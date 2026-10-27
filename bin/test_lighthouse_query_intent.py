@@ -56,6 +56,58 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
     def packet(self):
         return json.loads(self.model.complete.call_args.args[0][1]['content'])
 
+    async def test_document_followup_uses_cited_locations_without_sending_old_answer_or_body(self):
+        reference = {'document_id': 'doc_one', 'version': 2, 'ordinal': 3, 'name': '现场应急规程.xlsx'}
+        previous = self.previous('用户提供湿度86%，应查阅哪份规程？', status='completed', answer='PRIVATE ANSWER [2]',
+            sources=[{'kind': 'company_knowledge', 'number': 2, 'data': {**reference, 'text': 'PRIVATE BODY'}}])
+        knowledge = SimpleNamespace(evidence_current=Mock(return_value=True))
+        self.engine.portal = SimpleNamespace(get_knowledge=lambda: knowledge)
+        query = '用户提供湿度86%，请解释上轮引用规程的具体操作步骤'
+        self.model.complete.return_value = decision(query, 'knowledge', continued=True, document_refs=[1])
+        result = await self.resolve('具体该怎么操作？', history=[previous, copy.deepcopy(previous)])
+        self.assertEqual(result['document_references'], [reference])
+        self.assertEqual(len(self.packet()['documents']), 1)
+        self.assertEqual(self.packet()['documents'][0]['name'], reference['name'])
+        self.assertNotIn('PRIVATE', json.dumps(self.packet()))
+        self.assertEqual(self.model.complete.call_count, 1)
+
+    async def test_public_document_refs_never_fall_back_to_private_or_other_topic_documents(self):
+        reference = {'document_id': 'doc_one', 'version': 2, 'ordinal': 3, 'name': '报销规定.txt'}
+        previous_question = '出差应遵循哪份报销规定？'
+        self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'oc_Test:om_Root',
+            'questions': [previous_question], 'access': [],
+            'documents': [{'question': previous_question, 'documents': [reference]}]})
+        knowledge = SimpleNamespace(evidence_current=Mock(return_value=True))
+        self.engine.portal = SimpleNamespace(get_knowledge=lambda: knowledge)
+        self.model.complete.return_value = decision('解释此前报销规定的具体手续', 'knowledge', continued=True, document_refs=[1])
+        with patch.object(intent, '_stored_topic_history', side_effect=AssertionError('No private fallback')):
+            result = await self.resolve('手续具体怎么办？')
+            self.assertEqual(result['document_references'], [reference])
+            self.actor['_feishu_topic']['documents'][0]['question'] = '其他话题'
+            self.assert_unknown(await self.resolve('手续具体怎么办？'), '手续具体怎么办？')
+
+    async def test_stale_revoked_or_invented_document_refs_fail_closed(self):
+        reference = {'document_id': 'doc_one', 'version': 2, 'ordinal': 3, 'name': '现场规程.txt'}
+        previous = self.previous('请查阅现场规程', status='completed', answer='参考[1]',
+            sources=[{'kind': 'company_knowledge', 'number': 1, 'data': reference}])
+        knowledge = SimpleNamespace(evidence_current=Mock(return_value=True))
+        self.engine.portal = SimpleNamespace(get_knowledge=lambda: knowledge)
+        for changes in ({'document_refs': [9]}, {'continued': False}, {'kind': 'business'}):
+            values = {'continued': True, 'document_refs': [1], **changes}
+            self.model.complete.return_value = decision('现场规程的操作步骤', values.pop('kind', 'knowledge'), **values)
+            self.assert_unknown(await self.resolve('具体怎么操作？', history=[previous]), '具体怎么操作？')
+        self.model.complete.return_value = decision('现场规程的操作步骤', 'knowledge', continued=True, document_refs=[1])
+        knowledge.evidence_current.return_value = False
+        self.assert_unknown(await self.resolve('具体怎么操作？', history=[previous]), '具体怎么操作？')
+        self.assertEqual(self.packet()['documents'], [])
+        knowledge.evidence_current.side_effect = [True, True, False]
+        self.assert_unknown(await self.resolve('具体怎么操作？', history=[previous]), '具体怎么操作？')
+
+    async def test_new_subject_does_not_inherit_document_references(self):
+        self.model.complete.return_value = decision('今天有哪些事件？')
+        result = await self.resolve('今天有哪些事件？', history=[self.previous('公司规程有哪些？')])
+        self.assertNotIn('document_references', result)
+
     def assert_unknown(self, result, question, *, attempts=None):
         self.assertIs(type(result['attempts']), int)
         self.assertIn(result['attempts'], range(3))
@@ -814,10 +866,12 @@ class PortalAuthorityIntentTests(unittest.IsolatedAsyncioTestCase):
         questions = ['older-zero', 'older-one', 'earlier-two', 'earlier-three', 'earlier-four',
                      'earlier-five', 'earlier-six', 'earlier-seven', 'earlier-eight', 'Ｄ楼今天事件']
         request.state.feishu_topic.update(context='DOCUMENT_BODY_NOT_FOR_CLASSIFIER',
-            access=[self.capability], questions=questions)
+            access=[self.capability], questions=questions,
+            documents=[{'question': 'Ｄ楼今天事件', 'documents': []}])
         identity = self.fixture.authority.context(request, self.fixture.actor())
         stored = copy.deepcopy(self.fixture.authority.contexts[identity]['feishu_topic'])
         _, actor = await self.fixture.authority.authorize(identity)
+        self.assertEqual(actor['_feishu_topic']['documents'], request.state.feishu_topic['documents'])
         expected = ['earlier-two', 'earlier-three', 'earlier-four', 'earlier-five',
                     'earlier-six', 'earlier-seven', 'earlier-eight', 'D楼今天事件']
         self.assertEqual(actor['_feishu_topic']['questions'], expected)

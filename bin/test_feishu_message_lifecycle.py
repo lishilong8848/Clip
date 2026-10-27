@@ -2,6 +2,8 @@
 import asyncio
 import copy
 import hashlib
+import sqlite3
+from contextlib import closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -22,6 +24,18 @@ from bin.test_lighthouse_openclaw import _fake_engine
 
 
 class MessageLifecycleTests(unittest.IsolatedAsyncioTestCase):
+    def test_old_topic_history_gains_empty_document_refs_without_losing_posts(self):
+        path = self.path / 'legacy-inbox.sqlite3'
+        with closing(sqlite3.connect(path)) as db:
+            db.execute('CREATE TABLE topic_posts(message_id TEXT PRIMARY KEY,chat_id TEXT,root_id TEXT,question TEXT,answer TEXT,access TEXT,created_at REAL,app_id TEXT)')
+            db.execute('INSERT INTO topic_posts VALUES(?,?,?,?,?,?,?,?)',
+                ('om_old', 'oc_Test', 'om_Root', '原问题', '原回答', '{}', 1000, 'cliTest'))
+            db.commit()
+        inbox = Inbox(path)
+        with inbox.connect() as db:
+            self.assertEqual(db.execute('SELECT question,answer,app_id,documents FROM topic_posts').fetchone(),
+                ('原问题', '原回答', 'cliTest', '[]'))
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -151,14 +165,18 @@ class MessageLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_topic_context_is_app_chat_root_and_current_permission_scoped(self):
         message = self.message(group=True)
         reply = {'text': 'Authorized public document summary', 'delivery_access': self.bot._delivery_access(self.actor),
+                 'document_sources': [{'document_id': 'doc1', 'version': 1, 'ordinal': 3, 'name': '现场规程.txt'}],
                  'files': [{'id': 'not-authorized-for-other-person'}], 'thread_route': {
                      'chat_id': message['chat_id'], 'root_id': message['message_id'], 'thread_id': 'omt_Test', 'chat_type': 'group'}}
         self.bot.inbox.remember_public_reply(message, reply)
         follow = self.message(owner='second', group=True, identity='Second', root=message['message_id'])
         self.assertIn('public document', self.bot.inbox.topic_context(follow, self.actor))
+        details = self.bot.inbox.topic_context(follow, self.actor, details=True)
+        self.assertEqual(details['documents'][0]['documents'], reply['document_sources'])
         self.assertNotIn('not-authorized', self.bot.inbox.topic_context(follow, self.actor))
         for changes in ({'app_id': 'cliOther'}, {'chat_id': 'oc_Other'}, {'root_id': 'om_Other'}):
             self.assertEqual(self.bot.inbox.topic_context({**follow, **changes}, self.actor), '')
+            self.assertFalse(self.bot.inbox.topic_context({**follow, **changes}, self.actor, details=True).get('documents'))
         self.assertEqual(self.bot.inbox.topic_context(follow, {**self.actor, 'scopes': ['A']}), '')
         self.assertEqual(self.bot.inbox.topic_context(follow, {**self.actor, 'modules': []}), '')
         self.assertEqual(self.bot.inbox.topic_context(follow, {**self.actor, 'id': 'ou_Other'}),

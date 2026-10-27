@@ -87,7 +87,7 @@ def install_learning_routes(app, controller, runtime):
         with service_lock:
             if service is None:
                 service = LearningService(send_message=send_message,
-                                          get_shift_roster=lambda day: read_roster(runtime.service, day),
+                                          get_shift_roster=lambda day: read_roster(runtime.service, day, with_status=True),
                                           get_people=lambda: runtime.service.signature_management.directory(refresh=True),
                                           get_login_people=get_login_people,
                                           get_portal_url=lambda: runtime.service._critical_guard_public_base_url())

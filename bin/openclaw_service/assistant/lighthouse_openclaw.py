@@ -220,6 +220,20 @@ class OpenClawToolAgent:
         flight = history.get('inFlightRun') or {}
         return flight.get('text', answer) if flight.get('runId') == self.run_id else answer, False
 
+    async def _read_final_reply(self):
+        """Observe the accepted run on the existing connection; never infer completion from a preview."""
+        waited = await self.client.request('agent.wait', {'runId': self.run_id, 'timeoutMs': 0}, timeout=5)
+        text = self._terminal_answer(waited)
+        if text is not None or waited.get('status') != 'ok' or self._pending_outcome(waited, waited.get('terminalReply')):
+            return text
+        history = await self.client.request('chat.history', {'sessionKey': self.session_key, 'limit': 1}, timeout=5)
+        for message in history.get('messages', []):
+            if (isinstance(message, dict) and message.get('runId') == self.run_id
+                    and message.get('sessionKey', self.session_key) == self.session_key
+                    and message.get('agentId', agent_id(execution_key(self.actor))) == agent_id(execution_key(self.actor))):
+                return self._terminal_answer(waited, message)
+        return None
+
     @staticmethod
     def _reply_text(message):
         if not isinstance(message, dict) or message.get('role') != 'assistant':
@@ -425,6 +439,7 @@ class OpenClawToolAgent:
         while True:
             attempted.add(self._profile_key(self.profile))
             self._terminal_model_failure = False
+            self._read_completion_recovery = False
             started = time.monotonic()
             try:
                 async for event in events:
@@ -456,12 +471,12 @@ class OpenClawToolAgent:
                     raise exc
                 self.profile = {**candidate, '_fallback_model': True, '_output_recovery': exc.category == 'model_output'}
                 self._fallback_attempt += 1
-                if self.calls or exc.category in {'model_context', 'model_output'}:
+                if self.calls or self._read_completion_recovery or exc.category in {'model_context', 'model_output'}:
                     # Exhausted native history must not follow recovery; completed tools retain only their receipts.
                     suffix = hashlib.sha256((str(self.turn.get('run_id') or self.turn['operation_id'])
                         + ':' + str(self._fallback_attempt)).encode()).hexdigest()[:20]
                     self.session_key = original_session + (':evidence:' if self.calls else ':context:' if exc.category == 'model_context' else ':output:') + suffix
-                if self.calls:
+                if self.calls or self._read_completion_recovery:
                     prompt = [self._complete_from_evidence(safe_text(question), '根据已有证据补齐原请求，不能推断失败操作结果，不得重做写操作。')]
                     history = []
                 logging.getLogger(__name__).warning('Assistant model fallback: run=%s category=%s attempt=%s',
@@ -648,11 +663,22 @@ class OpenClawToolAgent:
                         self.run_id = ''
                         break
                 if terminal_deadline is not None and time.monotonic() >= terminal_deadline:
+                    try:
+                        text = await self._read_final_reply()
+                    except (GatewayError, OSError, asyncio.TimeoutError):
+                        text = None
+                    if text is not None:
+                        answer, self.run_id = text, ''
+                        break
                     pending = self._pending_outcome(finished, finished.get('terminalReply'), chat_message)
                     logging.getLogger(__name__).warning('Assistant terminal reply missing: run=%s completed=%s pending=%s calls=%s results=%s',
                         str(self.turn.get('run_id') or '')[:8], finished.get('status') == 'ok', pending, self.calls, len(self.results))
                     if finished.get('status') == 'ok' and not pending:
                         raise self._validation_failure('模型运行已结束但未返回完整终答，未将片段作为结论；原消息和任务已保留。')
+                    # Revoke this attempt before switching; only complete read receipts may continue.
+                    if (self.calls and self.calls == len(self.results) and self.called_tools
+                            and self.called_tools <= READ_RECOVERY_TOOLS and getattr(self, '_buffered_reply', False)):
+                        self._terminal_model_failure = self._read_completion_recovery = True
                     raise AssistantError('原回答尚未取得完整终答，原消息与操作任务已保留；未重新提交业务。',
                                          502, category='model_protocol')
                 try:

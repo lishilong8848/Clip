@@ -8,12 +8,44 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from openclaw_service.assistant.lighthouse_knowledge_answer import answer_company, company_followup, company_request
+from openclaw_service.assistant.lighthouse_knowledge_answer import answer_company, company_followup, company_request, document_references
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_model import LighthouseModel
 
 
 class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
+    async def test_followup_reads_same_document_originals_without_searching_or_inheriting_answer(self):
+        from bin.test_lighthouse_knowledge_evidence import EvidenceTests, TEXT
+        fixture = EvidenceTests(); fixture.setUp(); self.addCleanup(fixture.doCleanups)
+        reference = fixture.upload('现场应急规程.txt', sections=[
+            {'location': '适用范围', 'text': '此规程适用于设备甲，执行前须由获准人员核对。'},
+            {'location': '操作步骤', 'text': '先核实现场状态，再联系负责人员，不自行操作。'}])
+        self.engine.portal.get_knowledge = lambda: fixture.kb
+        turn = {'question': '具体该怎么操作？', '_profile': TEXT,
+                '_query_intent': {'document_references': [reference]}}
+        self.model.complete.return_value = '先由获准人员核实现场状态，再联系负责人员。[1]'
+        with patch.object(fixture.kb, 'search', side_effect=AssertionError('Should use the existing document location')):
+            result = await answer_company(self.engine, fixture.actor, turn, '上轮规程的具体操作步骤',
+                self.emit, AsyncMock(return_value=fixture.actor))
+        self.assertEqual(result['knowledge_retrieval']['searches'], 0)
+        self.assertTrue(result['knowledge_retrieval']['reused_document_refs'])
+        packet = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertIn('执行前须由获准人员核对', packet['documents'][0]['text'])
+        self.assertIn('不自行操作', packet['documents'][0]['text'])
+        self.assertEqual(result['sources'][0]['data']['document_id'], reference['document_id'])
+
+    def test_document_refs_only_include_cited_metadata_from_completed_read_answers(self):
+        row = {'status': 'completed', 'answer': '参考[2]', 'sources': [
+            {'number': i, 'kind': 'company_knowledge', 'data': {'document_id': f'doc{i}', 'version': 1,
+                'ordinal': 0, 'name': f'规程{i}.txt', 'text': 'PRIVATE BODY', 'secret': 'PRIVATE KEY'}} for i in (1, 2)]}
+        references = document_references(row)
+        self.assertEqual([r['document_id'] for r in references], ['doc2'])
+        self.assertNotIn('PRIVATE', json.dumps(references))
+        self.assertEqual(document_references({**row, 'status': 'failed'}), [])
+        self.assertEqual(document_references({**row, 'display_only': True}), [])
+        self.assertEqual(document_references({**row, 'sources': None}), [])
+        self.assertEqual(document_references({**row, 'sources': [{'kind': 'company_knowledge', 'number': []}]}), [])
+
     def setUp(self):
         self.actor = {'id': 'person-a', 'scopes': ['E']}
         self.item = {'name': '员工手册.txt', 'document_id': 'document', 'version': 2, 'ordinal': 0,

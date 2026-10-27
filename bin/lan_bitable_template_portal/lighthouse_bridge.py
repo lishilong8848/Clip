@@ -144,6 +144,8 @@ class PortalAuthority:
             if isinstance(topic.get('questions'), list):
                 current['_feishu_topic']['questions'] = [safe_text(question, limit=2000)
                     for question in topic['questions'][-8:] if isinstance(question, str)]
+            if isinstance(topic.get('documents'), list):
+                current['_feishu_topic']['documents'] = copy.deepcopy(topic['documents'][-8:])
         return context, shared_query_actor(current)
 
     @staticmethod

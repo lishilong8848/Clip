@@ -138,10 +138,10 @@ class SharingImages:
         self.save(item['sha256'], content)
         return content
 
-    def model_input(self, item):
+    def model_input(self, item, *, max_side=1600):
         from PIL import Image
         with Image.open(io.BytesIO(self.content(item))) as image:
-            image.thumbnail((1600, 1600))
+            image.thumbnail((max_side, max_side))
             output = io.BytesIO()
             image.save(output, format='JPEG', quality=85)
         return {'id': item['id'], 'ocr_text': item['text'],

@@ -332,6 +332,35 @@ class SharingTests(unittest.TestCase):
         result = sharing.exercise_card(batch, self.learning._get('sharing_attempt', attempt['id']), result=True)
         self.assertEqual(json.dumps(result, ensure_ascii=False).count('正确答案'), 5)
 
+    def test_result_marks_wrong_selected_red_correct_and_missed_green_without_regrading(self):
+        qs = questions(5)
+        qs[0]['options'][1] = '<at id=all>所有人</at> [链接](https://example.invalid)'
+        with self.learning.transaction() as conn:
+            batch = self.core.batch(self.bid, conn)
+            batch['questions'] = sharing.validate_questions(qs, SOURCE)
+            self.learning._put('sharing_batch', self.bid, batch, conn)
+        self.publish()
+        attempt = self.core.attempts(self.bid)[0]
+        fields = {q['id']: [str(i) for i in q['correct']] for q in self.core.batch(self.bid)['questions']}
+        fields.update(q1=['1'], q2=['0', '1'])
+        before = json.dumps(sharing.exercise_card(self.core.batch(self.bid), attempt), ensure_ascii=False)
+        self.assertNotIn('【正确', before)
+        response = self.submit(attempt, fields=fields)
+        content = '\n'.join(e['content'] for e in response['card']['body']['elements'] if e['tag'] == 'markdown')
+        self.assertIn('<font color="red">B. &lt;at', content)
+        self.assertNotIn('<at id=', content)
+        self.assertIn(r'\[链接\]\(https://example.invalid\)', content)
+        self.assertIn('<font color="green">A. 水流孔脏堵 【正确·漏选】</font>', content)
+        self.assertIn('<font color="green">A. 水流孔脏堵 【正确·已选】</font>', content)
+        self.assertIn('<font color="green">C. 通讯中断 【正确·漏选】</font>', content)
+        self.assertIn('<font color="red">B. 设备未供电 【错选】</font>', content)
+        self.assertNotIn('<font color="red">D.', content)
+        saved = self.learning._get('sharing_attempt', attempt['id'])
+        self.assertEqual(saved['correct'], 3)
+        replay = self.submit(attempt)
+        self.assertEqual(response['card'], replay['card'])
+        self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'result']), 1)
+
     def test_model_generation_is_structured_and_no_attendance_leak(self):
         model = Mock(); model.complete.return_value = json.dumps({'questions': questions()[:5]})
         result = generate(model, {'source': SOURCE + '\n参会人：@保密人员\n', 'previous': [], 'count': 5})

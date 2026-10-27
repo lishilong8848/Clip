@@ -121,6 +121,17 @@ class DeliveryStatusTests(unittest.TestCase):
         self.roster([])
         self.assertEqual((self.day()['state'], self.day()['expected']), ('unverified', 0))
 
+    def test_source_issues_are_visible_even_with_zero_valid_people_and_do_not_hide_successes(self):
+        self.complete()
+        snapshot = self.service._get('local', 'shift_roster:' + DATE)
+        snapshot['issues'] = [{'name': '待核对白班', 'scope': 'H', 'duty_kind': '白', 'reason': '楼栋待核对'}]
+        self.put('local', 'shift_roster:' + DATE, snapshot)
+        self.assertEqual((self.day()['state'], self.day()['sent']), ('unverified', 2))
+        self.assertEqual(self.read()['shifts'][1]['state'], 'success')
+        snapshot['people'] = []
+        self.put('local', 'shift_roster:' + DATE, snapshot)
+        self.assertEqual(self.day()['issues'], [{'name': '待核对白班', 'scope': 'H', 'status': 'unverified', 'reason': '楼栋待核对'}])
+
     def test_missing_stale_and_old_version_rosters_cannot_succeed(self):
         self.complete()
         with self.service.transaction() as conn:

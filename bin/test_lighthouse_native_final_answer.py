@@ -194,6 +194,69 @@ class NativeFinalAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assert_single_submission(client)
         self.assertFalse(getattr(self.agent, '_terminal_model_failure', False))
 
+    async def test_missing_reply_recovers_exact_original_run_without_a_new_submission(self):
+        client = ScriptedGateway(frames=[end()], outcomes=[{'status': 'ok'}], history={'messages': [
+            {'runId': agent_id(execution_key(self.agent.actor)) + ':run-final',
+             'role': 'assistant', 'phase': 'final', 'text': FINAL}]})
+        events = await self.collect(client)
+        self.assertEqual(events[-1].result.output, FINAL)
+        self.assert_single_submission(client)
+        self.assertTrue(any(method == 'chat.history' for method, _ in client.calls))
+
+    async def test_only_completed_read_receipts_allow_pending_final_recovery(self):
+        for tool, complete, permitted in [('lighthouse_query', True, True),
+                ('lighthouse_query', False, False), ('lighthouse_prepare_business', True, False)]:
+            with self.subTest(tool=tool, complete=complete):
+                agent = self.agent = _recovery_agent(turn={'operation_id': 'run-final'})
+                agent._buffered_reply = True
+                agent.calls, agent.called_tools = 1, {tool}
+                agent.results = {'original': ('signature', {'ok': True, 'data': {'count': 2}})} if complete else {}
+                client = ScriptedGateway(frames=[end()], outcomes=[{'status': 'ok', 'pendingError': True}])
+                with self.assertRaises(AssistantError):
+                    await self.collect(client)
+                self.assertEqual(bool(getattr(agent, '_read_completion_recovery', False)), permitted)
+                self.assert_single_submission(client)
+
+    async def test_pending_read_completion_switches_model_using_receipts_without_requery_or_write(self):
+        agent = self.agent
+        reads, writes = [], []
+        async def query():
+            reads.append('read')
+            return {'ok': True, 'data': {'count': 2, 'complete': True}}
+        async def submit():
+            writes.append('write')
+            return {'ok': True}
+        agent.tools.update(lighthouse_query=Tool(query), lighthouse_submit=Tool(submit))
+        first = ScriptedGateway(frames=[end()], outcomes=[{'status': 'ok', 'pendingError': True}])
+        second = ScriptedGateway(frames=[chat_final()], outcomes=[visible()])
+        first_event, second_event = first.next_event, second.next_event
+        async def read_once(timeout):
+            if not reads:
+                await agent.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                    'run_id': agent.run_id, 'tool': 'lighthouse_query', 'call_id': 'read-one', 'params': {}})
+            return await first_event(timeout)
+        async def refuse_write(timeout):
+            with self.assertRaises(AssistantError):
+                await agent.engine.bridge.call(agent.token, {'session_key': agent.session_key,
+                    'run_id': agent.run_id, 'tool': 'lighthouse_submit', 'call_id': 'write-one', 'params': {}})
+            return await second_event(timeout)
+        first.next_event, second.next_event = read_once, refuse_write
+        agent._acquire_runtime = AsyncMock(return_value=agent.item)
+        agent.engine.keep_gateway = AsyncMock()
+        agent.engine.gateway_client = AsyncMock(side_effect=[first, second])
+        agent._next_profile = Mock(return_value={'model': 'healthy', 'endpoint': 'https://fixture.invalid'})
+        events = []
+        async with agent.run_stream_events(['请查询资料'], message_history=[]) as stream:
+            async for event in stream:
+                events.append(event)
+        self.assertEqual(events[-1].result.output, FINAL)
+        self.assertEqual((reads, writes), (['read'], []))
+        self.assert_single_submission(first)
+        self.assert_single_submission(second)
+        prompts = [p for method, p in second.calls if method == 'agent']
+        self.assertIn('本轮工具回执', str(prompts))
+        self.assertNotEqual(next(p['sessionKey'] for m,p in first.calls if m=='agent'), prompts[0]['sessionKey'])
+
     async def test_chat_and_agent_sequence_numbers_are_not_one_counter(self):
         client = ScriptedGateway(frames=[assistant(PROCESS), end(seq=2), chat_final(seq=2)],
             outcomes=[{'status': 'ok'}])

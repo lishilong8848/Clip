@@ -43,6 +43,8 @@ class QueryIntent(BaseModel):
         description='For mixed: standalone read-only records question with ONLY its applicable subject, filters, scope and time.')
     document_query: str = Field(default='', max_length=MAX_QUERY,
         description='For mixed: standalone documentary question with ONLY its applicable subject, scope and time, retaining literal relative dates.')
+    document_refs: list[int] = Field(default_factory=list, max_length=6,
+        description='Numbers from documents that this knowledge followup asks to continue reading; empty for a new subject.')
 
 
 _INSTRUCTIONS = """Classify the current question semantically, without answering it.
@@ -81,9 +83,15 @@ When ambiguity changes the answer, do not assume a source or invent missing
 conditions. Preserve unknown so the answer agent can clarify the necessary point.
 Do not use literal business keyword routing. Concepts alone do not imply records.
 No output authorizes creating, editing, deleting, sending, uploading or executing.
-Only consecutive authorized USER QUESTIONS are supplied; they contain no answers
-or record identities. A reference to answer contents/ordinal records that cannot
-be resolved from those questions is unknown. Never invent another building,
+Consecutive authorized USER QUESTIONS and optional cited document metadata are
+supplied, never previous answer bodies or business records. Document metadata
+identifies a source to re-read; it is not proof of applicability or approval.
+For a followup asking how, why, prerequisites, steps or details of an earlier
+document, select its numbers in document_refs and resolve the question semantically.
+Explaining how to operate is a read request; actually issuing a command is an action.
+Do not classify a reference as unknown when its object is present in documents.
+A reference to business records that cannot be resolved from questions remains
+unknown. Never invent another building,
 device, record, date or fact to resolve 'the other one'.
 For a short followup, retain its actual question object and counting basis from
 the nearest relevant question. Replace conditions explicitly changed NOW, do
@@ -91,6 +99,7 @@ not append contradictory old conditions. Preserve unchanged date, building,
 device, shift, filter, counting basis and requested deliverables. New subjects
 start a new question. continued=true only when supplied history was used.
 For independent questions, query must be exactly the current question.
+document_refs must be empty unless continued=true and kind is knowledge or mixed.
 For unknown, query must be exactly the current question and continued=false.
 For mixed, split the requested deliverables semantically: business_query requests
 only read-only records; document_query asks only for documentary evidence.
@@ -287,6 +296,8 @@ def _stored_topic_history(engine, actor, turn):
                 continue
             item = {key: copy.deepcopy(row[key]) for key in ('question', 'owner', 'feishu_topic',
                 'execution_lane', 'source_channel', 'scopes', 'access_scopes', 'access_modules', 'topic_access') if key in row}
+            from .lighthouse_knowledge_answer import document_references
+            item['document_sources'] = document_references(row)
             context = row.get('_task_context')
             item['_task_context'] = {key: copy.deepcopy(context[key]) for key in
                 ('version', 'owner', 'topic_id', 'scopes', 'modules') if key in context} if isinstance(context, dict) else {}
@@ -303,7 +314,34 @@ def _constraints(question):
             {x.upper() for x in _DEVICE.findall(question)}, set(_BASIS.findall(question)))
 
 
-def _validate(value, question, history, actor, turn):
+def _document_context(engine, actor, turn, previous, questions):
+    from .lighthouse_knowledge_answer import document_references
+    topic = actor.get('_feishu_topic') or {}
+    if 'questions' in topic:
+        rows = topic.get('documents', [])
+        rows = rows[-MAX_HISTORY:] if isinstance(rows, list) else []
+    else:
+        rows = [{'question': row.get('question'), 'documents': row.get('document_sources', document_references(row))}
+                for row in previous[-MAX_HISTORY:] if isinstance(row, dict) and _bound_turn(row, actor, require_owner=True)]
+    candidates = []
+    for row in rows:
+        if not isinstance(row, dict) or row.get('question') not in questions or not isinstance(row.get('documents'), list):
+            continue
+        refs = document_references({'answer': ' '.join(f'[{i + 1}]' for i in range(6)),
+            'sources': [{'kind': 'company_knowledge', 'number': i + 1, 'data': ref}
+                        for i, ref in enumerate(row['documents'][:6])]})
+        candidates.extend({'question': row['question'], **ref} for ref in refs)
+    candidates = list({(ref['document_id'], ref['version'], ref['ordinal']): ref
+                       for ref in candidates}.values())[-6:]
+    factory = getattr(getattr(engine, 'portal', None), 'get_knowledge', None)
+    if not candidates or not callable(factory) or 'knowledge' not in actor.get('modules', []):
+        return []
+    knowledge = factory()
+    return [{'number': i + 1, **ref} for i, ref in enumerate(candidates)
+            if knowledge.evidence_current([ref], turn['_profile'], actor=actor)]
+
+
+def _validate(value, question, history, actor, turn, documents=()):
     if not isinstance(value, str) or len(value) > MAX_QUERY * 4:
         raise ValueError('invalid result size')
     decision = QueryIntent.model_validate_json(value)
@@ -311,6 +349,11 @@ def _validate(value, question, history, actor, turn):
         return _unknown(question)
     if decision.task_type not in {'unknown', _TASK_TYPES[decision.kind]}:
         raise ValueError('inconsistent task type')
+    refs = {row['number']: row for row in documents}
+    if (len(set(decision.document_refs)) != len(decision.document_refs)
+            or any(number not in refs for number in decision.document_refs)
+            or decision.document_refs and (not decision.continued or decision.kind not in {'knowledge', 'mixed'})):
+        raise ValueError('unbound document reference')
     query = _text(decision.query)
     if (not query or _original_flow({}, query)
             or decision.continued and not history
@@ -326,7 +369,7 @@ def _validate(value, question, history, actor, turn):
             if not explicit and prior and (not rewritten[index] or rewritten[index] - prior):
                 raise ValueError('unchanged constraint lost or contradicted')
     # Never introduce a concrete time/scope/device absent from the authorized questions.
-    known = _constraints('\n'.join([*history, question]))
+    known = _constraints('\n'.join([*history, question, *(refs[number]['name'] for number in decision.document_refs)]))
     if any(effective - supplied for effective, supplied in zip(rewritten, known)):
         raise ValueError('invented constraint')
     selected = turn.get('scopes', actor.get('scopes', []))
@@ -431,7 +474,9 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
                 questions = _history_questions(previous, authority)
             else:
                 questions = public_questions
+            documents = await asyncio.to_thread(_document_context, engine, authority, turn, previous, questions)
             packet = {'question': question, 'history': questions,
+                'documents': documents,
                 'constraints': dict(zip(('time', 'scopes', 'status', 'shift', 'devices', 'counting_basis'),
                                         (sorted(values) for values in _constraints(question))))}
             messages = [
@@ -442,10 +487,13 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
             for attempts, profile in enumerate(candidates, 1):
                 fallback['attempts'] = attempts
                 try:
+                    if documents != await asyncio.to_thread(_document_context, engine, authority,
+                            {**turn, '_profile': profile}, previous, questions):
+                        continue
                     value = await asyncio.wait_for(asyncio.to_thread(model.complete, copy.deepcopy(messages),
                         profile={**profile, 'reasoning': False}, max_tokens=1800,
                         structured=True, timeout=ATTEMPT_SECONDS), timeout=ATTEMPT_SECONDS)
-                    candidate = _validate(value, question, questions, baseline, turn)
+                    candidate = _validate(value, question, questions, baseline, turn, documents)
                 except Exception:
                     candidate = fallback
                 latest = copy.deepcopy(_permissions(await authorize()))
@@ -469,7 +517,12 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
                         if len(candidates) == 1:
                             candidates.append(profile)
                         continue
-                    return {**candidate, 'attempts': attempts}
+                    if documents != await asyncio.to_thread(_document_context, engine, latest_authority, turn, previous, questions):
+                        return fallback
+                    selected = set(candidate.pop('document_refs', []))
+                    references = [{key: row[key] for key in ('document_id', 'version', 'ordinal', 'name')}
+                                  for row in documents if row['number'] in selected]
+                    return {**candidate, 'attempts': attempts, **({'document_references': references} if references else {})}
             return fallback
     except Exception:
         # No raw provider errors, keys, or unvalidated expansions cross this API.

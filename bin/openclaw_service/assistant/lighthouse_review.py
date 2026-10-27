@@ -66,6 +66,7 @@ READ_REPAIR_TOOLS = frozenset((
 BUSINESS_READ_TOOLS = READ_REPAIR_TOOLS - {'company_documents'}
 
 UNVERIFIED_REPLY = '本次答复尚未完成核验，暂不把未核实内容作为确定结论返回。'
+PARTIAL_REVIEW_NOTICE = '其余内容本次未完成核验，暂不作为确定结论。'
 
 
 REVIEW = """你是独立答复复核器，不是回答作者。根据原问题、授权历史和证据判断候选答复是否切题、覆盖全部要求、符合日期/楼栋/人员/统计口径，且没有无依据结论、自相矛盾、虚构文件或误报业务成功。
@@ -364,7 +365,7 @@ def _supported_reply(claims, sources, answer):
         citations = ''.join(f'[{number}]' for number in dict.fromkeys(
             part['source_number'] for part in item['evidence']) if str(number) not in existing)
         lines.append(item['claim'] + (' ' + citations if citations else ''))
-    return '\n\n'.join(lines) + '\n\n其余内容本次未完成核验，暂不作为确定结论。' if lines else UNVERIFIED_REPLY
+    return '\n\n'.join(lines) + '\n\n' + PARTIAL_REVIEW_NOTICE if lines else UNVERIFIED_REPLY
 
 
 def _claim_spans(answer, claim):

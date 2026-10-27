@@ -439,14 +439,14 @@ class DrillManagementTests(unittest.TestCase):
             self.assertEqual(blank["status"], "ready")
             for sheet_type, row, col in (("record", 17, 6), ("assessment", 11, 7)):
                 preview = service.preview_model(definition["drill_id"], "A", sheet_type)
-                self.assertEqual(preview["rows"][row][col], "年 月 日 时 分")
+                self.assertEqual(preview["rows"][row][col], "　　　　年　　月　　日　　时　　分")
             for fields in ({"evaluator": reviewer}, {"signature_time": "2026-09-29T10:15"}, {"evaluation_time": "2026-09-29T11:32"}):
                 self.assertEqual(_validate_execution(definition, {**blank, **fields}), [])
                 derived = _derived_values(definition, {**blank, **fields})
                 self.assertEqual(derived["record_values"]["G18"],
-                    "2026年09月29日 10时15分" if "signature_time" in fields else "年 月 日 时 分")
+                    "2026年09月29日 10时15分" if "signature_time" in fields else "　　　　年　　月　　日　　时　　分")
                 self.assertEqual(derived["assessment_values"]["H12"],
-                    "2026年09月29日 11时32分" if "evaluation_time" in fields else "年 月 日 时 分")
+                    "2026年09月29日 11时32分" if "evaluation_time" in fields else "　　　　年　　月　　日　　时　　分")
             filled = service.save_execution(definition["drill_id"], "A", {**payload,
                 "evaluator": reviewer, "signature_time": "2026-09-29T10:15", "evaluation_time": "2026-09-29T11:32"}, expected_version=blank["version"])
             cleared = service.save_execution(definition["drill_id"], "A", {**payload,
@@ -464,10 +464,15 @@ class DrillManagementTests(unittest.TestCase):
             sheets = {sheet["name"]: sheet for sheet in _parse_workbook(Path(generated["generated"]["path"]))["sheets"]}
             for sheet, signature, time in (("本月记录", "C18", "G18"), ("评估表", "D12", "H12")):
                 self.assertEqual(sheets[sheet]["cells"].get(signature, ""), "")
-                self.assertEqual(sheets[sheet]["cells"][time], "年 月 日 时 分")
+                self.assertEqual(sheets[sheet]["cells"][time], "　　　　年　　月　　日　　时　　分")
+            with zipfile.ZipFile(generated["generated"]["path"]) as archive:
+                for sheet, time in (("本月记录", "G18"), ("评估表", "H12")):
+                    root = ET.fromstring(archive.read(sheets[sheet]["path"]))
+                    node = root.find(f".//{{*}}c[@r='{time}']/{{*}}is/{{*}}t")
+                    self.assertEqual(node.attrib.get("{http://www.w3.org/XML/1998/namespace}space"), "preserve")
             for sheet_type, row, col in (("record", 17, 6), ("assessment", 11, 7)):
                 printed = service.print_model(definition["drill_id"], "A", sheet_type)
-                self.assertEqual(printed["rows"][row][col], "年 月 日 时 分")
+                self.assertEqual(printed["rows"][row][col], "　　　　年　　月　　日　　时　　分")
             self.assertEqual(Path(definition["source"]["path"]).read_bytes(), source)
 
     def test_missing_review_times_do_not_reuse_dates_in_uploaded_template(self):
@@ -481,8 +486,8 @@ class DrillManagementTests(unittest.TestCase):
             definition, execution, signatures = self._ready_drill(service, source)
             generated = service.generate(definition["drill_id"], "A", signatures=signatures)
             sheets = {sheet["name"]: sheet for sheet in _parse_workbook(Path(generated["generated"]["path"]))["sheets"]}
-            self.assertEqual(sheets["本月记录"]["cells"]["G18"], "年 月 日 时 分")
-            self.assertEqual(sheets["评估表"]["cells"]["H12"], "年 月 日 时 分")
+            self.assertEqual(sheets["本月记录"]["cells"]["G18"], "　　　　年　　月　　日　　时　　分")
+            self.assertEqual(sheets["评估表"]["cells"]["H12"], "　　　　年　　月　　日　　时　　分")
             saved = store.get_document(DRILL_EXECUTION_NAMESPACE, execution["key"])
             saved["generated"]["rule_version"] = DRILL_GENERATION_RULE_VERSION - 1
             store.put_document(DRILL_EXECUTION_NAMESPACE, execution["key"], saved)

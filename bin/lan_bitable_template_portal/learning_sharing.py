@@ -3,6 +3,7 @@ import copy
 import datetime as dt
 import hashlib
 import hmac
+import html
 import json
 import logging
 import random
@@ -591,6 +592,10 @@ class SharingExercises:
             if not participants: raise LearningError('请至少保留一位参会人参加答题。')
             batch['date'] = now().date().isoformat()
             batch['business_date'] = batch['date']
+            # Reserve the full image-key size before publishing any recipient's paper.
+            sizing_batch = {**batch, 'questions': questions, 'app_id': app_id, 'card_images': {
+                image['id']: {'image_key': 'img_' + 'x' * 500, 'app_id': app_id, 'sha256': image['sha256']}
+                for image in batch['source'].get('images', [])}}
             rng = random.SystemRandom()
             for person in participants:
                 aid = key(identity, person['open_id'])
@@ -600,9 +605,9 @@ class SharingExercises:
                 attempt.update(draft_answers={}, progress_version=0)
                 source_questions = {q['id']: q for q in questions}
                 completed = {**attempt, 'correct': sum(source_questions[qid]['type'] != 'interview' for qid in attempt['question_ids']),
-                             'answers': {qid: ('答' * 1000 if source_questions[qid]['type'] == 'interview' else source_questions[qid]['correct']) for qid in attempt['question_ids']}}
+                             'answers': {qid: ('答' * 1000 if source_questions[qid]['type'] == 'interview' else list(range(len(source_questions[qid]['options'])))) for qid in attempt['question_ids']}}
                 for page in range((len(attempt['question_ids']) + 4) // 5):
-                    for card in (exercise_card({**batch, 'questions': questions}, attempt, page=page), exercise_card({**batch, 'questions': questions}, completed, result=True, page=page)):
+                    for card in (exercise_card(sizing_batch, attempt, page=page), exercise_card(sizing_batch, completed, result=True, page=page)):
                         if len(json.dumps(card, ensure_ascii=False).encode()) > 28000:
                             raise LearningError('题目或解析过长，超过飞书每页5题卡片大小限制；请缩短后重新发布，尚未发送。')
                 self.learning._put('sharing_attempt', aid, attempt, conn)
@@ -759,6 +764,7 @@ def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
     elements = [{'tag': 'div', 'text': plain(batch['title'])}, {'tag': 'div', 'text': plain(attempt['name'] + (' · 已完成' if result else f' · 共{count}题，已保存{len(attempt.get("draft_answers", {}))}题') + f' · 第{page + 1}/{pages}页')}]
     form = []
     questions = {q['id']: q for q in batch['questions']}
+    image_hashes = {image['id']: image['sha256'] for image in batch.get('source', {}).get('images', [])}
     choices = sum(questions[qid]['type'] != 'interview' for qid in attempt['question_ids'])
     if result:
         score = f"选择题正确 {attempt['correct']}/{choices} 题 · 正确率 {attempt['correct'] * 100 / choices:g}%" if choices else '本次为问答题，不计算正确率。'
@@ -770,7 +776,16 @@ def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
         heading = f"{index + 1}. {QUESTION_TYPES[q['type']]} · {q['stem']}"
         target = elements if result else form
         target.append({'tag': 'div', 'text': plain(heading)})
-        if q.get('image_ids') and batch.get('image_page_url'):
+        inline_images = []
+        for image_id in q.get('image_ids', []):
+            item = batch.get('card_images', {}).get(image_id, {})
+            if (item.get('app_id') == batch.get('app_id') and image_id in image_hashes
+                    and item.get('sha256') == image_hashes[image_id] and isinstance(item.get('image_key'), str)
+                    and re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', item['image_key'])):
+                inline_images.append({'tag': 'img', 'img_key': item['image_key'], 'alt': plain(f'第{index + 1}题配图'),
+                                      'scale_type': 'fit_horizontal', 'preview': True})
+        target.extend(inline_images)
+        if len(inline_images) < len(q.get('image_ids', [])) and batch.get('image_page_url'):
             target.append({'tag': 'div', 'text': {'tag': 'lark_md',
                 'content': f"[查看第{index + 1}题图片（{len(q['image_ids'])}张）]({batch['image_page_url']})"}})
         if q['type'] == 'interview':
@@ -782,11 +797,22 @@ def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
                 target.append({'tag': 'input', 'name': qid, 'input_type': 'multiline_text', 'rows': 3,
                                'max_length': 1000, 'required': False, 'default_value': attempt.get('draft_answers', {}).get(qid, ''), 'placeholder': plain('请输入文字答案，最多1000字')})
             continue
-        target.append({'tag': 'div', 'text': plain('\n'.join(f'{chr(65 + i)}. {text}' for i, text in enumerate(q['options'])))})
         if result:
+            selected, correct = set(attempt['answers'][qid]), set(q['correct'])
+            lines = []
+            for i, text in enumerate(q['options']):
+                text = re.sub(r'([\\`*_\[\]()!#])', r'\\\1', html.escape(text, quote=False))
+                label = f'{chr(65 + i)}. {text}'
+                if i in correct:
+                    label = '<font color="green">' + label + (' 【正确·已选】' if i in selected else ' 【正确·漏选】') + '</font>'
+                elif i in selected:
+                    label = '<font color="red">' + label + ' 【错选】</font>'
+                lines.append(label)
+            target.append({'tag': 'markdown', 'content': '\n'.join(lines)})
             target.append({'tag': 'div', 'text': plain('你的选择：' + '、'.join(chr(65 + i) for i in attempt['answers'][qid])
                 + '\n正确答案：' + '、'.join(chr(65 + i) for i in q['correct']) + '\n' + q['explanation'] + '\n' + ('专业经验人工题' if q.get('origin') == 'manual' else '原文依据：' + q['evidence']))})
         else:
+            target.append({'tag': 'div', 'text': plain('\n'.join(f'{chr(65 + i)}. {text}' for i, text in enumerate(q['options'])))})
             target.append({'tag': 'select_static' if q['type'] == 'single' else 'multi_select_static', 'name': qid,
                 'required': False, 'placeholder': plain('请选择答案'),
                 **({'initial_option': str(attempt['draft_answers'][qid][0])} if q['type'] == 'single' and attempt.get('draft_answers', {}).get(qid) else {}),

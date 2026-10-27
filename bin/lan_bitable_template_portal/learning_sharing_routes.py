@@ -1,5 +1,6 @@
 """Learning-owned endpoints and background jobs; reuse the existing Feishu socket."""
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -51,6 +52,39 @@ class SharingRuntime:
         if not bot or not getattr(bot, 'messenger', None) or not getattr(bot, 'config', {}).get('app_id'):
             raise LearningError('飞书智能体尚未连接，请在设置中核对应用及卡片回调。', 503)
         return bot
+
+    async def prepare_card_images(self, batch, attempt, bot):
+        from .sharing_images import SharingImages
+        core = self.service()
+        images = {item['id']: item for item in batch.get('source', {}).get('images', [])}
+        wanted = {image_id for q in batch['questions'] if q['id'] in attempt['question_ids'] for image_id in q.get('image_ids', [])}
+        for image_id in sorted(wanted):
+            item = images.get(image_id)
+            if item is None or bot.config['app_id'] != batch['app_id']:
+                raise LearningError('题图或飞书应用已变化，未发送不完整题目。', 409)
+            cached = batch.get('card_images', {}).get(image_id, {})
+            if (cached.get('sha256') == item['sha256'] and cached.get('app_id') == batch['app_id']
+                    and isinstance(cached.get('image_key'), str)
+                    and re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', cached['image_key'])):
+                continue
+            preview = await asyncio.to_thread(SharingImages(core.learning, self.runtime.service).model_input, item, max_side=2560)
+            content = base64.b64decode(preview['data_url'].split(',', 1)[1], validate=True)
+            client = await bot.messenger.client()
+            response = await client.post('https://open.feishu.cn/open-apis/im/v1/images',
+                headers=await bot.messenger.headers(), data={'image_type': 'message'},
+                files={'image': ('question.jpg', content, 'image/jpeg')}, timeout=30)
+            value = response.json()
+            image_key = (value.get('data') or {}).get('image_key')
+            if response.status_code >= 400 or value.get('code') != 0 or not isinstance(image_key, str) or not re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', image_key):
+                raise LearningError('题图上传未确认，请核对飞书智能体图片权限；保留任务重试，未发送缺图题目。', 502)
+            with core.learning.transaction() as conn:
+                saved = core.batch(batch['id'], conn)
+                if saved['status'] not in {'published', 'closed'} or saved['app_id'] != bot.config['app_id'] or saved['app_id'] != batch['app_id']:
+                    raise LearningError('批次或飞书应用已变化，题图未用于其他批次。', 409)
+                saved.setdefault('card_images', {})[image_id] = {'image_key': image_key, 'sha256': item['sha256'], 'app_id': saved['app_id']}
+                core.learning._put('sharing_batch', saved['id'], saved, conn)
+                batch = saved
+        return batch
 
     async def callback(self, payload, app_id):
         try:
@@ -308,7 +342,12 @@ class SharingRuntime:
                         url = core.learning.portal_url()
                         if url:
                             batch = {**batch, 'image_page_url': url.rstrip('/') + '/learning?tab=sharing&batch_id=' + batch['id']}
+                    batch = await self.prepare_card_images(batch, attempt, bot)
+                    if batch['app_id'] != bot.config['app_id'] or not await asyncio.to_thread(self.allowed, attempt['open_id']):
+                        raise LearningError('准备题图期间应用或账号权限已变化，未发送。', 403)
                     card = exercise_card(batch, attempt, reminder=job['kind'] == 'reminder', result=job['kind'] == 'result')
+                    if len(json.dumps(card, ensure_ascii=False).encode()) > 28000:
+                        raise LearningError('题图卡片超过飞书大小限制，未发送截断题目。', 413)
                     client = await bot.messenger.client()
                     response = await client.post('https://open.feishu.cn/open-apis/im/v1/messages',
                         params={'receive_id_type': 'union_id' if attempt.get('union_id') else 'open_id'}, headers=await bot.messenger.headers(),

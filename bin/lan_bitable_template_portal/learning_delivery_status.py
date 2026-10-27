@@ -94,9 +94,12 @@ def _shift(shift, publish_time, current, enabled, snapshot, publication, directo
         return _state(result, 'disabled')
     if current.strftime('%H:%M') < publish_time:
         return _state(result, 'not_due')
+    result['issues'].extend(_issue(issue, 'unverified', issue.get('reason') or '排班资料待核对')
+                            for issue in snapshot.get('issues', [])
+                            if issue.get('duty_kind') not in ('白', '夜') or issue['duty_kind'] == shift)
     if roster_reason or not people or not ready:
         reason = roster_reason or ('本班没有排班人员' if not people else '当前应用人员目录未就绪')
-        result['issues'] = [_issue(person, 'unverified', reason) for person in people or [{}]]
+        result['issues'].extend(_issue(person, 'unverified', reason) for person in people or ([] if result['issues'] else [{}]))
         return _state(result, 'unverified')
 
     resolved = []

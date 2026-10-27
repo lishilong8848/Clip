@@ -52,6 +52,110 @@ class SharingImageTests(unittest.TestCase):
             self.learning._put('sharing_batch', self.bid, batch, conn)
         return qs
 
+    def card_runtime(self, post):
+        client = SimpleNamespace(post=post)
+        bot = SimpleNamespace(config={'app_id': 'cli_bot'}, messenger=SimpleNamespace(
+            client=AsyncMock(return_value=client), headers=AsyncMock(return_value={})))
+        runtime = SharingRuntime(SimpleNamespace(service=object(), feishu_assistant_channel=bot), lambda: self.learning)
+        runtime.core = self.core
+        runtime.allowed = Mock(return_value=True)
+        return runtime, bot
+
+    def test_inline_images_survive_restart_and_are_shared_between_recipients_and_results(self):
+        self.draft(); self.fixture.publish()
+        post = AsyncMock(return_value=Mock(status_code=200, json=lambda: {'code': 0, 'data': {'image_key': 'img_fixture'}}))
+        runtime, bot = self.card_runtime(post)
+        attempt = self.core.attempts(self.bid)[0]
+        batch = asyncio.run(runtime.prepare_card_images(self.core.batch(self.bid), attempt, bot))
+        self.assertEqual(post.call_count, 1)
+        uploaded = post.call_args.kwargs['files']['image']
+        self.assertEqual(uploaded[2], 'image/jpeg')
+        from PIL import Image
+        with Image.open(io.BytesIO(uploaded[1])) as image:
+            self.assertEqual(image.format, 'JPEG')
+        runtime, bot = self.card_runtime(post)
+        batch = asyncio.run(runtime.prepare_card_images(self.core.batch(self.bid), self.core.attempts(self.bid)[1], bot))
+        self.assertEqual(post.call_count, 1, 'Durable cache must avoid another image upload for each recipient')
+        card = exercise_card(batch, attempt)
+        components = card['body']['elements'][-1]['elements']
+        image_index = next(i for i, c in enumerate(components) if c['tag'] == 'img')
+        self.assertIn('知识点0', components[image_index - 1]['text']['content'])
+        self.assertTrue(components[image_index]['preview'])
+        self.assertNotIn('查看第', json.dumps(card, ensure_ascii=False))
+        self.assertNotIn('PrivateToken', json.dumps(card))
+        submitted = self.fixture.submit(attempt)
+        self.assertIn('img_fixture', json.dumps(submitted['card']))
+        self.assertNotIn('查看第', json.dumps(submitted['card'], ensure_ascii=False))
+        self.assertEqual(self.core.batch(self.bid)['version'], 2)
+
+    def test_image_failure_keeps_message_pending_and_retry_reuses_uploaded_images(self):
+        self.draft()
+        second = {**self.image, 'id': 'f' * 64, 'label': '第二张'}
+        with self.learning.transaction() as conn:
+            batch = self.core.batch(self.bid, conn)
+            batch['source']['images'].append(second)
+            batch['questions'][0]['image_ids'].append(second['id'])
+            self.learning._put('sharing_batch', self.bid, batch, conn)
+        self.fixture.publish()
+        uploads, messages = [], []
+        def respond(url, **kwargs):
+            if url.endswith('/images'):
+                uploads.append(url)
+                if len(uploads) == 2:
+                    return Mock(status_code=400, json=lambda: {'code': 99991672})
+                return Mock(status_code=200, json=lambda: {'code': 0, 'data': {'image_key': 'img_' + str(len(uploads))}})
+            messages.append(kwargs['json'])
+            return Mock(status_code=200, json=lambda: {'code': 0, 'data': {'message_id': 'om_card'}})
+        runtime, _ = self.card_runtime(AsyncMock(side_effect=respond))
+        job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'paper')
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            asyncio.run(runtime.send(job))
+            saved = self.learning._get('sharing_delivery', job['id'])
+            self.assertEqual(saved['status'], 'pending')
+            self.assertIn('题图上传未确认', saved['error'])
+            self.assertEqual(messages, [], 'Do not send a card missing a required image')
+            self.assertEqual(len(self.core.batch(self.bid)['card_images']), 1)
+            runtime, _ = self.card_runtime(AsyncMock(side_effect=respond))
+            asyncio.run(runtime.send(saved))
+        self.assertEqual(len(uploads), 3, 'Only the failed second image should be uploaded again')
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(self.learning._get('sharing_delivery', job['id'])['status'], 'sent')
+        elements = json.loads(messages[0]['content'])['body']['elements'][-1]['elements']
+        self.assertEqual(sum(element['tag'] == 'img' for element in elements), 2)
+
+    def test_app_change_during_image_upload_is_not_cached_or_sent(self):
+        self.draft(); self.fixture.publish()
+        runtime, bot = self.card_runtime(AsyncMock())
+        def change(*args, **kwargs):
+            bot.config['app_id'] = 'cli_other'
+            return Mock(status_code=200, json=lambda: {'code': 0, 'data': {'image_key': 'img_wrong_app'}})
+        bot.messenger.client.return_value.post.side_effect = change
+        with self.assertRaisesRegex(LearningError, '应用已变化'):
+            asyncio.run(runtime.prepare_card_images(self.core.batch(self.bid), self.core.attempts(self.bid)[0], bot))
+        self.assertFalse(self.core.batch(self.bid).get('card_images'))
+
+    def test_revoked_recipient_after_image_upload_gets_no_message(self):
+        self.draft(); self.fixture.publish()
+        post = AsyncMock(return_value=Mock(status_code=200, json=lambda: {'code': 0, 'data': {'image_key': 'img_fixture'}}))
+        runtime, _ = self.card_runtime(post)
+        runtime.allowed.side_effect = [True, False]
+        job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'paper')
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}):
+            asyncio.run(runtime.send(job))
+        self.assertTrue(all(call.args[0].endswith('/images') for call in post.call_args_list))
+        self.assertEqual(self.learning._get('sharing_delivery', job['id'])['status'], 'pending')
+
+    def test_wrong_app_changed_image_and_invalid_key_never_render_in_card(self):
+        self.draft(); self.fixture.publish()
+        batch, attempt = self.core.batch(self.bid), self.core.attempts(self.bid)[0]
+        valid = {'app_id': 'cli_bot', 'sha256': self.image['sha256'], 'image_key': 'img_valid'}
+        for change in ({'app_id': 'cli_other'}, {'sha256': '0' * 64}, {'image_key': None}, {'image_key': 'invalid'}):
+            with self.subTest(change=change):
+                batch['card_images'] = {self.image['id']: {**valid, **change}}
+                card = json.dumps(exercise_card(batch, attempt), ensure_ascii=False)
+                self.assertNotIn('"tag": "img"', card)
+                self.assertIn('查看第', card)
+
     def test_evidence_normalizes_layout_not_facts_and_requires_known_image(self):
         self.assertNotEqual(evidence_text('两个显示值3 0请核对'), evidence_text('两个显示值30请核对'))
         self.assertEqual(evidence_text('间隔 30 分钟'), evidence_text('间隔30分钟'))

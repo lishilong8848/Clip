@@ -9,6 +9,103 @@ from lan_bitable_template_portal import learning_reminders as reminders
 
 
 class ShiftReminderTests(TestCase):
+    def test_existing_local_publication_sends_before_cloud_maintenance_failure(self):
+        self.service._restored = True
+        with self.service.transaction() as conn:
+            self.service._put('publication','personal:2026-10-10',{'date':'2026-10-10'},conn,False)
+        with patch.object(self.service,'_tick',side_effect=OSError('cloud unavailable')), \
+             patch('lan_bitable_template_portal.learning_engagement.send_due'):
+            with self.assertRaises(OSError):
+                self.service.tick(dt.datetime(2026,10,10,13,tzinfo=learning.TZ))
+            with self.assertRaises(OSError):
+                self.service.tick(dt.datetime(2026,10,10,13,1,tzinfo=learning.TZ))
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list],['ou_external'])
+
+    def test_partial_roster_does_not_drop_issues_or_block_valid_people(self):
+        self.reader.return_value={'people':self.reader.return_value,
+            'issues':[{'name':'待核对人员','scope':'H','reason':'班次待核对'}]}
+        self.run_at(13)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list],['ou_external'])
+        self.assertEqual(len(self.service._get('local','shift_roster')['issues']),1)
+        self.assertIn('班次待核对',self.service._last_error)
+
+    def test_update_restart_restores_local_schedule_before_cloud_refresh_without_resending(self):
+        with self.service.transaction() as conn:
+            self.service._put('publication','personal:2026-10-10',{'date':'2026-10-10'},conn,False)
+            self.service._put('local','personnel_table_v1',{'prepared':True},conn,False)
+        for _ in range(2):
+            self.service=self.make_service()
+            self.service.cloud.personnel_only_storage=True
+            with patch.object(self.service.cloud,'load_entities',side_effect=AssertionError('Must restore locally')), \
+                 patch.object(self.service,'_tick',side_effect=OSError('maintenance unavailable')), \
+                 patch('lan_bitable_template_portal.learning_engagement.send_due'):
+                with self.assertRaises(OSError):
+                    self.service.tick(dt.datetime(2026,10,10,5,tzinfo=dt.timezone.utc))
+            self.assertTrue(self.service._restored)
+        self.sender.assert_called_once()
+        self.assertEqual(self.sender.call_args.args[0],'ou_external')
+
+    def test_access_alerts_remain_separate_by_building_and_shift(self):
+        self.people['people']['external']['account_nature']='非VNET'
+        self.people['people']['night']['account_nature']='非VNET'
+        self.people['people']['other']={'name':'另一楼人员','scopes':['H'],'selectable':True,
+            'account_nature':'非VNET','login_ids':['ou_other']}
+        self.reader.return_value.append({'name':'另一楼人员','scope':'H','shift':'白','open_id':'ou_other'})
+        self.sender.side_effect=lambda recipient,*args:(False,'rejected',[{'open_id':recipient,'ok':False,'code':230013}]) if recipient.startswith('ou_') else (True,'',[])
+        self.run_at(20)
+        jobs=[job for job in self.service._all('notification') if job.get('kind')=='app_access']
+        self.assertEqual({(job['scope'],job['shift']) for job in jobs},{('A','白'),('A','夜'),('H','白')})
+        self.assertEqual(len({job['id'] for job in jobs}),3)
+        self.assertEqual(len([c for c in self.sender.call_args_list if c.args[0]=='H']),1)
+        for job in jobs:
+            self.assertEqual(len(job['members']),1)
+            self.assertEqual(job['status'],'sent')
+
+    def test_denied_non_vnet_recipients_are_grouped_for_duty_and_retry_independently(self):
+        self.people['people']['external']['account_nature']='非VNET'
+        self.people['people']['second']={'name':'外部人员二','scopes':['A'],'selectable':True,
+            'account_nature':'非VNET','login_ids':['ou_second']}
+        self.people['people']['vnet']={'name':'VNET人员','scopes':['A'],'selectable':True,
+            'account_nature':'VNET','login_ids':['ou_vnet']}
+        self.reader.return_value += [{'name':name,'scope':'A','shift':'白','open_id':oid}
+            for name,oid in [('外部人员二','ou_second'),('VNET人员','ou_vnet')]]
+        def send(recipient,*args):
+            if recipient in {'ou_external','ou_second','ou_vnet'}:
+                return False,'rejected',[{'open_id':recipient,'ok':False,'code':230013}]
+            return True,'ok',[]
+        self.sender.side_effect=send
+        with patch.object(learning.time,'time',return_value=1000):self.run_at(20)
+        self.assertIn('ou_night',[call.args[0] for call in self.sender.call_args_list])
+        forwards=[call for call in self.sender.call_args_list if call.args[0]=='A']
+        self.assertEqual(len(forwards),1)
+        card=forwards[0].args[1]
+        self.assertIn('外部人员二',card['elements'][0]['text']['content'])
+        self.assertNotIn('VNET人员',card['elements'][0]['text']['content'].split('：',1)[-1].split('。',1)[0])
+        self.assertEqual(card['elements'][-1]['actions'][0]['url'],reminders.APP_ACCESS_URL)
+        self.service=self.make_service()
+        self.sender.side_effect=lambda *args:(True,'ok',[])
+        with patch.object(learning.time,'time',return_value=1301):self.run_at(20)
+        self.assertEqual(sum(call.args[0]=='A' for call in self.sender.call_args_list),1)
+        self.assertEqual(sum(call.args[0]=='ou_night' for call in self.sender.call_args_list),1)
+        self.assertEqual(self.service._get('notification','shift:2026-10-10:白:ou_external')['status'],'sent')
+
+    def test_network_failure_does_not_trigger_application_request_and_duty_failure_is_durable(self):
+        self.people['people']['external']['account_nature']='非VNET'
+        self.sender.side_effect=OSError('network')
+        with patch.object(learning.time,'time',return_value=1000):self.run_at(13)
+        self.assertFalse(any(n.get('kind')=='app_access' for n in self.service._all('notification')))
+        def send(recipient,*args):
+            return (False,'rejected',[{'open_id':recipient,'ok':False,'failure_kind':'bot_unavailable'}]) if recipient.startswith('ou_') else (False,'duty offline',[])
+        self.sender.side_effect=send
+        with patch.object(learning.time,'time',return_value=1301):self.run_at(13)
+        notice=next(n for n in self.service._all('notification') if n.get('kind')=='app_access')
+        self.assertEqual(notice['status'],'pending')
+        first_id=notice['id']
+        self.service=self.make_service()
+        self.sender.side_effect=send
+        with patch.object(learning.time,'time',return_value=1602):self.run_at(13)
+        self.assertEqual([n['id'] for n in self.service._all('notification') if n.get('kind')=='app_access'],[first_id])
+
     def setUp(self):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)

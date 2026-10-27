@@ -478,7 +478,16 @@ class LearningService:
                 and not self._get("publication", self._publication_key(date)))
 
     def tick(self, current=None):
+        current = current or now()
+        current = current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ)
         try:
+            if (not self._restored and self.settings()['enabled']
+                    and getattr(self.cloud, 'personnel_only_storage', False) is True
+                    and (self._get('local', 'personnel_table_v1') or {}).get('prepared')):
+                self.restore()
+            # Existing local papers remain usable while unrelated cloud maintenance retries.
+            if self._restored and self.settings()['enabled'] and self._get('publication', self._publication_key(current.date().isoformat())):
+                self.send_notifications(current)
             self._tick(current)
         finally:
             if self._restored:
@@ -863,7 +872,7 @@ class LearningService:
             self._send_notifications(current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ))
 
     def _send_notifications(self, current):
-        from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times
+        from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times, notification_jobs, APP_ACCESS_URL
         settings = self.settings()
         if not settings['enabled']:
             return
@@ -877,7 +886,7 @@ class LearningService:
                     record = self._get("record", paper["id"], conn) or {}
                     if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
                         self._put("notification", key, {"id": key, "kind": "reminder", "personal_mode": True, "scope": paper["scope"], "date": date, "status": "pending"}, conn)
-        for notification in self._all("notification"):
+        for notification in notification_jobs(self, current, assignments):
             if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
                 continue
             current_settings = self.settings()
@@ -899,7 +908,7 @@ class LearningService:
             else:
                 if notification['kind'] == 'shift' and current.strftime('%H:%M') < shift_times(current_settings).get(notification.get('shift'), '23:59'):
                     continue
-                if notification['kind'] != 'shift' and ((paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty")):
+                if notification['kind'] not in {'shift', 'app_access'} and ((paper and paper["_dirty"]) or (self._get("publication", self._publication_key(date)) or {}).get("_dirty")):
                     continue
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
                     continue
@@ -908,9 +917,9 @@ class LearningService:
                 if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:
-                    if link is None:
+                    if link is None and notification['kind'] != 'app_access':
                         link = self.portal_url()
-                    if not link:
+                    if not link and notification['kind'] != 'app_access':
                         self._last_error = "程序暂未识别到可访问的门户地址，学习提醒保留待发送，请检查程序的网络与访问地址设置"
                         continue
                     message = notification.get("message") or f"【画像学练】{notification['scope']}楼 {date}\n" + ("今日学练已发布" if notification["kind"] == "publish" else "今日学练尚未完成")
@@ -921,8 +930,11 @@ class LearningService:
                     elif outstanding:
                         message += f"，已领取的{len(outstanding)}份个人题单待完成。"
                     url = f"{link}/learning?view=practice" if notification['kind'] == 'shift' else f"{link}/learning?scope={notification['scope']}"
+                    card = reminder_card(message, url)
+                    if notification['kind'] == 'app_access':
+                        card = reminder_card(message, APP_ACCESS_URL, button='申请使用小塔飞书应用')
                     try:
-                        result = self._send(notification.get('open_id') or notification['scope'], reminder_card(message, url), notification['id'])
+                        result = self._send(notification.get('open_id') or notification['scope'], card, notification['id'])
                     except Exception:
                         result = (False, '学习提醒发送失败，后台稍后重试。')
                     ok = result[0] if isinstance(result, tuple) else bool(result)

@@ -3,6 +3,7 @@ import asyncio
 import datetime as dt
 import json
 import re
+import time
 
 from .lighthouse_ai import AssistantError, safe_data, safe_text, private_identifier, CONTACT, PRIVATE_REPLY
 from .lighthouse_knowledge import company_question, sensitive_document
@@ -71,6 +72,36 @@ async def automatic_company_query(engine, actor, turn, question, history, author
 
 def has_company_sources(turn):
     return any(source.get('kind') == 'company_knowledge' for source in turn.get('sources', []))
+
+
+def document_references(turn):
+    """Keep cited document locations only; historical prose never becomes fresh evidence."""
+    if turn.get('status') not in (None, 'completed') or turn.get('plan') or turn.get('display_only'):
+        return []
+    if not isinstance(turn.get('sources', []), list):
+        return []
+    cited = {int(value) for value in re.findall(r'\[(\d{1,3})\]', str(turn.get('answer') or ''))}
+    result, seen = [], set()
+    for source in turn.get('sources', []):
+        if (not isinstance(source, dict) or source.get('kind') != 'company_knowledge'
+                or type(source.get('number')) is not int or source['number'] not in cited):
+            continue
+        data = source.get('data') or {}
+        if (not isinstance(data, dict) or not isinstance(data.get('document_id'), str)
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}', data['document_id'])
+                or type(data.get('version')) is not int or data['version'] < 1
+                or type(data.get('ordinal')) is not int or data['ordinal'] < 0
+                or not isinstance(data.get('name'), str) or not 1 <= len(data['name']) <= 300
+                or sensitive_document(data['name'])):
+            continue
+        identity = (data['document_id'], data['version'], data['ordinal'])
+        if identity in seen:
+            continue
+        seen.add(identity)
+        result.append({key: data[key] for key in ('document_id', 'version', 'ordinal', 'name')})
+        if len(result) == 6:
+            break
+    return result
 
 
 def company_request(turn):
@@ -281,7 +312,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     async def review(candidate, sources, items, *, defer):
         return await reviewer.run(actor, {**turn, 'question': question}, [], {'answer': candidate,
             'sources': review_sources(sources, items), 'knowledge_retrieval': {
-                'repair_rounds': repairs, 'searches': 1 + len(topic_results), 'complete': not bool(gaps)}},
+                'repair_rounds': repairs, 'searches': int(not reused) + len(topic_results), 'complete': not bool(gaps)}},
             authorize, defer_reads=defer)
 
     factory = getattr(engine.portal, 'get_knowledge', None)
@@ -295,15 +326,22 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     knowledge = await asyncio.to_thread(factory)
     profile = turn['_profile']
     await emit('status', {'label': '正在检索公司知识库'})
+    references = (turn.get('_query_intent') or {}).get('document_references', [])
+    reused = bool(references and callable(getattr(type(knowledge), 'answer_evidence', None))
+                  and await asyncio.to_thread(knowledge.evidence_current, references, profile, actor=current))
     try:
-        found = await asyncio.to_thread(knowledge.search, current, search_question, profile=profile)
+        if reused:
+            await emit('status', {'label': '正在读取本话题已引用文档的原文'})
+            found = {'items': [{**item, 'text': ''} for item in references], 'warning': ''}
+        else:
+            found = await asyncio.to_thread(knowledge.search, current, search_question, profile=profile)
     except AssistantError as exc:
         return await reply(str(exc))
     model, topics, topic_results = None, [], []
     compound = bool(_TOPIC_SEPARATOR.search(search_question))
     warning = found.get('warning') or ''
     retryable = not warning or found.get('mode') == 'keyword_fallback' or _RETRIEVAL_WARNING.search(warning)
-    if not _AUTH_WARNING.search(warning) and ((compound and found['items']) or (not found['items'] and retryable)):
+    if not reused and not _AUTH_WARNING.search(warning) and ((compound and found['items']) or (not found['items'] and retryable)):
         await emit('status', {'label': '正在补充公司资料检索词'})
         try:
             model = engine.assistant.model_for(current)
@@ -354,6 +392,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     seen_evidence = {_evidence_signature(item) for item in items}
     gaps, partial, partial_sources, partial_items = [], '', [], []
     repairs, invalid_answer, generation_problem = 0, False, ''
+    attempted_profiles = set()
     # Only read repair is allowed here; no tools that send messages or mutate business records.
     for attempt in range(3):
         current = await authorize()
@@ -365,6 +404,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if callable(expand):
             expanded = await asyncio.to_thread(knowledge.answer_evidence, current, items, profile=profile, model=model)
             items = expanded['items']
+            seen_evidence.update(_evidence_signature(item) for item in items)
             # Per-source visual gaps stay in coverage; unrelated images must not veto usable text.
             current = await authorize()
             if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
@@ -426,21 +466,40 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                     'previous_candidate': _previous_candidate(partial, partial_sources, sources),
                     'remaining_gaps': gaps}, ensure_ascii=False)}]
         try:
+            from .lighthouse_model_health import model_health, model_health_key, profile_key, select_task_profile
+            started = time.monotonic()
+            attempted_profiles.add(profile_key(profile))
             turn['_actual_profile'] = dict(profile)
             raw = await asyncio.wait_for(asyncio.to_thread(model.complete, messages, profile=profile,
                 max_tokens=None, structured=True, timeout=45), 45)
             answer, requested, gaps = _candidate(raw)
+            model_health(engine.assistant).record(model_health_key(current, profile), latency=time.monotonic() - started)
             generation_problem = ''
         except (AssistantError, OSError, asyncio.TimeoutError) as exc:
-            if isinstance(exc, AssistantError) and exc.status in (401, 403):
+            category = exc.category if isinstance(exc, AssistantError) else 'timeout' if isinstance(exc, TimeoutError) else 'model_connection'
+            if isinstance(exc, AssistantError) and exc.status in (401, 403) and not category.startswith('model_'):
                 raise
-            if isinstance(exc, AssistantError) and exc.category in {'model_protocol', 'model_output'}:
+            if category.startswith('model_') or category == 'timeout':
+                from ..diagnostics import capture
+                await asyncio.to_thread(capture, 'assistant', 'model_attempt', run_id=turn.get('run_id', ''),
+                    category=category, error=exc)
                 generation_problem = '资料已检索到，但答复未完整生成；未将未完成内容作为结论。'
                 gaps = ['补充答复尚未完整生成和核验']
                 review_feedback = ['上次答复格式不完整，不代表资料不适用。请用相同证据重新生成简明且完整的JSON，仅保留问题所需结论与引用。']
+                model_health(engine.assistant).record(model_health_key(current, profile), category=category)
                 if attempt < 2:
-                    await emit('status', {'label': '正在重新生成并核对资料答复'})
-                    continue
+                    try:
+                        alternative = select_task_profile(engine.assistant, current, turn, profile,
+                            attempted=attempted_profiles, initial=False)
+                    except (AssistantError, AttributeError, TypeError, ValueError):
+                        alternative = None
+                    if alternative and knowledge.model_allowed(alternative):
+                        profile = alternative
+                        await emit('status', {'label': '正在用可用模型继续核对已读取的资料'})
+                        continue
+                    if category in {'model_protocol', 'model_output'}:
+                        await emit('status', {'label': '正在重新生成并核对资料答复'})
+                        continue
                 break
             if not partial:
                 raise
@@ -578,6 +637,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         result['answer_review'] = reviewed
     result['_review_sources'] = review_sources(sources, items)
     result['_knowledge_evidence'] = [dict(source['data']) for source in sources[offset:]]
-    result['knowledge_retrieval'] = {'repair_rounds': repairs, 'searches': 1 + len(topic_results),
+    result['knowledge_retrieval'] = {'repair_rounds': repairs, 'searches': int(not reused) + len(topic_results),
+                                   'reused_document_refs': reused,
                                    'sources': len(sources), 'complete': not bool(gaps or (compound and missing))}
     return result

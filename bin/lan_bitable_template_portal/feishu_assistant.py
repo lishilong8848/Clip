@@ -227,6 +227,8 @@ class Inbox:
             db.execute("CREATE TABLE IF NOT EXISTS topic_posts (message_id TEXT PRIMARY KEY,chat_id TEXT,root_id TEXT,question TEXT,answer TEXT,access TEXT,created_at REAL)")
             if 'app_id' not in {row[1] for row in db.execute('PRAGMA table_info(topic_posts)')}:
                 db.execute("ALTER TABLE topic_posts ADD COLUMN app_id TEXT NOT NULL DEFAULT ''")
+            if 'documents' not in {row[1] for row in db.execute('PRAGMA table_info(topic_posts)')}:
+                db.execute("ALTER TABLE topic_posts ADD COLUMN documents TEXT NOT NULL DEFAULT '[]'")
             db.execute('CREATE INDEX IF NOT EXISTS topic_posts_recent ON topic_posts(chat_id,root_id,created_at)')
             db.execute('CREATE INDEX IF NOT EXISTS topic_posts_expiry ON topic_posts(created_at)')
             db.execute('CREATE INDEX IF NOT EXISTS topic_plans_expiry ON topic_plans(updated_at)')
@@ -401,9 +403,10 @@ class Inbox:
         if not route.get('root_id') or reply.get('thread_fallback') or not reply.get('delivery_access'):
             return
         with self.connect() as db:
-            db.execute('INSERT OR IGNORE INTO topic_posts(message_id,chat_id,root_id,question,answer,access,created_at,app_id) VALUES(?,?,?,?,?,?,?,?)',
+            db.execute('INSERT OR IGNORE INTO topic_posts(message_id,chat_id,root_id,question,answer,access,created_at,app_id,documents) VALUES(?,?,?,?,?,?,?,?,?)',
                        (message['message_id'], route['chat_id'], route['root_id'], safe_text(message.get('question'), limit=1500),
-                        safe_text(reply.get('text'), limit=2500), json.dumps(reply['delivery_access']), time.time(), message.get('app_id', '')))
+                        safe_text(reply.get('text'), limit=2500), json.dumps(reply['delivery_access']), time.time(), message.get('app_id', ''),
+                        json.dumps(reply.get('document_sources', []), ensure_ascii=False)))
 
     def context_topic(self, message):
         if message.get('chat_type') != 'group':
@@ -417,10 +420,10 @@ class Inbox:
         if not topic:
             return {'context': '', 'access': []} if details else ''
         with self.connect() as db:
-            rows = db.execute('SELECT question,answer,access FROM topic_posts WHERE chat_id=? AND root_id=? AND app_id=? ORDER BY created_at DESC LIMIT 64',
+            rows = db.execute('SELECT question,answer,access,documents FROM topic_posts WHERE chat_id=? AND root_id=? AND app_id=? ORDER BY created_at DESC LIMIT 64',
                               (topic['chat_id'], topic['root_id'], message.get('app_id', ''))).fetchall()
-        parts, required, questions = [], [], []
-        for question, answer, raw in reversed(rows):
+        parts, required, questions, documents = [], [], [], []
+        for question, answer, raw, source_json in reversed(rows):
             access = json.loads(raw)
             from .portal_auth import topic_access_allowed
             if topic_access_allowed(access, actor):
@@ -435,11 +438,17 @@ class Inbox:
                 required = combined
                 parts.append('话题问题：' + question + '\n已公开回复（历史）：' + answer)
                 questions.append(safe_text(question, limit=2000))
+                try:
+                    refs = json.loads(source_json)
+                except (TypeError, ValueError):
+                    refs = []
+                documents.append({'question': safe_text(question, limit=2000),
+                                  'documents': refs[:6] if isinstance(refs, list) else []})
         # Filter first, then retain bounded older excerpts and fuller recent replies.
         older, recent = parts[:-8], parts[-8:]
         excerpts = ['[较早话题摘要节选] ' + part[:max(48, 3800 // max(1, len(older)))] for part in older]
         context = ('\n\n'.join(excerpts)[:4500] + '\n\n' + '\n\n'.join(part[:900] for part in recent)).strip()[:12000]
-        return {'context': context, 'access': required, 'questions': questions[-8:]} if details else context
+        return {'context': context, 'access': required, 'questions': questions[-8:], 'documents': documents[-8:]} if details else context
 
     def defer_delivery(self, identity, *, permanent=False, reason=''):
         with self.connect() as db:
@@ -1536,6 +1545,9 @@ class FeishuAssistant:
                 'delivery_access': access,
                 'files': [{'id': file['id'], 'name': file['name']} for file in ([] if pending_reads else turn.get('output_files', []))
                           if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
+        if not pending_reads:
+            from openclaw_service.assistant.lighthouse_knowledge_answer import document_references
+            reply['document_sources'] = document_references(turn)
         if turn.get('plan') and not pending_reads:
             await self._attach_form_card(reply, message, request, actor, conversation, turn['plan'])
         return reply

@@ -97,6 +97,24 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('适用对象或条件不符', result['answer'])
         self.assertNotIn('请补充文件名称', result['answer'])
 
+    async def test_protocol_or_timeout_failure_switches_model_with_same_evidence_and_no_new_search(self):
+        for failure in (AssistantError('incomplete', 502, category='model_protocol'), TimeoutError()):
+            with self.subTest(failure=type(failure).__name__):
+                alternative = {**self.profile, 'model': 'healthy'}
+                self.kb.model_allowed = Mock(return_value=True)
+                self.kb.search.reset_mock()
+                self.model.complete.reset_mock()
+                self.model.complete.side_effect = [failure, candidate('该流程只适用于设备甲。[1]')]
+                with patch('openclaw_service.assistant.lighthouse_model_health.select_task_profile', return_value=alternative):
+                    result = await self.answer()
+                self.assertIn('设备甲', result['answer'])
+                self.kb.search.assert_called_once()
+                self.assertEqual(self.model.complete.call_args_list[1].kwargs['profile'], alternative)
+                bodies = [[{k:v for k,v in doc.items() if k != 'queried_at'}
+                           for doc in json.loads(call.args[0][1]['content'])['documents']]
+                          for call in self.model.complete.call_args_list]
+                self.assertEqual(bodies[0], bodies[1])
+
     async def test_visual_failures_do_not_discard_text_or_append_unrelated_document_warnings(self):
         base = self.kb
         class TextWithUnavailableImages:

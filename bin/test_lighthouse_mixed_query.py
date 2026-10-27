@@ -397,6 +397,18 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
         self.assertEqual(self.texts(), result['answer'])
 
+    async def test_partial_review_and_missing_document_produce_one_specific_limitation(self):
+        from openclaw_service.assistant.lighthouse_review import PARTIAL_REVIEW_NOTICE
+        self.patch_intent()
+        business = self.business_result(answer_review={'status': 'limited'})
+        business['answer'] += '\n\n' + PARTIAL_REVIEW_NOTICE
+        self.engine._answer_candidate = AsyncMock(return_value=business)
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock, side_effect=TimeoutError()):
+            result = await self.answer()
+        self.assertIn('本轮业务结果。[1]', result['answer'])
+        self.assertNotIn(PARTIAL_REVIEW_NOTICE, result['answer'])
+        self.assertEqual(result['answer'].count('尚未核实'), 1)
+
     async def test_model_requested_document_denial_never_returns_the_business_draft(self):
         self.patch_intent(resolved('unknown'))
         self.engine._answer_candidate = AsyncMock(return_value=self.business_result(_requested_company_query=DOCUMENT_QUERY))

@@ -704,7 +704,7 @@ class LighthouseModel:
                 except (AssistantError, OSError, asyncio.TimeoutError) as exc:
                     if isinstance(exc, AssistantError) and exc.status in (401, 403):
                         raise
-                    combined = {'answer': '文档依据本次未完成读取或核验，不能据此判断是否符合要求。', 'sources': []}
+                    combined = {'answer': '补充文档本次未完成读取或核验，尚未核实的部分未作为结论。', 'sources': []}
                 current = await authorize()
                 if (current['id'] != actor['id'] or set(actor['scopes']) - set(current['scopes'])
                         or set(actor.get('modules', [])) - set(current.get('modules', []))):
@@ -767,7 +767,9 @@ class LighthouseModel:
         if checked.get('answer') == PRIVATE_REPLY:
             return checked
         # Do not let another mixed review turn a fixed source failure into an old company rule.
-        result = {**business, 'answer': checked.get('answer', '') + '\n\n' + notice,
+        from .lighthouse_review import PARTIAL_REVIEW_NOTICE
+        supported = checked.get('answer', '').removesuffix('\n\n' + PARTIAL_REVIEW_NOTICE)
+        result = {**business, 'answer': supported + '\n\n' + notice,
                   'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable',
                     'business_status': (checked.get('answer_review') or {}).get('status', 'unverified'), 'repairs': 0}}
         result.pop('_task_context', None)
@@ -830,7 +832,7 @@ class LighthouseModel:
         except (AssistantError, OSError, asyncio.TimeoutError) as exc:
             if isinstance(exc, AssistantError) and exc.status in (401, 403):
                 raise
-            result = {'answer': '文档依据本次未完成读取或核验，不能据此判断是否符合要求。', 'sources': []}
+            result = {'answer': '补充文档本次未完成读取或核验，尚未核实的部分未作为结论。', 'sources': []}
         current = await authorize()
         if (current['id'] != actor['id'] or set(actor['scopes']) - set(current['scopes'])
                 or set(actor.get('modules', [])) - set(current.get('modules', []))):

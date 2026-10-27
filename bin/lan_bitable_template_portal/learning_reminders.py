@@ -9,7 +9,8 @@ from .personnel_source import APP_TOKEN, TABLE_ID
 VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
-ROSTER_VERSION = 5
+ROSTER_VERSION = 6
+APP_ACCESS_URL = 'https://applink.feishu.cn/T9aTCORtUJLb'
 
 
 def shift_times(settings):
@@ -43,11 +44,14 @@ def duty_recipients(service):
     return targets
 
 
-def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False):
+def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False, with_status=False):
     from .personnel_source import daily_roster
     snapshot = daily_roster(service, day)
-    return [dict(person) for person in snapshot['people'] if person['scope'] in scopes
-            and (include_long_day or person.get('duty_kind') != '长白')]
+    people = [dict(person) for person in snapshot['people'] if person['scope'] in scopes
+              and (include_long_day or person.get('duty_kind') != '长白')]
+    issues = [dict(issue) for issue in snapshot.get('issues', []) if (not issue.get('scope') or issue['scope'] in scopes)
+              and (include_long_day or issue.get('group') != '长白')]
+    return {'people': people, 'issues': issues} if with_status else people
 
 
 def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
@@ -86,22 +90,27 @@ def roster_snapshot(service, day):
     if snapshot.get('date') != day:
         snapshot = service._get('local', 'shift_roster:' + day) or {}
     if (snapshot.get('date') == day and day < dt.datetime.now(TZ).date().isoformat()
-            and snapshot.get('version') in {3, 4, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
+            and snapshot.get('version') in {3, 4, 5, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
         return snapshot
     if (snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION
             or time.time() - float(snapshot.get('observed_at') or 0) >= 300):
         retry = service._get('local', 'shift_roster_retry:' + day) or service._get('local', 'shift_roster_retry') or {}
-        if retry.get('date') == day and retry.get('retry_at', 0) > time.time():
+        if (snapshot.get('version') in (None, ROSTER_VERSION)
+                and retry.get('date') == day and retry.get('retry_at', 0) > time.time()):
             return
         try:
-            people = service._shift_roster_reader(day)
+            value = service._shift_roster_reader(day)
+            people = value.get('people') if isinstance(value, dict) else value
+            issues = value.get('issues', []) if isinstance(value, dict) else []
+            if not isinstance(people, list) or not isinstance(issues, list):
+                raise ValueError('invalid roster snapshot')
         except Exception:
             with service.transaction() as conn:
                 service._put('local', 'shift_roster_retry', {'date': day, 'retry_at': time.time() + 300}, conn, False)
                 service._put('local', 'shift_roster_retry:' + day, {'date': day, 'retry_at': time.time() + 300}, conn, False)
             service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
             return
-        snapshot = {'date': day, 'people': people, 'version': ROSTER_VERSION, 'observed_at': time.time()}
+        snapshot = {'date': day, 'people': people, 'issues': issues, 'version': ROSTER_VERSION, 'observed_at': time.time()}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
             service._put('local', 'shift_roster:' + day, snapshot, conn, False)
@@ -156,6 +165,8 @@ def enqueue_shift_reminders(service, current):
     if snapshot is None:
         return
     people, warnings = resolve_roster(snapshot['people'], directory)
+    warnings.extend((str(issue.get('name') or '未命名人员') + '：' + str(issue.get('reason') or '排班待核对'))
+                    for issue in snapshot.get('issues', []))
     if warnings:
         service._last_error = '学练排班待核对：' + '；'.join(warnings)
     with service.transaction() as conn:
@@ -172,12 +183,61 @@ def enqueue_shift_reminders(service, current):
     return {(person['shift'], person['open_id']) for person in people}
 
 
-def reminder_card(message, url):
+def notification_jobs(service, current, assignments):
+    """Complete personal attempts first, then aggregate confirmed access failures per building."""
+    yield from (job for job in service._all('notification') if job.get('kind') != 'app_access')
+    from .learning_personal import _login_directory
+    try:
+        directory, ready = _login_directory(service)
+    except Exception:
+        directory, ready = {}, False
+    if ready and assignments is not None:
+        day = current.date().isoformat()
+        notices = service._all('notification')
+        reported = {member for job in notices if job.get('kind') == 'app_access' and job.get('date') == day
+                    for member in job.get('members', [])}
+        by_id = defaultdict(list)
+        for person in directory.values():
+            for oid in person.get('login_ids', []):
+                by_id[oid].append(person)
+        groups = defaultdict(list)
+        for job in notices:
+            oid, shift = job.get('open_id'), job.get('shift')
+            if (job.get('kind') != 'shift' or job.get('date') != day or job.get('status') != 'pending'
+                    or job['id'] in reported or (shift, oid) not in assignments or len(by_id[oid]) != 1):
+                continue
+            person = by_id[oid][0]
+            nature = str(person.get('account_nature') or '').strip().upper()
+            scopes = list(dict.fromkeys(person.get('scopes') or []))
+            if not nature or nature == 'VNET' or len(scopes) != 1 or scopes[0] not in tuple('ABCDEH'):
+                continue
+            if not any(isinstance(d, dict) and d.get('open_id') == oid and d.get('ok') is False
+                       and (str(d.get('code')) == '230013' or d.get('failure_kind') == 'bot_unavailable')
+                       for d in job.get('delivery') or []):
+                continue
+            groups[scopes[0], shift].append((job['id'], person.get('name') or '未命名人员'))
+        with service.transaction() as conn:
+            for (scope, shift), members in groups.items():
+                identities = sorted(member[0] for member in members)
+                identity = 'app-access:' + str(uuid5(NAMESPACE_URL, '|'.join(identities)))
+                if service._get('notification', identity, conn):
+                    continue
+                names = '、'.join(dict.fromkeys(member[1] for member in members))
+                message = (f'【学练应用授权待处理】{day} {scope}楼{shift}班\n'
+                           f'以下非VNET人员的个人答题提醒被飞书拒绝投递：{names}。\n'
+                           '请值班人员联系本人申请使用小塔飞书应用；授权生效后，本日待发送提醒将自动重试。'
+                           '其他人员正常发送。\n申请链接：' + APP_ACCESS_URL)
+                service._put('notification', identity, {'id': identity, 'kind': 'app_access', 'date': day,
+                    'scope': scope, 'shift': shift, 'members': identities, 'status': 'pending', 'message': message}, conn)
+    yield from (job for job in service._all('notification') if job.get('kind') == 'app_access')
+
+
+def reminder_card(message, url, *, button='打开画像学练'):
     return {'config': {'wide_screen_mode': True},
             'header': {'title': {'tag': 'plain_text', 'content': '画像学练'}, 'template': 'blue'},
             'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': message}},
                          {'tag': 'action', 'actions': [{'tag': 'button', 'type': 'primary',
-                           'text': {'tag': 'plain_text', 'content': '打开画像学练'}, 'url': url}]}]}
+                           'text': {'tag': 'plain_text', 'content': button}, 'url': url}]}]}
 
 
 def send_reminder(recipient, card, identity):
