@@ -260,6 +260,8 @@ RUNTIME_MODULE_TO_PACKAGE = {
     "cryptography": "cryptography",
 
     "PIL": "Pillow",
+    "PIL.AvifImagePlugin": "Pillow>=11.3.0",
+    "pillow_heif": "pillow-heif==1.8.1",
 
     "openpyxl": "openpyxl",
     "docx": "python-docx==1.2.0",
@@ -341,6 +343,8 @@ RUNTIME_PACKAGE_INSTALL_ORDER = [
     "cryptography",
 
     "PIL",
+    "PIL.AvifImagePlugin",
+    "pillow_heif",
 
     "openpyxl",
 

@@ -23,13 +23,12 @@ from .pre_shift_schedule import normalize_frequency, occurrences_for_date, upcom
 TZ = dt.timezone(dt.timedelta(hours=8))
 SCOPES = ('110', 'A', 'B', 'C', 'D', 'E', 'H')
 DUTY = {'operator', 'shift_leader', 'duty'}
-ROSTER_VERSION = 4
+ROSTER_VERSION = 5
 REMINDER_LEAD_SECONDS = 600
 CLOUD_DETAIL_VERSION = 1
 
-ALLOWED_EXTS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf', '.doc', '.docx',
-                '.xls', '.xlsx', '.md', '.txt', '.csv'}
-IMAGE_EXTS = {'.jpg', '.jpeg', '.png', '.webp'}
+from .pre_shift_photo import UPLOAD_IMAGE_EXTS as IMAGE_EXTS
+ALLOWED_EXTS = IMAGE_EXTS | {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.md', '.txt', '.csv'}
 MAX_FILE_BYTES = 20 * 1024 * 1024          # 20 MiB per file
 MAX_TASK_BYTES = 100 * 1024 * 1024         # 100 MiB per task
 MAX_FILES_PER_ITEM = 10
@@ -436,7 +435,7 @@ class CheckService:
                 (day, current.timestamp() + REMINDER_LEAD_SECONDS, current.timestamp(),
                  REMINDER_LEAD_SECONDS, row['loaded_at'])).fetchone()
         covered = {p['scope'] for p in json.loads(row['people'] or '[]')} if row else set()
-        if row and day < current.date().isoformat() and row['version'] in {3, ROSTER_VERSION} and row['people'] and not row['retry_at']:
+        if row and day < current.date().isoformat() and row['version'] in {3, 4, ROSTER_VERSION} and row['people'] and not row['retry_at']:
             return
         if (row and row['version'] == ROSTER_VERSION and row['people'] and not row['retry_at']
                 and (day < current.date().isoformat() or configured <= covered and not due_refresh)):
@@ -978,6 +977,7 @@ class CheckService:
         current = current or now()
         self.cleanup_photo_previews(current)
         info = self.commit_upload(actor, session, size, current, preview=True)
+        size = Path(session['path']).stat().st_size
         preferences = self.photo_preferences(actor)
         session = {**session, 'photo_inspection': {key: info[key] for key in ('original_time', 'time_origin', 'time_source')},
                    'preference_version': preferences['version']}
@@ -1125,10 +1125,22 @@ class CheckService:
             self.abort_upload(session)
             raise CheckError('单个附件不能超过20MiB。')
         try:
+            if Path(name).suffix.lower() in IMAGE_EXTS:
+                from .pre_shift_photo import prepare_upload
+                try:
+                    name = session['name'] = prepare_upload(staging, name)
+                except ValueError as exc:
+                    raise CheckError(str(exc)) from None
+                size = staging.stat().st_size
+                if size > MAX_FILE_BYTES:
+                    raise CheckError('处理后的照片超过20MiB，请缩小照片后上传。', 413)
             self._verify_file(staging, name)
+        except CheckError:
+            self.abort_upload(session)
+            raise
         except Exception:
             self.abort_upload(session)
-            raise CheckError('文件内容与扩展名不符或无效。')
+            raise CheckError('无法读取文件内容，文件可能损坏或照片格式不支持；请从相册导出为JPG后重试。') from None
         try:
             from .pre_shift_photo import inspect_photo, photo_options
             try:

@@ -11,12 +11,53 @@ import unicodedata
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
+try:
+    from pillow_heif import register_heif_opener
+except (ImportError, OSError):
+    register_heif_opener = None
+else:
+    register_heif_opener()
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 _RENDER_SLOTS = threading.BoundedSemaphore(2)
+_IMPORT_SLOT = threading.BoundedSemaphore(1)
 _OCR_SLOT = threading.BoundedSemaphore(1)
 _MARKER = b'ClipFlowWatermark:'
 DELIVERY_IMAGE_BYTES = 10 * 1024 * 1024
+UPLOAD_IMAGE_EXTS = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.webp', '.heic', '.heif', '.hif',
+                     '.avif', '.gif', '.tif', '.tiff', '.bmp', '.dib', '.ico', '.icns', '.jp2', '.j2k',
+                     '.psd', '.tga', '.pcx', '.ppm', '.pgm', '.pbm', '.pnm', '.qoi'}
+
+
+def prepare_upload(source, name):
+    """Normalize common photo formats while preserving capture time and orientation."""
+    if Path(name).suffix.lower() in {'.heic', '.heif', '.hif'} and register_heif_opener is None:
+        raise ValueError('HEIC照片解码组件尚未就绪，请等待程序更新组件完成后重试；其他格式照片仍可上传。')
+    # Decode only one full-resolution phone original at a time.
+    with _IMPORT_SLOT, Image.open(source) as image:
+        ext = {'JPEG': '.jpg', 'PNG': '.png', 'WEBP': '.webp'}.get(image.format)
+        pixels = image.width * image.height
+        if pixels > 60_000_000:
+            raise ValueError('图片像素过大，请缩小照片后上传。')
+        if not ext or pixels > 25_000_000 or getattr(image, 'n_frames', 1) > 1:
+            exif, comment = image.getexif().tobytes(), image.info.get('comment', b'')
+            image.draft('RGB', (2560, 2560))
+            image.seek(0)
+            image.load()
+            image.thumbnail((4096, 4096), Image.Resampling.LANCZOS)
+            ext = '.png' if 'A' in image.getbands() or 'transparency' in image.info else '.jpg'
+            converted = image.convert('RGBA' if ext == '.png' else 'RGB')
+            temporary = Path(source).with_suffix('.normalized')
+            try:
+                converted.save(temporary, format='PNG' if ext == '.png' else 'JPEG', quality=95, exif=exif, comment=comment)
+                # Close the original Windows file before replacing it.
+                image.close()
+                temporary.replace(source)
+            finally:
+                converted.close()
+                temporary.unlink(missing_ok=True)
+        suffix = Path(name).suffix.lower()
+        return name if suffix == ext or suffix == '.jpeg' and ext == '.jpg' else str(Path(name).with_suffix(ext))
 
 
 def _logo_image(value):

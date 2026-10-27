@@ -60,6 +60,31 @@ def shift_kind(fields):
     return '待核对'
 
 
+def _resolve_options(service, rows, base, table):
+    from .portal_service import MaintenancePortalService
+    names = {name for row in rows for name in ('班组', '班次', '机楼/专业', '体系岗位', '岗位', '账号性质')
+             if any(re.fullmatch(r'opt[A-Za-z0-9]+', value) for value in values(row['fields'].get(name)))}
+    if not names:
+        return
+    metadata = {table: service._load_raw_table_fields(app_token=base, table_id=table)}
+    for name in sorted(names):
+        field = next((f for f in metadata[table] if f.get('field_name') == name), {})
+        options, _ = MaintenancePortalService._extract_option_map(field)
+        prop = field.get('property') or {}
+        target = (prop.get('filter_info') or {}).get('target_table')
+        if not options and target and prop.get('target_field'):
+            if target not in metadata:
+                metadata[target] = service._load_raw_table_fields(app_token=base, table_id=target)
+            linked = next((f for f in metadata[target] if f.get('field_id') == prop['target_field']), {})
+            options, _ = MaintenancePortalService._extract_option_map(linked)
+        for row in rows:
+            raw = values(row['fields'].get(name))
+            if any(re.fullmatch(r'opt[A-Za-z0-9]+', value) and value not in options for value in raw):
+                raise ValueError(f'员工信息池“{name}”的选项定义未完整读取，请稍后重试。')
+            if any(value in options for value in raw):
+                row['fields'][name] = [options.get(value, value) for value in raw]
+
+
 def read_records(service, *, base=APP_TOKEN, table=TABLE_ID, fields=ROSTER_FIELDS):
     from upload_event_module.config import config
     app_id = config.app_id
@@ -80,6 +105,7 @@ def read_records(service, *, base=APP_TOKEN, table=TABLE_ID, fields=ROSTER_FIELD
             seen.add(rid)
             rows.append(row)
         if not data['has_more']:
+            _resolve_options(service, rows, base, table)
             if config.app_id != app_id:
                 raise ValueError('Qt飞书应用已变化，请重新读取人员资料。')
             return rows
@@ -102,7 +128,7 @@ def daily_roster(service, day, *, force=False):
             if valid:
                 return copy.deepcopy(cached)
             raise ValueError('员工信息池的班次仅表示今天；所选日期尚无已保存排班快照，不能套用今天的名单。')
-        if valid and not force and 0 <= time.time() - cached.get('observed_at', 0) < 60:
+        if valid and cached.get('parser_version') == 2 and not force and 0 <= time.time() - cached.get('observed_at', 0) < 60:
             return copy.deepcopy(cached)
         rows = read_records(service)
         people, issues = [], []
@@ -116,8 +142,9 @@ def daily_roster(service, day, *, force=False):
             name = text(fields.get('姓名')) or text(fields.get('员工姓名'))
             scopes = MaintenancePortalService._building_codes_from_value(fields.get('机楼/专业'))
             if kind == '待核对' or not name or len(scopes) != 1:
+                reason = '班组或班次待核对' if kind == '待核对' else '姓名缺失' if not name else '归属楼栋待核对'
                 issues.append({'record_id': row['record_id'], 'name': name, 'scope': scopes[0] if len(scopes) == 1 else '',
-                               'reason': '班组、班次或归属楼栋待核对'})
+                               'duty_kind': kind, 'group': text(fields.get('班组')), 'reason': reason})
                 continue
             user = MaintenancePortalService._signature_user_info(fields.get('员工姓名'))
             oid = user.get('open_id', '')
@@ -128,7 +155,7 @@ def daily_roster(service, day, *, force=False):
         # Do not label yesterday's lookup result as today's after a midnight page read.
         if dt.datetime.now(TZ).date().isoformat() != day:
             raise ValueError('人员排班读取跨越零点，请重新读取。')
-        result = {'date': day, 'source': TABLE_ID, 'app_id': config.app_id, 'complete': True,
+        result = {'date': day, 'source': TABLE_ID, 'app_id': config.app_id, 'complete': True, 'parser_version': 2,
                   'observed_at': time.time(), 'people': people, 'issues': issues}
         service._state_store.put_document(ROSTER_NAMESPACE, day, result)
         return copy.deepcopy(result)

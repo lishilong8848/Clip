@@ -53,6 +53,8 @@ DEFAULT_MODULE_TO_PACKAGE = {
     "websockets": "websockets==16.0",
     "cryptography": "cryptography",
     "PIL": "Pillow",
+    "PIL.AvifImagePlugin": "Pillow>=11.3.0",
+    "pillow_heif": "pillow-heif==1.8.1",
     "openpyxl": "openpyxl",
     "docx": "python-docx==1.2.0",
     "pptx": "python-pptx==1.0.2",

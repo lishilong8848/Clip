@@ -109,7 +109,8 @@ try{
   await page.getByRole('button',{name:'新练习15题',exact:true}).click();await page.getByRole('dialog').filter({hasText:'开始新练习'}).getByRole('button',{name:'取消',exact:true}).click();assert.equal(practiceCount,1,'cancel keeps the unfinished practice');
   await page.locator('.v2-learning-tabs').getByRole('button',{name:'个人画像',exact:true}).click();
   await page.locator('.v2-learning-metrics').waitFor();await page.locator('.v2-learning-trend>div:first-child svg').waitFor();
-  const selectedTab=page.locator('.v2-learning-tabs .n-button--primary-type');await selectedTab.hover();assert.equal(await selectedTab.evaluate(node=>getComputedStyle(node).backgroundColor),'rgb(233, 242, 255)','selected tab remains readable on hover');
+  const selectedTab=page.locator('.v2-learning-tabs .n-button--primary-type');await selectedTab.hover();
+  const contrast=await selectedTab.evaluate(node=>{const css=getComputedStyle(node),luma=value=>{const rgb=value.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>{v/=255;return v<=.04045?v/12.92:((v+.055)/1.055)**2.4});return rgb[0]*.2126+rgb[1]*.7152+rgb[2]*.0722};const a=luma(css.color),b=luma(css.backgroundColor);return (Math.max(a,b)+.05)/(Math.min(a,b)+.05)});assert(contrast>=4.5,'selected tab remains readable on hover');
   assert.equal(await page.locator('.profile-toolbar .n-date-picker').count(),0,'preset period does not show redundant date inputs');
   await page.waitForTimeout(1100);await page.screenshot({path:path.join(out,'pc-personal-portrait.png'),fullPage:true});
   await page.locator('.v2-learning-chart-head .n-select').click();await page.locator('.n-base-select-option').filter({hasText:'错题分类对比'}).click();
@@ -121,9 +122,9 @@ try{
   await page.getByRole('button',{name:'2026-10-12 2 次',exact:true}).click();
   await page.waitForFunction(()=>document.querySelector('.learning-page').dataset.v2LearningTab==='history');
   assert(requests.some(row=>row.p==='/api/learning/history'&&row.query.from==='2026-10-12'&&row.query.to==='2026-10-12'));
-  await page.setViewportSize({width:390,height:844});await go('view=practice');await noOverflow();
+  await page.setViewportSize({width:402,height:874});await go('view=practice');await noOverflow();
   assert.equal(await page.locator('.v2-learning-rail').getAttribute('open'),null,'mobile answer card is collapsed');
-  const bar=await page.locator('.v2-learning-answerbar').boundingBox();assert(bar.y>600&&bar.y+bar.height<810,'answer controls remain above mobile navigation');
+  const bar=await page.locator('.v2-learning-answerbar').boundingBox(),navigation=await page.locator('.v2-mobile-nav').boundingBox();assert(bar.y>0&&bar.y+bar.height<=navigation.y+1,'answer controls remain above mobile navigation');
   assert.equal(await page.locator('.v2-learning-answerbar .n-button--primary-type').evaluate(node=>getComputedStyle(node).color),'rgb(255, 255, 255)','mobile submit has a distinct primary treatment');
   await page.locator('.v2-learning-rail summary').click();await page.locator('.question-numbers button').first().waitFor();
   const target=await page.locator('.question-numbers button').first().boundingBox();assert(target.width>=44&&target.height>=44);
@@ -134,12 +135,13 @@ try{
   await go('view=overview&scope=A');await page.locator('.v2-learning-person-list article').first().waitFor();await noOverflow();
   assert.equal(await page.locator('.v2-learning-people .n-data-table').count(),0,'mobile does not render the wide table');
   await page.screenshot({path:path.join(out,'mobile-building-portrait.png'),fullPage:true});
-  for(const width of [360,430]){await page.setViewportSize({width,height:844});await noOverflow();}
+  for(const width of [360,402,440]){await page.setViewportSize({width,height:844});await noOverflow();}
   await page.locator('.profile-toolbar .n-radio-button').filter({hasText:'自定义'}).click();await page.getByLabel('统计开始日期',{exact:true}).click();await page.locator('.n-date-panel').waitFor();
-  const calendar=await page.locator('.n-date-panel').boundingBox();assert(calendar.x>=-1&&calendar.x+calendar.width<=430+1,'mobile calendar fits its screen');await page.keyboard.press('Escape');
-  await page.setViewportSize({width:1366,height:900});await go('view=overview&scope=A');await noOverflow();
+  const calendar=await page.locator('.n-date-panel').boundingBox();assert(calendar.x>=-1&&calendar.x+calendar.width<=440+1,'mobile calendar fits its screen');await page.keyboard.press('Escape');
+  await page.setViewportSize({width:1440,height:900});await go('view=overview&scope=A');await noOverflow();
   await page.setViewportSize({width:1920,height:1080});await noOverflow();
   await page.getByRole('button',{name:'学练管理',exact:true}).click();await page.locator('.n-dropdown-option').filter({hasText:'发布设置'}).click();await page.locator('.settings-form .n-time-picker').first().waitFor();assert.equal(await page.locator('.settings-form .n-time-picker').count(),2,'day and night publication use the same mature picker');
+  for(const width of [1440,402,440]){await page.setViewportSize({width,height:900});await noOverflow();const boxes=await page.locator('.shift-publish-row').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().y));if(width===1440)assert(Math.abs(boxes[0]-boxes[1])<2,'day/night settings share a desktop row');await page.screenshot({path:path.join(out,`settings-${width}.png`),fullPage:true});}
   const writesBefore=writes.length;await go('view=overview&scope=A&person_id=other-learning');
   await page.locator('.v2-learning-tabs').getByRole('button',{name:'错题',exact:true}).click();
   assert.equal(writes.length,writesBefore,'viewing another person is read-only');

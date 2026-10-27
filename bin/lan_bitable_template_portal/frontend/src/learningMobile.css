@@ -14,10 +14,10 @@
   button, .file-button, summary, a[download] { min-height: 38px; padding: 7px 10px; font-size: 13px; touch-action: manipulation; }
   button.icon-button { width: 38px; height: 38px; min-height: 38px; flex-basis: 38px; }
   input:not([type=checkbox]):not([type=radio]), textarea, :deep(.vnet-select-trigger), :deep(.vnet-select-input) { font-size: 16px; min-height: 44px; }
-  .building-tabs, .building-tabs.with-all { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .building-tabs, .building-tabs.with-all { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin:8px 0; }
   .building-tabs button, .building-tabs.with-all button { flex-direction: row; align-items: center; gap: 2px; padding: 8px 10px; font-size: 15px; }
   .building-tabs span { display: none; }
-  .learner-strip { gap: 10px; align-items: flex-start; }
+  .learner-strip { gap:8px; padding:8px 0; align-items:flex-start; }
   .learner-strip > div { min-width: 0; }
   .learner-strip strong { display: block; font-size: 17px; overflow-wrap: anywhere; }
   .learner-strip span { display: block; margin: 4px 0 0; font-size: 12px; }
@@ -25,10 +25,10 @@
   .tabs { max-width: 100%; overscroll-behavior-x: contain; scroll-padding: 8px; }
   .tabs button { padding: 8px 10px; min-height: 40px; }
   .toolbar, .filters { width: 100%; gap: 8px; }
-  .filters > .search-field { flex: 1 1 100%; }
+  .filters > .search-field { flex:1 1 170px; }
   .search-field { min-width: 0; }
   .search-field input { width: 100%; min-width: 0; }
-  .inline-field { display: grid; grid-template-columns: 30px minmax(0, 1fr); flex: 1 1 100%; min-width: 0; white-space: nowrap; }
+  .inline-field { display: grid; grid-template-columns: 30px minmax(0, 1fr); flex:1 1 160px; min-width:0; white-space:nowrap; }
   .inline-field input { width: 100%; }
   .profile-toolbar:not(.custom-period) .inline-field, .profile-toolbar:not(.custom-period) .filters > button { display: none; }
   .profile-toolbar:not(.custom-period) .filters { flex: 1; width: auto; }
@@ -57,7 +57,7 @@
   .pagination, .pagination > .actions { justify-content: center; gap: 8px; }
   .list-pagination { position: static; }
   .page-jump { flex-basis: 100%; justify-content: center; }
-  .settings-form { padding: 18px 12px; }
+  .settings-form { padding:12px; gap:12px; }.learning-modal .form-grid,.learning-modal .form-grid.question-basics{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
   .learning-overlay { padding: 8px; }
   .learning-modal { width: 100%; max-height: calc(100dvh - 16px); }
   .learning-modal > header, .learning-modal > footer { padding: 10px 12px; }

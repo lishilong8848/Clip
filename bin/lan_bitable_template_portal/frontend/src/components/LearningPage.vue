@@ -128,8 +128,8 @@
             </li>
           </ul>
         </details>
-        <h2>题库与题单</h2><div class="actions"><button type="button" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库与人员</button><button type="button" class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || jobRunning || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button></div>
-        <h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label>
+        <div class="settings-section-head"><h2>题库与题单</h2><div class="actions"><button type="button" :disabled="busy || jobRunning" @click="runJob('refresh')"><RefreshCw :size="16" />同步题库与人员</button><button type="button" class="primary" :title="boot.silent_manual_publish ? '生成今日题单，不发送飞书消息' : '请重启主程序后使用静默发布'" :disabled="busy || jobRunning || !boot.silent_manual_publish" @click="runJob('publish')"><Send :size="16" />手动发布题单</button></div></div>
+        <div class="settings-section-head"><h2>每日发布</h2><label class="checkbox-label"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy" />每日自动发布</label></div>
         <div v-for="shift in publishShifts" :key="shift.key" class="shift-publish-row">
           <label class="time-field">{{ shift.label }}<input v-model="settingsForm[shift.field]" type="time" required :disabled="busy || !settingsForm.enabled" /></label>
           <div class="shift-delivery" data-v2-inline-feedback>
@@ -147,9 +147,9 @@
             </details>
           </div>
         </div>
-        <h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
+        <div class="settings-section-head"><h2>未完成提醒</h2><label class="checkbox-label"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy" />提醒未完成的楼栋</label>
         <label v-if="settingsForm.reminder_enabled" class="time-field">提醒时间<input v-model="settingsForm.reminder_time" type="time" required :disabled="busy" /></label>
-        <h2>个人提醒与回顾</h2>
+        </div><h2>个人提醒与回顾</h2>
         <label class="checkbox-label"><input v-model="settingsForm.timeout_reminder_enabled" type="checkbox" :disabled="busy" />值班员、值班长开始作答满2小时未完成，提醒本人一次</label>
         <label class="checkbox-label"><input v-model="settingsForm.weekly_report_enabled" type="checkbox" :disabled="busy" />每周结束后（周一00:00）发送：值班员、值班长收到个人回顾；A至E楼主管收到本楼汇总，学练群收到全楼汇总</label>
         <footer class="actions"><button class="primary" :disabled="busy || loading"><Save :size="16" />保存设置</button></footer>
@@ -377,12 +377,12 @@ td { line-height: 1.65; }td small { display: block; margin-top: 4px; }.stem-cell
 .inventory { margin-top: 24px; }.inventory dl { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }.inventory dd { margin: 0 30px 0 0; font-size: 18px; font-weight: 600; }
 .inventory dd { display: flex; flex-wrap: wrap; gap: 14px; font-size: 13px; font-weight: 400; }.inventory dd strong { font-size: 18px; font-weight: 600; }
 .settings-form { background: #fff; padding: 24px 28px; display: grid; gap: 18px; border-top: 1px solid #d8e5f7; }.settings-form h2:not(:first-child) { border-top: 1px solid #e5ecf5; padding-top: 22px; }.time-field { width: 170px; }.page-jump { display: inline-flex; align-items: center; gap: 5px; }.page-jump input { width: 64px; }
-.settings-form { min-width: 0; grid-template-columns: minmax(0, 1fr); }
-.settings-form .checkbox-label { min-width: 0; white-space: normal; align-items: flex-start; }
+.settings-form { min-width:0; grid-template-columns:repeat(auto-fit,minmax(min(100%,400px),1fr)); gap:12px 20px; padding:14px 16px; }.settings-form>h2,.settings-form>.settings-section-head,.settings-form>footer,.settings-form>.history-identity-issues{grid-column:1/-1}.settings-form h2:not(:first-child){padding-top:12px}
+.settings-section-head{display:flex;align-items:center;flex-wrap:wrap;gap:8px 18px;padding-top:8px}.settings-section-head .time-field{display:flex;align-items:center;gap:8px;width:auto}.settings-section-head .time-field input{width:140px}.settings-form .checkbox-label { min-width: 0; white-space: normal; align-items: flex-start; }
 .settings-form .checkbox-label input { flex-shrink: 0; }
 .shift-publish-row { display: flex; flex-wrap: wrap; align-items: start; gap: 12px 20px; min-width: 0; }
-.shift-publish-row .time-field { flex: 0 0 170px; }
-.shift-delivery { flex: 1 1 240px; min-width: 0; padding-top: 24px; }
+.shift-publish-row .time-field { flex:0 0 150px; }
+.shift-delivery { flex: 1 1 180px; min-width: 0; padding-top: 24px; }
 .shift-delivery-status { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; font-size: 13px; color: var(--text-color-3, #64758a); }
 .shift-result-label, .shift-delivery-status time { white-space: nowrap; }.shift-delivery-status svg { flex-shrink: 0; }
 .shift-delivery-status.success { color: #18794e; }.shift-delivery-status.partial, .shift-delivery-status.unverified { color: #a05216; }
@@ -400,7 +400,7 @@ td { line-height: 1.65; }td small { display: block; margin-top: 4px; }.stem-cell
 .learning-modal > header { padding: 18px 22px; border-bottom: 1px solid #d8e5f7; flex: 0 0 auto; }.learning-modal > header h2 { min-width: 0; overflow-wrap: anywhere; }
 .learning-modal > footer { padding: 14px 22px; border-top: 1px solid #d8e5f7; background: #f8fbff; flex: 0 0 auto; flex-wrap: wrap; gap: 12px; }.learning-modal > footer > .actions { margin-left: auto; }
 .modal-scroll { padding: 20px 24px; overflow-y: auto; min-height: 0; overscroll-behavior: contain; }
-.editor-form, .issue-form { display: grid; gap: 18px; }.form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.editor-form, .issue-form { display:grid; gap:12px; }.form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap:10px; }
 .form-grid.question-basics { grid-template-columns: repeat(3, minmax(0, 1fr)); }.question-extra > .editor-form { margin-top: 10px; }
 @media (max-width: 700px) { .form-grid.question-basics { grid-template-columns: minmax(0, 1fr); } }
 .option-editor { display: grid; gap: 12px; }.option-edit-row { display: grid; grid-template-columns: 18px 18px minmax(0, 1fr) repeat(3, 34px); gap: 8px; align-items: center; }.option-edit-row textarea { min-height: 60px; }
@@ -434,6 +434,8 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 .view-switch { display: inline-flex; align-items: center; gap: 6px; padding: 3px; background: #eef2f7; border-radius: 8px; }.view-switch button { display: inline-flex; align-items: center; gap: 5px; padding: 6px 12px; border-radius: 6px; border-color: transparent; background: transparent; color: #4b6484; font-size: 13px; font-weight: 600; }.view-switch button.active { background: #fff; color: #174fab; box-shadow: 0 1px 3px #0d3f8f22; }
 .attempt-records { margin: 12px 0; border: 1px solid #dce5ef; border-radius: 8px; padding: 10px 12px; background: #fbfcfe; }.attempt-records summary { cursor: pointer; font-weight: 600; color: #25425f; }.attempt-records ol { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 6px; }.attempt-records li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; line-height: 1.6; }.attempt-records li strong { min-width: 64px; }.attempt-records li time { color: #64758b; font-size: 12px; }.attempt-records .record-answer { color: #25425f; }.attempt-records .danger { color: #ad3a53; font-weight: 600; }.attempt-records .success-text { color: #247651; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { .spin, .question-body, .answer-reference, .result { animation: none; }button, .file-button, a[download], input, textarea, .options label { transition: none; } }
+.filters>.search-field{flex:0 1 240px}.filters>.inline-field{flex:0 1 auto}
+@media(min-width:701px){.building-tabs button{min-height:44px;padding:9px 12px}.learner-strip{padding:10px 0}.question-body{padding:18px 20px}.stem{margin:12px 0 16px}.options{grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr));gap:8px}.options label{min-height:48px;padding:9px 12px}.question-footer{padding-top:12px;margin-top:12px}.toolbar{margin:10px 0}.tabs{margin-bottom:10px}}
 </style>
 <style scoped src="../learningMobile.css"></style>
 

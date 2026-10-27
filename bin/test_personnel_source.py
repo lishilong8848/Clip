@@ -23,6 +23,43 @@ def row(rid, name='人员甲', number='10001', oid='ou_one', **fields):
 
 
 class PersonnelSourceTests(unittest.TestCase):
+    def test_lookup_option_ids_are_resolved_from_metadata_not_hardcoded(self):
+        service = Mock()
+        source_fields = [{'field_name': '班次', 'property': {'filter_info': {'target_table': 'tblSchedule'}, 'target_field': 'fldShift'}},
+            {'field_name': '班组', 'property': {'options': [{'id': 'optTeam', 'name': 'B班'}]}},
+            {'field_name': '机楼/专业', 'property': {'options': [{'id': 'optBuilding', 'name': 'B楼'}]}}]
+        service._load_raw_table_fields.side_effect = lambda **kw: source_fields if kw['table_id']==source.TABLE_ID else [
+            {'field_id': 'fldShift', 'property': {'options': [{'id': 'optToday', 'name': '夜'}]}}]
+        response = {'code':0,'data':{'items':[row('rec1', 班组='optTeam', 班次={'value':['optToday']}, **{'机楼/专业':['optBuilding']})], 'has_more':False}}
+        service._request_json.side_effect = lambda *args, **kwargs: copy.deepcopy(response)
+        actual=source.read_records(service)
+        self.assertEqual(source.shift_kind(actual[0]['fields']), '夜')
+        self.assertEqual(actual[0]['fields']['机楼/专业'], ['B楼'])
+        self.assertEqual(service._request_json.call_count, 1)
+        self.assertEqual(service._request_json.call_args.kwargs['table_id'], source.TABLE_ID)
+        service._load_raw_table_fields.side_effect = lambda **kw: source_fields
+        with self.assertRaisesRegex(ValueError, '班次.*选项定义'):
+            source.read_records(service)
+
+    def test_personnel_consumers_and_two_signature_stores_share_one_source(self):
+        from lan_bitable_template_portal import portal_service, learning_reminders, assistant_tables, personnel_password_login
+        for actual in (portal_service.PERMISSION_DIRECTORY_TABLE_ID, portal_service.SIGNATURE_TABLE_ID,
+                       learning_reminders.TABLE_ID, assistant_tables.PERSONNEL_TABLE, personnel_password_login.TABLE_ID):
+            self.assertEqual(actual, source.TABLE_ID)
+        self.assertEqual(portal_service.TEMP_SIGNATURE_TABLE_ID, source.EXTERNAL_TABLE_ID)
+
+    def test_roster_warning_counts_invalid_rows_and_excludes_long_day(self):
+        from lan_bitable_template_portal.pre_shift_cloud import read_roster
+        service=Mock()
+        service.get_permission_directory_people.return_value={'items':[]}
+        issues=[{'name':f'人员{i}','scope':'A','group':'A班','reason':'班次待核对'} for i in range(8)]
+        issues.append({'name':'长白人员','scope':'B','group':'长白','reason':'班次待核对'})
+        with patch.object(source,'daily_roster',return_value={'people':[],'issues':issues}):
+            result=read_roster(service,'2026-10-27',scopes=['A','B'])
+        self.assertIn('0/8人',result['warnings']['A'])
+        self.assertIn('另有5项',result['warnings']['A'])
+        self.assertNotIn('B',result['warnings'])
+
     def test_signature_cloud_has_only_two_fields_and_old_references_stay_stable(self):
         from lan_bitable_template_portal.portal_service import MaintenancePortalService, SIGNATURE_TABLE_ID, TEMP_SIGNATURE_TABLE_ID
         self.assertEqual(set(migration.FIELDS), {'手写签名','密钥'})

@@ -13,9 +13,10 @@
       <NButton attr-type="button" size="small" secondary :disabled="working" @click="camera?.click()"><Camera :size="15" />拍照</NButton>
     </div>
     <div v-if="working" class="v2-check-file-actions" role="status"><NSpin :size="14" />{{editor?'正在编辑照片':'正在处理'}} {{uploadName}}</div>
-    <input ref="photos" class="v2-check-file-input" type="file" accept="image/jpeg,image/png,image/webp" :multiple="kind!=='handover'" :aria-label="kind==='handover'?'上传交接班照片':'上传检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
-    <input ref="camera" class="v2-check-file-input" type="file" accept="image/jpeg,image/png,image/webp" capture="environment" :aria-label="kind==='handover'?'拍摄交接班照片':'拍摄检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
-    <input v-if="kind!=='handover'" ref="picker" class="v2-check-file-input" type="file" accept=".jpg,.jpeg,.png,.webp,.pdf,.doc,.docx,.xls,.xlsx,.md,.txt,.csv" multiple aria-label="上传检查附件" :disabled="locked||working||allowUpload===false" @change="pick" />
+    <input ref="photos" class="v2-check-file-input" type="file" accept="image/*,.heic,.heif,.hif,.avif" :multiple="kind!=='handover'" :aria-label="kind==='handover'?'上传交接班照片':'上传检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
+    <input ref="camera" class="v2-check-file-input" type="file" accept="image/*,.heic,.heif,.hif,.avif" capture="environment" :aria-label="kind==='handover'?'拍摄交接班照片':'拍摄检查照片'" :disabled="locked||working||allowUpload===false" @change="pick" />
+    <input v-if="kind!=='handover'" ref="picker" class="v2-check-file-input" type="file" accept="image/*,.heic,.heif,.hif,.avif,.pdf,.doc,.docx,.xls,.xlsx,.md,.txt,.csv" multiple aria-label="上传检查附件" :disabled="locked||working||allowUpload===false" @change="pick" />
+    <p v-if="!locked&&allowUpload!==false" class="v2-check-photo-format-hint">支持HEIC、JPG、PNG等相册图片；动图和多页图片使用首帧。</p>
     <p v-if="error" class="v2-check-file-error" role="alert">{{error}}</p>
   </div>
   <NModal :show="!!previewPhoto" preset="card" title="照片预览与保存" class="v2-check-photo-preview" :auto-focus="false" @update:show="value=>{if(!value)closePhoto()}">
@@ -41,6 +42,7 @@ import {requestBinaryJson,requestJson,type Dict} from '../client';
 import {requestFile} from '../../api/client';
 import PreShiftPhotoEditor from './PreShiftPhotoEditor.vue';
 const props=withDefaults(defineProps<{taskId:string;itemId?:string;kind:'item'|'handover';files:Dict[];locked:boolean;allowUpload?:boolean;revision?:number}>(),{allowUpload:true});
+const photoExtensions=/\.(jpe?g|jpe|jfif|png|webp|heic|heif|hif|avif|gif|tiff?|bmp|dib|ico|icns|jp2|j2k|psd|tga|pcx|ppm|pgm|pbm|pnm|qoi)$/i;
 const emit=defineEmits<{changed:[result?:Dict];busy:[value:boolean]}>();
 const camera=ref<HTMLInputElement>(),photos=ref<HTMLInputElement>(),picker=ref<HTMLInputElement>(),working=ref(false),error=ref(''),uploadName=ref(''),dragging=ref(false);
 const dialog=useDialog();let disposed=false,dragDepth=0;
@@ -80,13 +82,13 @@ async function upload(files:File[],captured=false){
   let lastPhoto:Dict|undefined;
   try{
     if(files.length+(replacingHandover.value?0:shownFiles.value.length)>(props.kind==='handover'?1:10))throw new Error(props.kind==='handover'?'本班交接班照片只需上传一次。':'每项最多10个附件。');
-    for(const file of files){if(!file.size||file.size>20*1024*1024)throw new Error('请选择20MB以内的非空文件。');if(!(props.kind==='handover'?/\.(jpe?g|png|webp)$/i:/\.(jpe?g|png|webp|pdf|docx?|xlsx?|md|txt|csv)$/i).test(file.name))throw new Error('不支持此文件类型。');}
-    const context=files.some(file=>/\.(jpe?g|png|webp)$/i.test(file.name))?await currentPosition():{};
+    for(const file of files){if(!file.size||file.size>20*1024*1024)throw new Error('请选择20MB以内的非空文件。');if(!photoExtensions.test(file.name)&&(props.kind==='handover'||!/\.(pdf|docx?|xlsx?|md|txt|csv)$/i.test(file.name)))throw new Error('不支持此文件类型。');}
+    const context=files.some(file=>photoExtensions.test(file.name))?await currentPosition():{};
     if(captured)context.captured_at=capturedAt;
     for(const file of files){
       if(disposed||taskId!==props.taskId)break;uploadName.value=file.name;
       let saved:Dict|null;
-      if(/\.(jpe?g|png|webp)$/i.test(file.name)){
+      if(photoExtensions.test(file.name)){
         const info=await photoRequest(file,context,captured,true);
         if(disposed||taskId!==props.taskId)break;
         if(!info.image||!info.options||!info.preview_id)throw new Error('照片暂存未完整返回，请重新选择。');
@@ -122,5 +124,5 @@ onBeforeUnmount(()=>{disposed=true;uploadController?.abort();editorSaving.value=
 .v2-check-photo-thumb{display:block;border:0;padding:0;background:transparent;cursor:pointer;border-radius:4px;overflow:hidden;min-width:44px;min-height:44px}.v2-check-photo-thumb img{display:block;width:56px;height:44px;object-fit:contain}.is-handover .v2-check-photo-thumb{grid-column:1/-1;width:100%}.is-handover .v2-check-photo-thumb img{width:auto;max-width:100%;height:auto;max-height:320px;margin:auto}@media(max-width:760px){.is-handover .v2-check-photo-thumb img{max-height:240px}}
 .v2-check-attachments{outline:2px solid transparent;outline-offset:3px;transition:outline-color .18s,background-color .18s;border-radius:6px}.v2-check-attachments:focus-visible,.v2-check-attachments.is-dragging{outline-color:var(--v2-blue)}.v2-check-attachments.is-dragging{background:color-mix(in srgb,var(--v2-blue) 10%,transparent)}
 .v2-check-attachments.is-handover .v2-check-file-list{display:block}.v2-check-attachments.is-handover .v2-check-file{display:grid;grid-template-columns:minmax(0,1fr) auto;width:100%;box-sizing:border-box;padding:8px;gap:8px}.v2-check-attachments.is-handover .n-image{grid-column:1/-1;width:100%;justify-content:center}.v2-check-attachments.is-handover .n-image img{max-width:100%;width:auto;max-height:320px;object-fit:contain}.v2-check-photo-delivery{grid-column:1/-1;color:var(--v2-muted);line-height:1.5}.v2-check-photo-delivery.has-error{color:#a35c10}@media(max-width:760px){.v2-check-attachments.is-handover .n-image img{max-height:240px}}
-.v2-check-attachments{grid-column:1/-1;min-width:0}.v2-check-file-list{display:flex;gap:6px;flex-wrap:wrap}.v2-check-file{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px;border:1px solid var(--v2-border);border-radius:6px;font-size:12px}.v2-check-file a{overflow-wrap:anywhere;min-width:0;color:var(--v2-blue)}.v2-check-file-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}.v2-check-file-actions>span{display:flex;gap:6px;font-size:12px;overflow-wrap:anywhere}.v2-check-file-input{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}.v2-check-file-error{margin:6px 0;color:#b42318;font-size:12px}.v2-check-handover{padding:12px 0;border-top:1px solid var(--v2-border)}.v2-check-handover h3{font-size:14px;margin:0 0 8px}
+.v2-check-attachments{grid-column:1/-1;min-width:0}.v2-check-file-list{display:flex;gap:6px;flex-wrap:wrap}.v2-check-file{display:flex;align-items:center;gap:6px;max-width:100%;padding:4px 6px;border:1px solid var(--v2-border);border-radius:6px;font-size:12px}.v2-check-file a{overflow-wrap:anywhere;min-width:0;color:var(--v2-blue)}.v2-check-file-actions{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px}.v2-check-file-actions>span{display:flex;gap:6px;font-size:12px;overflow-wrap:anywhere}.v2-check-file-input{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}.v2-check-photo-format-hint{font-size:12px;color:var(--v2-muted);margin:6px 0}.v2-check-file-error{margin:6px 0;color:#b42318;font-size:12px}.v2-check-handover{padding:12px 0;border-top:1px solid var(--v2-border)}.v2-check-handover h3{font-size:14px;margin:0 0 8px}
 </style>

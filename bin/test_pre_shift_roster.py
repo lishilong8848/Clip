@@ -119,7 +119,8 @@ class RecoveryTests(unittest.TestCase):
 
     def test_legacy_empty_roster_cache_is_refreshed_after_update(self):
         with self.service.connection(True) as db:
-            db.execute('INSERT INTO rosters(day,people,error,version) VALUES(?,?,?,0)',(DAY,'[]','旧版排班为1人'))
+            db.execute('INSERT INTO rosters(day,people,error,version,retry_at) VALUES(?,?,?,4,?)',
+                       (DAY,'[]','已匹配0/0人',NOW.timestamp()+300))
         self.service.tick(NOW)
         self.assertEqual(self.roster.call_count,1)
         self.assertEqual(self.sender.call_count,2)

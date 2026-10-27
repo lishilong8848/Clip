@@ -32,6 +32,95 @@ class PhotoPreviewTests(Base):
         info = self.service.retain_photo_preview(actor or self.worker, session, Path(session['path']).stat().st_size, self.current)
         return session, info
 
+    def test_valid_photo_with_wrong_suffix_preserves_capture_time_and_final_format(self):
+        session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','手机照片.png')
+        tags=Image.Exif(); tags[36867]='2026:10:13 08:31:00'
+        Image.new('RGB',(900,700)).save(session['path'],format='JPEG',exif=tags)
+        info=self.service.retain_photo_preview(self.worker,session,Path(session['path']).stat().st_size,self.current)
+        self.assertTrue(session['name'].endswith('.jpg'))
+        self.assertEqual(info['original_time'],'2026-10-13 08:31')
+        result=self.service.commit_photo_preview(self.worker,info['preview_id'],{**info['options'],'enabled':False},current=self.current)
+        self.assertTrue(result['name'].endswith('.jpg'))
+        self.assertEqual(self.counts(),(1,1))
+
+    def test_48mp_phone_jpeg_is_reduced_before_full_decode_and_can_be_confirmed(self):
+        session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','相机.jpg')
+        tags=Image.Exif(); tags[36867]='2026:10:13 08:31:00'; tags[274]=6
+        with Image.new('RGB',(8000,6000),'#708090') as photo:
+            photo.save(session['path'],format='JPEG',exif=tags)
+        original=Image.MAX_IMAGE_PIXELS
+        size=Path(session['path']).stat().st_size
+        info=self.service.retain_photo_preview(self.worker,session,size,self.current)
+        self.assertEqual(info['original_time'],'2026-10-13 08:31')
+        self.assertGreater(info['height'],info['width'])
+        self.assertEqual(Image.MAX_IMAGE_PIXELS,original)
+        with Image.open(session['path']) as photo:
+            self.assertLess(photo.width*photo.height,25_000_000)
+        result=self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info),current=self.current)
+        again=self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info),current=self.current)
+        self.assertEqual(result['id'],again['id'])
+        self.assertEqual(self.counts(),(1,1))
+
+    def test_corrupt_photos_do_not_save_and_size_errors_are_not_masked(self):
+        session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','broken.jpg')
+        Path(session['path']).write_bytes(b'not a photo')
+        with self.assertRaisesRegex(checks.CheckError,'无法读取文件'):
+            self.service.commit_upload(self.worker,session,len(b'not a photo'))
+        session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','too-big.png')
+        Path(session['path']).write_bytes(b'placeholder')
+        with patch('lan_bitable_template_portal.pre_shift_photo.prepare_upload',side_effect=ValueError('图片像素过大，请缩小照片后上传。')):
+            with self.assertRaisesRegex(checks.CheckError,'像素过大'):
+                self.service.commit_upload(self.worker,session,len(b'placeholder'))
+        self.assertEqual(self.counts(),(0,0))
+
+    def test_common_album_formats_decode_preview_and_preserve_capture_metadata(self):
+        from lan_bitable_template_portal.pre_shift_photo import prepare_upload
+        for suffix, fmt in [('heic','HEIF'),('heif','HEIF'),('avif','AVIF'),('png','PNG'),
+                            ('webp','WEBP'),('gif','GIF'),('tiff','TIFF'),('bmp','BMP'),('ico','ICO'),('jp2','JPEG2000')]:
+            with self.subTest(format=fmt,suffix=suffix):
+                session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','相册.'+suffix)
+                tags=Image.Exif();tags[36867]='2026:10:13 08:31:00'
+                with Image.new('RGB',(96,80),'#708090') as photo:
+                    photo.save(session['path'],format=fmt,exif=tags)
+                info=self.service.retain_photo_preview(self.worker,session,Path(session['path']).stat().st_size,self.current)
+                self.assertTrue(info['image'].startswith('data:image/jpeg'))
+                self.assertIn(Path(session['name']).suffix,{'.jpg','.png','.webp'})
+                if fmt in {'HEIF','AVIF','PNG','WEBP','TIFF'}:
+                    self.assertEqual(info['original_time'],'2026-10-13 08:31')
+                self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)
+
+    def test_multiframe_photos_use_first_frame_and_do_not_import_all_pages(self):
+        from lan_bitable_template_portal.pre_shift_photo import prepare_upload
+        for fmt in ('GIF','TIFF','WEBP'):
+            path=Path(self.temp)/('animated.'+fmt.lower())
+            with Image.new('RGB',(60,40),'red') as first, Image.new('RGB',(60,40),'blue') as second:
+                first.save(path,format=fmt,save_all=True,append_images=[second])
+            name=prepare_upload(path,path.name)
+            with Image.open(path) as actual:
+                self.assertEqual(getattr(actual,'n_frames',1),1)
+                r,g,b=actual.convert('RGB').getpixel((20,20))
+                self.assertGreater(r,b)
+            self.assertIn(Path(name).suffix,{'.jpg','.png'})
+
+    def test_photo_codec_is_part_of_packaging_and_startup_requirements(self):
+        import package_portable
+        from upload_event_module.services.dependency_bootstrap import DEFAULT_MODULE_TO_PACKAGE
+        self.assertEqual(package_portable.RUNTIME_MODULE_TO_PACKAGE['pillow_heif'],'pillow-heif==1.8.1')
+        self.assertEqual(DEFAULT_MODULE_TO_PACKAGE['pillow_heif'],'pillow-heif==1.8.1')
+        self.assertEqual(DEFAULT_MODULE_TO_PACKAGE['PIL.AvifImagePlugin'],'Pillow>=11.3.0')
+        self.assertEqual(package_portable.RUNTIME_MODULE_TO_PACKAGE['PIL.AvifImagePlugin'],'Pillow>=11.3.0')
+        self.assertTrue({'pillow_heif','PIL.AvifImagePlugin'} <= set(package_portable.RUNTIME_PACKAGE_INSTALL_ORDER))
+
+    def test_unavailable_heif_codec_does_not_break_standard_photo_uploads(self):
+        with patch('lan_bitable_template_portal.pre_shift_photo.register_heif_opener',None):
+            session,info=self.preview()
+            self.assertTrue(info['preview_id'])
+            self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)
+            session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','photo.heic')
+            Path(session['path']).write_bytes(b'heic')
+            with self.assertRaisesRegex(checks.CheckError,'解码组件尚未就绪'):
+                self.service.commit_upload(self.worker,session,4)
+
     def counts(self):
         with self.service.connection() as conn:
             return tuple(conn.execute('SELECT COUNT(*) FROM '+name).fetchone()[0] for name in ('files','photo_deliveries'))

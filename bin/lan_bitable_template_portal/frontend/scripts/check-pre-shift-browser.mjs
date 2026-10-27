@@ -109,6 +109,12 @@ try{
  await page.evaluate(()=>document.documentElement.dataset.v2Theme='light');
  await check.getByRole('button',{name:'提交检查',exact:true}).click();assert.equal(writes,0,'abnormal requires a note');await rows.nth(1).getByRole('textbox').fill('测试异常说明');
  await rows.nth(0).getByRole('button',{name:items[0].text+'附件',exact:true}).click();
+ const album=rows.nth(0).getByLabel('上传检查照片',{exact:true});
+ assert((await album.getAttribute('accept')).includes('.heic'),'album picker accepts iPhone originals');
+ await album.setInputFiles({name:'iPhone.HEIC',mimeType:'image/heic',buffer:Buffer.from('isolated codec fixture')});
+ await page.locator('.v2-photo-editor').waitFor();
+ await page.locator('.v2-photo-editor').getByRole('button',{name:'取消',exact:true}).click();
+ await page.locator('.v2-photo-editor').waitFor({state:'hidden'});assert.equal(fileWrites,0,'canceling HEIC preview does not upload');
  await rows.nth(0).getByLabel('上传检查附件',{exact:true}).setInputFiles({name:'检查记录.txt',mimeType:'text/plain',buffer:Buffer.from('test')});await check.getByRole('link',{name:'检查记录.txt',exact:true}).waitFor();assert.equal(fileWrites,1);assert.equal(writes,0);assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
  const uploadZone=rows.nth(0).getByRole('group',{name:'检查附件上传区',exact:true});
  await uploadZone.evaluate(el=>{const data=new DataTransfer();data.items.add(new File(['paste'],'粘贴截图.png',{type:'image/png'}));el.dispatchEvent(new ClipboardEvent('paste',{bubbles:true,cancelable:true,clipboardData:data}));});await page.locator('.v2-photo-editor').getByText('已识别到水印，当前保留原图。',{exact:true}).waitFor();assert.equal(fileWrites,1,'inspection does not save files');await confirmPhoto();await check.getByRole('link',{name:'粘贴截图.png',exact:true}).waitFor();assert.equal(fileWrites,2);assert.equal(photoSaves.at(-1).enabled,false);
@@ -130,7 +136,7 @@ for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:
   await missingTime.getByText('手动填写 · 照片未提供可核验的拍摄时间',{exact:true}).waitFor();
   assert.equal(fileWrites,5,'choosing a capture time only updates the preview');
  }
- await missingTime.getByRole('button',{name:'取消',exact:true}).click();await missingTime.waitFor({state:'hidden'});assert.equal(fileWrites,5,'canceling photo editing never uploads a record');assert.equal(cancelCount,1,'cancel removes the staged source');
+ await missingTime.getByRole('button',{name:'取消',exact:true}).click();await missingTime.waitFor({state:'hidden'});assert.equal(fileWrites,5,'canceling photo editing never uploads a record');assert.equal(cancelCount,2,'both canceled previews remove their staged source');
  await page.setViewportSize({width:375,height:667});
  await page.evaluate(()=>{window.__sharedPhoto=null;Object.defineProperty(navigator,'canShare',{configurable:true,value:()=>true});Object.defineProperty(navigator,'share',{configurable:true,value:async data=>{window.__sharedPhoto={name:data.files[0].name,type:data.files[0].type,size:data.files[0].size};}});});
  await rows.nth(0).getByLabel('拍摄检查照片',{exact:true}).setInputFiles({name:'拍照.png',mimeType:'image/png',buffer:Buffer.from('camera')});
@@ -174,7 +180,7 @@ for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:
  await previewPhoto.screenshot({path:path.join(output,'camera-save-375.png')});
  await previewPhoto.getByRole('button',{name:'完成',exact:true}).click();
  const tabs=context.pages().length;await rows.nth(0).getByRole('link',{name:'现场_班前检查水印.jpg',exact:true}).click();await previewPhoto.waitFor();assert.equal(context.pages().length,tabs,'photo filename opens in-page');await previewPhoto.getByRole('button',{name:'完成',exact:true}).click();
- await rows.nth(0).getByLabel('上传检查照片',{exact:true}).setInputFiles({name:'验证样式.jpg',mimeType:'image/jpeg',buffer:Buffer.from('style')});await photoEditor.waitFor();await photoEditor.getByRole('switch',{name:'添加水印',exact:true}).click();assert.equal(await photoEditor.getByRole('radio',{name:'右下角',exact:true}).isChecked(),true);assert.equal(await photoEditor.getByRole('slider').getAttribute('aria-valuenow'),'41');assert.equal(await photoEditor.getByRole('textbox',{name:'水印地点',exact:true}).inputValue(),'','previous photo location is not remembered');await photoEditor.getByRole('textbox',{name:'水印标题',exact:true}).fill('第二张照片');await photoEditor.getByRole('button',{name:'取消',exact:true}).click();await photoEditor.waitFor({state:'hidden'});assert.equal(fileWrites,6,'restoring and canceling styles does not save a file');assert.equal(previewCount,7,'one source upload per image selection');
+ await rows.nth(0).getByLabel('上传检查照片',{exact:true}).setInputFiles({name:'验证样式.jpg',mimeType:'image/jpeg',buffer:Buffer.from('style')});await photoEditor.waitFor();await photoEditor.getByRole('switch',{name:'添加水印',exact:true}).click();assert.equal(await photoEditor.getByRole('radio',{name:'右下角',exact:true}).isChecked(),true);assert.equal(await photoEditor.getByRole('slider').getAttribute('aria-valuenow'),'41');assert.equal(await photoEditor.getByRole('textbox',{name:'水印地点',exact:true}).inputValue(),'','previous photo location is not remembered');await photoEditor.getByRole('textbox',{name:'水印标题',exact:true}).fill('第二张照片');await photoEditor.getByRole('button',{name:'取消',exact:true}).click();await photoEditor.waitFor({state:'hidden'});assert.equal(fileWrites,6,'restoring and canceling styles does not save a file');assert.equal(previewCount,8,'one source upload per image selection including HEIC');
  await page.setViewportSize({width:1440,height:960});fail=true;await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('隔离测试：暂未确认，请重试',{exact:true}).waitFor();assert.equal(await rows.nth(1).getByRole('textbox').inputValue(),'测试异常说明');
  await check.getByRole('button',{name:'提交检查',exact:true}).click();await check.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,2);await check.getByText('已同步飞书',{exact:true}).waitFor();assert.equal(await check.getByRole('button',{name:'提交检查',exact:true}).count(),0);
  assert(await rows.nth(1).getByRole('radio',{name:'异常',exact:true}).isDisabled());

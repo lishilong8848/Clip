@@ -63,6 +63,11 @@ try {
     const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
     async function capture(label){for(const [width,height] of [[402,874],[440,956],[1440,900]]){
       await page.setViewportSize({width,height});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),label+' overflow');
+      if(label==='ai-create'&&width===1440){
+        const sources=await page.locator('.sharing-source').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().y));
+        assert.equal(sources.length,3);assert(sources.every(y=>Math.abs(y-sources[0])<2),'AI source controls share a row');
+        assert((await page.locator('#sharing-title').boundingBox()).width<=520,'Title input does not stretch across desktop');
+      }
       if(label==='manual'){
         const cards=await page.locator('.sharing-manual-create .sharing-question').evaluateAll(nodes=>nodes.map(node=>{const r=node.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width};}));
         if(width===1440){
@@ -74,7 +79,11 @@ try {
       await page.screenshot({path:path.join(output,`${label}-${v2}-${width}.png`),fullPage:true});
     }}
     try{
-      await page.goto(origin+'/__questions');await page.getByRole('button',{name:'人工出题',exact:true}).click();
+      await page.goto(origin+'/__questions');
+      await page.getByRole('button',{name:'AI出题',exact:true}).click();
+      await capture('ai-create');
+      await page.getByRole('button',{name:'返回批次列表',exact:true}).click();
+      await page.getByRole('button',{name:'人工出题',exact:true}).click();
       await page.getByLabel('题干',{exact:true}).fill('人工填写的第一题');
       await page.locator('.sharing-option textarea').nth(0).fill('手工选项甲');
       await page.locator('.sharing-option textarea').nth(1).fill('手工选项乙');

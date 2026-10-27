@@ -87,7 +87,7 @@
   .workspace-v2 .sharing-roster .sharing-people-tools .n-button{width:100%}
   .workspace-v2 .sharing-bulk{display:grid;grid-template-columns:minmax(0,1fr)}
   .workspace-v2 .sharing-bulk .n-button{width:100%;height:auto;white-space:normal}
-  .workspace-v2 .sharing-people-list{grid-template-columns:minmax(0,1fr);max-height:none}
+  .workspace-v2 .sharing-people-list{grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));max-height:280px}
   .workspace-v2 .sharing-chips li{max-width:100%}
 }
 @media(prefers-reduced-motion:reduce){.workspace-v2 .sharing-section,.workspace-v2 .sharing-answer-pane,.workspace-v2 .sharing-roster,.workspace-v2 .v2-sharing-delivery{animation:none}}

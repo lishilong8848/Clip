@@ -9,7 +9,7 @@ from .personnel_source import APP_TOKEN, TABLE_ID
 VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
-ROSTER_VERSION = 4
+ROSTER_VERSION = 5
 
 
 def shift_times(settings):
@@ -86,7 +86,7 @@ def roster_snapshot(service, day):
     if snapshot.get('date') != day:
         snapshot = service._get('local', 'shift_roster:' + day) or {}
     if (snapshot.get('date') == day and day < dt.datetime.now(TZ).date().isoformat()
-            and snapshot.get('version') in {3, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
+            and snapshot.get('version') in {3, 4, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
         return snapshot
     if (snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION
             or time.time() - float(snapshot.get('observed_at') or 0) >= 300):

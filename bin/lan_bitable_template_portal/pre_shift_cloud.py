@@ -39,9 +39,14 @@ def read_roster(service, day, *, scopes=SCOPES):
         group = [person for person in people if person['scope'] == scope]
         resolved, missing = resolve_roster(group, directory, allowed_scopes=SCOPES)
         result.extend(resolved)
-        missing.extend(str(item.get('reason') or '排班资料待核对') for item in issues if item.get('scope') == scope)
+        unresolved = [item for item in issues if item.get('scope') == scope
+                      and item.get('duty_kind') != '长白' and item.get('group') != '长白']
+        missing.extend((str(item.get('name') or '未命名人员') + '：' + str(item.get('reason') or '排班资料待核对'))
+                       for item in unresolved)
         if missing:
-            warnings[scope] = f'已匹配{len(resolved)}/{len(group)}人：' + '；'.join(missing) + '；已匹配人员正常推送，其余5分钟后重试。'
+            reasons = list(dict.fromkeys(missing))
+            detail = '；'.join(reasons[:3]) + (f'；另有{len(reasons)-3}项待核对' if len(reasons)>3 else '')
+            warnings[scope] = f'已匹配{len(resolved)}/{len(group)+len(unresolved)}人：' + detail + '；已匹配人员正常推送，其余5分钟后重试。'
     return {'people': result, 'warnings': warnings}
 
 

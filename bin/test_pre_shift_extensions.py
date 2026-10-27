@@ -495,15 +495,16 @@ class RegressionTests(Base):
                         '01:00 daily maps to previous roster night')
         self.assertIn(DAY, requested)
 
-    def test_image_extension_mismatch_rejected(self):
+    def test_valid_image_extension_mismatch_is_corrected(self):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
         self.prepare(at(DAY + 'T09:00:00'))
         white = self._white_id()
         session = self.service.stage_upload(self.worker, white, 'x', 'item', 'fake.jpeg')
         make_png(session['path'])  # PNG content but .jpeg extension
-        with self.assertRaises(checks.CheckError):
-            self.service.commit_upload(self.worker, session,
-                                       pathlib.Path(session['path']).stat().st_size)
+        result = self.service.commit_upload(self.worker, session,
+                                           pathlib.Path(session['path']).stat().st_size)
+        self.assertEqual(result['name'], 'fake.png')
+        self.assertTrue(result['is_image'])
 
     def test_document_signature_mismatch_rejected(self):
         self.save('A', 0, [{'id': 'x', 'text': 'X'}], at(DAY + 'T09:00:00'))
