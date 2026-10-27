@@ -276,7 +276,7 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(self.item['text'], json.dumps(result, ensure_ascii=False))
         self.assertNotIn(self.item['text'], str(self.emit.call_args_list))
         self.assertEqual(history, original)
-        self.assertEqual(self.kb.evidence_current.call_count, 3)
+        self.assertEqual(self.kb.evidence_current.call_count, 4)  # Includes the final pre-delivery version/access check.
 
     async def test_document_revoked_during_outer_review_prevents_text_delivery(self):
         async def revoke(actor, turn, history, result, authorize):

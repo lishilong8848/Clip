@@ -1,4 +1,4 @@
-"""Stateless read intent routing. Nothing returned here grants tool permissions.
+"""Stateless intent routing. Nothing returned here grants tool permissions.
 
 Call once before answer shortcuts, after explicit commands and attachment flows.
 Use query locally; never replace the persisted user question. Unknown preserves
@@ -27,7 +27,7 @@ MAX_HISTORY = 4
 MAX_SECONDS = 10.0
 ATTEMPT_SECONDS = 4.0
 _TASK_TYPES = {'knowledge': 'document', 'mixed': 'mixed', 'business': 'statistics',
-               'general': 'general', 'unknown': 'unknown'}
+               'general': 'general', 'schedule': 'unknown', 'unknown': 'unknown'}
 _FLOW_FLAGS = ('display_only', '_private_request', '_clarification_reply', '_research_mode',
                'file_ids', 'submitted_file_ids', 'attachments', 'commands', 'submitted_commands',
                'plan', 'clarification', 'source_topic', 'knowledge_access_changed')
@@ -35,7 +35,7 @@ _FLOW_FLAGS = ('display_only', '_private_request', '_clarification_reply', '_res
 
 class QueryIntent(BaseModel):
     model_config = ConfigDict(extra='forbid', strict=True)
-    kind: Literal['knowledge', 'mixed', 'business', 'general', 'unknown']
+    kind: Literal['knowledge', 'mixed', 'business', 'general', 'schedule', 'unknown']
     query: str = Field(max_length=MAX_QUERY)
     continued: bool
     task_type: Literal['statistics', 'document', 'mixed', 'general', 'unknown'] = 'unknown'
@@ -78,7 +78,19 @@ general: explanation, reasoning, calculation from supplied data, illustrative
 writing, conversation, or public-information lookup. Public/current information
 uses the appropriate public tools, not internal documents. Do not substitute
 general knowledge for a requested real company rule, or invent site conditions.
-unknown: uncertain, missing referent, writes/actions, attachments, explicit optout.
+schedule: an explicit request to create, list, change, pause, resume or cancel
+THIS assistant's timed reminders or scheduled queries, including natural
+followups to such a request in the authorized history. Decide semantically,
+not by matching scheduling words. Keep query EXACTLY the current question;
+continued=true only when history resolves the scheduled-task referent.
+Leave task_type=unknown, branch queries and document_refs empty. Do not create
+a schedule specification, infer missing parameters, call tools or claim success.
+A separate scheduling handler validates and performs any requested operation.
+Explanations, examples or drafts about scheduling are general, not schedule.
+Existing business staff rosters, shifts and publication plans retain their
+ordinary business/read or unknown/action flow; they are not assistant timers.
+Mentioning a frequency or time alone does not request an assistant schedule.
+unknown: uncertain, missing referent, other writes/actions, attachments, explicit optout.
 When ambiguity changes the answer, do not assume a source or invent missing
 conditions. Preserve unknown so the answer agent can clarify the necessary point.
 Do not use literal business keyword routing. Concepts alone do not imply records.
@@ -127,7 +139,7 @@ corrected JSON object.
 For other kinds leave branch queries empty. No answers, facts or private bodies.
 Return ONLY the JSON object matching the supplied schema. No markdown or extras.
 task_type is statistics for business, document for knowledge, mixed for mixed,
-general for general, unknown for unknown.
+general for general, unknown for schedule or unknown.
 """
 
 _WRITE = re.compile(
@@ -162,10 +174,10 @@ def _unknown(question):
             'task_type': 'unknown', 'business_query': '', 'document_query': '', 'attempts': 0}
 
 
-def _original_flow(turn, question):
+def _original_flow(turn, question, *, classify_actions=False):
     return (any(turn.get(key) for key in _FLOW_FLAGS)
-            or question.startswith('/') or bool(_OPTOUT.search(question) or WRITE_INTENT.search(question)
-                                                or _WRITE.search(question)))
+            or question.startswith('/') or bool(_OPTOUT.search(question))
+            or not classify_actions and bool(WRITE_INTENT.search(question) or _WRITE.search(question)))
 
 
 def _permissions(actor):
@@ -233,7 +245,7 @@ def _history_questions(history, actor):
         if not isinstance(item, dict) or not _bound_turn(item, actor, require_owner=True):
             break
         question = _text(item.get('question'))
-        if not question or _original_flow(item, question):
+        if not question or _original_flow(item, question, classify_actions=True):
             break
         result.append(question)
     return list(reversed(result))
@@ -267,7 +279,7 @@ def _public_topic_questions(actor, turn):
     result = []
     for value in reversed(questions):
         question = _text(value)
-        if not question or _original_flow({}, question):
+        if not question or _original_flow({}, question, classify_actions=True):
             break
         result.append(question)
     return list(reversed(result))
@@ -302,7 +314,8 @@ def _stored_topic_history(engine, actor, turn):
             item['_task_context'] = {key: copy.deepcopy(context[key]) for key in
                 ('version', 'owner', 'topic_id', 'scopes', 'modules') if key in context} if isinstance(context, dict) else {}
             item.update({key: bool(row.get(key)) for key in _FLOW_FLAGS})
-            if row.get('status') != 'completed':
+            # A failed read contributes only its authorized question, never its draft or sources.
+            if row.get('status') not in {'completed', 'failed'}:
                 item['display_only'] = True
             result.append(item)
         return result
@@ -355,18 +368,32 @@ def _validate(value, question, history, actor, turn, documents=()):
             or decision.document_refs and (not decision.continued or decision.kind not in {'knowledge', 'mixed'})):
         raise ValueError('unbound document reference')
     query = _text(decision.query)
-    if (not query or _original_flow({}, query)
+    if decision.kind == 'schedule':
+        if (query != question or decision.continued and not history
+                or decision.business_query or decision.document_query or decision.document_refs):
+            raise ValueError('invalid schedule route')
+        return {**decision.model_dump(), 'query': question, 'task_type': 'unknown'}
+    # Action questions are context for schedule routing, never a basis for a read rewrite.
+    for index in range(len(history) - 1, -1, -1):
+        if _original_flow({}, history[index]):
+            history = history[index + 1:]
+            break
+    if (not query or _original_flow({}, question) or _original_flow({}, query)
             or decision.continued and not history
             or not decision.continued and query != question):
         raise ValueError('ungrounded query')
     latest, rewritten = _constraints(question), _constraints(query)
-    for explicit, effective in zip(latest, rewritten):
-        if explicit and explicit != effective:
+    # Source identifiers can look like equipment codes; they do not replace the user's device.
+    document_codes = _constraints(' '.join(refs[number]['name'] for number in decision.document_refs))[4]
+    for index, (explicit, effective) in enumerate(zip(latest, rewritten)):
+        extra_codes = document_codes if index == 4 else set()
+        if explicit and (explicit - effective or effective - explicit - extra_codes):
             raise ValueError('latest constraint lost or contradicted')
     if decision.continued:
         for index, explicit in enumerate(latest):
             prior = next((values[index] for values in map(_constraints, reversed(history)) if values[index]), set())
-            if not explicit and prior and (not rewritten[index] or rewritten[index] - prior):
+            extra_codes = document_codes if index == 4 else set()
+            if not explicit and prior and (not rewritten[index] & prior or rewritten[index] - prior - extra_codes):
                 raise ValueError('unchanged constraint lost or contradicted')
     # Never introduce a concrete time/scope/device absent from the authorized questions.
     known = _constraints('\n'.join([*history, question, *(refs[number]['name'] for number in decision.document_refs)]))
@@ -450,7 +477,7 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
     question = _text(turn.get('question')) if isinstance(turn, dict) else ''
     fallback = _unknown(question)
     original = turn.get('_profile') if isinstance(turn, dict) else None
-    if not question or _original_flow(turn, question) or not _eligible(original):
+    if not question or _original_flow(turn, question, classify_actions=True) or not _eligible(original):
         return fallback
     try:
         async with asyncio.timeout(MAX_SECONDS):

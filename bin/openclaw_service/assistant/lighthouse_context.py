@@ -6,6 +6,9 @@ import hashlib
 
 def execution_lane(actor):
     """Execution isolation only; the authenticated account remains unchanged."""
+    scheduled = actor.get('_scheduled_task')
+    if isinstance(scheduled, str) and re.fullmatch('[a-f0-9]{32}', scheduled):
+        return 'schedule:' + scheduled
     channel = actor.get('channel', '')
     if channel.startswith('feishu:'):
         return channel + ':' + str((actor.get('_feishu_topic') or {}).get('id', 'private'))

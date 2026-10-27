@@ -26,6 +26,7 @@ import threading
 
 from pathlib import Path
 from functools import lru_cache
+import packaging_preflight
 from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
 from bin.upload_event_module.services import release_journal
 
@@ -79,6 +80,7 @@ EXCLUDE_FILES = {
     "vc_redist.x64.exe",
 
     "package_portable.py",
+    "packaging_preflight.py",
 
     "分发前检查清单.md",
 
@@ -1284,6 +1286,9 @@ def _verify_runtime_imports(venv_python: Path, project_root: Path) -> bool:
     script_lines = [
 
         "import importlib",
+        "import os, tempfile",
+        "isolated_data = tempfile.TemporaryDirectory(prefix='clipflow_imports_')",
+        "os.environ['CLIPFLOW_DATA_DIR'] = isolated_data.name",
 
         "import pathlib",
 
@@ -1652,6 +1657,7 @@ def _assert_project_iterator_excludes_runtime_data() -> None:
 
 
 def _run_preflight_check(args: list[str], **kwargs) -> None:
+    explicit_env = 'env' in kwargs
     kwargs['env'] = {**kwargs.get('env', os.environ), 'PYTHONNOUSERSITE': '1'}
     label = (f"{args[3]} 等 {len(args) - 3} 个测试模块" if args[1:3] == ["-m", "unittest"]
              else "Python 语法检查" if args[1] == "-c" else Path(args[1]).name)
@@ -1661,7 +1667,10 @@ def _run_preflight_check(args: list[str], **kwargs) -> None:
         if args[1:3] == ["-m", "unittest"]:
             _run_preflight_test_shards(args, **kwargs)
         else:
-            subprocess.run(args, **kwargs)
+            with tempfile.TemporaryDirectory(prefix="clipflow_preflight_") as directory:
+                if not explicit_env:
+                    kwargs['env'] = {**kwargs['env'], 'CLIPFLOW_DATA_DIR': directory}
+                subprocess.run(args, **kwargs)
     finally:
         log(f"检查耗时: {label}，{time.monotonic() - started:.1f} 秒")
 
@@ -1718,38 +1727,202 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
             print(detail[start.start():] if start else detail[-6000:], end="\n", flush=True)
 
 
-def _run_frontend_notice_navigation_checks() -> None:
+FRONTEND_PREFLIGHT_SCRIPTS = (
+    "check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
+    "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
+    "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
+    "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
+    "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs",
+    "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs", "check-notice-convergence-confirmation.mjs",
+)
+
+
+def _run_frontend_notice_navigation_checks(selection=None) -> None:
     frontend = PROJECT_ROOT / "bin/lan_bitable_template_portal/frontend"
     node = shutil.which("node")
     if not node:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
-    for name in ("check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
-                 "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
-                 "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
-                 "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
-                 "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs",
-                 "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs", "check-notice-convergence-confirmation.mjs"):
+    for name in FRONTEND_PREFLIGHT_SCRIPTS:
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
+        if selection is not None and "frontend:" + name not in selection.selected:
+            continue
         _run_preflight_check([node, os.fspath(script)], cwd=frontend, check=True, timeout=300)
 
 
 def _run_packaging_preflight_tests() -> None:
 
+    test_groups = [
+        [ "bin.test_notice_identity_boundaries"],
+        [ "bin.test_public_access"],
+        [ "bin.test_lighthouse_knowledge_stream_storage"],
+        [
+         "bin.test_robot_webhook",
+         "bin.test_assistant_diagnostics", "bin.test_assistant_diagnostic_store", "bin.test_assistant_diagnostics_cloud",
+         "bin.test_lighthouse_tool_readiness", "bin.test_lighthouse_engine_evaluation",
+         "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
+         "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
+         "bin.test_lighthouse_task_context", "bin.test_lighthouse_business_semantics", "bin.test_lighthouse_model_routing", "bin.test_lighthouse_file_provenance", "bin.test_lighthouse_intelligence_evaluation",
+         "bin.test_lighthouse_intelligence_replay", "bin.test_lighthouse_review_resilience", "bin.test_lighthouse_task_context_contract",
+         "bin.test_lighthouse_connection_isolation", "bin.test_lighthouse_source_coverage",
+         "bin.test_lighthouse_source_contracts",
+         "bin.test_lighthouse_partial_claims",
+         "bin.test_lighthouse_knowledge_automatic",
+         "bin.test_lighthouse_knowledge_repair", "bin.test_lighthouse_knowledge_evidence",
+         "bin.test_lighthouse_claim_review", "bin.test_lighthouse_answer_quality_replay",
+         "bin.test_lighthouse_reviewer_reread", "bin.test_lighthouse_mixed_query",
+         "bin.test_lighthouse_query_intent", "bin.test_lighthouse_task_model_quality",
+         "bin.test_lighthouse_mixed_native_guard", "bin.test_lighthouse_live_evaluation",
+         "bin.test_lighthouse_quality_integration",
+         "bin.test_pre_shift_edits",
+         "bin.test_lighthouse_quality_packaging",
+         "bin.test_lighthouse_workspace", "bin.test_lighthouse_workspace_integration", "bin.test_lighthouse_research",
+         "bin.test_lighthouse_sandbox", "bin.test_lighthouse_visual", "bin.test_lighthouse_media_bridge", "bin.test_lighthouse_voice",
+         "bin.test_lighthouse_request_budget", "bin.test_lighthouse_model_policy", "bin.test_lighthouse_system_messages",
+         "bin.test_lighthouse_live_concurrency", "bin.test_lighthouse_runtime_lanes", "bin.test_feishu_live_reply",
+         "bin.test_feishu_app_migration",
+         "bin.test_feishu_unified_settings",
+         "bin.test_qt_settings_save_pipeline", "bin.test_feishu_manual_configuration", "bin.test_feishu_manual_packaging",
+         "bin.test_feishu_cloud_auth",
+         "bin.test_feishu_cached_auth",
+         "bin.test_notice_connection",
+         "bin.test_feishu_write_auth_isolation", "bin.test_feishu_cloud_token_guard",
+         "bin.test_feishu_attachment_auth",
+         "bin.test_feishu_directory_identity",
+         "bin.test_feishu_identity_manifest", "bin.test_feishu_identity_documents",
+         "bin.test_feishu_identity_migration", "bin.test_feishu_identity_delivery",
+         "bin.test_feishu_identity_startup",
+         "bin.test_feishu_current_recipients",
+         "bin.test_learning_weekly_questions",
+         "bin.test_learning_repeated_reminders",
+         "bin.test_feishu_single_app_delivery", "bin.test_feishu_config_reload",
+         "bin.test_lighthouse_shared_snapshot",
+         "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
+         "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
+         "bin.test_learning_update_flow",
+         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_document_library_resilience", "bin.test_knowledge_source_maintenance",
+         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_question_import", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model", "bin.test_sharing_resilience", "bin.test_sharing_material_recovery",
+         "bin.test_signature_management_performance",
+         "bin.test_workspace_layouts",
+         "bin.test_workspace_extension_access",
+         "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access", "bin.test_signature_temporary_access",
+         "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_pre_shift_recipients", "bin.test_pre_shift_delivery", "bin.test_learning_weekly_cards",
+         "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_risk_inspection_delete", "bin.test_risk_inspection_system_fields", "bin.test_risk_inspection_final_push", "bin.test_risk_inspection_assignments", "bin.test_risk_inspection_task_access", "bin.test_risk_inspection_imports", "bin.test_risk_inspection_update_compatibility", "bin.test_account_bulk_modules", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
+         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_personnel_source", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
+         "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
+         "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
+         "bin.test_lighthouse_question_intent", "bin.test_lighthouse_read_followups", "bin.test_lighthouse_source_recovery", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
+         "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
+         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
+         "bin.test_lighthouse_document_tools",
+         "bin.test_lighthouse_office_tools",
+         "bin.test_lighthouse_general_tools", "bin.test_feishu_workpartner",
+         "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
+         "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
+         "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",
+         "bin.test_lighthouse_plan_rule_editor", "bin.test_lighthouse_daily_water_workflows", "bin.test_lighthouse_upload_fields",
+         "bin.test_lighthouse_notice_image_workflows", "bin.test_lighthouse_cabinet_text_workflows", "bin.test_lighthouse_cabinet_batch_actions",
+         "bin.test_lighthouse_cabinet_edit_fields", "bin.test_lighthouse_cabinet_edit_workflows", "bin.test_lighthouse_cabinet_proof_workflows",
+         "bin.test_lighthouse_interactive_intent", "bin.test_event_month_selection", "bin.test_lighthouse_reference_ids",
+         "bin.test_lighthouse_business_matrix", "bin.test_lighthouse_reference_workflows",
+         "bin.test_lighthouse_drill_configuration_fields", "bin.test_lighthouse_drill_configuration_workflows",
+         "bin.test_drill_management", "bin.test_drill_untimed_steps", "bin.test_drill_recognition_recovery", "bin.test_drill_backend_integration", "bin.test_drill_signature_ink",
+         "bin.test_lighthouse_creation_fields", "bin.test_lighthouse_creation_workflows", "bin.test_lighthouse_drill_upload",
+         "bin.test_lighthouse_water_fields", "bin.test_lighthouse_water_workflows",
+         "bin.test_lighthouse_download_links", "bin.test_lighthouse_download_workflows", "bin.test_lighthouse_query_pages", "bin.test_lighthouse_question_bank",
+         "bin.test_lighthouse_question_materials", "bin.test_lighthouse_learning_identity", "bin.test_lighthouse_learning_bridge", "bin.test_lighthouse_work_order_queries",
+         "bin.test_lighthouse_business_addresses", "bin.test_lighthouse_interactive_coverage",
+         "bin.test_lighthouse_dynamic_endpoints",
+         "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
+         "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
+         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_notice_delivery_source_recovery", "bin.test_notice_cycle_warnings", "bin.test_qt_notice_cycle_warnings", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
+                "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
+                "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
+                "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
+                "bin.test_knowledge_document_formats", "bin.test_knowledge_document_summary", "bin.test_document_library_all_scopes",
+                "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_notice_end_progress",
+                "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
+                "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
+                "bin.test_assistant_shared_read", "bin.test_lighthouse_shared_privacy",
+         "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
+        [ "bin.test_openclaw_service", "bin.test_openclaw_service_client",
+         "bin.test_openclaw_service_launcher", "bin.test_openclaw_service_store", "bin.test_openclaw_service_update",
+         "bin.test_openclaw_backend_proxy", "bin.test_openclaw_packaging_imports",
+         "bin.test_openclaw_gateway_log",
+         "bin.test_openclaw_connection_pool", "bin.test_openclaw_plan_nonblocking",
+         "bin.test_openclaw_plan_io", "bin.test_openclaw_early_exit",
+         "bin.test_openclaw_portal_startup", "bin.test_openclaw_python_entry"],
+        [ "bin.test_plan_convergence", "bin.test_plan_convergence_stability", "bin.test_plan_convergence_points_adapter", "bin.test_plan_convergence_notice_results", "bin.test_plan_convergence_send", "bin.test_plan_convergence_expiry", "bin.test_convergence_confirmation_flows"],
+        [ "bin.test_submission_reliability",
+         "bin.test_active_notice_model", "bin.test_qt_shell_backend_events",
+         "bin.test_event_remote_atomicity", "bin.test_event_notice_priority", "bin.test_event_notice_priority_recovery", "bin.test_event_notice_completion_recovery", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
+         "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_repair_deleted_projection", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
+        [ "bin.test_critical_guard", "bin.test_assistant_schedules", "bin.test_assistant_schedule_claims",
+         "bin.test_lighthouse_knowledge_followup", "bin.test_risk_inspection_reminders", "bin.test_learning_daily_report",
+         "bin.test_polling_work_order_undo", "bin.test_change_notice_rich_text"],
+        [ "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest", "bin.test_logger_reentry", "bin.test_update_check_recovery", "bin.test_release_journal", "bin.test_release_journal_routes"],
+        ["bin.test_packaging_preflight_selection"],
+    ]
+
     log("开始执行打包前自动测试。")
     test_python = str(_find_build_python() or sys.executable)
     log(f"测试解释器: {test_python}")
 
-    subprocess.run([test_python, '-c',
+    dependency_started = time.monotonic()
+    log("检查开始: 测试依赖安装状态")
+    _ensure_packaging_preflight_dependencies(Path(test_python))
+    log(f"测试依赖检查通过，耗时 {time.monotonic() - dependency_started:.1f} 秒")
+    _cleanup_vue_dist_assets()
+    import_started = time.monotonic()
+    log("检查开始: 打包运行时实际导入")
+    if not _verify_runtime_imports(Path(test_python), PROJECT_ROOT):
+        raise RuntimeError(f"打包运行时导入失败，请检查上述依赖错误。解释器: {test_python}")
+    log(f"打包运行时实际导入通过，耗时 {time.monotonic() - import_started:.1f} 秒")
+    log("正在核对源码、检查清单和执行环境指纹。")
+    try:
+        before = packaging_preflight.snapshot(PROJECT_ROOT, test_python)
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        # No trustworthy fingerprint means FULL with no new receipt.
+        before = None
+        log(f"指纹不可用 ({type(exc).__name__})，执行 FULL 且不更新缓存。")
+    safety = ("safety:manifest", "safety:runtime-data", "safety:syntax", "safety:imports",
+              "safety:readiness", "safety:notice-flow")
+    frontend_checks = tuple("frontend:" + name for name in FRONTEND_PREFLIGHT_SCRIPTS)
+    checks = (*safety, *frontend_checks, *(name for group in test_groups for name in group))
+    selection = packaging_preflight.Selection(
+        before, checks, BUILD_DIR / ".preflight-coverage.json",
+        full=any(flag in sys.argv[1:] for flag in ("--preflight-test", "--full-preflight")),
+    )
+    selection.passed("safety:imports")
+    for name in selection.checks:
+        if name.startswith("bin.test_"):
+            required = PROJECT_ROOT / (name.replace(".", "/") + ".py")
+        elif name.startswith("frontend:"):
+            required = PROJECT_ROOT / packaging_preflight.FRONTEND / "scripts" / name.split(":", 1)[1]
+        else:
+            continue
+        if not required.is_file():
+            raise RuntimeError(f"缺少预检文件 {required.relative_to(PROJECT_ROOT)}，已停止打包。")
+    log(f"预检模式: {'FULL' if selection.full else 'LAYERED'}；{selection.reason}；"
+        f"执行 {len(selection.selected)}/{len(selection.checks)} 项，其余复用完全匹配的通过记录。")
+
+    def run_tests(names):
+        selected = [name for name in names if name in selection.selected]
+        if selected:
+            _run_preflight_check([test_python, "-m", "unittest", *selected], cwd=PROJECT_ROOT, check=True)
+            selection.passed(*selected)
+
+    _run_preflight_check([test_python, '-c',
         "import json,sys;sys.path.insert(0,'bin');from public_access.config import SPEC;"
         "from openclaw_service.assistant.lighthouse_distribution import validate_spec;"
         "validate_spec(json.loads(SPEC.read_text(encoding='utf-8')),component='frpc');"
         "from public_access.provisioning import read_deployment;read_deployment()"],
-        cwd=PROJECT_ROOT, check=True, env={**os.environ, 'PYTHONNOUSERSITE': '1'})
+        cwd=PROJECT_ROOT, check=True)
+    selection.passed("safety:manifest")
 
     _assert_project_iterator_excludes_runtime_data()
-    _cleanup_vue_dist_assets()
+    selection.passed("safety:runtime-data")
 
     py_targets = [
         PROJECT_ROOT / "bin" / "refactored_main.py",
@@ -1864,43 +2037,46 @@ def _run_packaging_preflight_tests() -> None:
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_bridge.py")
     py_targets.extend(sorted((PROJECT_ROOT / "bin/lan_bitable_template_portal").glob("feishu_workpartner*.py")))
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_icon_weather.py")
-    py_targets = list(dict.fromkeys(path for path in py_targets if path.exists()))
+    py_targets.append(PROJECT_ROOT / "packaging_preflight.py")
+    py_targets.extend(path for path in _iter_project_files(PROJECT_ROOT, exclude_venv=True) if path.suffix == ".py")
+    py_targets.extend(PROJECT_ROOT / (name.replace(".", "/") + ".py")
+                      for name in selection.checks if name.startswith("bin.test_"))
+    py_targets = list(dict.fromkeys(py_targets))
 
     if py_targets:
         with tempfile.TemporaryDirectory(prefix="clipflow_pycompile_") as pycache_dir:
-            compile_script = "import pathlib,py_compile,sys\nfor index,source in enumerate(sys.argv[2:]): py_compile.compile(source,cfile=str(pathlib.Path(sys.argv[1])/f'{index}.pyc'),doraise=True)"
+            manifest = Path(pycache_dir) / "sources.json"
+            manifest.write_text(json.dumps([os.fspath(path) for path in py_targets]), encoding="utf-8")
+            compile_script = "import json,pathlib,py_compile,sys\nfor index,source in enumerate(json.loads(pathlib.Path(sys.argv[2]).read_text(encoding='utf-8'))): py_compile.compile(source,cfile=str(pathlib.Path(sys.argv[1])/f'{index}.pyc'),doraise=True)"
             _run_preflight_check(
-                [test_python, "-c", compile_script, pycache_dir, *[os.fspath(path) for path in py_targets]],
+                [test_python, "-c", compile_script, pycache_dir, os.fspath(manifest)],
                 cwd=PROJECT_ROOT,
                 check=True,
             )
 
         log(f"Python 语法检查通过: {len(py_targets)} 个文件。")
+    selection.passed("safety:syntax")
 
     log("Vue 生产页 JS 检查由发布就绪检查负责。")
 
     readiness_script = PROJECT_ROOT / "bin" / "tools" / "release_readiness_check.py"
     if readiness_script.exists():
-        dependency_started = time.monotonic()
-        log("检查开始: 测试依赖安装状态")
-        _ensure_packaging_preflight_dependencies(Path(test_python))
-        log(f"测试依赖检查通过，耗时 {time.monotonic() - dependency_started:.1f} 秒")
-        import_started = time.monotonic()
-        log("检查开始: 打包运行时实际导入")
-        if not _verify_runtime_imports(Path(test_python), PROJECT_ROOT):
-            raise RuntimeError(f"打包运行时导入失败，请检查上述依赖错误。解释器: {test_python}")
-        log(f"打包运行时实际导入通过，耗时 {time.monotonic() - import_started:.1f} 秒")
         _run_preflight_check(
             [test_python, os.fspath(readiness_script)],
             cwd=PROJECT_ROOT,
             check=True,
         )
         log("发布就绪检查通过。")
+        selection.passed("safety:readiness")
     else:
         raise RuntimeError("缺少发布就绪检查脚本，已中止打包。")
 
-    _run_frontend_notice_navigation_checks()
-    log("新旧导航、照片粘贴隔离与草稿恢复专项检查通过。")
+    if selection.full:
+        _run_frontend_notice_navigation_checks()
+    else:
+        _run_frontend_notice_navigation_checks(selection)
+    selection.passed(*(name for name in frontend_checks if name in selection.selected))
+    log("所选前端检查通过，其余检查已核对精确缓存。")
 
     notice_flow_smoke = PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py"
     if notice_flow_smoke.exists():
@@ -1910,163 +2086,36 @@ def _run_packaging_preflight_tests() -> None:
             check=True,
         )
         log("通告链路静态烟测通过。")
+        selection.passed("safety:notice-flow")
     else:
         raise RuntimeError("缺少通告链路静态烟测脚本，已中止打包。")
 
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_notice_identity_boundaries"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[0])
     log("通告 ID 边界测试通过。")
 
     # Timing-sensitive checks retain their strict budgets outside CPU-heavy shards.
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_public_access"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_lighthouse_knowledge_stream_storage"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
-    _run_preflight_check(
-        [test_python, "-m", "unittest",
-         "bin.test_robot_webhook",
-         "bin.test_assistant_diagnostics", "bin.test_assistant_diagnostic_store", "bin.test_assistant_diagnostics_cloud",
-         "bin.test_lighthouse_tool_readiness", "bin.test_lighthouse_engine_evaluation",
-         "bin.test_feishu_delivery", "bin.test_feishu_message_lifecycle", "bin.test_feishu_topic_delegation", "bin.test_lighthouse_model_failover",
-         "bin.test_feishu_answer_delivery", "bin.test_lighthouse_native_final_answer", "bin.test_lighthouse_model_completion", "bin.test_lighthouse_learning_participation", "bin.test_lighthouse_reply_resilience",
-         "bin.test_lighthouse_task_context", "bin.test_lighthouse_business_semantics", "bin.test_lighthouse_model_routing", "bin.test_lighthouse_file_provenance", "bin.test_lighthouse_intelligence_evaluation",
-         "bin.test_lighthouse_intelligence_replay", "bin.test_lighthouse_review_resilience", "bin.test_lighthouse_task_context_contract",
-         "bin.test_lighthouse_connection_isolation", "bin.test_lighthouse_source_coverage",
-         "bin.test_lighthouse_source_contracts",
-         "bin.test_lighthouse_partial_claims",
-         "bin.test_lighthouse_knowledge_automatic",
-         "bin.test_lighthouse_knowledge_repair", "bin.test_lighthouse_knowledge_evidence",
-         "bin.test_lighthouse_claim_review", "bin.test_lighthouse_answer_quality_replay",
-         "bin.test_lighthouse_reviewer_reread", "bin.test_lighthouse_mixed_query",
-         "bin.test_lighthouse_query_intent", "bin.test_lighthouse_task_model_quality",
-         "bin.test_lighthouse_mixed_native_guard", "bin.test_lighthouse_live_evaluation",
-         "bin.test_lighthouse_quality_integration",
-         "bin.test_pre_shift_edits",
-         "bin.test_lighthouse_quality_packaging",
-         "bin.test_lighthouse_workspace", "bin.test_lighthouse_workspace_integration", "bin.test_lighthouse_research",
-         "bin.test_lighthouse_sandbox", "bin.test_lighthouse_visual", "bin.test_lighthouse_media_bridge", "bin.test_lighthouse_voice",
-         "bin.test_lighthouse_request_budget", "bin.test_lighthouse_model_policy", "bin.test_lighthouse_system_messages",
-         "bin.test_lighthouse_live_concurrency", "bin.test_lighthouse_runtime_lanes", "bin.test_feishu_live_reply",
-         "bin.test_feishu_app_migration",
-         "bin.test_feishu_unified_settings",
-         "bin.test_qt_settings_save_pipeline", "bin.test_feishu_manual_configuration", "bin.test_feishu_manual_packaging",
-         "bin.test_feishu_cloud_auth",
-         "bin.test_feishu_cached_auth",
-         "bin.test_notice_connection",
-         "bin.test_feishu_write_auth_isolation", "bin.test_feishu_cloud_token_guard",
-         "bin.test_feishu_attachment_auth",
-         "bin.test_feishu_directory_identity",
-         "bin.test_feishu_identity_manifest", "bin.test_feishu_identity_documents",
-         "bin.test_feishu_identity_migration", "bin.test_feishu_identity_delivery",
-         "bin.test_feishu_identity_startup",
-         "bin.test_feishu_current_recipients",
-         "bin.test_learning_weekly_questions",
-         "bin.test_learning_repeated_reminders",
-         "bin.test_feishu_single_app_delivery", "bin.test_feishu_config_reload",
-         "bin.test_lighthouse_shared_snapshot",
-         "bin.test_admin_impersonation", "bin.test_admin_impersonation_notices",
-         "bin.test_notice_memory_history", "bin.test_notice_memory_isolation", "bin.test_plan_convergence_recovery", "bin.test_plan_convergence_recipients", "bin.test_planned_notice_deadlines",
-         "bin.test_learning_update_flow",
-         "bin.test_document_library", "bin.test_document_library_remote", "bin.test_document_library_portal", "bin.test_document_library_knowledge", "bin.test_document_library_preview", "bin.test_document_library_sync", "bin.test_document_library_cache", "bin.test_document_library_maintenance", "bin.test_document_library_maintenance_permissions", "bin.test_document_library_resilience", "bin.test_knowledge_source_maintenance",
-         "bin.test_learning_completion", "bin.test_learning_delivery_status", "bin.test_learning_shift_storage", "bin.test_learning_shift_cloud", "bin.test_learning_personnel_only", "bin.test_learning_sharing_materials", "bin.test_learning_question_import", "bin.test_learning_sharing_linked", "bin.test_learning_sharing_images", "bin.test_sharing_image_model", "bin.test_sharing_generation", "bin.test_sharing_question_repair_model", "bin.test_sharing_resilience", "bin.test_sharing_material_recovery",
-         "bin.test_signature_management_performance",
-         "bin.test_workspace_layouts",
-         "bin.test_workspace_extension_access",
-         "bin.test_public_health", "bin.test_public_certificate", "bin.test_public_links", "bin.test_public_frontend_delivery", "bin.test_frontend_resource_closure", "bin.test_signature_access", "bin.test_signature_temporary_access",
-         "bin.test_pre_shift_schedule", "bin.test_pre_shift_extensions", "bin.test_pre_shift_photos", "bin.test_pre_shift_location_distribution", "bin.test_pre_shift_roster", "bin.test_pre_shift_recipients", "bin.test_pre_shift_delivery", "bin.test_learning_weekly_cards",
-         "bin.test_pre_shift_checks", "bin.test_pre_shift_history", "bin.test_work_handover", "bin.test_risk_inspection", "bin.test_risk_inspection_delete", "bin.test_risk_inspection_system_fields", "bin.test_risk_inspection_final_push", "bin.test_risk_inspection_assignments", "bin.test_risk_inspection_task_access", "bin.test_risk_inspection_imports", "bin.test_risk_inspection_update_compatibility", "bin.test_account_bulk_modules", "bin.test_account_permission_overrides", "bin.test_module_access", "bin.test_lighthouse_notice_photos", "bin.test_feishu_notice_photos", "bin.test_notice_panel_photos", "bin.test_feishu_photo_attachment_recovery",
-         "bin.test_learning", "bin.test_learning_engagement", "bin.test_learning_sharing", "bin.test_learning_shift_reminders", "bin.test_learning_roster_resolution", "bin.test_learning_personal", "bin.test_learning_routes", "bin.test_learning_cloud", "bin.test_learning_self_service", "bin.test_learning_scope_boundaries", "bin.test_learning_autonomous", "bin.test_learning_password_identity", "bin.test_personnel_password_login", "bin.test_personnel_source", "bin.test_account_management", "bin.test_account_categories", "bin.test_account_levels", "bin.test_work_order_dom_compatibility", "bin.test_portal_auth_persistence", "bin.test_portal_login_entry", "bin.test_portal_access_boundaries",
-         "bin.test_lighthouse_assistant", "bin.test_lighthouse_account_models", "bin.test_lighthouse_widget", "bin.test_lighthouse_appearance", "bin.test_lighthouse_appearance_routes", "bin.test_lighthouse_icon_weather", "bin.test_lighthouse_pending", "bin.test_lighthouse_scope",
-         "bin.test_lighthouse_stream", "bin.test_lighthouse_artifacts", "bin.test_lighthouse_fast_paths", "bin.test_lighthouse_notice_command_regression", "bin.test_notice_navigation_cache", "bin.test_lighthouse_workbench_shell", "bin.test_lighthouse_queries", "bin.test_lighthouse_api",
-         "bin.test_lighthouse_question_intent", "bin.test_lighthouse_read_followups", "bin.test_lighthouse_source_recovery", "bin.test_lighthouse_query_reliability", "bin.test_lighthouse_repair_routing",
-         "bin.test_lighthouse_notice_counts", "bin.test_lighthouse_native_task_progress", "bin.test_lighthouse_basics", "bin.test_lighthouse_read_urls", "bin.test_lighthouse_documents",
-         "bin.test_lighthouse_gateway", "bin.test_lighthouse_openclaw", "bin.test_lighthouse_runtime", "bin.test_lighthouse_startup", "bin.test_lighthouse_startup_log", "bin.test_lighthouse_public", "bin.test_lighthouse_news", "bin.test_lighthouse_distribution", "bin.test_lighthouse_skills", "bin.test_lighthouse_module_skills", "bin.test_lighthouse_imported_skills", "bin.test_lighthouse_shared_skills", "bin.test_lighthouse_commands", "bin.test_lighthouse_skill_routes", "bin.test_lighthouse_extensions", "bin.test_mcp_packaging",
-         "bin.test_lighthouse_document_tools",
-         "bin.test_lighthouse_office_tools",
-         "bin.test_lighthouse_general_tools", "bin.test_feishu_workpartner",
-         "bin.test_lighthouse_agent", "bin.test_lighthouse_agent_boundaries", "bin.test_lighthouse_agent_workflows",
-         "bin.test_lighthouse_guard_fields", "bin.test_lighthouse_guard_template_fields",
-         "bin.test_lighthouse_mop_fields", "bin.test_lighthouse_mop_workflows", "bin.test_lighthouse_plan_workflows",
-         "bin.test_lighthouse_plan_rule_editor", "bin.test_lighthouse_daily_water_workflows", "bin.test_lighthouse_upload_fields",
-         "bin.test_lighthouse_notice_image_workflows", "bin.test_lighthouse_cabinet_text_workflows", "bin.test_lighthouse_cabinet_batch_actions",
-         "bin.test_lighthouse_cabinet_edit_fields", "bin.test_lighthouse_cabinet_edit_workflows", "bin.test_lighthouse_cabinet_proof_workflows",
-         "bin.test_lighthouse_interactive_intent", "bin.test_event_month_selection", "bin.test_lighthouse_reference_ids",
-         "bin.test_lighthouse_business_matrix", "bin.test_lighthouse_reference_workflows",
-         "bin.test_lighthouse_drill_configuration_fields", "bin.test_lighthouse_drill_configuration_workflows",
-         "bin.test_drill_management", "bin.test_drill_untimed_steps", "bin.test_drill_recognition_recovery", "bin.test_drill_backend_integration", "bin.test_drill_signature_ink",
-         "bin.test_lighthouse_creation_fields", "bin.test_lighthouse_creation_workflows", "bin.test_lighthouse_drill_upload",
-         "bin.test_lighthouse_water_fields", "bin.test_lighthouse_water_workflows",
-         "bin.test_lighthouse_download_links", "bin.test_lighthouse_download_workflows", "bin.test_lighthouse_query_pages", "bin.test_lighthouse_question_bank",
-         "bin.test_lighthouse_question_materials", "bin.test_lighthouse_learning_identity", "bin.test_lighthouse_learning_bridge", "bin.test_lighthouse_work_order_queries",
-         "bin.test_lighthouse_business_addresses", "bin.test_lighthouse_interactive_coverage",
-         "bin.test_lighthouse_dynamic_endpoints",
-         "bin.test_lighthouse_signature_usage_workflows", "bin.test_message_delivery", "bin.test_notice_alert_tags",
-         "bin.test_lighthouse_plan_edit", "bin.test_lighthouse_secure_navigation", "bin.test_lighthouse_file_forms", "bin.test_lighthouse_repair_people", "bin.test_lighthouse_repair_relations", "bin.test_lighthouse_repair_catalog", "bin.test_lighthouse_repair_prefill", "bin.test_lighthouse_notice_fields", "bin.test_lighthouse_notice_workflows", "bin.test_lighthouse_notice_sop", "bin.test_lighthouse_notice_binding", "bin.test_lighthouse_notice_identity", "bin.test_lighthouse_notice_identity_workflows", "bin.test_lighthouse_event_transfer",
-         "bin.test_planned_notices", "bin.test_notice_source_cycle_regressions", "bin.test_notice_delivery_source_recovery", "bin.test_notice_cycle_warnings", "bin.test_qt_notice_cycle_warnings", "bin.test_lighthouse_planned", "bin.test_lighthouse_planned_match",
-                "bin.test_notice_panel", "bin.test_notice_panel_data", "bin.test_link_directory",
-                "bin.test_feishu_assistant", "bin.test_feishu_assistant_topics", "bin.test_feishu_assistant_settings", "bin.test_feishu_assistant_forms", "bin.test_feishu_assistant_questions", "bin.test_feishu_notice_cards", "bin.test_feishu_assistant_files", "bin.test_feishu_conversation_isolation", "bin.test_lighthouse_unlimited", "bin.test_permission_review_cards",
-                "bin.test_lighthouse_knowledge", "bin.test_lighthouse_knowledge_groups", "bin.test_lighthouse_knowledge_extract", "bin.test_lighthouse_knowledge_routes", "bin.test_lighthouse_knowledge_answer", "bin.test_lighthouse_knowledge_keyword",
-                "bin.test_knowledge_document_formats", "bin.test_knowledge_document_summary", "bin.test_document_library_all_scopes",
-                "bin.test_lighthouse_knowledge_local", "bin.test_lighthouse_knowledge_model", "bin.test_lighthouse_knowledge_faiss", "bin.test_lighthouse_knowledge_stream_upload", "bin.test_notice_end_progress",
-                "bin.test_notice_paired_finalization", "bin.test_notice_undo_isolation", "bin.test_repair_followup_completion_time",
-                "bin.test_assistant_tables", "bin.test_lighthouse_people_stats",
-                "bin.test_assistant_shared_read", "bin.test_lighthouse_shared_privacy",
-         "bin.test_lighthouse_frontend_contracts", "bin.test_lighthouse_frontend_coverage"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[1])
+    run_tests(test_groups[2])
+    run_tests(test_groups[3])
     log("画像学练与灯塔助手专项测试通过。")
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_openclaw_service", "bin.test_openclaw_service_client",
-         "bin.test_openclaw_service_launcher", "bin.test_openclaw_service_store", "bin.test_openclaw_service_update",
-         "bin.test_openclaw_backend_proxy", "bin.test_openclaw_packaging_imports",
-         "bin.test_openclaw_gateway_log",
-         "bin.test_openclaw_connection_pool", "bin.test_openclaw_plan_nonblocking",
-         "bin.test_openclaw_plan_io", "bin.test_openclaw_early_exit",
-         "bin.test_openclaw_portal_startup", "bin.test_openclaw_python_entry"], cwd=PROJECT_ROOT, check=True,
-    )
+    run_tests(test_groups[4])
     log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
 
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_plan_convergence", "bin.test_plan_convergence_stability", "bin.test_plan_convergence_points_adapter", "bin.test_plan_convergence_notice_results", "bin.test_plan_convergence_send", "bin.test_plan_convergence_expiry", "bin.test_convergence_confirmation_flows"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[5])
     log("计划收敛审查专项测试通过。")
 
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_submission_reliability",
-         "bin.test_active_notice_model", "bin.test_qt_shell_backend_events",
-         "bin.test_event_remote_atomicity", "bin.test_event_notice_priority", "bin.test_event_notice_priority_recovery", "bin.test_event_notice_completion_recovery", "bin.test_notice_upload_reliability", "bin.test_notice_undo", "bin.test_notice_undo_fields", "bin.test_notice_undo_pairs",
-         "bin.test_repair_snapshot_cache", "bin.test_repair_project_identity", "bin.test_repair_deleted_projection", "bin.test_event_repair_id_rule", "bin.test_process_lifetime"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[6])
     log("通告与维修可靠性、恢复及进程退出测试通过。")
 
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_critical_guard"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[7])
     log("重保管理专项测试通过。")
 
-    _run_preflight_check(
-        [test_python, "-m", "unittest", "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest", "bin.test_logger_reentry", "bin.test_update_check_recovery", "bin.test_release_journal", "bin.test_release_journal_routes"],
-        cwd=PROJECT_ROOT,
-        check=True,
-    )
+    run_tests(test_groups[8])
     log("补丁传输与打包完整性测试通过。")
+    run_tests(test_groups[9])
 
+    log("正在复核预检期间文件及环境是否保持一致。")
+    selection.finish(packaging_preflight.snapshot(PROJECT_ROOT, test_python) if before is not None else None)
     log("打包前自动测试完成。")
 
 
@@ -3190,7 +3239,7 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(
 
-        description="Package ClipFlow into a portable folder."
+        description="Package ClipFlow into a portable folder.", allow_abbrev=False
 
     )
 
@@ -3304,8 +3353,12 @@ def main() -> None:
 
         action="store_true",
 
-        help="Run packaging preflight checks and exit without building.",
+        help="Run FULL packaging preflight checks and exit without building (never reuse passes).",
 
+    )
+    parser.add_argument(
+        "--full-preflight", action="store_true",
+        help="Run FULL preflight for this release instead of automatic layered selection.",
     )
     parser.add_argument(
 
@@ -3332,6 +3385,10 @@ def main() -> None:
     parser.add_argument("--release-notes-file", default="", help="Reviewed JSON items for noninteractive packaging.")
 
     args = parser.parse_args()
+    if args.skip_preflight and (args.preflight_test or args.full_preflight):
+        parser.error("--skip-preflight cannot be combined with an explicit FULL preflight")
+    if args.retry_upload and (args.preflight_test or args.full_preflight):
+        parser.error("--retry-upload cannot be combined with an explicit FULL preflight")
 
     if args.retry_upload:
         if args.skip_upload:

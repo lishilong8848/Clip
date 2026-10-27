@@ -158,10 +158,71 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
     async def test_model_failure_during_repair_keeps_supported_answer(self):
         self.kb.search.side_effect = [{'items': [item], 'warning': ''} for item in (self.first, self.second)]
         self.model.complete.side_effect = [candidate('甲流程仅适用于甲。[1]', ['设备乙流程'], ['乙的依据']),
-                                          AssistantError('模型暂不可用', 502)]
+                                          AssistantError('模型暂不可用', 502, category='model_connection')]
         result = await self.answer()
         self.assertIn('甲流程仅适用于甲', result['answer'])
         self.assertEqual(result['sources'][0]['data']['document_id'], 'candidate')
+        self.assertFalse(result['knowledge_retrieval']['complete'])
+        self.assertIn('乙的依据', result['answer'])
+
+    async def test_failed_supplement_cannot_publish_partial_after_permission_changes(self):
+        def search(*args, **kwargs):
+            if self.kb.search.call_count == 1:
+                return {'items': [self.first], 'warning': ''}
+            self.auth.return_value = {**self.actor, 'modules': []}
+            raise AssistantError('读取失败', 503)
+        self.kb.search.side_effect = search
+        self.model.complete.return_value = candidate('甲流程仅适用于甲。[1]', ['设备乙流程'], ['乙的依据'])
+        result = await self.answer()
+        self.assertNotIn('甲流程仅适用于甲', result['answer'])
+        self.assertEqual(result['sources'], [])
+
+    async def test_reviewed_partial_does_not_trigger_second_review_of_gap_notice(self):
+        from openclaw_service.assistant.lighthouse_review import AnswerReviewer
+        reviewer = Mock(spec=AnswerReviewer)
+        reviewer.run = AsyncMock(side_effect=lambda actor, turn, history, result, authorize, **kw: {
+            **result, 'answer_review': {'status': 'passed', 'repairs': 0}})
+        self.engine.answer_reviewer = reviewer
+        self.model.complete.return_value = candidate('甲流程仅适用于甲。[1]')
+        self.kb.search.return_value['warning'] = '向量索引尚未就绪，本次仅使用关键词结果。'
+        result = await self.answer()
+        self.assertIn('甲流程仅适用于甲', result['answer'])
+        self.assertEqual(reviewer.run.await_count, 1)
+
+    def test_protocol_parser_rejects_unbounded_response(self):
+        with self.assertRaises(AssistantError):
+            _candidate(candidate('x' * 20001 + '[1]'))
+
+    async def test_generation_retries_share_a_deadline(self):
+        clock = [0]
+        def fail(*args, **kwargs):
+            clock[0] += 50
+            raise AssistantError('invalid response', 502, category='model_protocol')
+        self.model.complete.side_effect = fail
+        with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time',
+                   SimpleNamespace(monotonic=lambda: clock[0])), \
+             patch('openclaw_service.assistant.lighthouse_model_health.select_task_profile', return_value=None):
+            result = await self.answer()
+        self.assertEqual([call.kwargs['timeout'] for call in self.model.complete.call_args_list], [45, 10])
+        self.kb.search.assert_called_once()
+        self.assertIn('未完整生成', result['answer'])
+
+    async def test_failed_repair_and_review_keep_only_previously_verified_claims(self):
+        from openclaw_service.assistant.lighthouse_review import AnswerReviewer
+        reviewer = Mock(spec=AnswerReviewer)
+        reviewer.run = AsyncMock(side_effect=[
+            {'answer': '甲流程仅适用甲。[1] 乙也能照做。[1]', '_review_supported_answer': '甲流程仅适用甲。[1]',
+             'answer_review': {'status': 'needs_repair', 'issues': ['乙没有依据'], 'read_queries': ['乙流程']}},
+            {'answer': '甲流程仅适用甲。[1] 乙也能照做。[1]', 'answer_review': {'status': 'unavailable'}}])
+        self.engine.answer_reviewer = reviewer
+        self.kb.search.side_effect = [{'items': [item], 'warning': ''} for item in (self.first, self.second)]
+        self.model.complete.side_effect = [candidate('甲流程仅适用甲。[1] 乙也能照做。[1]'),
+                                          AssistantError('connection', 502, category='model_connection')]
+        with patch('openclaw_service.assistant.lighthouse_model_health.select_task_profile', return_value=None):
+            result = await self.answer()
+        self.assertIn('甲流程仅适用甲。[1]', result['answer'])
+        self.assertNotIn('乙也能照做', result['answer'])
+        self.assertEqual(result['answer_review']['status'], 'needs_review')
         self.assertFalse(result['knowledge_retrieval']['complete'])
 
     async def test_repair_is_bounded_even_when_every_search_finds_new_data(self):

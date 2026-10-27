@@ -24,6 +24,9 @@ class RepeatedReminderTests(unittest.TestCase):
 
     def setUp(self):
         support.LearningTests.setUp(self)
+        # This suite owns shift reminders; daily reports have a separate offline suite.
+        daily = patch('lan_bitable_template_portal.learning_daily_report.send_due')
+        daily.start(); self.addCleanup(daily.stop)
         fake_portal = SimpleNamespace(BUILDING_OPEN_ID_MAP={'A': 'ou_shared'})
         guard = patch.dict(sys.modules, {'lan_bitable_template_portal.portal_service': fake_portal})
         guard.start(); self.addCleanup(guard.stop)

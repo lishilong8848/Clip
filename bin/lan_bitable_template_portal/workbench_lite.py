@@ -13,6 +13,7 @@ from urllib.parse import quote, urlencode
 
 from lan_bitable_template_portal.identity_utils import is_local_record_id
 from upload_event_module.building_normalizer import extract_building_codes
+from upload_event_module.services.handlers.base import notice_field_text
 from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules, MAINTENANCE_CYCLE_DURATION_PATTERN, MAINTENANCE_CYCLE_DATE_PATTERN
 
 
@@ -279,9 +280,7 @@ def _field(record: dict[str, Any], *names: str) -> str:
     fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
     for name in names:
         value = fields.get(name)
-        if isinstance(value, list):
-            value = "、".join(str(item or "").strip() for item in value if str(item or "").strip())
-        text = str(value or "").strip()
+        text = notice_field_text(value).strip()
         if text:
             return text
     return ""
@@ -341,7 +340,7 @@ def _relation_record_ids(record: dict[str, Any], *names: str) -> list[str]:
 
 def _first(*values: Any) -> str:
     for value in values:
-        text = str(value or "").strip()
+        text = notice_field_text(value).strip()
         if text:
             return text
     return ""

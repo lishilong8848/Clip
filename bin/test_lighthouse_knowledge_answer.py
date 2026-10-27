@@ -24,9 +24,10 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         turn = {'question': '具体该怎么操作？', '_profile': TEXT,
                 '_query_intent': {'document_references': [reference]}}
         self.model.complete.return_value = '先由获准人员核实现场状态，再联系负责人员。[1]'
-        with patch.object(fixture.kb, 'search', side_effect=AssertionError('Should use the existing document location')):
+        with patch.object(fixture.kb, 'search', wraps=fixture.kb.search) as search:
             result = await answer_company(self.engine, fixture.actor, turn, '上轮规程的具体操作步骤',
                 self.emit, AsyncMock(return_value=fixture.actor))
+        self.assertEqual(search.call_args.kwargs['document_refs'], [reference])
         self.assertEqual(result['knowledge_retrieval']['searches'], 0)
         self.assertTrue(result['knowledge_retrieval']['reused_document_refs'])
         packet = json.loads(self.model.complete.call_args.args[0][1]['content'])

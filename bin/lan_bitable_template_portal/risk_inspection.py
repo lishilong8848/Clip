@@ -17,6 +17,7 @@ SYSTEM_NAMES = {'排查任务编号': 'number', '排查进度': 'status', '楼�
                 '排查人': 'person', '复核人': 'reviewer', '复核结果': 'review',
                 '复核日期': 'reviewed_at', '最终推送': 'sync', '排查日期': 'inspected_at'}
 STATUS = {'pending': '未提交', 'submitted': '待审核', 'approved': '审核通过', 'returned': '退回修改', 'revoked': '已撤销'}
+REMINDER_SECONDS = 2 * 60 * 60
 
 
 class RiskError(Exception):
@@ -60,6 +61,10 @@ def person_scopes(person):
 
 def item_scope(person, item):
     return item.get('scope') or person['scope']
+
+
+def outstanding_items(person):
+    return [i for i in person['items'] if not person['revoked'] and i['status'] in {'pending', 'returned'}]
 
 
 def scoped_people(people):
@@ -497,12 +502,13 @@ class RiskInspections:
                 files.setdefault((row['person_id'], row['item_id']), []).append({k: row[k] for k in ('id', 'name', 'size', 'field_id')})
             for p in public['people']:
                 p.pop('open_id', None)
+                p.pop('_reminder', None)
                 for i in p['items']:
                     i['files'] = files.get((p['id'], i['id']), [])
                     automatic = system_values(release, p, i)
                     i['system_values'] = {f['key']: automatic[f['role']] for f in public['fields'] if f['role'] != 'input'}
                     i['values'] = {k: v for k, v in i['values'].items() if k in input_keys}
-            jobs = db.execute("SELECT id,kind,status,error,json_extract(payload,'$.item_id') AS item_id,COALESCE(json_extract(payload,'$.subject_id'),json_extract(payload,'$.person_id')) AS subject FROM risk_jobs WHERE release_id=? AND status!='done'", (rid,))
+            jobs = db.execute("SELECT id,kind,status,error,json_extract(payload,'$.item_id') AS item_id,COALESCE(json_extract(payload,'$.subject_id'),json_extract(payload,'$.person_id')) AS subject FROM risk_jobs WHERE release_id=? AND status!='done' AND NOT(kind='reminder' AND status='cancelled')", (rid,))
             public['can_manage_release'] = full_control
             public['can_delete_release'] = public['can_manage_release']
             public['jobs'] = []
@@ -511,7 +517,8 @@ class RiskInspections:
                 whole_subject = subject and len(subject['items']) == len(next(p for p in people if p['id'] == subject['id'])['items'])
                 if (full_control or subject and (whole_subject or job['item_id'] in {i['id'] for i in subject['items']})
                         and (manager(actor) or is_reviewer or job['kind'] != 'review_notice')):
-                    public['jobs'].append({k: job[k] for k in ('id', 'kind', 'status', 'error')})
+                    public['jobs'].append({**{k: job[k] for k in ('id', 'kind', 'status', 'error')},
+                                           'kind': 'notify' if job['kind'] == 'reminder' else job['kind']})
             audit_ids = [*visible_ids, *([''] if public['can_manage_release'] else [])]
             public['audit'] = []
             visible_items = {p['id']: {i['id'] for i in p['items']} for p in visible}
@@ -680,6 +687,7 @@ class RiskInspections:
             if action in {'submit', 'return', 'approve'}:
                 item['notice_version'] = person['version']
             person['updated'] = time.time()
+            self._reminder_state(db, release, person)
             self._put_person(db, rid, person)
             self._audit(db, rid, pid, actor, action, {'item_id': body.get('item_id'), 'reason': reason, 'version': person['version'], 'items': person['items']})
             if action != 'save':
@@ -758,7 +766,7 @@ class RiskInspections:
                 if originals is None:
                     originals = [{'title': i['title'], 'values': {}} for i in self._person(db, rid,
                         db.execute('SELECT person_id FROM risk_people WHERE release_id=? LIMIT 1', (rid,)).fetchone()[0])['items']]
-                person = {**self.brief(actor), 'scope': scope, 'scopes': [scope], 'version': 1, 'revoked': False, 'updated': time.time(),
+                person = {**self.brief(actor), 'scope': scope, 'scopes': [scope], 'version': 1, 'revoked': False, 'updated': time.time(), 'assigned_at': time.time(),
                           'items': [{'id': uuid.uuid4().hex, 'scope': scope, 'title': i['title'], 'values': deepcopy(i['values']), 'status': 'pending', 'reason': ''} for i in originals]}
                 self._put_person(db, rid, person)
                 self._audit(db, rid, actor['id'], actor, '领取本人任务', {})
@@ -768,23 +776,92 @@ class RiskInspections:
     def checkpoint(self, rid, **values):
         with self.connect(True) as db:
             data = self._release(db, rid)
+            previous_messages = data['cloud'].get('messages', {})
             data['cloud'].update(values)
+            prefix = f'notify:{rid}:'
+            for key, receipt in values.get('messages', {}).items():
+                if key.startswith(prefix) and receipt.get('message_id') and receipt != previous_messages.get(key):
+                    person = self._person(db, rid, key[len(prefix):])
+                    self._reminder_state(db, data, person)
+                    self._put_person(db, rid, person)
             self._put_release(db, data)
 
     def activate(self, rid):
         with self.connect(True) as db:
             release = self._release(db, rid)
             release['status'] = 'active'
+            release.setdefault('activated_at', time.time())
             self._put_release(db, release)
             people = [json.loads(row[0]) for row in db.execute('SELECT data FROM risk_people WHERE release_id=?', (rid,))]
             self.history.create(db, release, people)
             for row in db.execute('SELECT data FROM risk_people WHERE release_id=?', (rid,)).fetchall():
                 person = json.loads(row[0])
+                self._reminder_state(db, release, person)
+                self._put_person(db, rid, person)
                 self.enqueue(db, rid, 'notify', {'person_id': person['id']}, f'notify:{rid}:{person["id"]}')
 
     def raw(self, rid):
         with self.connect() as db:
             return self._release(db, rid), [json.loads(r[0]) for r in db.execute('SELECT data FROM risk_people WHERE release_id=?', (rid,))]
+
+    @staticmethod
+    def _reminder_state(db, release, person):
+        items = outstanding_items(person)
+        state = person.get('_reminder')
+        if release['status'] != 'active' or not items:
+            if state:
+                db.execute("UPDATE risk_jobs SET status='cancelled',lease=0 WHERE id=? AND status NOT IN ('done','cancelled')", (state['id'],))
+                person.pop('_reminder', None)
+            return
+        initial = release['cloud'].get('messages', {}).get(f'notify:{release["id"]}:{person["id"]}', {})
+        initial_sent = initial.get('sent_at', 0) if initial.get('message_id') else 0
+        if state:
+            receipt = release['cloud'].get('messages', {}).get(state['id'], {})
+            if not receipt.get('message_id'):
+                due = max(state['due'], initial_sent + REMINDER_SECONDS)
+                if due != state['due']:
+                    # Keep the same delivery UUID and move its queued work with the timer.
+                    state['due'] = due
+                    db.execute("UPDATE risk_jobs SET next_at=MAX(next_at,?) WHERE id=? AND status='queued'", (due, state['id']))
+                return
+            due = max(receipt['sent_at'], initial_sent) + REMINDER_SECONDS
+        else:
+            assigned = max(person.get('assigned_at', release.get('activated_at', release['created'])), initial_sent)
+            due = min(i.get('reviewed_at', assigned) if i['status'] == 'returned' else assigned for i in items) + REMINDER_SECONDS
+        person['_reminder'] = {'id': f'remind:{release["id"]}:{person["id"]}:{uuid.uuid4().hex}', 'due': due}
+
+    def enqueue_reminders(self):
+        """One durable reminder per release/person; downtime never creates catch-up bursts."""
+        with self.connect(True) as db:
+            for row in db.execute("SELECT data FROM risk_releases WHERE json_extract(data,'$.status')='active'"):
+                release = json.loads(row[0])
+                people = db.execute('SELECT data FROM risk_people WHERE release_id=?', (release['id'],)).fetchall()
+                for row in people:
+                    person = json.loads(row[0])
+                    before = deepcopy(person.get('_reminder'))
+                    self._reminder_state(db, release, person)
+                    state = person.get('_reminder')
+                    if before != state:
+                        self._put_person(db, release['id'], person)
+                    if state:
+                        db.execute("UPDATE risk_jobs SET status='queued' WHERE id=? AND kind='notify' AND status='failed'",
+                                   (f'notify:{release["id"]}:{person["id"]}',))
+                    if state and state['due'] <= time.time():
+                        self.enqueue(db, release['id'], 'reminder', {'person_id': person['id']}, state['id'])
+
+    def reminder(self, job):
+        """Recheck the current assignment and cycle immediately before delivery."""
+        with self.connect() as db:
+            row = db.execute('''SELECT r.data AS release,p.data AS person FROM risk_releases r
+                JOIN risk_people p ON p.release_id=r.id WHERE r.id=? AND p.person_id=?''',
+                (job['release_id'], job['payload']['person_id'])).fetchone()
+            if row:
+                release, person = json.loads(row['release']), json.loads(row['person'])
+                state = person.get('_reminder') or {}
+                if (release['status'] == 'active' and state.get('id') == job['id']
+                        and state['due'] <= time.time() and outstanding_items(person)):
+                    return release, person
+        return None
 
     def claim_job(self):
         with self.connect(True) as db:
@@ -794,7 +871,8 @@ class RiskInspections:
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs owner WHERE owner.status='running' AND owner.lease>=?)
                 AND NOT EXISTS(SELECT 1 FROM risk_jobs earlier WHERE earlier.release_id=j.release_id
                     AND earlier.status NOT IN ('done','cancelled') AND earlier.id!=j.id AND
-                    (earlier.kind='publish' OR (j.kind='final_push' AND earlier.kind IN ('sync','registry')) OR (j.kind='sync' AND earlier.kind='sync'
+                    (earlier.kind='publish' OR (j.kind='reminder' AND earlier.id='notify:'||j.release_id||':'||json_extract(j.payload,'$.person_id'))
+                    OR (j.kind='final_push' AND earlier.kind IN ('sync','registry')) OR (j.kind='sync' AND earlier.kind='sync'
                     AND json_extract(earlier.payload,'$.person.version')<json_extract(j.payload,'$.person.version')
                     AND json_extract(earlier.payload,'$.person_id')=json_extract(j.payload,'$.person_id'))))
                 ORDER BY j.created,j.id LIMIT 1""", (time.time(), time.time(), time.time())).fetchone()
@@ -815,7 +893,7 @@ class RiskInspections:
 
     def finish_job(self, job, error=''):
         attempts = job['attempts'] + bool(error)
-        status = 'done' if not error else 'failed' if attempts >= 6 else 'queued'
+        status = 'done' if not error else 'failed' if attempts >= 6 and job['kind'] not in {'reminder', 'notify'} else 'queued'
         with self.connect(True) as db:
             db.execute("UPDATE risk_jobs SET status=?,error=?,attempts=?,next_at=?,lease=0 WHERE id=? AND status='running' AND lease=?",
                        (status, error[:700], attempts, time.time() + min(600, 15 * 2 ** min(attempts, 6)), job['id'], job['lease']))

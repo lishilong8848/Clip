@@ -323,6 +323,7 @@ def install_risk_inspection_routes(app, controller, runtime):
             return response(error=exc)
 
     def run():
+        next_reminder_scan = 0
         while not stop.is_set():
             job = None
             try:
@@ -330,6 +331,9 @@ def install_risk_inspection_routes(app, controller, runtime):
                     stop.wait(5)
                     continue
                 svc, remote = get_services()
+                if time.monotonic() >= next_reminder_scan:
+                    svc.enqueue_reminders()
+                    next_reminder_scan = time.monotonic() + 30
                 job = svc.claim_job()
                 if job:
                     remote.process(job)

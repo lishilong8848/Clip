@@ -63,12 +63,14 @@ def install_lighthouse_routes(app, controller, runtime):
                 emit('service_failed', error=type(exc).__name__)
                 logging.getLogger(__name__).warning('Assistant service connection not ready: type=%s', type(exc).__name__)
         preparation = asyncio.create_task(connect())
+        scheduler.start()
         public_sender.start()
         await feishu_channel.start()
 
     async def shutdown():
         nonlocal closing
         closing = True
+        await scheduler.close()
         await public_sender.close()
         await feishu_channel.close()
         if diagnostic_reporter is not None:
@@ -84,6 +86,9 @@ def install_lighthouse_routes(app, controller, runtime):
     from .feishu_assistant import install_feishu_assistant
     feishu_channel = install_feishu_assistant(app, controller, runtime, ready)
     runtime.feishu_assistant_channel = feishu_channel
+    from .assistant_schedule_runtime import AssistantScheduler
+    scheduler = AssistantScheduler(controller, runtime, ready)
+    runtime.assistant_scheduler = scheduler
     from .feishu_delivery import PublicFeishuSender
     public_sender = PublicFeishuSender(runtime)
     from .feishu_workpartner_routes import install_feishu_workpartner_routes

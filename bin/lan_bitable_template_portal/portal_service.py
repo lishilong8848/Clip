@@ -47,6 +47,7 @@ from upload_event_module.services.service_registry import (
 )
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 from upload_event_module.services.handlers import change_today_in_progress_value
+from upload_event_module.services.handlers.base import notice_field_text
 from upload_event_module.utils import get_data_file_path
 
 from .state_store import LanPortalStateStore
@@ -21338,7 +21339,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 names = [str(user.get("name") or "").strip() for user in users]
                 return "、".join([name for name in names if name])
             for key in ("name", "text", "value"):
-                value = str(raw_value.get(key) or "").strip()
+                value = raw_value.get(key)
+                if isinstance(value, list) and all(
+                    item is None or isinstance(item, dict) and "text" in item for item in value
+                ):
+                    value = notice_field_text(value)
+                value = str(value or "").strip()
                 if value:
                     return normalize_option_text(value)
             option_id = str(raw_value.get("id") or "").strip()
@@ -21346,8 +21352,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 resolved = normalize_option_text(option_id)
                 if resolved:
                     return resolved
+            if not raw_value or any(key in raw_value for key in ("name", "text", "value")):
+                return ""
             return json.dumps(raw_value, ensure_ascii=False)
         if isinstance(raw_value, list):
+            if all(item is None or isinstance(item, dict) and "text" in item for item in raw_value):
+                return normalize_option_text(notice_field_text(raw_value))
             normalized_items: list[str] = []
             for item in raw_value:
                 if isinstance(item, dict):
@@ -22452,7 +22462,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     @staticmethod
     def _clean_source_text(value: Any) -> str:
-        text = str(value or "").strip()
+        text = notice_field_text(value).strip()
         if text in PLACEHOLDER_TEXT_VALUES:
             return ""
         if re.fullmatch(r"opt[A-Za-z0-9]{6,}", text):
@@ -30277,7 +30287,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def _change_title(self, record: dict[str, Any]) -> str:
         fields = record.get("display_fields") or {}
-        return str(
+        return notice_field_text(
             fields.get("变更简述")
             or record.get("title")
             or record.get("record_id")
@@ -42366,7 +42376,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         lines = [f"【{heading}】状态：{str(status or '').strip()}"]
         for label, key in template["fields"]:
             value = values.get(key, "")
-            lines.append(f"【{label}】{str(value or '').strip()}")
+            lines.append(f"【{label}】{notice_field_text(value).strip()}")
         return "\n".join(lines)
 
     @staticmethod
@@ -44490,6 +44500,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         status = str(prepared.get("status") or "").strip()
         if not status:
             return prepared
+        if work_type == WORK_TYPE_CHANGE:
+            for _, key in NOTICE_TEXT_TEMPLATES[WORK_TYPE_CHANGE]["fields"]:
+                if key in prepared:
+                    prepared[key] = notice_field_text(prepared[key]).strip()
         expected = ""
         if work_type == WORK_TYPE_MAINTENANCE:
             expected = cls.build_notice_text(
@@ -45113,8 +45127,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "location": location,
                 "content": content,
                 "reason": reason,
-                "impact": str(impact or "").strip() or DEFAULT_IMPACT_TEXT,
-                "progress": str(progress or "").strip() or DEFAULT_PROGRESS_TEXT,
+                "impact": notice_field_text(impact).strip() or DEFAULT_IMPACT_TEXT,
+                "progress": notice_field_text(progress).strip() or DEFAULT_PROGRESS_TEXT,
             },
         )
 
@@ -45265,6 +45279,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         self, request_payload: dict[str, Any], *, job_id: str
     ) -> dict[str, Any]:
         request_payload = normalize_notice_identity_payload(request_payload)
+        for _, key in NOTICE_TEXT_TEMPLATES[WORK_TYPE_CHANGE]["fields"]:
+            if key in request_payload:
+                request_payload[key] = notice_field_text(request_payload[key])
         action = str(request_payload.get("action") or "").strip().lower()
         status_map = {"start": "开始", "update": "更新", "end": "结束"}
         status = status_map.get(action)

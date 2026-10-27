@@ -9,6 +9,25 @@ from ...config import STATUS_END
 from ...time_parser import parse_single_datetime, parse_time_only
 
 
+def notice_field_text(value) -> str:
+    """Keep rich-text runs contiguous; ordinary strings are never parsed."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for key in ("text", "name", "value"):
+            if key in value:
+                return notice_field_text(value[key])
+        return ""
+    if isinstance(value, (list, tuple)):
+        rich_text = all(item is None or isinstance(item, dict) and "text" in item for item in value)
+        return ("" if rich_text else "、").join(
+            part for item in value if (part := notice_field_text(item))
+        )
+    return str(value)
+
+
 @dataclass
 class NoticePayload:
     """封装通告处理所需字段，便于在各处理器之间传递。"""
@@ -160,19 +179,10 @@ class BaseNoticeHandler:
         return buildings
 
     def _normalize_response_text(self, response_time: Union[str, List[dict], dict, None]) -> str:
-        if isinstance(response_time, list) and response_time:
-            # 飞书多行文本可能返回多个片段，拼接避免丢失已有记录
-            parts = []
-            for seg in response_time:
-                if isinstance(seg, dict):
-                    parts.append(seg.get("text", ""))
-                else:
-                    parts.append(str(seg))
-            return "".join(parts)
-        if isinstance(response_time, dict):
-            return response_time.get("text", "")
-        if isinstance(response_time, str):
-            return response_time
+        if isinstance(response_time, list):
+            return "".join(notice_field_text(seg) for seg in response_time)
+        if isinstance(response_time, (dict, str)):
+            return notice_field_text(response_time)
         return ""
 
     def _parse_response_datetime(

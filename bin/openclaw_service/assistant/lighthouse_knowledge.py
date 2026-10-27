@@ -1637,7 +1637,7 @@ class KnowledgeBase:
             'pending_version': item.pop('pending_version'), 'original_document_complete': None}
         item['content_trust'] = 'untrusted_data'
 
-    def search(self, actor, query, *, profile=None):
+    def search(self, actor, query, *, profile=None, document_refs=None):
         check_actor(actor)
         if not isinstance(query, str) or not 2 <= len(query.strip()) <= 1000 or sensitive_document(query):
             raise AssistantError('请输入2至1000字的检索内容，不要包含私人信息或凭证。')
@@ -1645,6 +1645,14 @@ class KnowledgeBase:
         config = self.configuration()
         if profile is not None and not self.model_allowed(profile):
             raise AssistantError('当前聊天模型未获授权接收公司资料，请选择管理员批准的公司模型。', 403)
+        if document_refs is not None:
+            if (not isinstance(document_refs, list) or not 1 <= len(document_refs) <= 6 or any(
+                    not isinstance(ref, dict) or not isinstance(ref.get('document_id'), str)
+                    or type(ref.get('version')) is not int or ref['version'] < 1
+                    or type(ref.get('ordinal')) is not int or ref['ordinal'] < 0 for ref in document_refs)):
+                raise AssistantError('文档追问须包含至多6个有效引用。')
+            from .lighthouse_knowledge_evidence import _current
+            _current(self, actor, document_refs, profile or {})
         with self.connect() as db:
             if not db.execute('SELECT 1 FROM documents WHERE deleted=0 AND active_version IS NOT NULL LIMIT 1').fetchone():
                 return {'items': [], 'mode': 'keyword', 'warning': '公司知识库暂无已完成入库的文件。',
@@ -1652,7 +1660,7 @@ class KnowledgeBase:
                     'coverage': {'scope': 'ranked_search_hits', 'complete': False, 'history': 'unknown'}}
         mode, warning, snapshot, hits = 'keyword', '', None, []
         indexready = False
-        if self._vector_mode(config):
+        if document_refs is None and self._vector_mode(config):
             try:
                 with self.connect() as db:
                     vector_rev = self._vector_revision(db)
@@ -1704,6 +1712,15 @@ class KnowledgeBase:
                     'v.hash AS source_hash,v.created_at AS source_created_at,d.chunks AS indexed_chunks,d.pending_version')
                 joins = ' JOIN documents d ON d.id=c.document_id JOIN versions v ON v.document_id=c.document_id AND v.version=c.version '
                 active = 'd.deleted=0 AND d.active_version=c.version AND knowledge_visible(d.id)=1'
+                scope_args = []
+                if document_refs is not None:
+                    for ref in document_refs:
+                        if not db.execute('SELECT 1 FROM chunks c' + joins + 'WHERE ' + active +
+                                ' AND c.document_id=? AND c.version=? AND c.ordinal=?',
+                                (ref['document_id'], ref['version'], ref['ordinal'])).fetchone():
+                            raise AssistantError('已引用文档的版本、片段或授权已变化，请重新查询。', 409)
+                    active += ' AND (c.document_id,c.version) IN (' + ','.join('(?,?)' for _ in document_refs) + ')'
+                    scope_args = [value for ref in document_refs for value in (ref['document_id'], ref['version'])]
                 if snapshot is not None and snapshot.revision != self._vector_revision(db):
                     hits = []
                     mode, indexready = 'keyword', False
@@ -1724,13 +1741,13 @@ class KnowledgeBase:
                 if expanded:
                     match = ' OR '.join('"' + term.replace('"', '""') + '"' for term in expanded)
                     rows = db.execute('SELECT ' + fields + ' FROM chunks_fts f JOIN chunks c ON c.id=f.rowid' + joins +
-                        'WHERE chunks_fts MATCH ? AND ' + active + ' ORDER BY bm25(chunks_fts) LIMIT 40', (match,)).fetchall()
+                        'WHERE chunks_fts MATCH ? AND ' + active + ' ORDER BY bm25(chunks_fts) LIMIT 40', [match, *scope_args]).fetchall()
                     for rank, row in enumerate(rows):
                         add(row, 'keyword', rank)
                     short = [term for term in terms if len(term) == 2][:24]
                     if not rows and short:
                         condition = ' OR '.join('(instr(lower(c.text),lower(?))>0 OR instr(lower(v.name),lower(?))>0)' for _ in short)
-                        rows = db.execute('SELECT ' + fields + ' FROM chunks c' + joins + 'WHERE ' + active + ' AND (' + condition + ') LIMIT 20', [value for term in short for value in (term, term)]).fetchall()
+                        rows = db.execute('SELECT ' + fields + ' FROM chunks c' + joins + 'WHERE ' + active + ' AND (' + condition + ') LIMIT 20', [*scope_args, *[value for term in short for value in (term, term)]]).fetchall()
                         for rank, row in enumerate(rows):
                             add(row, 'keyword', rank)
                 revision = self._revision(db)

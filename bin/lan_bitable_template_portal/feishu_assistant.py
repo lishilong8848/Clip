@@ -1235,6 +1235,8 @@ class FeishuAssistant:
         from .lighthouse_bridge import actor_for
         actor = await actor_for(self.controller, self.runtime, request)
         await self._prepare_topic(message, request, actor)
+        request.state.feishu_message_route = {key: str(message.get(key) or '') for key in
+            ('app_id', 'chat_id', 'chat_type', 'message_id', 'root_id', 'thread_id', 'sender_id', 'union_id')}
         return request, actor
 
     async def _prepare_topic(self, message, request, actor):
@@ -1257,7 +1259,8 @@ class FeishuAssistant:
                     registry = auth._topic_delegations = TopicDelegations(auth, self.runtime.state_store)
                 from .assistant_shared_read import original_actor, shared_query_actor
                 personal = original_actor(actor)
-                await asyncio.to_thread(registry.register, topic_id, personal, message)
+                if not message.get('_scheduled_task'):
+                    await asyncio.to_thread(registry.register, topic_id, personal, message)
                 from .portal_service import PortalError
                 try:
                     enriched = await asyncio.to_thread(registry.enrich, personal, topic_id)

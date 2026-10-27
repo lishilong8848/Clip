@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import sys
+import threading
 import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -107,6 +108,45 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
         self.model.complete.return_value = decision('今天有哪些事件？')
         result = await self.resolve('今天有哪些事件？', history=[self.previous('公司规程有哪些？')])
         self.assertNotIn('document_references', result)
+
+    async def test_document_number_is_not_a_new_device_constraint(self):
+        reference = {'document_id': 'doc_one', 'version': 2, 'ordinal': 0,
+                     'name': 'OPS-KT-309 V1.3 应急规程.txt'}
+        previous = self.previous('UPS-1异常应查哪份现场规程？', status='completed', answer='参考[1]',
+            sources=[{'kind': 'company_knowledge', 'number': 1, 'data': reference}])
+        self.engine.portal = SimpleNamespace(get_knowledge=lambda: SimpleNamespace(
+            evidence_current=Mock(return_value=True)))
+        for question in ('具体怎么操作？', 'UPS-2的具体操作步骤呢？'):
+            device = 'UPS-2' if 'UPS-2' in question else 'UPS-1'
+            query = f'{device}异常时，OPS-KT-309 V1.3 应急规程的具体操作步骤'
+            self.model.complete.return_value = decision(query, 'knowledge', continued=True, document_refs=[1])
+            result = await self.resolve(question, history=[previous])
+            self.assertEqual(result['kind'], 'knowledge')
+            self.assertEqual(result['document_references'], [reference])
+        self.model.complete.return_value = decision('OPS-KT-309 V1.3 应急规程的操作步骤',
+                                                   'knowledge', continued=True, document_refs=[1])
+        self.assert_unknown(await self.resolve('具体怎么操作？', history=[previous]), '具体怎么操作？')
+
+    async def test_failed_document_followup_keeps_prior_reference_but_never_failed_body(self):
+        self.actor.update(channel='feishu:group', _feishu_topic={'id': 'topic-one'})
+        ref = {'document_id': 'doc_one', 'version': 1, 'ordinal': 0, 'name': '差旅手册.txt'}
+        source = {'number': 1, 'kind': 'company_knowledge', 'data': ref}
+        previous = self.previous('出差报销遵循哪份规定？', status='completed', answer='参考[1]', sources=[source])
+        failed = self.previous('具体怎么办理？', status='failed', answer='PRIVATE FAILED ANSWER [1]', sources=[source])
+        turn = self.turn('具体步骤呢？', operation_id='current')
+        assistant = Mock(spec=intent.LighthouseAssistant)
+        assistant._lock = threading.RLock()
+        assistant.store = Mock(get_document=Mock(return_value={'turns': [previous, failed, turn]}))
+        assistant._key = Mock(return_value='fixture-key')
+        assistant.model_for = Mock(return_value=self.model)
+        self.engine.assistant = assistant
+        self.engine.portal = SimpleNamespace(get_knowledge=lambda: SimpleNamespace(evidence_current=Mock(return_value=True)))
+        self.model.complete.return_value = decision('此前差旅手册的办理步骤', 'knowledge', continued=True, document_refs=[1])
+        result = await self.resolve(turn['question'], turn=turn)
+        self.assertEqual(result['kind'], 'knowledge')
+        self.assertEqual(result['document_references'], [ref])
+        self.assertEqual(self.packet()['history'], [previous['question'], failed['question']])
+        self.assertNotIn('PRIVATE', json.dumps(self.packet()))
 
     def assert_unknown(self, result, question, *, attempts=None):
         self.assertIs(type(result['attempts']), int)
@@ -441,10 +481,13 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
         previous = self.previous('A楼今天事件')
         self.model.complete.return_value = decision('A楼昨天事件', continued=True)
         with patch.object(intent, '_stored_topic_history', side_effect=AssertionError('No stored fallback')):
-            for questions in ([], ['person@example.test'], ['A楼今天事件', '删除这些事件']):
+            for questions in ([], ['person@example.test']):
                 self.actor['_feishu_topic']['questions'] = questions
                 self.assert_unknown(await self.resolve('改成昨天', history=[previous]), '改成昨天', attempts=2)
                 self.assertEqual(self.packet()['history'], [])
+            self.actor['_feishu_topic']['questions'] = ['A楼今天事件', '删除这些事件']
+            self.assert_unknown(await self.resolve('改成昨天', history=[previous]), '改成昨天', attempts=2)
+            self.assertEqual(self.packet()['history'], ['A楼今天事件', '删除这些事件'])
 
     async def test_topic_snapshot_change_after_classification_discards_rewrite(self):
         self.actor.update(channel='feishu:oc_Test', _feishu_topic={'id': 'oc_Test:om_Root',
@@ -525,15 +568,71 @@ class QueryIntentTests(unittest.IsolatedAsyncioTestCase):
         unconfigured.complete.assert_not_called()
         unconfigured.profile.assert_not_called()
 
-    async def test_optout_attachments_commands_and_writes_preserve_original_flow(self):
-        for question in ('不要查公司资料，只解释原理', '删除当前事件', '把这些改成已完成',
-                         'Please send the report', '/公司知识库 流程', '不用南通文件，讲一下应急原则'):
+    async def test_optout_attachments_and_commands_preserve_original_flow(self):
+        for question in ('不要查公司资料，只解释原理', '/公司知识库 流程', '不用南通文件，讲一下应急原则'):
             self.assert_unknown(await self.resolve(question), question)
         for key in ('file_ids', 'submitted_file_ids', 'attachments', 'commands', 'submitted_commands',
                     'display_only', '_private_request', '_clarification_reply', '_research_mode', 'plan'):
             self.assert_unknown(await self.resolve('分析问题', turn=self.turn('分析问题', **{key: ['present']})), '分析问题')
         self.engine.assistant.model_for.assert_not_called()
         self.model.complete.assert_not_called()
+
+    async def test_assistant_schedules_are_semantic_routes_without_specs_or_writes(self):
+        self.actor['modules'] = ['assistant']
+        for question in ('帮我设置每天早上九点提醒我核对资料', '创建一个每天查询待办的定时任务',
+                         '列出你为我安排的提醒', '修改你给我的提醒时间到十点',
+                         '暂停你每天给我的报告', '恢复你上次暂停的提醒', '取消你定时查询工单的任务',
+                         'Please send me a reminder every Monday'):
+            with self.subTest(question=question):
+                self.model.complete.return_value = decision(question, 'schedule')
+                result = await self.resolve(question)
+                self.assertEqual(result['kind'], 'schedule')
+                self.assertEqual(result['task_type'], 'unknown')
+                self.assertEqual(result['query'], question)
+                self.assertEqual(result['attempts'], 1)
+                self.assertFalse(result['continued'])
+                self.assertEqual(set(result), {'kind', 'task_type', 'query', 'continued', 'attempts',
+                                               'business_query', 'document_query'})
+        rules = self.model.complete.call_args.args[0][0]['content']
+        self.assertIn('THIS assistant', rules)
+        self.assertIn('publication plans', rules)
+
+    async def test_schedule_followup_uses_bound_questions_without_rewriting_schedule(self):
+        history = [self.previous('创建一个每天九点的定时提醒'), self.previous('改成十点')]
+        self.model.complete.return_value = decision('先停掉吧', 'schedule', continued=True)
+        result = await self.resolve('先停掉吧', history=history)
+        self.assertEqual(result['kind'], 'schedule')
+        self.assertEqual(result['query'], '先停掉吧')
+        self.assertTrue(result['continued'])
+        self.assertEqual(self.packet()['history'], [row['question'] for row in history])
+        self.assert_unknown(await self.resolve('先停掉吧', history=[{**history[-1], 'owner': 'other'}]), '先停掉吧')
+
+    async def test_scheduling_explanations_and_business_plans_keep_their_routes(self):
+        for question, kind in (('定时任务是怎么运行的？', 'general'), ('帮我写一个每周提醒的示例', 'general'),
+                               ('本周排班情况有哪些？', 'business'), ('查询发布排期', 'business'),
+                               ('创建下周排班计划', 'unknown'), ('修改发布排期', 'unknown'),
+                               ('删除当前事件', 'unknown'), ('把这些改成已完成', 'unknown'),
+                               ('Please send the report', 'unknown')):
+            self.model.complete.return_value = decision(question, kind)
+            result = await self.resolve(question)
+            self.assertEqual(result['kind'], kind)
+            self.assertGreater(result['attempts'], 0)
+        # A bad read classification must not grant business writes a read shortcut.
+        self.model.complete.return_value = decision('删除当前事件', 'business')
+        self.assert_unknown(await self.resolve('删除当前事件'), '删除当前事件')
+
+    async def test_schedule_route_rejects_specs_rewrites_and_authority_changes(self):
+        question = '每天提醒我'
+        for value in (decision(question, 'schedule', schedule={'time': '09:00'}),
+                      decision('每天九点提醒我', 'schedule'), decision(question, 'schedule', continued=True),
+                      decision(question, 'schedule', document_query='规程'),
+                      decision(question, 'schedule', document_refs=[1]),
+                      decision(question, 'schedule', task_type='document')):
+            self.model.complete.return_value = value
+            self.assert_unknown(await self.resolve(question), question)
+        self.model.complete.return_value = decision(question, 'schedule')
+        self.authorize.side_effect = [self.actor, {**self.actor, 'id': 'other'}]
+        self.assert_unknown(await self.resolve(question), question, attempts=1)
 
     async def test_failure_falls_back_once_to_other_configured_text_model(self):
         question = 'A楼今天事件'

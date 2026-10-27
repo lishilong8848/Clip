@@ -18,7 +18,7 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
         await fixtures.StreamTests.asyncSetUp(self)
         self.addAsyncCleanup(self.runtime.close)
 
-    async def run_tools(self, question, steps, *, file_ids=(), channel='', history=(), public_sources=None):
+    async def run_tools(self, question, steps, *, file_ids=(), channel='', history=(), public_sources=None, emit=None):
         calls = []
         async def stream(messages, info):
             index = len(calls)
@@ -38,7 +38,7 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
         self.addAsyncCleanup(engine.close)
         actor = {**self.actor, 'channel': channel}
         result = await engine.answer(actor, {'question': question, 'file_ids': list(file_ids), '_profile': self.model.profile()},
-                                     list(history), self.request, AsyncMock(), AsyncMock(return_value=actor), {})
+                                     list(history), self.request, emit or AsyncMock(), AsyncMock(return_value=actor), {})
         return result, calls
 
     async def test_chinese_public_lookup_is_shared_by_web_and_feishu(self):
@@ -70,6 +70,19 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(requests), 3, 'The second channel can reuse safe public evidence')
         self.assertEqual(self.reads, [])
 
+    async def test_schedule_tool_fallback_returns_saved_receipt_without_extra_model_round(self):
+        receipt={'answer':'定时任务已保存：明天09:00提醒核对报告。','sources':[],
+                 'answer_review':{'status':'original_flow','reason':'schedule_receipt','repairs':0}}
+        for channel in ('','feishu:oc_fixture'):
+            with self.subTest(channel=channel), patch('openclaw_service.assistant.lighthouse_schedules.handle',
+                    new=AsyncMock(return_value=receipt)) as save:
+                result,calls=await self.run_tools('明天九点提醒我核对报告',[('scheduled_tasks',{})],channel=channel)
+                self.assertEqual(result['answer'],receipt['answer'])
+                self.assertEqual(len(calls),1)
+                save.assert_awaited_once()
+                self.assertEqual(save.call_args.args[2]['question'],'明天九点提醒我核对报告')
+        self.assertEqual(self.reads,[])
+
     async def test_attachment_business_words_use_file_not_live_business_data(self):
         file = self.portal.files.upload(self.actor, '维修记录.txt', 'A楼维修项目：测试设备一、测试设备二。'.encode())
         for channel in ('', 'feishu:oc_fixture'):
@@ -80,6 +93,31 @@ class GeneralToolTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(any(file['name'] in source['title'] for source in result['sources']))
                 self.assertEqual(self.reads, [])
                 self.assertNotIn('plan', result)
+
+    async def test_schedule_success_requires_receipt_when_intent_routing_failed(self):
+        receipt={'answer':'定时任务已保存：明天09:00提醒核对报告。','sources':[],
+                 'answer_review':{'status':'original_flow','reason':'schedule_receipt','repairs':0}}
+        for channel in ('','feishu:oc_fixture'):
+            for attempts in (0,2):
+                with self.subTest(channel=channel,attempts=attempts), patch('openclaw_service.assistant.lighthouse_query_intent.resolve_query_intent',
+                        new=AsyncMock(return_value={'kind':'unknown','attempts':attempts})), \
+                        patch('openclaw_service.assistant.lighthouse_schedules.handle',new=AsyncMock(return_value=receipt)) as save:
+                    emit=AsyncMock()
+                    guessed='已为你设置明天上午九点的核对提醒。'
+                    result,calls=await self.run_tools('明天九点提醒我核对报告',
+                        [guessed,('scheduled_tasks',{})],channel=channel,emit=emit)
+                    self.assertEqual(len(calls),2)
+                    save.assert_awaited_once()
+                    self.assertEqual(result['answer'],receipt['answer'])
+                    text=''.join(call.args[1]['delta'] for call in emit.call_args_list if call.args[0]=='text')
+                    self.assertEqual(text,receipt['answer'])
+
+    def test_schedule_receipt_guard_allows_explanations_and_failure(self):
+        from openclaw_service.assistant.lighthouse_schedules import claims_saved_schedule
+        for text in ('已为你设置明天九点的提醒','定时任务已经取消','Reminder has been created'):
+            self.assertTrue(claims_saved_schedule(text),text)
+        for text in ('当前尚未设置提醒','例如：已为你设置明天九点的提醒','可以告诉我时间和内容来设置提醒'):
+            self.assertFalse(claims_saved_schedule(text),text)
 
     async def test_generated_file_defaults_to_conversation_in_both_channels(self):
         for channel in ('', 'feishu:oc_fixture'):

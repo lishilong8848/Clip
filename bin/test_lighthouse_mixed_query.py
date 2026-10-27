@@ -193,6 +193,39 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn['question'], '改成昨天')
         self.assertEqual(self.transcript, [])
 
+    async def test_document_followup_routes_through_real_classifier_and_local_reader(self):
+        from bin import test_lighthouse_knowledge_evidence as evidence_fixtures
+        from openclaw_service.assistant.lighthouse_context import execution_lane, task_context
+        fixture = evidence_fixtures.EvidenceTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        reference = fixture.upload('差旅管理.txt', sections=[
+            {'location': '手续', 'text': '申请人应提交差旅申请和凭证。'}])
+        self.fixture.portal.get_knowledge.return_value = fixture.kb
+        self.actor['modules'] = ['assistant', 'knowledge']
+        for channel in ('', 'feishu:group'):
+            self.actor['channel'] = channel
+            self.current_actor = copy.deepcopy(self.actor)
+            previous = {**self.turn('出差手续依据哪份公司文件？', execution_lane=execution_lane(self.actor)),
+                'status': 'completed', 'answer': '原答复[1]',
+                'access_scopes': self.actor['scopes'], 'access_modules': self.actor['modules'],
+                '_task_context': task_context('出差手续依据哪份公司文件？', None, self.actor),
+                'sources': [{'number': 1, 'kind': 'company_knowledge', 'data': reference}]}
+            self.fixture.model.complete.side_effect = [
+                json.dumps({'kind': 'knowledge', 'query': '差旅管理文件的具体办理步骤',
+                            'continued': True, 'document_refs': [1]}),
+                json.dumps({'answer': '申请人应提交差旅申请和凭证。[1]', 'queries': [], 'gaps': []})]
+            turn = self.turn('具体怎么办理？', execution_lane=execution_lane(self.actor))
+            with patch.object(fixture.kb, 'search', wraps=fixture.kb.search) as search:
+                result = await self.answer(turn, [previous])
+            self.assertEqual(turn['_query_intent']['kind'], 'knowledge')
+            self.assertTrue(result['sources'], result)
+            self.assertEqual(result['sources'][0]['data']['document_id'], reference['document_id'])
+            self.assertEqual(search.call_args.kwargs['document_refs'], [reference])
+            self.assertEqual(self.transcript, [])
+            self.assertEqual(self.fixture.reads, [])
+            self.assertEqual(self.fixture.writes, [])
+
     async def test_semantic_general_intent_is_not_overridden_by_business_or_document_words(self):
         cases = [('包间湿度从91%下降到80%，下降了几个百分点？', '按你提供的读数，下降了11个百分点。'),
                  ('已有10条维修工单，完成了6条，完成率是多少？', '按你提供的数据，完成率为60%。'),

@@ -8172,6 +8172,24 @@ class PortalRuntime:
             group = cls.polling_work_orders().get_group(target_record_id)
         except Exception:
             group = None
+        if (isinstance(group, dict) and group.get("state") == "cancelled"
+                and group.get("cancel_reason") == "target_terminal" and "state_before_cancel" not in group):
+            # Old releases may already have applied undo without reopening the work order.
+            try:
+                snapshot = cls.service._find_qt_active_snapshot({**context, "target_record_id": target_record_id})
+                active = (snapshot or {}).get("payload") or {}
+                undo = cls.state_store.get_notice_undo_action(str(active.get("undo_restored_id") or "")) or {}
+                if (active.get("undo_restored_from_action") == "end"
+                        and str(active.get("target_record_id") or active.get("record_id") or "") == target_record_id
+                        and undo.get("status") == "undone" and undo.get("action_type") == "end"
+                        and undo.get("target_record_id") == target_record_id
+                        and (undo.get("restored_target_record_id") or target_record_id) == target_record_id
+                        and undo.get("notice_type") == cls._work_order_notice_type(context)
+                        and (undo.get("work_type") or context["work_type"]) == context["work_type"]):
+                    cls.polling_work_orders().restore_ended_group(target_record_id, work_type=context["work_type"])
+                    group = cls.polling_work_orders().get_group(target_record_id)
+            except Exception:
+                return f"无法核验{label}工单完成状态，不能发送结束。"
         local_required = bool(
             isinstance(group, dict)
             and str(group.get("state") or "")
@@ -10839,13 +10857,50 @@ class PortalRuntime:
             and isinstance(undo.get("source_remote", {}).get("fields"), dict)
             and undo.get("source_remote", {}).get("fields")
         )
+        work_type = str(undo.get("work_type") or cls._notice_work_type_from_notice_type(notice_type)).strip()
+        work_order_end = bool(action_type == "end" and target_record_id and not paired_undo
+            and work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
+            and notice_type == cls._work_order_notice_type({"work_type": work_type}))
+        if work_order_end:
+            field = cls._work_order_field_config({"work_type": work_type})["work_order_required"]
+            required = cls._change_confirmation_checked(remote_fields.get(field))
+            if not required:
+                try:
+                    group = cls.polling_work_orders().get_group(target_record_id)
+                except PortalNotFoundError:
+                    group = None
+                work_order_end = bool(isinstance(group, dict)
+                    and str(group.get("target_record_id") or target_record_id) == target_record_id
+                    and str(group.get("group_id") or target_record_id) == target_record_id
+                    and str(group.get("work_type") or "polling").strip() == work_type)
+        remote_done = False
+        if work_order_end:
+            receipt_binding = {"target_record_id": target_record_id, "notice_type": notice_type,
+                "mock_external": bool(guard["mock_external"]), "snapshot": hashlib.sha256(json.dumps(
+                    [remote_fields, undo.get("source_remote")], sort_keys=True, ensure_ascii=False).encode()).hexdigest()}
+            receipt = undo.get("work_order_end_remote_receipt")
+            if receipt is not None:
+                if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in receipt_binding.items()):
+                    raise PortalError("工单结束回退的远端回执与当前任务不一致，请核验原回退。")
+                if receipt.get("state") != "restored":
+                    raise PortalError("远端回退结果尚未确认，请核验原回退；未重复修改远端。")
+                remote_done = True
+            else:
+                if remote_fields and not remote.get("missing") and not guard["mock_external"] and not guard["real_write_allowed"]:
+                    raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
+                if not cls.state_store.mark_notice_undo_action(undo_id, "available", payload_patch={
+                        "work_order_end_remote_receipt": {**receipt_binding, "state": "pending"}}):
+                    raise PortalError("回退远端执行标记保存失败，未修改远端。")
         if (
             is_repair_end
             and not guard["mock_external"]
             and (not remote_fields or bool(remote.get("missing")))
         ):
             raise PortalError("检修结束回退缺少目标多维快照，未执行回退。")
-        if action_type == "start":
+        if remote_done:
+            remote_message = receipt["remote_message"]
+            related_remote_result = receipt["related_remote"]
+        elif action_type == "start":
             if not target_record_id:
                 raise PortalError("开始回退缺少目标多维记录 ID。")
             if guard["mock_external"]:
@@ -10953,7 +11008,7 @@ class PortalRuntime:
                     raise PortalError(f"维保目标表回退失败：{result}；双表回退未完成，可重试原回退。")
             remote_message = "变更与维保目标表已恢复" if action_type != "start" else "变更与维保开始记录已删除"
 
-        if is_repair_end or has_source_end_snapshot:
+        if (is_repair_end or has_source_end_snapshot) and not remote_done:
             if guard["mock_external"]:
                 related_remote_result = {
                     "restored": False,
@@ -10981,6 +11036,13 @@ class PortalRuntime:
                     if item
                 )
 
+        if work_order_end and not remote_done:
+            if restored_record_id != target_record_id:
+                raise PortalError("远端回退返回了其他通告标识，未恢复工单。")
+            if not cls.state_store.mark_notice_undo_action(undo_id, "available", payload_patch={
+                    "work_order_end_remote_receipt": {**receipt_binding, "state": "restored",
+                        "remote_message": remote_message, "related_remote": related_remote_result}}):
+                raise PortalError("回退远端回执保存失败，请核验原回退；未标记为已完成。")
         if job_id:
             cls.service.mark_job(job_id, phase="undoing_local", upload_message=remote_message)
         if action_type == "start":
@@ -11000,6 +11062,8 @@ class PortalRuntime:
             applied_by=requested_by,
             job_id=job_id,
         )
+        if work_order_end:
+            cls.polling_work_orders().restore_ended_group(target_record_id, work_type=work_type)
         if (
             notice_type == NOTICE_TYPE_CHANGE
             and action_type != "start"

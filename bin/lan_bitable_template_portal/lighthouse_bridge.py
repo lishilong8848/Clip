@@ -99,6 +99,7 @@ class PortalAuthority:
         self.contexts[identity] = {'request': request, 'actor': copy.deepcopy(personal),
             'expires': now + 1800, 'plan_id': plan_id, 'lease': self.client.lease,
             'shared_plan': copy.deepcopy(shared_plan),
+            'schedule': copy.deepcopy(getattr(getattr(request, 'state', None), 'assistant_schedule', None)),
             'topic_evidence_pending': bool(getattr(getattr(request, 'state', None), 'feishu_topic_evidence_pending', False)),
             'feishu_topic': copy.deepcopy(getattr(getattr(request, 'state', None), 'feishu_topic', None))}
         return identity
@@ -107,6 +108,9 @@ class PortalAuthority:
         context = self.contexts.get(identity)
         if not context or context['expires'] <= time.monotonic() or context['lease'] != self.client.lease:
             raise AssistantError('原登录授权已失效，未重新提交业务。', 403)
+        schedule = context.get('schedule')
+        if schedule:
+            await asyncio.to_thread(self.runtime.assistant_scheduler.validate, schedule)
         current = original_actor(await actor_for(self.controller, self.runtime, context['request']))
         prior = context['actor']
         if set(prior.get('modules', [])) - set(current.get('modules', [])):
@@ -146,7 +150,11 @@ class PortalAuthority:
                     for question in topic['questions'][-8:] if isinstance(question, str)]
             if isinstance(topic.get('documents'), list):
                 current['_feishu_topic']['documents'] = copy.deepcopy(topic['documents'][-8:])
-        return context, shared_query_actor(current)
+        current = shared_query_actor(current)
+        if schedule:
+            current.update(_scheduled_task=schedule['id'], _scheduled_mode=schedule['mode'],
+                           _execution_lane='schedule:' + schedule['id'])
+        return context, current
 
     @staticmethod
     def record_access(context, capability):
@@ -248,6 +256,8 @@ class PortalAuthority:
             raise AssistantError('业务操作参数无效。')
         descriptor = catalog.get(operation.get('api_id', ''))
         normalized, missing = await asyncio.to_thread(catalog.validate_operation, operation)
+        if context.get('schedule') and descriptor.get('method') not in {'GET', 'HEAD'} and not shared_operation(normalized):
+            raise AssistantError('定时任务只能准备业务操作，必须由用户确认后才能提交。', 403)
         if actor.get('_shared_business_queries') and not missing and shared_operation(normalized):
             from starlette.requests import Request
             def validate_login():
@@ -347,6 +357,10 @@ class PortalAuthority:
         context, actor = await self.authorize(message.get('context_id'))
         if action == 'authorize':
             return actor
+        if action == 'assistant_schedule':
+            if context.get('schedule'):
+                raise AssistantError('定时任务不能再次创建或修改定时任务。', 403)
+            return await self.runtime.assistant_scheduler.manage(context, actor, payload)
         if action in {'feishu_document', 'table_catalog', 'table_records', 'staff_count', 'roster_count', 'question_bank', 'question_material', 'search', 'cached', 'work_orders'}:
             shared = actor.get('_shared_business_queries')
             actor = reader_actor(actor) if shared else self.personal_actor(actor)

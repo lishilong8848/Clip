@@ -4,7 +4,7 @@ import copy
 import json
 import unittest
 from contextlib import asynccontextmanager
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 from bin import test_lighthouse_stream as fixtures
 from bin import test_lighthouse_learning_bridge as bridge_fixtures
@@ -240,6 +240,8 @@ class LiveConcurrencyTests(unittest.IsolatedAsyncioTestCase):
         reviewer = AsyncMock()
         engine = LighthouseModel(self.portal, model_factory=factory, answer_reviewer=reviewer)
         self.runtime.engine = engine
+        self.enterContext(patch('openclaw_service.assistant.lighthouse_query_intent.resolve_query_intent',
+            new=AsyncMock(return_value={'kind':'general','task_type':'general','continued':False,'attempts':1})))
         actor, ack, _ = await self.launch({'_execution_lane': 'browser-one'})
         try:
             await self.until(lambda: bool(self.runtime.live[ack['run_id']]['answer']))

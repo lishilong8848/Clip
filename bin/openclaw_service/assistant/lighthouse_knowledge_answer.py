@@ -156,10 +156,10 @@ def merge_company_hits(groups, limit=12):
 
 def _candidate(value):
     """Older providers may return plain Markdown instead of the requested envelope."""
-    text = str(value or '').strip()
     malformed = AssistantError('资料答复格式不完整，需重新生成后核验。', 502, category='model_protocol')
-    if not text:
+    if not isinstance(value, str) or not value.strip() or len(value) > 20000:
         raise malformed
+    text = value.strip()
     if text.startswith('```'):
         match = re.fullmatch(r'```(?:json)?\s*(\{.*\})\s*```', text, re.S)
         if not match:
@@ -325,15 +325,19 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         raise AssistantError('当前账号尚未获授共享知识库权限。', 403)
     knowledge = await asyncio.to_thread(factory)
     profile = turn['_profile']
-    await emit('status', {'label': '正在检索公司知识库'})
     references = (turn.get('_query_intent') or {}).get('document_references', [])
     reused = bool(references and callable(getattr(type(knowledge), 'answer_evidence', None))
                   and await asyncio.to_thread(knowledge.evidence_current, references, profile, actor=current))
+    if references and not reused:
+        return await reply('已引用的公司资料或授权已变化，请重新查询；未沿用旧版内容。')
     try:
         if reused:
             await emit('status', {'label': '正在读取本话题已引用文档的原文'})
-            found = {'items': [{**item, 'text': ''} for item in references], 'warning': ''}
+            found = await asyncio.to_thread(knowledge.search, current, document_query or turn.get('question') or search_question,
+                profile=profile, document_refs=references)
+            found['items'] = merge_company_hits([found['items'], [{**item, 'text': ''} for item in references]])
         else:
+            await emit('status', {'label': '正在检索公司知识库'})
             found = await asyncio.to_thread(knowledge.search, current, search_question, profile=profile)
     except AssistantError as exc:
         return await reply(str(exc))
@@ -393,8 +397,13 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     gaps, partial, partial_sources, partial_items = [], '', [], []
     repairs, invalid_answer, generation_problem = 0, False, ''
     attempted_profiles = set()
+    deadline = time.monotonic() + 60
     # Only read repair is allowed here; no tools that send messages or mutate business records.
     for attempt in range(3):
+        if time.monotonic() >= deadline:
+            generation_problem = '资料已读取，但答复核对超时；尚未核实的部分未作为结论。'
+            gaps = gaps or ['补充答复尚未完成核验']
+            break
         current = await authorize()
         if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
                 or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
@@ -470,8 +479,9 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             started = time.monotonic()
             attempted_profiles.add(profile_key(profile))
             turn['_actual_profile'] = dict(profile)
+            timeout = min(45, max(0, deadline - time.monotonic()))
             raw = await asyncio.wait_for(asyncio.to_thread(model.complete, messages, profile=profile,
-                max_tokens=None, structured=True, timeout=45), 45)
+                max_tokens=None, structured=True, timeout=timeout), timeout)
             answer, requested, gaps = _candidate(raw)
             model_health(engine.assistant).record(model_health_key(current, profile), latency=time.monotonic() - started)
             generation_problem = ''
@@ -484,10 +494,10 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                 await asyncio.to_thread(capture, 'assistant', 'model_attempt', run_id=turn.get('run_id', ''),
                     category=category, error=exc)
                 generation_problem = '资料已检索到，但答复未完整生成；未将未完成内容作为结论。'
-                gaps = ['补充答复尚未完整生成和核验']
-                review_feedback = ['上次答复格式不完整，不代表资料不适用。请用相同证据重新生成简明且完整的JSON，仅保留问题所需结论与引用。']
+                gaps = gaps or ['补充答复尚未完整生成和核验']
+                review_feedback = [*review_feedback[:5], '上次答复未完整生成，不代表资料不适用。请用相同证据重新生成简明且完整的JSON，仅保留问题所需结论与引用。']
                 model_health(engine.assistant).record(model_health_key(current, profile), category=category)
-                if attempt < 2:
+                if attempt < 2 and time.monotonic() < deadline:
                     try:
                         alternative = select_task_profile(engine.assistant, current, turn, profile,
                             attempted=attempted_profiles, initial=False)
@@ -537,7 +547,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             break
         if not requested and not gaps and answer != '[NO_APPLICABLE_DOCUMENT]':
             break
-        if attempt == 2:
+        if attempt == 2 or time.monotonic() >= deadline:
             break
         if not requested:
             try:
@@ -565,7 +575,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             if current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']:
                 raise AssistantError('登录身份或知识库权限已变化，请重新提问。', 403)
             try:
-                extra = await asyncio.to_thread(knowledge.search, current, query, profile=profile)
+                extra = await asyncio.to_thread(knowledge.search, current, query, profile=profile,
+                    **({'document_refs': references} if reused else {}))
             except AssistantError as exc:
                 if exc.status in (401, 403):
                     raise
@@ -599,25 +610,18 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             return await reply(reason, business_public)
         return await public_company_fallback(engine, actor, turn, reason, emit, authorize)
     answer, sources, items = partial, partial_sources, partial_items
-    current = await authorize() if repairs else current
-    if repairs:
-        if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-                or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
-            return await reply('回答期间公司资料或授权已变化，请重新查询。')
+    current = await authorize()
+    if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
+            or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+        return await reply('回答期间公司资料或授权已变化，请重新查询。')
     answer = safe_text(answer, limit=14000)
     if not answer:
         return await reply('本轮未生成有效的公司资料回答，请重试。')
     citations = [int(number) for number in re.findall(r'\[(\d{1,3})\]', answer)]
     if (not citations or any(number < 1 or number > len(sources) for number in citations)) and not reviewed:
         return await reply('本轮回答未提供有效的文档出处，未作为公司规定使用。请补充文件名称或重新查询。')
-    if found.get('warning'):
-        answer += '\n\n' + found['warning']
-    if gaps:
-        answer += '\n\n尚未核实：' + '；'.join(gaps) + '。以上仅列出有资料支持的部分。'
     missing = [result['query'] for result in topic_results if not result['items'] and not result.get('warning')
                and (not repairs or gaps)]
-    if compound and missing:
-        answer += '\n\n以下主题尚未检索到公司资料依据：' + '、'.join(missing) + '。未用其他主题的流程代替。'
     if reviewer and answer != reviewed_answer:
         checked = await review(answer, sources, items, defer=False)
         answer, reviewed = checked['answer'], checked.get('answer_review')
@@ -632,6 +636,12 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
                 or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
             raise AssistantError('复核期间资料或授权已变化，未发送原答复。', 403)
+    if found.get('warning'):
+        answer += '\n\n' + found['warning']
+    if gaps:
+        answer += '\n\n尚未核实：' + '；'.join(gaps) + '。以上仅列出有资料支持的部分。'
+    if compound and missing:
+        answer += '\n\n以下主题尚未检索到公司资料依据：' + '、'.join(missing) + '。未用其他主题的流程代替。'
     result = await reply(answer, sources)
     if reviewed:
         result['answer_review'] = reviewed

@@ -15,7 +15,7 @@ from upload_event_module.services.http_client import FeishuHttpClient
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 
 from .risk_inspection import (RiskError, SCOPES, SYSTEM_NAMES, can_scope, completion_key,
-                              digest, final_manager, item_scope, manager, reviewer_list, scoped_people,
+                              digest, final_manager, item_scope, manager, outstanding_items, reviewer_list, scoped_people,
                               schema_fields, system_fields, system_values, text)
 from .risk_inspection_templates import clean_fields
 
@@ -36,6 +36,23 @@ STATUS = {'pending': '未提交', 'submitted': '待审核', 'approved': '审核�
 
 class CloudRejected(RiskError):
     """A definitive rejection, unlike an unknown transport or response outcome."""
+
+
+class _ReminderObsolete(Exception):
+    """The assignment no longer needs this queued reminder."""
+
+
+def reminder_note(person):
+    items = outstanding_items(person)
+    lines = [f'本次排查仍有{len(items)}项尚未提交。请提交反馈；仅保存草稿仍需提醒，已提交待审核的事项不催办。']
+    for scope in SCOPES:
+        pending = [i for i in items if item_scope(person, i) == scope]
+        if pending:
+            label = '110站' if scope == '110' else scope + '楼'
+            titles = '、'.join(i['title'][:80] for i in pending[:3])
+            lines.append(f'{label}：{len(pending)}项（退回待补交{sum(i["status"] == "returned" for i in pending)}项） · {titles}'
+                         + ('等' if len(pending) > 3 else ''))
+    return '\n'.join(lines)
 
 
 def field_spec(field):
@@ -147,7 +164,19 @@ class RiskCloud:
             job = getattr(self.work, 'job', None)
             if job:
                 self.store.renew_job(job)
-            response = self.http.request(method, API + path, headers=self.headers(), **kwargs)
+            headers = self.headers()
+            if job and job['kind'] == 'reminder' and path == 'im/v1/messages':
+                current = self.store.reminder(job)
+                if current is None:
+                    raise _ReminderObsolete()
+                try:
+                    self.store.check(self.store.person_for(current[1]['id']))
+                except RiskError as exc:
+                    raise CloudRejected(str(exc), exc.status) from None
+                card = json.loads(kwargs['json']['content'])
+                card['elements'][0]['text']['content'] = reminder_note(current[1])
+                kwargs['json'] = {**kwargs['json'], 'content': json.dumps(card, ensure_ascii=False)}
+            response = self.http.request(method, API + path, headers=headers, **kwargs)
             if job:
                 self.store.renew_job(job)
             try:
@@ -621,6 +650,8 @@ class RiskCloud:
             if self.work.job:
                 self.store.renew_job(job)
             self._process(job)
+        except _ReminderObsolete:
+            pass
         finally:
             self.work.job = None
 
@@ -630,6 +661,14 @@ class RiskCloud:
             return
         if job['kind'] == 'final_push':
             self.final_push(job)
+            return
+        if job['kind'] == 'reminder':
+            current = self.store.reminder(job)
+            if current is not None:
+                release, person = current
+                target = self.store.person_for(person['id'])
+                self.store.check(target)
+                self.notify(job, release, target, note=reminder_note(person))
             return
         release, people = self.store.raw(job['release_id'])
         if job['kind'] == 'publish':
@@ -684,6 +723,12 @@ class RiskCloud:
         if receipts.get(receipt_key, {}).get('message_id'):
             return
         recipient = self.identity(target)
+        if job.get('kind') == 'reminder':
+            current = self.store.reminder(job)
+            if current is None:
+                raise _ReminderObsolete()
+            release, person = current
+            note = reminder_note(person)
         url = self.base_url().rstrip('/') + '/risk-inspections?id=' + release['id']
         attempted_before = bool(receipts.get(receipt_key))
         attempt = receipts.get(receipt_key, {}).get('attempted_at', time.time())

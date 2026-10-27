@@ -83,10 +83,11 @@ class AdjustWorkOrderTests(unittest.TestCase):
             self.assertTrue(all(step["photo_required"] for step in projection["steps"]))
             self.assertNotIn("other_unit",projection["work_orders"][0])
 
-            invalid=service.save_sop({"work_type":"adjust","scope":"A","name":"错误占位符","steps":[{"content":"普通步骤 {{to}}","operator_required":True}]})
-            invalid=service.add_sop_attachment(invalid["sop_id"],file_name="说明.txt",content=b"test",expected_version=invalid["version"])
+            invalid={"work_type":"adjust","scope":"A","name":"错误占位符","steps":[{"content":"普通步骤 {{to}}","operator_required":True}]}
+            with self.assertRaisesRegex(Exception,"普通设备调整 SOP 不能使用设备占位符"):
+                service.save_sop(invalid)
             with self.assertRaisesRegex(Exception,"只允许使用"):
-                service.prepare_start({**base,"polling_sop_id":invalid["sop_id"],"polling_sop_version":invalid["version"],"polling_run_count":1,"polling_runs":[{"from_unit":"1#","to_unit":"2#","other_unit":"2#"}]},job_id="bad-placeholder",people=people)
+                service.save_sop({**invalid,"adjust_sop_type":"cooling"})
 
     def test_adjust_target_fields_and_end_guard_routing(self):
         fields=AdjustNoticeHandler().build_create_fields(NoticePayload(

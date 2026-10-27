@@ -368,5 +368,46 @@ class CacheRecoveryRoutesTests(SyncFixture):
                     release.set()
 
 
+class ConcurrentAttachmentCacheTests(SyncFixture):
+    def test_permission_error_without_a_valid_cache_is_not_hidden(self):
+        self.save()
+        source=self.service._table('manuals')
+        with patch.object(Path,'replace',side_effect=PermissionError('cache directory denied')):
+            with self.assertRaises(PermissionError):
+                self.service._content_path(source,'tokenFixtureOne',record_id='recOne',field_id='fldFiles')
+        self.assertEqual(self.service._cache_size('tokenFixtureOne'),0)
+        self.assertFalse(list((self.service.root/'files').glob('*.part')))
+
+    def test_second_download_reuses_cache_while_first_reader_has_it_open(self):
+        self.save()
+        source=self.service._table('manuals')
+        second_started, release_second=threading.Event(),threading.Event()
+        first_started=threading.Event()
+        original=self.remote.download_to_file
+        def download(token,target,**context):
+            original(token,target,**context)
+            if not first_started.is_set():
+                first_started.set()
+                self.assertTrue(second_started.wait(5))
+            else:
+                second_started.set()
+                self.assertTrue(release_second.wait(5))
+        def read():
+            return self.service._content_path(source,'tokenFixtureOne',record_id='recOne',field_id='fldFiles')
+        with patch.object(self.remote,'download_to_file',side_effect=download),ThreadPoolExecutor(max_workers=2) as pool:
+            first=pool.submit(read)
+            self.assertTrue(first_started.wait(5))
+            second=pool.submit(read)
+            try:
+                path=first.result(5)
+                with path.open('rb') as reader:
+                    release_second.set()
+                    self.assertEqual(second.result(5),path)
+                    self.assertEqual(reader.read(),self.remote.files['tokenFixtureOne'])
+            finally:
+                release_second.set()
+        self.assertFalse(list((self.service.root/'files').glob('*.part')))
+
+
 if __name__ == '__main__':
     unittest.main()

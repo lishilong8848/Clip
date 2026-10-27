@@ -3119,10 +3119,37 @@ class PollingWorkOrderService:
                 return
             group.update(
                 {
+                    "state_before_cancel": group.get("state"),
                     "state": "cancelled",
                     "cancel_reason": str(reason or "target_terminal"),
                     "updated_at": self._now_text(),
                     "version": int(group.get("version") or 0) + 1,
                 }
             )
+            self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
+
+    def restore_ended_group(self, target_record_id: str, *, work_type: str) -> None:
+        """Undo only this notice's terminal cancellation; execution data stays intact."""
+        work_type = _work_order_type(work_type)
+        with self._lock:
+            try:
+                group = self.get_group(target_record_id)
+            except PortalNotFoundError:
+                return
+            if (str(group.get('target_record_id') or target_record_id) != target_record_id
+                    or str(group.get('group_id') or target_record_id) != target_record_id
+                    or str(group.get('work_type') or 'polling').strip() != work_type
+                    or group.get('state') != 'cancelled' or group.get('cancel_reason') != 'target_terminal'):
+                return
+            state = group.get('state_before_cancel')
+            if state not in {'active', 'upload_pending', 'completed'}:
+                # Older cancellations did not retain state; attachments alone cannot prove execution.
+                steps = group.get('steps') or []
+                finished = bool(steps) and group.get('current_index') == len(steps) and all(
+                    isinstance(step, dict) and self._step_done(step) for step in steps)
+                state = ('completed' if group.get('uploaded_file_tokens') and group.get('upload_completed_at')
+                         else 'upload_pending') if finished else 'active'
+            group.update(state=state, updated_at=self._now_text(), version=int(group.get('version') or 0) + 1)
+            group.pop('cancel_reason', None)
+            group.pop('state_before_cancel', None)
             self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)

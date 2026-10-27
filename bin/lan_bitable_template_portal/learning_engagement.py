@@ -417,13 +417,18 @@ def make_card(job, url, paper=None, record=None):
 
 def send_due(service, current):
     current = current.astimezone(core.TZ) if current.tzinfo else current.replace(tzinfo=core.TZ)
+    from . import learning_daily_report
+    try:
+        learning_daily_report.send_due(service, current)
+    except Exception:
+        service._last_error = '昨日学练日报暂未完成，原学练提醒继续处理。'
     settings = service.settings()
     duties = duty_recipients(service)
     assignments, unavailable = repeated_reminders(service, current)
     if settings['weekly_report_enabled']:
         enqueue_weekly(service, current, duties)
     with closing(service._connect()) as conn:
-        jobs = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='engagement' AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY json_extract(payload,'$.due_at'),key LIMIT 10", (current.timestamp(),))]
+        jobs = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='engagement' AND COALESCE(json_extract(payload,'$.kind'),'')<>'daily_report' AND json_extract(payload,'$.status')='pending' AND json_extract(payload,'$.due_at')<=? ORDER BY json_extract(payload,'$.due_at'),key LIMIT 10", (current.timestamp(),))]
     if not jobs:
         return
     people = service._all('person')

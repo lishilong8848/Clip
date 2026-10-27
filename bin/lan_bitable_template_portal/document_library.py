@@ -820,7 +820,14 @@ class DocumentLibraryService:
                     remote.download_to_file(token, temporary, record_id=record_id, field_id=field_id)
                 if not temporary.is_file() or not 0 < temporary.stat().st_size <= MAX_FILE:
                     raise AssistantError('附件无效或超过大小限制。', 413, category='too_large')
-                temporary.replace(path)
+                # Another downloader may have published this immutable token while
+                # Windows readers hold it open; reuse that complete cache entry.
+                if not self._cache_size(token):
+                    try:
+                        temporary.replace(path)
+                    except PermissionError:
+                        if not self._cache_size(token):
+                            raise
             finally:
                 temporary.unlink(missing_ok=True)
         return path

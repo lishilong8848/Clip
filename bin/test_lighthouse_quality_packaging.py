@@ -12,12 +12,18 @@ class QualityPackaging(unittest.TestCase):
         preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
                          and node.name == '_run_packaging_preflight_tests')
         groups = []
+        configured = ast.literal_eval(next(node.value for node in preflight.body if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == 'test_groups' for target in node.targets)))
         for call in ast.walk(preflight):
             if (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
                     and call.func.id == '_run_preflight_check' and isinstance(call.args[0], ast.List)):
                 modules = [node.value for node in call.args[0].elts if isinstance(node, ast.Constant)
                            and isinstance(node.value, str) and node.value.startswith('bin.test_')]
                 groups.append((call.lineno, modules))
+            elif (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == 'run_tests'
+                    and isinstance(call.args[0], ast.Subscript) and isinstance(call.args[0].value, ast.Name)
+                    and call.args[0].value.id == 'test_groups'):
+                groups.append((call.lineno, configured[ast.literal_eval(call.args[0].slice)]))
         name = 'bin.test_lighthouse_knowledge_stream_storage'
         self.assertEqual([modules for _, modules in groups if name in modules], [[name]])
         isolated = next(line for line, modules in groups if name in modules)
