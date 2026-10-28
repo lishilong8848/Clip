@@ -137,6 +137,103 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
     def message(self, **extra):
         return MessageSend(**{'operation_id': 'message-test', 'text': '确认后的消息', 'recipient': '我', **extra})
 
+    def reference_message(self, **extra):
+        row = {'message_id': 'om_card', 'chat_id': 'oc_test', 'msg_type': 'interactive',
+               'update_time': '1', 'body': {'content': json.dumps({'schema': '2.0',
+                   'header': {'title': {'tag': 'plain_text', 'content': '测试任务'}},
+                   'body': {'elements': [{'tag': 'markdown', 'content': '请核对最新进度'},
+                       {'tag': 'person', 'user_id': 'ou_botBob'},
+                       {'tag': 'button', 'text': {'tag': 'plain_text', 'content': '查看记录'},
+                        'url': 'https://example.test/record', 'value': {'private': 'must-not-read'}}]}})}, **extra}
+        self.response = lambda request: httpx.Response(200, json={'code': 0, 'data': {'items': [row]}}) if '/im/v1/messages/' in request.url.path else None
+        route = {'app_id': 'cli_testAgent', 'chat_id': 'oc_test', 'chat_type': 'group',
+                 'message_id': 'om_current', 'parent_id': 'om_card', 'root_id': 'om_root', 'sender_id': 'ou_botAlice'}
+        return {**ALICE, 'channel': 'feishu:oc_test'}, route, row
+
+    async def test_referenced_card_has_real_people_visible_content_and_no_hidden_actions(self):
+        actor, route, _ = self.reference_message()
+        result = await self.service.message_context(actor, route)
+        self.assertEqual(result['message_id'], 'om_card')
+        self.assertEqual(result['people'], [{'id': 'recBob', 'name': BOB['name'], 'employee_no': '1', 'building': 'A'}])
+        self.assertIn('最新进度', result['content'])
+        self.assertEqual(result['links'], ['https://example.test/record'])
+        self.assertNotIn('must-not-read', json.dumps(result))
+        self.assertNotIn('ou_botBob', json.dumps(result))
+        request = next(r for r in self.requests if '/im/v1/messages/' in r.url.path)
+        self.assertEqual(request.url.params['card_msg_content_type'], 'user_card_content')
+        self.assertFalse(self.writes())
+
+    async def test_message_context_is_bound_to_app_chat_sender_and_original_reference(self):
+        actor, route, row = self.reference_message()
+        for changed_actor, changed_route in ((ALICE, route), (actor, {**route, 'app_id': 'cli_other'}),
+                (actor, {**route, 'sender_id': 'ou_botBob'})):
+            with self.subTest(route=changed_route), self.assertRaises(AssistantError):
+                await self.service.message_context(changed_actor, changed_route)
+        self.assertFalse(any('/im/v1/messages/' in r.url.path for r in self.requests))
+        row['chat_id'] = 'oc_foreign'
+        with self.assertRaisesRegex(AssistantError, '不属于当前会话'):
+            await self.service.message_context(actor, route)
+        row['chat_id'], row['deleted'] = 'oc_test', True
+        with self.assertRaisesRegex(AssistantError, '已撤回'):
+            await self.service.message_context(actor, route)
+
+    async def test_card_pages_are_versioned_and_cannot_mix_updated_messages(self):
+        actor, route, row = self.reference_message(msg_type='text', body={'content': json.dumps({'text': '原文' * 2500})})
+        first = await self.service.message_context(actor, route)
+        second = await self.service.message_context(actor, route, offset=first['next_offset'], version=first['version'])
+        self.assertEqual(first['content'] + second['content'], '原文' * 2500)
+        self.assertFalse(second['has_more'])
+        row['update_time'] = '2'
+        with self.assertRaisesRegex(AssistantError, '已变化'):
+            await self.service.message_context(actor, route, offset=4000, version=first['version'])
+
+    async def test_unresolved_and_out_of_scope_card_people_are_not_guessed(self):
+        actor, route, _ = self.reference_message(body={'content': json.dumps({'elements': [
+            {'tag': 'person', 'user_id': 'ou_unknown'}, {'tag': 'person', 'user_id': 'ou_botCharlie'}]})})
+        result = await self.service.message_context(actor, route)
+        self.assertEqual(result['people'], [])
+        self.assertEqual(result['unresolved_people'], 2)
+        self.assertNotIn(CHARLIE['name'], json.dumps(result, ensure_ascii=False))
+
+    async def test_reference_reads_need_group_scope_and_cannot_cross_app_rotation(self):
+        actor, route, _ = self.reference_message()
+        self.scopes.remove('im:message.group_msg')
+        with self.assertRaisesRegex(AssistantError, '尚未获授'):
+            await self.service.message_context(actor, route)
+        self.assertFalse(any('/im/v1/messages/' in r.url.path for r in self.requests))
+        self.scopes.append('im:message.group_msg')
+        self.service.permission_cache = None
+        original = self.response
+        def rotate(request):
+            result = original(request)
+            if result:
+                self.rotate_identity('app')
+            return result
+        self.response = rotate
+        with self.assertRaises(AssistantError):
+            await self.service.message_context(actor, route)
+
+    async def test_empty_template_and_malformed_reference_are_not_successful_reads(self):
+        actor, route, row = self.reference_message(body={'content': json.dumps({'type': 'template', 'data': {'value': 'hidden'}})})
+        with self.assertRaisesRegex(AssistantError, '没有返回.*可读正文'):
+            await self.service.message_context(actor, route)
+        row['body']['content'] = 'not-json'
+        with self.assertRaisesRegex(AssistantError, '格式无效'):
+            await self.service.message_context(actor, route)
+
+    def test_old_cards_post_mentions_table_numbers_and_media_keep_their_limits(self):
+        result = wp.message_projection(json.dumps({'title': '旧卡片', 'elements': [[
+            {'tag': 'text', 'text': '联系<at id="ou_botBob"></at>'},
+            {'tag': 'table', 'rows': [{'数量': 3, '密码': 'must-not-read'}]},
+            {'tag': 'img', 'img_key': 'private-image', 'alt': {'content': '设备照片'}}]]}))
+        self.assertIn('3', result['text'])
+        self.assertNotIn('must-not-read', result['text'])
+        self.assertEqual(result['people'], {'ou_botBob'})
+        self.assertEqual(result['unread_media'], ['img'])
+        self.assertNotIn('private-image', json.dumps({**result, 'people': list(result['people'])}))
+        huge = wp.message_projection(json.dumps({'elements': [{'text': '一行'}] * 4500}))
+        self.assertTrue(huge['limited'])
+
     def rotate_identity(self, field):
         app, secret = self.qt_credentials
         if field == 'app':
@@ -864,6 +961,58 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
                 await authority.invoke({'request': request}, ALICE, payload)
         self.assertEqual(len(self.writes()), 1)
 
+    async def test_current_message_reference_survives_internal_authority_without_model_ids(self):
+        from lan_bitable_template_portal.feishu_assistant import FeishuAssistant
+        actor = {**ALICE, 'channel': 'feishu:oc_test', 'learning_scopes': []}
+        fake = SimpleNamespace(config={'app_id': 'cli_testAgent'},
+            controller=SimpleNamespace(bound_port=18766), runtime=self.runtime,
+            _require_current_config=AsyncMock(), _resolve_user=AsyncMock(return_value={'open_id': ALICE['id']}),
+            _session=lambda _: 'test-session', _prepare_topic=AsyncMock())
+        message = {'app_id': 'cli_testAgent', 'message_id': 'om_current', 'chat_id': 'oc_test', 'chat_type': 'group',
+                   'parent_id': 'om_card', 'root_id': 'om_root', 'sender_id': 'ou_botAlice', 'question': '通知卡片中的人'}
+        with patch('lan_bitable_template_portal.lighthouse_bridge.actor_for', AsyncMock(return_value=actor)):
+            request, _ = await FeishuAssistant._request_context(fake, message)
+            self.assertEqual(request.state.feishu_message_route['parent_id'], 'om_card')
+            authority = PortalAuthority(FastAPI(), fake.controller, self.runtime,
+                                        SimpleNamespace(root=Path(self.temp.name), lease='test'))
+            _, current = await authority.authorize(authority.context(request, actor))
+        self.assertEqual(current['_feishu_message_context'], {'has_reference': True, 'has_root': True, 'chat_type': 'group'})
+        self.assertNotIn('om_card', json.dumps(current))
+
+    async def test_original_confirmed_message_can_retry_rejection_but_not_duplicate_success(self):
+        await self.install()
+        authority = PortalAuthority(self.app, self.controller, self.runtime, SimpleNamespace(root=Path(self.temp.name)))
+        authority.catalog = PortalAPICatalog(self.app)
+        request = Request({'type': 'http', 'method': 'POST', 'path': '/', 'scheme': 'http',
+            'server': ('portal.test', 80), 'headers': [(b'host', b'portal.test'), (b'origin', b'http://portal.test')]})
+        payload = {'operation': {'api_id': 'POST /api/feishu-workpartner/messages/send',
+            'body': self.message().model_dump()}, 'operation_id': 'plan:retry-test:0'}
+        context = {'request': request, 'plan_id': 'retry-test'}
+        self.response = lambda r: httpx.Response(400, json={'code': 230013}) if r.method == 'POST' else None
+        with patch('lan_bitable_template_portal.feishu_workpartner_routes.actor_for', AsyncMock(return_value=ALICE)):
+            failed = await authority.invoke(context, ALICE, payload)
+            self.assertFalse(failed['ok'])
+            self.response = None
+            sent = await authority.invoke(context, ALICE, payload)
+            self.assertTrue(sent['ok'], sent)
+            self.assertEqual(await authority.invoke(context, ALICE, payload), sent)
+        self.assertEqual(len(self.writes()), 2)
+        self.assertEqual(json.loads(self.writes()[0].content)['uuid'], json.loads(self.writes()[1].content)['uuid'])
+
+    async def test_message_context_route_has_no_arbitrary_message_id_and_all_five_groups_are_discoverable(self):
+        await self.install()
+        catalog = PortalAPICatalog(self.app)
+        descriptor = catalog.get('GET /api/feishu-workpartner/messages/context')
+        self.assertTrue(descriptor['read_only'])
+        self.assertIn('读取', descriptor['name'])
+        self.assertNotIn('message_id', json.dumps(descriptor['schema']))
+        for endpoint in ('messages/send', 'tasks', 'events', 'documents', 'tables/{table_id}/records'):
+            self.assertEqual(catalog.get('POST /api/feishu-workpartner/' + endpoint)['group'], '飞书工作伙伴')
+        with patch('lan_bitable_template_portal.feishu_workpartner_routes.actor_for', AsyncMock(return_value=ALICE)):
+            result = await self.portal.get('/api/feishu-workpartner/messages/context?message_id=om_foreign')
+        self.assertEqual(result.status_code, 403)
+        self.assertFalse(self.writes())
+
     def test_packager_keeps_runtime_and_skill_but_excludes_test_file(self):
         import package_portable as package
         root = Path(__file__).resolve().parent.parent
@@ -901,6 +1050,96 @@ class WorkpartnerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(safe_data({'calendar_id': calendar_id})['calendar_id'], calendar_id)
         self.assertEqual(safe_data({'resource_id': calendar_id})['resource_id'], calendar_id)
         self.assertNotIn('someone@example.com', safe_data({'resource_id': 'someone@example.com'})['resource_id'])
+
+
+class WorkpartnerPlanTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        from test_lighthouse_agent import AgentTests
+        AgentTests.setUp(self)
+        install_feishu_workpartner_routes(self.catalog.app, SimpleNamespace(), None, None)
+        self.catalog = self.agent.catalog = PortalAPICatalog(self.catalog.app)
+
+    def plan(self, recipients=('测试乙', '测试甲'), **extra):
+        return self.agent.prepare(ALICE, {'title': '通知本卡片涉及人员', 'operations': [
+            {'api_id': 'POST /api/feishu-workpartner/messages/send', 'body': {'recipient': name, 'text': '请核对进度'}}
+            for name in recipients]}, 'card-notification', [], queries={'query_card': {'people': [
+                {'id': 'recAlice', 'name': ALICE['name'], 'employee_no': '0'},
+                {'id': 'recBob', 'name': BOB['name'], 'employee_no': '1'}]}},
+            question='给卡片涉及到的人发送消息，请核对进度', **extra)
+
+    def test_card_people_prefill_stable_identity_and_human_preview_still_requires_confirmation(self):
+        plan = self.plan()
+        self.assertEqual(plan['status'], 'awaiting_confirmation')
+        self.assertEqual([op['body']['recipient'] for op in plan['operations']], ['recBob', 'recAlice'])
+        public = self.agent.public_plan(plan, ALICE)
+        self.assertIn('测试乙', public['operations'][0]['selected_labels']['recipient'])
+        self.assertIn('工号 1', public['operations'][0]['selected_labels']['recipient'])
+        self.assertEqual(plan['results'], [])
+        self.assertEqual(self.writes, [])
+
+    def test_editing_recipient_updates_identity_and_preview_together(self):
+        plan = self.plan(('测试乙',))
+        edited = self.agent.amend(ALICE, plan['id'], {'action': 'edit', 'version': plan['version']})
+        recipient = next(field for field in edited['fields'] if field['path'] == 'recipient')
+        self.assertEqual(recipient['type'], 'select')
+        values = {field['name']: field['value'] for field in edited['fields']}
+        values[recipient['name']] = 'recAlice'
+        updated = self.agent.amend(ALICE, plan['id'], {'version': edited['version'], 'values': values})
+        self.assertEqual(updated['operations'][0]['body']['recipient'], 'recAlice')
+        self.assertIn('测试甲', updated['operations'][0]['selected_labels']['recipient'])
+        self.assertNotIn('测试乙', updated['operations'][0]['selected_labels']['recipient'])
+        self.assertEqual(updated['status'], 'awaiting_confirmation')
+
+    async def test_one_rejection_does_not_block_others_and_retry_keeps_success_receipts(self):
+        plan = self.plan()
+        attempts = []
+        async def invoke(actor, op, request, **kwargs):
+            target = op['body']['recipient']
+            attempts.append(target)
+            failed = target == 'recBob' and attempts.count(target) == 1
+            return {'ok': not failed, 'api_id': op['api_id'], 'status': 400 if failed else 200,
+                    'error': '飞书拒绝发送' if failed else '', 'data': {} if failed else {'message_id': 'om_' + target, 'sent': True}}
+        self.agent._invoke = AsyncMock(side_effect=invoke)
+        await self.agent._execute(ALICE, plan, self.request)
+        self.assertEqual(attempts, ['recBob', 'recAlice'])
+        self.assertEqual(plan['status'], 'failed')
+        self.assertTrue(self.agent.public_plan(plan, ALICE)['can_retry'])
+        receipt = copy.deepcopy(plan['results'][1])
+        with patch.object(self.agent, '_schedule_execution'):
+            await self.agent.retry_notice(ALICE, plan['id'], {'version': plan['version']}, self.request)
+        resumed = self.agent.get_plan(ALICE, plan['id'])
+        self.assertNotIn('retry_attempt', resumed['operations'][0]['body'])
+        await self.agent._execute(ALICE, resumed, self.request)
+        self.assertEqual(resumed['status'], 'completed')
+        self.assertEqual(attempts, ['recBob', 'recAlice', 'recBob'])
+        self.assertEqual(resumed['results'][1], receipt)
+
+    async def test_duplicate_same_recipient_and_text_reuses_receipt_without_second_send(self):
+        plan = self.plan(('测试乙', '1'))
+        self.agent._invoke = AsyncMock(return_value={'ok': True, 'status': 200,
+            'api_id': 'POST /api/feishu-workpartner/messages/send', 'data': {'message_id': 'om_once', 'sent': True}})
+        await self.agent._execute(ALICE, plan, self.request)
+        self.assertEqual(plan['status'], 'completed')
+        self.assertEqual(self.agent._invoke.await_count, 1)
+        self.assertEqual(plan['results'][0], plan['results'][1])
+
+    def test_conflicting_names_need_selection_and_dependent_or_mixed_writes_are_not_auto_continued(self):
+        query = {'people': [{'id': 'recOne', 'name': '重名', 'employee_no': '10'},
+                            {'id': 'recTwo', 'name': '重名', 'employee_no': '11'}]}
+        with self.assertRaisesRegex(AssistantError, '重名'):
+            self.agent.prepare(ALICE, {'operations': [{'api_id': 'POST /api/feishu-workpartner/messages/send',
+                'body': {'recipient': '重名', 'text': '正文'}}]}, 'ambiguous', [], queries={'query_people': query})
+        self.assertFalse(self.agent._independent_messages({'operations': [
+            {'api_id': 'POST /api/feishu-workpartner/tasks', 'body': {'summary': '任务'}}]}))
+        self.assertFalse(self.agent._independent_messages({'operations': [
+            {'api_id': 'POST /api/feishu-workpartner/messages/send', 'body': {'recipient': 'recBob', 'text': {'$result': {'step': 0, 'path': 'title'}}}}]}))
+
+    def test_combined_business_query_and_collaboration_keep_both_instructions(self):
+        from openclaw_service.assistant.lighthouse_model import instructions_for_question
+        instructions = instructions_for_question('查询未结束的维保通告，给相关人员发送飞书消息')
+        self.assertIn('飞书工作伙伴', instructions)
+        self.assertIn('通告原文先用', instructions)
+        self.assertIn('任务、日程', instructions)
 
 
 if __name__ == '__main__':

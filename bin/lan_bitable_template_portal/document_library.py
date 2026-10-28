@@ -466,6 +466,7 @@ class DocumentLibraryService:
                 for a in attachments if a['field_id'] == fid]
         field_names = {fid: field['field_name'] for fid, field in by_id.items()}
         payload = {'record_id': raw['record_id'], 'fields': values, 'field_names': field_names, 'attachments': attachments,
+            'person_fields': sorted(fid for fid, field in by_id.items() if field.get('type') == 11),
             'scopes': self._record_scopes(source, values), 'config_revision': source['revision'],
             'origin': _digest([source['base_token'], source['table_id']])}
         payload['revision'] = _digest({'fields': values, 'field_names': field_names, 'table_revision': source['revision']})
@@ -481,6 +482,10 @@ class DocumentLibraryService:
             if fid in attachment_fields:
                 value = [{key: item[key] for key in ('name', 'size', 'type')}
                     for item in record['attachments'] if item['field_id'] == fid]
+            elif fid in record.get('person_fields', []) and value is not None:
+                # Personnel contact metadata is not document content; preserve the original cache.
+                value = [person.get('name') or person.get('en_name') or '未命名人员'
+                    if isinstance(person, dict) else person for person in (value if isinstance(value, list) else [value])]
             lines.append(f"{names.get(fid, fid)} ({fid}): {value if isinstance(value, str) else _json(value)}")
         return '\n\n'.join(lines)
 
@@ -493,7 +498,8 @@ class DocumentLibraryService:
 
     @staticmethod
     def _source_entries(source, record):
-        entries = [('record', {'kind': 'record', 'name': record['record_id'] + '.txt'}),
+        entries = [('record', {'kind': 'record', 'name': record['record_id'] + '.txt',
+            'person_fields': record.get('person_fields', [])}),
             *((a['field_id'] + '/' + a['attachment_id'], a) for a in record['attachments'])]
         for suffix, entry in entries:
             yield source['id'] + '/' + record['record_id'] + '/' + suffix, {

@@ -269,6 +269,89 @@ class FullSourceKnowledgeTests(LibraryFixture):
         self.assertTrue(item['error'])
         self.assertFalse(any(item['name'] == 'recOne.txt' for item in self.kb.search(actor(), 'Alpha')['items']))
 
+    def test_people_index_names_without_private_contact_metadata(self):
+        fields = [*self.remote.fields(), {'field_id': 'fldSubmitter', 'field_name': '提交人', 'type': 11}]
+        self.enterContext(patch.object(self.remote, 'fields', return_value=fields))
+        people = [{'id': 'ou_fixturePerson', 'name': 'Submitterneedle', 'en_name': 'Fixture User',
+            'email': 'private@example.invalid', 'mobile': '13800138000'}]
+        self.remote.rows['recOne']['fields']['提交人'] = people
+        self.sync()
+        hit = self.record_hit('Submitterneedle')
+        content = self.kb.file(actor(), hit['document_id'])[0].read_text(encoding='utf-8')
+        self.assertIn('Submitterneedle', content)
+        for private in ('private@example.invalid', '13800138000', 'ou_fixturePerson'):
+            self.assertNotIn(private, content)
+        self.assertEqual(self.record()['fields']['fldSubmitter'], people)
+        self.assertEqual(self.remote.rows['recOne']['fields']['提交人'], people)
+        self.assertEqual(self.record()['knowledge_summary']['ready'], 2)
+        self.assertEqual((self.remote.creates, self.remote.updates, self.remote.uploads), (0, 0, 0))
+
+    def test_blocked_index_error_does_not_claim_automatic_retry(self):
+        hit = self.record_hit('Alpha')
+        for error in ('文件包含不宜公开的信息，未入库。', '', '已移除联系方式'):
+            with self.subTest(error=error):
+                with self.kb.connect() as db:
+                    db.execute("UPDATE documents SET status='blocked',error=? WHERE id=?", (error, hit['document_id']))
+                public = self.record()
+                body = next(item for item in public['knowledge_items'] if item['kind'] == 'record')
+                attachment = next(item for item in public['knowledge_items'] if item['kind'] == 'attachment')
+                self.assertEqual(body['status'], 'blocked')
+                self.assertIn('敏感', body['error'])
+                self.assertNotIn('重试', body['error'])
+                self.assertEqual(attachment['status'], 'ready')
+                self.assertEqual(public['knowledge_summary']['ready'], 1)
+
+    def test_upgrade_recovers_person_metadata_block_without_rewriting_source_or_attachment(self):
+        fields = [*self.remote.fields(), {'field_id': 'fldSubmitter', 'field_name': '提交人', 'type': 11}]
+        self.enterContext(patch.object(self.remote, 'fields', return_value=fields))
+        people = [{'id': 'ou_fixturePerson', 'name': 'Submitterneedle', 'email': 'private@example.invalid'}]
+        self.remote.rows['recOne']['fields']['提交人'] = people
+        normalize, entries = self.service._normalize, self.service._source_entries
+        def legacy_normalize(*args, **kwargs):
+            record = normalize(*args, **kwargs)
+            record.pop('person_fields', None)
+            return record
+        def legacy_entries(*args):
+            for key, payload in entries(*args):
+                payload.pop('person_fields', None)
+                yield key, payload
+        with patch.object(self.service, '_normalize', side_effect=legacy_normalize), \
+                patch.object(self.service, '_source_entries', side_effect=legacy_entries), \
+                patch.object(self.service, '_record_text', side_effect=lambda source, record: json.dumps(record['fields'])):
+            self.sync()
+            self.assertEqual(self.record()['knowledge_status'], 'blocked')
+        with self.service.connect(readonly=True) as db:
+            history = db.execute('SELECT count(*) FROM versions').fetchone()[0]
+        attachment = self.source_items()[0]
+        downloads = self.remote.downloads
+        self.service = DocumentLibraryService(self.temp, remote_factory=lambda _: self.remote,
+            knowledge=self.kb, clock=lambda: self.now)
+        self.now += 301
+        self.drain()
+        hit = self.record_hit('Submitterneedle')
+        self.assertTrue(self.record()['knowledge_summary']['vectorized'])
+        self.assertEqual(self.record()['fields']['fldSubmitter'], people)
+        content = self.kb.file(actor(), hit['document_id'])[0].read_text(encoding='utf-8')
+        self.assertNotIn('private@example.invalid', content)
+        self.assertEqual(self.remote.downloads, downloads)
+        with self.service.connect(readonly=True) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM versions').fetchone()[0], history)
+        with self.kb.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM versions WHERE document_id=?', (attachment['id'],)).fetchone()[0], 1)
+        calls = len(self.kb.embedder.calls)
+        self.now += 301
+        self.drain()
+        self.assertEqual(len(self.kb.embedder.calls), calls)
+        self.assertEqual((self.remote.creates, self.remote.updates, self.remote.uploads), (0, 0, 0))
+
+    def test_contact_in_document_body_still_blocks_indexing(self):
+        self.remote.rows['recOne']['fields']['Opaque'] = 'Contact: private@example.invalid'
+        self.sync()
+        public = self.record()
+        self.assertEqual(public['knowledge_status'], 'blocked')
+        self.assertFalse(public['knowledge_summary']['vectorized'])
+        self.assertFalse(any(item['name'] == 'recOne.txt' for item in self.kb.search(actor(), 'Alpha')['items']))
+
 
 if __name__ == '__main__':
     unittest.main()

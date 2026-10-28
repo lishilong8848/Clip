@@ -129,6 +129,14 @@ def install_feishu_workpartner_routes(app, controller, runtime, channel):
             return await get_service().send(current, bound(payload))
         return await respond(request, run)
 
+    @app.get('/api/feishu-workpartner/messages/context')
+    async def message_context(request: Request, target: str = 'reference', offset: int = 0, version: str = ''):
+        async def run():
+            current = await actor(request)
+            route = getattr(request.state, 'feishu_message_route', None)
+            return await get_service().message_context(current, route, target, offset, version)
+        return await respond(request, run)
+
     @app.post('/api/feishu-workpartner/tasks')
     async def create_task(request: Request):
         async def run():

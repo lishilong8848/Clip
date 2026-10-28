@@ -9,6 +9,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -58,12 +59,39 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(selection.full)
         self.assertEqual(selection.selected, frozenset(CHECKS))
 
-    def test_unchanged_exact_reuse_keeps_mandatory_checks(self):
+    def test_unchanged_exact_reuse_keeps_safety_and_updater_checks(self):
         self.baseline()
         selection = self.select()
         self.assertFalse(selection.full)
-        self.assertEqual(selection.selected, frozenset(check for check in CHECKS if preflight.check_areas(check) is None))
+        self.assertEqual(selection.selected, frozenset(check for check in CHECKS
+            if check.startswith("safety:") or check in preflight.EXACT_RECHECK_TESTS))
         self.assertNotIn("bin.test_learning", selection.selected)
+        self.assertNotIn("bin.test_notice_identity_boundaries", selection.selected)
+        self.assertIn("bin.test_patch_mirror", selection.selected)
+
+    def test_exact_reuse_expires_without_extending_full_baseline(self):
+        self.baseline()
+        original_time = json.loads(self.cache.read_text())["payload"]["full_passed_at"]
+        with patch.object(preflight.time, "time", return_value=original_time + preflight.FULL_BASELINE_MAX_AGE - 1):
+            selection = self.select()
+            self.assertFalse(selection.full)
+            selection.passed(*selection.selected)
+            selection.finish(self.state)
+        self.assertEqual(json.loads(self.cache.read_text())["payload"]["full_passed_at"], original_time)
+        for now in (original_time - 1, original_time + preflight.FULL_BASELINE_MAX_AGE):
+            with self.subTest(now=now), patch.object(preflight.time, "time", return_value=now):
+                self.assertTrue(self.select().full)
+
+    def test_unknown_or_invalid_full_baseline_time_is_untrusted(self):
+        self.baseline()
+        envelope = json.loads(self.cache.read_text())
+        for value in (None, True, -1, "invalid", float("nan"), float("inf"), 10 ** 100):
+            envelope["payload"]["full_passed_at"] = value
+            envelope["signature"] = preflight.hmac.new(self.cache.with_suffix(".key").read_bytes(),
+                preflight._digest(envelope["payload"]).encode(), "sha256").hexdigest()
+            self.cache.write_text(json.dumps(envelope))
+            with self.subTest(value=value):
+                self.assertTrue(self.select().full)
 
     def test_learning_change_selects_consumers_and_frontend(self):
         self.baseline()
@@ -315,10 +343,11 @@ class PackagingIntegrationTests(unittest.TestCase):
             snapshot_mock = stack.enter_context(patch.object(preflight, "snapshot", side_effect=snapshot,
                                                             return_value=self.state))
             frontend = stack.enter_context(patch.object(packaging, "_run_frontend_notice_navigation_checks"))
+            self.frontend = frontend
             packaging._run_packaging_preflight_tests()
         return frontend, snapshot_mock
 
-    def test_normal_run_reuses_pass_and_retains_core_tests(self):
+    def test_normal_unchanged_run_reuses_pass_and_retains_safety_tests(self):
         self.run_preflight()
         full_count = len(self.executed)
         self.executed.clear()
@@ -327,9 +356,21 @@ class PackagingIntegrationTests(unittest.TestCase):
         self.assertNotIn("bin.test_learning", self.executed)
         self.assertIn("bin.test_packaging_preflight_selection", self.executed)
         self.assertIn("bin.test_patch_mirror", self.executed)
+        self.assertNotIn("bin.test_notice_identity_boundaries", self.executed)
+        self.assertNotIn("bin.test_module_access", self.executed)
+        self.assertIn("bin.test_release_readiness", self.executed)
+        self.assertIn("bin.test_transport_safety", self.executed)
+        self.assertIn("bin.test_update_check_recovery", self.executed)
+        self.assertFalse(frontend.call_args.args[0].full)
+
+    def test_changed_known_module_still_reruns_all_mandatory_checks(self):
+        self.run_preflight()
+        self.executed.clear()
+        self.state["files"][LEARNING] = "changed"
+        frontend, _ = self.run_preflight()
         self.assertIn("bin.test_notice_identity_boundaries", self.executed)
         self.assertIn("bin.test_module_access", self.executed)
-        self.assertIn("bin.test_release_readiness", self.executed)
+        self.assertIn("bin.test_learning", self.executed)
         self.assertFalse(frontend.call_args.args[0].full)
 
     def test_cli_full_flags_bypass_normal_reuse(self):
@@ -356,6 +397,7 @@ class PackagingIntegrationTests(unittest.TestCase):
         with self.assertRaises(subprocess.CalledProcessError):
             self.run_preflight(failure=subprocess.CalledProcessError(1, "fixture"))
         self.assertFalse((self.build / ".preflight-coverage.json").exists())
+        self.frontend.assert_not_called()
 
     def test_midrun_change_stops_without_advancing_baseline(self):
         self.run_preflight()
@@ -391,6 +433,40 @@ class PackagingIntegrationTests(unittest.TestCase):
             packaging._run_frontend_notice_navigation_checks(selection)
         names = {Path(call.args[0][1]).name for call in run.call_args_list}
         self.assertEqual(names, preflight.CORE_FRONTEND)
+
+    def test_frontend_independent_long_checks_run_concurrently(self):
+        names = ("check-legacy-module-entry.mjs", "check-pre-shift-edits.mjs", "check-workspace-navigation.mjs")
+        barrier, calls = threading.Barrier(2), []
+        def run(args, **kwargs):
+            name = Path(args[1]).name
+            calls.append(name)
+            if name in names[:2]:
+                barrier.wait(timeout=5)
+        with patch.object(packaging, "FRONTEND_PREFLIGHT_SCRIPTS", names), \
+                patch.object(packaging, "PREFLIGHT_WORKERS", 2), \
+                patch.object(packaging.shutil, "which", return_value="fixture-node"), \
+                patch.object(packaging, "_run_preflight_check", side_effect=run):
+            packaging._run_frontend_notice_navigation_checks()
+        self.assertEqual(set(calls[:2]), set(names[:2]))
+        self.assertEqual(calls[2:], [names[2]])
+
+    def test_frontend_parallel_failure_stops_remaining_checks(self):
+        names = ("check-legacy-module-entry.mjs", "check-pre-shift-edits.mjs", "check-workspace-navigation.mjs")
+        barrier, calls = threading.Barrier(2), []
+        def run(args, **kwargs):
+            name = Path(args[1]).name
+            calls.append(name)
+            if name in names[:2]:
+                barrier.wait(timeout=5)
+            if name == names[0]:
+                raise subprocess.CalledProcessError(1, name)
+        with patch.object(packaging, "FRONTEND_PREFLIGHT_SCRIPTS", names), \
+                patch.object(packaging, "PREFLIGHT_WORKERS", 2), \
+                patch.object(packaging.shutil, "which", return_value="fixture-node"), \
+                patch.object(packaging, "_run_preflight_check", side_effect=run), \
+                self.assertRaises(subprocess.CalledProcessError):
+            packaging._run_frontend_notice_navigation_checks()
+        self.assertEqual(set(calls), set(names[:2]))
 
     def test_non_unittest_checks_receive_isolated_data(self):
         directories = []

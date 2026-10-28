@@ -169,7 +169,8 @@ def parse_message(payload, app_id, bot_id, *, inbox=None):
             lines.append(''.join(fragments))
         question = '\n'.join(lines)
     for mention in mentions:
-        question = question.replace(str(mention.get("key") or "\x00"), "")
+        name = '' if (mention.get('id') or {}).get('open_id') == bot_id else str(mention.get('name') or '被提及人员')
+        question = question.replace(str(mention.get("key") or "\x00"), name)
     question = question.strip()
     from .feishu_assistant_files import parse_resources, parse_audio_resource
     try:
@@ -1236,7 +1237,7 @@ class FeishuAssistant:
         actor = await actor_for(self.controller, self.runtime, request)
         await self._prepare_topic(message, request, actor)
         request.state.feishu_message_route = {key: str(message.get(key) or '') for key in
-            ('app_id', 'chat_id', 'chat_type', 'message_id', 'root_id', 'thread_id', 'sender_id', 'union_id')}
+            ('app_id', 'chat_id', 'chat_type', 'message_id', 'parent_id', 'root_id', 'thread_id', 'sender_id', 'union_id')}
         return request, actor
 
     async def _prepare_topic(self, message, request, actor):

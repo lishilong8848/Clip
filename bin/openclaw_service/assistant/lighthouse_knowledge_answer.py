@@ -419,6 +419,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     seen_evidence = {_evidence_signature(item) for item in items}
     gaps, partial, partial_sources, partial_items = [], '', [], []
     repairs, rewrites, invalid_answer, generation_problem = 0, 0, False, ''
+    unresolved_repair = False
     attempted_profiles = set()
     # Only read repair is allowed here; no tools that send messages or mutate business records.
     for attempt in range(3):
@@ -574,7 +575,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                                       checked['answer_review'])
                     review_feedback = checked['answer_review'].get('issues', [])
                     requested = checked['answer_review'].get('read_queries', [])
-                    gaps = ['部分结论仍需核对依据']
+                    gaps = gaps or ['部分结论仍需核对依据']
                     reviewed, reviewed_answer = None, None
                     if not requested and attempt < 2 and time.monotonic() < deadline:
                         rewrites += 1
@@ -591,6 +592,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if not requested and not gaps and answer != '[NO_APPLICABLE_DOCUMENT]':
             break
         if attempt == 2 or time.monotonic() >= deadline:
+            unresolved_repair = bool(requested or gaps)
             break
         if not requested:
             try:
@@ -611,6 +613,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                 pass
         queries = _repair_queries(requested if isinstance(requested, list) else [], seen_queries)
         if not queries:
+            unresolved_repair = bool(requested or gaps)
             break
         await emit('status', {'label': '正在补查缺失或不适用的资料'})
         groups = []
@@ -635,6 +638,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                 found['warning'] = '；'.join(filter(None, [found.get('warning'), extra['warning']]))
         novel = {_evidence_signature(row) for group in groups for row in group} - seen_evidence
         if not novel:
+            unresolved_repair = True
             break
         seen_evidence.update(novel)
         # Keep supported chunks, but let new evidence displace irrelevant first hits.
@@ -671,7 +675,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     if reviewer and answer != reviewed_answer:
         checked = await review(answer, sources, items, defer=False)
         answer, reviewed = checked['answer'], checked.get('answer_review')
-        if (reviewed or {}).get('status') in {'passed', 'corrected', 'limited'}:
+        if (reviewed or {}).get('status') in {'passed', 'corrected', 'limited'} and not unresolved_repair:
             gaps = []
     if rejected_reply and reviewed and reviewed.get('status') == 'unavailable':
         from .lighthouse_review import UNVERIFIED_REPLY
@@ -705,5 +709,5 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     result['_knowledge_evidence'] = [dict(source['data']) for source in sources[offset:]]
     result['knowledge_retrieval'] = {'repair_rounds': repairs, 'searches': int(not reused) + len(topic_results),
                                    'reused_document_refs': reused,
-                                   'sources': len(sources), 'complete': not bool(gaps or (compound and missing))}
+                                   'sources': len(sources), 'complete': not bool(gaps or unresolved_repair or (compound and missing))}
     return result

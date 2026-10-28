@@ -23,7 +23,8 @@ LEASE_SECONDS = 120
 def render_card(report, portal_url):
     """Pure renderer. Rows: person_id/name/scope/shift/answered/assigned/reason.
 
-    report: date, completed/unfinished/failed/unverified lists; optional example and as_of.
+    report: date, completed/unfinished/failed/unverified lists; optional question_issues,
+    question_problem_count, example and as_of.
     portal_url is the existing portal base URL, not a new privileged endpoint.
     """
     date = report['date']
@@ -82,11 +83,48 @@ def render_card(report, portal_url):
                     row.get('shift', '') + '班' if row.get('shift') else '', row.get('name', '')]))
                 lines.append((label + '：' if label else '') + row['reason'])
             elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}})
+    if report.get('question_issues'):
+        lines = [f"待处理质疑（截至发送时）· {len(report['question_issues'])} 题"]
+        for row in report['question_issues']:
+            lines.append(f"{row['stem']}｜当前答案：{row['answer']}｜质疑原因：{'；'.join(row['reasons'])}")
+        elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}})
+    if report.get('question_problem_count'):
+        elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
+            'content': f"题库待核对 {report['question_problem_count']} 题"}})
     elements.append({'tag': 'note', 'elements': [{'tag': 'plain_text', 'content':
         '口径：每日题单，夜班跨零点归排班日，截至发送时核实；不含长白、分享会、主动练习及未安排。'
         + (' 核实时间：' + report['as_of'] if report.get('as_of') else '')}]})
     card['elements'] = [*elements, card['elements'][-1]]
     return card
+
+
+def _question_summary(service, conn):
+    questions = {q['id']: q for q in service._all('question', conn)}
+    grouped = {}
+    for issue in sorted(service._all('issue', conn), key=lambda row: (row.get('updated_at', ''), row['id'])):
+        if issue.get('status') not in {'pending', 'processing', 'needs_info'}:
+            continue
+        qid = issue['question_id']
+        question = questions.get(qid) or issue.get('question', {})
+        answer = question.get('answer_text') or ('见参考答案附件' if any(
+            a.get('kind') == 'answer' for a in question.get('attachments', [])) else '未设置')
+        options = question.get('options') or []
+        selected = set(question.get('correct_option_ids') or [])
+        if question.get('type') != 'interview' and selected and selected <= {o['id'] for o in options}:
+            answer = '；'.join(f"{o.get('label') or chr(65 + index)}. {o['text']}"
+                for index, o in enumerate(options) if o['id'] in selected)
+        row = grouped.setdefault(qid, {'question_id': qid, 'reasons': []})
+        row.update(stem=' '.join(core.text(question.get('stem')).split()) or '题干待核对',
+                   answer=' '.join(core.text(answer).split()))
+        for description in [issue.get('description'), *(c.get('text') for c in issue.get('comments', []) if not c.get('is_admin'))]:
+            reason = ' '.join(core.text(description).split())
+            if reason and reason not in row['reasons']:
+                row['reasons'].append(reason)
+    for row in grouped.values():
+        if not row['reasons']:
+            row['reasons'].append('原因待补充')
+    return {'question_issues': list(grouped.values()), 'question_problem_count': sum(
+        bool(q.get('problems')) and q.get('status') != 'deleted' for q in questions.values())}
 
 
 def collect(service, date, current, conn, directory, app_id):
@@ -97,7 +135,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .pre_shift_checks import windows
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
-              'completed': [], 'unfinished': [], 'failed': [], 'unverified': []}
+              'completed': [], 'unfinished': [], 'failed': [], 'unverified': [], **_question_summary(service, conn)}
     view = SimpleNamespace(_get=lambda kind, key: service._get(kind, key, conn), settings=service.settings)
     roster = completion._snapshot(view, date)
     if roster is None:
@@ -297,7 +335,7 @@ def send_due(service, current):
             if job.get('lease') != token or job['status'] != 'pending' or service._stop.is_set():
                 return
             report = collect(service, date, checked, conn, directory if ready else {}, app_id if ready else '')
-            if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified')):
+            if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified', 'question_issues', 'question_problem_count')):
                 job.update(status='skipped_completed', report=report, error='')
             elif not url:
                 job.update(due_at=current.timestamp() + 300, error='学练入口地址未就绪，日报等待重试。')
@@ -317,7 +355,7 @@ def send_due(service, current):
             if allowed:
                 report = collect(service, date, checked, conn, directory if ready else {}, app_id if ready else '')
                 latest['report'] = report
-                if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified')):
+                if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified', 'question_issues', 'question_problem_count')):
                     latest.update(status='skipped_completed', attempted_at=None, error='')
                     allowed = False
                 else:

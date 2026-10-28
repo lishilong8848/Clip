@@ -1742,12 +1742,27 @@ def _run_frontend_notice_navigation_checks(selection=None) -> None:
     node = shutil.which("node")
     if not node:
         raise RuntimeError("缺少 Node.js，无法核验新旧导航与通告图片交互，已停止打包。")
+    selected = []
     for name in FRONTEND_PREFLIGHT_SCRIPTS:
         script = frontend / "scripts" / name
         if not script.is_file():
             raise RuntimeError(f"缺少前端专项检查脚本 {name}，已停止打包。")
         if selection is not None and "frontend:" + name not in selection.selected:
             continue
+        selected.append(script)
+
+    # These two long checks use separate output folders and independent servers.
+    parallel_names = {"check-legacy-module-entry.mjs", "check-pre-shift-edits.mjs"}
+    parallel = [script for script in selected if script.name in parallel_names]
+    if len(parallel) == 2 and PREFLIGHT_WORKERS > 1:
+        log("两项独立的前端长检查并行执行。")
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(_run_preflight_check, [node, os.fspath(script)],
+                                   cwd=frontend, check=True, timeout=300) for script in parallel]
+            for future in as_completed(futures):
+                future.result()
+        selected = [script for script in selected if script not in parallel]
+    for script in selected:
         _run_preflight_check([node, os.fspath(script)], cwd=frontend, check=True, timeout=300)
 
 
@@ -2071,13 +2086,6 @@ def _run_packaging_preflight_tests() -> None:
     else:
         raise RuntimeError("缺少发布就绪检查脚本，已中止打包。")
 
-    if selection.full:
-        _run_frontend_notice_navigation_checks()
-    else:
-        _run_frontend_notice_navigation_checks(selection)
-    selection.passed(*(name for name in frontend_checks if name in selection.selected))
-    log("所选前端检查通过，其余检查已核对精确缓存。")
-
     notice_flow_smoke = PROJECT_ROOT / "bin" / "tools" / "notice_flow_smoke.py"
     if notice_flow_smoke.exists():
         _run_preflight_check(
@@ -2091,28 +2099,35 @@ def _run_packaging_preflight_tests() -> None:
         raise RuntimeError("缺少通告链路静态烟测脚本，已中止打包。")
 
     run_tests(test_groups[0])
-    log("通告 ID 边界测试通过。")
+    log("通告 ID 边界检查已核对（执行或复用通过记录）。")
 
     # Timing-sensitive checks retain their strict budgets outside CPU-heavy shards.
     run_tests(test_groups[1])
     run_tests(test_groups[2])
     run_tests(test_groups[3])
-    log("画像学练与灯塔助手专项测试通过。")
+    log("画像学练与灯塔助手专项检查已核对（执行或复用通过记录）。")
     run_tests(test_groups[4])
-    log("助手后台、统一启动、迁移、权限代理与更新专项测试通过。")
+    log("助手后台、统一启动、迁移、权限代理与更新专项检查已核对（执行或复用通过记录）。")
 
     run_tests(test_groups[5])
-    log("计划收敛审查专项测试通过。")
+    log("计划收敛审查专项检查已核对（执行或复用通过记录）。")
 
     run_tests(test_groups[6])
-    log("通告与维修可靠性、恢复及进程退出测试通过。")
+    log("通告与维修可靠性、恢复及进程退出检查已核对（执行或复用通过记录）。")
 
     run_tests(test_groups[7])
-    log("重保管理专项测试通过。")
+    log("重保管理专项检查已核对（执行或复用通过记录）。")
 
     run_tests(test_groups[8])
-    log("补丁传输与打包完整性测试通过。")
+    log("补丁传输与打包完整性检查已核对（执行或复用通过记录）。")
     run_tests(test_groups[9])
+
+    if selection.full:
+        _run_frontend_notice_navigation_checks()
+    else:
+        _run_frontend_notice_navigation_checks(selection)
+    selection.passed(*(name for name in frontend_checks if name in selection.selected))
+    log("所选前端检查通过，其余检查已核对精确缓存。")
 
     log("正在复核预检期间文件及环境是否保持一致。")
     selection.finish(packaging_preflight.snapshot(PROJECT_ROOT, test_python) if before is not None else None)

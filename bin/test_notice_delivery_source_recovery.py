@@ -176,6 +176,99 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
         payload['ended_at'] = '2026-10-27 17:17:12.123'
         return payload, remote, row
 
+    def change_option_source(self):
+        payload, remote, row = self.change_lookup_source()
+        remote.update({'变更进度': ['opt-progress'], '开始/结束状态打标': ['opt-finished'],
+                       '实际开始时间': 46321.375, '实际结束时间': 46322.7201388889})
+        for name, options in (('变更进度', {'opt-progress': '进行中'}),
+                              ('开始/结束状态打标', {'opt-finished': '正常结束'})):
+            self.service._change_field_meta_by_name[name] = portal.FieldMeta(
+                'field-' + name, name, 'Formula', 20, False, options, list(options.values()), True)
+        row.update(self.service._normalize_record({'record_id': 'rec-source', 'fields': copy.deepcopy(remote)},
+            meta_by_name=self.service._change_field_meta_by_name, work_type='change', notice_type='变更通告'))
+        payload['ended_at'] = '2026-10-27 17:17:00'
+        return payload, remote, row
+
+    def test_formula_option_ids_and_excel_dates_confirm_without_cloud_writes(self):
+        payload, remote, row = self.change_option_source()
+        for wrapped in (False, True):
+            with self.subTest(wrapped=wrapped):
+                remote['开始/结束状态打标'] = ({'type': 3, 'value': ['opt-finished']}
+                                             if wrapped else ['opt-finished'])
+                self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+                self.assertEqual(row['display_fields']['开始/结束状态打标'], '正常结束')
+                self.assertEqual(self.service._change_progress_value(row), '已结束')
+                refreshed = self.service._normalize_record({'record_id': 'rec-source', 'fields': remote},
+                    meta_by_name=self.service._change_field_meta_by_name, work_type='change', notice_type='变更通告')
+                self.assertEqual(self.service._change_progress_value(refreshed), '已结束')
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_cold_source_metadata_is_retained_for_plan_status_after_binding(self):
+        payload, _, row = self.change_option_source()
+        metadata = self.service._change_field_meta_by_name
+        self.service._change_field_meta_by_name = {}
+        self.service._load_table_fields = Mock(return_value=(list(metadata.values()), metadata))
+        self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+        self.assertEqual(self.service._change_progress_value(row), '已结束')
+        self.assertNotIn(row, self.service._filter_change_records(scope='A'))
+        self.service._load_table_fields.assert_called_once()
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_unknown_execution_option_id_stays_pending(self):
+        payload, remote, _ = self.change_option_source()
+        remote['开始/结束状态打标'] = ['opt-unknown']
+        with self.assertRaises(portal.NoticeSourcePending):
+            self.service.sync_notice_source_ended_fields(payload)
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_writable_maintenance_option_id_already_ended_does_not_repeat_write(self):
+        payload, remote, _ = self.source()
+        remote.update({'维护实施状态': ['opt-ended'], '实际结束时间': payload['ended_at']})
+        self.service._field_meta_by_name['维护实施状态'] = portal.FieldMeta(
+            'field-state', '维护实施状态', 'SingleSelect', 3, False,
+            {'opt-ended': '已结束'}, ['进行中', '已结束'], False)
+        self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_native_planned_binding_commits_ended_identity_and_keeps_independent_second_notice(self):
+        from clipflow_backend.main import FastAPIPortalController
+        from fastapi.testclient import TestClient
+
+        payload, _, row = self.change_option_source()
+        target = self.change_target()
+        target['raw_fields']['变更结束时间'] = 1793092620000
+        validation = self.validate_change_target(target)
+        self.service._summary_lock = threading.RLock()
+        self.service._work_status_dir = Path(self.tmp.name) / 'work-status'
+        self.service._summary_dir = Path(self.tmp.name) / 'summaries'
+        self.service._legacy_summary_migrated = True
+        self.store.upsert_qt_active_item({'active_item_id': 'independent-two', 'target_record_id': 'rec-two',
+            'record_id': 'rec-two', 'work_type': 'change', 'notice_type': '变更通告', 'status': '开始',
+            'title': 'HVDC防护罩更换（二）', 'building_codes': ['A']}, section='other', origin='portal')
+        session = {'user': {'open_id': 'fixture-owner'}, 'role': 'building', 'allowed_scopes': ['A']}
+        with (
+            patch.object(server.PortalRuntime, 'state_store', self.store),
+            patch.object(server.PortalRuntime, 'service', self.service),
+            patch('clipflow_backend.main.LanPortalStateStore', return_value=self.store),
+            patch.object(server.PortalRuntime.auth_manager, 'account_profile', return_value={'modules': ['change']}),
+            patch.object(server.PortalRuntime.auth_manager, 'scope_allowed', return_value=True),
+            patch.object(server.PortalRuntime.auth_manager, 'is_admin', return_value=False),
+            patch.object(self.service, 'validate_notice_identity_binding', return_value=validation),
+        ):
+            controller = FastAPIPortalController(host='127.0.0.1', port=18766)
+            with patch.object(controller, '_current_session', return_value=session):
+                response = TestClient(controller._build_app()).post('/api/notice-identity/bind', json={
+                    **payload, 'scope': 'A', 'binding_context': 'planned', 'notice_type': '变更通告',
+                    'title': 'HVDC防护罩更换', 'building': 'A楼'})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertTrue(response.json()['data']['source_ended_synced'])
+        identity = self.store.resolve_notice_identity(work_type='change', source_record_id='rec-source')
+        self.assertEqual(identity['target_record_id'], 'rec-target')
+        self.assertEqual(identity['payload']['ended_at'], '2026-10-27 17:17:00.000')
+        self.assertEqual(self.service._change_progress_value(row), '已结束')
+        self.assertEqual([item['payload']['target_record_id'] for item in self.store.list_visible_qt_active_items()], ['rec-two'])
+        self.service._patch_record_fields.assert_not_called()
+
     def validate_change_target(self, target):
         self.service._source_record_in_scope_snapshot = Mock(return_value={
             'record_id': 'rec-source', 'work_type': 'change', 'display_fields': {}})

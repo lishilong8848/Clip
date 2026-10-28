@@ -150,6 +150,11 @@ class PortalAuthority:
                     for question in topic['questions'][-8:] if isinstance(question, str)]
             if isinstance(topic.get('documents'), list):
                 current['_feishu_topic']['documents'] = copy.deepcopy(topic['documents'][-8:])
+        route = getattr(getattr(context['request'], 'state', None), 'feishu_message_route', None)
+        if isinstance(route, dict) and current.get('channel') == 'feishu:' + str(route.get('chat_id') or ''):
+            current['_feishu_message_context'] = {
+                'has_reference': bool(route.get('parent_id') or route.get('root_id')),
+                'has_root': bool(route.get('root_id')), 'chat_type': route.get('chat_type')}
         current = shared_query_actor(current)
         if schedule:
             current.update(_scheduled_task=schedule['id'], _scheduled_mode=schedule['mode'],
@@ -343,7 +348,12 @@ class PortalAuthority:
                 task = asyncio.create_task(catalog.invoke(operation, gateway_request, file_provider=provider.get))
             self.writes[key] = task
         # Dropping the chat connection must not cancel an already submitted write.
-        return copy.deepcopy(await asyncio.shield(task))
+        result = await asyncio.shield(task)
+        if descriptor['path'] == '/api/feishu-workpartner/messages/send' and not result.get('ok'):
+            # The durable per-operation ledger, not a cached HTTP rejection, owns retry safety.
+            if self.writes.get(key) is task:
+                self.writes.pop(key, None)
+        return copy.deepcopy(result)
 
     async def dispatch(self, message):
         if not isinstance(message, dict) or message.get('instance') != self.client.instance or message.get('lease') != self.client.lease:

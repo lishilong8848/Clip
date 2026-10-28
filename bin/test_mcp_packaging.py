@@ -25,10 +25,11 @@ class PackagingTests(unittest.TestCase):
                     'check-learning-question-import.mjs', 'check-pre-shift-edits.mjs',
                     'check-repair-plan-binding.mjs', 'check-notice-convergence-confirmation.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
-        with patch.object(package.shutil, 'which', return_value='fixture-node'), \
+        with patch.object(package, 'PREFLIGHT_WORKERS', 2), \
+                patch.object(package.shutil, 'which', return_value='fixture-node'), \
                 patch.object(package, '_run_preflight_check') as run:
             package._run_frontend_notice_navigation_checks()
-        self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], expected)
+        self.assertCountEqual([Path(call.args[0][1]).name for call in run.call_args_list], expected)
         for call in run.call_args_list:
             self.assertEqual(call.args[0][0], 'fixture-node')
             self.assertEqual(call.kwargs, {'cwd': frontend, 'check': True, 'timeout': 300})
@@ -44,14 +45,20 @@ class PackagingTests(unittest.TestCase):
                     patch.object(package, '_run_preflight_check') as run:
                 with self.assertRaisesRegex(RuntimeError, name):
                     package._run_frontend_notice_navigation_checks()
-                self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], expected[:index])
+                run.assert_not_called()
+            def fail_named(args, **_kwargs):
+                if Path(args[1]).name == name:
+                    raise subprocess.CalledProcessError(1, name)
             with self.subTest(failed=name), \
+                    patch.object(package, 'PREFLIGHT_WORKERS', 2), \
                     patch.object(package.shutil, 'which', return_value='fixture-node'), \
-                    patch.object(package, '_run_preflight_check',
-                                 side_effect=[None] * index + [subprocess.CalledProcessError(1, name)]) as run:
+                    patch.object(package, '_run_preflight_check', side_effect=fail_named) as run:
                 with self.assertRaises(subprocess.CalledProcessError):
                     package._run_frontend_notice_navigation_checks()
-                self.assertEqual([Path(call.args[0][1]).name for call in run.call_args_list], expected[:index + 1])
+                parallel = {'check-legacy-module-entry.mjs', 'check-pre-shift-edits.mjs'}
+                serial = [item for item in expected if item not in parallel]
+                reached = parallel if name in parallel else parallel | set(serial[:serial.index(name) + 1])
+                self.assertCountEqual([Path(call.args[0][1]).name for call in run.call_args_list], reached)
 
     def test_document_extras_and_knowledge_compatible_versions_are_checked(self):
         from bin.upload_event_module.services import dependency_bootstrap as dependencies

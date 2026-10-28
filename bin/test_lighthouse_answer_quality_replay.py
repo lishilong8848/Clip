@@ -66,9 +66,11 @@ class ScriptedModel:
             self.calls.append({'kind': kind, 'packet': copy.deepcopy(packet),
                                'messages': copy.deepcopy(messages), 'options': copy.deepcopy(kwargs)})
             expected, response = self.steps.popleft()
-            if kind != expected:
+            if kind != expected and not (expected == 'correction' and kind in {'generate', 'rewrite'}):
                 raise AssertionError(f'Expected {expected}, received {kind}')
             value = response(packet) if callable(response) else response
+            if expected == 'correction' and kind == 'generate' and isinstance(value, str):
+                value = envelope(value)
             return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
         except Exception as exc:
             # Production catches provider failures; retain them so the replay still fails.
@@ -228,31 +230,39 @@ class AnswerQualityReplay(unittest.IsolatedAsyncioTestCase):
                         ('generate', envelope(wrong)),
                         ('review', verdict(wrong, [(1, '业务稿蓝要求使用蓝色标签'), (2, '业务稿红要求使用红色标签')],
                                            status='conflict', issue='入库时间不是业务批准；需披露冲突及替代关系缺失。')),
-                        ('rewrite', fixed),
+                        ('correction', fixed),
                         ('review', verdict(fixed, [(1, '未记载批准或替代关系'), (2, '未记载批准或替代关系')]))])
                 self.assertEqual(result['answer'], unicodedata.normalize('NFKC', fixed))
                 self.assertEqual(result['answer_review']['repairs'], 1)
                 self.assertNotIn(wrong, json.dumps(events, ensure_ascii=False))
+                correction = model.calls[2]['packet']
+                self.assertIn('入库时间不是业务批准', ' '.join(correction.get('review_feedback') or correction.get('issues') or []))
                 self.assertEqual([call['options']['profile']['id'] for call in model.calls],
                                  ['writer', 'checker', 'writer', 'checker'])
 
     async def test_partial_source_failure_retains_supported_result_and_specific_gap(self):
         doc = self.document('QX03-available', 'QX03登记规则：登记在乙类清单。复核条件另见附录。')
         supported = '应登记在乙类清单。[1]'
+        incomplete = supported + ' 复核条件尚未核实。'
+        needs_appendix = {'passed': False, 'issues': ['复核条件缺少依据。'],
+                          'read_queries': ['QX03复核条件附录']}
         for channel in CHANNELS:
             with self.subTest(channel=channel):
                 search, calls = self.retrieval([[doc], AssistantError('合成附录暂不可用', 503)])
                 with search:
                     result, model, _ = await self.company(channel, 'QX03登记规则及复核条件是什么？', [
                         ('generate', envelope(supported, ['QX03复核条件附录'], ['复核条件'])),
-                        ('review', verdict(supported, [(1, '登记在乙类清单')]))])
+                        ('review', needs_appendix), ('review', needs_appendix),
+                        ('correction', incomplete),
+                        ('review', verdict(incomplete, [(1, '登记在乙类清单'), (1, '复核条件另见附录')]))])
                 self.assertEqual(len(calls), 2)
                 self.assertFalse(result['knowledge_retrieval']['complete'])
                 self.assertEqual(result['knowledge_retrieval']['repair_rounds'], 0)
                 self.assertIn(supported, result['answer'])
-                self.assertRegex(result['answer'], r'尚未核实[:：]复核条件')
+                self.assertIn('复核条件尚未核实', result['answer'])
                 self.assertIn('合成附录暂不可用', result['answer'])
-                self.assertEqual([call['kind'] for call in model.calls], ['generate', 'review'])
+                self.assertEqual(model.calls[0]['kind'], 'generate')
+                self.assertGreaterEqual(sum(call['kind'] == 'review' for call in model.calls), 2)
                 self.assertFalse(model.calls[-1]['packet']['knowledge_retrieval']['complete'])
 
     async def test_requested_short_and_detailed_answers_reach_generation_and_review(self):
@@ -266,7 +276,7 @@ class AnswerQualityReplay(unittest.IsolatedAsyncioTestCase):
                     if answer == short:
                         steps = [('generate', envelope(detailed)),
                                  ('review', {'passed': False, 'issues': ['用户只要一句结果，保留例外并缩短。']}),
-                                 ('rewrite', short)]
+                                 ('correction', short)]
                     steps.append(('review', verdict(answer, [(1, '结论是登记乙类。适用范围为B楼设备乙。例外是演练样本无需登记。')])))
                     search, _ = self.retrieval([[doc]])
                     with search:

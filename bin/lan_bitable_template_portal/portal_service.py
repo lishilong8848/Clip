@@ -22388,21 +22388,31 @@ class MaintenancePortalService(RepairOperationsMixin):
         if (app_token, table_id) != (default_app, default_table) or (
             not guard.get('mock_external') and status_field not in meta_by_name
         ):
-            _, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+            metas, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+            if (app_token, table_id) == (default_app, default_table):
+                with self._refresh_lock:
+                    prefix = '_change_field_meta' if source_work_type == WORK_TYPE_CHANGE else '_field_meta'
+                    setattr(self, prefix + '_list', metas)
+                    setattr(self, prefix + '_by_name', meta_by_name)
         status_meta = meta_by_name.get(status_field)
         if not status_meta and not guard.get('mock_external'):
             raise NoticeSourcePending('源表状态字段元信息缺失，后台将重新读取字段定义后重试，未猜测写入。')
         writable_status = bool(status_meta and not self._field_meta_is_readonly(status_meta))
         expected_status = '已结束' if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_PROGRESS_ENDED
+        def state_text(fields, name):
+            return self._normalize_field_value(name, self._repair_management_plain_text(fields.get(name)),
+                                               meta_by_name=meta_by_name)
+
         def status_ended(fields):
             if source_work_type == WORK_TYPE_CHANGE and not writable_status:
-                progress = self._repair_management_plain_text(fields.get(status_field))
+                progress = state_text(fields, status_field)
                 legacy_execution_status = '开始/结束状态打标' not in meta_by_name and (
                     progress in {'正常结束', '延期结束', '延迟结束'}
                     or not self._change_time_range({'display_fields': fields})[0])
-                return self._change_execution_has_ended(fields, allow_status_fallback=legacy_execution_status)
+                return self._change_execution_has_ended(fields, allow_status_fallback=legacy_execution_status,
+                                                         meta_by_name=meta_by_name)
             return self._maintenance_status_is_completed({'display_fields': {
-                '维护实施状态': self._repair_management_plain_text(fields.get(status_field)).strip()}})
+                '维护实施状态': state_text(fields, status_field)}})
 
         current_end = self._repair_management_datetime_ms(current_fields.get('实际结束时间'))
         same_end = current_end == ended_at_ms
@@ -22432,11 +22442,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                 raise NoticeSourcePending("源记录本次实际结束时间尚未准确读回，保留同步任务等待核验。")
             local_fields = {
                 "实际结束时间": self._format_source_datetime(actual_end),
-                status_field: self._repair_management_plain_text(confirmed_fields[status_field]).strip(),
+                status_field: state_text(confirmed_fields, status_field),
             }
             if source_work_type == WORK_TYPE_CHANGE:
-                local_fields['开始/结束状态打标'] = self._repair_management_plain_text(
-                    confirmed_fields.get('开始/结束状态打标'))
+                local_fields['开始/结束状态打标'] = state_text(confirmed_fields, '开始/结束状态打标')
                 # Persist the verified dates at full precision; snapshot patches update display fields only.
                 for name in CHANGE_EXECUTION_DATETIME_FIELDS:
                     if name in confirmed_fields:
@@ -22476,13 +22485,19 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         return self._building_codes_from_value(raw_building)
 
-    def _change_execution_has_ended(self, fields: dict[str, Any], *, allow_status_fallback: bool = False) -> bool:
-        marker = self._repair_management_plain_text(fields.get("开始/结束状态打标"))
+    def _change_execution_has_ended(self, fields: dict[str, Any], *, allow_status_fallback: bool = False,
+                                    meta_by_name: dict[str, FieldMeta] | None = None) -> bool:
+        metadata = meta_by_name if meta_by_name is not None else getattr(self, '_change_field_meta_by_name', {})
+        def state_text(name):
+            value = self._repair_management_plain_text(fields.get(name))
+            return self._normalize_field_value(name, value, meta_by_name=metadata) if metadata else value
+
+        marker = state_text("开始/结束状态打标")
         if '开始/结束状态打标' not in fields and allow_status_fallback:
-            marker = self._repair_management_plain_text(fields.get('变更进度'))
+            marker = state_text('变更进度')
         if marker not in {"正常结束", "延期结束", "延迟结束", "已结束"}:
             return False
-        progress = self._repair_management_plain_text(fields.get("变更进度"))
+        progress = state_text("变更进度")
         if progress in {"未开始", "退回", "已取消", "取消"}:
             return False
         end_ms = self._repair_management_datetime_ms(fields.get("实际结束时间"))

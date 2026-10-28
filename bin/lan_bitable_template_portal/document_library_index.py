@@ -5,7 +5,9 @@ from pathlib import Path
 import sqlite3
 
 
-def index_error(message):
+def index_error(message, *, status=''):
+    if status == 'blocked':
+        return '内容包含疑似敏感信息，已阻止索引；请核对并脱敏后重新向量化。'
     text = str(message or '')
     for words, result in (
         (('敏感', '凭证', '身份证'), '内容包含疑似敏感信息，已阻止索引，请先脱敏。'),
@@ -56,7 +58,7 @@ def read_index_states(path, prefix, current, *, record_ids=None):
                 vectorized = row['status'] == 'ready' and bool(chunks and chunks == vectors)
                 status = 'queued' if missing else 'text_only' if row['status'] == 'ready' and not vectorized else row['status']
                 result[row['source_key']] = {'status': status, 'vectorized': vectorized,
-                    'error': '知识库索引缺失，等待补入。' if missing else index_error(row['error']), 'missing': missing}
+                    'error': '知识库索引缺失，等待补入。' if missing else index_error(row['error'], status=status), 'missing': missing}
             return result
     except (OSError, sqlite3.Error, ValueError, TypeError, KeyError):
         return None

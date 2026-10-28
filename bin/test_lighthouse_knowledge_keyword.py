@@ -303,5 +303,41 @@ class LocalSearchTests(LocalTestCase):
         self.assertEqual(ctx.exception.status, 400)
 
 
+class FilenameFirstSearchTests(LocalTestCase):
+    def test_filename_lookup_does_not_embed_or_return_passages(self):
+        row = self.kb.upload(self.admin, *_text('正文不作为文件名目录返回', '现场仪表失联应急指引.txt'))
+        self._index(row['id'])
+        self.embedder.calls.clear()
+        found = self.kb.find_documents(self.user, '仪表失联如何响应')
+        self.assertEqual(found['items'][0]['document_id'], row['id'])
+        self.assertNotIn('text', found['items'][0])
+        self.assertEqual(self.embedder.calls, [])
+        self.assertFalse(found['complete'])
+        self.assertNotIn('source_key', found['items'][0])
+
+    def test_file_clues_prioritize_passages_without_hiding_a_better_body_only_source(self):
+        first = self.kb.upload(self.admin, *_text('一般信号的名称说明。', '信号检查目录.txt'))
+        self._index(first['id'])
+        actual = self.kb.upload(self.admin, *_text('超声信号断续时，记录测量值并按该设备规程逐项核对。', '资料总册.txt'))
+        self._index(actual['id'])
+        result = self.kb.search(self.user, '超声信号断续')
+        self.assertEqual(result['file_candidates'][0]['document_id'], first['id'])
+        self.assertIn(actual['id'], [item['document_id'] for item in result['items']])
+        self.assertIn('filename_then_passages', result['retrieval_strategy'])
+        self.assertTrue(any(item.get('filename_match') for item in result['items']))
+
+    def test_file_lookup_uses_active_version_and_current_source_permissions(self):
+        row = self.kb.upload(self.admin, *_text('旧版核对规则', '旧版仪表规范.txt'))
+        self._index(row['id'])
+        new = self.kb.upload(self.admin, *_text('新版核对规则', '在用仪表规范.txt'), document_id=row['id'], revision=1)
+        self._index(new['id'])
+        found = self.kb.find_documents(self.user, '仪表规范')
+        self.assertEqual([(item['name'], item['version']) for item in found['items']], [('在用仪表规范.txt', 2)])
+        with self.kb.connect() as db:
+            db.execute("UPDATE documents SET source_key='private-source' WHERE id=?", (row['id'],))
+        self.assertEqual(self.kb.find_documents(self.user, '仪表规范')['items'], [])
+        self.assertEqual(self.kb.search(self.user, '新版核对规则')['items'], [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -648,6 +648,33 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['answer'], FINAL)
         self.assertEqual(self.fixture.writes, [])
 
+    async def test_document_only_tool_hands_off_after_filename_lookup_without_unverified_draft(self):
+        question = '现场仪表失联时，依据在用规程应该如何处置？'
+        self.patch_intent(resolved('unknown', question=question))
+        outer = self
+        class FilenameKnowledge:
+            def find_documents(self, *args, **kwargs):
+                outer.filename_reads += 1
+                return {'items': [{key: outer.item[key] for key in ('document_id', 'name', 'version')}]}
+            evidence_current = Mock(return_value=True)
+            search = Mock(side_effect=AssertionError('Filename discovery must not retrieve passages twice'))
+        self.filename_reads = 0
+        self.fixture.portal.get_knowledge.return_value = FilenameKnowledge()
+        self.steps = [('company_documents', {'query': question, 'document_only': True}), 'UNVERIFIED_DRAFT_MUST_NOT_RUN']
+        async def review(actor, turn, history, result, authorize):
+            self.assertIn(DOCUMENT_BODY, repr(result['sources']))
+            return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
+        self.engine.answer_reviewer = SimpleNamespace(run=AsyncMock(side_effect=review))
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock, return_value=self.combined_result()) as synth:
+            result = await self.answer(self.turn(question))
+        self.assertEqual(self.filename_reads, 1)
+        self.assertEqual(len(self.transcript), 1)
+        self.assertEqual(synth.await_count, 1)
+        self.assertEqual(self.engine.answer_reviewer.run.await_count, 1)
+        self.assertNotIn('UNVERIFIED_DRAFT', repr(result))
+        self.assertEqual(result['answer'], FINAL)
+        self.assertEqual(self.fixture.writes, [])
+
     async def test_prior_company_answer_is_not_reimported_into_native_prompt(self):
         self.patch_intent()
         history = [{'question': '旧资料问题', 'answer': 'OLD_DOCUMENT_BODY', 'scopes': ['D'],

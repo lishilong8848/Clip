@@ -11,10 +11,16 @@ import secrets
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 
-VERSION = 1
+VERSION = 2
+FULL_BASELINE_MAX_AGE = 7 * 24 * 60 * 60
+EXACT_RECHECK_TESTS = frozenset((
+    "bin.test_packaging_preflight_selection", "bin.test_transport_safety",
+    "bin.test_patch_mirror", "bin.test_update_check_recovery", "bin.test_release_readiness",
+))
 FRONTEND = "bin/lan_bitable_template_portal/frontend/"
 # Only reviewed leaf modules qualify. Shared code, storage, auth, runners and
 # new paths deliberately have no mapping: they invalidate every cached check.
@@ -220,13 +226,18 @@ class Selection:
         self.completed: set[str] = set()
         self.keys = fingerprints(state, self.checks) if state else {}
         previous = self._read()
+        self.previous = previous
         self.full = True
+        unchanged = False
         self.reason = "显式 FULL" if full else "缺少可信完整基线或指纹不可用"
         if not full and state and previous:
             old_files = previous["files"]
             changed = {path for path in set(old_files) | set(state["files"])
                        if old_files.get(path) != state["files"].get(path)}
-            if previous["environment"] != state["environment"]:
+            age = time.time() - previous["full_passed_at"]
+            if age < 0 or age >= FULL_BASELINE_MAX_AGE:
+                self.reason = "完整测试基线已过期或系统时间发生变化"
+            elif previous["environment"] != state["environment"]:
                 self.reason = "执行环境或已安装依赖发生变化"
             elif set(old_files) != set(state["files"]):
                 self.reason = "文件新增或删除"
@@ -234,9 +245,12 @@ class Selection:
                 self.reason = "共享、测试、配置、依赖或未知文件发生变化"
             else:
                 self.full = False
+                unchanged = not changed
                 self.reason = "已知业务模块改动" if changed else "源文件及环境完全一致"
         self.selected = frozenset(check for check in self.checks
-            if self.full or check_areas(check) is None or previous["coverage"].get(check) != self.keys[check])
+            if self.full or check.startswith("safety:") or check in EXACT_RECHECK_TESTS
+            or (not unchanged and check_areas(check) is None)
+            or previous["coverage"].get(check) != self.keys[check])
 
     def _read(self) -> dict:
         try:
@@ -247,6 +261,9 @@ class Selection:
                     hmac.new(key, _digest(payload).encode(), "sha256").hexdigest()):
                 return {}
             if (payload["version"] != VERSION or not self.state
+                    or not isinstance(payload["full_passed_at"], (int, float))
+                    or isinstance(payload["full_passed_at"], bool)
+                    or not 0 < payload["full_passed_at"] < 10_000_000_000
                     or payload["root"] != self.state["root"]
                     or payload["checks"] != list(self.checks)
                     or set(payload["coverage"]) != set(self.checks)
@@ -279,7 +296,8 @@ class Selection:
             key_path.write_bytes(key)
         payload = {"version": VERSION, "root": current["root"],
                    "environment": current["environment"], "files": current["files"],
-                   "checks": list(self.checks), "coverage": self.keys}
+                   "checks": list(self.checks), "coverage": self.keys,
+                   "full_passed_at": time.time() if self.full else self.previous["full_passed_at"]}
         envelope = {"payload": payload, "signature": hmac.new(key, _digest(payload).encode(), "sha256").hexdigest()}
         temporary = None
         try:

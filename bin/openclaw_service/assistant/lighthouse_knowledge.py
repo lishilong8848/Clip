@@ -29,7 +29,7 @@ from urllib.parse import urlsplit
 import uuid
 
 from .lighthouse_ai import (AssistantError, ADDRESS, API_KEY, CONTACT, ID_NUMBER,
-                            protect_key, safe_text)
+                            protect_key, safe_data, safe_text)
 from .lighthouse_message_delivery import MESSAGE_INTENT
 from .lighthouse_knowledge_extract import SUPPORTED_EXTENSIONS
 
@@ -1637,6 +1637,50 @@ class KnowledgeBase:
             'pending_version': item.pop('pending_version'), 'original_document_complete': None}
         item['content_trust'] = 'untrusted_data'
 
+    @staticmethod
+    def _filename_candidates(db, query):
+        words = re.findall(r'[A-Za-z0-9][A-Za-z0-9._-]{1,79}|[\u4e00-\u9fff]{2,}', query.casefold())
+        terms = set(words)
+        for word in words:
+            if re.fullmatch(r'[\u4e00-\u9fff]+', word):
+                terms.update(word[i:i + size] for size in (1, 2, 3) for i in range(len(word) - size + 1))
+        rows = db.execute('''SELECT d.id AS document_id,d.active_version AS version,v.name,d.source_key
+            FROM documents d JOIN versions v ON v.document_id=d.id AND v.version=d.active_version
+            WHERE d.deleted=0 AND d.active_version IS NOT NULL AND knowledge_visible(d.id)=1''').fetchall()
+        terms = sorted(terms, key=lambda term: (-len(term), term))[:256]
+        matched, frequency = [], {}
+        for row in rows:
+            name = row['name'].casefold()
+            hits = {term for term in terms if term in name}
+            matched.append((dict(row), hits))
+            for term in hits:
+                frequency[term] = frequency.get(term, 0) + 1
+        ranked = []
+        for row, hits in matched:
+            if not hits:
+                continue
+            score = sum((.1 if len(term) == 1 else 1) / frequency[term] for term in hits)
+            ranked.append((score, row))
+        ranked.sort(key=lambda item: (-item[0], item[1]['document_id']))
+        return [{**{key: row[key] for key in ('document_id', 'version', 'name')},
+                 'source_kind': 'document_library' if row['source_key'] else 'shared'}
+                for _, row in ranked[:12]]
+
+    def find_documents(self, actor, query, *, profile=None):
+        """Filename clues only; neither applicability nor document approval is inferred."""
+        check_actor(actor)
+        if not isinstance(query, str) or not 2 <= len(query.strip()) <= 1000 or sensitive_document(query):
+            raise AssistantError('请输入2至1000字的检索内容，不要包含私人信息或凭证。')
+        if profile is not None and not self.model_allowed(profile):
+            raise AssistantError('当前聊天模型未获授权接收公司资料，请选择管理员批准的公司模型。', 403)
+        with self.connect() as db:
+            self._acl_sql(db, actor)
+            items = self._filename_candidates(db, query.strip())
+            revision = self._revision(db)
+            acl_revision = db.execute('SELECT knowledge_acl_stamp()').fetchone()[0]
+        return {'items': safe_data(items), 'revision': revision, 'acl_revision': acl_revision, 'complete': False,
+                'note': '仅按文件名查找的候选，不是适用或已读取原文的结论。接着检索候选文件段落并核对；文件名不明确或依据不足时补查全库。'}
+
     def search(self, actor, query, *, profile=None, document_refs=None):
         check_actor(actor)
         if not isinstance(query, str) or not 2 <= len(query.strip()) <= 1000 or sensitive_document(query):
@@ -1659,6 +1703,11 @@ class KnowledgeBase:
                     'revision': self._revision(db), 'indexready': False, 'complete': False,
                     'coverage': {'scope': 'ranked_search_hits', 'complete': False, 'history': 'unknown'}}
         mode, warning, snapshot, hits = 'keyword', '', None, []
+        file_candidates = []
+        if document_refs is None:
+            with self.connect() as db:
+                self._acl_sql(db, actor)
+                file_candidates = self._filename_candidates(db, query)
         indexready = False
         if document_refs is None and self._vector_mode(config):
             try:
@@ -1698,7 +1747,11 @@ class KnowledgeBase:
         def add(row, kind, rank):
             item = selected.setdefault(row['id'], {**dict(row), 'score': 0.0, 'matches': []})
             item['score'] += 1 / (60 + rank)
-            item['matches'].append(kind)
+            if kind == 'filename':
+                item['filename_match'] = True
+                kind = 'keyword'
+            if kind not in item['matches']:
+                item['matches'].append(kind)
 
         try:
             with self.connect() as db:
@@ -1740,6 +1793,17 @@ class KnowledgeBase:
                             add(row, 'vector', rank)
                 if expanded:
                     match = ' OR '.join('"' + term.replace('"', '""') + '"' for term in expanded)
+                    if file_candidates:
+                        ids = [item['document_id'] for item in file_candidates]
+                        passage_terms = list(dict.fromkeys([*expanded, *(term[i:i + 2] for term in terms
+                            if re.fullmatch(r'[\u4e00-\u9fff]{3,}', term) for i in range(len(term) - 1))]))[:64]
+                        condition = ' OR '.join('instr(lower(c.text),lower(?))>0' for _ in passage_terms)
+                        rows = db.execute('SELECT ' + fields + ' FROM chunks c' + joins +
+                            'WHERE ' + active + ' AND c.document_id IN (' + ','.join('?' for _ in ids) +
+                            ') AND (' + condition + ') ORDER BY c.document_id,c.ordinal LIMIT 24',
+                            [*scope_args, *ids, *passage_terms]).fetchall()
+                        for rank, row in enumerate(rows):
+                            add(row, 'filename', rank)
                     rows = db.execute('SELECT ' + fields + ' FROM chunks_fts f JOIN chunks c ON c.id=f.rowid' + joins +
                         'WHERE chunks_fts MATCH ? AND ' + active + ' ORDER BY bm25(chunks_fts) LIMIT 40', [match, *scope_args]).fetchall()
                     for rank, row in enumerate(rows):
@@ -1763,6 +1827,8 @@ class KnowledgeBase:
             item['score'] = round(item['score'], 6)
             item['url'] = f"/knowledge-base?document={item['document_id']}&version={item['version']}&chunk={item['ordinal']}"
         return {'items': items, 'mode': mode, 'warning': warning, 'revision': revision,
+            'file_candidates': safe_data(file_candidates),
+            'retrieval_strategy': 'referenced_document' if document_refs is not None else 'filename_then_passages_with_library_fallback',
             'indexready': indexready, 'acl_revision': acl_revision, 'complete': False,
             'coverage': {'scope': 'ranked_search_hits', 'complete': False, 'hit_limit': 8,
                 'returned_hits': len(items), 'history': 'unknown', 'count_basis': 'retrieval_hits_not_business_records'},

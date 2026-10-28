@@ -57,6 +57,14 @@ class ParsingTests(unittest.TestCase):
         payload["event"]["message"].update(message_type="post", content=json.dumps({"title": "问题", "content": [[{"tag": "text", "text": "通告多少条"}]]}))
         self.assertIn("通告多少条", parse_message(payload, "cliTest", "ouBot")["question"])
 
+    def test_recipient_mention_is_preserved_while_bot_mention_is_removed(self):
+        payload = event(content='@_user_1 请给 @_user_2 发消息确认时间')
+        payload['event']['message']['mentions'].append(
+            {'key': '@_user_2', 'id': {'open_id': 'ou_Recipient'}, 'name': '测试收件人'})
+        parsed = parse_message(payload, 'cliTest', 'ouBot')
+        self.assertEqual(parsed['question'], '请给 测试收件人 发消息确认时间')
+        self.assertNotIn('ou_Recipient', parsed['question'])
+
     def test_post_link_keeps_the_document_address_and_label(self):
         payload = event()
         url = 'https://vnet.feishu.cn/docx/FixtureMinutes'

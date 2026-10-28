@@ -621,6 +621,104 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(query, {'tab': ['completion']})
         self.assertEqual(card['elements'][-1]['actions'][0]['text']['content'], '查看学练完成情况')
 
+    def issue(self, identity='issue1', question=None, **changes):
+        question = question or self.question(0)
+        return self.put('issue', {'id': identity, 'question_id': question['id'],
+            'question': question, 'status': 'pending', 'description': '选项存在歧义',
+            'updated_at': NOW.isoformat(), 'comments': [], **changes})
+
+    def test_open_question_issues_merge_and_use_current_bank_answer(self):
+        old = self.question(0, stem='旧题干')
+        current = self.question(0, stem='新的\n题干', type='multiple', correct_option_ids=['o1', 'o2'])
+        self.put('question', current)
+        self.issue(question=old)
+        self.issue('issue2', question=old, status='processing', description='答案\n有误',
+            comments=[{'text': '补充依据', 'is_admin': False}, {'text': '内部处理备注', 'is_admin': True}])
+        self.issue('issue3', question=self.question(1), status='needs_info')
+        for state in ('resolved', 'no_change', 'withdrawn'):
+            self.issue('closed-' + state, question=self.question(2), status=state)
+        report = self.report()
+        self.assertEqual(len(report['question_issues']), 2)
+        row = next(row for row in report['question_issues'] if row['question_id'] == current['id'])
+        self.assertEqual(row['stem'], '新的 题干')
+        self.assertEqual(row['answer'], 'B. Choice 1；C. Choice 2')
+        self.assertEqual(row['reasons'], ['选项存在歧义', '答案 有误', '补充依据'])
+        card = daily.render_card(report, 'https://portal.invalid')
+        block = next(e['text'] for e in card['elements'] if '待处理质疑' in e.get('text', {}).get('content', ''))
+        self.assertEqual(block['tag'], 'plain_text')
+        self.assertEqual(len(block['content'].splitlines()), 3)
+        self.assertIn('新的 题干｜当前答案：B. Choice 1；C. Choice 2｜质疑原因：选项存在歧义；答案 有误；补充依据', block['content'])
+        self.assertNotIn('旧题干', block['content'])
+        self.assertNotIn('内部处理备注', json.dumps(card, ensure_ascii=False))
+
+    def test_question_sections_are_independently_hidden_when_empty(self):
+        report = self.report()
+        content = json.dumps(daily.render_card(report, 'https://portal.invalid'), ensure_ascii=False)
+        self.assertNotIn('待处理质疑', content)
+        self.assertNotIn('题库待核对', content)
+        self.put('question', self.question(8, problems=['缺少参考答案'], status='draft'))
+        self.put('question', self.question(9, problems=['选项缺失'], status='deleted'))
+        self.put('question', self.question(10, status='draft'))
+        report = self.report()
+        self.assertEqual(report['question_problem_count'], 1)
+        content = json.dumps(daily.render_card(report, 'https://portal.invalid'), ensure_ascii=False)
+        self.assertIn('题库待核对 1 题', content)
+        self.assertNotIn('待处理质疑', content)
+        self.delete('question', 'written:8')
+        self.issue(question=self.question(11, bank='duty', stem='面试题', answer_text='参考\n操作方法'))
+        report = self.report()
+        self.assertEqual(report['question_issues'][0]['answer'], '参考 操作方法')
+        content = json.dumps(daily.render_card(report, 'https://portal.invalid'), ensure_ascii=False)
+        self.assertIn('待处理质疑', content)
+        self.assertNotIn('题库待核对', content)
+
+    def test_question_only_report_sends_once_without_daily_assignments(self):
+        self.roster = []; self.save_roster()
+        self.issue()
+        self.run_due()
+        self.assertEqual(self.job()['status'], 'sent')
+        self.assertIn('待处理质疑', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
+        self.restart(); self.run_due()
+        self.assertEqual(self.send_mock.call_count, 1)
+
+    def test_problem_count_only_report_is_not_skipped(self):
+        self.roster = []; self.save_roster()
+        self.put('question', self.question(8, status='draft', problems=['选项缺失']))
+        self.run_due()
+        self.assertEqual(self.job()['status'], 'sent')
+        content = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
+        self.assertIn('题库待核对 1 题', content)
+        self.assertNotIn('待处理质疑', content)
+
+    def test_answer_attachment_and_unset_answer_are_not_misrepresented(self):
+        self.issue(question=self.question(1, bank='duty', answer_text='', attachments=[{'kind': 'answer'}]))
+        self.issue('issue2', question=self.question(2, answer_text='', correct_option_ids=[]))
+        report = self.report()
+        self.assertEqual([row['answer'] for row in report['question_issues']], ['见参考答案附件', '未设置'])
+
+    def test_question_section_does_not_depend_on_yesterdays_roster(self):
+        self.delete('local', 'shift_roster:' + DATE)
+        self.issue()
+        report = self.report()
+        self.assertTrue(report['unverified'])
+        self.assertEqual(len(report['question_issues']), 1)
+
+    def test_question_correction_or_resolution_is_rechecked_before_send(self):
+        self.issue()
+        original = daily.collect
+        def collect(*args):
+            report = original(*args)
+            if not getattr(collect, 'called', False):
+                collect.called = True
+                issue = self.service._get('issue', 'issue1', args[3])
+                issue['status'] = 'resolved'
+                self.service._put('issue', issue['id'], issue, args[3])
+            return report
+        with patch.object(daily, 'collect', side_effect=collect):
+            self.run_due()
+        self.assertEqual(self.job()['status'], 'sent')
+        self.assertNotIn('待处理质疑', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
+
 
 if __name__ == '__main__':
     unittest.main()

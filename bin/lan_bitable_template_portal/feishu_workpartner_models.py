@@ -13,7 +13,7 @@ class Action(BaseModel):
 
 class MessageSend(Action):
     text: str = Field(min_length=1, max_length=12000)
-    recipient: str = Field(default='', max_length=120, description='私信收件人的完整姓名或工号；发给本人填写“我”。')
+    recipient: str = Field(default='', max_length=120, description='优先使用已查询人员的稳定id，也可用完整姓名或工号；发给本人填写“我”。')
     chat_id: str = Field(default='', max_length=120, description='已查询且当前人员在其中的群ID；不能猜测。')
     mention_names: list[str] = Field(default_factory=list, max_length=20, description='需要真正@的人员完整姓名或工号。')
     reply_message_id: str = Field(default='', max_length=120, description='回复已有消息时，使用当前群已读取的消息ID。')

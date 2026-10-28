@@ -868,6 +868,8 @@ class PortalAgent:
             and task.get("error_retryable", True))
         if plan.get("status") == "failed" and len(plan.get("operations", [])) == 1 and plan["operations"][0]["api_id"] == "POST /api/message-delivery/send":
             result["can_retry"] = True
+        if plan.get('status') == 'failed' and self._independent_messages(plan):
+            result['can_retry'] = True
         file_details = {}
 
         def describe_file(identity):
@@ -1284,6 +1286,8 @@ class PortalAgent:
         notice_undo_targets = {}
         ready_messages = {}
         ready_workpartner_messages = set()
+        workpartner_labels = {}
+        workpartner_choices = {}
         normalized, fields, risk, form_queries, repair_controls, guard_controls, drill_controls, mop_controls, template_controls = [], [], "normal", {}, {}, {}, {}, {}, {}
         for index, operation in enumerate(operations):
             if not isinstance(operation, dict):
@@ -1298,6 +1302,21 @@ class PortalAgent:
                 risk = "high"
             op = copy.deepcopy(operation)
             op.setdefault("body", {})
+            if op['api_id'] == 'POST /api/feishu-workpartner/messages/send':
+                op = _result_refs(op, [], references, queries)
+                recipient = op['body'].get('recipient')
+                people = {person['id']: person for value in (queries or {}).values() if isinstance(value, dict)
+                          for person in value.get('people', []) if isinstance(person, dict) and person.get('id') and person.get('name')}
+                found = [person for person in people.values() if recipient and recipient in
+                         (person['id'], person['name'], person.get('employee_no'))]
+                if len(found) == 1:
+                    person = found[0]
+                    op['body']['recipient'] = person['id']
+                    workpartner_labels[str(index)] = {'recipient': person['name'] + ' · 工号 ' + str(person.get('employee_no') or '未填写')}
+                    workpartner_choices[index] = [{'value': row['id'], 'label': row['name'] + ' · 工号 ' + str(row.get('employee_no') or '未填写')}
+                                                  for row in people.values()]
+                elif len(found) > 1:
+                    raise AssistantError('收件人存在重名，请用已查询到的工号或人员稳定id选择，未猜测发送。', 422)
             if op["api_id"] == "POST /api/message-delivery/send":
                 from .lighthouse_message_delivery import feishu_delivery_requested, self_delivery_requested
                 if question and not feishu_delivery_requested(question):
@@ -1845,7 +1864,9 @@ class PortalAgent:
                         fields.append({'name': f'step{index}.{path}', 'operation_index': index, 'path': path,
                             'section': 'body', 'label': label, 'type': 'textarea' if path == 'text' else 'text',
                             'required': True, 'maxlength': 12000 if path == 'text' else 120,
-                            'value': checked.get('body', {}).get(path, '')})
+                            'value': checked.get('body', {}).get(path, ''),
+                            **({'type': 'select', 'options': workpartner_choices[index]}
+                               if path == 'recipient' and index in workpartner_choices else {})})
             for field in missing:
                 if any(item.get("native_notice") and item["operation_index"] == index for item in fields) and field.get("section", "body") == "body":
                     continue
@@ -2019,6 +2040,8 @@ class PortalAgent:
             plan['selected_labels'] = {str(index): labels for index, labels in ready_messages.items()}
             if all(field['operation_index'] in ready_messages for field in fields):
                 plan.update(fields=[], status='awaiting_confirmation', _review_fields=copy.deepcopy(fields), _review_operations=copy.deepcopy(normalized))
+        if workpartner_labels:
+            plan.setdefault('selected_labels', {}).update(workpartner_labels)
         if notice_delete_targets:
             plan["_notice_delete_targets"] = notice_delete_targets
         if notice_undo_targets:
@@ -3639,6 +3662,13 @@ class PortalAgent:
         operations = plan.get("operations") or []
         return len(operations) == 1 and operations[0].get("api_id") == "POST /api/workbench-actions"
 
+    @staticmethod
+    def _independent_messages(plan):
+        operations = plan.get('operations') or []
+        return bool(operations) and all(op.get('api_id') == 'POST /api/feishu-workpartner/messages/send'
+            and isinstance((op.get('body') or {}).get('recipient'), str) and op['body']['recipient']
+            and not op['body'].get('chat_id') and '"$result"' not in json.dumps(op) for op in operations)
+
     def _check_pending_plan(self, actor, plan):
         pending = {
             item["id"]: item for turn in self.assistant._state(actor).get("turns", [])
@@ -3742,7 +3772,7 @@ class PortalAgent:
 
     async def retry_notice(self, actor, identity, payload, request):
         plan = await asyncio.to_thread(self.get_plan, actor, identity)
-        if len(plan.get("operations", [])) == 1 and plan["operations"][0]["api_id"] == "POST /api/message-delivery/send":
+        if self._independent_messages(plan) or (len(plan.get("operations", [])) == 1 and plan["operations"][0]["api_id"] == "POST /api/message-delivery/send"):
             def retry_message():
                 with self.assistant._lock:
                     current = self.get_plan(actor, identity)
@@ -3752,10 +3782,11 @@ class PortalAgent:
                         raise AssistantError("发送清单已变化，请重新读取。", 409)
                     self._check_pending_plan(actor, current)
                     current.setdefault("attempt_history", []).append({"at": time.time(), "results": copy.deepcopy(current["results"])})
-                    current["results"] = []
-                    # Keep the delivery ID stable while bypassing the bridge's prior HTTP response cache.
-                    body = current['operations'][0]['body']
-                    body['retry_attempt'] = body.get('retry_attempt', 0) + 1
+                    if not self._independent_messages(current):
+                        current["results"] = []
+                        # Keep the delivery ID stable while bypassing the bridge's prior HTTP response cache.
+                        body = current['operations'][0]['body']
+                        body['retry_attempt'] = body.get('retry_attempt', 0) + 1
                     self._mark_running(actor, current)
                     return current, True
             return await self._run_commit(retry_message,
@@ -3908,9 +3939,10 @@ class PortalAgent:
     async def _execute(self, actor, plan, request):
         from openclaw_service.bridge import OPERATION
         grant = None
+        independent_messages = self._independent_messages(plan)
         try:
             for index, original in enumerate(plan["operations"]):
-                if index < len(plan["results"]):
+                if index < len(plan["results"]) and (not independent_messages or plan['results'][index].get('ok')):
                     continue
                 if grant is not None:
                     OPERATION.reset(grant)
@@ -3988,7 +4020,10 @@ class PortalAgent:
                     if str(index) not in plan.setdefault("_water_attempted", []):
                         plan["_water_attempted"].append(str(index))
                     await self._durable_save(actor, plan)
-                result = await self._invoke(actor, op, request, uploads=True)
+                duplicate = next((prior for pos, prior in enumerate(plan['results'][:index])
+                    if prior.get('ok') and all(plan['operations'][pos]['body'].get(key) == op['body'].get(key)
+                                              for key in ('recipient', 'text'))), None) if independent_messages else None
+                result = copy.deepcopy(duplicate) if duplicate else await self._invoke(actor, op, request, uploads=True)
                 raw = result.get("_raw", result.get("data"))
                 if not result.get("ok") and op["api_id"] in NOTICE_WRITES and isinstance(raw, dict) and raw.get("error_code") == "notice_photo_required":
                     restore_photo_form(plan, index, result.get("error") or "请上传至少一张现场照片，再确认结束通告。", required=True)
@@ -4039,7 +4074,10 @@ class PortalAgent:
                         result["query_reply"] = _plan_query_reply(op["api_id"], result.get("_raw", result.get("data")))
                         if result.get("scope_warning"):
                             result["query_reply"] += "\n\n" + result["scope_warning"]
-                plan["results"].append(result)
+                if independent_messages and index < len(plan['results']):
+                    plan['results'][index] = result
+                else:
+                    plan["results"].append(result)
                 if result.get("ok") and op["api_id"] in _WATER_WRITES:
                     plan.pop("_water_stage", None)
                     plan.get("_water_forms", {}).pop(str(index), None)
@@ -4047,6 +4085,8 @@ class PortalAgent:
                 if result.get("ok") and op["api_id"] == "POST /api/workbench-actions" and isinstance(raw, dict) and raw.get("supersedes_job_ids"):
                     await asyncio.to_thread(self._retire_notice_plans, actor, set(raw["supersedes_job_ids"]))
                 if not result.get("ok"):
+                    if independent_messages:
+                        continue
                     raise AssistantError(str(result.get("error") or "业务接口未完成操作。"))
                 spec = self._task_spec(op, result)
                 if spec:
@@ -4085,7 +4125,10 @@ class PortalAgent:
                         plan["error"] = "后台任务仍在处理，可查询原任务结果；不会重复提交。"
                         await self._durable_save(actor, plan)
                         return
-            plan["status"] = "completed"
+            failures = sum(not result.get('ok') for result in plan['results']) if independent_messages else 0
+            plan['status'] = 'failed' if failures else 'completed'
+            if failures:
+                plan['error'] = f"{len(plan['results']) - failures}项已发送，{failures}项未确认成功；可继续原计划，已成功项不重发，结果待核实项先核对回执。"
         except asyncio.CancelledError:
             water = plan.get("_water_stage") or {}
             if water.get("phase") != "photos" or not self._restore_water_form(plan, water.get("index"), "照片上传已中断，填写已保留，请确认后继续；本条水耗尚未保存。"):

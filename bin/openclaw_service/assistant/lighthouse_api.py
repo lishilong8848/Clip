@@ -896,7 +896,7 @@ def _action_label(path: str, method: str) -> str:
         if parts[-1] == 'attendees':
             return '邀请日程参与人'
         if parts[0] == 'messages':
-            return '发送飞书消息（支持@和话题回复）'
+            return '读取当前会话引用消息及卡片人员' if method == 'GET' else '发送飞书消息（支持@和话题回复）'
         label = {'capabilities': '应用已授权能力', 'people': '协作人员', 'chats': '本人所在群聊',
             'resources': '本人授权资源', 'operations': '协作操作回执', 'tasks': '飞书任务',
             'events': '飞书日程', 'documents': '飞书云文档', 'tables': '独立协作表记录'}.get(parts[0], '飞书协作')
