@@ -113,6 +113,10 @@ CLIENT_DISCONNECT_WINERRORS = {10053, 10054, 10058}
 MAX_JSON_BODY_BYTES = 512 * 1024
 CHANGE_CONFIRMATION_REMINDER_SECONDS = 10 * 60
 CHANGE_CONFIRMATION_EMPTY_READS_BEFORE_RESET = 2
+START_TARGET_VALIDATION_ERRORS = (
+    "原关联目标已结束或未开始，不能作为本次开始通告复用，请重新核对关联。",
+    "原关联目标与本次通告名称或楼栋不一致，未修改旧记录，请重新核对关联。",
+)
 WORKBENCH_NOTICE_DRAFT_NAMESPACE = "workbench_notice_draft"
 WORKBENCH_NOTICE_DRAFT_TTL_SECONDS = 30 * 24 * 60 * 60
 WORKBENCH_NOTICE_DRAFT_MAX_PER_USER = 100
@@ -10476,7 +10480,7 @@ class PortalRuntime:
                 target_record={"display_fields": fields},
             )
             if lifecycle.get("finished") or not lifecycle.get("active"):
-                raise PortalError("原关联目标已结束或未开始，不能作为本次开始通告复用，请重新核对关联。")
+                raise PortalError(START_TARGET_VALIDATION_ERRORS[0])
             field_config = get_field_config(notice_type)
             target = {
                 "title": fields.get(field_config.get("title") or field_config.get("name") or "名称"),
@@ -10486,7 +10490,7 @@ class PortalRuntime:
             if (not title_key or title_key != cls.service._semantic_notice_title(target)
                     or cls.service._semantic_notice_building_key(prepared)
                     != cls.service._semantic_notice_building_key(target)):
-                raise PortalError("原关联目标与本次通告名称或楼栋不一致，未修改旧记录，请重新核对关联。")
+                raise PortalError(START_TARGET_VALIDATION_ERRORS[1])
             return target_record_id
         try:
             ok_query, query_result = query_record_by_id(
@@ -11561,9 +11565,17 @@ class PortalRuntime:
         target_record_id = str(
             operation.get("target_record_id")
             or prepared.get("target_record_id")
-            or prepared.get("record_id")
+            or (prepared.get("record_id") if action != "start" else "")
             or ""
         ).strip()
+        if action == "start" and (
+            is_local_record_id(target_record_id)
+            or target_record_id in {
+                canonical_source_record_id(prepared),
+                canonical_source_record_id(operation.get("request")),
+            }
+        ):
+            target_record_id = ""
         if action == "start" and not target_record_id:
             target_record_id = cls._existing_target_for_prepared_start(
                 prepared,
@@ -11621,20 +11633,40 @@ class PortalRuntime:
         )
 
     @classmethod
-    def _replacement_start_target(cls, prepared: dict, notice_type: str, original_id: str) -> str:
+    def _replacement_start_target(
+        cls, prepared: dict, notice_type: str, original_id: str,
+        *, latest_payload: NoticePayload | None = None,
+    ) -> str:
         from upload_event_module.services.feishu_service import (
             create_bitable_record_fields, _notice_create_client_token, _filter_missing_optional_fields,
         )
         operation = cls._get_notice_remote_operation(original_id) or {}
         saved = operation.get("result") or {}
-        target = str(saved.get("created_record_id") or operation.get("target_record_id") or "")
+        source_id = canonical_source_record_id(operation.get("request"))
+        # Older start attempts incorrectly stored their plan ID as a created target.
+        target = next((str(value).strip() for value in (
+            saved.get("created_record_id"), operation.get("target_record_id"), saved.get("record_id")
+        ) if value and not is_local_record_id(str(value)) and str(value).strip() != source_id), "")
         fields, token = saved.get("create_fields"), saved.get("create_client_token")
         if not target or is_local_record_id(target):
             if not isinstance(fields, dict) or not fields:
                 original_payload = saved.get("robot_payload")
                 if not isinstance(original_payload, dict) or not original_payload.get("text"):
-                    raise PortalError("原创建内容缺失，无法安全核验；请绑定已存在的目标记录后提交最新版。")
-                original_payload = NoticePayload(**original_payload)
+                    # These legacy errors occur before any target write. Unknown
+                    # outcomes still need their original frozen create evidence.
+                    validation_failed = saved.get("start_validation_failed") is True or (
+                        source_id and operation.get("error") in START_TARGET_VALIDATION_ERRORS
+                    )
+                    no_create = not any(key in saved for key in (
+                        "create_fields", "create_client_token", "robot_payload", "written_fields", "record_id",
+                    ))
+                    if (operation.get("status") not in {"failed", "superseded"}
+                            or not validation_failed or not no_create
+                            or latest_payload is None or not latest_payload.text):
+                        raise PortalError("原创建内容缺失，无法安全核验；请核对原任务的目标记录后继续，勿重复新增。")
+                    original_payload = copy.deepcopy(latest_payload)
+                else:
+                    original_payload = NoticePayload(**original_payload)
                 handler = get_notice_handler(notice_type)
                 fields = _filter_missing_optional_fields(notice_type, handler.build_create_fields(original_payload))
                 original_payload.operation_id = original_id
@@ -11645,6 +11677,7 @@ class PortalRuntime:
             # A lost create response must never mint a second client_token.
             cls._mark_notice_remote_operation(original_id, status=operation.get("status") or "failed",
                 result={"create_fields": fields, "create_client_token": token})
+            cls._check_current_notice_actor()
             ok, result = create_bitable_record_fields(notice_type, fields, client_token=token)
             if not ok:
                 raise PortalError(str(result or "原创建结果尚未取得。"))
@@ -11697,7 +11730,16 @@ class PortalRuntime:
         work_order_label = cls._work_order_label(prepared)
         if action == "start":
             replacement = str(prepared.get("replacement_create_operation_id") or "")
-            existing_target = "" if replacement else cls._existing_target_for_prepared_start(prepared, notice_type)
+            if prepared.get("_remote_operation_id"):
+                cls._mark_notice_remote_operation(prepared["_remote_operation_id"],
+                    status="executing", result={"start_validation_failed": False})
+            try:
+                existing_target = "" if replacement else cls._existing_target_for_prepared_start(prepared, notice_type)
+            except PortalError as exc:
+                if prepared.get("_remote_operation_id") and str(exc) in START_TARGET_VALIDATION_ERRORS:
+                    cls._mark_notice_remote_operation(prepared["_remote_operation_id"],
+                        status="executing", result={"start_validation_failed": True})
+                raise
             if existing_target:
                 if cls._has_extra_images_payload(prepared):
                     ok_existing_images, existing_image_record = query_record_by_id(
@@ -12016,7 +12058,7 @@ class PortalRuntime:
                 payload._clipflow_create_checkpoint = lambda fields, token: cls._mark_notice_remote_operation(
                     remote_operation_id, status="executing", result={"create_fields": fields, "create_client_token": token})
             if replacement:
-                target = cls._replacement_start_target(prepared, notice_type, replacement)
+                target = cls._replacement_start_target(prepared, notice_type, replacement, latest_payload=payload)
                 cls._check_current_notice_actor()
                 ok, result = create_bitable_record_by_payload(notice_type, payload, target_record_id=target)
             else:
@@ -15881,7 +15923,7 @@ class PortalRuntime:
                     request=operation_request,
                     target_record_id=str(
                         prepared.get("target_record_id")
-                        or prepared.get("record_id")
+                        or (prepared.get("record_id") if prepared.get("action") != "start" else "")
                         or ""
                     ),
                     expected_record_version=cls._expected_remote_record_version(

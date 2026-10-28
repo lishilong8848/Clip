@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from openclaw_service.assistant.lighthouse_ai import AssistantError, PRIVATE_REPLY
-from openclaw_service.assistant.lighthouse_knowledge_answer import answer_company, _candidate, _previous_candidate
+from openclaw_service.assistant.lighthouse_knowledge_answer import answer_company, merge_company_hits, _candidate, _previous_candidate
 
 
 def hit(identity, text, **extra):
@@ -51,6 +51,110 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         texts = [call.args[1]['delta'] for call in self.emit.call_args_list if call.args[0] == 'text']
         self.assertEqual(texts, [result['answer']])
         self.assertNotIn('设备不符', result['answer'])
+
+    def test_identical_chunks_merge_without_losing_other_locations_versions_or_images(self):
+        duplicate = {**self.first, 'ordinal': 1}
+        other_location = {**duplicate, 'ordinal': 2, 'location': '第2段'}
+        other_version = {**duplicate, 'version': 2}
+        with_image = {**duplicate, 'ordinal': 3, 'visual_evidence': [{'text': 'unique diagram'}]}
+        result = merge_company_hits([[self.first, duplicate, other_location, other_version, with_image]])
+        self.assertEqual(result, [self.first, other_location, other_version, with_image])
+
+    async def test_only_cited_company_sources_are_published_with_original_numbers(self):
+        self.kb.search.return_value['items'] = [self.first, self.second]
+        self.model.complete.return_value = candidate('设备乙先核实现场状态。[2]')
+        result = await self.answer()
+        self.assertEqual([source['number'] for source in result['sources']], [2])
+        self.assertEqual(result['sources'][0]['data']['document_id'], 'applicable')
+        labels = [call.args[1]['label'] for call in self.emit.call_args_list if call.args[0] == 'status']
+        self.assertIn('正在整理资料答复', labels)
+
+    async def test_overlapping_original_context_is_sent_to_model_only_once(self):
+        base = self.kb
+        base.search.return_value['items'] = [self.first, {**self.first, 'ordinal': 1, 'text': 'different indexed summary'}]
+        class OverlappingEvidence:
+            search = base.search
+            evidence_current = base.evidence_current
+            def answer_evidence(self, actor, items, *, profile, model):
+                return {'items': [{**item, 'text': 'same authorized original section',
+                                  'location': f"第1段（片段{item['ordinal'] + 1}）"} for item in items]}
+        self.kb = OverlappingEvidence()
+        self.model.complete.return_value = candidate('先核实现场状态。[1]')
+        await self.answer()
+        packet = json.loads(self.model.complete.call_args.args[0][1]['content'])
+        self.assertEqual(len(packet['documents']), 1)
+
+    async def test_reviewer_stops_supplement_for_gaps_unrelated_to_question(self):
+        from openclaw_service.assistant.lighthouse_review import AnswerReviewer
+        reviewer = Mock(spec=AnswerReviewer)
+        reviewer.run = AsyncMock(side_effect=lambda actor, turn, history, result, authorize, **kw: {
+            **result, 'answer_review': {'status': 'passed', 'repairs': 0}})
+        self.engine.answer_reviewer = reviewer
+        self.model.complete.return_value = candidate('使用设备甲流程。[1]', ['流程封面日期'], ['封面日期待核对'])
+        for channel in ('', 'feishu:topic'):
+            self.actor['channel'] = channel
+            self.kb.search.reset_mock()
+            self.model.complete.reset_mock()
+            reviewer.run.reset_mock()
+            result = await self.answer('设备甲使用哪个流程？')
+            self.kb.search.assert_called_once()
+            self.model.complete.assert_called_once()
+            reviewer.run.assert_awaited_once()
+            self.assertTrue(result['knowledge_retrieval']['complete'])
+            self.assertNotIn('封面日期', result['answer'])
+
+    async def test_expression_repair_reuses_evidence_instead_of_searching(self):
+        from openclaw_service.assistant.lighthouse_review import AnswerReviewer
+        reviewer = Mock(spec=AnswerReviewer)
+        reviewer.run = AsyncMock(side_effect=[
+            {'answer': '含糊答复。[1]', 'answer_review': {'status': 'needs_repair',
+             'issues': ['使用已有原文直接回答，不增加无关说明'], 'read_queries': []}},
+            {'answer': '先核实现场状态。[1]', 'answer_review': {'status': 'passed', 'repairs': 0}}])
+        self.engine.answer_reviewer = reviewer
+        self.model.complete.side_effect = [candidate('含糊答复。[1]'), candidate('先核实现场状态。[1]')]
+        result = await self.answer()
+        self.kb.search.assert_called_once()
+        self.assertEqual(self.model.complete.call_count, 2)
+        self.assertEqual(result['answer'], '先核实现场状态。[1]')
+
+    async def test_existing_gap_text_is_not_appended_twice(self):
+        self.model.complete.return_value = candidate('先核实现场状态；设备型号待确认。[1]', gaps=['设备型号待确认'])
+        result = await self.answer()
+        self.assertEqual(result['answer'].count('设备型号待确认'), 1)
+        self.assertFalse(result['knowledge_retrieval']['complete'])
+
+    async def test_initial_search_and_final_review_share_generation_budget(self):
+        from openclaw_service.assistant.lighthouse_review import AnswerReviewer
+        clock = [0]
+        def search(*args, **kwargs):
+            clock[0] += 25
+            return {'items': [self.first], 'warning': ''}
+        def generate(*args, **kwargs):
+            clock[0] += 30
+            return candidate('先核实现场状态。[1]')
+        reviewer = Mock(spec=AnswerReviewer)
+        reviewer.run = AsyncMock(side_effect=lambda actor, turn, history, result, authorize, **kw: {
+            **result, 'answer_review': {'status': 'passed', 'repairs': 0}})
+        self.engine.answer_reviewer = reviewer
+        self.kb.search.side_effect = search
+        self.model.complete.side_effect = generate
+        with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time', SimpleNamespace(monotonic=lambda: clock[0])):
+            result = await self.answer()
+        self.assertLessEqual(reviewer.run.call_args.kwargs['timeout'], 5)
+        self.assertLessEqual(self.model.complete.call_args.kwargs['timeout'], 35)
+        self.assertIn('现场状态', result['answer'])
+
+    async def test_expired_search_budget_does_not_start_model_generation(self):
+        clock = [0]
+        def search(*args, **kwargs):
+            clock[0] = 60
+            return {'items': [self.first], 'warning': ''}
+        self.kb.search.side_effect = search
+        with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time', SimpleNamespace(monotonic=lambda: clock[0])):
+            result = await self.answer()
+        self.model.complete.assert_not_called()
+        self.assertIn('超时', result['answer'])
+        self.assertEqual(result['sources'], [])
 
     async def test_legacy_no_applicable_marker_also_repairs(self):
         self.kb.search.side_effect = [{'items': [item], 'warning': ''} for item in (self.first, self.second)]

@@ -155,6 +155,237 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
         self.assertEqual(sent['fields']['变更进度'], '已结束')
         self.assertNotIn('维护实施状态', sent['fields'])
 
+    def change_lookup_source(self):
+        payload, remote, row = self.source(formula=True, work_type='change')
+        remote.update({
+            '变更进度': {'type': 3, 'value': ['进行中']},
+            '实际开始时间': {'type': 5, 'value': [1792976400000]},
+            '实际结束时间': {'type': 5, 'value': [1793092632123]},
+            '开始/结束状态打标': {'type': 3, 'value': ['正常结束']},
+            '计划开始日期（阿里）': 1792976400000,
+            '计划结束日期（阿里）': 1793199600000,
+            '变更楼栋': 'A楼', '变更简述': 'HVDC防护罩更换',
+        })
+        self.service._change_field_meta_by_name['实际结束时间'] = portal.FieldMeta(
+            'lookup-end', '实际结束时间', 'Lookup', 19, False, {}, [], False)
+        row['raw_fields'] = copy.deepcopy(remote)
+        row['display_fields'] = copy.deepcopy(remote)
+        for name in ('实际开始时间', '实际结束时间', '计划开始日期（阿里）'):
+            row['display_fields'][name] = self.service._format_source_datetime(
+                self.service._repair_management_datetime_ms(remote[name]))
+        payload['ended_at'] = '2026-10-27 17:17:12.123'
+        return payload, remote, row
+
+    def validate_change_target(self, target):
+        self.service._source_record_in_scope_snapshot = Mock(return_value={
+            'record_id': 'rec-source', 'work_type': 'change', 'display_fields': {}})
+        self.service._load_table_fields = Mock(return_value=([], {'变更状态': field('变更状态')}))
+        self.service._load_table_records_by_ids = Mock(return_value=[target])
+        self.service._target_record_form_fields = Mock(return_value={})
+        self.service._target_snapshot_active_payload = Mock(return_value={'active_item_id': 'active-target'})
+        with patch.object(portal.config, 'app_token', 'target-app'), \
+                patch.object(portal.config, 'get_table_id', return_value='target-table'):
+            return self.service.validate_notice_identity_binding(
+                scope='A', work_type='change', notice_type='变更通告',
+                source_record_id='rec-source', target_record_id='rec-target',
+                allow_finished=True, fresh_target=True)
+
+    def change_target(self):
+        return {
+            'record_id': 'rec-target', 'last_modified_time': 1793092692000,
+            'created_time': 1792974275000,
+            'raw_fields': {'变更状态': '结束', '变更结束时间': {'type': 5, 'value': [1793092632123]}},
+            'display_fields': {'变更状态': '结束', '变更结束时间': '2026-10-27 17:17', '楼栋': 'A楼'},
+        }
+
+    def test_binding_uses_raw_actual_end_instead_of_display_or_modification_time(self):
+        target = self.change_target()
+        for modified in (1793092692000, 1793199600000):
+            with self.subTest(modified=modified):
+                target['last_modified_time'] = modified
+                result = self.validate_change_target(target)
+                self.assertEqual(result['target_ended_at'], '2026-10-27 17:17:12.123')
+                self.assertTrue(result['target_finished'])
+        self.assertEqual(self.service._target_record_finished_at(
+            work_type='change', target_record=target, lifecycle={'ended_at': '2026-10-27 17:17'}),
+            '2026-10-28 23:00', 'candidate recency keeps its existing metadata fallback')
+
+    def test_binding_without_actual_end_never_falls_back_to_metadata(self):
+        target = self.change_target()
+        target['raw_fields'].pop('变更结束时间')
+        result = self.validate_change_target(target)
+        self.assertEqual(result['target_ended_at'], '')
+        payload, _, _ = self.source(work_type='change')
+        with self.assertRaisesRegex(portal.PortalError, '缺少实际结束时间'):
+            self.service.sync_notice_source_ended_fields({**payload, 'ended_at': result['target_ended_at']})
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_raw_missing_or_empty_end_is_authoritative_over_stale_display(self):
+        target = self.change_target()
+        target['display_fields']['变更结束时间'] = 1793092632123
+        for raw in ({}, {'变更状态': '结束'}):
+            target['raw_fields'] = raw
+            self.assertEqual(self.validate_change_target(target)['target_ended_at'], '')
+        for empty in (None, '', {'type': 5, 'value': []}):
+            with self.subTest(empty=empty):
+                target['raw_fields']['变更结束时间'] = empty
+                self.assertEqual(self.validate_change_target(target)['target_ended_at'], '')
+        target.pop('raw_fields')
+        self.assertEqual(self.validate_change_target(target)['target_ended_at'], '2026-10-27 17:17:12.123')
+
+    def test_datetime_precision_in_epoch_lookup_fraction_and_explicit_timezones(self):
+        for value in (1793092632123, '1793092632123', 1793092632.123, '1793092632.123',
+                      '1793092632123.0', {'type': 5, 'value': [1793092632123]},
+                      '[1793092632123]', '2026-10-27 17:17:12.123',
+                      '2026-10-27T17:17:12.123+08:00', '2026-10-27T09:17:12.123Z'):
+            with self.subTest(value=value):
+                self.assertEqual(self.service._repair_management_datetime_ms(value), 1793092632123)
+        for milliseconds in range(1000):
+            text = f'2026-10-27 17:17:12.{milliseconds:03d}'
+            seconds_text = f'1793092632.{milliseconds:03d}'
+            expected = 1793092632000 + milliseconds
+            for value in (text, float(seconds_text), seconds_text, expected, str(expected)):
+                with self.subTest(milliseconds=milliseconds, value=value):
+                    self.assertEqual(self.service._repair_management_datetime_ms(value), expected)
+        self.assertEqual(self.service._repair_management_datetime_ms(1793092632), 1793092632000)
+        self.assertEqual(self.service._parse_notice_datetime('2026年10月27日17时17分'), dt.datetime(2026, 10, 27, 17, 17))
+
+    def test_active_update_with_stale_prior_end_is_not_a_finished_binding(self):
+        target = self.change_target()
+        target['raw_fields']['变更状态'] = target['display_fields']['变更状态'] = '更新'
+        result = self.validate_change_target(target)
+        self.assertTrue(result['target_active'])
+        self.assertFalse(result['target_finished'])
+        self.assertEqual(result['target_ended_at'], '')
+
+    def test_lookup_exact_milliseconds_and_execution_marker_confirm_without_writes(self):
+        payload, remote, row = self.change_lookup_source()
+        for value in (1793092632123, '1793092632123', {'type': 5, 'value': [1793092632123]}):
+            with self.subTest(value=value):
+                remote['实际结束时间'] = value
+                self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+        for expected in (1793092632123, '2026-10-27T17:17:12.123+08:00', '2026-10-27T09:17:12.123Z'):
+            with self.subTest(expected=expected):
+                self.assertTrue(self.service.sync_notice_source_ended_fields({**payload, 'ended_at': expected}))
+        self.service._patch_record_fields.assert_not_called()
+        self.assertEqual(row['display_fields']['变更进度'], '进行中', 'do not overwrite the schedule formula')
+        self.assertEqual(self.service._change_progress_value(row), '已结束')
+
+    def test_lookup_one_millisecond_difference_stays_pending_without_writes(self):
+        payload, remote, _ = self.change_lookup_source()
+        remote['实际结束时间'] = {'type': 5, 'value': [1793092632122]}
+        for _ in range(2):
+            with self.assertRaisesRegex(portal.NoticeSourcePending, '实际结束时间尚未准确读回'):
+                self.service.sync_notice_source_ended_fields(payload)
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_writable_source_preserves_seconds_and_milliseconds_without_repeat_patch(self):
+        for kind in ('maintenance', 'change'):
+            with self.subTest(kind=kind):
+                payload, remote, _ = self.source(work_type=kind)
+                payload['ended_at'] = '2026-10-27 17:17:12.123'
+                self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+                self.assertEqual(remote['实际结束时间'], 1793092632123)
+                self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+                self.service._patch_record_fields.assert_called_once()
+
+    def test_delayed_lookup_then_execution_marker_recovers_with_only_reads(self):
+        payload, remote, _ = self.change_lookup_source()
+        remote['实际结束时间'] = {'type': 5, 'value': []}
+        remote['开始/结束状态打标'] = {'type': 3, 'value': ['正常开始']}
+        with self.assertRaisesRegex(portal.NoticeSourcePending, '实际结束时间尚未准确读回'):
+            self.service.sync_notice_source_ended_fields(payload)
+        remote['实际结束时间'] = {'type': 5, 'value': [1793092632123]}
+        with self.assertRaisesRegex(portal.NoticeSourcePending, '只读状态尚未结束'):
+            self.service.sync_notice_source_ended_fields(payload)
+        remote['开始/结束状态打标'] = {'type': 3, 'value': ['正常结束']}
+        self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_missing_or_conflicting_execution_marker_cannot_confirm_formula_end(self):
+        for marker in (None, '', '正常开始', '未开始', '流程终止', ['正常结束', '正常开始']):
+            for progress in ('进行中', '已结束'):
+                with self.subTest(marker=marker, progress=progress):
+                    payload, remote, _ = self.change_lookup_source()
+                    if marker is None:
+                        remote.pop('开始/结束状态打标')
+                    else:
+                        remote['开始/结束状态打标'] = marker
+                    remote['变更进度'] = progress
+                    with self.assertRaises(portal.NoticeSourcePending):
+                        self.service.sync_notice_source_ended_fields(payload)
+                    self.service._patch_record_fields.assert_not_called()
+
+    def test_newer_actual_or_planned_start_cannot_be_closed_by_old_lookup_end(self):
+        for name in ('实际开始时间', '计划开始日期（阿里）'):
+            with self.subTest(field=name):
+                payload, remote, row = self.change_lookup_source()
+                remote[name] = {'type': 5, 'value': [1793092632124]}
+                row['raw_fields'] = copy.deepcopy(remote)
+                row['display_fields'][name] = '2026-10-27 17:17'
+                self.assertFalse(self.service.sync_notice_source_ended_fields(payload))
+                self.assertEqual(self.service._change_progress_value(row), '进行中')
+                self.service._patch_record_fields.assert_not_called()
+
+    def test_verified_execution_updates_plan_status_and_source_ongoing_counts(self):
+        _, _, completed = self.change_lookup_source()
+        ongoing = copy.deepcopy(completed)
+        ongoing['record_id'] = 'rec-newer-cycle'
+        ongoing['raw_fields']['实际开始时间'] = 1793092632124
+        ongoing['display_fields']['实际开始时间'] = '2026-10-27 17:17'
+        self.service._change_records = [completed, ongoing]
+        self.service._get_record_memory = Mock(return_value={})
+        serialized = self.service._serialize_record(completed)
+        self.assertEqual(serialized['source_progress'], '已结束')
+        self.assertEqual(serialized['source_status'], '已结束')
+        self.assertEqual(self.service._serialize_record(ongoing)['source_progress'], '进行中')
+        self.assertEqual([r['record_id'] for r in self.service._filter_change_records(scope='A')], ['rec-newer-cycle'])
+        self.assertEqual(len(self.service._filter_change_records(scope='A', progress_values={'已结束'})), 1)
+        self.service._summary_lock = threading.RLock()
+        self.service.ensure_snapshot_loaded = Mock()
+        self.service._load_work_status_items_locked = Mock(return_value=[])
+        self.service._repair_records = self.service._zhihang_change_records = []
+        sources, zhihang = self.service._ongoing_source_snapshot_records_locked()
+        self.assertEqual([r['record_id'] for r in sources], ['rec-newer-cycle'])
+        self.assertEqual(zhihang, [])
+
+    def test_confirmed_completion_survives_snapshot_reload_with_stale_raw_fields(self):
+        payload, remote, row = self.change_lookup_source()
+        for fields in (row['raw_fields'], row['display_fields']):
+            fields['实际结束时间'] = ''
+            fields['开始/结束状态打标'] = '正常开始'
+        self.store.replace_source_table_snapshot('change', {'A': [row]})
+        self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+        reloaded = self.store.get_source_table_scope_snapshot('change', 'A')['records'][0]
+        self.assertEqual(reloaded['raw_fields']['实际结束时间'], '', 'exercise the unchanged raw snapshot')
+        self.assertEqual(reloaded['display_fields']['实际结束时间'], '2026-10-27 17:17:12.123')
+        restarted = self.new_service()
+        restarted._change_field_meta_by_name = self.service._change_field_meta_by_name
+        self.assertEqual(restarted._change_progress_value(reloaded), '已结束')
+        self.assertFalse(restarted._source_record_is_ongoing(reloaded))
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_normalized_lookup_record_keeps_verified_execution_status(self):
+        _, remote, _ = self.change_lookup_source()
+        normalized = self.service._normalize_record({'record_id': 'rec-source', 'fields': remote},
+            meta_by_name=self.service._change_field_meta_by_name, work_type='change', notice_type='变更通告')
+        self.assertEqual(self.service._change_progress_value(normalized), '已结束')
+
+    def test_writable_active_progress_is_not_overridden_by_stale_execution_marker(self):
+        _, _, row = self.change_lookup_source()
+        self.service._change_field_meta_by_name['变更进度'] = field('变更进度', options=['进行中', '已结束'])
+        self.assertEqual(self.service._change_progress_value(row), '进行中')
+
+    def test_legacy_readonly_execution_status_can_confirm_without_separate_marker(self):
+        for status in ('正常结束', '延期结束', '已结束'):
+            with self.subTest(status=status):
+                payload, remote, _ = self.source(formula=True, work_type='change')
+                remote.update({'变更进度': status, '实际结束时间': payload['ended_at']})
+                if status != '已结束':
+                    remote['计划开始日期（阿里）'] = '2026-10-19 09:30'
+                self.assertTrue(self.service.sync_notice_source_ended_fields(payload))
+                self.service._patch_record_fields.assert_not_called()
+
     def test_formula_lag_reads_without_repeating_patch_then_completes(self):
         payload, remote, row = self.source(formula=True)
         for _ in range(3):

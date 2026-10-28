@@ -12,6 +12,9 @@ if str(BIN_DIR) not in sys.path:
 
 from lan_bitable_template_portal.portal_service import MaintenancePortalService  # noqa: E402
 from lan_bitable_template_portal.portal_service import PortalError  # noqa: E402
+from lan_bitable_template_portal.portal_service import NoticeSourcePending  # noqa: E402
+from clipflow_backend.main import FastAPIPortalController  # noqa: E402
+from fastapi.testclient import TestClient  # noqa: E402
 from lan_bitable_template_portal.identity_utils import (  # noqa: E402
     notice_payload_matches_month,
 )
@@ -33,6 +36,105 @@ from upload_event_module.services import feishu_service  # noqa: E402
 class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
+
+    def test_native_planned_ended_bind_pending_source_is_truthful_and_retry_preserves_end(self):
+        root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store = LanPortalStateStore(root / "state.sqlite3")
+        self.addCleanup(store.shutdown_write_worker, timeout=2.0)
+        self.service._state_store = store
+        self.service._work_status_dir = root / "work-status"
+        self.service._summary_dir = root / "summaries"
+        self.service._legacy_summary_migrated = True
+        self.service._state_version_lock = threading.RLock()
+        self.service._state_version = 0
+        ended_at = "2026-10-28 10:23:47"
+        request = {
+            "scope": "A", "binding_context": "planned", "work_type": "maintenance", "notice_type": "维保通告",
+            "source_record_id": "rec-source-bind", "target_record_id": "rec-ended-bind",
+            "active_item_id": "active-ended-bind", "title": "A楼计划维保", "building": "A楼", "building_code": "A",
+        }
+        store.upsert_qt_active_item({**request, "record_id": request["target_record_id"], "status": "更新"},
+            section="other", origin="portal")
+        store.delete_qt_active_item(active_item_id=request["active_item_id"])
+        before_identities = store.list_notice_identities(include_deleted=True)
+        validation = {**request, "source_found": True, "target_active": False, "target_finished": True,
+            "target_status": "已结束", "target_ended_at": ended_at, "_target_active_payload": {}}
+        session = {"user": {"open_id": "fixture-bind-user"}, "role": "building", "allowed_scopes": ["A"]}
+        with (
+            mock.patch.object(PortalRuntime, "state_store", store),
+            mock.patch.object(PortalRuntime, "service", self.service),
+            mock.patch("clipflow_backend.main.LanPortalStateStore", return_value=store),
+            mock.patch.object(PortalRuntime.auth_manager, "account_profile", return_value={"modules": []}) as profile,
+            mock.patch.object(PortalRuntime.auth_manager, "scope_allowed", side_effect=lambda _session, scope: scope == "A") as scope_allowed,
+            mock.patch.object(PortalRuntime.auth_manager, "is_admin", return_value=False),
+            mock.patch.object(self.service, "validate_notice_identity_binding", return_value=validation) as validate,
+            mock.patch.object(self.service, "sync_notice_source_ended_fields", side_effect=[
+                NoticeSourcePending("源表状态字段元信息缺失，后台将重新读取字段定义后重试，未猜测写入。"), True,
+            ]) as sync,
+            mock.patch.object(self.service, "_mark_local_notice_finished_from_target", wraps=self.service._mark_local_notice_finished_from_target) as finish,
+            mock.patch.object(store, "upsert_notice_identity", wraps=store.upsert_notice_identity) as save_identity,
+            mock.patch.object(store, "upsert_qt_active_item", wraps=store.upsert_qt_active_item) as revive,
+            mock.patch.object(store, "enqueue_outbox_event", wraps=store.enqueue_outbox_event) as enqueue,
+            mock.patch.object(store, "upsert_runtime_queue_item", wraps=store.upsert_runtime_queue_item) as queue,
+            mock.patch.object(PortalRuntime, "enqueue_initial_message_or_upload_job") as background,
+        ):
+            controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+            with mock.patch.object(controller, "_current_session", return_value=session):
+                client = TestClient(controller._build_app())
+                denied = client.post("/api/notice-identity/bind", json=request)
+                self.assertEqual(denied.status_code, 403, denied.text)
+                self.assertEqual(denied.json()["error_code"], "module_access_denied")
+                profile.return_value = {"modules": ["maintenance"]}
+                denied = client.post("/api/notice-identity/bind", json={**request, "scope": "B"})
+                self.assertEqual(denied.status_code, 403, denied.text)
+                self.assertIn("无权访问", denied.json()["error"])
+                validate.assert_not_called()
+                sync.assert_not_called()
+
+                pending = client.post("/api/notice-identity/bind", json=request)
+                self.assertEqual(pending.status_code, 403, pending.text)
+                self.assertEqual(pending.json(), {"ok": False, "error":
+                    "目标通告已结束，但源表完成信息尚未核实；本次绑定未完成，请稍后重试绑定。"})
+                self.assertEqual(sync.call_args.args[0]["ended_at"], ended_at)
+                save_identity.assert_not_called()
+                finish.assert_not_called()
+                revive.assert_not_called()
+                enqueue.assert_not_called()
+                queue.assert_not_called()
+                background.assert_not_called()
+                self.assertEqual(store.list_notice_identities(include_deleted=True), before_identities)
+                self.assertEqual(store.list_documents("notice_action_job"), [])
+                self.assertEqual(store.list_visible_qt_active_items(), [])
+
+                retried = client.post("/api/notice-identity/bind", json=request)
+                self.assertEqual(retried.status_code, 200, retried.text)
+                data = retried.json()["data"]
+                self.assertTrue(data["target_finished"])
+                self.assertTrue(data["source_ended_synced"])
+                self.assertEqual(data["target_ended_at"], ended_at)
+                self.assertEqual(sync.call_count, 2)
+                self.assertEqual(sync.call_args_list[0], sync.call_args_list[1])
+                save_identity.assert_called_once()
+                finish.assert_called_once()
+                self.assertEqual(finish.call_args.kwargs["ended_at"], ended_at)
+                identity = store.resolve_notice_identity(work_type="maintenance", source_record_id=request["source_record_id"])
+                self.assertEqual(identity["payload"]["ended_at"], ended_at)
+                self.assertEqual(identity["payload"]["status"], "已结束")
+                local = self.service._load_work_status_locked(building_code="A")["items"]
+                self.assertEqual([(row["status"], row["ended_at"]) for row in local], [("已结束", ended_at)])
+                restored = store.restore_live_portal_qt_active_items(force=True, grace_seconds=0)
+                self.assertEqual(restored["restored"], 0)
+                self.assertEqual(store.list_visible_qt_active_items(), [])
+                revive.assert_not_called()
+                enqueue.assert_not_called()
+                queue.assert_not_called()
+                background.assert_not_called()
+                self.assertEqual(scope_allowed.call_args_list.count(mock.call(session, "A")), 2)
+                for call in validate.call_args_list:
+                    self.assertEqual(call.kwargs["scope"], "A")
+                    self.assertTrue(call.kwargs["allow_finished"])
+                    self.assertTrue(call.kwargs["fresh_target"])
+                    self.assertFalse(call.kwargs["allow_unscoped_target"])
 
     def test_start_never_reuses_missing_ended_or_unrelated_target(self):
         prepared = {"action": "start", "work_type": "maintenance", "notice_type": "维保通告",

@@ -13296,6 +13296,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_maintenance_end_writes_actual_end_and_marks_left_source_ended(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
+            service._field_meta_by_name = {
+                "维护实施状态": FieldMeta("fld-state", "维护实施状态", "Formula", 20, False, {}, [], True),
+            }
             store = service._state_store
             source_record_id = "source-maintenance-end"
             target_record_id = "target-maintenance-end"
@@ -13331,6 +13334,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "title": "EA118机房A楼结束回写维护",
                 "building": "A楼",
                 "building_codes": ["A"],
+                "plan_month": _TEST_MONTH_LABEL,
             }
             store.upsert_qt_active_item(active, section="other", origin="portal")
             job_id, _ = service.create_action_job(
@@ -13406,6 +13410,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(service._records[0]["display_fields"]["维护实施状态"], "进行中")
                 self.assertEqual(len(store.list_outbox_events("notice_source_finalize", status="pending")), 1)
                 PortalRuntime.process_source_end_sync()
+                self.assertEqual(
+                    [row["payload"]["state"] for row in store.list_documents("notice_source_recovery")],
+                    ["done"], store.list_documents("notice_source_recovery"),
+                )
 
             upload.assert_not_called()
             source_write.assert_called_once()
@@ -14840,6 +14848,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         PortalRuntime.service = previous_service
 
     def test_notice_identity_binding_updates_shared_ongoing_and_source_status(self):
+        self.enterContext(patch.object(
+            PortalRuntime.auth_manager, "account_profile",
+            return_value={"role": "admin", "modules": ["maintenance", "change", "repair", "power"]},
+        ))
         class _BindingService:
             def __init__(self):
                 self.cache_touches = 0
@@ -15124,7 +15136,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     ongoing,
                 )
                 self.assertIsNotNone(linked)
-                self.assertEqual(linked["source_progress"], "进行中")
+                # Linking a target must not invent a new status for the source record.
+                self.assertEqual(linked["source_progress"], "未开始")
                 self.assertEqual(
                     linked["target_record_id"],
                     "rec-target-binding",

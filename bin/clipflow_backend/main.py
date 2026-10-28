@@ -174,6 +174,7 @@ from lan_bitable_template_portal.portal_service import (
     NOTICE_TYPE_BY_WORK_TYPE,
     PortalConflictError,
     PortalError,
+    NoticeSourcePending,
     REPAIR_SOURCE_APP_TOKEN,
     REPAIR_SOURCE_TABLE_ID,
     SCOPE_OPTIONS,
@@ -7843,10 +7844,16 @@ class FastAPIPortalController:
 
                 source_ended_synced = False
                 if target_finished and work_type != WORK_TYPE_REPAIR:
-                    source_ended_synced = await asyncio.to_thread(
-                        PortalRuntime.service.sync_notice_source_ended_fields,
-                        identity_payload,
-                    )
+                    try:
+                        source_ended_synced = await asyncio.to_thread(
+                            PortalRuntime.service.sync_notice_source_ended_fields,
+                            identity_payload,
+                        )
+                    except NoticeSourcePending as exc:
+                        # Binding has not committed or queued a background sync yet.
+                        raise PortalError(
+                            "目标通告已结束，但源表完成信息尚未核实；本次绑定未完成，请稍后重试绑定。"
+                        ) from exc
                     if validation.get("source_found") and not source_ended_synced:
                         raise PortalError("目标记录已结束，但源表完成状态同步失败，请重试绑定。")
 

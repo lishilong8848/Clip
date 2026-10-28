@@ -94,9 +94,9 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
 
     async def test_compound_faults_retrieve_both_topics_even_when_first_search_hits(self):
         transformer = [{**self.item, 'document_id': 'transformer', 'ordinal': n,
-                        'name': '变压器故障流程.xlsx', 'text': '变压器故障按电气应急流程处理。'} for n in range(8)]
+                        'name': '变压器故障流程.xlsx', 'text': f'变压器故障第{n}项按电气应急流程处理。'} for n in range(8)]
         heat = [{**self.item, 'document_id': 'room-heat', 'ordinal': n,
-                 'name': '机房局部高温流程.xlsx', 'text': '机房环境高温按暖通应急流程处理。'} for n in range(8)]
+                 'name': '机房局部高温流程.xlsx', 'text': f'机房环境高温第{n}项按暖通应急流程处理。'} for n in range(8)]
         self.kb.search.side_effect = [{'items': rows, 'warning': ''} for rows in (transformer, transformer, heat)]
         self.model.complete.side_effect = ['{"keywords":["变压器故障","机房高温"]}', '分别核实供电与机房温度，按对应流程协调处置。[1][2]']
         question = '根据公司知识库中的内容告诉我变压器故障的同时又机房温度高温了给我一个简单的应急思路。'
@@ -107,7 +107,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({doc['name'] for doc in prompt['documents']}, {'变压器故障流程.xlsx', '机房局部高温流程.xlsx'})
         self.assertEqual(len(prompt['documents']), 12)
         self.assertEqual([doc['number'] for doc in prompt['documents']], list(range(1, 13)))
-        self.assertEqual(len({(s['data']['document_id'], s['data']['ordinal']) for s in response['sources']}), 12)
+        self.assertEqual([source['number'] for source in response['sources']], [1, 2])
         self.assertTrue(all(topic['candidate_sources'] for topic in prompt['topics']))
         self.assertIn('逐一覆盖', self.model.complete.call_args.args[0][0]['content'])
 

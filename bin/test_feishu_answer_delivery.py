@@ -239,6 +239,17 @@ class AnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
             {'status': 'failed', 'run_id': 'untrusted reference', 'error_code': 'model_validation'}, self.message['question'])
         self.assertNotIn('诊断编号', reply['text'])
 
+    async def test_saved_company_reply_shows_only_cited_sources_without_renumbering(self):
+        turn = {'status': 'completed', 'answer': '使用当前在用流程。[3]', 'sources': [
+            {'number': 1, 'kind': 'company_knowledge', 'title': '未引用的旧版'},
+            {'number': 2, 'kind': 'company_knowledge', 'title': '无关制度'},
+            {'number': 3, 'kind': 'company_knowledge', 'title': '当前在用流程'}]}
+        reply = await self.bot._turn_reply(self.message, self.request, self.actor, self.conversation,
+                                           turn, self.message['question'])
+        self.assertIn('[3] 当前在用流程', reply['text'])
+        self.assertNotIn('未引用的旧版', reply['text'])
+        self.assertNotIn('无关制度', reply['text'])
+
     async def test_temporarily_unreachable_backend_keeps_pending_outcome_for_later(self):
         waiting = await self.bot._answer_message(self.message)
         self.bot._call.side_effect = TimeoutError()

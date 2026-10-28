@@ -462,5 +462,364 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
             server._request_notice_locks.reset(token)
 
 
+class StandaloneStartRecoveryTests(unittest.TestCase):
+    validation_errors = (
+        "原关联目标已结束或未开始，不能作为本次开始通告复用，请重新核对关联。",
+        "原关联目标与本次通告名称或楼栋不一致，未修改旧记录，请重新核对关联。",
+    )
+    source_id = "rec-fixture-source"
+    tearDown = fixtures.EventRemoteAtomicityTests.tearDown
+
+    def setUp(self):
+        fixtures.EventRemoteAtomicityTests.setUp(self)
+        for name in ("socket.create_connection", "socket.socket.connect", "socket.socket.connect_ex"):
+            self.enterContext(patch(name, side_effect=AssertionError("real network forbidden")))
+        self.handler = SimpleNamespace(
+            build_create_fields=Mock(side_effect=lambda payload: {
+                "原文": payload.text, "附件": list(payload.file_tokens or []),
+            }),
+            get_table_id=Mock(return_value="fixture-table"),
+        )
+        self.enterContext(patch.object(server, "get_notice_handler", return_value=self.handler))
+        self.enterContext(patch.object(feishu, "config", SimpleNamespace(app_token="fixture-app")))
+        self.enterContext(patch.object(feishu, "_filter_missing_optional_fields", side_effect=lambda _, fields: fields))
+        self.token = self.enterContext(patch.object(feishu, "_notice_create_client_token", wraps=feishu._notice_create_client_token))
+        self.create = self.enterContext(patch.object(feishu, "create_bitable_record_fields", return_value=(True, "rec-created")))
+
+    def prepared(self, **overrides):
+        title = "EA118-A楼HVDC蓄电池汇流排防护罩更换变更（二）"
+        return {
+            "action": "start", "manual": True, "work_type": "change", "notice_type": "变更通告",
+            "scope": "A", "title": title, "building": "A楼", "buildings": ["A楼"], "building_codes": ["A"],
+            "start_time": "2026-10-28 09:00", "end_time": "2026-10-28 23:00", "level": "I3",
+            "text": f"【变更通告】状态：开始\n【标题】{title}\n【时间】2026-10-28 09:00~23:00",
+            "record_id": "manual:lite:A:change:fixture", "source_record_id": "", "target_record_id": "",
+            "operation_id": "latest-submit", "robot_group_choice": "skip", **overrides,
+        }
+
+    def replacement(self, *, status="failed", error="", result=None, target=None):
+        store = PortalRuntime.state_store
+        root, current = "notice_action:" + uuid.uuid4().hex, "notice_action:" + uuid.uuid4().hex
+        store.begin_notice_remote_operation(operation_id=root, operation_type="start",
+            request={"action": "start", "source_record_id": self.source_id, "record_id": self.source_id},
+            target_record_id=self.source_id if target is None else target)
+        store.mark_notice_remote_operation(root, status=status, error=error, result=result or {})
+        store.begin_notice_remote_operation(operation_id=current, operation_type="start")
+        return root, self.prepared(_remote_operation_id=current, replacement_create_operation_id=root)
+
+    def worker_begin(self, prepared):
+        class StopAfterBegin(BaseException):
+            pass
+
+        native = Mock()
+        native.get_job.return_value = {"request": copy.deepcopy(prepared)}
+        native.prepare_action_job.return_value = copy.deepcopy(prepared)
+        native._synchronize_prepared_notice_text.side_effect = lambda value: value
+        native._action_message_signature.return_value = "fixture-signature"
+        recorded = {}
+
+        def begin(**kwargs):
+            recorded.update(PortalRuntime.state_store.begin_notice_remote_operation(**kwargs))
+            # Inspect the real first ledger write without running upload or delivery.
+            raise StopAfterBegin()
+
+        with (
+            patch.object(PortalRuntime, "service", native),
+            patch.object(PortalRuntime, "_hold_for_active_event", return_value=False),
+            patch.object(PortalRuntime, "_resolve_polling_work_order_mode", side_effect=lambda value, **_: value),
+            patch.object(PortalRuntime, "_begin_notice_remote_operation", side_effect=begin),
+        ):
+            with self.assertRaises(StopAfterBegin):
+                PortalRuntime._process_maintenance_action_job_impl(uuid.uuid4().hex)
+        return recorded
+
+    def test_start_worker_ledger_excludes_source_and_manual_record_ids(self):
+        for record_id, source_id in ((self.source_id, self.source_id), ("manual:lite:A:change:fixture", "")):
+            with self.subTest(record_id=record_id):
+                operation = self.worker_begin(self.prepared(record_id=record_id, source_record_id=source_id))
+                self.assertEqual(operation["target_record_id"], "")
+                self.assertEqual(operation["request"]["source_record_id"], source_id)
+                self.assertEqual(operation["operation_type"], "start")
+
+    def test_update_end_worker_ledger_keeps_actual_target(self):
+        for action in ("update", "end"):
+            for explicit_target in (False, True):
+                with self.subTest(action=action, explicit_target=explicit_target):
+                    operation = self.worker_begin(self.prepared(action=action,
+                        record_id=self.source_id if explicit_target else "rec-existing-target",
+                        source_record_id=self.source_id, target_record_id="rec-existing-target" if explicit_target else ""))
+                    self.assertEqual(operation["target_record_id"], "rec-existing-target")
+                    self.assertEqual(operation["operation_type"], action)
+
+    def test_legacy_precreate_validation_freezes_latest_payload_under_root_token(self):
+        for status in ("failed", "superseded"):
+            for error in self.validation_errors:
+                with self.subTest(status=status, error=error):
+                    self.create.reset_mock()
+                    self.token.reset_mock()
+                    root, prepared = self.replacement(status=status, error=error,
+                        result={"created_record_id": self.source_id})
+                    latest = PortalRuntime._prepared_to_notice_payload(prepared, file_tokens=["latest-image"])
+                    before = copy.deepcopy(latest)
+                    fields = {"原文": latest.text, "附件": ["latest-image"]}
+
+                    def create(kind, frozen_fields, *, client_token):
+                        saved = PortalRuntime.state_store.get_notice_remote_operation(root)["result"]
+                        self.assertEqual(saved["create_fields"], fields)
+                        self.assertEqual(saved["create_client_token"], client_token)
+                        self.assertEqual(frozen_fields, fields)
+                        self.assertEqual(uuid.UUID(client_token).version, 4)
+                        return True, "rec-created"
+
+                    self.create.side_effect = create
+                    target = PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest)
+                    self.assertEqual(target, "rec-created")
+                    self.assertEqual(latest, before)
+                    self.create.assert_called_once()
+                    self.token.assert_called_once()
+                    token_payload, kind, table = self.token.call_args.args
+                    self.assertEqual((token_payload.operation_id, kind, table), (root, "变更通告", "fixture-table"))
+                    self.assertEqual(PortalRuntime.state_store.get_notice_remote_operation(prepared["_remote_operation_id"])["target_record_id"], target)
+
+    def test_persisted_validation_marker_allows_checkpointed_root_create(self):
+        for status in ("failed", "superseded"):
+            with self.subTest(status=status):
+                self.create.reset_mock()
+                root, prepared = self.replacement(status=status, error="旧任务已被最新提交替代。",
+                    result={"start_validation_failed": True, "created_record_id": self.source_id})
+                latest = PortalRuntime._prepared_to_notice_payload(prepared)
+                self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest), "rec-created")
+                self.create.assert_called_once()
+                saved = PortalRuntime.state_store.get_notice_remote_operation(root)["result"]
+                self.assertEqual(saved["create_fields"]["原文"], latest.text)
+                self.assertEqual(saved["create_client_token"], self.create.call_args.kwargs["client_token"])
+
+    def test_backend_persists_marker_only_for_exact_precreate_validation_errors(self):
+        for error in self.validation_errors:
+            with self.subTest(error=error):
+                root, prepared = self.replacement(error="")
+                prepared.pop("replacement_create_operation_id")
+                prepared["_remote_operation_id"] = root
+                with (
+                    patch.object(server, "external_real_write_guard", return_value={"mock_external": False, "real_write_allowed": True}),
+                    patch.object(PortalRuntime, "_existing_target_for_prepared_start", side_effect=server.PortalError(error)),
+                    patch.object(server, "create_bitable_record_by_payload") as upload,
+                ):
+                    with self.assertRaisesRegex(server.PortalError, error):
+                        PortalRuntime._execute_backend_prepared_upload(prepared)
+                self.assertIs(PortalRuntime.state_store.get_notice_remote_operation(root)["result"]["start_validation_failed"], True)
+                upload.assert_not_called()
+        self.create.assert_not_called()
+
+    def test_unreadable_target_does_not_mark_validation_failure_or_allow_replacement_create(self):
+        for raises in (False, True):
+            with self.subTest(query_raises=raises):
+                root, prepared = self.replacement(error="", result={"start_validation_failed": True})
+                bound = self.prepared(_remote_operation_id=root, target_record_id="rec-existing-target",
+                    record_id=self.source_id, source_record_id=self.source_id)
+                with (
+                    patch.object(server, "external_real_write_guard", return_value={"mock_external": False, "real_write_allowed": True}),
+                    patch.object(server, "query_record_by_id", return_value=(False, "Read timed out"),
+                        side_effect=TimeoutError("Read timed out") if raises else None) as query,
+                    patch.object(server, "create_bitable_record_by_payload") as upload,
+                    patch.object(server, "update_bitable_record_fields") as update,
+                ):
+                    with self.assertRaises(server.PortalError) as failure:
+                        PortalRuntime._execute_backend_prepared_upload(bound)
+                query.assert_called_once_with("rec-existing-target", "变更通告")
+                upload.assert_not_called()
+                update.assert_not_called()
+                saved = PortalRuntime.state_store.get_notice_remote_operation(root)["result"]
+                self.assertIs(saved["start_validation_failed"], False)
+                self.assertFalse(any(key in saved for key in ("create_fields", "create_client_token", "robot_payload")))
+                PortalRuntime.state_store.mark_notice_remote_operation(root, status="failed", error=str(failure.exception))
+                with self.assertRaises(server.PortalError):
+                    PortalRuntime._replacement_start_target(prepared, "变更通告", root,
+                        latest_payload=PortalRuntime._prepared_to_notice_payload(prepared))
+        self.create.assert_not_called()
+        self.token.assert_not_called()
+
+    def test_precreate_validation_without_latest_payload_stays_blocked(self):
+        root, prepared = self.replacement(error=self.validation_errors[0])
+        with self.assertRaises(server.PortalError):
+            PortalRuntime._replacement_start_target(prepared, "变更通告", root)
+        self.create.assert_not_called()
+
+    def test_unknown_or_nonterminal_original_cannot_start_a_new_create(self):
+        for status, error, result in (
+            ("failed", "", {}), ("failed", "Read timed out", {}), ("superseded", "未知失败", {}),
+            ("failed", "前缀" + self.validation_errors[0], {}),
+            ("executing", self.validation_errors[0], {"start_validation_failed": True}),
+        ):
+            with self.subTest(status=status, error=error):
+                root, prepared = self.replacement(status=status, error=error, result=result)
+                with self.assertRaises(server.PortalError):
+                    PortalRuntime._replacement_start_target(prepared, "变更通告", root,
+                        latest_payload=PortalRuntime._prepared_to_notice_payload(prepared))
+        self.create.assert_not_called()
+
+    def test_missing_original_operation_stays_blocked(self):
+        with self.assertRaises(server.PortalError):
+            PortalRuntime._replacement_start_target(self.prepared(), "变更通告", "notice_action:missing",
+                latest_payload=PortalRuntime._prepared_to_notice_payload(self.prepared()))
+        self.create.assert_not_called()
+
+    def test_partial_create_or_write_evidence_cannot_be_replaced_by_latest_payload(self):
+        for evidence in (
+            {"create_fields": {"原文": "original"}}, {"create_client_token": str(uuid.uuid4())},
+            {"robot_payload": {"text": ""}}, {"written_fields": {"原文": "original"}},
+            {"record_id": self.source_id},
+        ):
+            with self.subTest(evidence=evidence):
+                root, prepared = self.replacement(error=self.validation_errors[0],
+                    result={"start_validation_failed": True, **evidence})
+                with self.assertRaises(server.PortalError):
+                    PortalRuntime._replacement_start_target(prepared, "变更通告", root,
+                        latest_payload=PortalRuntime._prepared_to_notice_payload(prepared))
+        self.create.assert_not_called()
+
+    def test_source_contamination_replays_frozen_original_fields_and_token(self):
+        fields, token = {"原文": "frozen original"}, str(uuid.uuid4())
+        root, prepared = self.replacement(status="superseded", error=self.validation_errors[0], result={
+            "created_record_id": self.source_id, "create_fields": fields, "create_client_token": token,
+        })
+        self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root), "rec-created")
+        self.create.assert_called_once_with("变更通告", fields, client_token=token)
+        self.token.assert_not_called()
+
+    def test_lost_create_response_replays_root_checkpoint_even_after_latest_text_changes(self):
+        root, prepared = self.replacement(error=self.validation_errors[0])
+        latest = PortalRuntime._prepared_to_notice_payload(prepared)
+        original = copy.deepcopy(latest)
+        self.create.side_effect = [(False, "Read timed out after create"), (True, "rec-created")]
+        with self.assertRaisesRegex(server.PortalError, "Read timed out"):
+            PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest)
+        frozen = copy.deepcopy(PortalRuntime.state_store.get_notice_remote_operation(root)["result"])
+        self.assertEqual(frozen["create_fields"]["原文"], original.text)
+        self.assertTrue(frozen["create_client_token"])
+        current = "notice_action:" + uuid.uuid4().hex
+        PortalRuntime.state_store.begin_notice_remote_operation(operation_id=current, operation_type="start")
+        prepared["_remote_operation_id"] = current
+        latest.text += "\n【进度】另一次编辑，不能覆盖已冻结的创建内容"
+        latest.operation_id = "another-latest-submit"
+        changed = copy.deepcopy(latest)
+        self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest), "rec-created")
+        self.assertEqual(latest, changed)
+        self.assertEqual(self.create.call_count, 2)
+        self.assertEqual(self.create.call_args_list[0], self.create.call_args_list[1])
+        self.token.assert_called_once()
+        self.handler.build_create_fields.assert_called_once()
+        self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest), "rec-created")
+        self.assertEqual(self.create.call_count, 2)
+
+    def test_revoked_actor_blocks_create_but_preserves_root_checkpoint_for_authorized_retry(self):
+        root, prepared = self.replacement(error=self.validation_errors[0])
+        latest = PortalRuntime._prepared_to_notice_payload(prepared)
+        with patch.object(PortalRuntime, "_check_current_notice_actor",
+                side_effect=server.PortalError("办理权限已撤销")) as denied:
+            with self.assertRaisesRegex(server.PortalError, "办理权限已撤销"):
+                PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest)
+        denied.assert_called_once()
+        self.create.assert_not_called()
+        frozen = copy.deepcopy(PortalRuntime.state_store.get_notice_remote_operation(root)["result"])
+        self.assertEqual(frozen["create_fields"]["原文"], latest.text)
+        self.assertTrue(frozen["create_client_token"])
+        latest.text += "\n【进度】授权恢复后的新编辑"
+        with patch.object(PortalRuntime, "_check_current_notice_actor") as allowed:
+            self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root, latest_payload=latest), "rec-created")
+        allowed.assert_called_once()
+        self.create.assert_called_once_with("变更通告", frozen["create_fields"], client_token=frozen["create_client_token"])
+        self.token.assert_called_once()
+
+    def test_replacement_preserves_real_created_target_when_other_candidate_is_source(self):
+        for saved_target, ledger_target in (("rec-real", self.source_id), (self.source_id, "rec-real"), ("", "rec-real")):
+            with self.subTest(saved_target=saved_target, ledger_target=ledger_target):
+                root, prepared = self.replacement(status="superseded", target=ledger_target,
+                    result={"created_record_id": saved_target, "start_validation_failed": True})
+                self.assertEqual(PortalRuntime._replacement_start_target(prepared, "变更通告", root), "rec-real")
+                self.assertEqual(PortalRuntime.state_store.get_notice_remote_operation(prepared["_remote_operation_id"])["target_record_id"], "rec-real")
+        self.create.assert_not_called()
+
+    def test_start_reconcile_source_or_local_placeholder_uses_uncertain_create_lookup(self):
+        for value in (self.source_id, "manual:lite:A:change:fixture", "local_fixture"):
+            for location in ("operation", "prepared_target", "prepared_record"):
+                with self.subTest(value=value, location=location):
+                    prepared = self.prepared(source_record_id="" if location == "operation" else self.source_id, record_id="",
+                        target_record_id=value if location == "prepared_target" else "")
+                    if location == "prepared_record":
+                        prepared["record_id"] = value
+                    operation = {"status": "executing", "target_record_id": value if location == "operation" else "",
+                        "request": {"source_record_id": self.source_id}}
+                    with (
+                        patch.object(PortalRuntime, "_existing_target_for_prepared_start", return_value=""),
+                        patch.object(PortalRuntime, "_find_replayed_start_target", return_value=("rec-recovered", "")) as replay,
+                        patch.object(server, "external_real_write_guard", return_value={"mock_external": False}),
+                        patch.object(server, "query_record_by_id", return_value=(True, {"fields": {}, "record_version": "v1"})) as query,
+                        patch.object(PortalRuntime, "_remote_record_matches_prepared", return_value=True),
+                    ):
+                        ok, target, _, blocked = PortalRuntime._reconcile_notice_remote_intent(prepared, operation)
+                    replay.assert_called_once_with(prepared, "变更通告")
+                    query.assert_called_once_with("rec-recovered", "变更通告")
+                    self.assertEqual((ok, target, blocked), (True, "rec-recovered", False))
+
+    def test_start_reconcile_unconfirmed_create_stays_blocked(self):
+        for replay_result in (("", ""), ("", "候选记录存在歧义")):
+            with self.subTest(replay_result=replay_result):
+                with (
+                    patch.object(PortalRuntime, "_existing_target_for_prepared_start", return_value=""),
+                    patch.object(PortalRuntime, "_find_replayed_start_target", return_value=replay_result) as replay,
+                    patch.object(server, "query_record_by_id", side_effect=AssertionError("must not read a local placeholder")) as query,
+                ):
+                    ok, target, message, blocked = PortalRuntime._reconcile_notice_remote_intent(
+                        self.prepared(), {"status": "failed", "error": "Read timed out", "target_record_id": "local_fixture"})
+                self.assertEqual((ok, target, blocked), (False, "", True))
+                self.assertTrue(message)
+                replay.assert_called_once()
+                query.assert_not_called()
+
+    def test_update_end_reconcile_keeps_actual_target(self):
+        for action in ("update", "end"):
+            with self.subTest(action=action):
+                with (
+                    patch.object(PortalRuntime, "_find_replayed_start_target") as replay,
+                    patch.object(server, "external_real_write_guard", return_value={"mock_external": False}),
+                    patch.object(server, "query_record_by_id", return_value=(True, {"fields": {}})) as query,
+                    patch.object(PortalRuntime, "_remote_record_matches_prepared", return_value=True),
+                ):
+                    ok, target, _, blocked = PortalRuntime._reconcile_notice_remote_intent(
+                        self.prepared(action=action, target_record_id="rec-real"), {"status": "executing", "target_record_id": "rec-real"})
+                self.assertEqual((ok, target, blocked), (True, "rec-real", False))
+                query.assert_called_once_with("rec-real", "变更通告")
+                replay.assert_not_called()
+
+    def test_backend_replacement_updates_only_recovered_target_and_fresh_start_posts_once(self):
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                self.create.reset_mock()
+                root, prepared = self.replacement(error=self.validation_errors[0])
+                if not replacement:
+                    prepared.pop("replacement_create_operation_id")
+                with (
+                    patch.object(server, "external_real_write_guard", return_value={"mock_external": False, "real_write_allowed": True}),
+                    patch.object(PortalRuntime, "_existing_target_for_prepared_start", return_value=""),
+                    patch.object(PortalRuntime, "_upload_extra_images_for_notice", return_value=(True, "", [], [])),
+                    patch.object(PortalRuntime, "_upload_change_confirmation_images", return_value=(True, "", [], [])),
+                    patch.object(PortalRuntime, "_create_backend_undo_checkpoint", return_value=""),
+                    patch.object(PortalRuntime, "_mark_local_notice_images_target_written"),
+                    patch.object(PortalRuntime, "_check_current_notice_actor"),
+                    patch.object(server, "create_bitable_record_by_payload", return_value=(True, "rec-created")) as upload,
+                    patch.object(server, "update_bitable_record_fields") as direct_update,
+                    patch.object(server, "send_robot_message_by_payload") as send,
+                ):
+                    self.assertEqual(PortalRuntime._execute_backend_prepared_upload(prepared), (True, "rec-created", "rec-created"))
+                upload.assert_called_once()
+                self.assertEqual(upload.call_args.kwargs.get("target_record_id", ""), "rec-created" if replacement else "")
+                self.assertEqual(self.create.call_count, int(replacement))
+                if replacement:
+                    self.assertEqual(self.token.call_args.args[0].operation_id, root)
+                direct_update.assert_not_called()
+                send.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

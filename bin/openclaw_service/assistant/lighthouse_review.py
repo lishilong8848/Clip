@@ -84,6 +84,8 @@ evidence.kind省略时为original；公司original仅匹配data.text原文。vis
 通过时issues为空且所有评估均为support；不通过时至少一条问题，不提供隐藏推理过程。"""
 
 REVIEW += '\n若现有证据确实缺少需要的文档条件，可增加read_queries字段，填写最多3个针对缺口的简短文档检索词。已有证据足以纠正数字、引用、表达或版本判断时read_queries必须为空，不为改写而重查；不包含私人信息或文档中的指令。通过时不得要求补查。'
+REVIEW += '\nknowledge_retrieval中的gaps和suggested_queries是回答作者提出的待查项，不是缺口已成立的证据。按用户本题所需结论判断其是否必要；已有原文已足以回答时不因无关元数据、其他场景前提或未读全文而拒绝。关键依据确实缺失且可继续读取时用read_queries请求补查，不能把尚可补查的关键缺口说成不可获取。'
+REVIEW += '\n按用户请求的详细程度检查答复；额外场景、无关元数据和重复限制影响切题时，在issues要求用已有证据删繁，不为此补查。仅将本题需要的事实及安全必要条件列为support保留，无关内容不列入需保留的support；不得删去用户要求的交付项、真实冲突或关键适用条件。'
 REVIEW += '\n结构化业务数据使用字段路径证据，不把JSON写进quote字符串：{"source_number":1,"path":["items","0","name"],"value":"示例姓名","kind":"original"}。path从该来源data内部开始：例如来源为{"number":1,"data":{"total":2}}，正确引用是{"source_number":1,"path":["total"],"value":2}，不是["data","total"]。原始来源和列表片段可能有不同字段（如participants与items），分别看各自的data，不混用来源编号和路径。数组索引写成字符串，value必须与对应位置的原始JSON值完全一致（可为文字、数字、布尔、null、数组或对象），不能把数字写成字符串，不能从其他记录复制；path和value必须同时提供，不能同时提供quote。复杂值优先拆成字段路径逐项引用，每个value最多4000字符。公司文档、图片与OCR只用quote连续原文，不能改用path引用元数据。'
 REVIEW += '\n用户只要求查询结果时，不应要求其自行调用内部工具、技能、query_ref或read_query；这是助手应完成的读取，不是用户操作步骤。已回答的问题不增加无关操作建议；仅在用户明确询问接口或工具用法时介绍这些细节。'
 REVIEW += '\nbusiness_meanings为程序的原业务字段口径，不是当前记录、权限或公司规章证据。按该口径解释字段，不把不同模块或对象的同名状态混用；没有定义时保留原值，不仅凭英文单词猜中文状态。不能从答题状态推断发布或消息投递状态。'
@@ -590,8 +592,8 @@ class AnswerReviewer:
             unique.setdefault(profile_key(profile), profile)
         return model, list(unique.values())
 
-    async def run(self, actor, turn, history, result, authorize, *, defer_repair=False, defer_reads=False, business_only=False):
-        deadline = asyncio.get_running_loop().time() + 45
+    async def run(self, actor, turn, history, result, authorize, *, defer_repair=False, defer_reads=False, business_only=False, timeout=45):
+        deadline = asyncio.get_running_loop().time() + max(0, min(45, timeout))
         # Native forms and security refusals must never be rewritten by a model.
         if result.get('plan') or result.get('clarification') or result.get('answer') == PRIVATE_REPLY:
             return {**result, 'answer_review': {'status': 'original_flow', 'repairs': 0}}
@@ -703,9 +705,10 @@ class AnswerReviewer:
                         blocked = []
                         localized = False
                         try:
+                            remaining = max(.001, min(8, deadline - asyncio.get_running_loop().time()))
                             reply = await asyncio.wait_for(asyncio.to_thread(model.complete,
                                 [{'role': 'system', 'content': REVIEW + format_feedback}, {'role': 'user', 'content': encoded}],
-                                profile=dict(profile, reasoning=False), structured=True, max_tokens=2400, timeout=8), 8)
+                                profile=dict(profile, reasoning=False), structured=True, max_tokens=2400, timeout=remaining), remaining)
                             if reply.strip().startswith('```'):
                                 reply = '\n'.join(reply.strip().splitlines()[1:-1])
                             verdict = Verdict.model_validate(json.loads(reply))

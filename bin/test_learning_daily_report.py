@@ -88,11 +88,11 @@ class DailyReportTests(unittest.TestCase):
             'delivery': [{'open_id': 'ou_' + pid, 'ok': True, 'message_id': 'om_notice',
                           'sender_app_id': 'cli_current'}], **changes})
 
-    def answer(self, pid='p1', count=2):
+    def answer(self, pid='p1', count=2, correct=0):
         paper = self.service._get('paper', 'paper:' + pid)
         return self.put('record', {'id': paper['id'], 'person_id': pid, 'date': DATE, 'scope': paper['scope'],
-            'entries': {q['id']: {'attempt': {'correct': False, 'submitted_at': self.clock.isoformat()}}
-                        for q in paper['questions'][:count]}})
+            'entries': {q['id']: {'attempt': {'correct': index < correct, 'submitted_at': self.clock.isoformat()}}
+                        for index, q in enumerate(paper['questions'][:count])}})
 
     def report(self):
         with self.service.transaction() as conn:
@@ -274,16 +274,89 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(self.send_mock.call_count, 1)
         self.assertEqual(self.job()['status'], 'sent')
 
-    def test_complete_zero_never_sends(self):
+    def test_all_completed_sends_green_summary_once_with_people_and_accuracy(self):
+        self.member('night', '夜')
+        self.answer(correct=2); self.answer('night', correct=1)
+        self.run_due()
+        self.assertEqual(self.job()['status'], 'sent')
+        card = self.send_mock.call_args.args[0]
+        text = json.dumps(card, ensure_ascii=False)
+        self.assertEqual(card['header']['template'], 'green')
+        self.assertIn('全部答题完成', text)
+        self.assertIn('答题人员 2 人', text)
+        self.assertIn('75.0%', text)
+        self.assertIn('3/4题', text)
+        self.assertNotIn('<font color="red">', text)
+        self.restart(); self.run_due(NOW + dt.timedelta(hours=1))
+        self.assertEqual(self.send_mock.call_count, 1)
+
+    def test_completed_with_zero_correct_is_not_missing_accuracy(self):
         self.answer(); self.run_due()
-        self.assertEqual(self.job()['status'], 'skipped_completed'); self.send_mock.assert_not_called()
+        self.assertEqual(self.job()['status'], 'sent')
+        self.assertIn('0.0%', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
+
+    def test_completed_subjective_questions_do_not_invent_accuracy(self):
+        paper = self.service._get('paper', 'paper:p1')
+        paper['questions'] = [self.question(n, kind='interview') for n in range(2)]
+        self.put('paper', paper); self.answer(correct=2); self.run_due()
+        text = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
+        self.assertIn('全部答题完成', text)
+        self.assertIn('暂无可统计客观题', text)
+        self.assertNotIn('100.0%', text)
+
+    def test_completed_metrics_use_first_answers_and_exclude_review_and_practice(self):
+        record = self.answer(correct=1)
+        for entry in record['entries'].values():
+            entry['practice'] = [{'correct': True, 'submitted_at': NOW.isoformat()}]
+        self.put('record', record)
+        self.put('paper', {'id': 'practice', 'person_id': 'p1', 'date': DATE, 'scope': 'A',
+                          'mode': 'practice', 'questions': [self.question(9)]})
+        self.put('record', {'id': 'practice', 'entries': {'written:9': {
+            'attempt': {'correct': True, 'submitted_at': NOW.isoformat()}}}})
+        self.run_due()
+        text = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
+        self.assertIn('50.0%', text)
+        self.assertIn('1/2题', text)
+
+    def test_completed_roster_duplicates_do_not_inflate_people_or_accuracy(self):
+        self.roster.append(copy.deepcopy(self.roster[0])); self.save_roster()
+        self.answer(correct=1)
+        report = self.report()
+        report['completed'].append(copy.deepcopy(report['completed'][0]))
+        card = daily.render_card(report, 'https://portal.invalid')
+        text = json.dumps(card, ensure_ascii=False)
+        self.assertIn('答题人员 1 人', text)
+        self.assertIn('1/2题', text)
+
+    def test_accuracy_weights_question_counts_and_people_are_unique_across_shifts(self):
+        self.answer(correct=1)
+        report = self.report()
+        report['completed'].append({**report['completed'][0], 'shift': '夜',
+                                   'answered': 3, 'assigned': 3, 'correct': 3, 'objective_answered': 3})
+        card = daily.render_card(report, 'https://portal.invalid')
+        text = json.dumps(card, ensure_ascii=False)
+        self.assertIn('答题人员 1 人', text)
+        self.assertIn('完成 2 人班', text)
+        self.assertIn('80.0%（4/5题）', text)
+
+    def test_completed_people_with_unverified_or_failed_duties_never_report_all_done(self):
+        self.answer(correct=1); self.member('night', '夜')
+        for status, delivery in (('pending', []), ('sent', [])):
+            with self.subTest(status=status):
+                self.notice('night', '夜', status=status, delivery=delivery)
+                report = self.report()
+                card = daily.render_card(report, 'https://portal.invalid')
+                self.assertEqual(card['header']['template'], 'orange')
+                self.assertNotIn('全部答题完成', json.dumps(card, ensure_ascii=False))
 
     def test_failure_rechecks_completed_and_never_retries_early(self):
         self.send_mock.side_effect = self.reject
         self.run_due(); self.assertEqual(self.job()['status'], 'pending')
         self.run_due(NOW + dt.timedelta(minutes=1)); self.assertEqual(self.send_mock.call_count, 1)
+        self.send_mock.side_effect = self.accept
         self.answer(); self.run_due(NOW + dt.timedelta(minutes=5))
-        self.assertEqual(self.job()['status'], 'skipped_completed'); self.assertEqual(self.send_mock.call_count, 1)
+        self.assertEqual(self.job()['status'], 'sent'); self.assertEqual(self.send_mock.call_count, 2)
+        self.assertIn('全部答题完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
 
     def test_definite_failure_retries_new_verified_payload_only(self):
         self.send_mock.side_effect = self.reject
@@ -467,8 +540,9 @@ class DailyReportTests(unittest.TestCase):
             return original(*args)
         with patch.object(daily, 'collect', side_effect=changed):
             self.run_due()
-        self.assertEqual(len(calls), 2); self.send_mock.assert_not_called()
-        self.assertEqual(self.job()['status'], 'skipped_completed')
+        self.assertEqual(len(calls), 2); self.send_mock.assert_called_once()
+        self.assertEqual(self.job()['status'], 'sent')
+        self.assertIn('全部答题完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
 
     def test_midnight_during_preparation_expires_original_day(self):
         def rollover():

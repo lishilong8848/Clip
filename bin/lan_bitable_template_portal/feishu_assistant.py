@@ -93,7 +93,7 @@ def _public_phase(turn):
         ('connecting', ('正在连接', '正在准备', '正在恢复原回答')),
         ('query', ('正在查询', '正在检索', '正在补查', '正在读取')),
         ('checking', ('正在核对', '正在检查', '正在验证', '正在匹配')),
-        ('finishing', ('正在整理答复', '正在生成答复')),
+        ('finishing', ('正在整理答复', '正在整理资料答复', '正在生成答复')),
         ('thinking', ('正在思考', '正在分析', '正在整理上下文', '正在自动整理上下文')),
     ):
         if label.startswith(prefixes):
@@ -1528,7 +1528,9 @@ class FeishuAssistant:
             text = '\n\n'.join(f"需要你确认：{item['summary']}。仅查询你的权限范围，结果将在{destination}。\n"
                 f"回复“确认查询 {item['code']}”继续（5分钟内有效），或回复“取消查询”。未确认则不读取。" for item in pending_reads)
         if turn.get("plan"): text += "\n\n" + self.plan_text(turn["plan"])
-        company_sources = [source for source in turn.get('sources', []) if source.get('kind') == 'company_knowledge']
+        cited = {int(value) for value in re.findall(r'\[(\d{1,3})\]', text)}
+        company_sources = [source for source in turn.get('sources', [])
+                           if source.get('kind') == 'company_knowledge' and source.get('number') in cited]
         if company_sources:
             text += '\n\n公司资料来源：\n' + '\n'.join(f"[{source['number']}] {source['title']}" for source in company_sources)
         from .feishu_assistant_questions import prepare_question_card

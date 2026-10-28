@@ -23,28 +23,42 @@ LEASE_SECONDS = 120
 def render_card(report, portal_url):
     """Pure renderer. Rows: person_id/name/scope/shift/answered/assigned/reason.
 
-    report: date, unfinished/failed/unverified lists; optional example and as_of.
+    report: date, completed/unfinished/failed/unverified lists; optional example and as_of.
     portal_url is the existing portal base URL, not a new privileged endpoint.
     """
     date = report['date']
     unfinished = list({(r['person_id'], r['scope'], r['shift']): r
                        for r in report.get('unfinished', [])}.values())
+    completed = list({(r['person_id'], r['scope'], r['shift']): r
+                      for r in report.get('completed', [])}.values())
+    all_completed = bool(completed) and not any(report.get(key) for key in ('unfinished', 'failed', 'unverified'))
     people = {row['person_id'] for row in unfinished}
     assignments = {(row['person_id'], row['shift']) for row in unfinished}
     card = reminder_card('', portal_url.rstrip('/') + '/learning?' + urlencode(
         {'tab': 'completion'}), button='查看学练完成情况')
-    card['header'] = {'template': 'orange', 'title': {
-        'tag': 'plain_text', 'content': '昨日学练未完成汇总'}}
+    card['header'] = {'template': 'green' if all_completed else 'orange', 'title': {
+        'tag': 'plain_text', 'content': '昨日学练完成汇总' if all_completed else '昨日学练未完成汇总'}}
     elements = []
     if report.get('example'):
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
             'content': '虚构示例，不代表实际进度。'}})
-    elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
-        'content': f"排班日：{date}\n白/夜共已核实待完成 {len(assignments)} 人班 · 去重 {len(people)} 人"}})
+    summary = f"排班日：{date}\n白/夜共已核实待完成 {len(assignments)} 人班 · 去重 {len(people)} 人"
+    if all_completed:
+        correct = sum(row['correct'] for row in completed)
+        objective = sum(row['objective_answered'] for row in completed)
+        accuracy = f'{correct * 100 / objective:.1f}%（{correct}/{objective}题）' if objective else '暂无可统计客观题'
+        summary = (f"排班日：{date}\n全部答题完成 · 答题人员 {len({row['person_id'] for row in completed})} 人"
+                   f" · 完成 {len(completed)} 人班\n首次客观题正确率：{accuracy}")
+    elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': summary}})
     if report.get('failed') or report.get('unverified'):
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
             'content': '以上仅计已核实未完成；发送失败及资料待核对单列，不计为未完成。'}})
     for shift in ('白', '夜'):
+        if all_completed:
+            rows = [row for row in completed if row['shift'] == shift]
+            text = f"已完成 {len({row['person_id'] for row in rows})} 人" if rows else '未安排每日题单'
+            elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': f'**{shift}班**\n{text}'}})
+            continue
         groups = defaultdict(list)
         for row in unfinished:
             if row['shift'] == shift:
@@ -83,7 +97,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .pre_shift_checks import windows
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
-              'unfinished': [], 'failed': [], 'unverified': []}
+              'completed': [], 'unfinished': [], 'failed': [], 'unverified': []}
     view = SimpleNamespace(_get=lambda kind, key: service._get(kind, key, conn), settings=service.settings)
     roster = completion._snapshot(view, date)
     if roster is None:
@@ -155,11 +169,9 @@ def collect(service, date, current, conn, directory, app_id):
             reason = '已有题单属于另一班或班次不明，未重复计算跨班完成情况。'
         elif tasks[0]['status'] == '未安排':
             continue
-        elif tasks[0]['status'] == '已完成':
-            continue
         elif tasks[0]['status'] == '待核对':
             reason = '题单或作答证据待核对，未计入未完成。'
-        elif tasks[0]['status'] not in {'待答', '答题中', '逾期'} or dt.datetime.fromisoformat(tasks[0]['start_at']) >= end:
+        elif tasks[0]['status'] not in {'待答', '答题中', '逾期', '已完成'} or dt.datetime.fromisoformat(tasks[0]['start_at']) >= end:
             reason = '本班题单尚未到时或截止后才生成，未计入未完成。'
         saved = service._get(completion.KIND, completion.key(date, pid), conn) or {}
         if not reason and completion.valid(saved):
@@ -180,6 +192,11 @@ def collect(service, date, current, conn, directory, app_id):
                     reason = '昨日冻结题目不足，应答题数待核对；不使用当前题库补推昨日任务。'
         if reason:
             result['unverified'].append({**row, 'reason': reason})
+            continue
+        task = tasks[0]
+        if task['status'] == '已完成':
+            result['completed'].append({**row, **{key: task[key] for key in (
+                'answered', 'assigned', 'correct', 'objective_answered')}})
             continue
         notices = [n for n in data['notification'] if n.get('kind') == 'shift'
                    and n.get('shift') == shift and n.get('open_id') == duty['open_id']]
@@ -280,7 +297,7 @@ def send_due(service, current):
             if job.get('lease') != token or job['status'] != 'pending' or service._stop.is_set():
                 return
             report = collect(service, date, checked, conn, directory if ready else {}, app_id if ready else '')
-            if not any(report[key] for key in ('unfinished', 'failed', 'unverified')):
+            if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified')):
                 job.update(status='skipped_completed', report=report, error='')
             elif not url:
                 job.update(due_at=current.timestamp() + 300, error='学练入口地址未就绪，日报等待重试。')
@@ -300,7 +317,7 @@ def send_due(service, current):
             if allowed:
                 report = collect(service, date, checked, conn, directory if ready else {}, app_id if ready else '')
                 latest['report'] = report
-                if not any(report[key] for key in ('unfinished', 'failed', 'unverified')):
+                if not any(report[key] for key in ('completed', 'unfinished', 'failed', 'unverified')):
                     latest.update(status='skipped_completed', attempted_at=None, error='')
                     allowed = False
                 else:

@@ -1046,6 +1046,10 @@ CHANGE_PROGRESS_NOT_STARTED = "未开始"
 CHANGE_PROGRESS_ONGOING = "进行中"
 CHANGE_PROGRESS_ENDED = "已结束"
 CHANGE_WORKBENCH_PROGRESS_VALUES = {CHANGE_PROGRESS_NOT_STARTED, CHANGE_PROGRESS_ONGOING}
+CHANGE_EXECUTION_DATETIME_FIELDS = (
+    '实际开始时间', '实际结束时间', '变更开始日期（阿里）', '计划开始日期（阿里）',
+    '计划开始', '计划开始时间', '计划延迟开始日期',
+)
 CHANGE_DEFAULT_LEVEL = "I3"
 CHANGE_PROGRESS_OPTION_FALLBACK = {
     "optXQcI0z3": "未开始",
@@ -6235,6 +6239,10 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _repair_management_datetime_ms(cls, value: Any) -> int | None:
         if isinstance(value, bool):
             return None
+        if isinstance(value, (dict, list, tuple)) or (
+            isinstance(value, str) and value.strip()[:1] in {"[", "{"}
+        ):
+            value = cls._repair_management_plain_text(value)
         numeric_value: float | None = None
         if isinstance(value, (int, float)):
             numeric_value = float(value)
@@ -6242,7 +6250,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         if numeric_value is None and re.fullmatch(r"\d+(?:\.\d+)?", numeric_text):
             parsed_numeric = float(numeric_text)
             if 20_000 <= parsed_numeric <= 80_000 or re.fullmatch(
-                r"\d{10,13}", numeric_text
+                r"\d{10,13}(?:\.\d+)?", numeric_text
             ):
                 numeric_value = parsed_numeric
         if numeric_value is not None and math.isfinite(numeric_value):
@@ -6254,13 +6262,17 @@ class MaintenancePortalService(RepairOperationsMixin):
                     return int(parsed_excel_date.timestamp() * 1000)
                 except (OSError, OverflowError, ValueError):
                     return None
-            raw = int(numeric_value)
-            result = raw if raw > 10_000_000_000 else raw * 1000
+            result = int(numeric_value if numeric_value > 10_000_000_000 else numeric_value * 1000)
             try:
                 dt.datetime.fromtimestamp(result / 1000)
             except (OSError, OverflowError, ValueError):
                 return None
             return result
+        if re.search(r"(?:Z|[+-]\d{2}:\d{2})$", numeric_text):
+            try:
+                return int(dt.datetime.fromisoformat(numeric_text).timestamp() * 1000)
+            except (OSError, OverflowError, ValueError):
+                return None
         parsed = cls._parse_notice_datetime(value)
         if parsed is None:
             return None
@@ -21507,7 +21519,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             return None
         match = re.search(
             r"(\d{4})-(\d{1,2})-(\d{1,2})\s+(\d{1,2}):(\d{1,2})"
-            r"(?::(\d{1,2}))?",
+            r"(?::(\d{1,2})(?:\.(?P<fraction>\d{1,6}))?)?",
             text,
         )
         if not match:
@@ -21527,6 +21539,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 int(match.group(4)),
                 int(match.group(5) or 0),
                 int(match.group(6) or 0),
+                int((match.groupdict().get("fraction") or "").ljust(6, "0")),
             )
         except Exception:
             return None
@@ -22264,12 +22277,12 @@ class MaintenancePortalService(RepairOperationsMixin):
         if source_work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
             # 检修源表结束仍由维修单原有流程控制，通告结束不改其源字段。
             return False
-        ended_at = self._parse_notice_datetime(payload.get("ended_at"))
-        if ended_at is None:
+        ended_at_ms = self._repair_management_datetime_ms(payload.get("ended_at"))
+        if ended_at_ms is None:
             raise PortalError("目标记录缺少实际结束时间，未使用当前时间代替。")
         if not target_record_id or is_local_record_id(target_record_id):
             raise PortalError("目标通告记录未确认，未回写源记录。")
-        ended_at_ms = int(ended_at.timestamp() * 1000)
+        ended_at = dt.datetime.fromtimestamp(ended_at_ms / 1000)
         ended_at_text = ended_at.strftime("%Y-%m-%d %H:%M")
         if source_work_type == WORK_TYPE_MAINTENANCE:
             app_token = str(payload.get("source_app_token") or self.app_token).strip()
@@ -22339,7 +22352,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         for value in (current_fields.get("实际开始时间"), plan_start):
             value = self._repair_management_plain_text(value)
-            started_at = self._history_datetime_from_values(value)
+            started_ms = self._repair_management_datetime_ms(value)
+            started_at = (dt.datetime.fromtimestamp(started_ms / 1000) if started_ms is not None
+                          else self._history_datetime_from_values(value))
             if value and started_at is None:
                 raise PortalError("源记录开始时间无法解析，保留同步任务等待核验。")
             if started_at and started_at > ended_at:
@@ -22380,11 +22395,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         writable_status = bool(status_meta and not self._field_meta_is_readonly(status_meta))
         expected_status = '已结束' if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_PROGRESS_ENDED
         def status_ended(fields):
+            if source_work_type == WORK_TYPE_CHANGE and not writable_status:
+                progress = self._repair_management_plain_text(fields.get(status_field))
+                legacy_execution_status = '开始/结束状态打标' not in meta_by_name and (
+                    progress in {'正常结束', '延期结束', '延迟结束'}
+                    or not self._change_time_range({'display_fields': fields})[0])
+                return self._change_execution_has_ended(fields, allow_status_fallback=legacy_execution_status)
             return self._maintenance_status_is_completed({'display_fields': {
                 '维护实施状态': self._repair_management_plain_text(fields.get(status_field)).strip()}})
 
-        current_end = self._history_datetime_from_values(self._repair_management_plain_text(current_fields.get('实际结束时间')))
-        same_end = bool(current_end and int(current_end.timestamp() * 1000) == ended_at_ms)
+        current_end = self._repair_management_datetime_ms(current_fields.get('实际结束时间'))
+        same_end = current_end == ended_at_ms
         end_meta = meta_by_name.get('实际结束时间')
         if same_end or (end_meta and self._field_meta_is_readonly(end_meta)):
             remote_fields.pop('实际结束时间', None)
@@ -22406,13 +22427,24 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not guard.get("mock_external"):
             confirmed_fields = read_source_fields() if remote_fields else current_fields
             actual_end = self._repair_management_plain_text(confirmed_fields.get("实际结束时间"))
-            confirmed_end = self._history_datetime_from_values(actual_end)
-            if not confirmed_end or int(confirmed_end.timestamp() * 1000) != ended_at_ms:
+            confirmed_end = self._repair_management_datetime_ms(actual_end)
+            if confirmed_end != ended_at_ms:
                 raise NoticeSourcePending("源记录本次实际结束时间尚未准确读回，保留同步任务等待核验。")
             local_fields = {
                 "实际结束时间": self._format_source_datetime(actual_end),
                 status_field: self._repair_management_plain_text(confirmed_fields[status_field]).strip(),
             }
+            if source_work_type == WORK_TYPE_CHANGE:
+                local_fields['开始/结束状态打标'] = self._repair_management_plain_text(
+                    confirmed_fields.get('开始/结束状态打标'))
+                # Persist the verified dates at full precision; snapshot patches update display fields only.
+                for name in CHANGE_EXECUTION_DATETIME_FIELDS:
+                    if name in confirmed_fields:
+                        value = confirmed_fields[name]
+                        value_ms = self._repair_management_datetime_ms(value)
+                        local_fields[name] = (dt.datetime.fromtimestamp(value_ms / 1000).isoformat(
+                            sep=' ', timespec='milliseconds') if value_ms is not None
+                            else self._repair_management_plain_text(value))
 
         with self._refresh_lock:
             if source_record is not None:
@@ -22444,10 +22476,40 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         return self._building_codes_from_value(raw_building)
 
-    @staticmethod
-    def _change_progress_value(record: dict[str, Any]) -> str:
-        fields = record.get("display_fields") or {}
-        return str(fields.get("变更进度") or "").strip()
+    def _change_execution_has_ended(self, fields: dict[str, Any], *, allow_status_fallback: bool = False) -> bool:
+        marker = self._repair_management_plain_text(fields.get("开始/结束状态打标"))
+        if '开始/结束状态打标' not in fields and allow_status_fallback:
+            marker = self._repair_management_plain_text(fields.get('变更进度'))
+        if marker not in {"正常结束", "延期结束", "延迟结束", "已结束"}:
+            return False
+        progress = self._repair_management_plain_text(fields.get("变更进度"))
+        if progress in {"未开始", "退回", "已取消", "取消"}:
+            return False
+        end_ms = self._repair_management_datetime_ms(fields.get("实际结束时间"))
+        start_ms = self._repair_management_datetime_ms(fields.get("实际开始时间"))
+        if end_ms is None or start_ms is None or start_ms > end_ms:
+            return False
+        plan_start = self._change_time_range({"display_fields": fields})[0]
+        if plan_start:
+            plan_ms = self._repair_management_datetime_ms(self._repair_management_plain_text(plan_start))
+            if plan_ms is None or plan_ms > end_ms:
+                return False
+        return True
+
+    def _change_progress_value(self, record: dict[str, Any]) -> str:
+        raw_fields = record.get("raw_fields") or {}
+        fields = {**raw_fields, **(record.get("display_fields") or {})}
+        for name in CHANGE_EXECUTION_DATETIME_FIELDS:
+            # Recover precision only when this display value is the same minute-formatted raw date.
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}", str(fields.get(name) or "")):
+                value = raw_fields.get(name)
+                value_ms = self._repair_management_datetime_ms(value)
+                if value_ms is not None and self._format_source_datetime(value_ms) == fields[name]:
+                    fields[name] = value
+        status_meta = getattr(self, '_change_field_meta_by_name', {}).get('变更进度')
+        if status_meta and self._field_meta_is_readonly(status_meta) and self._change_execution_has_ended(fields):
+            return CHANGE_PROGRESS_ENDED
+        return self._repair_management_plain_text(fields.get("变更进度")).strip()
 
     def _change_progress_allows_workbench(self, record: dict[str, Any]) -> bool:
         return self._change_progress_value(record) in CHANGE_WORKBENCH_PROGRESS_VALUES
@@ -32617,6 +32679,20 @@ class MaintenancePortalService(RepairOperationsMixin):
             return modified_at or lifecycle_ended_at
         return lifecycle_ended_at or modified_at
 
+    def _target_record_actual_ended_at(
+        self, *, notice_type: str, target_record: dict[str, Any],
+    ) -> str:
+        # Display dates lose seconds; metadata describes edits, not completion.
+        fields = target_record.get("raw_fields")
+        if not isinstance(fields, dict):
+            fields = target_record.get("display_fields") or {}
+        field_config = get_field_config(notice_type)
+        end_field = field_config.get("actual_end") or field_config.get("end_time") or "实际结束时间"
+        ended_ms = self._repair_management_datetime_ms(fields.get(end_field))
+        if ended_ms is None:
+            return ""
+        return dt.datetime.fromtimestamp(ended_ms / 1000).isoformat(sep=" ", timespec="milliseconds")
+
     def _source_snapshot_active_payload(
         self,
         record: dict[str, Any],
@@ -34090,10 +34166,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             "target_active": bool(target_lifecycle.get("active")),
             "target_finished": bool(target_lifecycle.get("finished")),
             "target_ended_at": (
-                self._target_record_finished_at(
-                    work_type=work_type,
+                self._target_record_actual_ended_at(
+                    notice_type=notice_type,
                     target_record=target_record,
-                    lifecycle=target_lifecycle,
                 )
                 if target_record and target_lifecycle.get("finished")
                 else ""

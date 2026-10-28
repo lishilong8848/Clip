@@ -4136,7 +4136,7 @@ def render_workbench_lite(
         return '飞书接口等待超时，通告结果暂不能确认。请刷新核验本条通告，不要重新新增或反复发送。';
       }}
       if (raw.includes('目标多维记录不存在') || raw.includes('RecordIdNotFound') || (raw.includes('record_id') && raw.includes('不存在'))) {{
-        return '没有找到对应的目标多维记录。请先点击“查找目标记录”重新绑定，再更新或结束。';
+        return '引用的多维记录不存在，请核对原任务的记录关联后继续；不要重复新增通告。';
       }}
       if (raw.includes('字段') && raw.includes('不存在')) {{
         return '多维表字段配置不一致，请联系管理员检查字段。';

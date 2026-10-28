@@ -330,6 +330,15 @@ class ReviewResilienceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['answer_review']['status'], 'unavailable')
         self.assertEqual(self.model.complete.call_count, 1)
 
+    async def test_document_review_respects_callers_remaining_time(self):
+        result = await self.run_review(timeout=.5)
+        self.assertEqual(result['answer_review']['status'], 'passed')
+        self.assertLessEqual(self.model.complete.call_args.kwargs['timeout'], .5)
+        self.model.complete.reset_mock()
+        result = await self.run_review(timeout=0)
+        self.model.complete.assert_not_called()
+        self.assertEqual(result['answer_review']['status'], 'unavailable')
+
 
 if __name__ == '__main__':
     unittest.main()

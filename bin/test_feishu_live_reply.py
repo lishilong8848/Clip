@@ -564,6 +564,7 @@ class LiveReplyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_public_phase({'process': []}), 'unknown')
         self.assertEqual(_public_phase({}), 'unknown')
         self.assertEqual(_public_phase({'label': '正在整理答复'}), 'finishing')
+        self.assertEqual(_public_phase({'label': '正在整理资料答复'}), 'finishing')
 
     async def test_raw_or_invalid_process_label_is_never_shown(self):
         message = self.message()
