@@ -85,6 +85,40 @@ class RepeatedReminderTests(unittest.TestCase):
         self.send(self.at(17))
         self.assertEqual(len(self.sender.calls), 2)
 
+    def test_autonomous_completion_stops_queued_and_future_daily_reminders(self):
+        self.claim()
+        engagement.repeated_reminders(self.service, self.at(15))
+        pending = [j for j in self.service._all('engagement') if j.get('kind') == 'shift_timeout']
+        self.assertEqual(len(pending), 1)
+        with self.service.transaction() as conn:
+            self.service._put('paper', 'practice', {'id': 'practice', 'person_id': 'canonical',
+                'scope': 'A', 'date': DAY, 'mode': 'practice', 'questions': [self.question(1)]}, conn, False)
+            self.service._put('record', 'practice', {'id': 'practice', 'person_id': 'canonical',
+                'entries': {'written:1': {'attempt': {'correct': False,
+                    'submitted_at': DAY + 'T14:00:00+08:00'}}}}, conn, False)
+        self.send(self.at(15)); self.send(self.at(17))
+        self.assertFalse(self.sender.calls)
+        self.assertEqual(self.service._get('engagement', pending[0]['id'])['status'], 'skipped_completed')
+        self.assertEqual(len([j for j in self.service._all('engagement') if j.get('kind') == 'shift_timeout']), 1)
+        self.assertIsNone(self.service._get('record', 'daily'))
+
+    def test_partial_autonomous_counts_are_shown_in_reminder_card(self):
+        self.claim()
+        with self.service.transaction() as conn:
+            paper = self.service._get('paper', 'daily', conn)
+            paper['questions'].append(self.question(2))
+            self.service._put('paper', paper['id'], paper, conn, False)
+            self.service._put('paper', 'practice', {'id': 'practice', 'person_id': 'canonical',
+                'scope': 'A', 'date': DAY, 'mode': 'practice', 'questions': [self.question(1)]}, conn, False)
+            self.service._put('record', 'practice', {'id': 'practice', 'person_id': 'canonical',
+                'entries': {'written:1': {'attempt': {'correct': True,
+                    'submitted_at': DAY + 'T14:00:00+08:00'}}}}, conn, False)
+        self.send(self.at(15))
+        card = json.dumps(self.sender.calls[0][1], ensure_ascii=False)
+        self.assertIn('已答1/2题', card)
+        self.assertIn('还有1题未提交', card)
+        self.assertIn('当班自主练习', card)
+
     def test_night_crosses_midnight_uses_roster_date_and_authoritative_window(self):
         self.roster[0]['shift'] = '夜'
         for hour, day in ((20, 10), (22, 10), (0, 11), (2, 11), (4, 11), (6, 11), (8, 11), (9, 11)):

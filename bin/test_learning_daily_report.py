@@ -125,6 +125,37 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual([(r['person_id'], r['answered'], r['assigned']) for r in report['unfinished']], [('p1', 1, 2)])
         self.assertFalse(report['unverified'])
 
+    def test_autonomous_answers_are_in_daily_group_card_without_relabelling_daily_paper(self):
+        practice = {'id': 'practice:p1', 'person_id': 'p1', 'date': DATE, 'scope': 'A',
+                    'mode': 'practice', 'questions': [self.question(n + 20) for n in range(2)]}
+        self.put('paper', practice)
+        self.put('record', {'id': practice['id'], 'person_id': 'p1', 'entries': {
+            q['id']: {'attempt': {'correct': n == 0, 'submitted_at': DATE + 'T14:00:00+08:00'},
+                      'practice': [{'correct': True, 'submitted_at': DATE + 'T15:00:00+08:00'}]}
+            for n, q in enumerate(practice['questions'])}})
+        report = self.report()
+        self.assertFalse(report['unfinished'])
+        self.assertEqual([(r['answered'], r['assigned'], r['correct']) for r in report['completed']], [(2, 2, 1)])
+        self.assertIsNone(self.service._get('record', 'paper:p1'))
+        self.run_due()
+        card = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
+        self.assertIn('全部答题完成', card)
+        self.assertIn('50.0%', card)
+        self.assertIn('当班自主练习', card)
+        self.assertNotIn('<font color="red">', card)
+
+    def test_next_day_autonomous_answers_complete_previous_night_only(self):
+        self.member('night', '夜')
+        self.answer()
+        practice = {'id': 'practice:night', 'person_id': 'night', 'date': '2026-10-27', 'scope': 'A',
+                    'mode': 'practice', 'questions': [self.question(n + 20) for n in range(2)]}
+        self.put('paper', practice)
+        self.put('record', {'id': practice['id'], 'person_id': 'night', 'entries': {
+            q['id']: {'attempt': {'correct': True, 'submitted_at': '2026-10-27T02:00:00+08:00'}}
+            for q in practice['questions']}})
+        self.assertEqual({r['person_id'] for r in self.report()['completed']}, {'p1', 'night'})
+        self.assertFalse(self.report()['unfinished'])
+
     def test_no_publication_or_dirty_publication_never_accuses(self):
         original = self.service._get('publication', self.service._publication_key(DATE))
         for value in (None, original):

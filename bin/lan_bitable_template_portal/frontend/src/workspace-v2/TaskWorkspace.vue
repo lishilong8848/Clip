@@ -154,7 +154,7 @@ async function loadTasks(){
       const total=count(data.today_summary?.assigned),done=count(data.today_summary?.task_answered);
       rows.value=[];
       if(total && done!==null && done<total)rows.value=[{key:'self-learning',title:'今日学练',status:done?'答题中':'未开始',scope:data.self_scope,time:`已答 ${done} / ${total} 题`,progress:null,url:'/learning?view=practice'}];
-      emptyText.value=data.unlinked?'当前账号尚未关联个人学练身份':total&&done===total?'今日学练已完成':total===0?'今日暂无已领取题单': '今日学练进度暂未返回';
+      emptyText.value=data.unlinked?'当前账号尚未关联个人学练身份':total&&done!==null&&done>=total?'今日学练已完成':total===0?'今日暂无已领取题单': '今日学练进度暂未返回';
       taskNote.value='仅当前登录人员的题单';
     } else if(kind==='event'){rows.value=toRows(items(data.records).filter((r:Dict)=>eventStatusTone(r.status)==='processing'),kind).slice(0,60);taskNote.value=`本月处理中 · 已读取 ${rows.value.length} 条`;}
     else if(kind==='daily'){const tasks=items(data.categories).flatMap((c:Dict)=>items(c.tasks)).filter((r:Dict)=>r.status_tone!=='completed');rows.value=toRows(tasks,kind).slice(0,60);taskNote.value=`今日任务 · 已读取 ${rows.value.length} 条`;}

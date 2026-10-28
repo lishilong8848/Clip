@@ -629,7 +629,9 @@ class ReminderTests(unittest.TestCase):
             self.remote.process(initial)
         self.store.finish_job(initial, 'unknown beyond provider dedupe window')
         self.assertEqual(len(self.calls), 1)
-        self.assertIsNone(self.store.claim_job())
+        selected = self.store.claim_job()
+        if selected:
+            self.assertEqual(selected['kind'], 'review_reminder', 'uncertain initial send must remain blocked')
 
     def test_failed_initial_is_not_revived_after_submission(self):
         self.publish()
@@ -641,6 +643,120 @@ class ReminderTests(unittest.TestCase):
         self.tick()
         with self.store.connect() as db:
             self.assertEqual(db.execute('SELECT status FROM risk_jobs WHERE id=?', (initial_id,)).fetchone()[0], 'failed')
+
+
+class ReviewReminderTests(unittest.TestCase):
+    setUp = ReminderTests.setUp
+    restart = ReminderTests.restart
+    publish = ReminderTests.publish
+    transport = ReminderTests.transport
+    tick = ReminderTests.tick
+    drain = ReminderTests.drain
+    act = ReminderTests.act
+
+    def quiet_other_jobs(self):
+        with self.store.connect(True) as db:
+            db.execute("UPDATE risk_jobs SET status='done' WHERE kind!='review_reminder'")
+
+    def jobs(self, status=None):
+        with self.store.connect() as db:
+            rows = db.execute("SELECT * FROM risk_jobs WHERE kind='review_reminder' ORDER BY created,id").fetchall()
+        return [{**dict(row), 'payload': json.loads(row['payload'])} for row in rows
+                if status is None or row['status'] == status]
+
+    def test_24_hours_from_submission_once_concurrent_and_restart(self):
+        self.publish(); self.now += 3600
+        self.act('alice', 'submit')
+        self.now += 86399
+        self.tick(); self.assertEqual(self.jobs(), [])
+        self.now += 1
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            list(pool.map(lambda _: self.tick(), range(8)))
+        self.assertEqual(len(self.jobs()), 1)
+        key = self.jobs()[0]['id']
+        self.restart(); self.tick(); self.drain()
+        self.assertEqual(self.jobs()[0]['status'], 'done')
+        self.assertEqual({b['receive_id'] for b in self.calls}, {'on_reviewer'})
+        content = json.loads(self.calls[0]['content'])
+        self.assertIn('超过24小时', content['elements'][0]['text']['content'])
+        self.assertIn('view=review', content['elements'][1]['actions'][0]['url'])
+        self.now += 2 * 86400
+        self.tick(); self.drain()
+        self.assertEqual([j['id'] for j in self.jobs()], [key])
+        self.assertEqual(len(self.calls), 1)
+
+    def test_any_reviewer_completion_stops_all_and_resubmission_gets_new_cycle(self):
+        self.body.pop('reviewer_id'); self.body['reviewer_ids'] = ['reviewer', 'other']
+        self.publish(); self.act('alice', 'submit'); self.now += 86400
+        self.tick(); self.assertEqual(len(self.jobs()), 2)
+        self.act('alice', 'return', who='other'); self.drain()
+        self.assertFalse(self.calls)
+        self.act('alice', 'submit'); self.tick()
+        self.assertEqual(len(self.jobs()), 2)
+        self.now += 86400; self.tick()
+        self.assertEqual(len(self.jobs()), 4)
+        self.act('alice', 'approve', who='reviewer'); self.drain()
+        self.assertFalse(self.calls)
+
+    def test_changed_reviewer_and_revocation_do_not_send_to_old_recipient(self):
+        self.publish(); self.act('alice', 'submit'); self.now += 86400; self.tick()
+        self.store.change_reviewer(self.people['admin'], self.body['id'], {'reviewer_ids': ['other'], 'version': 1})
+        self.tick(); self.drain()
+        self.assertEqual({b['receive_id'] for b in self.calls}, {'on_other'})
+        self.act('bob', 'submit'); self.now += 86400; self.tick()
+        self.act('bob', 'revoke_item', who='admin'); self.drain()
+        self.assertEqual(len(self.calls), 1)
+
+    def test_approval_while_loading_auth_is_rechecked_before_network_send(self):
+        self.publish(); self.act('alice', 'submit'); self.now += 86400; self.tick()
+        def authenticate():
+            self.act('alice', 'approve', who='reviewer')
+            return {'Authorization': 'Bearer synthetic'}
+        self.remote.headers.side_effect = authenticate
+        self.drain()
+        self.assertFalse(self.calls)
+        self.assertEqual(self.jobs()[0]['status'], 'done')
+
+    def test_receipt_loss_recovers_using_original_provider_uuid(self):
+        self.publish(); self.act('alice', 'submit'); self.now += 86400; self.tick()
+        checkpoint = self.store.checkpoint
+        def fail_receipt(rid, **values):
+            if any(r.get('message_id') for r in values.get('messages', {}).values()):
+                raise OSError('synthetic receipt write failure')
+            return checkpoint(rid, **values)
+        with patch.object(self.store, 'checkpoint', side_effect=fail_receipt):
+            self.drain()
+        self.assertEqual(len(self.sent), 1)
+        first_uuid = self.calls[0]['uuid']
+        self.restart(); self.now += 31; self.tick(); self.drain()
+        self.assertEqual([b['uuid'] for b in self.calls], [first_uuid, first_uuid])
+        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(self.jobs()[0]['status'], 'done')
+
+    def test_one_reviewer_failure_does_not_block_another_reviewer(self):
+        self.body.pop('reviewer_id'); self.body['reviewer_ids'] = ['reviewer', 'other']
+        self.publish(); self.act('alice', 'submit'); self.now += 86400; self.tick()
+        def reject_one(body):
+            if body['receive_id'] == 'on_reviewer':
+                raise cloud.CloudRejected('synthetic definite rejection', 403)
+        self.hook = reject_one; self.drain()
+        self.assertEqual({m['body']['receive_id'] for m in self.sent.values()}, {'on_other'})
+        self.assertEqual(len(self.jobs('queued')), 1)
+        self.hook = None; self.now += 31; self.restart(); self.tick(); self.drain()
+        self.assertEqual({m['body']['receive_id'] for m in self.sent.values()}, {'on_other', 'on_reviewer'})
+        self.assertEqual(len(self.jobs('done')), 2)
+
+    def test_legacy_submission_marker_is_stable_when_another_item_changes(self):
+        self.publish(); self.act('alice', 'submit')
+        with self.store.connect(True) as db:
+            person = self.store._person(db, self.body['id'], 'alice')
+            person['items'][0].pop('notice_version')
+            self.store._put_person(db, self.body['id'], person)
+        self.now += 86400; self.tick(); self.drain()
+        original = self.jobs()[0]['id']
+        self.act('alice', 'save', index=1); self.restart(); self.tick(); self.drain()
+        self.assertEqual([j['id'] for j in self.jobs()], [original])
+        self.assertEqual(len(self.calls), 1)
 
 
 if __name__ == '__main__':

@@ -12,6 +12,7 @@ from unittest.mock import patch
 from bin import test_learning as base
 from bin import test_learning_self_service as support
 from lan_bitable_template_portal import learning
+import upload_event_module.logger  # Initialize logging before the no-worker guard.
 
 # The autonomous harness freezes threading.Thread.start to forbid worker threads.
 # The concurrency test temporarily restores the genuine implementation, which we

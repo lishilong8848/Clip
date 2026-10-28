@@ -22,7 +22,7 @@ class PackagingTests(unittest.TestCase):
                     'check-assistant-shared-query.mjs', 'check-repair-overview.mjs',
                     'check-document-library-all-scopes.mjs', 'check-document-library-resilience.mjs',
                     'check-learning-sharing-types.mjs', 'check-learning-sharing-resilience.mjs',
-                    'check-learning-question-import.mjs', 'check-pre-shift-edits.mjs',
+                    'check-learning-question-import.mjs', 'check-learning-daily-entry.mjs', 'check-pre-shift-edits.mjs',
                     'check-repair-plan-binding.mjs', 'check-notice-convergence-confirmation.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
         with patch.object(package, 'PREFLIGHT_WORKERS', 2), \

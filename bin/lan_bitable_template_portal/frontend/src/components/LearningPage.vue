@@ -37,18 +37,19 @@
             <button v-if="reading && tab !== 'today'" :disabled="busy" @click="saveDraft(); reading = false; loadView()"><ChevronLeft :size="16" />返回{{ tab === 'review' ? '复习列表' : '学习历史' }}</button>
             <span v-if="tab === 'today'" class="muted">{{ studyMode === 'practice' ? '自主练习' : '每日题单' }} · {{ date }}</span>
             <span v-else>{{ paper?.date }} · {{ paper?.scope }}楼</span>
-            <span v-if="paper" class="muted">已完成 {{ answered }} / {{ validCount }} 题</span>
+            <span v-if="paper" class="muted">本题单已答 {{ answered }} / {{ validCount }} 题</span>
             <span v-if="paper?.status" class="badge">{{ paper.status === 'completed' ? '已完成' : paper.status === 'published' ? '已发布' : paper.status === 'pending' ? '待完成' : paper.status }}</span>
           </div>
           <div v-if="tab === 'today' && viewMode === 'practice' && boot.can_answer" class="actions">
             <div class="view-switch" role="group" aria-label="学练方式"><button :class="{ active: studyMode === 'daily' }" :aria-pressed="studyMode === 'daily'" :disabled="busy || loading" @click="switchStudyMode('daily')">每日题单</button><button :class="{ active: studyMode === 'practice' }" :aria-pressed="studyMode === 'practice'" :disabled="busy || loading" @click="switchStudyMode('practice')">自主练习</button></div>
-            <button class="primary" :disabled="busy || loading" @click="startSelfPractice"><Loader2 v-if="busy" :size="16" class="spin" /><Shuffle v-else :size="16" />开始学练</button>
+            <button class="primary" :disabled="busy || loading" @click="studyMode === 'daily' ? continueLearning() : startSelfPractice()"><Loader2 v-if="busy || loading" :size="16" class="spin" /><BookOpen v-else-if="studyMode === 'daily'" :size="16" /><Shuffle v-else :size="16" />{{ studyMode === 'daily' ? '打开每日题单' : '开始自主练习' }}</button>
           </div>
         </div>
+        <div v-if="tab === 'today'" class="actions" role="note"><span class="muted">此处显示本题单进度；每日完成统计包含当班自主练习的有效首答，复习不重复计数。</span><button :disabled="busy || loading" @click="switchTab('completion')">查看每日完成</button></div>
         <div v-if="paper?.legacy" class="muted read-only"><Eye :size="16" />旧楼栋题单 · 只读历史，不计入个人画像</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
-        <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>{{ studyMode === 'practice' ? '尚未开始自主练习' : '今日暂无可学习题目' }}</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : studyMode === 'practice' ? '点击开始学练，随机生成15题。' : '每日题单未发布或有效题目不足，可开始自主练习。' }}</span></div>
+        <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>{{ studyMode === 'practice' ? '尚未开始自主练习' : '今日暂无可学习题目' }}</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : studyMode === 'practice' ? '可开始新的自主练习，每轮随机生成15题。' : '每日题单未发布或有效题目不足，可切换到自主练习。' }}</span></div>
         <div v-else-if="current" class="practice-layout">
           <aside class="question-rail" aria-label="题号导航">
             <h2>题目 <span>{{ paper.questions.length }}</span></h2>
@@ -871,7 +872,8 @@ function goOverview(): void {
   navigate(`/learning?view=overview${scope.value ? `&scope=${encodeURIComponent(scope.value)}` : ""}`);
 }
 async function continueLearning(): Promise<void> {
-  if (!learner.value || busy.value || viewMode.value !== "practice") return;
+  if (!learner.value || busy.value || loading.value || viewMode.value !== "practice") return;
+  saveDraft();
   await loadTodayPaper();
 }
 async function enterPracticeToday(): Promise<void> {

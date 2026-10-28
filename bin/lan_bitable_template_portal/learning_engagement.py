@@ -76,6 +76,7 @@ def supervisors(service):
 
 
 def repeated_reminders(service, current):
+    from .learning_completion import daily_progress
     from .learning_personal import candidates
     from .pre_shift_checks import windows
 
@@ -113,11 +114,14 @@ def repeated_reminders(service, current):
             due = start + dt.timedelta(hours=2 * period)
             expires = min(due + dt.timedelta(hours=2), end)
             with service.transaction() as conn:
+                progress = daily_progress(service, day, current, conn)
                 reserves = [service._get('reserve', rid, conn) for rid in publication.get('reserve_ids', [])]
                 available = candidates(service, conn)
                 for duty, person in learners:
                     if (person.get('scopes') != [duty['scope']]
                             or str(person.get('name') or '').strip() != duty['name']):
+                        continue
+                    if progress.get((person['id'], duty['scope'], shift), {}).get('status') == '已完成':
                         continue
                     papers = [p for p in service._documents('paper', person_id=person['id'], start=day, end=day, conn=conn)
                               if p.get('mode') != 'practice']
@@ -370,8 +374,16 @@ def summary_card(job, url):
     return card
 
 
-def make_card(job, url, paper=None, record=None):
-    if job['kind'] == 'shift_timeout' and not paper:
+def make_card(job, url, paper=None, record=None, progress=None):
+    if job['kind'] == 'shift_timeout' and progress:
+        remaining = max(0, progress['assigned'] - progress['answered'])
+        message = (f"{job['date']} · {job['scope']}楼{job['shift']}班\n"
+                   + (f"本班已答{progress['answered']}/{progress['assigned']}题，还有{remaining}题未提交。" if progress['answered'] else
+                      f"每日题单已发布，尚未开始作答，还有{remaining}题未提交。")
+                   + '统计包含每日题单和当班自主练习的有效首答，请完成本班学练。')
+        card = reminder_card(message, url + '/learning?view=practice&date=' + quote(job['date'], safe='') + '&shift=' + quote(job['shift'], safe=''))
+        title = '学练待完成提醒'
+    elif job['kind'] == 'shift_timeout' and not paper:
         message = f"{job['date']} · {job['scope']}楼{job['shift']}班\n每日题单已发布，尚未开始作答，请完成本班学练。"
         card = reminder_card(message, url + '/learning?view=practice&date=' + quote(job['date'], safe='') + '&shift=' + quote(job['shift'], safe=''))
         title = '学练待完成提醒'
@@ -441,6 +453,7 @@ def send_due(service, current):
             managers = supervisors(service)
         except Exception:
             service._last_error = '本地主管目录暂不可用，楼栋周报等待重试。'
+    progress_by_date = {}
     for job in jobs:
         if service._stop.is_set():
             break
@@ -458,11 +471,17 @@ def send_due(service, current):
         paper = service._get('paper', job.get('paper_id', ''))
         record = service._get('record', job.get('paper_id', '')) or {}
         person = people_by_id.get(job.get('person_id'))
+        progress = None
         if job['kind'] == 'shift_timeout':
             context = assignments.get(job['assignment']) or {}
             paper = context.get('paper') or paper
             paper = service._get('paper', paper['id']) if paper else None
             record = service._get('record', paper['id']) or {} if paper else {}
+            if job['date'] not in progress_by_date:
+                from .learning_completion import daily_progress
+                progress_by_date[job['date']] = daily_progress(service, job['date'], current)
+            progress = progress_by_date[job['date']].get((job.get('person_id'), job.get('scope'), job.get('shift')))
+            completed = progress and progress.get('status') == '已完成'
         if not enabled:
             job['status'] = 'cancelled'
         elif job['kind'] == 'weekly_summary' and not (job.get('audience') == 'group'
@@ -475,7 +494,7 @@ def send_due(service, current):
             job['status'] = 'superseded'
         elif job['kind'] == 'shift_timeout' and job['date'] in unavailable:
             job['due_at'] = current.timestamp() + 300
-        elif job['kind'] == 'shift_timeout' and paper and (paper.get('deleted_at') or service._completed(paper, record)):
+        elif job['kind'] == 'shift_timeout' and (completed or paper and (paper.get('deleted_at') or service._completed(paper, record))):
             job['status'] = 'skipped_completed'
         elif job['kind'] == 'shift_timeout' and (not context or context['open_id'] != job.get('open_id')):
             job['status'] = 'skipped_roster'
@@ -518,7 +537,7 @@ def send_due(service, current):
                             result = interactive(job, target, identity)
                         else:
                             if card is None:
-                                card = make_card(job, url, paper, record)
+                                card = make_card(job, url, paper, record, progress)
                             result = service._send(target, card, identity)
                         ok = result[0] if isinstance(result, tuple) else bool(result)
                         if not ok:

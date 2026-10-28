@@ -11,6 +11,8 @@ from .pre_shift_checks import windows
 
 KIND = 'daily_progress'
 VERSION = 1
+RULE_VERSION = 2
+COUNTS = ('answered', 'correct', 'objective_answered', 'answer_viewed', 'answer_view_unknown')
 STATES = ('未安排', '未到时', '待答', '答题中', '已完成', '逾期', '待核对')
 DISPLAY_FIELDS = {'日期': 5, '人员标识': 1, '姓名': 1, '楼栋': 1, '班次': 1, '完成状态': 1,
                   '应答题数': 2, '已答题数': 2, '正确题数': 2, '首次客观正确率': 2,
@@ -126,11 +128,77 @@ def _paper_task(paper, record, date, shift, current, notification=None):
     return task
 
 
-def _data(service):
+def _data(service, conn=None):
+    kinds = ('person', 'paper', 'record', KIND, 'notification',
+             'sharing_batch', 'sharing_attempt', 'sharing_delivery')
+    if conn is not None:
+        return {kind: service._all(kind, conn) for kind in kinds}
     with closing(service._connect()) as conn:
         conn.execute('BEGIN')
-        return {kind: service._all(kind, conn) for kind in ('person', 'paper', 'record', KIND, 'notification',
-                                                         'sharing_batch', 'sharing_attempt', 'sharing_delivery')}
+        return {kind: service._all(kind, conn) for kind in kinds}
+
+
+def add_practice(tasks, papers, records, date, current):
+    """Credit each autonomous first answer to one matching duty; never alter its paper."""
+    sources = set()
+    for task in tasks:
+        previous = task.pop('practice_counts', {})
+        for field in COUNTS:
+            task[field] = max(0, (task.get(field) or 0) - previous.get(field, 0))
+    for paper in papers:
+        if paper.get('mode') != 'practice' or paper.get('deleted_at'):
+            continue
+        record = records.get(paper['id'], {})
+        if record.get('person_id') not in (None, '', paper.get('person_id')):
+            continue
+        for question in paper.get('questions', []):
+            entry = record.get('entries', {}).get(question['id'], {})
+            attempt = entry.get('attempt')
+            if question.get('invalid') or entry.get('needs_review') or not attempt:
+                continue
+            try:
+                submitted = dt.datetime.fromisoformat(attempt['submitted_at'])
+                submitted = submitted.astimezone(core.TZ) if submitted.tzinfo else submitted.replace(tzinfo=core.TZ)
+            except (KeyError, ValueError, TypeError):
+                continue
+            if submitted > current:
+                continue
+            matches = []
+            for task in tasks:
+                if (task['source'] not in {'paper', 'roster'} or task.get('uncertain') or task.get('cancelled')
+                        or not task.get('assigned') or task['scope'] != paper.get('scope') or task['shift'] not in {'白', '夜'}):
+                    continue
+                start, end = windows(date, task['shift'])
+                if start <= submitted < end:
+                    matches.append(task)
+            if len(matches) != 1:
+                continue
+            task = matches[0]
+            counts = task.setdefault('practice_counts', {field: 0 for field in COUNTS})
+            counts['answered'] += 1
+            if question.get('type') != 'interview' and isinstance(attempt.get('correct'), bool):
+                counts['objective_answered'] += 1
+                counts['correct'] += int(attempt['correct'])
+            evidence = attempt.get('answer_view_snapshot')
+            evidence = evidence if isinstance(evidence, dict) else {}
+            viewed = evidence.get('version') == 1 and evidence.get('answer_before_submit')
+            counts['answer_viewed'] += int(bool(viewed))
+            counts['answer_view_unknown'] += int(evidence.get('version') != 1 or bool(evidence.get('legacy_unknown') and not viewed))
+            sources.add(paper['id'])
+    for task in tasks:
+        for field, count in task.get('practice_counts', {}).items():
+            task[field] = (task.get(field) or 0) + count
+        task['status'] = _status(task, current)
+    return sources
+
+
+def daily_progress(service, date, current, conn=None):
+    grouped = defaultdict(list)
+    for row in project(service, date, current=current, data=_data(service, conn)):
+        for task in row['tasks']:
+            if task['source'] in {'paper', 'roster'}:
+                grouped[row['person_id'], task['scope'], task['shift']].append(task)
+    return {key: values[0] for key, values in grouped.items() if len(values) == 1}
 
 
 def _sharing_tasks(data, pid, date, current):
@@ -274,10 +342,11 @@ def project(service, date, *, current=None, data=None, scope=''):
                     task = copy.deepcopy(task)
                     task['status'] = _status(task, current)
                     tasks.append(task)
+        practice_sources = add_practice(tasks, person_papers, records, date, current)
         tasks.extend(t for t in _sharing_tasks(data, pid, date, current) if not scope or t['scope'] == scope)
         activity = Counter()
         practice_questions = set()
-        source_papers = {task['task_id'] for task in tasks if task['source'] == 'paper'}
+        source_papers = {task['task_id'] for task in tasks if task['source'] == 'paper'} | practice_sources
         for paper in person_papers:
             if scope and paper.get('scope') != scope:
                 continue
@@ -352,7 +421,7 @@ def refresh(service, current=None):
     current = current.astimezone(core.TZ) if current.tzinfo else current.replace(tzinfo=core.TZ)
     dates = {current.date().isoformat(), (current.date() - dt.timedelta(days=1)).isoformat()}
     # Existing verified paper dates can be backfilled; absent historical rosters stay unknown.
-    if not service._get('local', 'completion_initialized'):
+    if (service._get('local', 'completion_initialized') or {}).get('rules_version') != RULE_VERSION:
         dates.update(p['date'] for p in service._all('paper') if p.get('date') and p.get('person_id'))
         dates.update(b.get('business_date') or date_of(b.get('published_at')) for b in service._all('sharing_batch') if b.get('status') in {'published', 'closed'})
         for record in service._all('record'):
@@ -382,7 +451,7 @@ def refresh(service, current=None):
             conn.execute("DELETE FROM documents WHERE kind='local' AND key=? AND revision=?",
                          ('completion_pending:' + date, pending.get(date, -1)))
     with service.transaction() as conn:
-        service._put('local', 'completion_initialized', {'version': VERSION}, conn, False)
+        service._put('local', 'completion_initialized', {'version': VERSION, 'rules_version': RULE_VERSION}, conn, False)
 
 
 def report(service, actor, query):

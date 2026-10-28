@@ -1011,6 +1011,10 @@ def profile(service, actor, query):
         directory = {p['id']: p for p in service._all('person')}
         ids.update(p['id'] for p in directory.values() if p.get('active') and set(p.get('scopes') or []) & set(SCOPES))
     today = core.now().date().isoformat()
+    from .learning_completion import daily_progress
+    today_tasks = {key: task for key, task in daily_progress(service, today, core.now()).items()
+                   if (not identity or key[0] == identity) and (not scope or key[1] == scope)
+                   and task['status'] != '未安排'}
     for pid in sorted(ids):
         own = [p for p in papers if p['person_id'] == pid]
         latest = own[-1] if own else {}
@@ -1020,6 +1024,10 @@ def profile(service, actor, query):
         latest_activity = max(activity, key=lambda r: r['submitted_at'], default={})
         today_paper = service._get('paper', 'personal:' + today + ':' + pid)
         progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') and (not scope or today_paper['scope'] == scope) else None
+        own_tasks = [task for key, task in today_tasks.items() if key[0] == pid]
+        if own_tasks:
+            progress = {**(progress or {}), 'total': sum(t.get('assigned') or 0 for t in own_tasks),
+                        'answered': sum(t['answered'] for t in own_tasks)}
         people_rows.append({'person_id': pid, 'name': p['name'], 'employee_no': p.get('employee_no', ''),
             'scope': latest.get('scope') or latest_activity.get('scope') or '、'.join(p.get('scopes') or []), 'summary': summarize(rows, own, pid=pid), 'today': progress,
             'last_answered_at': latest_activity.get('submitted_at', '')})
@@ -1058,7 +1066,20 @@ def profile(service, actor, query):
     today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at') and p.get('mode') != 'practice']
     for p in today_papers:
         records.setdefault(p['id'], service._get('record', p['id']) or {})
-    return {'person': learner, 'summary': summary, 'today_summary': summarize(today_rows, today_papers, practice_rows=practices_by_day.get(today, [])),
+    today_summary = summarize(today_rows, today_papers, practice_rows=practices_by_day.get(today, []))
+    if today_tasks:
+        assigned = sum(t.get('assigned') or 0 for t in today_tasks.values())
+        answered = sum(t['answered'] for t in today_tasks.values())
+        by_person = defaultdict(list)
+        for (pid, _, _), task in today_tasks.items():
+            by_person[pid].append(task)
+        today_summary.update(assigned=assigned, task_answered=answered,
+            completion_rate=min(100, ratio(answered, assigned)) if assigned else None,
+            completed=sum(t['status'] == '已完成' for t in today_tasks.values()),
+            completed_people=sum(all(t['status'] == '已完成' for t in tasks) for tasks in by_person.values()),
+            received_people=len(by_person), not_started_people=sum(not any(t['answered'] or t.get('started') for t in tasks)
+                                                                 for tasks in by_person.values()))
+    return {'person': learner, 'summary': summary, 'today_summary': today_summary,
             'buildings': [] if ordinary else buildings, 'people': people_rows, 'trend': trend,
             'topics': topics, 'banks': bank_rows, 'distribution': [] if ordinary else distribution,
             'questions': questions, 'inventory': {} if ordinary else (inventory if actor.get('is_admin') else {}),

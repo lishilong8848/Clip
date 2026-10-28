@@ -1732,7 +1732,7 @@ FRONTEND_PREFLIGHT_SCRIPTS = (
     "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
     "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
     "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
-    "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs",
+    "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs", "check-learning-daily-entry.mjs",
     "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs", "check-notice-convergence-confirmation.mjs",
 )
 

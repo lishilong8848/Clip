@@ -411,7 +411,10 @@ try {
   await page.goto(`${base}/learning?view=practice`);
   await page.getByText('今日暂无可学习题目', {exact:true}).waitFor();
   assert.equal(claims.length, claimsBefore, 'unpublished daily paper is not claimed');
-  await page.getByRole('button', {name:'开始学练',exact:true}).click();
+  await page.getByRole('button', {name:'打开每日题单',exact:true}).click();
+  assert.equal(claims.length, claimsBefore, 'daily entry never silently creates autonomous practice');
+  await page.getByRole('group', {name:'学练方式'}).getByRole('button', {name:'自主练习',exact:true}).click();
+  await page.getByRole('button', {name:'开始自主练习',exact:true}).click();
   await page.getByRole('button', {name:'确认作答',exact:true}).waitFor();
   assert.equal(await page.locator('.question-numbers button').count(), 15);
   const firstRound = allPapers().find(p => p.person_id === 'autonomous-user');
@@ -432,7 +435,7 @@ try {
   assert.equal(claims.length, claimsBefore + 1, 'reload does not generate new questions');
   await page.screenshot({path:path.join(output, 'autonomous-practice.png'), fullPage:true, animations:'disabled'});
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'autonomous toolbar fits viewport');
-  await page.getByRole('button', {name:'开始学练',exact:true}).click();
+  await page.getByRole('button', {name:'开始自主练习',exact:true}).click();
   await page.getByRole('button', {name:'确认作答',exact:true}).waitFor();
   assert.equal(claims.length, claimsBefore + 2);
   assert.notEqual(claims.at(-1).operation_id, claims.at(-2).operation_id);

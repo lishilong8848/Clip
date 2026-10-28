@@ -1,6 +1,7 @@
 <template>
   <section class="completion" aria-label="每日完成情况" :aria-busy="loading">
     <h2>每日完成</h2>
+    <p>已答题数包含每日题单及当班自主练习的有效首答，达到应答题数即完成；复习不重复计数。</p>
     <form class="completion-filters" @submit.prevent="reload()">
       <label>开始日期<input v-model="filters.from" type="date" required :max="filters.to" @input="followToday = false" /></label>
       <label>结束日期<input v-model="filters.to" type="date" required :min="filters.from" @input="followToday = false" /></label>
@@ -19,7 +20,7 @@
         <tbody><tr v-for="row in result.items || []" :key="row.id">
           <td><time>{{ row.date }}</time><strong>{{ row.person.name || '未填写' }}</strong><details v-if="row.source_papers?.length" class="completion-records"><summary>题单与作答记录</summary><ul><li v-for="paperId in row.source_papers" :key="paperId"><button type="button" @click="emit('open-paper', { paperId, person: row.person, date: row.date })"><BookOpen :size="14" />{{ paperTitle(row, paperId) }}</button></li></ul></details></td>
           <td>{{ row.scopes.map((s: string) => `${s}楼`).join('、') || '未关联' }}<small>{{ shifts(row) }}</small></td>
-          <td><span class="completion-state" :class="tone(row.status)">{{ row.status }}</span><details v-if="row.tasks.length"><summary>任务 {{ row.tasks.length }}</summary><ul><li v-for="task in row.tasks" :key="task.task_id"><span>{{ task.source === 'sharing' ? '分享会' : '每日题单' }} {{ task.shift ? `${task.shift}班` : '' }}</span><span>{{ task.status }} · {{ task.answered }}/{{ task.assigned ?? '待核对' }}</span></li></ul></details></td>
+          <td><span class="completion-state" :class="tone(row.status)">{{ row.status }}</span><details v-if="row.tasks.length"><summary>任务 {{ row.tasks.length }}</summary><ul><li v-for="task in row.tasks" :key="task.task_id"><span>{{ task.source === 'sharing' ? '分享会' : '当班学练' }} {{ task.shift ? `${task.shift}班` : '' }}</span><span>{{ task.status }} · {{ task.answered }}/{{ task.assigned ?? '待核对' }}<template v-if="task.practice_counts?.answered">（含自主练习 {{ task.practice_counts.answered }} 题）</template></span></li></ul></details></td>
           <td class="numbers">{{ row.assigned }} / {{ row.answered }} / {{ row.correct }}</td>
           <td class="numbers">{{ row.accuracy == null ? '暂无客观作答' : `${row.accuracy.toFixed(1)}%` }}</td>
           <td class="numbers">{{ row.answer_viewed }}<small v-if="row.answer_view_unknown">{{ row.answer_view_unknown }} 题证据待核对</small></td>
@@ -62,7 +63,7 @@ let todayTimer: number | undefined;
 function shifts(row: Dict): string { return [...new Set(row.tasks.map((t: Dict) => t.shift).filter(Boolean))].map(s => `${s}班`).join('、') || '未安排班次'; }
 function delivery(row: Dict): string { return [...new Set(row.tasks.map((t: Dict) => t.delivery_status).filter(Boolean))].join('、') || '未记录'; }
 function tone(state: string): string { return state === '已完成' ? 'success' : ['逾期', '待核对'].includes(state) ? 'warning' : ''; }
-function paperTitle(row:Dict,id:string):string{const task=row.tasks.find((task:Dict)=>task.source==='paper'&&task.task_id===id);return task?`${task.shift?task.shift+'班 ':''}每日题单 ${task.answered}/${task.assigned ?? '待核对'}`:'练习与复习记录';}
+function paperTitle(row:Dict,id:string):string{const task=row.tasks.find((task:Dict)=>task.source==='paper'&&task.task_id===id);return task?`${task.shift?task.shift+'班 ':''}每日题单（当班合计 ${task.answered}/${task.assigned ?? '待核对'}）`:'练习与复习记录';}
 function timeLabel(value: string): string { return new Date(value).toLocaleString('zh-CN', { hour12: false }); }
 async function load(): Promise<void> {
   const currentDay = beijingDate();

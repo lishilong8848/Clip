@@ -60,7 +60,7 @@ CORE_FRONTEND = frozenset((
 OPTIONAL_FRONTEND = frozenset((
     "check-repair-overview.mjs", "check-document-library-resilience.mjs",
     "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs",
-    "check-learning-question-import.mjs", "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs",
+    "check-learning-question-import.mjs", "check-learning-daily-entry.mjs", "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs",
 ))
 
 # Output/data directories are never source inputs. Do not use gitignore here:

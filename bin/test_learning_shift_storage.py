@@ -112,6 +112,18 @@ class ShiftStorageTests(unittest.TestCase):
         self.assertEqual((value['summary']['practice_questions'], value['summary']['review_count']), (1, 1))
         self.assertEqual(len(value['entities']), 4)
 
+    def test_autonomous_completion_is_saved_in_same_shift_person_cloud_summary(self):
+        self.roster(); self.paper()
+        self.paper('extra', mode='practice'); self.record('extra')
+        self.service.sync_pending()
+        value = next(iter(self.bundles().values()))
+        self.assertEqual((value['summary']['status'], value['summary']['assigned'],
+                          value['summary']['answered'], value['summary']['practice_questions']), ('已完成', 1, 1, 1))
+        self.assertIsNone(self.service._get('record', 'paper'))
+        self.service.sync_pending()
+        self.assertEqual(len(self.bundles()), 1)
+        self.assertEqual(next(iter(self.bundles().values()))['summary']['answered'], 1)
+
     def test_night_after_midnight_stays_with_roster_day(self):
         self.roster(); self.paper(shift='夜')
         self.record(practice=[{'correct': False, 'submitted_at': '2026-10-21T03:00:00+08:00'}])

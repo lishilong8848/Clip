@@ -55,6 +55,13 @@ def reminder_note(person):
     return '\n'.join(lines)
 
 
+def review_reminder_note(person, item):
+    scope = item_scope(person, item)
+    label = '110站' if scope == '110' else scope + '楼'
+    return (f"{label} · {person['name']} · {item['title']}\n"
+            '该项反馈提交已超过24小时，仍待审核，请及时复核。任意一名指定审核人完成复核后，不再提醒。')
+
+
 def field_spec(field):
     result = {'field_name': field['field_name'], 'type': field['type']}
     prop = deepcopy(field.get('property') or {})
@@ -175,6 +182,18 @@ class RiskCloud:
                     raise CloudRejected(str(exc), exc.status) from None
                 card = json.loads(kwargs['json']['content'])
                 card['elements'][0]['text']['content'] = reminder_note(current[1])
+                kwargs['json'] = {**kwargs['json'], 'content': json.dumps(card, ensure_ascii=False)}
+            if job and job['kind'] == 'review_reminder' and path == 'im/v1/messages':
+                current = self.store.review_reminder(job)
+                if current is None:
+                    raise _ReminderObsolete()
+                release, person, item = current
+                target = self.store.person_for(job['payload']['person_id'])
+                self.store.check(target)
+                if not self.store._visible(target, release, person, item=item):
+                    raise RiskError('审核提醒接收人权限已变化。', 403)
+                card = json.loads(kwargs['json']['content'])
+                card['elements'][0]['text']['content'] = review_reminder_note(person, item)
                 kwargs['json'] = {**kwargs['json'], 'content': json.dumps(card, ensure_ascii=False)}
             response = self.http.request(method, API + path, headers=headers, **kwargs)
             if job:
@@ -670,6 +689,16 @@ class RiskCloud:
                 self.store.check(target)
                 self.notify(job, release, target, note=reminder_note(person))
             return
+        if job['kind'] == 'review_reminder':
+            current = self.store.review_reminder(job)
+            if current is not None:
+                release, person, item = current
+                target = self.store.person_for(job['payload']['person_id'])
+                self.store.check(target)
+                if not self.store._visible(target, release, person, item=item):
+                    raise RiskError('审核提醒接收人权限已变化。', 403)
+                self.notify(job, release, target, note=review_reminder_note(person, item))
+            return
         release, people = self.store.raw(job['release_id'])
         if job['kind'] == 'publish':
             self.create_release(release, people)
@@ -730,6 +759,8 @@ class RiskCloud:
             release, person = current
             note = reminder_note(person)
         url = self.base_url().rstrip('/') + '/risk-inspections?id=' + release['id']
+        if job.get('kind') == 'review_reminder':
+            url += '&view=review'
         attempted_before = bool(receipts.get(receipt_key))
         attempt = receipts.get(receipt_key, {}).get('attempted_at', time.time())
         if time.time() - attempt > 20 * 3600:

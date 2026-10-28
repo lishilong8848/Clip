@@ -873,18 +873,21 @@ class LearningService:
 
     def _send_notifications(self, current):
         from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times, notification_jobs, APP_ACCESS_URL
+        from .learning_completion import daily_progress
         settings = self.settings()
         if not settings['enabled']:
             return
         assignments = enqueue_shift_reminders(self, current)
         date = current.date().isoformat()
+        completed_papers = {task['task_id'] for task in daily_progress(self, date, current).values()
+                            if task['status'] == '已完成'} if settings['reminder_enabled'] else set()
         link = None
         with self.transaction() as conn:
             if settings["reminder_enabled"] and current.strftime("%H:%M") >= settings["reminder_time"]:
                 for paper in self._documents("paper", start=date, end=date, conn=conn):
                     key = "reminder:personal:" + date + ":" + paper["scope"]
                     record = self._get("record", paper["id"], conn) or {}
-                    if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and not self._completed(paper, record) and not self._get("notification", key, conn):
+                    if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and paper['id'] not in completed_papers and not self._completed(paper, record) and not self._get("notification", key, conn):
                         self._put("notification", key, {"id": key, "kind": "reminder", "personal_mode": True, "scope": paper["scope"], "date": date, "status": "pending"}, conn)
         for notification in notification_jobs(self, current, assignments):
             if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
@@ -913,7 +916,7 @@ class LearningService:
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
                     continue
                 outstanding = [p for p in self._documents("paper", scope=notification["scope"], start=date, end=date)
-                               if p.get('mode') != 'practice' and not p.get("deleted_at") and p["questions"] and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
+                               if p.get('mode') != 'practice' and not p.get("deleted_at") and p["questions"] and p['id'] not in completed_papers and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
                 if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:

@@ -189,7 +189,7 @@ class CompletionTests(unittest.TestCase):
         self.record(practice, answered=1, submitted=next_day + 'T03:00:00+08:00',
                     practice=[{'submitted_at': next_day + 'T04:00:00+08:00', 'correct': False}])
         row = self.rows(current=AFTERNOON + dt.timedelta(days=1))['p1']
-        self.assertEqual((row['assigned'], row['answered'], row['status'], row['practice_questions']), (2, 2, '已完成', 0))
+        self.assertEqual((row['assigned'], row['answered'], row['status'], row['practice_questions']), (2, 3, '已完成', 0))
         following = completion.project(self.service, next_day, current=AFTERNOON + dt.timedelta(days=1))[0]
         self.assertEqual((following['assigned'], following['practice_questions'], following['practice_attempts'], following['review_count']), (0, 1, 2, 1))
 
@@ -203,6 +203,87 @@ class CompletionTests(unittest.TestCase):
         self.put('notification', {'id': 'notice', 'date': DATE, 'paper_id': paper['id'], 'status': 'failed'})
         row = self.rows()['p1']
         self.assertEqual((row['status'], row['accuracy'], row['delivery_failed']), ('已完成', 100.0, True))
+
+    def test_autonomous_first_answers_complete_daily_without_rewriting_either_paper(self):
+        self.roster([{'person_id': 'p1', 'scope': 'A', 'shift': '白'}])
+        daily = self.paper(count=15)
+        practice = self.paper(mode='practice', identity='practice', count=15)
+        self.record(practice, answered=14, practice=[{'submitted_at': DATE + 'T15:00:00+08:00', 'correct': True}])
+        row = self.rows()['p1']
+        self.assertEqual((row['assigned'], row['answered'], row['status']), (15, 14, '答题中'))
+        self.record(practice, answered=15)
+        row = self.rows()['p1']
+        self.assertEqual((row['assigned'], row['answered'], row['status'], row['correct']), (15, 15, '已完成', 15))
+        self.assertEqual(row['tasks'][0]['practice_counts']['answered'], 15)
+        with patch.object(learning, 'now', return_value=AFTERNOON):
+            profile = self.service.profile(self.actor(), {})
+        self.assertEqual((profile['today_summary']['assigned'], profile['today_summary']['task_answered'],
+                          profile['today_summary']['completed_people']), (15, 15, 1))
+        self.assertEqual(profile['people'][0]['today']['answered'], 15)
+        self.assertIsNone(self.service._get('record', daily['id']))
+        self.record(daily, answered=1)
+        self.assertEqual(self.rows()['p1']['answered'], 16, 'all first answers counted; no quota truncation')
+        self.put(completion.KIND, self.rows()['p1'])
+        self.assertEqual(self.rows()['p1']['answered'], 16, 'repeated projections never add credit twice')
+
+    def test_autonomous_credit_isolated_by_person_building_shift_and_submission_time(self):
+        self.person('p2', ('A',))
+        self.roster([{'person_id': 'p1', 'scope': 'A', 'shift': shift} for shift in ('白', '夜')])
+        self.paper(shift='夜', identity='night', count=2)
+        self.paper(pid='p2', identity='other', count=2)
+        practice = self.paper(mode='practice', identity='practice', count=2)
+        tomorrow = (support.DAY + dt.timedelta(days=1)).isoformat()
+        self.record(practice, answered=2, submitted=tomorrow + 'T02:00:00+08:00')
+        row = self.rows(current=AFTERNOON + dt.timedelta(days=1))['p1']
+        self.assertEqual({t['shift']: t['answered'] for t in row['tasks']}, {'白': 0, '夜': 2})
+        self.assertEqual(self.rows(current=AFTERNOON + dt.timedelta(days=1))['p2']['answered'], 0)
+        self.put('paper', {**practice, 'scope': 'B'})
+        self.assertEqual(self.rows(current=AFTERNOON + dt.timedelta(days=1))['p1']['answered'], 0)
+
+    def test_invalid_review_unconfirmed_timestamp_and_ambiguous_shift_never_add_credit(self):
+        self.roster([{'person_id': 'p1', 'scope': 'A', 'shift': shift} for shift in ('白', '夜')])
+        self.paper(shift='白', identity='day', count=2)
+        practice = self.paper(mode='practice', identity='practice', count=2)
+        for submitted, current in (('invalid', AFTERNOON),
+                                   (DATE + 'T17:55:00+08:00', AFTERNOON.replace(hour=18)),
+                                   (DATE + 'T19:00:00+08:00', AFTERNOON)):
+            self.record(practice, submitted=submitted)
+            self.assertEqual(self.rows(current=current)['p1']['answered'], 0)
+        record = self.record(practice)
+        record['entries'][practice['questions'][0]['id']]['needs_review'] = True
+        self.put('record', record)
+        practice['questions'][1]['invalid'] = True
+        self.put('paper', practice)
+        self.assertEqual(self.rows()['p1']['answered'], 0)
+
+    def test_autonomous_credit_without_claimed_daily_and_restored_roster_is_idempotent(self):
+        self.roster([{'person_id': 'p1', 'scope': 'A', 'shift': '白'}])
+        practice = self.paper(mode='practice', identity='practice', count=15)
+        self.record(practice, answered=15)
+        row = self.rows()['p1']
+        self.assertEqual((row['status'], row['answered'], row['assigned']), ('已完成', 15, 15))
+        self.put(completion.KIND, row)
+        with self.service.transaction() as conn:
+            conn.execute("DELETE FROM documents WHERE kind='local'")
+        row = self.rows()['p1']
+        self.assertEqual((row['status'], row['answered']), ('已完成', 15))
+
+    def test_existing_install_backfills_autonomous_credit_once_without_changing_answers(self):
+        self.roster([{'person_id': 'p1', 'scope': 'A', 'shift': '白'}])
+        self.paper(count=15)
+        practice = self.paper(mode='practice', identity='practice', count=15)
+        record = self.record(practice, answered=15)
+        original = self.service._get('record', record['id'])
+        self.put('local', {'id': 'completion_initialized', 'version': 1})
+        self.service._completion_enabled = self.service._restored = True
+        current = AFTERNOON + dt.timedelta(days=5)
+        completion.refresh(self.service, current)
+        saved = self.service._get(completion.KIND, completion.key(DATE, 'p1'))
+        self.assertEqual((saved['status'], saved['answered']), ('已完成', 15))
+        self.assertEqual(self.service._get('local', 'completion_initialized')['rules_version'], completion.RULE_VERSION)
+        completion.refresh(self.service, current)
+        self.assertEqual(self.service._get(completion.KIND, saved['id'])['_revision'], saved['_revision'])
+        self.assertEqual(self.service._get('record', record['id']), original)
 
     def test_server_start_marks_in_progress_without_inventing_answers(self):
         self.roster(); self.paper()

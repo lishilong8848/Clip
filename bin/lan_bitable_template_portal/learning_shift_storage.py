@@ -1,5 +1,6 @@
 """Person/shift cloud snapshots; local business entities keep their original keys."""
 import datetime as dt
+import copy
 import json
 import re
 import time
@@ -243,8 +244,12 @@ class Snapshot:
         known = {task['task_id'] for task in tasks}
         for task in daily.get('tasks', []):
             if (task.get('shift') or '未归班') == shift and task['task_id'] not in known:
-                tasks.append(task)
+                tasks.append(copy.deepcopy(task))
                 scopes.add(task.get('scope', ''))
+        completion.add_practice(tasks,
+            [row['payload'] for (kind, _), row in self.documents.items()
+             if kind == 'paper' and row['payload'].get('person_id') == pid],
+            {identity: row['payload'] for identity, row in self.records_by_person[pid]}, date, current)
         for identity, row in self.records_by_person[pid]:
             paper = self.get('paper', identity)
             if paper.get('deleted_at'):

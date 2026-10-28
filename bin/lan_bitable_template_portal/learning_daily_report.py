@@ -92,7 +92,7 @@ def render_card(report, portal_url):
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
             'content': f"题库待核对 {report['question_problem_count']} 题"}})
     elements.append({'tag': 'note', 'elements': [{'tag': 'plain_text', 'content':
-        '口径：每日题单，夜班跨零点归排班日，截至发送时核实；不含长白、分享会、主动练习及未安排。'
+        '口径：每日题单及当班自主练习的有效首答，复习不重复计数；夜班跨零点归排班日，截至发送时核实；不含长白、分享会及未安排。'
         + (' 核实时间：' + report['as_of'] if report.get('as_of') else '')}]})
     card['elements'] = [*elements, card['elements'][-1]]
     return card
@@ -168,13 +168,12 @@ def collect(service, date, current, conn, directory, app_id):
             continue
         duties[pid, row['scope'], row['shift']] = {**row, 'open_id': oid, 'person_id': pid}
 
-    # Filter sharing/practice before projection; their completion must not mask a daily task.
+    # Sharing remains separate; autonomous answers are credited by their actual duty window.
     data = {kind: [] for kind in ('person', 'paper', 'record', completion.KIND,
                                   'notification', 'sharing_batch', 'sharing_attempt', 'sharing_delivery')}
     data['person'] = people
-    for kind in ('paper', 'notification'):
-        data[kind] = service._documents(kind, start=date, end=date, conn=conn)
-    data['paper'] = [p for p in data['paper'] if p.get('mode', 'daily') == 'daily']
+    data['paper'] = service._all('paper', conn)
+    data['notification'] = service._documents('notification', start=date, end=date, conn=conn)
     data['record'] = [record for paper in data['paper']
                       if (record := service._get('record', paper['id'], conn))]
     normalized = {**roster, 'people': list(duties.values())}
@@ -192,7 +191,8 @@ def collect(service, date, current, conn, directory, app_id):
         row = {k: duty[k] for k in ('person_id', 'name', 'scope', 'shift')}
         tasks = [t for t in projected.get(pid, {}).get('tasks', []) if
                  t['source'] in {'paper', 'roster'} and t['scope'] == scope and t['shift'] == shift]
-        papers = [p for p in data['paper'] if p.get('person_id') == pid]
+        papers = [p for p in data['paper'] if p.get('person_id') == pid
+                  and p.get('date') == date and p.get('mode') != 'practice']
         reason = ''
         end = windows(date, shift)[1]
         if current < end:
