@@ -491,7 +491,7 @@ def check_frontend_freeze_guards() -> tuple[bool, list[str]]:
         "PortalRuntime.start_event_month_refresh(month)",
         "render_workbench_lite(",
         "parse_pasted_notice_to_draft",
-        "if key != \"frontend\"",
+        "for key, value in request.query_params.multi_items()",
         "headers={\"Location\": f\"/workbench-lite?",
     ]
     for marker in backend_markers:

@@ -1,5 +1,6 @@
 """Stable frontend entry metadata and web MIME types, independent of Windows registry."""
 from pathlib import Path
+import asyncio
 import sys
 import tempfile
 import unittest
@@ -7,9 +8,25 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clipflow_backend.main import FastAPIPortalController
+from starlette.requests import Request
+from urllib.parse import parse_qs, urlsplit
 
 
 class FrontendDeliveryTests(unittest.TestCase):
+    def test_scoped_home_redirect_preserves_explicit_frontend_without_changing_scope(self):
+        controller = FastAPIPortalController(host='127.0.0.1', port=18766)
+        with patch.object(controller, '_root_oauth_callback_response', return_value=None):
+            root = next(route.endpoint for route in controller._build_app().routes if getattr(route, 'path', '') == '/')
+            for selected in ('', '&frontend=legacy', '&frontend=workspace'):
+                query = 'scope=A&work_type=change' + selected
+                request = Request({'type': 'http', 'method': 'GET', 'path': '/',
+                    'query_string': query.encode(), 'headers': []})
+                response = asyncio.run(root(request))
+                self.assertEqual(response.status_code, 302)
+                target = urlsplit(response.headers['location'])
+                self.assertEqual(target.path, '/workbench-lite')
+                self.assertEqual(parse_qs(target.query), parse_qs(query))
+
     def test_entry_is_not_cached_and_module_types_ignore_registry(self):
         controller = FastAPIPortalController(host='127.0.0.1', port=18766)
         with tempfile.TemporaryDirectory() as temp, \

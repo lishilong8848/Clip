@@ -896,7 +896,6 @@ class FastAPIPortalController:
                 params = {
                     key: value
                     for key, value in request.query_params.multi_items()
-                    if key != "frontend"
                 }
                 return Response(
                     status_code=302,

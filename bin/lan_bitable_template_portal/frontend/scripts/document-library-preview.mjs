@@ -68,7 +68,7 @@ export async function startDocumentLibraryPreview({ port = 0 } = {}) {
       if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/document-library')) return request.method === 'GET' ? json({ items: [], records: [], revision: 0, value: null }) : json('隔离验收禁止访问其他写入接口', 403);
       if (!url.pathname.startsWith('/api/')) {
         if (url.pathname === '/' && url.searchParams.has('version')) {
-          response.writeHead(302, { Location: url.searchParams.get('version') === 'v2' ? '/assets/workspace-v2/index.html?__page=/document-library' : '/document-library' }); response.end(); return;
+          response.writeHead(302, { Location: url.searchParams.get('version') === 'v2' ? '/assets/workspace-v2/index.html?__page=/document-library' : '/document-library?frontend=legacy' }); response.end(); return;
         }
         const file = url.pathname.startsWith('/assets/') ? path.resolve(outDir, '.' + url.pathname) : path.join(outDir, 'index.html');
         assert(file.startsWith(outDir + path.sep));

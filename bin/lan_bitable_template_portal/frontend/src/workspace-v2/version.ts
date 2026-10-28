@@ -21,9 +21,9 @@ export function prepareWorkspaceEntry():Promise<void>{
 }
 
 export function readVersion(identity: string): FrontendVersion {
-  if (!identity) return 'legacy';
-  try { return localStorage.getItem(prefix + identity) === 'workspace' ? 'workspace' : 'legacy'; }
-  catch { return 'legacy'; }
+  if (!identity) return 'workspace';
+  try { return localStorage.getItem(prefix + identity) === 'legacy' ? 'legacy' : 'workspace'; }
+  catch { return 'workspace'; }
 }
 export function saveVersion(identity: string, version: FrontendVersion): void {
   if (!identity) return;

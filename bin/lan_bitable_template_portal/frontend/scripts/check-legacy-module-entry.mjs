@@ -25,6 +25,7 @@ const viewports=[{width:1440,height:900},{width:402,height:874},{width:440,heigh
 const scopeOptions=['A','B'].map(value=>({value,label:value+'楼'}));
 let page,modules=fullModules,category='supervisor';
 const v2Url=path=>{const target=new URL(path,origin),url=new URL('/assets/workspace-v2/index.html',origin);url.search=target.search;url.searchParams.set('__page',target.pathname);return url.href;};
+const legacyUrl=path=>{const url=new URL(path,origin);url.searchParams.set('frontend','legacy');return url.href;};
 async function fitAndCapture(name){
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),name+': no horizontal overflow');
   await page.screenshot({path:path.join(output,name+'.png'),fullPage:true});
@@ -39,7 +40,7 @@ async function legacyBack(expected){
   const back=page.locator('.vnet-back-button:visible');
   await back.waitFor();assert.equal(await back.count(),1,'only one legacy back button');
   await clickVisible(back,'legacy back');
-  await page.waitForURL(origin+expected);
+  await page.waitForURL(legacyUrl(expected));
 }
 async function assertSpecialMenu(expected){
   await page.getByRole('heading',{name:'专项任务',exact:true}).waitFor();
@@ -97,7 +98,7 @@ try{
   for(const viewport of viewports){
     const {width}=viewport;modules=fullModules;category='supervisor';
     await page.setViewportSize(viewport);
-    await page.goto(origin+'/');
+    await page.goto(origin+'/?frontend=legacy');
     await page.locator('.module-pre_shift').waitFor();
     assert(await page.locator('.module-card').first().evaluate(node=>node.classList.contains('module-pre_shift')),'checklist is the first authorized home card');
     await fitAndCapture('home-'+width);
@@ -121,7 +122,7 @@ try{
     assert.equal(await page.locator('.scope-summary-strip').count(),0,'inspection must not show unrelated notice counts');
     await fitAndCapture('risk-buildings-'+width);
     await clickVisible(page.locator('.scope-card').filter({hasText:'B楼'}).getByRole('button',{name:'进入专项排查',exact:true}),'B building inspection');
-    await page.waitForURL('**/risk-inspections?scope=B');
+    await page.waitForURL(legacyUrl('/risk-inspections?scope=B'));
     await page.getByRole('region',{name:'风险排查',exact:true}).waitFor();
     await page.getByRole('tab',{name:'发布管理',exact:true}).waitFor();
     const scopedRead=page.waitForResponse(response=>{const url=new URL(response.url());return url.pathname==='/api/risk-inspections'&&url.searchParams.get('view')==='published'&&url.searchParams.get('scope')==='B';});
@@ -134,22 +135,22 @@ try{
     await assertSpecialMenu(special.map(item=>item.label));
     for(const item of special.filter(item=>item.id!=='risk_inspection')){
       await clickVisible(page.getByRole('button',{name:'选择'+item.label,exact:true}),item.label);
-      await page.waitForURL(origin+item.path);
+      await page.waitForURL(legacyUrl(item.path));
       await page.locator(item.surface).waitFor();
       if(item.id==='learning')await page.getByRole('button',{name:'选择人员',exact:true}).waitFor();
       if(item.id==='plan_convergence')await page.locator('.pc-page[aria-busy="false"]').waitFor();
       await fitAndCapture(item.id+'-'+width);
       if(item.id==='work_handover')await clickVisible(page.locator(item.surface).getByRole('button',{name:'返回',exact:true}),item.label+' back');
       else await legacyBack('/?entry=special');
-      await page.waitForURL(origin+'/?entry=special');
+      await page.waitForURL(legacyUrl('/?entry=special'));
       await assertSpecialMenu(special.map(item=>item.label));
       await fitAndCapture(item.id+'-returned-'+width);
     }
-    await page.goto(origin+'/risk-inspections');
+    await page.goto(origin+'/risk-inspections?frontend=legacy');
     await clickVisible(page.getByRole('region',{name:'风险排查',exact:true}).getByRole('button',{name:'返回',exact:true}),'unscoped inspection back');
-    await page.waitForURL(origin+'/?entry=special');
+    await page.waitForURL(legacyUrl('/?entry=special'));
     await assertSpecialMenu(special.map(item=>item.label));
-    await page.goto(origin+'/?entry=tools');
+    await page.goto(origin+'/?entry=tools&frontend=legacy');
     await page.getByRole('heading',{name:'选择其它功能入口',exact:true}).waitFor();
     assert.deepEqual(await page.locator('.tool-card').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),toolLabels.map(label=>'选择'+label),'other tools retain knowledge/documents/daily and no moved special entries');
     for(const item of special)assert.equal(await page.getByRole('button',{name:'选择'+item.label,exact:true}).count(),0,item.id+': removed from other tools');
@@ -175,20 +176,20 @@ try{
     for(const allowed of [...special.map(item=>[item.id]),['critical_guard','daily','knowledge'],[]]){
       modules=allowed;
       const caseName=allowed.join('-')||'none',expected=special.filter(item=>allowed.includes(item.id));
-      await page.goto(origin+'/');
+      await page.goto(origin+'/?frontend=legacy');
       await page.getByRole('heading',{name:'业务模块',exact:true}).waitFor();
       assert.equal(await page.locator('.module-pre_shift').count(),0,'navigation does not grant engineer checklist submission');
       assert.equal(await page.locator('.module-special').count(),expected.length?1:0,caseName+': legacy special home gate');
       assert.equal(await page.locator('.module-risk').count(),allowed.includes('critical_guard')?1:0,caseName+': legacy risk home gate');
       assert.equal(await page.locator('.module-tools').count(),allowed.some(id=>['daily','knowledge'].includes(id))?1:0,caseName+': legacy tools home gate');
       if(expected.length)await clickVisible(page.getByRole('button',{name:'进入专项功能',exact:true}),'single-grant special card');
-      else await page.goto(origin+'/?entry=special');
+      else await page.goto(origin+'/?entry=special&frontend=legacy');
       await assertSpecialMenu(expected.map(item=>item.label));
       await fitAndCapture('legacy-permission-'+caseName+'-'+width);
-      await page.goto(origin+'/?entry=risk');
+      await page.goto(origin+'/?entry=risk&frontend=legacy');
       await page.getByRole('heading',{name:'选择风险管理业务',exact:true}).waitFor();
       assert.equal(await page.locator('.tool-card').count(),allowed.includes('critical_guard')?1:0,caseName+': direct risk menu cannot expose another module');
-      await page.goto(origin+'/?entry=tools');
+      await page.goto(origin+'/?entry=tools&frontend=legacy');
       await page.getByRole('heading',{name:'选择其它功能入口',exact:true}).waitFor();
       assert.deepEqual(await page.locator('.tool-card').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),allowed.includes('knowledge')?['选择共享知识库','选择南通文件','选择每日任务清单']:[],caseName+': other-tools grants stay separate');
       await page.goto(v2Url('/?view=functions'));
@@ -196,7 +197,7 @@ try{
       await fitAndCapture('v2-permission-'+caseName+'-'+width);
       // Direct links must remain guarded, not merely disappear from navigation.
       for(const item of special.filter(item=>!allowed.includes(item.id))){
-        for(const url of [origin+item.path,v2Url(item.path)]){
+        for(const url of [origin+item.path+'?frontend=legacy',v2Url(item.path)]){
           const before=reads.filter(path=>path.startsWith(item.api)).length;
           await page.goto(url);
           await page.getByText('没有该功能权限',{exact:true}).waitFor();

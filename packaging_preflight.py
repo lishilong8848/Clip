@@ -51,7 +51,7 @@ TEST_AREAS = (
      frozenset({"learning", "assistant", "frontend"})),
 )
 CORE_FRONTEND = frozenset((
-    "check-workspace-navigation.mjs", "check-legacy-module-entry.mjs",
+    "check-workspace-navigation.mjs", "check-login-version-switch.mjs", "check-legacy-module-entry.mjs",
     "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs",
     "check-notice-cycle-warnings.mjs", "check-account-fixed-duty.mjs",
     "check-notice-convergence-confirmation.mjs", "check-assistant-shared-query.mjs",

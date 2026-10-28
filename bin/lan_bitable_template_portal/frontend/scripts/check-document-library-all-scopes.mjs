@@ -17,7 +17,7 @@ try {
       });
       const page = await context.newPage(), errors = [];
       page.on('pageerror', error => errors.push(error.message));
-      const target = version === 'v2' ? '/assets/workspace-v2/index.html?scope=ALL&__page=%2Fdocument-library' : '/document-library?scope=ALL';
+      const target = version === 'v2' ? '/assets/workspace-v2/index.html?scope=ALL&__page=%2Fdocument-library' : '/document-library?scope=ALL&frontend=legacy';
       await page.goto(server.origin + target);
       await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click();
       await page.locator('.document-pagination').waitFor();

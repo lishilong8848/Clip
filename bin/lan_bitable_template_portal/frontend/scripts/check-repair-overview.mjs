@@ -46,7 +46,7 @@ try {
   page.on('pageerror', error => errors.push(error.message));
   const card = page.locator('.module-repair_management');
   const values = card.locator('.module-metrics b');
-  await page.goto(origin + '/');
+  await page.goto(origin + '/?frontend=legacy');
   await card.waitFor();
   await values.first().filter({ hasText: /^4$/ }).waitFor();
   assert.deepEqual(await values.allTextContents(), ['4', '3'], 'homepage uses projects, not 347 pending notices');
@@ -80,7 +80,7 @@ try {
   await page.getByRole('alert').waitFor({ state: 'detached' });
 
   fail = true;
-  await page.goto(origin + '/?entry=repair_management');
+  await page.goto(origin + '/?entry=repair_management&frontend=legacy');
   await page.getByRole('alert').filter({ hasText: /检修统计暂未读取/ }).waitFor();
   assert.equal(await page.locator('.scope-summary-strip article strong').first().innerText(), '待读取', 'failed initial read is not zero');
   fail = false; incomplete = true;

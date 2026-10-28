@@ -29,8 +29,13 @@ if (typeof window !== 'undefined') window.addEventListener('popstate', (event) =
 }, true);
 
 export function toAbsoluteUrl(target: string | URL): string {
-  if (target instanceof URL) return target.toString();
-  return new URL(target, window.location.origin).toString();
+  const url = new URL(target, window.location.origin);
+  if (new URLSearchParams(window.location.search).get('frontend') === 'legacy'
+      && url.origin === window.location.origin && !url.pathname.startsWith('/api/')
+      && !url.pathname.startsWith('/assets/') && !url.searchParams.has('frontend')) {
+    url.searchParams.set('frontend', 'legacy');
+  }
+  return url.toString();
 }
 
 export function navigate(target: string | URL, options: NavigateOptions = {}): void {

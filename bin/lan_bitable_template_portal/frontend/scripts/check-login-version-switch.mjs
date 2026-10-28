@@ -41,7 +41,22 @@ for(const unsafe of ['https://outside.invalid/','//outside.invalid/','/api/auth/
 }
 globalThis.localStorage = {getItem:key=>key.endsWith('alice')?'workspace':null,setItem:()=>assert.fail('Anonymous switching must not change account preferences')};
 assert.equal(readVersion('alice'),'workspace');
-assert.equal(readVersion('bob'),'legacy');
+assert.equal(readVersion('bob'),'workspace');
+assert.equal(readVersion(''),'workspace');
+globalThis.localStorage.getItem=()=>{throw new Error('storage unavailable');};
+assert.equal(readVersion('bob'),'workspace');
+globalThis.window.location=new URL('/?frontend=legacy',testOrigin);
+globalThis.window.addEventListener=()=>{};
+const oldNavigation=await build({entryPoints:[path.join(root,'src/navigation.ts')],bundle:true,format:'esm',write:false});
+const {toAbsoluteUrl}=await import('data:text/javascript;base64,'+Buffer.from(oldNavigation.outputFiles[0].text).toString('base64'));
+const legacyBusiness=new URL(toAbsoluteUrl('/learning?scope=A#history'));
+assert.equal(legacyBusiness.searchParams.get('frontend'),'legacy');
+assert.equal(legacyBusiness.searchParams.get('scope'),'A');
+assert.equal(legacyBusiness.hash,'#history');
+for(const target of ['/api/auth/logout','/assets/workspace-v2/index.html','https://outside.invalid/']){
+  assert.equal(new URL(toAbsoluteUrl(target)).searchParams.has('frontend'),false);
+}
+assert.equal(new URL(toAbsoluteUrl('/?frontend=workspace')).searchParams.get('frontend'),'workspace');
 delete globalThis.window;delete globalThis.document;delete globalThis.localStorage;
 
 const server = await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
@@ -51,9 +66,10 @@ await mkdir(output,{recursive:true});
 let browser;
 try{
   browser = await chromium.launch({headless:true});
-  for(const width of [1440,390]){
-    const context = await browser.newContext({viewport:{width,height:960}});
+  for(const width of [1440,402,440]){
+    const context = await browser.newContext({viewport:{width,height:width===402?874:width===440?956:900}});
     const errors=[],writes=[];
+    let signedIn=false;
     await context.route('**/*',route=>{
       const request=route.request(),url=new URL(request.url());
       if(url.origin!==origin)return route.abort();
@@ -61,15 +77,29 @@ try{
       if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'login-version-fixture'}});
       if(request.method()!=='GET')writes.push(url.pathname);
       const data=url.pathname==='/api/auth/status'
-        ? {logged_in:false,user:{},scope_options:[],login_url:'/api/auth/login?next='+encodeURIComponent(url.searchParams.get('next')||'/')}
+        ? {logged_in:signedIn,user:signedIn?{open_id:'ou_default_entry',name:'入口验收',role:'building',level:'L4',home_scope:'A',modules:[]}: {},scope_options:signedIn?[{value:'A',label:'A楼'}]:[],login_url:'/api/auth/login?next='+encodeURIComponent(url.searchParams.get('next')||'/')}
         : {items:[],people:[],options:[],scope_options:[],stats:{},settings:{}};
       return route.fulfill({json:{ok:true,data}});
     });
     const page = await context.newPage();
     page.setDefaultTimeout(15000);
     page.on('pageerror',error=>errors.push(error.message));
+    await context.addInitScript(()=>localStorage.setItem('clipflow:frontend-version:ou_previous','legacy'));
+    for(const target of ['/', '/?entry=pre_shift', '/learning?scope=H&view=history', '/signature?request_id=fixture#token=fixture-token']){
+      await page.goto(origin+target);
+      await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
+      const source=new URL(target,origin),actual=new URL(page.url());
+      if(source.pathname!=='/signature')await page.getByRole('button',{name:'切换旧版',exact:true}).waitFor();
+      assert.equal(actual.searchParams.get('__page'),source.pathname);
+      for(const [key,value] of source.searchParams)assert.equal(actual.searchParams.get(key),value);
+      assert.equal(actual.hash,source.hash,'token fragments must survive default entry navigation');
+    }
     await page.goto(origin+'/?login=feishu&next='+encodeURIComponent('/learning?view=practice'));
+    await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
     await page.locator('#login-tab-password').click();
+    await page.getByRole('button',{name:'切换旧版',exact:true}).click();
+    await page.waitForURL(url=>url.pathname==='/');
+    await page.locator('#login-tab-password[aria-selected="true"]').waitFor();
     const toNew=page.getByRole('button',{name:'切换新版',exact:true});
     await toNew.waitFor();
     const oldBox=await toNew.boundingBox();
@@ -102,6 +132,17 @@ try{
     await page.locator('a.feishu-btn').waitFor();
     const oldOauth=new URL(await page.locator('a.feishu-btn').getAttribute('href'),origin);
     assert.equal(new URL(oldOauth.searchParams.get('next'),origin).searchParams.get('frontend'),'legacy');
+    signedIn=true;
+    await page.evaluate(()=>localStorage.setItem('clipflow:frontend-version:ou_default_entry','legacy'));
+    await page.goto(origin+'/');
+    await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
+    await page.locator('.v2-sidebar').waitFor({state:'attached'});
+    await page.getByRole('button',{name:'切换旧版',exact:true}).click();
+    await page.waitForURL(url=>url.pathname==='/'&&url.searchParams.get('frontend')==='legacy');
+    await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
+    await page.goto(origin+'/');
+    await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
+    await page.getByRole('button',{name:'切换旧版',exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
     assert.deepEqual(errors,[]);
     assert.deepEqual(writes,[],'Switching UI must not submit credentials or business requests');

@@ -119,7 +119,7 @@ async function context() {
 try {
   if(!process.argv.includes('--duty')){
   const ctx=await context(),page=await ctx.newPage();
-  await page.goto(origin+'/');
+  await page.goto(origin+'/?frontend=legacy');
   await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
   assert.equal(await page.locator('.v2-shell').count(),0);
   await page.getByRole('button',{name:'切换新版',exact:true}).hover();
@@ -128,7 +128,7 @@ try {
   await page.getByRole('button',{name:'切换新版',exact:true}).click();
   await page.locator('.v2-dashboard').waitFor();
   const originalUser=user;user={...user,open_id:'ou_second_person_fixture',name:'另一名验收人员'};
-  await page.goto(origin+'/');await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();assert.equal(new URL(page.url()).pathname,'/','version preference must not cross accounts');user=originalUser;
+  await page.goto(origin+'/');await page.locator('.v2-dashboard').waitFor();assert.equal(new URL(page.url()).pathname,entry,'every account defaults to the new workspace');user=originalUser;
   await page.goto(origin+'/');await page.locator('.v2-dashboard').waitFor();
   await page.getByText('A楼BA系统资料维护',{exact:true}).first().waitFor();
   assert.equal(new URL(page.url()).pathname,entry);

@@ -1,8 +1,8 @@
 import { createApp } from "vue";
-import App from "./App.vue";
 import LoadingIndicator from "./components/LoadingIndicator.vue";
 import UiTransition from "./components/UiTransition.vue";
 import "./global.css";
+import { workspaceUrl } from "./workspace-v2/version";
 
 function resetLocalRuntimeStateIfRequested(): void {
   if (typeof window === "undefined") return;
@@ -34,4 +34,10 @@ document.addEventListener("click", (event) => {
   }
 });
 
-createApp(App).component("LoadingIndicator", LoadingIndicator).component("UiTransition", UiTransition).mount("#app");
+if (new URLSearchParams(window.location.search).get("frontend") === "legacy") {
+  void import("./App.vue").then(({ default: App }) => {
+    createApp(App).component("LoadingIndicator", LoadingIndicator).component("UiTransition", UiTransition).mount("#app");
+  });
+} else {
+  window.location.replace(workspaceUrl(window.location.href));
+}

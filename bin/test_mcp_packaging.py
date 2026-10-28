@@ -16,7 +16,7 @@ spec.loader.exec_module(package)
 
 class PackagingTests(unittest.TestCase):
     def test_notice_navigation_browser_checks_are_mandatory_and_failure_stops(self):
-        expected = ['check-workspace-navigation.mjs', 'check-legacy-module-entry.mjs',
+        expected = ['check-workspace-navigation.mjs', 'check-login-version-switch.mjs', 'check-legacy-module-entry.mjs',
                     'check-notice-photo-paste.mjs', 'check-legacy-notice-cycle.mjs',
                     'check-notice-cycle-warnings.mjs', 'check-account-fixed-duty.mjs',
                     'check-assistant-shared-query.mjs', 'check-repair-overview.mjs',
@@ -38,9 +38,9 @@ class PackagingTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'Node.js'):
                 package._run_frontend_notice_navigation_checks()
             run.assert_not_called()
-        for index, name in enumerate(expected):
+        for name in expected:
             with self.subTest(missing=name), \
-                    patch.object(Path, 'is_file', side_effect=[True] * index + [False]), \
+                    patch.object(Path, 'is_file', autospec=True, side_effect=lambda path, missing=name: path.name != missing), \
                     patch.object(package.shutil, 'which', return_value='fixture-node'), \
                     patch.object(package, '_run_preflight_check') as run:
                 with self.assertRaisesRegex(RuntimeError, name):
