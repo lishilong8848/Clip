@@ -20,7 +20,7 @@ import { GripVertical } from 'lucide-vue-next';
 import 'gridstack/dist/gridstack.min.css';
 import type { Widget } from './layout';
 import WidgetViewport from '../WidgetViewport.vue';
-const props=withDefaults(defineProps<{items:T[];editing:boolean;cellHeight?:number;label?:string;adaptive?:boolean}>(),{cellHeight:80,label:'个人工作台组件',adaptive:false});
+const props=withDefaults(defineProps<{items:T[];editing:boolean;cellHeight?:number;label?:string;adaptive?:boolean;contentSizedIds?:string[]}>(),{cellHeight:80,label:'个人工作台组件',adaptive:false});
 const emit=defineEmits<{layout:[items:T[]]}>();
 const host=ref<HTMLElement>();
 let grid:GridStack|null=null,syncing=false,disposed=false;
@@ -35,7 +35,15 @@ function transition(el:Element,done:()=>void,leaving:boolean){
 }
 function enter(el:Element,done:()=>void){transition(el,done,false);}
 function leave(el:Element,done:()=>void){transition(el,done,true);}
-const geometry=(w:T):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:w.minW||(w.kind==='module'?4:3),minH:w.minH||(w.kind==='module'?6:3),maxH:props.adaptive||w.kind==='module'?30:12});
+const contentSized=(id:string)=>!props.editing&&props.contentSizedIds?.includes(id);
+const geometry=(w:T):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:w.minW||(w.kind==='module'?4:3),minH:w.minH||(w.kind==='module'?6:3),maxH:contentSized(w.id)?0:props.adaptive||w.kind==='module'?30:12,sizeToContent:!!contentSized(w.id),resizeToContentParent:contentSized(w.id)?'.v2-responsive-body':undefined});
+let contentObserver:ResizeObserver|undefined;
+function observeContent(){
+  contentObserver?.disconnect();
+  if(!grid||!props.contentSizedIds?.length||props.editing)return;
+  contentObserver ||= new ResizeObserver(entries=>{if(disposed||props.editing||mobile.matches)return;for(const entry of entries){const el=entry.target.closest<GridItemHTMLElement>('.grid-stack-item');if(el&&contentSized(el.dataset.widgetId||''))grid?.resizeToContent(el);}});
+  for(const el of host.value!.querySelectorAll<GridItemHTMLElement>('.grid-stack-item'))if(contentSized(el.dataset.widgetId||'')){const child=el.querySelector('.v2-module-block');if(child)contentObserver.observe(child);grid.resizeToContent(el);}
+}
 async function sync(){
   await nextTick();if(!grid||disposed)return;syncing=true;grid.batchUpdate();
   const ids=new Set(props.items.map(w=>w.id));
@@ -44,7 +52,7 @@ async function sync(){
   for(const el of host.value!.querySelectorAll<GridItemHTMLElement>('.grid-stack-item')){
     const item=props.items.find(w=>w.id===el.dataset.widgetId);if(item&&!el.gridstackNode)grid.makeWidget(el,geometry(item));
   }
-  grid.load(props.items.map(geometry),false);grid.batchUpdate(false);grid.setStatic(!props.editing||mobile.matches);syncing=false;changed();
+  grid.load(props.items.map(geometry),false);grid.batchUpdate(false);grid.setStatic(!props.editing||mobile.matches);syncing=false;observeContent();changed();
 }
 function changed(){
   if(syncing||!grid||!props.editing)return;
@@ -61,5 +69,6 @@ onMounted(()=>{
 });
 watch(()=>JSON.stringify(props.items.map(item=>[item.id,item.x,item.y,item.w,item.h,item.minW,item.minH])),()=>void sync());
 watch(()=>props.editing,controls);
-onBeforeUnmount(()=>{disposed=true;reduced.removeEventListener('change',motion);mobile.removeEventListener('change',controls);grid?.destroy(false);grid=null;});
+watch(()=>props.editing,()=>{if(props.contentSizedIds?.length)void sync();});
+onBeforeUnmount(()=>{disposed=true;contentObserver?.disconnect();reduced.removeEventListener('change',motion);mobile.removeEventListener('change',controls);grid?.destroy(false);grid=null;});
 </script>

@@ -337,7 +337,7 @@ try {
     const text = (await command.innerText());
     assert(/测试维修项目|搜索/.test(text) || await command.getByRole('textbox').count() >= 1, 'repair filter/search must be in command row');
     assert(/新建维修单|刷新/.test(text), 'repair action buttons must be in command row: ' + text);
-    assert.equal(await page.locator('[data-widget-id="block_records"] .v2-widget-head [aria-label="维修项目状态"]').count(),1,'state controls are part of the repair list header');
+    assert.equal(await page.locator('.v2-repair-overview[aria-label="维修项目状态"]').count(),1,'state overview is the single filter group');
     await shot('repair-command-1440');
   });
 

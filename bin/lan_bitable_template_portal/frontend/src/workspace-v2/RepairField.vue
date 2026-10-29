@@ -1,17 +1,18 @@
 <template>
   <NFormItem class="v2-repair-field" :label="label || String(field.field_name || '')" :label-props="{for:percentage&&disabled?undefined:inputId}" :required="required" :validation-status="error ? 'error' : undefined" :feedback="error || undefined" :show-feedback="Boolean(error)" :class="{ 'v2-repair-field-wide': wide, 'v2-repair-field-compact': compact, 'is-readonly': disabled }">
-    <div v-if="percentage" class="v2-repair-progress-input">
+    <div v-if="sourceControlled" v-bind="inputProps" class="v2-repair-source-value" role="textbox" aria-readonly="true" tabindex="0"><span>{{(date?modelValue?.replace('T',' '):modelValue) || '待关联资料'}}</span><small>来自关联资料</small></div>
+    <div v-else-if="percentage" class="v2-repair-progress-input">
       <span v-if="disabled&&!filled" class="v2-repair-muted">未填写</span><NProgress v-else-if="disabled" type="line" :percentage="percent" :height="7" :show-indicator="true" :status="percent===100?'success':'default'" />
-      <template v-else><NSlider :value="percent" :min="0" :max="100" :step="1" :aria-label="label || String(field.field_name)" @update:value="percentageInput" /><NInputNumber :value="filled?percent:null" placeholder="未填写" :min="0" :max="100" :precision="0" :input-props="inputProps" @update:value="percentageInput"><template #suffix>%</template></NInputNumber></template>
+      <template v-else><NSlider :value="percent" :min="0" :max="100" :step="1" :aria-label="label || String(field.field_name)" @update:value="percentageInput" /><NInputNumber :value="filled?percent:null" placeholder="0–100" :show-button="false" :min="0" :max="100" :precision="0" :input-props="inputProps" @update:value="percentageInput"><template #suffix>%</template></NInputNumber></template>
     </div>
     <select v-else-if="mobile&&selectable&&!allowCustomSelect" v-bind="inputProps" class="v2-repair-native-control" :value="modelValue || ''" :disabled="disabled" :required="required" @change="update(($event.target as HTMLSelectElement).value)">
-      <option value="">{{placeholder || '请选择'}}</option><option v-if="modelValue&&!options.some(option=>option.value===modelValue)" :value="modelValue">{{modelValue}}</option><option v-for="option in options" :key="option.value" :value="option.value">{{option.label}}</option>
+      <option value="">{{inputHint}}</option><option v-if="modelValue&&!options.some(option=>option.value===modelValue)" :value="modelValue">{{modelValue}}</option><option v-for="option in options" :key="option.value" :value="option.value">{{option.label}}</option>
     </select>
-    <NSelect v-else-if="selectable" :value="modelValue || null" :options="options" :disabled="disabled" :tag="allowCustomSelect" filterable clearable :placeholder="placeholder || '请选择'" :input-props="inputProps" @update:value="update($event || '')" />
+    <NSelect v-else-if="selectable" :value="modelValue || null" :options="options" :disabled="disabled" :tag="allowCustomSelect" filterable clearable :placeholder="inputHint" :input-props="inputProps" @update:value="update($event || '')" />
     <input v-else-if="date&&mobile" v-bind="inputProps" class="v2-repair-native-control" type="datetime-local" :value="modelValue?.replace(' ','T') || ''" :disabled="disabled" :required="required" step="60" @change="update(($event.target as HTMLInputElement).value)" />
-    <NDatePicker v-else-if="date" v-control-label="inputProps" :formatted-value="modelValue?.replace('T',' ') || null" type="datetime" value-format="yyyy-MM-dd HH:mm" format="yyyy-MM-dd HH:mm" :disabled="disabled" :clearable="!required" @update:formatted-value="update($event?.replace(' ','T') || '')" />
-    <NInputNumber v-else-if="number" :value="numericValue" :min="numberMin" :max="numberMax" :step="typeof numberStep==='number'?numberStep:1" :disabled="disabled" :input-props="inputProps" @update:value="update($event===null?'':String($event))" />
-    <NInput v-else :value="modelValue || ''" :type="textarea?'textarea':'text'" :autosize="textarea ? (mobile ? {minRows:1} : {minRows:2,maxRows:5}) : undefined" :disabled="disabled" :placeholder="placeholder || (disabled?'未填写':'请输入')" :input-props="inputProps" @update:value="update" />
+    <NDatePicker v-else-if="date" v-control-label="inputProps" :formatted-value="modelValue?.replace('T',' ') || null" type="datetime" value-format="yyyy-MM-dd HH:mm" format="yyyy-MM-dd HH:mm" :placeholder="inputHint" :disabled="disabled" :clearable="!required" @update:formatted-value="update($event?.replace(' ','T') || '')" />
+    <NInputNumber v-else-if="number" :value="numericValue" :min="numberMin" :max="numberMax" :step="typeof numberStep==='number'?numberStep:1" :disabled="disabled" :placeholder="inputHint" :input-props="inputProps" @update:value="update($event===null?'':String($event))" />
+    <NInput v-else :value="modelValue || ''" :type="textarea?'textarea':'text'" :autosize="textarea ? (mobile ? {minRows:1} : {minRows:2,maxRows:5}) : undefined" :disabled="disabled" :placeholder="inputHint" :input-props="inputProps" @update:value="update" />
   </NFormItem>
 </template>
 <script setup lang="ts">
@@ -19,7 +20,7 @@ import { computed, onBeforeUnmount, ref, type Directive } from 'vue';
 import { NDatePicker, NFormItem, NInput, NInputNumber, NProgress, NSelect, NSlider } from 'naive-ui';
 import { repairFieldUsesTextarea } from '../repairManagementUtils';
 import type { LooseDict } from '../types';
-const props=withDefaults(defineProps<{field:LooseDict;modelValue?:string;inputId:string;label?:string;required?:boolean;error?:string;disabled?:boolean;wide?:boolean;percentage?:boolean;selectOptions?:string[]|null;allowCustomSelect?:boolean;placeholder?:string;numberMin?:number;numberMax?:number;numberStep?:number|string}>(),{modelValue:'',label:'',error:'',selectOptions:null});
+const props=withDefaults(defineProps<{field:LooseDict;modelValue?:string;inputId:string;label?:string;required?:boolean;error?:string;disabled?:boolean;sourceControlled?:boolean;wide?:boolean;percentage?:boolean;selectOptions?:string[]|null;allowCustomSelect?:boolean;placeholder?:string;numberMin?:number;numberMax?:number;numberStep?:number|string}>(),{modelValue:'',label:'',error:'',selectOptions:null});
 const emit=defineEmits<{'update:modelValue':[value:string];edited:[]}>();
 const media=matchMedia('(max-width:760px)'),mobile=ref(media.matches);
 const resize=()=>{mobile.value=media.matches;};
@@ -30,6 +31,34 @@ const selectable=computed(()=>props.selectOptions!==null||options.value.length>0
 const date=computed(()=>Number(props.field.field_type)===5||String(props.field.ui_type||'').toLowerCase().includes('datetime'));
 const number=computed(()=>Number(props.field.field_type)===2||['number','progress'].includes(String(props.field.ui_type||'').toLowerCase()));
 const textarea=computed(()=>repairFieldUsesTextarea(props.field.field_name));
+const fieldHints:Record<string,string>={
+  '维修名称':'填写设备或位置，以及本次维修事项',
+  '故障维修原因':'填写已核实的故障原因',
+  '故障发生现象描述':'描述现场故障现象和影响',
+  '事件应急措施':'填写已采取的应急措施',
+  '维修进展描述':'填写本次处理内容和处理结果',
+  '跟进项（如有）':'填写后续待跟进事项',
+  '后续整改措施（如有）':'填写后续整改措施',
+  '备注':'补充需要说明的事项',
+  '设备名称':'填写或选择维修设备名称',
+  '设备编号':'填写设备台账编号',
+  '供应商名称':'填写维修供应商名称',
+  '供应商维修人员':'填写到场维修人员姓名',
+  '更换备件名称':'填写本次更换的备件名称',
+  '更换备件数量':'填写更换数量',
+  '故障维修总费用':'填写维修费用（元）',
+  '设备使用年限':'填写已使用年数',
+  '设备容量KW/AH':'填写容量及单位（kW/Ah）',
+};
+const inputHint=computed(()=>{
+  // Contextual business hints (for example, choose a brand first) take precedence.
+  if(props.placeholder?.trim())return props.placeholder;
+  if(props.sourceControlled)return '关联资料后自动带入';
+  const label=props.label||String(props.field.field_name||'');
+  if(selectable.value)return `请选择${label}`;
+  if(date.value)return `选择${label}`;
+  return fieldHints[String(props.field.field_name)]||`填写${label}`;
+});
 const compact=computed(()=>!props.wide&&!props.percentage&&!date.value&&(number.value||(!textarea.value&&String(props.label||props.field.field_name||'').length<=10&&options.value.every(option=>option.label.length<=12))));
 const numericValue=computed(()=>props.modelValue?.trim() && Number.isFinite(Number(props.modelValue))?Number(props.modelValue):null);
 const filled=computed(()=>Boolean(props.modelValue?.trim()));

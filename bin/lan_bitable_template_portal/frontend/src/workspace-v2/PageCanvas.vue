@@ -7,7 +7,7 @@
       <template v-if="editing"><NButton size="small" data-v2-navigation :disabled="saving" @click="cancel">取消</NButton><NButton size="small" data-v2-navigation :disabled="saving" @click="restore">恢复默认</NButton><NButton size="small" data-v2-navigation :disabled="saving" @click="library=true"><Plus :size="14" />添加组件</NButton><NButton size="small" type="primary" :loading="saving" :disabled="saving" @click="save"><Check :size="14" />保存布局</NButton></template>
     </header>
     <NAlert v-if="error" type="warning" :bordered="false">{{error}} <NButton text data-v2-navigation :disabled="saving||loading" @click="reload">重新读取</NButton></NAlert>
-    <WidgetGrid :items="visible" :editing="editing&&!saving" :inert="saving||undefined" :cell-height="64" :label="label+'布局'" adaptive @layout="positions">
+    <WidgetGrid :items="visible" :editing="editing&&!saving" :inert="saving||undefined" :cell-height="64" :label="label+'布局'" :content-sized-ids="page==='repair'?['block_records']:undefined" adaptive @layout="positions">
       <template #tools="{item}">
         <slot v-if="item.builtin&&!editing" :name="'header-'+item.id.slice(6)" />
         <NButton v-if="!toolsTarget&&!editing&&item.id===visible[0]?.id" size="tiny" text data-v2-navigation :disabled="!ready||loading" :aria-label="'自定义'+label+'布局'" title="自定义布局" @click="edit"><SlidersHorizontal :size="14" />自定义布局</NButton>

@@ -1,0 +1,70 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e4]:
+    - generic [aria-hidden]:
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+    - banner [ref=e5]:
+      - button "展开或收起导航" [expanded] [ref=e6] [cursor=pointer]
+      - link "世纪互联 VNET 灯塔 南通运维工作空间" [ref=e9] [cursor=pointer]:
+        - /url: http://127.0.0.1:12273/assets/workspace-v2/index.html?__page=%2F
+        - img "世纪互联 VNET" [ref=e10]
+        - generic [ref=e11]:
+          - text: 灯塔
+          - generic [ref=e12]: 南通运维工作空间
+      - generic [ref=e13]:
+        - button "导航配色" [ref=e14] [cursor=pointer]
+        - button "切换旧版" [ref=e22] [cursor=pointer]
+        - button "打开个人页面" [ref=e24] [cursor=pointer]:
+          - generic [ref=e25]: 隔离验收人员
+    - complementary "功能导航" [ref=e30]:
+      - generic [ref=e32]:
+        - generic [ref=e33]:
+          - text: 工作导航
+          - generic [ref=e34]: "5"
+        - button "收起导航" [expanded] [ref=e35] [cursor=pointer]
+      - menu [ref=e40]:
+        - menuitem "个人工作台" [ref=e41]:
+          - img [ref=e42] [cursor=pointer]
+          - text: 个人工作台
+        - group [ref=e45]:
+          - generic "运行管理" [ref=e46]
+          - generic [ref=e47]:
+            - menuitem "事件管理" [ref=e48]:
+              - img [ref=e49] [cursor=pointer]
+              - text: 事件管理
+            - menuitem "通告办理" [ref=e51]:
+              - img [ref=e52] [cursor=pointer]
+              - text: 通告办理
+            - menuitem "维修项目" [ref=e55]:
+              - img [ref=e56] [cursor=pointer]
+              - text: 维修项目
+        - group [ref=e58]:
+          - generic "账号与协作" [ref=e59]
+          - menuitem "签名管理" [ref=e61]:
+            - img [ref=e62] [cursor=pointer]
+            - text: 签名管理
+    - main [ref=e64]
+  - button "正在载入灯塔助手" [disabled] [ref=e65]:
+    - generic [ref=e68]: 加载中

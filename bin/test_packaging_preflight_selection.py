@@ -194,6 +194,48 @@ class SelectionTests(unittest.TestCase):
                 selection.finish(after)
             self.assertEqual(self.cache.read_bytes(), original)
 
+    def test_drift_report_names_changed_source_without_advancing_receipt(self):
+        self.baseline()
+        original = self.cache.read_bytes()
+        selection = self.select(); selection.passed(*selection.selected)
+        after = copy.deepcopy(self.state)
+        after['files'][LEARNING] = 'new-content-hash'
+        after['files']['new-module.py'] = 'new-file-hash'
+        del after['files'][CABINET]
+        with self.assertRaisesRegex(RuntimeError, LEARNING):
+            selection.finish(after)
+        report = json.loads(self.cache.with_name('.preflight-changes.json').read_text(encoding='utf-8'))
+        self.assertEqual(report['changes']['项目文件内容变化']['paths'], [LEARNING])
+        self.assertEqual(report['changes']['项目文件新增']['paths'], ['new-module.py'])
+        self.assertEqual(report['changes']['项目文件删除']['paths'], [CABINET])
+        self.assertEqual(self.cache.read_bytes(), original)
+
+    def test_environment_details_distinguish_dependency_content_from_metadata_and_hide_values(self):
+        before = copy.deepcopy(self.state)
+        before['environment_details'] = {'probe': 'probe-hash',
+            'variables': {'PRIVATE_KEY': preflight._digest('do-not-store-secret')},
+            'dependencies': {'python-library': {'module.py': ('same-hash', (1, 2, 3))}}}
+        after = copy.deepcopy(before); after['environment'] = 'changed-hash'
+        after['environment_details']['variables']['PRIVATE_KEY'] = preflight._digest('new-private-value')
+        after['environment_details']['dependencies']['python-library']['module.py'] = ('same-hash', (1, 4, 3))
+        result = preflight.changes(before, after)
+        self.assertEqual(result['环境变量变化（仅名称）'], ['PRIVATE_KEY'])
+        self.assertEqual(result['依赖文件时间或状态变化'], [str(Path('python-library/module.py'))])
+        self.assertNotIn('do-not-store-secret', json.dumps(result))
+        self.assertNotIn('new-private-value', json.dumps(result))
+        after['environment_details']['dependencies']['python-library']['module.py'] = ('different-content', (1, 4, 3))
+        self.assertIn('依赖文件新增、删除或内容变化', preflight.changes(before, after))
+
+    def test_unwritable_drift_report_does_not_hide_failure_or_replace_cache(self):
+        self.baseline()
+        original = self.cache.read_bytes()
+        selection = self.select(); selection.passed(*selection.selected)
+        after = copy.deepcopy(self.state); after['stamps'][LEARNING][1] += 1
+        with patch.object(Path, 'write_text', side_effect=OSError('report unavailable')):
+            with self.assertRaisesRegex(RuntimeError, '项目文件时间或状态变化'):
+                selection.finish(after)
+        self.assertEqual(self.cache.read_bytes(), original)
+
     def test_successful_layered_run_carries_only_matching_passes_forward(self):
         self.baseline()
         self.state["files"][LEARNING] = "edited"

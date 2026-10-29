@@ -3,7 +3,7 @@ import {parse} from '@vue/compiler-sfc';
 const cls=node=>(node.props?.find(p=>p.type===6&&p.name==='class')?.value?.content||'').split(/\s+/);
 const has=(node,value)=>cls(node).includes(value)||node.tag===value;
 const plans={
-  'RepairWorkspace.vue':[{container:'v2-repair-body',id:'repair',label:'检修办理',headers:{records:'v2-repair-state-row'},blocks:[['records','维修项目',['v2-repair-list'],12,10],['editor','维修单与跟进',['Transition'],12,12,'r.projectDrawerOpen']]}],
+  'RepairWorkspace.vue':[{container:'v2-repair-body',id:'repair',label:'检修办理',headers:{records:'v2-repair-state-row'},blocks:[['records','维修项目',['v2-repair-list'],12,10]]}],
   'NoticeSopManager.vue':[{container:'v2-sop-layout',id:'sops',label:'SOP模板',headers:{editor:'v2-sop-edit-actions'},blocks:[['templates','SOP列表',['aside'],4,9],['editor','SOP步骤与附件',['NForm','NEmpty'],8,12]]}],
   'MopBindingWorkspace.vue':[{container:'mop-layout',id:'mop',label:'维护单办理',blocks:[['notices','维保通告',['MopNoticeList'],4,10],['binding','维护单选择与办理',['MopBindingPanel'],8,12]]}],
   'PlanConvergencePage.vue':[{container:'pc-review',id:'plan-review',label:'计划收敛核对',blocks:[['records','屏蔽记录',['pc-list'],4,10],['snapshot','实例快照与明细',['pc-main'],8,10]]},{container:'pc-maintenance',id:'plan-audit',label:'通告核对',blocks:[['results','核对结果',['pc-empty','pc-table-wrap'],12,10]]}],

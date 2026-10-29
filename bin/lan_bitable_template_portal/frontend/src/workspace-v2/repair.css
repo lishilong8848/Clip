@@ -1,5 +1,15 @@
 .v2-repair-workspace{--repair-line:#dce3e7;--repair-muted:#627078;--repair-panel:#fff;--repair-soft:#f4f7f8;--repair-input-bg:#eef5ff;--repair-input-border:#9db8d9;--repair-readonly-bg:#f1f3f5;--repair-readonly-text:#607080;--repair-offset:265px;color:#243039;min-width:0;display:grid;gap:12px;padding-bottom:12px}
-html.workspace-v2[data-v2-theme="dark"] .v2-repair-workspace{--repair-input-bg:#24374c;--repair-input-border:#6c88a5;--repair-readonly-bg:#252a30;--repair-readonly-text:#b2bdc9}
+.v2-repair-overview{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:8px}
+.v2-repair-overview>.n-button{height:52px;padding:8px 12px;border-radius:8px;min-width:0;text-align:left}
+.v2-repair-overview>.n-button .n-button__content{display:flex;justify-content:space-between;gap:8px;width:100%}
+.v2-repair-overview>.n-button.is-selected{box-shadow:inset 0 0 0 1px var(--v2-blue);background:var(--repair-input-bg)}
+.v2-repair-overview>.n-button.is-selected span,.v2-repair-overview>.n-button.is-selected strong{color:var(--v2-blue)}
+.v2-repair-list-caption{font-size:13px;font-weight:600}
+.v2-repair-overview>div{display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--repair-line);border-radius:8px;background:var(--repair-panel);padding:12px 16px}
+.v2-repair-overview span{font-size:13px;color:var(--repair-muted)}.v2-repair-overview strong{font-size:25px;line-height:1.2;font-variant-numeric:tabular-nums}
+.v2-repair-overview .is-pending strong{color:#966319}.v2-repair-overview .is-progress strong{color:#0065cb}.v2-repair-overview .is-completed strong{color:#13785d}
+.v2-repair-list-head{display:grid;grid-template-columns:minmax(0,1fr) 130px 104px;gap:14px;padding:10px 16px;background:var(--repair-soft);border-bottom:1px solid var(--repair-line);font-size:12px;color:var(--repair-muted)}
+html.workspace-v2[data-v2-theme="dark"] .v2-repair-workspace{--repair-input-bg:#24374c!important;--repair-input-border:#6c88a5!important;--repair-readonly-bg:#252a30!important;--repair-readonly-text:#b2bdc9!important}
 .v2-main>.v2-context~.v2-repair-workspace{--repair-offset:349px}
 .v2-repair-heading,.v2-repair-detail-head,.v2-repair-followup-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .v2-repair-heading h1{font-size:23px;line-height:1.3;margin:0;font-weight:650}.v2-repair-heading p{margin:3px 0 0;color:var(--repair-muted);font-size:13px}
@@ -156,3 +166,78 @@ html.workspace-v2:has(.v2-repair-workspace) .picker-confirm{background:#0071e3;c
 .v2-repair-field-sections section>h3,.v2-repair-followup-section>header{border-bottom:1px solid var(--repair-line);padding-bottom:7px}
 @media(min-width:761px){html.workspace-v2 .v2-repair-workspace .v2-repair-field-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,225px),1fr))!important}}
 @media(max-width:760px){.v2-repair-source-flow ol{grid-template-columns:1fr}}
+
+/* A selected project is a bounded dialog, never a widget after the long list. */
+.v2-repair-dialog-shell{position:fixed;inset:0;z-index:1900;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(15,27,44,.42);overscroll-behavior:contain}
+.v2-repair-dialog-shell .v2-repair-detail{width:min(1140px,100%);height:min(880px,calc(100dvh - 48px));max-height:calc(100dvh - 48px);overflow:hidden;border-radius:12px;box-shadow:0 16px 60px #10203938}
+.v2-repair-dialog-shell .v2-repair-detail-head{padding:14px 20px;min-height:44px}
+.v2-repair-dialog-shell .v2-repair-detail-head h2{font-size:18px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.v2-repair-dialog-shell .v2-repair-detail-head>.n-button{flex:none;width:44px;height:44px;background:var(--repair-soft);color:var(--v2-ink)}
+.v2-repair-detail-tabs{padding:10px 20px;border-bottom:1px solid var(--repair-line);flex-shrink:0}
+.v2-repair-detail-tabs .n-radio-group{display:flex;flex-wrap:wrap;gap:4px;height:auto;min-height:36px}
+.v2-repair-detail-tabs .n-radio-group__splitor{display:none}
+.v2-repair-detail-tabs .n-radio-button{border-radius:6px!important;border:0!important;box-shadow:none!important;min-height:36px;display:inline-flex;align-items:center;font-size:14px}
+.v2-repair-detail-tabs .n-radio-button__state-border{display:none}
+.v2-repair-dialog-shell .v2-repair-detail-body{overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;flex:1;min-height:0;padding:16px 20px;scroll-padding-block:16px}
+.v2-repair-dialog-shell .v2-repair-detail-footer{position:static;box-shadow:none;min-height:64px;padding:10px 20px;flex-shrink:0}
+.v2-repair-dialog-shell .v2-repair-source-flow{border:1px solid var(--repair-line);border-radius:8px;background:var(--repair-soft);padding:12px}
+.v2-repair-dialog-shell .v2-repair-source-flow header{margin-bottom:10px}
+.v2-repair-dialog-shell .v2-repair-source-flow .v2-repair-source-step{display:none}
+.v2-repair-dialog-shell .v2-repair-source-copy>p{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.v2-repair-source-flow summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:10px;list-style:none;min-height:32px}
+.v2-repair-source-flow summary::-webkit-details-marker{display:none}
+.v2-repair-source-flow summary>span:first-child{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.v2-repair-source-flow summary small{color:var(--repair-muted);font-size:12px}
+.v2-repair-source-toggle{font-size:12px;display:flex;align-items:center;gap:4px;white-space:nowrap;color:var(--v2-blue)}
+.v2-repair-source-flow details[open] summary{margin-bottom:12px}.v2-repair-source-flow details[open] .v2-repair-source-toggle svg{transform:rotate(180deg)}
+.v2-repair-source-value{width:100%;min-height:34px;display:flex;align-items:center;justify-content:space-between;gap:8px;border-bottom:1px solid var(--repair-line);font-size:14px;line-height:1.5;overflow-wrap:anywhere;padding:5px 0}
+.v2-repair-source-value small{font-size:11px;color:var(--repair-muted);flex:none}
+.v2-repair-source-value:focus-visible,.v2-repair-source-flow summary:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
+.v2-repair-workspace .record-row{min-height:68px;padding-block:8px}
+.v2-repair-workspace .v2-repair-row-meta{flex-wrap:wrap}
+.v2-repair-workspace .v2-repair-devices{padding-block:6px}
+.v2-repair-workspace .v2-repair-devices>header{margin-bottom:0;min-height:36px}
+.v2-repair-device-tags:not(:empty){margin-top:8px}
+.v2-repair-workspace [data-page-layout="repair"]:not(.is-customizing) [data-widget-id="block_records"] .v2-responsive-body{overflow:visible;padding:0}
+.v2-repair-workspace [data-page-layout="repair"]:not(.is-customizing) [data-widget-id="block_records"] .v2-module-block{padding:10px 12px;box-sizing:border-box}
+/* Keep the assistant available through navigation without covering this form. */
+html.workspace-v2:has(.v2-repair-dialog-shell) .lighthouse-launcher{visibility:hidden;pointer-events:none}
+html.workspace-v2[data-v2-theme="light"] .v2-repair-workspace{--repair-input-bg:#f0f6ff!important;--repair-readonly-bg:#f1f3f5!important;--repair-input-border:#9db8d9!important}
+html.workspace-v2 .v2-repair-dialog-shell .v2-repair-project-form .v2-repair-field-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}
+.v2-repair-dialog-shell .v2-repair-project-form .v2-repair-field:has([aria-label="维修名称"]){grid-column:1/-1}
+@media(min-width:1100px){
+  html.workspace-v2 .v2-repair-dialog-shell .v2-repair-project-form .v2-repair-field-grid{grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr))!important}
+  .v2-repair-dialog-shell .v2-repair-project-form .v2-repair-field:has([aria-label="维修名称"]){grid-column:span 2}
+  html.workspace-v2 .v2-repair-workspace .is-progress-section .v2-repair-field-grid{grid-template-columns:repeat(3,minmax(0,1fr))!important}
+  .v2-repair-workspace .is-progress-section .v2-repair-field-summary{grid-column:span 2}
+  .v2-repair-workspace .is-progress-section .v2-repair-field-progress{grid-column:auto}
+  html.workspace-v2 .v2-repair-workspace .is-execution-section .v2-repair-field-grid{grid-template-columns:repeat(4,minmax(0,1fr))!important}
+  .v2-repair-workspace .is-execution-section .repair-people-picker{grid-column:span 2}
+}
+html.workspace-v2[data-v2-theme="light"] .v2-repair-workspace{--repair-placeholder:#667085!important}
+html.workspace-v2[data-v2-theme="dark"] .v2-repair-workspace{--repair-placeholder:#aab7c7!important}
+.v2-repair-workspace .v2-repair-field-grid :is(.n-input,.n-base-selection){--n-placeholder-color:var(--repair-placeholder)!important;--n-placeholder-color-disabled:var(--repair-placeholder)!important}
+.v2-repair-workspace .v2-repair-field-grid :is(input,textarea)::placeholder{color:var(--repair-placeholder)!important;opacity:1}
+@media(max-width:760px){
+  .v2-repair-overview{gap:6px;grid-template-columns:repeat(3,minmax(0,1fr))}.v2-repair-overview>.n-button{height:44px;padding:7px 9px}.v2-repair-overview strong{font-size:18px}.v2-repair-overview span{font-size:12px}
+  .v2-repair-list-head{display:none}
+  .v2-repair-dialog-shell{padding:0}
+  body .v2-repair-dialog-shell .v2-repair-detail{width:100%;max-width:100%!important;height:100dvh;max-height:100dvh!important;border:0;border-radius:0}
+  .v2-repair-dialog-shell .v2-repair-detail-head{padding:6px 12px;padding-top:max(6px,env(safe-area-inset-top))}
+  .v2-repair-dialog-shell .v2-repair-detail-head small{display:none}
+  .v2-repair-dialog-shell .v2-repair-detail-head h2{font-size:16px}
+  .v2-repair-dialog-shell .v2-repair-detail-summary{padding:6px 12px}
+  .v2-repair-detail-tabs{padding:2px 8px}
+  .v2-repair-detail-tabs .n-radio-group{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px;min-height:44px}
+  .v2-repair-detail-tabs .n-radio-button{padding:0 3px;font-size:12px;min-height:44px;white-space:nowrap}
+  .v2-repair-dialog-shell .v2-repair-detail-body{padding:12px;scroll-padding-block:12px}
+  .v2-repair-dialog-shell .v2-repair-detail-footer{padding:8px 12px max(8px,env(safe-area-inset-bottom));gap:6px;min-height:60px}
+  .v2-repair-dialog-shell .v2-repair-source-flow{padding:10px}
+  .v2-repair-dialog-shell .v2-repair-source-flow ol{grid-template-columns:1fr}
+  .v2-repair-source-value{min-height:44px;font-size:15px;align-items:flex-start;flex-direction:column;gap:2px}
+  .v2-repair-workspace .v2-repair-followup-heading{align-items:center;flex-wrap:nowrap}
+  .v2-repair-workspace .v2-repair-followup-heading>div:first-child{min-width:0;flex:none}
+  .v2-repair-workspace .v2-repair-followup-heading>.v2-repair-inline-actions{gap:4px}
+  .v2-repair-workspace .v2-repair-progress-input>.n-slider{display:none}
+  .v2-repair-workspace .v2-repair-progress-input>.n-input-number{width:100%}
+}

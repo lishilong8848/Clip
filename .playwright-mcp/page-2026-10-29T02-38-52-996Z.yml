@@ -1,0 +1,45 @@
+- generic [active] [ref=f1e1]:
+  - generic [ref=f1e4]:
+    - generic [aria-hidden]:
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+    - banner [ref=f1e5]:
+      - link "世纪互联 VNET 灯塔" [ref=f1e6] [cursor=pointer]:
+        - /url: http://127.0.0.1:12273/assets/workspace-v2/index.html?__page=%2F
+        - img "世纪互联 VNET" [ref=f1e7]
+        - generic [ref=f1e8]: 灯塔
+      - generic [ref=f1e9]:
+        - button "导航配色" [ref=f1e10] [cursor=pointer]
+        - button "切换旧版" [ref=f1e18] [cursor=pointer]
+        - button "打开个人页面" [ref=f1e20] [cursor=pointer]:
+          - generic [ref=f1e21]: 隔离验收人员
+    - main [ref=f1e26]
+    - navigation "手机导航" [ref=f1e27]:
+      - button "首页" [ref=f1e28] [cursor=pointer]
+      - button "待办" [ref=f1e34] [cursor=pointer]
+      - button "功能" [ref=f1e40] [cursor=pointer]
+      - button "我的" [ref=f1e45] [cursor=pointer]
+  - button "正在载入灯塔助手" [disabled] [ref=f1e51]:
+    - generic [ref=f1e54]: 加载中

@@ -1,0 +1,588 @@
+- generic [ref=e1]:
+  - generic [ref=e4]:
+    - generic [aria-hidden]:
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+      - generic: 内部资料 · 隔离验收人员 · 2026-10-29
+    - banner [ref=e5]:
+      - link "世纪互联 VNET 灯塔" [ref=e69] [cursor=pointer]:
+        - /url: http://127.0.0.1:12273/assets/workspace-v2/index.html?__page=%2F
+        - img "世纪互联 VNET" [ref=e10]
+        - generic [ref=e11]: 灯塔
+      - generic [ref=e13]:
+        - button "导航配色" [ref=e14] [cursor=pointer]
+        - button "切换旧版" [ref=e22] [cursor=pointer]
+        - button "打开个人页面" [ref=e24] [cursor=pointer]:
+          - generic [ref=e25]: 隔离验收人员
+    - main [ref=e64]:
+      - generic [ref=e70]:
+        - generic "维修状态概览" [ref=e71]:
+          - generic [ref=e72]:
+            - generic [ref=e73]: 未完成
+            - strong [ref=e74]: "30"
+          - generic [ref=e75]:
+            - generic [ref=e76]: 未开始
+            - strong [ref=e77]: "2"
+          - generic [ref=e78]:
+            - generic [ref=e79]: 维修中
+            - strong [ref=e80]: "28"
+          - generic [ref=e81]:
+            - generic [ref=e82]: 已完成
+            - strong [ref=e83]: "5"
+        - generic [ref=e84]:
+          - generic [ref=e85]:
+            - generic [ref=e92]:
+              - textbox "搜索维修项目" [ref=e93]:
+                - /placeholder: 搜索维修名称、设备、位置或专业
+              - generic: 搜索维修名称、设备、位置或专业
+            - generic [ref=e96]: 30 项
+          - generic [ref=e97]:
+            - button "新建维修单" [ref=e98] [cursor=pointer]
+            - button "更多检修操作" [ref=e101] [cursor=pointer]
+            - button "刷新显示" [ref=e107] [cursor=pointer]
+          - button "自定义检修办理布局" [ref=e115] [cursor=pointer]:
+            - generic [ref=e116]: 自定义布局
+        - generic "检修办理布局" [ref=e120]:
+          - region "维修项目" [ref=e122]:
+            - generic [ref=e123]:
+              - heading "维修项目" [level=2] [ref=e124]
+              - generic "维修项目状态" [ref=e126]:
+                - generic [ref=e127] [cursor=pointer]:
+                  - radio "未完成 30" [checked]
+                  - generic [ref=e128]: 未完成 30
+                - generic [ref=e129] [cursor=pointer]:
+                  - radio "已完成 5"
+                  - generic [ref=e130]: 已完成 5
+                - generic [ref=e131] [cursor=pointer]:
+                  - radio "全部"
+                  - generic [ref=e132]: 全部
+            - region "维修项目列表" [ref=e135]:
+              - generic [ref=e137]:
+                - button "打开维修项目：A-1 配电设备通信异常检修" [ref=e138] [cursor=pointer]:
+                  - generic [ref=e139]:
+                    - strong [ref=e140]: A-1 配电设备通信异常检修
+                    - generic [ref=e141]:
+                      - generic [ref=e142]: A楼
+                      - generic [ref=e143]: 电气
+                      - generic [ref=e144]: 2026-10-14 09:10
+                  - generic [ref=e148]:
+                    - generic [ref=e149]: 维修中
+                    - generic [ref=e151]:
+                      - progressbar [ref=e152]
+                      - generic [ref=e157]: 35%
+                  - button "跟进 1 条" [ref=e158]
+                - button "打开维修项目：A-2 配电设备通信异常检修" [ref=e163] [cursor=pointer]:
+                  - generic [ref=e164]:
+                    - strong [ref=e165]: A-2 配电设备通信异常检修
+                    - generic [ref=e166]:
+                      - generic [ref=e167]: A楼
+                      - generic [ref=e168]: 电气
+                      - generic [ref=e169]: 2026-10-14 09:10
+                  - generic [ref=e173]:
+                    - generic [ref=e174]: 维修中
+                    - generic [ref=e176]:
+                      - progressbar [ref=e177]
+                      - generic [ref=e182]: 35%
+                  - button "跟进 1 条" [ref=e183]
+                - button "打开维修项目：A-3 配电设备通信异常检修" [ref=e188] [cursor=pointer]:
+                  - generic [ref=e189]:
+                    - strong [ref=e190]: A-3 配电设备通信异常检修
+                    - generic [ref=e191]:
+                      - generic [ref=e192]: A楼
+                      - generic [ref=e193]: 电气
+                      - generic [ref=e194]: 2026-10-14 09:10
+                  - generic [ref=e198]:
+                    - generic [ref=e199]: 维修中
+                    - generic [ref=e201]:
+                      - progressbar [ref=e202]
+                      - generic [ref=e207]: 35%
+                  - button "跟进 1 条" [ref=e208]
+                - button "打开维修项目：A-4 配电设备通信异常检修" [ref=e213] [cursor=pointer]:
+                  - generic [ref=e214]:
+                    - strong [ref=e215]: A-4 配电设备通信异常检修
+                    - generic [ref=e216]:
+                      - generic [ref=e217]: A楼
+                      - generic [ref=e218]: 电气
+                      - generic [ref=e219]: 2026-10-14 09:10
+                  - generic [ref=e223]:
+                    - generic [ref=e224]: 维修中
+                    - generic [ref=e226]:
+                      - progressbar [ref=e227]
+                      - generic [ref=e232]: 35%
+                  - button "跟进 1 条" [ref=e233]
+                - button "打开维修项目：A-5 配电设备通信异常检修" [ref=e238] [cursor=pointer]:
+                  - generic [ref=e239]:
+                    - strong [ref=e240]: A-5 配电设备通信异常检修
+                    - generic [ref=e241]:
+                      - generic [ref=e242]: A楼
+                      - generic [ref=e243]: 电气
+                      - generic [ref=e244]: 2026-10-14 09:10
+                  - generic [ref=e248]:
+                    - generic [ref=e249]: 维修中
+                    - generic [ref=e251]:
+                      - progressbar [ref=e252]
+                      - generic [ref=e257]: 35%
+                  - button "跟进 1 条" [ref=e258]
+                - button "打开维修项目：A-6 配电设备通信异常检修" [ref=e263] [cursor=pointer]:
+                  - generic [ref=e264]:
+                    - strong [ref=e265]: A-6 配电设备通信异常检修
+                    - generic [ref=e266]:
+                      - generic [ref=e267]: A楼
+                      - generic [ref=e268]: 电气
+                      - generic [ref=e269]: 2026-10-14 09:10
+                  - generic [ref=e273]:
+                    - generic [ref=e274]: 维修中
+                    - generic [ref=e276]:
+                      - progressbar [ref=e277]
+                      - generic [ref=e282]: 35%
+                  - button "跟进 1 条" [ref=e283]
+                - button "打开维修项目：A-7 配电设备通信异常检修" [ref=e288] [cursor=pointer]:
+                  - generic [ref=e289]:
+                    - strong [ref=e290]: A-7 配电设备通信异常检修
+                    - generic [ref=e291]:
+                      - generic [ref=e292]: A楼
+                      - generic [ref=e293]: 电气
+                      - generic [ref=e294]: 2026-10-14 09:10
+                  - generic [ref=e298]:
+                    - generic [ref=e299]: 维修中
+                    - generic [ref=e301]:
+                      - progressbar [ref=e302]
+                      - generic [ref=e307]: 35%
+                  - button "跟进 1 条" [ref=e308]
+                - button "打开维修项目：A-8 配电设备通信异常检修" [ref=e313] [cursor=pointer]:
+                  - generic [ref=e314]:
+                    - strong [ref=e315]: A-8 配电设备通信异常检修
+                    - generic [ref=e316]:
+                      - generic [ref=e317]: A楼
+                      - generic [ref=e318]: 电气
+                      - generic [ref=e319]: 2026-10-14 09:10
+                  - generic [ref=e323]:
+                    - generic [ref=e324]: 维修中
+                    - generic [ref=e326]:
+                      - progressbar [ref=e327]
+                      - generic [ref=e332]: 35%
+                  - button "跟进 1 条" [ref=e333]
+                - button "打开维修项目：A-9 配电设备通信异常检修" [ref=e338] [cursor=pointer]:
+                  - generic [ref=e339]:
+                    - strong [ref=e340]: A-9 配电设备通信异常检修
+                    - generic [ref=e341]:
+                      - generic [ref=e342]: A楼
+                      - generic [ref=e343]: 电气
+                      - generic [ref=e344]: 2026-10-14 09:10
+                  - generic [ref=e348]:
+                    - generic [ref=e349]: 维修中
+                    - generic [ref=e351]:
+                      - progressbar [ref=e352]
+                      - generic [ref=e357]: 35%
+                  - button "跟进 1 条" [ref=e358]
+                - button "打开维修项目：A-10 配电设备通信异常检修" [ref=e363] [cursor=pointer]:
+                  - generic [ref=e364]:
+                    - strong [ref=e365]: A-10 配电设备通信异常检修
+                    - generic [ref=e366]:
+                      - generic [ref=e367]: A楼
+                      - generic [ref=e368]: 电气
+                      - generic [ref=e369]: 2026-10-14 09:10
+                  - generic [ref=e373]:
+                    - generic [ref=e374]: 维修中
+                    - generic [ref=e376]:
+                      - progressbar [ref=e377]
+                      - generic [ref=e382]: 35%
+                  - button "跟进 1 条" [ref=e383]
+                - button "打开维修项目：A-11 配电设备通信异常检修" [ref=e388] [cursor=pointer]:
+                  - generic [ref=e389]:
+                    - strong [ref=e390]: A-11 配电设备通信异常检修
+                    - generic [ref=e391]:
+                      - generic [ref=e392]: A楼
+                      - generic [ref=e393]: 电气
+                      - generic [ref=e394]: 2026-10-14 09:10
+                  - generic [ref=e398]:
+                    - generic [ref=e399]: 维修中
+                    - generic [ref=e401]:
+                      - progressbar [ref=e402]
+                      - generic [ref=e407]: 35%
+                  - button "跟进 1 条" [ref=e408]
+                - button "打开维修项目：A-12 配电设备通信异常检修" [ref=e413] [cursor=pointer]:
+                  - generic [ref=e414]:
+                    - strong [ref=e415]: A-12 配电设备通信异常检修
+                    - generic [ref=e416]:
+                      - generic [ref=e417]: A楼
+                      - generic [ref=e418]: 电气
+                      - generic [ref=e419]: 2026-10-14 09:10
+                  - generic [ref=e423]:
+                    - generic [ref=e424]: 维修中
+                    - generic [ref=e426]:
+                      - progressbar [ref=e427]
+                      - generic [ref=e432]: 35%
+                  - button "跟进 1 条" [ref=e433]
+                - button "打开维修项目：A-13 配电设备通信异常检修" [ref=e438] [cursor=pointer]:
+                  - generic [ref=e439]:
+                    - strong [ref=e440]: A-13 配电设备通信异常检修
+                    - generic [ref=e441]:
+                      - generic [ref=e442]: A楼
+                      - generic [ref=e443]: 电气
+                      - generic [ref=e444]: 2026-10-14 09:10
+                  - generic [ref=e448]:
+                    - generic [ref=e449]: 维修中
+                    - generic [ref=e451]:
+                      - progressbar [ref=e452]
+                      - generic [ref=e457]: 35%
+                  - button "跟进 1 条" [ref=e458]
+                - button "打开维修项目：A-14 配电设备通信异常检修" [ref=e463] [cursor=pointer]:
+                  - generic [ref=e464]:
+                    - strong [ref=e465]: A-14 配电设备通信异常检修
+                    - generic [ref=e466]:
+                      - generic [ref=e467]: A楼
+                      - generic [ref=e468]: 电气
+                      - generic [ref=e469]: 2026-10-14 09:10
+                  - generic [ref=e473]:
+                    - generic [ref=e474]: 维修中
+                    - generic [ref=e476]:
+                      - progressbar [ref=e477]
+                      - generic [ref=e482]: 35%
+                  - button "跟进 1 条" [ref=e483]
+                - button "打开维修项目：A-15 配电设备通信异常检修" [ref=e488] [cursor=pointer]:
+                  - generic [ref=e489]:
+                    - strong [ref=e490]: A-15 配电设备通信异常检修
+                    - generic [ref=e491]:
+                      - generic [ref=e492]: A楼
+                      - generic [ref=e493]: 电气
+                      - generic [ref=e494]: 2026-10-14 09:10
+                  - generic [ref=e498]:
+                    - generic [ref=e499]: 维修中
+                    - generic [ref=e501]:
+                      - progressbar [ref=e502]
+                      - generic [ref=e507]: 35%
+                  - button "跟进 1 条" [ref=e508]
+                - button "打开维修项目：A-16 配电设备通信异常检修" [ref=e513] [cursor=pointer]:
+                  - generic [ref=e514]:
+                    - strong [ref=e515]: A-16 配电设备通信异常检修
+                    - generic [ref=e516]:
+                      - generic [ref=e517]: A楼
+                      - generic [ref=e518]: 电气
+                      - generic [ref=e519]: 2026-10-14 09:10
+                  - generic [ref=e523]:
+                    - generic [ref=e524]: 维修中
+                    - generic [ref=e526]:
+                      - progressbar [ref=e527]
+                      - generic [ref=e532]: 35%
+                  - button "跟进 1 条" [ref=e533]
+                - button "打开维修项目：A-17 配电设备通信异常检修" [ref=e538] [cursor=pointer]:
+                  - generic [ref=e539]:
+                    - strong [ref=e540]: A-17 配电设备通信异常检修
+                    - generic [ref=e541]:
+                      - generic [ref=e542]: A楼
+                      - generic [ref=e543]: 电气
+                      - generic [ref=e544]: 2026-10-14 09:10
+                  - generic [ref=e548]:
+                    - generic [ref=e549]: 维修中
+                    - generic [ref=e551]:
+                      - progressbar [ref=e552]
+                      - generic [ref=e557]: 35%
+                  - button "跟进 1 条" [ref=e558]
+                - button "打开维修项目：A-18 配电设备通信异常检修" [ref=e563] [cursor=pointer]:
+                  - generic [ref=e564]:
+                    - strong [ref=e565]: A-18 配电设备通信异常检修
+                    - generic [ref=e566]:
+                      - generic [ref=e567]: A楼
+                      - generic [ref=e568]: 电气
+                      - generic [ref=e569]: 2026-10-14 09:10
+                  - generic [ref=e573]:
+                    - generic [ref=e574]: 维修中
+                    - generic [ref=e576]:
+                      - progressbar [ref=e577]
+                      - generic [ref=e582]: 35%
+                  - button "跟进 1 条" [ref=e583]
+                - button "打开维修项目：A-19 配电设备通信异常检修" [ref=e588] [cursor=pointer]:
+                  - generic [ref=e589]:
+                    - strong [ref=e590]: A-19 配电设备通信异常检修
+                    - generic [ref=e591]:
+                      - generic [ref=e592]: A楼
+                      - generic [ref=e593]: 电气
+                      - generic [ref=e594]: 2026-10-14 09:10
+                  - generic [ref=e598]:
+                    - generic [ref=e599]: 维修中
+                    - generic [ref=e601]:
+                      - progressbar [ref=e602]
+                      - generic [ref=e607]: 35%
+                  - button "跟进 1 条" [ref=e608]
+                - button "打开维修项目：A-20 配电设备通信异常检修" [ref=e613] [cursor=pointer]:
+                  - generic [ref=e614]:
+                    - strong [ref=e615]: A-20 配电设备通信异常检修
+                    - generic [ref=e616]:
+                      - generic [ref=e617]: A楼
+                      - generic [ref=e618]: 电气
+                      - generic [ref=e619]: 2026-10-14 09:10
+                  - generic [ref=e623]:
+                    - generic [ref=e624]: 维修中
+                    - generic [ref=e626]:
+                      - progressbar [ref=e627]
+                      - generic [ref=e632]: 35%
+                  - button "跟进 1 条" [ref=e633]
+                - button "打开维修项目：A-21 配电设备通信异常检修" [ref=e638] [cursor=pointer]:
+                  - generic [ref=e639]:
+                    - strong [ref=e640]: A-21 配电设备通信异常检修
+                    - generic [ref=e641]:
+                      - generic [ref=e642]: A楼
+                      - generic [ref=e643]: 电气
+                      - generic [ref=e644]: 2026-10-14 09:10
+                  - generic [ref=e648]:
+                    - generic [ref=e649]: 维修中
+                    - generic [ref=e651]:
+                      - progressbar [ref=e652]
+                      - generic [ref=e657]: 35%
+                  - button "跟进 1 条" [ref=e658]
+                - button "打开维修项目：A-22 配电设备通信异常检修" [ref=e663] [cursor=pointer]:
+                  - generic [ref=e664]:
+                    - strong [ref=e665]: A-22 配电设备通信异常检修
+                    - generic [ref=e666]:
+                      - generic [ref=e667]: A楼
+                      - generic [ref=e668]: 电气
+                      - generic [ref=e669]: 2026-10-14 09:10
+                  - generic [ref=e673]:
+                    - generic [ref=e674]: 维修中
+                    - generic [ref=e676]:
+                      - progressbar [ref=e677]
+                      - generic [ref=e682]: 35%
+                  - button "跟进 1 条" [ref=e683]
+                - button "打开维修项目：A-23 配电设备通信异常检修" [ref=e688] [cursor=pointer]:
+                  - generic [ref=e689]:
+                    - strong [ref=e690]: A-23 配电设备通信异常检修
+                    - generic [ref=e691]:
+                      - generic [ref=e692]: A楼
+                      - generic [ref=e693]: 电气
+                      - generic [ref=e694]: 2026-10-14 09:10
+                  - generic [ref=e698]:
+                    - generic [ref=e699]: 维修中
+                    - generic [ref=e701]:
+                      - progressbar [ref=e702]
+                      - generic [ref=e707]: 35%
+                  - button "跟进 1 条" [ref=e708]
+                - button "打开维修项目：A-24 配电设备通信异常检修" [ref=e713] [cursor=pointer]:
+                  - generic [ref=e714]:
+                    - strong [ref=e715]: A-24 配电设备通信异常检修
+                    - generic [ref=e716]:
+                      - generic [ref=e717]: A楼
+                      - generic [ref=e718]: 电气
+                      - generic [ref=e719]: 2026-10-14 09:10
+                  - generic [ref=e723]:
+                    - generic [ref=e724]: 维修中
+                    - generic [ref=e726]:
+                      - progressbar [ref=e727]
+                      - generic [ref=e732]: 35%
+                  - button "跟进 1 条" [ref=e733]
+                - button "打开维修项目：A-25 配电设备通信异常检修" [ref=e738] [cursor=pointer]:
+                  - generic [ref=e739]:
+                    - strong [ref=e740]: A-25 配电设备通信异常检修
+                    - generic [ref=e741]:
+                      - generic [ref=e742]: A楼
+                      - generic [ref=e743]: 电气
+                      - generic [ref=e744]: 2026-10-14 09:10
+                  - generic [ref=e748]:
+                    - generic [ref=e749]: 维修中
+                    - generic [ref=e751]:
+                      - progressbar [ref=e752]
+                      - generic [ref=e757]: 35%
+                  - button "跟进 1 条" [ref=e758]
+                - button "打开维修项目：A-26 配电设备通信异常检修" [ref=e763] [cursor=pointer]:
+                  - generic [ref=e764]:
+                    - strong [ref=e765]: A-26 配电设备通信异常检修
+                    - generic [ref=e766]:
+                      - generic [ref=e767]: A楼
+                      - generic [ref=e768]: 电气
+                      - generic [ref=e769]: 2026-10-14 09:10
+                  - generic [ref=e773]:
+                    - generic [ref=e774]: 维修中
+                    - generic [ref=e776]:
+                      - progressbar [ref=e777]
+                      - generic [ref=e782]: 35%
+                  - button "跟进 1 条" [ref=e783]
+                - button "打开维修项目：A-27 配电设备通信异常检修" [ref=e788] [cursor=pointer]:
+                  - generic [ref=e789]:
+                    - strong [ref=e790]: A-27 配电设备通信异常检修
+                    - generic [ref=e791]:
+                      - generic [ref=e792]: A楼
+                      - generic [ref=e793]: 电气
+                      - generic [ref=e794]: 2026-10-14 09:10
+                  - generic [ref=e798]:
+                    - generic [ref=e799]: 维修中
+                    - generic [ref=e801]:
+                      - progressbar [ref=e802]
+                      - generic [ref=e807]: 35%
+                  - button "跟进 1 条" [ref=e808]
+                - button "打开维修项目：A-28 配电设备通信异常检修" [ref=e813] [cursor=pointer]:
+                  - generic [ref=e814]:
+                    - strong [ref=e815]: A-28 配电设备通信异常检修
+                    - generic [ref=e816]:
+                      - generic [ref=e817]: A楼
+                      - generic [ref=e818]: 电气
+                      - generic [ref=e819]: 2026-10-14 09:10
+                  - generic [ref=e823]:
+                    - generic [ref=e824]: 维修中
+                    - generic [ref=e826]:
+                      - progressbar [ref=e827]
+                      - generic [ref=e832]: 35%
+                  - button "跟进 1 条" [ref=e833]
+                - button "打开维修项目：A-29 配电设备通信异常检修" [ref=e838] [cursor=pointer]:
+                  - generic [ref=e839]:
+                    - strong [ref=e840]: A-29 配电设备通信异常检修
+                    - generic [ref=e841]:
+                      - generic [ref=e842]: A楼
+                      - generic [ref=e843]: 电气
+                      - generic [ref=e844]: 2026-10-14 09:10
+                  - generic [ref=e848]:
+                    - generic [ref=e849]: 维修中
+                    - generic [ref=e851]:
+                      - progressbar [ref=e852]
+                      - generic [ref=e857]: 35%
+                  - button "跟进 1 条" [ref=e858]
+                - button "打开维修项目：A-30 配电设备通信异常检修" [ref=e863] [cursor=pointer]:
+                  - generic [ref=e864]:
+                    - strong [ref=e865]: A-30 配电设备通信异常检修
+                    - generic [ref=e866]:
+                      - generic [ref=e867]: A楼
+                      - generic [ref=e868]: 电气
+                      - generic [ref=e869]: 2026-10-14 09:10
+                  - generic [ref=e873]:
+                    - generic [ref=e874]: 维修中
+                    - generic [ref=e876]:
+                      - progressbar [ref=e877]
+                      - generic [ref=e882]: 35%
+                  - button "跟进 1 条" [ref=e883]
+              - generic [ref=e888]:
+                - generic [ref=e889]: 30 项
+                - generic [ref=e890]: "1"
+    - navigation "手机导航" [ref=e900]:
+      - button "首页" [ref=e901] [cursor=pointer]
+      - button "待办" [ref=e907] [cursor=pointer]
+      - button "功能" [ref=e913] [cursor=pointer]
+      - button "我的" [ref=e918] [cursor=pointer]
+  - dialog [active] [ref=e925]:
+    - banner [ref=e926]:
+      - generic [ref=e927]:
+        - text: 维修项目
+        - heading "A楼—2026-10-14 09:10—通信模块异常" [level=2] [ref=e928]
+      - button "关闭维修项目" [ref=e929] [cursor=pointer]
+    - generic [ref=e934]:
+      - generic [ref=e935]: 维修中
+      - generic [ref=e937]: A楼 · 电气
+      - generic [ref=e938]: 当前进度 35%
+    - navigation "维修办理内容" [ref=e939]:
+      - generic [ref=e940]:
+        - generic [ref=e941] [cursor=pointer]:
+          - radio "维修单信息" [checked]
+          - generic [ref=e942]: 维修单信息
+        - generic [ref=e944] [cursor=pointer]:
+          - radio "跟进记录 1"
+          - generic [ref=e945]: 跟进记录 1
+    - generic [ref=e947]:
+      - region "关联资料自动填写" [ref=e948]:
+        - generic [ref=e949]:
+          - generic [ref=e950]:
+            - heading "关联资料" [level=3] [ref=e951]
+            - text: 事件与检修通告中的资料会自动带入维修单
+          - generic [ref=e952]: 2 / 2 已关联
+        - list [ref=e954]:
+          - listitem [ref=e955]:
+            - generic [ref=e956]:
+              - strong [ref=e957]: 关联事件
+              - paragraph [ref=e958]: 通信模块异常
+              - generic [ref=e959]:
+                - button "更换事件" [ref=e960] [cursor=pointer]
+                - button "解除关联事件" [ref=e962] [cursor=pointer]:
+                  - generic [ref=e963]: 解除
+          - listitem [ref=e964]:
+            - generic [ref=e965]:
+              - strong [ref=e966]: 关联检修通告
+              - paragraph [ref=e967]: 已关联
+              - generic [ref=e968]:
+                - button "更换检修通告" [ref=e969] [cursor=pointer]
+                - button "解除关联检修通告" [ref=e971] [cursor=pointer]:
+                  - generic [ref=e972]: 解除
+      - generic [ref=e975]:
+        - generic [ref=e977]:
+          - generic [ref=e978]:
+            - generic [ref=e979]:
+              - generic [ref=e980]: 故障发生时间
+              - generic [ref=e981]: "*"
+            - textbox "故障发生时间" [disabled] [ref=e983]: 2026-10-14T09:10
+          - generic [ref=e984]:
+            - generic [ref=e985]:
+              - generic [ref=e986]: 故障原因
+              - generic [ref=e987]: "*"
+            - textbox "故障原因" [disabled] [ref=e991]:
+              - /placeholder: 未填写
+              - text: 通信模块异常
+          - generic [ref=e992]:
+            - generic [ref=e993]:
+              - generic [ref=e994]: 楼栋
+              - generic [ref=e995]: "*"
+            - combobox "楼栋" [disabled] [ref=e997]:
+              - option "请选择"
+              - option "A楼" [selected]
+          - generic [ref=e998]:
+            - generic [ref=e999]:
+              - generic [ref=e1000]: 专业
+              - generic [ref=e1001]: "*"
+            - combobox "专业" [ref=e1003]:
+              - option "请选择"
+              - option "电气" [selected]
+              - option "暖通"
+              - option "消防"
+              - option "弱电"
+          - generic [ref=e1004]:
+            - generic [ref=e1005]:
+              - generic [ref=e1006]: 维修名称
+              - generic [ref=e1007]: "*"
+            - textbox "维修名称" [ref=e1012]:
+              - /placeholder: 请输入
+              - text: 配电设备通信异常检修
+        - generic [ref=e1013]:
+          - heading "维修执行" [level=3] [ref=e1014]
+          - generic [ref=e1015]:
+            - generic [ref=e1016]:
+              - generic [ref=e1017]: 当前维修进度
+              - progressbar [ref=e1021]:
+                - generic [ref=e1026]: 35%
+            - generic [ref=e1027]:
+              - generic [ref=e1028]: 维修结束时间（2026）-L
+              - textbox "维修结束时间（2026）-L" [ref=e1031]: 2026-10-20T18:30
+        - generic [ref=e1032]:
+          - heading "其他信息" [level=3] [ref=e1033]
+          - generic [ref=e1035]:
+            - generic [ref=e1036]: 备注
+            - generic [ref=e1041]:
+              - textbox "备注" [ref=e1042]:
+                - /placeholder: 请输入
+              - generic: 请输入
+    - contentinfo [ref=e1043]:
+      - generic [ref=e1044]: 已保存
+      - generic [ref=e1045]:
+        - button "返回列表" [ref=e1046] [cursor=pointer]
+        - button "检修通告" [ref=e1048] [cursor=pointer]
+        - button "维修单更多操作" [ref=e1053] [cursor=pointer]
+        - button "保存修改" [disabled] [ref=e1059]
+  - generic:
+    - button "打开灯塔助手"
+  - generic:
+    - complementary

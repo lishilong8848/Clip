@@ -523,6 +523,21 @@ class BackendApiModelTests(unittest.TestCase):
         self.addCleanup(auth.shutdown)
         self.enterContext(patch.object(PortalRuntime, "auth_manager", auth))
         self.enterContext(patch.object(PortalRuntime, "state_store", auth._state_store))
+        # Seed trusted grants in the isolated store, as startup now does. Raw
+        # session role/scope strings are intentionally not permission grants.
+        self.enterContext(patch.object(auth, "current_feishu_app_id", return_value="test-app"))
+        def grant(scopes, modules, level="L4"):
+            return {"enabled": True, "access_version": 1, "level": level,
+                    "category": "duty", "scopes": scopes, "modules": modules}
+        auth._save_permissions_locked({"version": 2, "users": {
+            LI_SHILONG_OPEN_ID: grant(["ALL"], [], "L0"),
+            BUILDING_OPEN_ID_MAP["A"]: grant(["A"], ["critical_guard"]),
+            BUILDING_OPEN_ID_MAP["E"]: grant(["E"], ["repair_management", "event"]),
+            "ou_test": grant(["E"], ["engineer_mop"]),
+            "ou_mop_operator": grant(["A"], ["engineer_mop"]),
+            "ou_signature_test": grant(["A"], ["signatures"]),
+            "ou-allowed": grant(["A"], ["maintenance"]),
+        }})
 
     def test_mop_download_uses_authenticated_fill_and_returns_attachment(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -755,7 +770,7 @@ class BackendApiModelTests(unittest.TestCase):
         with PortalRuntime.auth_manager._lock:
             PortalRuntime.auth_manager._sessions[session_id] = {
                 "session_id": session_id,
-                "user": {"name": "测试人员", "open_id": ""},
+                "user": {"name": "测试人员", "open_id": "ou_signature_test"},
                 "role": "user",
                 "allowed_scopes": ["A"],
                 "expires_at": 9999999999,
@@ -1146,10 +1161,14 @@ class BackendApiModelTests(unittest.TestCase):
 
     def test_permission_review_models_keep_safe_defaults(self):
         review = parse_api_model(PermissionRequestReviewRequest, {}).to_payload()
-        bulk = parse_api_model(PermissionRequestBulkReviewRequest, {}).to_payload()
+        with self.assertRaises(ValueError):
+            parse_api_model(PermissionRequestBulkReviewRequest, {})
+        with self.assertRaises(ValueError):
+            parse_api_model(PermissionRequestBulkReviewRequest, {"request_ids": []})
+        bulk = parse_api_model(PermissionRequestBulkReviewRequest, {"request_ids": ["request-test"]}).to_payload()
         self.assertEqual(review["scopes"], [])
         self.assertEqual(review["reason"], "")
-        self.assertEqual(bulk["request_ids"], [])
+        self.assertEqual(bulk["request_ids"], ["request-test"])
         self.assertEqual(bulk["scopes_by_request_id"], {})
 
     def test_ongoing_delete_defaults_are_stable(self):
@@ -1235,6 +1254,8 @@ class BackendApiModelTests(unittest.TestCase):
         denied_job = {"request": {"_auth_open_id": "ou-other"}}
         self.assertTrue(FastAPIPortalController._job_visible_to_session(visible_job, session))
         self.assertFalse(FastAPIPortalController._job_visible_to_session(denied_job, session))
+        self.assertFalse(FastAPIPortalController._job_visible_to_session(
+            {"request": {"_auth_open_id": "ou-allowed", "work_type": "change"}}, session))
 
 
 if __name__ == "__main__":

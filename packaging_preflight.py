@@ -188,7 +188,59 @@ def snapshot(root: Path, python: str) -> dict:
     files = _tree(root, project=True)
     return {"root": str(root), "environment": environment,
             "files": {name: value[0] for name, value in files.items()},
-            "stamps": {name: value[1] for name, value in files.items()}}
+            "stamps": {name: value[1] for name, value in files.items()},
+            "environment_details": {"probe": _digest(info),
+                "variables": {name: _digest(value) for name, value in variables.items()},
+                "dependencies": dependencies}}
+
+
+def changes(before: dict, after: dict | None) -> dict[str, list[str]]:
+    """Identify drift without writing environment values, credentials or file contents."""
+    if after is None:
+        return {"指纹读取失败": ["检查结束后未取得可信指纹"]}
+    result = {}
+    def add(kind, path):
+        result.setdefault(kind, []).append(str(path))
+    if before.get("root") != after.get("root"):
+        add("项目目录变化", after.get("root", ""))
+    old, new = before.get("files", {}), after.get("files", {})
+    for name in sorted(set(old) | set(new)):
+        if name not in old:
+            add("项目文件新增", name)
+        elif name not in new:
+            add("项目文件删除", name)
+        elif old[name] != new[name]:
+            add("项目文件内容变化", name)
+        elif before.get("stamps", {}).get(name) != after.get("stamps", {}).get(name):
+            add("项目文件时间或状态变化", name)
+    if before.get("environment") != after.get("environment"):
+        a, b = before.get("environment_details"), after.get("environment_details")
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            add("执行环境变化", "原指纹没有环境明细，无法还原具体依赖")
+        else:
+            if a.get("probe") != b.get("probe"):
+                add("Python运行环境变化", "解释器、导入路径、系统或时区")
+            av, bv = a.get("variables", {}), b.get("variables", {})
+            for name in sorted(set(av) | set(bv)):
+                if av.get(name) != bv.get(name):
+                    add("环境变量变化（仅名称）", name)
+            ad, bd = a.get("dependencies", {}), b.get("dependencies", {})
+            for root in sorted(set(ad) | set(bd)):
+                left, right = ad.get(root), bd.get(root)
+                if isinstance(left, dict) and isinstance(right, dict):
+                    pairs = ((str(Path(root) / name), left.get(name), right.get(name))
+                             for name in sorted(set(left) | set(right)))
+                else:
+                    pairs = ((root, left, right),)
+                for name, previous, current in pairs:
+                    if previous == current:
+                        continue
+                    metadata_only = (isinstance(previous, (tuple, list)) and isinstance(current, (tuple, list))
+                                     and previous[0] == current[0])
+                    add("依赖文件时间或状态变化" if metadata_only else "依赖文件新增、删除或内容变化", name)
+            if not result:
+                add("执行环境变化", "环境摘要不一致")
+    return result
 
 
 def source_area(path: str) -> str | None:
@@ -285,7 +337,21 @@ class Selection:
         if self.state is None:
             return
         if current != self.state:
-            raise RuntimeError("预检执行期间源文件或环境发生变化，请重新执行；未更新通过基线")
+            details = changes(self.state, current)
+            report = self.cache.with_name('.preflight-changes.json')
+            try:
+                report.parent.mkdir(parents=True, exist_ok=True)
+                report.write_text(json.dumps({'created_at': time.time(), 'changes': {
+                    kind: {'count': len(paths), 'paths': paths[:200]} for kind, paths in details.items()}},
+                    ensure_ascii=False, indent=2), encoding='utf-8')
+            except OSError:
+                report = None
+            summary = [f"{kind}（{len(paths)}项）：" + '、'.join(
+                name.replace('\r', r'\r').replace('\n', r'\n') for name in paths[:8])
+                for kind, paths in details.items()]
+            if report:
+                summary.append(f"变化明细已保存: {report}")
+            raise RuntimeError("预检执行期间源文件或环境发生变化，请重新执行；未更新通过基线\n" + '\n'.join(summary))
         self.cache.parent.mkdir(parents=True, exist_ok=True)
         key_path = self.cache.with_suffix(".key")
         try:

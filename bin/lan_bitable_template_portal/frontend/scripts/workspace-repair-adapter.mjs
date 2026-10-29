@@ -21,8 +21,18 @@ const v2FollowupApi = ref<any>(null);
 const v2AppliedState = ref('未完成'), v2Stats = ref<LooseDict | null>(null), v2StatsError = ref('');
 const v2StatsLoading = ref(false), v2StatsAt = ref('');
 let v2StatsAbort: AbortController | undefined;
+let v2StatsTimer: ReturnType<typeof setTimeout> | undefined;
 const v2Writing = computed(() => saving.value || v2FollowupBusy.value || v2FollowupApi.value?.action.busy || reconcilingRemote.value || integrityRepairSubmitting.value);
-const v2StateLabel = computed(() => recordStateOptions.find(item => item.value === recordState.value)?.label || '未完成');
+const v2StatusFilters = new Set(['without_followup','in_progress','no_followup']);
+const v2StateLabel = computed(() => ({active:'未完成',all:'全部',completed:'已完成',without_followup:'未开始',in_progress:'维修中',no_followup:'暂无跟进'}[recordState.value]));
+const v2EmptyText = computed(() => searchText.value.trim()?'没有匹配的维修项目':'当前没有“'+v2StateLabel.value+'”的维修项目');
+async function v2ReadList(url: string, signal: AbortSignal, fresh: boolean): Promise<LooseDict> {
+  const payload = await requestJson(url,{signal,fresh});
+  if(!url.startsWith('/api/repair-management/status?'))return payload;
+  // A quick filter can be clicked before the first schema response arrives.
+  const schema = fields.value.length ? {fields:fields.value} : await requestJson('/api/repair-management/records?'+new URLSearchParams({scope:props.scope||'ALL',state:'all',limit:'1',summary_only:'1'}),{signal});
+  return {...payload,fields:schema.fields,schema_warnings:payload.warnings||[],records:(payload.records||[]).map((item:LooseDict)=>({...item,title:item.repair_title||item.title,summary_only:true,is_completed:item.state==='completed'}))};
+}
 function v2ProgressKnown(record: LooseDict): boolean {
   return record.progress_percent !== null && record.progress_percent !== undefined && record.progress_percent !== '' && Number.isFinite(Number(record.progress_percent));
 }
@@ -45,6 +55,10 @@ async function v2LoadStats(): Promise<void> {
     if (!controller.signal.aborted) v2StatsError.value = error instanceof Error ? error.message : '状态数量暂未读取';
   } finally { if (v2StatsAbort === controller) v2StatsLoading.value = false; }
 }
+function v2ScheduleStats(): void {
+  if(v2StatsTimer)clearTimeout(v2StatsTimer);
+  v2StatsTimer=setTimeout(()=>{v2StatsTimer=undefined;if(repairPageActive)void v2LoadStats();},180);
+}
 async function v2RefreshView(): Promise<void> {
   if (v2Writing.value || loading.value) return;
   clearRecordResponseCache(); clearRecordDetailCache();
@@ -63,11 +77,12 @@ function v2BeforeUnload(event: BeforeUnloadEvent): void {
 }
 watch(v2FollowupBusy, value => { if(!value && serverUpdatePending.value && !hasAnyUnsavedChanges.value)scheduleRepairStreamRefresh(); });
 onMounted(()=>{void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);});
-onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();window.removeEventListener('beforeunload',v2BeforeUnload);});
+watch(()=>props.scope,()=>{v2Stats.value=null;v2StatsAt.value='';void v2LoadStats();});
+onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();if(v2StatsTimer)clearTimeout(v2StatsTimer);window.removeEventListener('beforeunload',v2BeforeUnload);});
 `;
 
 const followupExtras = `
-const v2HistoryOpen = ref(true), v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
+const v2HistoryOpen = ref(false), v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
 const v2ReadError = ref(''), v2Ready = ref(false);
 const v2Locked = computed(() => props.readOnly || Boolean(editingRecordId.value) && !v2EditingHistory.value);
 const v2Submission = useRepairSubmission(() => 'followup:' + props.userId + ':' + props.scope + ':' + props.summaryRecordId, result => {
@@ -107,11 +122,12 @@ export function adaptRepairController(source, kind, exposedNames) {
   script = `import { proxyRefs } from 'vue';\n` + script;
   script = changeOnce(script, '  scope: string;', '  scope: string;\n  userId?: string;');
   if (kind === 'management') {
-    script = changeOnce(script, 'type WorkspaceTab = "project" | "followups";', 'type WorkspaceTab = "project" | "followups" | "flow" | "complete";');
+    script = changeOnce(script,'import { ApiError, refreshRemoteSourceAndWait, requestJson }','import { ApiError, refreshRemoteSourceAndWait, requestJson, invalidateReadCache }');
+    script = changeOnce(script,'type RecordStateFilter = "all" | "active" | "completed";','type RecordStateFilter = "all" | "active" | "completed" | "without_followup" | "in_progress" | "no_followup";');
     script = `import { useDialog, useMessage } from 'naive-ui';\nimport { registerNavigationGuard } from '../workspace-v2/navigation';\n` + script;
     script = changeOnce(script, 'const recordState = ref<RecordStateFilter>("all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : "active");');
     if(script.split('loadRecordDetailAndOpen(focused);').length!==4)throw new Error('Repair focus entry contract changed');
-    script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : new URLSearchParams(window.location.search).get("workspace_tab") === "project" ? "project" : "flow");');
+    script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : "project");');
     script = changeOnce(script, '`project:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`', '`project:${props.userId}:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`');
     script = changeOnce(script, '}, () => `project:${props.scope}`);', '});');
     script = changeOnce(script,'    && hasWritableDraft.value','    && hasWritableDraft.value\n    && !projectConflict.value\n    && (!submission.pending.value || submission.status.value === "failed")');
@@ -129,17 +145,35 @@ export function adaptRepairController(source, kind, exposedNames) {
     script = editFunction(script, 'requestSelectRecord', body => prepend(body, `  if(v2Writing.value||loading.value)return;`));
     script = editFunction(script, 'requestDeleteRecord', body => prepend(body, `  if(!props.canDelete)return;`));
     script = editFunction(script, 'deleteRecordNow', body => prepend(body, `  if(!props.canDelete)return;`));
-    script = editFunction(script, 'handleProjectDrawerKeydown', () => `{\n  if(event.key==='Escape' && !event.defaultPrevented){event.preventDefault();requestCloseProjectDrawer();}\n}`);
-    const watcher = `watch(projectDrawerOpen, (open) => {`;
-    const start = script.indexOf(watcher), end = script.indexOf('\n});', start);
-    if(start<0||end<start)throw new Error('Repair detail lifecycle changed');
-    script = script.slice(0,start) + `watch(projectDrawerOpen, open => {\n  if(open){projectDrawerReturnFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;focusProjectDrawer();}\n  else clearSyncStatusTimer();\n});` + script.slice(end+'\n});'.length);
+    // Keep the legacy modal ownership/focus trap, including nested source pickers.
+    // Focusing the editor must not move the underlying list or a dashboard widget.
+    script = editFunction(script,'focusProjectDrawer',body=>body.replace('?.focus()','?.focus({preventScroll:true})'));
+    script = editFunction(script,'closeProjectDrawerNow',body=>body.replace('returnFocus.focus()','returnFocus.focus({preventScroll:true})'));
+    script = editFunction(script,'handleProjectDrawerKeydown',body=>prepend(body,'  if(confirmDialog.open)return;'));
+    script = editFunction(script,'openWorkspaceTab',body=>body.replace('  activeWorkspaceTab.value = tab;','  activeWorkspaceTab.value = tab;\n  void nextTick(()=>{projectDrawerRef.value?.querySelector(".v2-repair-detail-body")?.scrollTo({top:0});});'));
+    script = editFunction(script,'repairRecordMatchesCurrentView',body=>prepend(body,`
+  if(v2StatusFilters.has(recordState.value)){
+    if(repairRecordIsCompleted(record)||repairRecordStateLocked(record))return false;
+    if(recordState.value==='without_followup'&&record.workflow!=='未开始')return false;
+    if(recordState.value==='in_progress'&&record.workflow!=='维修中')return false;
+    if(recordState.value==='no_followup'&&record.followup_count!==0)return false;
+  }
+`));
     script = editFunction(script, 'loadRecords', body => {
       let value=changeOnce(body,'  loading.value = true;',"  loading.value = true;v2RecordError.value='';");
+      value=changeOnce(value,'const requestUrl = `/api/repair-management/records?'+ '${query.toString()}`;',"const requestUrl = '/api/repair-management/'+(v2StatusFilters.has(recordState.value)?'status':'records')+'?'+query.toString();");
+      value=changeOnce(value,'await requestJson(requestUrl, { signal: abortController.signal, fresh: announce })','await v2ReadList(requestUrl,abortController.signal,announce)');
       value=changeOnce(value,'    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));','    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));\n    v2RecordsReady.value=true;v2AppliedState.value=v2StateLabel.value;');
       return changeOnce(value,'    if (!silent) {',"    v2RecordError.value=error instanceof Error?error.message:'维修项目读取失败';\n    if (!silent) {");
     });
-    script = editFunction(script,'handleFollowupChanged',body=>prepend(body,'  void v2LoadStats();'));
+    script = editFunction(script,'applyRepairChanges',body=>changeOnce(body,
+      '  let needsFullRefresh = false;',
+      '  clearRecordResponseCache();invalidateReadCache();v2ScheduleStats();\n  let needsFullRefresh = false;'));
+    script = editFunction(script,'handleFollowupChanged',body=>{
+      let value=prepend(body,'  v2ScheduleStats();');
+      return changeOnce(value,'      records.value = nextRecords;',`      if(repairRecordMatchesCurrentView(current))records.value=nextRecords;
+      else {records.value=nextRecords.filter(item=>String(item.record_id||'')!==recordId);total.value=Math.max(0,total.value-1);}`);
+    });
     script = editFunction(script,'saveRecord',body=>{
       const value=changeOnce(body,'      fields: writablePayload(),','      fields: writablePayload(),\n      expected_version: editingRecordId.value ? String(selectedRecord.value?.record_version || "") : "",');
       return changeOnce(value,'    return true;\n  } catch','    void v2LoadStats();\n    return true;\n  } catch');

@@ -30941,6 +30941,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(payload["stats"]["total"], 4)
         self.assertEqual(payload["stats"]["without_followup"], 2)
         self.assertEqual(payload["stats"]["in_progress"], 2)
+        self.assertEqual(payload["stats"]["no_followup"], 3)
+        missing = service.get_repair_management_status(scope="E", state="no_followup")
+        self.assertEqual({row["record_id"] for row in missing["records"]}, {
+            "rec_without_followup", "rec_workflow_completed_stale", "rec_started_without_followup",
+        })
+        paged = service.get_repair_management_status(scope="E", state="no_followup", limit=1, offset=1)
+        self.assertEqual(paged["total"], 3)
+        self.assertEqual(paged["records"], missing["records"][1:2])
+        filtered = service.get_repair_management_status(scope="E", state="no_followup", query="已开始待首次跟进")
+        self.assertEqual([row["record_id"] for row in filtered["records"]], ["rec_started_without_followup"])
         self.assertEqual(payload["stats"]["completed_total"], 2)
         self.assertEqual(payload["stats"]["completed_today"], 1)
         started_without_followup = next(
@@ -30971,6 +30981,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             today_payload["records"][0]["status_label"],
             "历史已完成",
         )
+
+    def test_repair_no_followup_filters_all_records_before_paging(self):
+        service = _TestMaintenancePortalService()
+        projects = [{"record_id": f"rec_project_{i}", "display_fields": {
+            "维修名称": f"E楼设备{i}", "所属数据中心/楼栋-使用": "南通E楼",
+            "维修开始时间": "2026-10-01 09:00",
+        }, "raw_fields": {}} for i in range(555)]
+        followups = [{"record_id": f"rec_followup_{i}", "display_fields": {
+            REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: f"rec_project_{i}", "维修进度": "50%",
+        }, "raw_fields": {REPAIR_FOLLOWUP_PARENT_ID_FIELD_NAME: f"rec_project_{i}"}} for i in range(554)]
+        service._load_repair_management_status_sources = lambda **_kwargs: (projects, followups)
+        data = service.get_repair_management_status(scope="E", state="no_followup", limit=30)
+        self.assertEqual(data["total"], 1)
+        self.assertEqual([row["record_id"] for row in data["records"]], ["rec_project_554"])
+        self.assertEqual(data["records"][0]["state"], "in_progress")
+        self.assertEqual(service.get_repair_management_status(scope="A", state="no_followup")["total"], 0)
+        self.assertEqual(service.get_repair_management_status(scope="E", state="no_followup", query="不存在")["total"], 0)
 
     def test_repair_management_scope_overview_uses_project_and_followup_state(self):
         service = _TestMaintenancePortalService()

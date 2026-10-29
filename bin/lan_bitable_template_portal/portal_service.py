@@ -14780,6 +14780,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             filtered_records = [
                 item for item in active_records if item.get("state") == normalized_state
             ]
+        elif normalized_state == "no_followup":
+            # This is independent of the workflow: a started project can still
+            # have no followup. Filter the complete authorized set before paging.
+            filtered_records = [
+                item for item in active_records if item["followup_count"] == 0
+            ]
         else:
             filtered_records = list(active_records)
 
@@ -14892,6 +14898,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "warnings": warnings,
             "stats": {
                 "total": len(active_records),
+                "no_followup": sum(1 for item in active_records if item["followup_count"] == 0),
                 "without_followup": sum(
                     1 for item in active_records if item.get("state") == "without_followup"
                 ),
