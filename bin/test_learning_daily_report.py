@@ -240,6 +240,19 @@ class DailyReportTests(unittest.TestCase):
         self.assertTrue(report['unverified']); self.assertFalse(report['unfinished'])
         self.service._shift_roster_reader.assert_not_called()
 
+    def test_working_long_day_operations_intern_in_daily_report_but_other_jobs_excluded(self):
+        self.roster[0].update(group='长白', duty_kind='长白', position='运维实习生')
+        self.directory['p1']['position']='实习生'
+        self.member('foc'); self.roster[-1].update(group='长白',duty_kind='长白',position='FOC')
+        self.member('engineer'); self.roster[-1].update(group='长白',duty_kind='长白',position='电气工程师')
+        self.save_roster()
+        result=self.report()
+        self.assertEqual([r['person_id'] for r in result['unfinished']],['p1'])
+        self.answer('p1')
+        result=self.report()
+        self.assertEqual([r['person_id'] for r in result['completed']],['p1'])
+        self.assertEqual(result['unfinished'],[])
+
     def test_empty_roster_is_zero_but_roster_issue_is_not(self):
         self.roster = []; self.save_roster()
         self.run_due(); self.assertEqual(self.job()['status'], 'skipped_completed')

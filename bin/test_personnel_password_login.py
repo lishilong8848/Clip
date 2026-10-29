@@ -2599,6 +2599,28 @@ class RouteLoginMethodPreferenceRegressionTests(unittest.TestCase):
 
 
 class SignaturePeopleHashStrippingTests(unittest.TestCase):
+    def test_signature_recipient_uses_only_current_employee_field(self):
+        service=object.__new__(MaintenancePortalService)
+        service._signature_people_cache_lock=threading.RLock()
+        service._signature_people_cache=None
+        service._signature_crypto=SimpleNamespace(metadata_from_field=lambda value:{},
+                                                  is_portable_metadata=lambda value:False)
+        fields={'姓名':'收件人','账号性质':'VNET','员工姓名':[], 'openid':'ou_old',
+                'OpenID':'ou_old','飞书OpenID':'ou_old'}
+        service._request_json=lambda *a,**kw:{'code':0,'data':{'items':[
+            {'record_id':'recReceiver','fields':fields}],'has_more':False}}
+        person=service._load_signature_people(force=True)[0]
+        self.assertEqual(person['open_id'],'')
+        self.assertFalse(person['can_receive_message'])
+        fields['员工姓名']=[{'open_id':'ou_new','name':'收件人'}]
+        person=service._load_signature_people(force=True)[0]
+        self.assertEqual(person['open_id'],'ou_new')
+        self.assertTrue(person['can_receive_message'])
+        fields['员工姓名'].append({'open_id':'ou_other','name':'另一人'})
+        person=service._load_signature_people(force=True)[0]
+        self.assertEqual(person['open_id'],'')
+        self.assertFalse(person['can_receive_message'])
+
     def test_load_signature_people_strips_password_field_without_network(self):
         service = object.__new__(MaintenancePortalService)
         service._signature_people_cache_lock = threading.RLock()

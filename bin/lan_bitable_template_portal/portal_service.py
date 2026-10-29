@@ -38436,16 +38436,11 @@ class MaintenancePortalService(RepairOperationsMixin):
             fields = {key: value for key, value in (item.get("fields") or {}).items() if key != "密码"} if isinstance(item.get("fields"), dict) else {}
             if self._signature_person_inactive(fields.get(SIGNATURE_INACTIVE_FIELD)):
                 continue
-            user_info = self._signature_user_info(fields.get(SIGNATURE_USER_FIELD))
-            open_id = user_info.get("open_id", "") or self._signature_open_id_from_any(
-                fields.get("openid")
-                or fields.get("OpenID")
-                or fields.get("open_id")
-                or fields.get("飞书OpenID")
-                or fields.get("飞书 openid")
-                or fields.get("飞书openid")
-                or fields.get("人员openid")
-            )
+            employee = fields.get(SIGNATURE_USER_FIELD)
+            user_info = {} if isinstance(employee, list) and len(employee) != 1 else self._signature_user_info(employee)
+            # 员工姓名 is authoritative; clearing/changing it must not revive
+            # an account left in a historical text field.
+            open_id = user_info.get("open_id", "")
             name = (
                 self._mop_field_text(fields, [SIGNATURE_NAME_FIELD])
                 or user_info.get("name")
@@ -39328,7 +39323,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         mop_attachment_name = str(mop_attachment_name or "").strip()
         normalized_context = str(context_type or "mop").strip().lower()
         is_critical_guard = normalized_context == "critical_guard"
-        people = self._load_signature_people(force=False)
+        people = self._load_signature_people(force=True)
         people_by_id = {
             str(item.get("record_id") or "").strip(): item
             for item in people
@@ -39345,14 +39340,6 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not record_id or role not in {"implementer", "auditor", "inspector"}:
                 continue
             requested.setdefault(record_id, set()).add(role)
-        missing = [record_id for record_id in requested if record_id not in people_by_id]
-        if missing:
-            people = self._load_signature_people(force=True)
-            people_by_id = {
-                str(item.get("record_id") or "").strip(): item
-                for item in people
-                if str(item.get("record_id") or "").strip()
-            }
         base_url = self._signature_public_base_url(
             scope=scope,
             request_base_url=request_base_url,
@@ -39402,10 +39389,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "roles": sorted(roles),
                     "role_text": role_text,
                     "context_type": normalized_context,
+                    "app_id": str(config.app_id or ''),
+                    "public_base_url": base_url,
                 },
             )
             token = str(confirmation.get("token") or "").strip()
             link_url = f"{base_url}/api/signatures/usage-confirm?token={quote(token, safe='')}"
+            from .signature_usage_cards import render as render_usage_card
+            usage_card = render_usage_card(
+                self._state_store.get_mop_signature_usage_confirmation(token=token), token, link_url)
             if is_critical_guard:
                 detail_lines = [
                     f"重保任务：{notice_title or '未命名重保任务'}",
@@ -39442,6 +39434,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "link_url": link_url,
                     "text": text,
                     "confirmation_id": confirmation.get("confirmation_id"),
+                    "card": usage_card,
                 }
             )
         return {

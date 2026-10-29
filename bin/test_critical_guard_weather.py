@@ -1521,7 +1521,7 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         self.assertEqual(
             fields["机房经理"],
             [
-                {"id": "ou_a6644e62a43b916c6bc26148cf74f208"},
+                {"id": "ou_cee45ea48df99def799710e782f5434c"},
                 {"id": "ou_6e607320c167d816366acba893b339b1"},
             ],
         )

@@ -902,6 +902,8 @@ class LearningService:
                 notification["status"] = "cancelled"
             elif notification.get("date") != date:
                 notification["status"] = "expired"
+            elif notification['kind'] == 'shift' and notification.get('expires_at', float('inf')) <= current.timestamp():
+                notification['status'] = 'expired'
             elif notification['kind'] == 'shift' and assignments is None:
                 continue
             elif notification['kind'] == 'shift' and (notification.get('shift'), notification.get('open_id')) not in assignments:

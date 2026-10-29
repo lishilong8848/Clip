@@ -180,6 +180,18 @@ class HandoverTests(unittest.TestCase):
         self.assertEqual(result['status'],'returned')
         self.assertEqual(result['decision_reason'],'请补资料')
 
+    def test_expired_card_cannot_accept_but_web_handover_stays_available(self):
+        from lan_bitable_template_portal.feishu_card_lifetime import timestamp, MAX_CARD_AGE
+        data = self.pending()
+        with self.store.connect() as db:
+            private = self.store._read(db, data['id'])
+        with patch('time.time', return_value=timestamp(private['sent_at']) + MAX_CARD_AGE):
+            with self.assertRaisesRegex(HandoverError, '7天'):
+                self.store.action(self.b, data['id'], data['version'], 'accept', token=private['card_token'])
+            self.assertNotIn('form_action_type', json.dumps(card(private, 'https://fixture.invalid')))
+        self.assertEqual(self.store.get(self.b, data['id'])['status'], 'pending')
+        self.assertEqual(self.store.action(self.b, data['id'], data['version'], 'accept')['status'], 'accepted')
+
     def test_duplicate_pending_source_is_rejected(self):
         self.pending(True)
         other=self.draft('2'*32,True)

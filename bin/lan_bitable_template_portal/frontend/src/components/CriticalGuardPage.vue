@@ -777,6 +777,8 @@ let adminDetailPollInFlight = false;
 let adminDetailPollFailureReported = false;
 let componentUnmounted = false;
 let weatherStatusLoading = false;
+let weatherStatusGeneration = 0;
+let weatherStatusRefreshQueued = false;
 let weatherTaskRefreshJobId = "";
 let manualWeatherJobId = "";
 const publishForm = ref({
@@ -875,7 +877,7 @@ const weatherResultText = computed(() => {
   const sent = Number(result.notifications_sent || 0);
   const failed = Number(result.notifications_failed || 0);
   const archived = Number(result.archived || 0);
-  const archiveFailed = Number(result.archive_failed || 0);
+  const archiveFailed = weatherArchiveFailures.value.length;
   const taskFailed = Number(result.task_failed || 0);
   const warnings = [
     failed ? `通知失败 ${failed} 次` : "",
@@ -1119,14 +1121,18 @@ function scheduleWeatherStatus(delay = 30_000): void {
 }
 usePageReadRefresh(url => url.pathname === '/api/critical-guard/tasks' && (url.searchParams.get('scope') || '') === (viewMode.value === 'admin' ? '' : activeScope.value), loadTasks, () => !componentUnmounted && !dirty.value && !loading.value);
 
-async function loadWeatherStatus(silent = false): Promise<void> {
-  if (viewMode.value !== "admin" || weatherStatusLoading) return;
+async function loadWeatherStatus(silent = false, force = false): Promise<void> {
+  if (viewMode.value !== "admin") return;
+  if (force) weatherStatusGeneration += 1;
+  if (weatherStatusLoading) { if (force) weatherStatusRefreshQueued = true; return; }
+  const generation = weatherStatusGeneration;
   weatherStatusLoading = true;
   try {
     const nextStatus = await requestJson("/api/critical-guard/weather-status", {
       cache: "no-store",
       timeoutMs: 15_000,
     });
+    if (componentUnmounted || generation !== weatherStatusGeneration) return;
     weatherStatus.value = nextStatus;
     const jobId = String(nextStatus?.job?.job_id || "");
     const jobFinished = ["completed", "failed"].includes(String(nextStatus?.job?.status || ""));
@@ -1152,7 +1158,10 @@ async function loadWeatherStatus(silent = false): Promise<void> {
     if (!silent) setMessage(loadError?.message || "天气任务状态读取失败。", "error");
   } finally {
     weatherStatusLoading = false;
-    scheduleWeatherStatus(weatherRunning.value ? 1_000 : 30_000);
+    if (weatherStatusRefreshQueued && !componentUnmounted) {
+      weatherStatusRefreshQueued = false;
+      void loadWeatherStatus(true);
+    } else scheduleWeatherStatus(weatherRunning.value ? 1_000 : 30_000);
   }
 }
 
@@ -1211,12 +1220,17 @@ async function retryWeatherArchive(item: Dict): Promise<void> {
   if (weatherActionBusy.value) return;
   weatherActionBusy.value = true;
   try {
-    await requestJson(
+    const result = await requestJson(
       `/api/critical-guard/tasks/${encodeURIComponent(String(item.task_id || ""))}/archive-retry`,
       { method: "POST", timeoutMs: 120_000 },
     );
+    if (result?.status !== 'archived' || !result.record_id) throw new Error(result?.error || '归档结果尚未确认，请稍后核对；原提示已保留。');
+    if (Array.isArray(weatherStatus.value?.tasks)) {
+      weatherStatus.value = {...weatherStatus.value, tasks: weatherStatus.value!.tasks.map((row:Dict)=>
+        row.task_id===item.task_id ? {...row, archive_status:'archived', archive_error:'', archive_record_id:result.record_id} : row)};
+    }
     setMessage("重保汇总已归档。", "success");
-    await loadWeatherStatus(true);
+    await loadWeatherStatus(true, true);
   } catch (retryError: any) {
     setMessage(retryError?.message || "归档重试失败。", "error");
   } finally {

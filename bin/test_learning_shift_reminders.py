@@ -145,6 +145,30 @@ class ShiftReminderTests(TestCase):
         self.run_at(13, 11)
         self.assertEqual(self.reader.call_count, 2)
 
+    def test_upgrade_adds_working_long_day_intern_without_resending_existing_person(self):
+        current = dt.datetime.now(learning.TZ).replace(hour=13,minute=0,second=0,microsecond=0)
+        day = current.date().isoformat()
+        intern = {'name':'当班实习','scope':'A','shift':'白','duty_kind':'长白','group':'长白',
+                  'position':'运维实习生','open_id':'ou_intern'}
+        self.people['people']['intern']={'name':'当班实习','scopes':['A'],'selectable':True,
+                                        'position':'实习生','login_ids':['ou_intern']}
+        self.reader.return_value.append(intern)
+        with self.service.transaction() as conn:
+            self.service._put('local','shift_roster',{'date':day,'version':reminders.ROSTER_VERSION,
+                'observed_at':1000,'people':self.reader.return_value[:-1]},conn,False)
+            key=f'shift:{day}:白:ou_external'
+            self.service._put('notification',key,{'id':key,'date':day,'shift':'白','kind':'shift',
+                'open_id':'ou_external','scope':'','status':'sent'},conn,False)
+        with patch.object(reminders.time,'time',return_value=1000):
+            self.service.send_notifications(current.replace(hour=12,minute=59))
+            self.sender.assert_not_called()
+            self.service.send_notifications(current)
+            self.service=self.make_service()
+            self.service.send_notifications(current)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list],['ou_intern'])
+        self.assertEqual(self.reader.call_count,1)
+        self.assertEqual(self.service._get('notification',f'shift:{day}:白:ou_intern')['status'],'sent')
+
     def test_failure_preserves_other_recipient_and_retries_same_identity(self):
         self.sender.side_effect = [OSError('offline'), (True, '', []), (True, '', [])]
         with patch.object(learning.time, 'time', return_value=1000):
@@ -154,6 +178,20 @@ class ShiftReminderTests(TestCase):
             self.run_at(20)
         self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[2].args[2])
         self.reader.assert_called_once()
+
+    def test_long_day_intern_does_not_receive_late_initial_or_failed_retry_after_work(self):
+        self.reader.return_value=[{'name':'外部人员','scope':'A','shift':'白','open_id':'ou_external',
+                                  'position':'运维实习生','duty_kind':'长白','group':'长白'}]
+        self.people['people']['external']['position']='实习生'
+        self.run_at(19)
+        self.sender.assert_not_called()
+        self.assertFalse(self.service._all('notification'))
+        self.sender.return_value=(False,'offline',[])
+        with patch.object(learning.time,'time',return_value=1000): self.run_at(13)
+        self.assertEqual(self.sender.call_count,1)
+        with patch.object(learning.time,'time',return_value=1301): self.run_at(18)
+        self.assertEqual(self.sender.call_count,1)
+        self.assertEqual(self.service._get('notification','shift:2026-10-10:白:ou_external')['status'],'expired')
 
     def test_delivery_receipt_is_persisted_and_survives_restart(self):
         receipt = {'open_id': 'ou_external', 'ok': True, 'sender_app_id': 'cli_fixture',

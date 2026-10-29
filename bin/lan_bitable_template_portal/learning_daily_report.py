@@ -92,7 +92,7 @@ def render_card(report, portal_url):
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
             'content': f"题库待核对 {report['question_problem_count']} 题"}})
     elements.append({'tag': 'note', 'elements': [{'tag': 'plain_text', 'content':
-        '口径：每日题单及当班自主练习的有效首答，复习不重复计数；夜班跨零点归排班日，截至发送时核实；不含长白、分享会及未安排。'
+        '口径：每日题单及当班自主练习的有效首答，复习不重复计数；夜班跨零点归排班日，截至发送时核实；含当天上班的长白运维实习生，不含其他长白、分享会及未安排。'
         + (' 核实时间：' + report['as_of'] if report.get('as_of') else '')}]})
     card['elements'] = [*elements, card['elements'][-1]]
     return card
@@ -133,6 +133,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .learning_engagement import recipients
     from .learning_shift_storage import person_open_id
     from .pre_shift_checks import windows
+    from .learning_reminders import excluded_long_day
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
               'completed': [], 'unfinished': [], 'failed': [], 'unverified': [], **_question_summary(service, conn)}
@@ -142,7 +143,7 @@ def collect(service, date, current, conn, directory, app_id):
         result['unverified'].append({'reason': '昨日排班快照缺失或版本待核对，名单不全，不能判定为零人未完成。'})
         return result
     for issue in roster.get('issues', []):
-        if issue.get('duty_kind') != '长白' and issue.get('group') != '长白':
+        if not excluded_long_day(issue):
             result['unverified'].append({k: issue.get(k, '') for k in ('name', 'scope', 'shift')} | {
                 'reason': issue.get('reason') or '排班名单待核对'})
     people = service._all('person', conn)
@@ -151,8 +152,7 @@ def collect(service, date, current, conn, directory, app_id):
     people_by_id = {p['id']: p for p in people}
     duties = {}
     for raw in roster['people']:
-        if isinstance(raw, dict) and (raw.get('duty_kind') == '长白' or raw.get('group') == '长白'
-                                     or raw.get('shift') in {'长白', '休', '未安排'}):
+        if isinstance(raw, dict) and (excluded_long_day(raw) or raw.get('shift') in {'长白', '休', '未安排'}):
             continue
         if not isinstance(raw, dict) or raw.get('shift') not in {'白', '夜'} or raw.get('scope') not in core.SCOPES:
             result['unverified'].append({'reason': '排班记录格式或班次待核对，未计入未完成。'})

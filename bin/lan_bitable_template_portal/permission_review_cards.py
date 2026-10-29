@@ -47,6 +47,9 @@ def parse_event(payload, app_id):
 
 
 def card(data):
+    from .feishu_card_lifetime import expired, expired_card
+    if data.get('status') == 'pending' and expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
+        return expired_card()
     plain = lambda text: {"tag": "plain_text", "content": str(text)}
     elements = [{"tag": "div", "text": plain("申请人：" + str(data.get("name") or "用户"))},
                 {"tag": "div", "text": plain("申请范围：" + "、".join(data.get("requested_scopes") or []))},
@@ -142,6 +145,10 @@ class PermissionCards:
     async def notify(self, request_id):
         try:
             data = await asyncio.to_thread(self.request, request_id)
+            from .feishu_card_lifetime import expired
+            if expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
+                await asyncio.to_thread(self.update, request_id, notification_status='expired', notification_error='卡片超过7天，停止重试；请在灯塔处理。')
+                return
             if data.get("status") != "pending" or not data.get("approver_open_id") or data.get("notification_status") == "sent":
                 return
             if data.get("expires_at_ts") and time.time() >= float(data["expires_at_ts"]):
@@ -185,6 +192,9 @@ class PermissionCards:
                     raise AssistantError("审批卡片标识不一致，未更改权限。", 403)
                 applied = data.get("status") == "pending"
                 if applied:
+                    from .feishu_card_lifetime import expired, EXPIRED_CARD_MESSAGE
+                    if expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
+                        raise AssistantError(EXPIRED_CARD_MESSAGE, 410)
                     if value["action"] == "approve":
                         auth.approve_permission_request(data["request_id"], updated_by=user["open_id"])
                     else:
@@ -211,6 +221,9 @@ class PermissionCards:
         return {"text": "权限申请" + label + "。", "card": card(data)}
 
     async def update_card(self, data):
+        from .feishu_card_lifetime import expired
+        if expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
+            return
         if not data.get("review_message_id") or not self.bot.messenger:
             return
         if data.get('review_sender_app_id') and data['review_sender_app_id'] != getattr(self.bot, 'config', {}).get('app_id'):

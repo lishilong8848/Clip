@@ -85,6 +85,16 @@ class RepeatedReminderTests(unittest.TestCase):
         self.send(self.at(17))
         self.assertEqual(len(self.sender.calls), 2)
 
+    def test_long_day_intern_reminds_until_completed_or_day_shift_end(self):
+        self.roster[0].update(group='长白',duty_kind='长白',position='运维实习生')
+        self.hr['people']['r1']['position']='实习生'
+        self.send(self.at(15))
+        self.assertEqual([c[0] for c in self.sender.calls],['ou_person'])
+        self.claim(complete=True)
+        for current in (self.at(17),self.at(18),self.at(20)):
+            self.send(current)
+        self.assertEqual(len(self.sender.calls),1,'completion and shift end stop reminders')
+
     def test_autonomous_completion_stops_queued_and_future_daily_reminders(self):
         self.claim()
         engagement.repeated_reminders(self.service, self.at(15))

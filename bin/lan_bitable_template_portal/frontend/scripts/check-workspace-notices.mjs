@@ -1,3 +1,4 @@
+import {openWorkspaceRail,selectWorkspaceAccount,selectWorkspaceSetting} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdir, readFile } from 'node:fs/promises';
@@ -269,10 +270,10 @@ try {
     assert(await page.locator('[data-list="ongoing"]').getByRole('button', { name: '更新', exact: true }).first().isEnabled(), 'source read failure does not disable existing notice operations');
   }
   if (!process.argv.includes('--baseline')) {
-    await page.getByRole('button', { name: '打开个人页面', exact: true }).click();
-    await page.getByRole('button', { name: '退出登录', exact: true }).click();
+    await selectWorkspaceAccount(page,'个人信息');
+    await selectWorkspaceAccount(page,'退出登录');await page.getByRole('button',{name:'继续',exact:true}).click();
     await page.getByRole('alert').filter({ hasText: '退出暂时失败' }).waitFor();
-    assert.equal(await page.getByRole('button', { name: '退出登录', exact: true }).isEnabled(), true);
+    assert.equal(await page.getByRole('button', { name: /^账户菜单：/ }).isEnabled(), true);
     assert.match(page.url(), /view=my/);
     assert.equal(writes.filter(url => url !== '/api/workbench/draft').length, 0, 'no real notice writes');
   }

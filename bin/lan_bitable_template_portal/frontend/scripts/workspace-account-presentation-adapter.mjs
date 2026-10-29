@@ -113,7 +113,7 @@ function adaptAdminTools(source) {
   source = source.slice(0, header.loc.start.offset) + source.slice(header.loc.end.offset);
   const chrome=source.match(/<AdminWorkspaceChrome\b[\s\S]*?\/>/);
   if(!chrome)throw new Error('AdminTools settings category changed');
-  const tools=`<button type="button" data-v2-navigation class="v2-admin-toolbar-back" @click="$emit('close')"><ArrowLeft :size="16" />返回个人页面</button><span data-v2-layout-tools="accounts" class="v2-admin-toolbar-anchor"></span>`;
+  const tools=`<span data-v2-layout-tools="accounts" class="v2-admin-toolbar-anchor"></span>`;
   source=source.replace(chrome[0],chrome[0].replace(/\s*\/>$/,`><template #admin-tools>${tools}</template></AdminWorkspaceChrome>`)+`<div v-if="!systemAdmin" class="v2-admin-toolbar"><span>账号与权限</span>${tools}</div>`);
   source=source.replace('advancedDiagnosticsVisible.value = !advancedDiagnosticsVisible.value;',`advancedDiagnosticsVisible.value = !advancedDiagnosticsVisible.value;
   if(advancedDiagnosticsVisible.value){selectAdminTab('pressure');return;}`);

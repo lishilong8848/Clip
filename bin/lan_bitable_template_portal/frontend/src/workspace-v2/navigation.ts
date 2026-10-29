@@ -43,6 +43,9 @@ function allowNavigation(target:string,proceed:()=>void,owner?:string):boolean {
   }
   return check(0);
 }
+export function runNavigationAction(target:string,action:()=>void){
+  if(allowNavigation(toAbsoluteUrl(target),action))action();
+}
 export function requestEmbeddedChange(owner:string,proceed:()=>void){if(allowNavigation(toAbsoluteUrl(window.location.href),proceed,owner))proceed();}
 export function toAbsoluteUrl(target: string | URL): string { return logicalUrl(new URL(target, window.location.origin).href).href; }
 export function navigate(target: string | URL, options: NavigateOptions = {}): void {

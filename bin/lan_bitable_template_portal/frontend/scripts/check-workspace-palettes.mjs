@@ -18,11 +18,16 @@ for(const palette of api.PALETTES)for(const dark of [false,true]){
   for(const background of [c.accent,c.hover,c.pressed])assert(Math.max(api.contrast('#000000',background),api.contrast('#ffffff',background))>=4.5,palette.id+' button label');
   assert(api.contrast('#f4f8ff',c.header)>=4.5,palette.id+' header');
   assert(api.contrast(c.text,c.selection)>=4.5,palette.id+' selected menu');
+  for(const background of [c.sidebar,c.sidebarEnd,c.navHover,c.navSelected]){
+    assert(api.contrast(c.navText,background)>=4.5,palette.id+' navigation text');
+    assert(api.contrast(c.navMuted,background)>=4.5,palette.id+' navigation secondary text');
+  }
 }
 for(const custom of ['#000000','#ffffff','#fdc941','#ff0000','#808080'])for(const dark of [false,true]){
   const c=api.paletteColors('custom',dark,custom);
   assert(api.contrast(c.accentText,c.surface)>=4.5,'custom accent text');
   assert(api.contrast(c.onAccent,c.accent)>=4.5,'custom filled button');
+  assert(api.contrast(c.navText,c.sidebar)>=4.5,'custom navigation text');
 }
 api.savePalette('a','gold');api.saveNightMode('a',true);
 api.loadPalette('b');api.loadNightMode('b');

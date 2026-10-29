@@ -162,6 +162,17 @@ class CompletionTests(unittest.TestCase):
         self.roster([{'person_id': 'p1', 'shift': '白'}])
         self.assertEqual(self.rows()['p1']['status'], '待核对')
 
+    def test_working_long_day_intern_has_day_task_and_autonomous_credit(self):
+        self.person()
+        self.roster([{'person_id':'p1','scope':'A','shift':'白','group':'长白',
+                      'duty_kind':'长白','position':'运维实习生'}])
+        self.assertEqual(self.rows()['p1']['assigned'],sum(learning.QUOTAS.values()))
+        paper=self.paper(mode='practice',identity='practice',count=sum(learning.QUOTAS.values()))
+        self.record(paper,answered=len(paper['questions']))
+        row=self.rows()['p1']
+        self.assertEqual(row['status'],'已完成')
+        self.assertEqual(row['tasks'][0]['shift'],'白')
+
     def test_two_scopes_or_shifts_never_share_completion_credit(self):
         self.person(scopes=('A', 'B'))
         self.roster([{'person_id': 'p1', 'scope': s, 'shift': '白'} for s in ('A', 'B')])

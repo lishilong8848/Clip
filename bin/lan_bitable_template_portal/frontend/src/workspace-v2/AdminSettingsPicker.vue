@@ -1,29 +1,17 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { NButton, NSelect, NTag } from 'naive-ui';
-import { Settings2, Wrench } from 'lucide-vue-next';
-import type { AdminTabKey } from '../adminToolsUtils';
-const props = defineProps<{
-  tabs: Array<{ key: AdminTabKey; label: string; description: string; badge: string }>;
-  activeTab: AdminTabKey;
-  advancedVisible: boolean;
-}>();
-const emit = defineEmits<{ 'select-tab': [tab: AdminTabKey]; 'toggle-advanced': [] }>();
-const selected = computed(() => props.tabs.find(item => item.key === props.activeTab));
-const options = computed(() => props.tabs.map(item => ({ value:item.key, label:item.label })));
-function select(value: AdminTabKey) { if (props.tabs.some(item => item.key === value)) emit('select-tab',value); }
+import {computed,inject,ref,type Ref} from 'vue';
+import type {AdminTabKey} from '../adminToolsUtils';
+const props=defineProps<{tabs:Array<{key:AdminTabKey;label:string;description:string;badge:string}>;activeTab:AdminTabKey;advancedVisible:boolean}>();
+const selected=computed(()=>props.tabs.find(item=>item.key===props.activeTab));
+const mobile=inject<Ref<boolean>>('workspace-mobile-navigation',ref(false));
+const emit=defineEmits<{'select-tab':[tab:AdminTabKey]}>();
+const options=computed(()=>[...props.tabs.map(item=>({value:item.key,label:item.label})),...(props.tabs.some(item=>item.key==='pressure')?[]:[{value:'pressure',label:'高级诊断'}])]);
+function select(event:Event){const value=(event.target as HTMLSelectElement).value;if(options.value.some(item=>item.value===value))emit('select-tab',value as AdminTabKey);}
 </script>
-<template>
-  <div class="v2-settings-picker" data-v2-navigation>
-    <label for="v2-settings-category"><Settings2 :size="17" />设置分类</label>
-    <NSelect :value="activeTab" :options="options" :input-props="{id:'v2-settings-category'}" aria-label="设置分类" @update:value="select" />
-    <NTag v-if="selected?.badge" size="small" :bordered="false">{{selected.badge}}</NTag>
-    <div class="v2-settings-actions"><NButton size="small" quaternary :aria-pressed="advancedVisible" @click="emit('toggle-advanced')"><Wrench :size="15" />{{advancedVisible?'收起诊断':'高级诊断'}}</NButton><slot name="admin-tools" /></div>
-  </div>
-</template>
+<template><header class="v2-settings-picker"><div><span>系统设置</span><h1>{{selected?.label||'账号与权限'}}</h1></div><select v-if="mobile" class="v2-mobile-settings-select" aria-label="设置分类" :value="activeTab" @change="select"><option v-for="item in options" :key="item.value" :value="item.value">{{item.label}}</option></select><slot name="admin-tools" /></header></template>
 <style scoped>
-.v2-settings-picker{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-bottom:1px solid var(--v2-border);padding:4px 0 14px}
-label{display:flex;gap:7px;align-items:center;font-size:13px;color:var(--v2-muted)}
-.n-select{width:240px;max-width:100%}.v2-settings-actions{margin-left:auto;display:flex;align-items:center;flex-wrap:wrap;gap:8px}.n-button :deep(.n-button__content){gap:6px}
-@media(max-width:600px){.n-select{width:calc(100% - 90px)}.n-button{margin-left:0}}
+.v2-settings-picker{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:4px 0 14px;border-bottom:1px solid var(--v2-border)}
+span{font-size:12px;color:var(--v2-muted)}h1{font-size:20px;line-height:1.4;margin:4px 0 0}
+.v2-mobile-settings-select{display:none;border:1px solid var(--v2-border);border-radius:8px;background:var(--v2-palette-surface);color:var(--v2-ink);font:inherit;min-height:40px;padding:6px 10px}
+@media(max-width:760px),(hover:none) and (max-width:1024px){.v2-settings-picker{flex-wrap:wrap}.v2-mobile-settings-select{display:block;flex:1;min-width:140px;max-width:220px;margin-left:auto}}
 </style>

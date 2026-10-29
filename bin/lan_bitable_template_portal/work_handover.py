@@ -273,6 +273,10 @@ class Handovers:
             if action in {'accept','return'}:
                 if not recipient or token and not secrets.compare_digest(token, str(data.get('card_token',''))):
                     raise HandoverError('只有本次指定接收人能确认交接。',403)
+                if token:
+                    from .feishu_card_lifetime import expired, EXPIRED_CARD_MESSAGE
+                    if expired(data.get('sent_at')):
+                        raise HandoverError(EXPIRED_CARD_MESSAGE, 410)
                 if data.get('sent_version') == version and data['status'] == ('accepted' if action=='accept' else 'returned'):
                     return self._public(db, data, actor)
             if data['version'] != version:

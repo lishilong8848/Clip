@@ -1,3 +1,4 @@
+import {openWorkspaceRail,selectWorkspaceAccount,selectWorkspaceSetting} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
@@ -35,38 +36,41 @@ await context.route('**/*',route=>{
 const page=await context.newPage();page.setDefaultTimeout(12000);page.on('pageerror',e=>errors.push(e.message));
 const entry=origin+'/assets/workspace-v2/index.html';
 const main=page.locator('.v2-main');
+const addScrollFixture=()=>main.evaluate(el=>{const block=document.createElement('div');block.dataset.shellScrollFixture='';block.style.height='1200px';block.style.minHeight='1200px';block.style.flexShrink='0';el.appendChild(block);});
+const removeScrollFixture=()=>main.locator('[data-shell-scroll-fixture]').evaluateAll(nodes=>nodes.forEach(node=>node.remove()));
 const shot=async name=>{await page.waitForTimeout(250);await page.screenshot({path:path.join(output,name+'.png'),animations:'disabled'});};
 async function shellGeometry(){
   const rects=await page.evaluate(()=>{
     const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};};
-    return {header:box('.v2-header'),side:box('.v2-sidebar'),main:box('.v2-main'),height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1};
+    return {header:null,side:box('.v2-sidebar'),main:box('.v2-main'),height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1};
   });
   assert.equal(rects.overflow,false,'no page-wide overflow');
-  assert(Math.abs(rects.header.bottom-rects.side.y)<=1&&Math.abs(rects.main.y-rects.side.y)<=1,'all regions share the same upper baseline');
-  assert(Math.abs(rects.side.right-rects.main.x)<=1,'content never slides underneath navigation');
+  assert(Math.abs(rects.side.y)<=1&&Math.abs(rects.main.y)<=1,'business area uses the full height without a top bar');
+  assert(Math.abs(rects.main.x-72)<=1,'floating navigation never shifts the business area');
   assert(Math.abs(rects.main.bottom-rects.height)<=1,'content scroll region ends at viewport');
 }
 try{
   if(!process.argv.includes('--bot-only')){
   await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
   await shot('profile');await shellGeometry();
-  await page.getByRole('button',{name:'账号与设置',exact:true}).click();await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
+  await selectWorkspaceAccount(page,'系统设置');await selectWorkspaceSetting(page,'账号与权限');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
   await shot('accounts');await shellGeometry();
   assert.equal(await page.locator('.admin-workspace-tabs').count(),0,'settings has no second navigation');
   const nav=await page.locator('.v2-settings-picker').boundingBox(),content=await page.locator('.admin-settings-content').boundingBox();
   assert(nav.y+nav.height<=content.y+1,'admin sections are above the account table, not a second sidebar');
-  assert(Math.abs(nav.x-content.x)<=1,'admin sections and account list align');
-  await page.mouse.move(1100,650);await page.mouse.wheel(0,400);await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop>100);
+  const contentCard=await page.locator('.v2-widget').filter({has:page.locator('.admin-settings-content')}).boundingBox();assert(Math.abs(nav.x-contentCard.x)<=1,'settings heading aligns with the outside of the padded content card');
+  await addScrollFixture();await page.mouse.move(1100,650);await main.evaluate(el=>el.scrollTo({top:400,behavior:'instant'}));await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop>100);
   await shellGeometry();assert.equal(await page.evaluate(()=>window.scrollY),0,'desktop scrolling never moves the header');
   const before=await main.evaluate(el=>el.scrollTop);
   await page.setViewportSize({width:1366,height:480});await page.waitForTimeout(250);
-  await page.mouse.move(100,300);await page.mouse.wheel(0,400);await page.waitForFunction(()=>document.querySelector('.v2-sidebar').scrollTop>0);
+  await openWorkspaceRail(page);await page.mouse.move(100,300);await page.mouse.wheel(0,400);await page.waitForFunction(()=>document.querySelector('.v2-rail-scroll').scrollTop>0);
   assert.equal(await main.evaluate(el=>el.scrollTop),before,'sidebar scroll does not move the business area');
-  await page.locator('.v2-sidebar').evaluate(el=>el.scrollTop=0);
-  await page.getByRole('button',{name:'收起导航',exact:true}).click();
+  await page.locator('.v2-rail-scroll').evaluate(el=>el.scrollTop=0);
+  await page.mouse.move(1000,100);
   for(let frame=0;frame<6;frame++){await shellGeometry();await page.waitForTimeout(35);}
-  await page.getByRole('button',{name:'展开导航',exact:true}).click();
+  await openWorkspaceRail(page);
   for(let frame=0;frame<6;frame++){await shellGeometry();await page.waitForTimeout(35);}
+  await removeScrollFixture();
   for(const width of [360,390,430]){
     await page.setViewportSize({width,height:844});await shot('accounts-'+width);
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'mobile table scroll remains inside the table');
@@ -75,19 +79,19 @@ try{
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
   await page.setViewportSize({width:1440,height:900});
   await page.goto(entry+'?__page=/admin/settings');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
-  await main.evaluate(el=>el.scrollTo({top:500,behavior:'instant'}));
+  await addScrollFixture();await main.evaluate(el=>el.scrollTo({top:500,behavior:'instant'}));
   assert(await main.evaluate(el=>el.scrollTop>0));
-  await page.getByRole('button',{name:'打开个人页面',exact:true}).click();await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
-  await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop===0);
-  const profileHeading=await page.getByRole('heading',{name:user.name,exact:true}).boundingBox(),topHeader=await page.locator('.v2-header').boundingBox();
-  assert(profileHeading.y>=topHeader.y+topHeader.height,'switching modules never inherits the prior scroll offset');
+  await selectWorkspaceAccount(page,'个人信息');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
+  await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop===0);await removeScrollFixture();
+  const profileHeading=await page.getByRole('heading',{name:user.name,exact:true}).boundingBox();
+  assert(profileHeading.y>=0,'switching modules never inherits the prior scroll offset');
   await page.goto(entry+'?__page=/plan-convergence');await page.getByText('A楼冷机检修屏蔽',{exact:true}).waitFor();
   await shot('plan-review');await shellGeometry();
-  const filters=page.locator('#workspace-page-filters');
+  const filters=page.locator('.pc-page');
   await page.getByRole('button',{name:'检修核对',exact:true}).click();await page.getByText('A楼冷机检修',{exact:true}).waitFor();
   await page.waitForFunction(()=>document.querySelector('.pc-tabs [aria-current=page]')?.textContent.includes('检修核对'));
   await shot('plan-maintenance');
-  assert.equal(await filters.getByRole('searchbox').count(),1,'only the active tab search belongs in the shared toolbar');
+  assert.equal(await filters.getByRole('searchbox').count(),1,'only the active business tab exposes a search field');
   assert.equal(await filters.getByRole('searchbox',{name:'搜索屏蔽记录'}).count(),0,'hidden review filters must not escape through Teleport');
   await filters.getByRole('searchbox').fill('无匹配项');await page.getByText('暂无匹配的检修记录',{exact:true}).waitFor();
   await page.getByRole('button',{name:'变更核对',exact:true}).click();await page.getByRole('searchbox',{name:'搜索变更记录'}).waitFor();

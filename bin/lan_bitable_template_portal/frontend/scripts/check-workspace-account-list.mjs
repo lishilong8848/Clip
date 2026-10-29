@@ -1,3 +1,4 @@
+import {openWorkspaceRail,selectWorkspaceAccount,selectWorkspaceSetting} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
@@ -140,8 +141,8 @@ try{
   await page.mouse.move(10,10);await page.waitForTimeout(350);
   await page.screenshot({path:path.join(output,'tree-level-pc.png')});
   const picker=page.locator('.v2-settings-picker');assert(await picker.locator('[data-v2-layout-tools="accounts"] button').isVisible());
-  await picker.getByRole('button',{name:'高级诊断',exact:true}).click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('tab')==='pressure');
-  await page.getByRole('button',{name:'返回个人页面',exact:true}).click();await page.waitForFunction(()=>new URL(location.href).searchParams.get('view')==='my');
+  await selectWorkspaceSetting(page,'高级诊断');await page.waitForFunction(()=>new URL(location.href).searchParams.get('tab')==='pressure');
+  await selectWorkspaceAccount(page,'个人信息');await page.waitForFunction(()=>new URL(location.href).searchParams.get('view')==='my');
 
   const relation=(name,level,category,home='H',extra={})=>({...fixture(name,level,category,home),modules:level==='L4'?['learning']:['accounts'],...extra});
   const relations=[relation('当前管理员','L0','manager','H',{open_id:actor.open_id,is_self:true,role:'admin'}),

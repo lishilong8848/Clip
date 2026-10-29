@@ -396,6 +396,20 @@ class SignatureManagementTests(unittest.TestCase):
         self.assertEqual(result['building'], 'C楼')
         self.assertIn('楼栋：C楼', self.messages[-1][0].splitlines())
 
+    def test_empty_employee_skips_link_then_same_record_rebind_sends_to_new_account(self):
+        self.m.people({})  # The page has already cached the old account.
+        self.s.staff['recStaff']['fixture_open_id']=''
+        result=self.m.send({'source':'staff','record_id':'recStaff','operation_id':'rebind'},
+            actor='ou-actor',base_url='http://localhost:18766',send_text=self.sender,direct_open_id='ou_old')
+        self.assertEqual(result['status'],'recipient_required')
+        self.sender.assert_not_called()
+        self.s.staff['recStaff']['fixture_open_id']='ou_new'
+        self.request(operation_id='rebind')
+        self.assertEqual(self.messages[-1][1],['ou_new'])
+        self.s.staff['recStaff']['fixture_open_id']='ou_next'
+        self.request(operation_id='rebind')
+        self.assertEqual(self.sender.call_count,1,'completed operation is not replayed after rebinding')
+
     def test_save_and_duplicate_submission_upload_once(self):
         self.request()
         payload = self.payload()

@@ -62,6 +62,27 @@ class ResolveRosterTests(TestCase):
         self.assertEqual(resolved, [{'open_id': 'ou_z', 'shift': '白', 'scope': 'A', 'name': '张三'}])
         self.assertEqual(warnings, [])
 
+    def test_employee_link_cleared_never_uses_cached_account_or_namesake(self):
+        person={'record_id':'recA','name':'张三','open_id':'ou_old','scope':'A','shift':'白','employee_linked':False}
+        directory={'recA':hr_row('张三','A','ou_old'),'recB':hr_row('张三','A','ou_other')}
+        self.assertEqual(self.resolve([person],directory),([],[]))
+        person['employee_linked']=True
+        directory['recA']['login_ids']=[]
+        self.assertEqual(self.resolve([person],directory),([],[]))
+
+    def test_same_person_record_uses_new_account_without_name_based_substitution(self):
+        person={'record_id':'recA','name':'张三','open_id':'ou_old','scope':'A','shift':'白'}
+        directory={'recA':hr_row('张三','A','ou_new'),'recB':hr_row('张三','A','ou_other')}
+        resolved,warnings=self.resolve([person],directory)
+        self.assertEqual([p['open_id'] for p in resolved],['ou_new'])
+        self.assertEqual(warnings,[])
+        directory.pop('recA')
+        resolved,warnings=self.resolve([person],directory)
+        self.assertEqual(resolved,[])
+        self.assertEqual(len(warnings),1)
+        directory['recA']=hr_row('张三','A','',login_ids=['ou_one','ou_two'])
+        self.assertEqual(self.resolve([person],directory)[0],[])
+
     def test_blank_position_is_allowed_no_role_filter(self):
         row = hr_row('张三', 'A', 'ou_z', position='')
         row.pop('position')
@@ -276,7 +297,7 @@ class EnqueueShiftRemindersTests(TestCase):
 
     def test_reader_failure_respects_active_retry_deadline(self):
         service = self.FakeService(reader=Mock(), settings={},
-                                   local={'shift_roster_retry': {'date': DAY, 'retry_at': 2000}})
+                                   local={'shift_roster_retry': {'date': DAY, 'retry_at': 2000, 'policy_version': reminders.ROSTER_POLICY_VERSION}})
         now = dt.datetime(2026, 10, 10, 14, 0, tzinfo=learning.TZ)
         with patch('lan_bitable_template_portal.learning_personal._login_directory',
                    return_value=({}, True)), \
@@ -297,6 +318,26 @@ class EnqueueShiftRemindersTests(TestCase):
         # Reader is re-invoked once the retry deadline has passed.
         self.assertEqual(service._local['shift_roster']['date'], DAY)
         self.assertEqual(result, set())
+
+    def test_policy_upgrade_keeps_history_and_backoff_after_failed_current_refresh(self):
+        today = dt.datetime.now(reminders.TZ).date()
+        day, yesterday = today.isoformat(), (today-dt.timedelta(days=1)).isoformat()
+        old = {'date':day, 'version':reminders.ROSTER_VERSION, 'people':[], 'observed_at':999}
+        previous = {**old, 'date':yesterday}
+        reader = Mock(side_effect=ValueError('offline'))
+        service = self.FakeService(reader, local={'shift_roster':old, 'shift_roster:'+yesterday:previous})
+        with patch.object(reminders.time,'time',return_value=1000):
+            self.assertIs(reminders.roster_snapshot(service,yesterday),previous)
+            reader.assert_not_called()
+            self.assertIsNone(reminders.roster_snapshot(service,day))
+            self.assertIsNone(reminders.roster_snapshot(service,day))
+            self.assertEqual(reader.call_count,1,'failed upgrade retains the five-minute retry interval')
+        reader.side_effect=None; reader.return_value=[{'name':'实习','position':'运维实习生','duty_kind':'长白','shift':'白','scope':'A'}]
+        with patch.object(reminders.time,'time',return_value=1301):
+            fresh=reminders.roster_snapshot(service,day)
+            self.assertEqual(fresh['policy_version'],reminders.ROSTER_POLICY_VERSION)
+            self.assertEqual(len(fresh['people']),1)
+            self.assertEqual(reader.call_count,2)
 
 
 if __name__ == '__main__':

@@ -1078,6 +1078,9 @@ class FeishuAssistant:
                 print("[ClipFlow][FeishuAssistant] 消息接收器已准备，正在连接飞书；等待消息事件", flush=True)
             else:
                 action_value = ((data.get('event') or {}).get('action') or {}).get('value') or {}
+                if isinstance(action_value, dict) and action_value.get('kind') == 'signature_usage':
+                    from .signature_usage_cards import callback
+                    return JSONResponse(await callback(self.runtime, data, self.config['app_id']))
                 if isinstance(action_value, dict) and action_value.get('kind') == 'learning_weekly':
                     weekly = getattr(self.runtime, 'learning_weekly_cards', None)
                     if weekly is None:

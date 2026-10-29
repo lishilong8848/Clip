@@ -29,6 +29,8 @@ def _people(snapshot, shift):
     reason = '' if snapshot.get('version') == ROSTER_VERSION else '排班快照版本待核对'
     selected = {}
     for row in people:
+        if isinstance(row, dict) and row.get('employee_linked') is False:
+            continue
         if not isinstance(row, dict) or row.get('shift') not in ('白', '夜'):
             reason = '排班名单格式待核对'
             continue
@@ -40,8 +42,9 @@ def _people(snapshot, shift):
         if not name or not scope:
             reason = '排班姓名或楼栋待核对'
         person = {'name': name, 'scope': scope, 'shift': shift,
-                  'open_id': row.get('open_id') if isinstance(row.get('open_id'), str) else ''}
-        key = (name, scope)
+                  'open_id': row.get('open_id') if isinstance(row.get('open_id'), str) else '',
+                  **({'record_id': row['record_id']} if row.get('record_id') else {})}
+        key = ('record', row['record_id'], scope) if row.get('record_id') else ('name', name, scope)
         if key in selected and selected[key]['open_id'] != person['open_id']:
             person['open_id'] = ''
         selected[key] = person

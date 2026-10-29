@@ -21,6 +21,9 @@ def plain(text):
 
 
 def render(ticket, url, *, scope='', page=0, person_id=''):
+    from .feishu_card_lifetime import expired, expired_card
+    if expired(ticket.get('created_at') or (ticket.get('report') or {}).get('end')):
+        return expired_card(url.rstrip('/') + '/learning')
     report = ticket['report']
     buildings = report.get('buildings') or {}
     scope = report.get('scope') or scope
@@ -136,6 +139,7 @@ class WeeklyCards:
                     report['question_buildings'] = {s: weekly_questions(service, job['date'], job['end'], conn, s)
                                                     for s in report['buildings']}
                 ticket = {'id': identity, 'kind': 'weekly_card', 'status': 'prepared', 'token': secrets.token_urlsafe(32),
+                          'created_at': time.time(),
                           'app_id': app_id, 'target': target, 'report': report, 'message_id': '', 'chat_id': '',
                           'view_scope': job.get('scope', ''), 'page': 0}
                 service._put('engagement', identity, ticket, conn)
@@ -188,6 +192,9 @@ class WeeklyCards:
 
         await require_current()
         ticket = await asyncio.to_thread(self.prepare, job, target, configuration[0])
+        from .feishu_card_lifetime import expired
+        if expired(ticket.get('created_at') or (ticket.get('report') or {}).get('end')):
+            raise LearningError('周报卡片超过7天，停止投递；可在灯塔查看历史周报。', 410)
         check_operation(ticket)
         if ticket['message_id']:
             return True
@@ -275,6 +282,9 @@ class WeeklyCards:
                 raise LearningError('此操作不属于原周报消息。', 403)
             if ticket['target'].startswith('ou_') and ticket['target'] != oid:
                 raise LearningError('只能操作发送给本人的周报卡片。', 403)
+            from .feishu_card_lifetime import expired, expired_card, EXPIRED_CARD_MESSAGE
+            if expired(ticket.get('created_at') or (ticket.get('report') or {}).get('end')):
+                return {'ok': True, 'toast': EXPIRED_CARD_MESSAGE, 'card': expired_card(service.portal_url().rstrip('/') + '/learning')}
             scope, page = value.get('scope', ''), value.get('page', 0)
             report = ticket['report']
             if report.get('scope') and not (profile.get('level') in {'L0', 'L1'} or

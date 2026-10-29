@@ -545,6 +545,9 @@ def send_due(service, current):
                     except Exception as exc:
                         ok = False
                         errors.append(str(exc) if isinstance(exc, core.LearningError) else '发送未完成（' + type(exc).__name__ + '），原任务等待重试')
+                        if job['kind'] == 'weekly_summary' and isinstance(exc, core.LearningError) and exc.status == 410:
+                            job['status'] = 'expired'
+                            break
                     if ok:
                         sent_to.append(target)
                         # Persist each receipt before sending to another supervisor.

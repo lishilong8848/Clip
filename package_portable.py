@@ -447,6 +447,8 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.notice_alert_tags",
     "lan_bitable_template_portal.planned_notice_deadlines",
     "lan_bitable_template_portal.signature_management",
+    "lan_bitable_template_portal.signature_usage_cards",
+    "lan_bitable_template_portal.feishu_card_lifetime",
     "lan_bitable_template_portal.personnel_source",
     "lan_bitable_template_portal.signature_access",
     "lan_bitable_template_portal.lighthouse_routes",
@@ -1729,6 +1731,7 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
 
 FRONTEND_PREFLIGHT_SCRIPTS = (
     "check-test-server-ports.mjs",
+    "check-workspace-palettes.mjs",
     "check-workspace-navigation.mjs", "check-login-version-switch.mjs", "check-legacy-module-entry.mjs",
     "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
     "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",
@@ -1768,6 +1771,10 @@ def _run_frontend_notice_navigation_checks(selection=None) -> None:
 
 
 def _run_packaging_preflight_tests() -> None:
+    packaging_preflight.run_with_stable_inputs(_run_packaging_preflight_tests_once, log=log)
+
+
+def _run_packaging_preflight_tests_once() -> None:
 
     test_groups = [
         [ "bin.test_notice_identity_boundaries"],
@@ -1878,7 +1885,7 @@ def _run_packaging_preflight_tests() -> None:
          "bin.test_lighthouse_knowledge_followup", "bin.test_risk_inspection_reminders", "bin.test_learning_daily_report",
          "bin.test_polling_work_order_undo", "bin.test_change_notice_rich_text"],
         [ "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest", "bin.test_logger_reentry", "bin.test_update_check_recovery", "bin.test_release_journal", "bin.test_release_journal_routes"],
-        ["bin.test_packaging_preflight_selection"],
+        ["bin.test_packaging_preflight_selection", "bin.test_signature_usage_cards", "bin.test_feishu_card_lifetime"],
     ]
 
     log("开始执行打包前自动测试。")

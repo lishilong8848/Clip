@@ -11039,7 +11039,7 @@ class LanPortalStateStore:
             raise ValueError("签名确认角色无效。")
         if not signer_record_id or not signer_open_id:
             raise ValueError("签名确认缺少人员信息。")
-        ttl_seconds = max(3600, min(int(ttl_seconds or 0), 30 * 24 * 3600))
+        ttl_seconds = max(1, min(int(ttl_seconds or 0), 7 * 24 * 3600))
         token = secrets.token_urlsafe(32)
         token_hash = self._signature_link_token_hash(token)
         confirmation_id = uuid.uuid4().hex
@@ -11049,10 +11049,6 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 conn.execute("BEGIN IMMEDIATE")
-                conn.execute(
-                    "DELETE FROM mop_signature_usage_confirmations WHERE expires_at < ? AND status != 'confirmed'",
-                    (now - 24 * 3600,),
-                )
                 conn.execute(
                     """
                     INSERT INTO mop_signature_usage_confirmations(
@@ -11092,7 +11088,7 @@ class LanPortalStateStore:
         result["payload"] = self._loads(self._text(result.get("payload_json")), {})
         return result
 
-    def get_mop_signature_usage_confirmation(self, *, token: str) -> dict[str, Any]:
+    def get_mop_signature_usage_confirmation(self, *, token: str, allow_expired: bool = False) -> dict[str, Any]:
         token_hash = self._signature_link_token_hash(token)
         if not token_hash:
             raise ValueError("签名确认链接无效。")
@@ -11110,11 +11106,13 @@ class LanPortalStateStore:
         if not row:
             raise ValueError("签名确认链接无效或已过期。")
         status = self._text(row["status"]) or "pending"
-        if status == "pending" and float(row["expires_at"] or 0) < now:
+        from .feishu_card_lifetime import expired
+        if not allow_expired and status == "pending" and expired(row['created_at'], deadline=row['expires_at'], now=now):
             raise ValueError("签名确认链接已过期。")
         return self._mop_signature_usage_result(row)
 
-    def decide_mop_signature_usage(self, *, token: str, decision: str) -> dict[str, Any]:
+    def decide_mop_signature_usage(self, *, token: str, decision: str,
+                                   expected_signer: str = '', confirmation_id: str = '') -> dict[str, Any]:
         decision_text = self._text(decision).lower()
         if decision_text in {"confirm", "confirmed", "approve", "approved", "yes", "allow"}:
             final_status = "confirmed"
@@ -11140,8 +11138,13 @@ class LanPortalStateStore:
                 if not row:
                     conn.rollback()
                     raise ValueError("签名确认链接无效或已过期。")
+                if (expected_signer and row['signer_open_id'] != expected_signer
+                        or confirmation_id and row['confirmation_id'] != confirmation_id):
+                    conn.rollback()
+                    raise ValueError('签名确认不属于当前人员或原卡片。')
                 current_status = self._text(row["status"]) or "pending"
-                if current_status == "pending" and float(row["expires_at"] or 0) < now:
+                from .feishu_card_lifetime import expired
+                if current_status == "pending" and expired(row['created_at'], deadline=row['expires_at'], now=now):
                     conn.rollback()
                     raise ValueError("签名确认链接已过期。")
                 if current_status == "pending":
@@ -11154,6 +11157,8 @@ class LanPortalStateStore:
                           AND notice_key = ?
                           AND signer_record_id = ?
                           AND requested_by_openid = ?
+                          AND signer_open_id = ?
+                          AND expires_at > ? AND created_at > ?
                         """,
                         (
                             final_status,
@@ -11162,6 +11167,7 @@ class LanPortalStateStore:
                             self._text(row["notice_key"]),
                             self._text(row["signer_record_id"]),
                             self._text(row["requested_by_openid"]),
+                            self._text(row['signer_open_id']), now, now - 7 * 24 * 3600,
                         ),
                     )
                 conn.commit()

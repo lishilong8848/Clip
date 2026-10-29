@@ -46,6 +46,9 @@ def parse_event(payload,app_id):
 
 
 def card(data,base):
+    from .feishu_card_lifetime import expired, expired_card
+    if data.get('status') == 'pending' and expired(data.get('sent_at')):
+        return expired_card(base.rstrip('/')+'/work-handover?id='+data['id'])
     plain=lambda value:{'tag':'plain_text','content':str(value)}
     rows=[i for i in data['items'] if not i.get('removed')]
     count=lambda kinds:sum(i['kind'] in kinds for i in rows)
@@ -188,6 +191,9 @@ class HandoverCards:
         row,data,current,previous=await asyncio.to_thread(read)
         if row['state']=='sent':
             return row['message_id']
+        from .feishu_card_lifetime import expired
+        if row['kind'] in {'invite', 'refresh'} and expired(data.get('sent_at')):
+            return None
         credentials=await asyncio.to_thread(current_app_credentials)
         app_id=credentials[0]
         self._check_scope(data.get('_delivery'),app_id)

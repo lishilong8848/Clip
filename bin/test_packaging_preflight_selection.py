@@ -11,6 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from types import ModuleType
 from unittest.mock import patch
 
 import packaging_preflight as preflight
@@ -58,6 +59,23 @@ class SelectionTests(unittest.TestCase):
         selection = self.select()
         self.assertTrue(selection.full)
         self.assertEqual(selection.selected, frozenset(CHECKS))
+
+    def test_loaded_release_helper_cannot_be_retested_in_old_process(self):
+        helper = 'bin/frontend_assets.py'
+        self.state['files'][helper] = 'original-helper'
+        self.baseline()
+        receipt = self.cache.read_bytes()
+        selection = self.select()
+        selection.passed(*selection.selected)
+        after = copy.deepcopy(self.state)
+        after['files'][helper] = 'edited-helper'
+        module = ModuleType('isolated_preflight_helper')
+        module.__file__ = str(self.root / helper)
+        with patch.dict(sys.modules, {'isolated_preflight_helper': module}):
+            with self.assertRaises(preflight.PreflightChanged) as caught:
+                selection.finish(after)
+        self.assertFalse(caught.exception.retryable)
+        self.assertEqual(self.cache.read_bytes(), receipt)
 
     def test_unchanged_exact_reuse_keeps_safety_and_updater_checks(self):
         self.baseline()
@@ -236,6 +254,42 @@ class SelectionTests(unittest.TestCase):
                 selection.finish(after)
         self.assertEqual(self.cache.read_bytes(), original)
 
+    def test_probe_drift_identifies_fields_without_exposing_values_or_accepting_run(self):
+        self.baseline()
+        original = self.cache.read_bytes()
+        initial = {"timezone": ["old-zone", "old-summer"], "utc_offset": -28800,
+                   "paths": ["private-import-path"], "encoding": "utf-8"}
+        before = copy.deepcopy(self.state)
+        before['environment_details'] = {'probe': preflight._digest(initial),
+            'probe_fields': {name: preflight._digest(value) for name, value in initial.items()},
+            'variables': {}, 'dependencies': {}}
+        for name, value, expected in (
+            ('timezone', ['new-zone', 'new-summer'], '系统时区名称（timezone）'),
+            ('utc_offset', 0, '系统UTC偏移（utc_offset）'),
+            ('paths', ['new-private-import-path'], 'Python导入路径（paths）'),
+            ('encoding', 'cp936', '默认文本编码（encoding）'),
+        ):
+            with self.subTest(field=name):
+                changed = {**initial, name: value}
+                after = copy.deepcopy(before); after['environment'] = 'changed'
+                after['environment_details'].update(probe=preflight._digest(changed),
+                    probe_fields={key: preflight._digest(item) for key, item in changed.items()})
+                self.assertEqual(preflight.changes(before, after), {'Python运行环境变化': [expected]})
+                selection = self.select(before); selection.passed(*selection.selected)
+                with self.assertRaisesRegex(RuntimeError, expected):
+                    selection.finish(after)
+                self.assertEqual(self.cache.read_bytes(), original)
+                report = self.cache.with_name('.preflight-changes.json').read_text(encoding='utf-8')
+                for secret in ('private-import-path', 'new-private-import-path', 'old-zone', 'new-zone'):
+                    self.assertNotIn(secret, report)
+
+    def test_probe_drift_without_field_hashes_keeps_blocking_legacy_diagnostics(self):
+        before = copy.deepcopy(self.state)
+        before['environment_details'] = {'probe': 'before'}
+        after = copy.deepcopy(before); after['environment'] = 'changed'
+        after['environment_details']['probe'] = 'after'
+        self.assertIn('原指纹未记录分项', preflight.changes(before, after)['Python运行环境变化'][0])
+
     def test_successful_layered_run_carries_only_matching_passes_forward(self):
         self.baseline()
         self.state["files"][LEARNING] = "edited"
@@ -316,7 +370,8 @@ class SelectionTests(unittest.TestCase):
         browsers = self.root / "local/ms-playwright"
         browser = browsers / "chromium_headless_shell-123/chrome-headless-shell-win64/chrome-headless-shell.exe"
         generated = (modules / ".vue-global-types/vue_99.d.ts",
-                     browsers / "b/browser@fixture", browser.with_name("debug.log"))
+                     browsers / "b/browser@fixture", browser.with_name("debug.log"),
+                     browsers / 'daemon/fixture/archive-home.err', browsers / 'daemon/fixture/archive-home.session')
         inputs = (executable, node, dependency, metadata, node_dependency, compiler, browser)
         for path in inputs + generated:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -327,6 +382,8 @@ class SelectionTests(unittest.TestCase):
                 patch.object(preflight.shutil, "which", return_value=str(node)), \
                 patch.object(preflight.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, json.dumps(info))) as run:
             before = preflight.snapshot(root, str(executable))
+            self.assertEqual(before['environment_details']['probe_fields'],
+                             {key: preflight._digest(value) for key, value in info.items()})
             self.assertEqual(before, preflight.snapshot(root, str(executable)))
             with patch.dict(os.environ, {"CODEX_TOOL_CALL_ID": "another-command"}):
                 self.assertEqual(before, preflight.snapshot(root, str(executable)))
@@ -448,7 +505,7 @@ class PackagingIntegrationTests(unittest.TestCase):
         after = copy.deepcopy(self.state)
         after["files"][LEARNING] = "edited-during-run"
         with self.assertRaisesRegex(RuntimeError, "发生变化"):
-            self.run_preflight(snapshot=[self.state, after])
+            self.run_preflight(snapshot=[self.state, after, self.state, after])
         self.assertEqual(cache.read_bytes(), original)
 
     def test_missing_cached_test_is_rejected_before_execution(self):
@@ -458,6 +515,35 @@ class PackagingIntegrationTests(unittest.TestCase):
             return False if path.name == "test_learning.py" else original(path)
         with patch.object(Path, "is_file", exists), self.assertRaisesRegex(RuntimeError, "缺少预检文件"):
             self.run_preflight()
+
+    def test_midrun_change_automatically_rechecks_stable_new_inputs(self):
+        after = copy.deepcopy(self.state)
+        after['files'][LEARNING] = 'new-source'
+        self.run_preflight(snapshot=[self.state, after, after, after])
+        receipt = json.loads((self.build / '.preflight-coverage.json').read_text())['payload']
+        self.assertEqual(receipt['files'][LEARNING], 'new-source')
+        self.assertGreater(self.executed.count('bin.test_learning'), 1)
+
+    def test_packager_or_environment_change_requires_new_process(self):
+        for kind in ('environment', 'packager'):
+            after = copy.deepcopy(self.state)
+            if kind == 'environment':
+                after['environment'] = 'changed-interpreter'
+            else:
+                after['files']['package_portable.py'] = 'new-runner'
+            with self.subTest(kind=kind), self.assertRaisesRegex(preflight.PreflightChanged, '重新运行'):
+                self.run_preflight(snapshot=[self.state, after])
+
+    def test_identical_built_assets_touch_is_not_a_source_change(self):
+        before = copy.deepcopy(self.state)
+        path = preflight.FRONTEND + 'dist/assets/example.js'
+        before['files'][path] = 'same-bytes'
+        before['stamps'][path] = [10, 20, 30]
+        after = copy.deepcopy(before)
+        after['stamps'][path] = [10, 40, 50]
+        self.assertTrue(preflight.same_inputs(before, after))
+        after['files'][path] = 'different-bytes'
+        self.assertFalse(preflight.same_inputs(before, after))
 
     def test_missing_cached_frontend_check_is_rejected(self):
         self.run_preflight()
@@ -540,7 +626,7 @@ class PackagingIntegrationTests(unittest.TestCase):
     def test_existing_test_registration_and_timing_groups_are_preserved(self):
         tree = ast.parse(Path(packaging.__file__).read_text(encoding="utf-8-sig"))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                        and node.name == "_run_packaging_preflight_tests")
+                        and node.name == "_run_packaging_preflight_tests_once")
         groups = next(node.value for node in function.body if isinstance(node, ast.Assign)
                       and any(isinstance(target, ast.Name) and target.id == "test_groups" for target in node.targets))
         groups = ast.literal_eval(groups)

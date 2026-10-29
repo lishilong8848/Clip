@@ -51,15 +51,15 @@ html.workspace-v2:not([data-v2-theme=dark]) .daily-page .category-tabs button.ac
   }
   html.workspace-v2[data-v2-palette] :is(.v2-shell,.v2-shell.is-collapsed) {
     --v2-nav-top:var(--v2-palette-header);--v2-nav-bottom:var(--v2-palette-header);
-    --v2-nav-side:var(--v2-palette-surface);--v2-nav-side-bottom:var(--v2-palette-surface);
-    --v2-nav-text:var(--v2-palette-text);--v2-nav-active:var(--v2-palette-selection);
+    --v2-nav-side:var(--v2-palette-sidebar);--v2-nav-side-bottom:var(--v2-palette-sidebar-end);
+    --v2-nav-text:var(--v2-palette-nav-text);--v2-nav-active:var(--v2-palette-nav-selected);
   }
   html.workspace-v2[data-v2-palette] .v2-header::before { display:none; }
-  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar :is(.n-menu-item-group-title,.v2-nav-heading>span,.v2-nav-heading small,.v2-nav-empty) {color:var(--v2-muted)!important;}
-  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content:hover::before {background:var(--v2-palette-soft)!important;}
+  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar :is(.n-menu-item-group-title,.v2-nav-heading>span,.v2-nav-heading small,.v2-nav-empty) {color:var(--v2-palette-nav-muted)!important;}
+  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content:hover::before {background:var(--v2-palette-nav-hover)!important;}
   html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content--selected::before {background:var(--v2-nav-active)!important;}
   html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content--selected::after {background:var(--v2-palette-accent);}
-  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content--selected :is(.n-menu-item-content-header,.n-menu-item-content__icon) {color:var(--v2-palette-text)!important;}
+  html.workspace-v2[data-v2-palette] .v2-shell>.v2-sidebar .n-menu-item-content--selected :is(.n-menu-item-content-header,.n-menu-item-content__icon) {color:var(--v2-nav-text)!important;}
 }
 @media print {
   html.workspace-v2[data-v2-theme=dark] { color-scheme:light;--v2-ink:#1d1d1f;--v2-muted:#636366;--v2-bg:#fff;--v2-border:#dedee3; }

@@ -86,6 +86,23 @@ class DeliveryStatusTests(unittest.TestCase):
         self.assertEqual([v['publish_time'] for v in result['shifts']], ['13:00', '20:00'])
         self.assertEqual(result['shifts'][0]['issues'], [])
 
+    def test_empty_employee_link_needs_no_delivery_and_rebound_uses_current_receipt(self):
+        self.roster([{'record_id':'one','name':'甲','scope':'A','shift':'白','open_id':'ou_old'},
+                     {'record_id':'two','name':'乙','scope':'B','shift':'白','open_id':'ou_two','employee_linked':False}])
+        self.notice('ou_one')
+        result=self.day()
+        self.assertEqual((result['expected'],result['sent'],result['failed']), (1,1,0))
+        self.assertEqual(result['state'],'success')
+        self.assertEqual(result['issues'], [])
+
+    def test_same_name_different_employee_records_remain_two_recipients(self):
+        self.directory['people']['two'].update(name='甲',scopes=['A'])
+        self.roster([{'record_id':rid,'name':'甲','scope':'A','shift':'白','open_id':''}
+                     for rid in ('one','two')])
+        self.notice('ou_one');self.notice('ou_two')
+        result=self.day()
+        self.assertEqual((result['expected'],result['sent'],result['state']),(2,2,'success'))
+
     def test_partial_failure_lists_roster_name_and_scope_without_raw_error(self):
         self.notice()
         self.notice('ou_two', status='pending', receipts=[{'open_id': 'ou_two', 'ok': False,

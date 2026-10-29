@@ -222,7 +222,7 @@ try {
   // --- Block 1: application link + reminder + dropdown identities / duplicates / disabled ---
   await openForm();
   const link = page.locator('.app-link');
-  assert.equal(await link.getAttribute('href'), 'https://applink.feishu.cn/T9aqNt3i8fXN');
+  assert.equal(await link.getAttribute('href'), 'https://applink.feishu.cn/T9aX3K4ZHOXl');
   assert.equal(await link.getAttribute('target'), '_blank');
   assert.equal(await link.getAttribute('rel'), 'noopener noreferrer');
   assert.match(String(await link.textContent()), /在登录前需先点击此链接并申请使用飞书应用，如已经申请就无需重复申请。/);

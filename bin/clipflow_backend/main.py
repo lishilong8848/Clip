@@ -3112,12 +3112,11 @@ class FastAPIPortalController:
                 )
                 messages = list(data.get("messages") or [])
                 results: list[dict[str, Any]] = []
+                from lan_bitable_template_portal.signature_usage_cards import send as send_usage_card
                 for item in messages:
                     open_id = str(item.get("open_id") or "")
                     ok, message, send_results = await asyncio.to_thread(
-                        _send_text_to_open_ids_guarded,
-                        str(item.get("text") or ""),
-                        [open_id],
+                        send_usage_card, item,
                     )
                     send_result = (send_results or [{}])[0] if send_results else {}
                     results.append(

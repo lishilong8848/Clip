@@ -2,7 +2,7 @@
   <a
     v-if="mode === 'login'"
     class="app-link"
-    href="https://applink.feishu.cn/T9aqNt3i8fXN"
+    href="https://applink.feishu.cn/T9aX3K4ZHOXl"
     target="_blank"
     rel="noopener noreferrer"
   >

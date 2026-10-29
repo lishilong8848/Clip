@@ -600,6 +600,7 @@ class SharingExercises:
             for person in participants:
                 aid = key(identity, person['open_id'])
                 attempt = {**person, 'id': aid, 'batch_id': identity, 'date': batch['date'], 'app_id': app_id,
+                           'card_created_at': stamp(),
                            'question_ids': sample_questions(questions, rng), 'ticket': secrets.token_urlsafe(32),
                            'answers': {}, 'correct': None, 'submitted_at': '', 'delivery_status': 'pending'}
                 attempt.update(draft_answers={}, progress_version=0)
@@ -631,6 +632,11 @@ class SharingExercises:
                     or not isinstance(value.get('ticket'), str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', value['ticket'])
                     or not hmac.compare_digest(attempt['ticket'], value['ticket']) or not allowed(attempt['open_id'])):
                 raise LearningError('仅当前仍有学练权限的参会人本人可提交，转发卡片不能代答。', 403)
+            batch = self.batch(attempt['batch_id'], conn)
+            from .feishu_card_lifetime import expired, EXPIRED_CARD_MESSAGE, expired_card
+            if expired(attempt.get('card_created_at') or batch.get('published_at'), now=now().timestamp()):
+                return {'ok': True, 'toast': EXPIRED_CARD_MESSAGE,
+                        'card': expired_card(self.learning.portal_url().rstrip('/') + '/learning?tab=sharing&batch_id=' + batch['id'])}
             if attempt['submitted_at']:
                 batch = self.batch(attempt['batch_id'], conn)
                 return {'ok': True, 'toast': '已提交，保留首次成绩；答案已安排发送。',
@@ -753,6 +759,9 @@ class SharingExercises:
 
 
 def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
+    from .feishu_card_lifetime import expired, expired_card
+    if expired(attempt.get('card_created_at') or batch.get('published_at'), now=now().timestamp()):
+        return expired_card(batch.get('learning_url') or batch.get('image_page_url') or '')
     count = len(attempt['question_ids'])
     pages = max(1, (count + 4) // 5)
     if page is None:

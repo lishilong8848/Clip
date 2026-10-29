@@ -1,1 +1,0 @@
-import{cg as t,b1 as s,b0 as i,bv as c}from"./app-v2-0BtYZIna.js";function m(){const o=t(s,null);return i(()=>{if(o===null)return c;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||c;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{m as u};

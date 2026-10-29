@@ -1,3 +1,4 @@
+import {openWorkspaceRail,selectWorkspaceAccount} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import { mkdir } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
@@ -136,13 +137,13 @@ try{
     await page.evaluate(()=>localStorage.setItem('clipflow:frontend-version:ou_default_entry','legacy'));
     await page.goto(origin+'/');
     await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
-    await page.locator('.v2-sidebar').waitFor({state:'attached'});
-    await page.getByRole('button',{name:'切换旧版',exact:true}).click();
+    if(page.viewportSize().width>760)await page.locator('.v2-sidebar').waitFor({state:'attached'});else await page.locator('.v2-mobile-nav').waitFor();
+    await selectWorkspaceAccount(page,'切换旧版');
     await page.waitForURL(url=>url.pathname==='/'&&url.searchParams.get('frontend')==='legacy');
     await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();
     await page.goto(origin+'/');
     await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
-    await page.getByRole('button',{name:'切换旧版',exact:true}).waitFor();
+    await openWorkspaceRail(page);await page.getByRole('button',{name:/^账户菜单：/}).click();await page.locator('.n-dropdown-menu').getByText('切换旧版',{exact:true}).waitFor();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
     assert.deepEqual(errors,[]);
     assert.deepEqual(writes,[],'Switching UI must not submit credentials or business requests');

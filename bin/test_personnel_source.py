@@ -91,6 +91,16 @@ class PersonnelSourceTests(unittest.TestCase):
         service._request_json.return_value = {'code':0,'data':{'items':[row('rec1')]}}
         with self.assertRaises(ValueError): source.read_records(service)
 
+    def test_empty_employee_link_is_explicit_even_with_old_text_openid(self):
+        service=SimpleNamespace(_state_store=Store())
+        today=dt.datetime.now(source.TZ).date().isoformat()
+        rows=[row('recEmpty',班组='A班',班次='白',**{'员工姓名':[],'open_id':'ou_old'}),
+              row('recNested',班组='A班',班次='白',**{'员工姓名':{'value':[]}})]
+        with patch.object(source,'read_records',return_value=rows):
+            people=source.daily_roster(service,today)['people']
+        self.assertEqual([p['employee_linked'] for p in people],[False,False])
+        self.assertEqual([p['open_id'] for p in people],['',''])
+
     def test_today_snapshot_keeps_long_day_separate_and_never_invents_past_roster(self):
         service = SimpleNamespace(_state_store=Store())
         today = dt.datetime.now(source.TZ).date()
@@ -116,6 +126,34 @@ class PersonnelSourceTests(unittest.TestCase):
         self.assertEqual(target, before)
         for altered in [row('rec_wrong', name='其他人'), row('rec_wrong', oid='ou_other')]:
             self.assertEqual(migration.match_people([old], [altered])[0], [])
+
+    def test_daily_learning_includes_only_working_operations_interns_from_job_field(self):
+        from lan_bitable_template_portal.learning_reminders import read_roster
+        service = SimpleNamespace(_state_store=Store())
+        today = dt.datetime.now(source.TZ).date().isoformat()
+        rows = [
+            row('recIntern', name='当班实习', 班组='长白', 班次={'value':['白']}, 岗位=['运维实习生'], 体系岗位=''),
+            row('recRest', name='休班实习', 班组='长白', 班次={'value':[]}, 岗位='运维实习生'),
+            row('recFoc', name='其他岗位', 班组='长白', 班次='白', 岗位='FOC', 体系岗位='实习生'),
+            row('recEngineer', name='工程师', 班组='长白', 班次='白', 岗位='电气工程师'),
+            row('recDuty', name='普通白班', 班组='A班', 班次='白'),
+            row('recNight', name='普通夜班', 班组='B班', 班次='夜'),
+            row('recLeft', name='离职实习', 班组='长白', 班次='白', 岗位='运维实习生', **{'离职/异动情况':'离职'}),
+            row('recIssue', name='楼栋待核对实习', 班组='长白', 班次='白', 岗位='运维实习生', **{'机楼/专业':[]}),
+        ]
+        with patch.object(source, 'read_records', return_value=rows) as fetch:
+            raw = source.daily_roster(service, today)
+            self.assertEqual(next(p for p in raw['people'] if p['name']=='当班实习')['duty_kind'], '长白')
+            eligible = read_roster(service, today, scopes=['B'], with_status=True)
+            self.assertEqual([p['name'] for p in eligible['people']], ['当班实习','普通白班','普通夜班'])
+            self.assertEqual([p['name'] for p in eligible['issues']], ['楼栋待核对实习'])
+            self.assertEqual(len(read_roster(service, today, scopes=['B'], include_long_day=True)), 5)
+            # Upgrade a still-fresh raw snapshot which predates the 岗位 field.
+            old = copy.deepcopy(raw); old['parser_version'] = 2
+            for person in old['people']: person.pop('position', None)
+            service._state_store.put_document(source.ROSTER_NAMESPACE, today, old)
+            self.assertEqual(read_roster(service, today, scopes=['B'])[0]['position'], '运维实习生')
+            self.assertEqual(fetch.call_count, 2)
 
     def test_migration_does_not_merge_duplicate_names_or_employee_numbers(self):
         self.assertFalse(migration.match_people([row('old')], [row('one'),row('two')])[0])

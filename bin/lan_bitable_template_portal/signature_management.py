@@ -464,6 +464,9 @@ class SignatureManagement:
                     raise SignatureManagementError("操作编号已被使用。", 409)
                 return self._public_request(prior)
             person = self.person(source, rid, refresh=True)
+            if source == 'staff' and not local and not recipient and not person.get('open_id'):
+                return {'status': 'recipient_required',
+                        'error': '员工姓名未关联唯一有效的飞书账号，未发送链接。'}
             if access:
                 access.profile = access.auth.account_profile(actor)
                 access.profiles = {actor: access.profile}

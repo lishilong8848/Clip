@@ -10,12 +10,13 @@ from pathlib import Path
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 
 
-VERSION = 2
+VERSION = 3
 FULL_BASELINE_MAX_AGE = 7 * 24 * 60 * 60
 EXACT_RECHECK_TESTS = frozenset((
     "bin.test_packaging_preflight_selection", "bin.test_transport_safety",
@@ -52,6 +53,7 @@ TEST_AREAS = (
 )
 CORE_FRONTEND = frozenset((
     "check-test-server-ports.mjs",
+    "check-workspace-palettes.mjs",
     "check-workspace-navigation.mjs", "check-login-version-switch.mjs", "check-legacy-module-entry.mjs",
     "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs",
     "check-notice-cycle-warnings.mjs", "check-account-fixed-duty.mjs",
@@ -77,6 +79,49 @@ DATA_DIRS = ("data", "bin/data", "bin/runtime", "bin/resources/knowledge_model")
 TRANSIENT_SUFFIXES = (".pyc", ".pyo", ".log", ".tmp", ".tsbuildinfo", ".db", ".sqlite",
                       ".sqlite3", ".db-wal", ".db-shm", ".sqlite-wal", ".sqlite-shm",
                       ".sqlite3-wal", ".sqlite3-shm")
+PROBE_LABELS = {
+    "version": "Python版本", "platform": "操作系统", "executable": "Python解释器路径",
+    "paths": "Python导入路径", "stdlib": "Python标准库路径", "timezone": "系统时区名称",
+    "utc_offset": "系统UTC偏移", "locale": "区域设置", "encoding": "默认文本编码",
+}
+
+
+class PreflightChanged(RuntimeError):
+    """Checks passed, but their inputs changed; never a passing receipt."""
+    def __init__(self, message, *, retryable=True):
+        super().__init__(message)
+        self.retryable = retryable
+
+
+def run_with_stable_inputs(check, *, log=print):
+    """Retry one fresh selection on drift, never on a failing check."""
+    try:
+        return check()
+    except PreflightChanged as exc:
+        if not exc.retryable:
+            raise
+        log(str(exc))
+        log("预检期间文件有更新，自动重新核对一次；仅复用已有可信基线，变化部分重新检查。请暂勿修改源码或重建前端。")
+    return check()
+
+
+def loaded_project_sources(root: str) -> set[str]:
+    """Imported release helpers keep old code until the packager is restarted."""
+    base = Path(root).resolve()
+    sources = {'package_portable.py', 'packaging_preflight.py'}
+    for module in tuple(sys.modules.values()):
+        filename = getattr(module, '__file__', None)
+        if not isinstance(filename, (str, Path)):
+            continue
+        try:
+            path = Path(filename).resolve()
+            if path.suffix == '.pyc':
+                from importlib.util import source_from_cache
+                path = Path(source_from_cache(str(path)))
+            sources.add(path.relative_to(base).as_posix())
+        except (ValueError, OSError):
+            continue
+    return sources
 
 
 def _digest(value) -> str:
@@ -179,7 +224,7 @@ def snapshot(root: Path, python: str) -> dict:
             browsers.add(Path(os.environ[variable]) / "Microsoft/Edge/Application")
     for path in sorted(browsers):
         # Playwright's live-browser registry and Chromium debug log are outputs.
-        exclude = ("b", "**/debug.log") if path in browser_caches else ()
+        exclude = ("b", "daemon", "**/debug.log") if path in browser_caches else ()
         dependencies[str(path)] = _tree(path, exclude=exclude) if path.is_dir() else None
     # Only hashes are persisted, never environment variables or private config.
     # The host's per-command trace ID does not configure Python, Node or checks.
@@ -190,8 +235,20 @@ def snapshot(root: Path, python: str) -> dict:
             "files": {name: value[0] for name, value in files.items()},
             "stamps": {name: value[1] for name, value in files.items()},
             "environment_details": {"probe": _digest(info),
+                "probe_fields": {name: _digest(value) for name, value in info.items()},
                 "variables": {name: _digest(value) for name, value in variables.items()},
                 "dependencies": dependencies}}
+
+
+def same_inputs(before: dict, after: dict | None) -> bool:
+    if after is None:
+        return False
+    # A byte-identical frontend rebuild may touch every emitted asset. Content,
+    # additions/deletions and all source/dependency stamps still remain checked.
+    def significant(state):
+        return {**state, 'stamps': {name: stamp for name, stamp in state.get('stamps', {}).items()
+                                  if not name.startswith(FRONTEND + 'dist/')}}
+    return significant(before) == significant(after)
 
 
 def changes(before: dict, after: dict | None) -> dict[str, list[str]]:
@@ -219,7 +276,13 @@ def changes(before: dict, after: dict | None) -> dict[str, list[str]]:
             add("执行环境变化", "原指纹没有环境明细，无法还原具体依赖")
         else:
             if a.get("probe") != b.get("probe"):
-                add("Python运行环境变化", "解释器、导入路径、系统或时区")
+                ap, bp = a.get("probe_fields"), b.get("probe_fields")
+                fields = sorted(name for name in set(ap) | set(bp) if ap.get(name) != bp.get(name)) \
+                    if isinstance(ap, dict) and isinstance(bp, dict) else []
+                for name in fields:
+                    add("Python运行环境变化", f"{PROBE_LABELS.get(name, '运行参数')}（{name}）")
+                if not fields:
+                    add("Python运行环境变化", "解释器、导入路径、系统或时区（原指纹未记录分项）")
             av, bv = a.get("variables", {}), b.get("variables", {})
             for name in sorted(set(av) | set(bv)):
                 if av.get(name) != bv.get(name):
@@ -336,7 +399,7 @@ class Selection:
             raise RuntimeError("预检存在未完成的检查，不能记录通过或继续打包")
         if self.state is None:
             return
-        if current != self.state:
+        if not same_inputs(self.state, current):
             details = changes(self.state, current)
             report = self.cache.with_name('.preflight-changes.json')
             try:
@@ -351,7 +414,13 @@ class Selection:
                 for kind, paths in details.items()]
             if report:
                 summary.append(f"变化明细已保存: {report}")
-            raise RuntimeError("预检执行期间源文件或环境发生变化，请重新执行；未更新通过基线\n" + '\n'.join(summary))
+            # The running packager/imported dependencies cannot hot-reload safely.
+            retryable = bool(current and current.get('environment') == self.state.get('environment')
+                and all(current['files'].get(name) == self.state['files'].get(name)
+                        for name in loaded_project_sources(self.state['root'])))
+            if not retryable:
+                summary.append('打包程序或执行环境已改变，请重新运行打包程序，不能在旧进程中继续。')
+            raise PreflightChanged("预检执行期间源文件或环境发生变化；未更新通过基线\n" + '\n'.join(summary), retryable=retryable)
         self.cache.parent.mkdir(parents=True, exist_ok=True)
         key_path = self.cache.with_suffix(".key")
         try:

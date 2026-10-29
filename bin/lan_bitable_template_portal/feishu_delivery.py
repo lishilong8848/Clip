@@ -97,6 +97,11 @@ def current_recipient_open_id(runtime, open_id, app_id, *, record_id=None):
                 or record_id is not None and str(row.get('id') or rid) != record_id):
             raise FeishuDeliveryError('接收人已停用或人员记录不一致，未发送。')
         return open_id
+    if (snapshot.get('schema') == 4 and snapshot.get('app_id') == app_id
+            and isinstance(snapshot.get('people'), dict)):
+        # A complete current directory supersedes sender/session history. This
+        # also covers a cleared employee link and an account rebound on the same row.
+        raise FeishuDeliveryError('当前人员表未关联此飞书账号，员工姓名为空或账号已更换；未向旧账号发送。')
     prefix = str(app_id) + ':'
     for row in store.list_documents('feishu_assistant_sender', key_prefix=prefix):
         value = row.get('payload') or {}

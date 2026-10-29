@@ -134,6 +134,22 @@ class FeishuDeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(rows[0]['chat_id'], 'oc_original')
         self.assertGreater(rows[0]['accepted_at'], 0)
 
+    async def test_current_employee_directory_overrides_historical_sender_after_clear_or_rebind(self):
+        from lan_bitable_template_portal.personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY
+        for ids in ([],['ou_new']):
+            self.runtime.state_store.put_document(DIRECTORY_NS,DIRECTORY_KEY,{
+                'schema':4,'app_id':TARGET_APP_ID,'people':{'recPerson':{
+                    'id':'recPerson','name':'当前人员','login_ids':ids,'selectable':True}}})
+            ok,message,_=await self.text('cleared-or-rebound-'+str(len(ids)))
+            self.assertFalse(ok)
+            self.assertIn('员工姓名为空或账号已更换',message)
+        self.post.assert_not_awaited()
+        self.token.assert_not_called()
+        ok,_,receipts=await self.text('new-account',['ou_new'])
+        self.assertTrue(ok)
+        self.assertEqual(self.post.call_args.kwargs['json']['receive_id'],'ou_new')
+        self.assertEqual(receipts[0]['open_id'],'ou_new')
+
     async def test_agent_accepts_future_qt_app_but_rejects_stale_app_or_secret(self):
         with patch.object(robot.config, 'app_id', 'cli_future'):
             ok, _, _ = await self.text('stale')

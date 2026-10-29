@@ -338,11 +338,14 @@ class SharingRuntime:
                         raise LearningError('飞书应用已更换，旧批次不能跨应用发送；请核对原应用设置。', 409)
                     if not await asyncio.to_thread(self.allowed, attempt['open_id']):
                         raise LearningError('参会账号已停用或无学练权限，未发送。', 403)
+                    batch = {**batch, 'learning_url': core.learning.portal_url().rstrip('/') + '/learning?tab=sharing&batch_id=' + batch['id']}
                     if batch.get('image_page_url'):
                         url = core.learning.portal_url()
                         if url:
                             batch = {**batch, 'image_page_url': url.rstrip('/') + '/learning?tab=sharing&batch_id=' + batch['id']}
-                    batch = await self.prepare_card_images(batch, attempt, bot)
+                    from .feishu_card_lifetime import expired
+                    if not expired(attempt.get('card_created_at') or batch.get('published_at'), now=now().timestamp()):
+                        batch = await self.prepare_card_images(batch, attempt, bot)
                     if batch['app_id'] != bot.config['app_id'] or not await asyncio.to_thread(self.allowed, attempt['open_id']):
                         raise LearningError('准备题图期间应用或账号权限已变化，未发送。', 403)
                     card = exercise_card(batch, attempt, reminder=job['kind'] == 'reminder', result=job['kind'] == 'result')

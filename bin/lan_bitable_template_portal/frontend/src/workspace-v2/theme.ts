@@ -33,8 +33,13 @@ export function paletteColors(id:string,dark:boolean,custom=DEFAULT_NAV_COLOR) {
   for(let i=0;i<24&&Math.min(...[base.bg,base.surface,soft].map(bg=>contrast(accentText,bg)))<4.5;i++)accentText=mix(accentText,dark?'#ffffff':'#000000',.1);
   const hover=id==='vermilion'?'#f97243':mix(base.accent,onColor(base.accent)==='#000000'?'#ffffff':'#000000',.08);
   const pressed=id==='vermilion'?'#fa932c':mix(base.accent,onColor(base.accent)==='#000000'?'#ffffff':'#000000',.16);
+  let header=mix(base.accent,'#10151f',dark?.67:.30);
+  for(let i=0;i<24&&contrast(header,'#f4f8ff')<5;i++)header=mix(header,'#10151f',.1);
+  const sidebar=mix(base.surface,base.accent,dark?.20:.27),sidebarEnd=mix(base.surface,base.accent,dark?.12:.17);
+  const navSelected=mix(base.surface,base.accent,dark?.32:.42),navHover=mix(base.surface,base.accent,dark?.26:.34);
+  const readable=(initial:string)=>{let text=initial;for(let i=0;i<24&&Math.min(...[sidebar,sidebarEnd,navSelected,navHover].map(bg=>contrast(text,bg)))<4.5;i++)text=mix(text,dark?'#ffffff':'#000000',.1);return text;};
   return {...base,soft,accentText,hover,pressed,onAccent:onColor(base.accent),onAccentText:onColor(accentText),
-    header:mix(dark?base.bg:'#151719',base.accent,id==='gold'?0:.07),
+    header,sidebar,sidebarEnd,navSelected,navHover,navText:readable(base.text),navMuted:readable(base.muted),
     selection:mix(base.surface,id==='vermilion'?'#fcb833':base.accent,dark?.16:.09)};
 }
 export const activeColors = computed(()=>paletteColors(paletteId.value,nightMode.value,customNavColor.value));

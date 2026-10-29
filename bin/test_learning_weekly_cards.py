@@ -39,6 +39,20 @@ class WeeklyCardsTests(unittest.TestCase):
     def apply(self, event):
         return self.feature.apply(event, 'cli_fixture', {'open_id': 'ou_reviewer', 'name': '审阅人'})
 
+    def test_expired_weekly_card_stops_callback_without_removing_report(self):
+        with patch('time.time', return_value=self.ticket['created_at'] + 7 * 86400):
+            result = self.apply(self.event())
+            self.assertIn('7天', result['toast'])
+            self.assertNotIn('callback', json.dumps(result['card']))
+        self.assertEqual(self.service._get('engagement', self.ticket['id'])['report'], self.ticket['report'])
+
+    def test_legacy_weekly_card_uses_original_period_not_restart_time(self):
+        self.ticket.pop('created_at')
+        with self.service.transaction() as conn:
+            self.service._put('engagement', self.ticket['id'], self.ticket, conn)
+        with patch('time.time', return_value=1900000000):
+            self.assertIn('7天', self.apply(self.event())['toast'])
+
     def test_overview_has_building_buttons_and_no_error_rate_or_attempt_counts(self):
         card = render(self.ticket, 'http://fixture')
         text = json.dumps(card, ensure_ascii=False)

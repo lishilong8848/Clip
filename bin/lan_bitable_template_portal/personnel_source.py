@@ -14,6 +14,7 @@ URL = f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}'
 EXTERNAL_APP_TOKEN = 'HU38bc1vnamMK9sCeOgclUvXnFc'
 EXTERNAL_TABLE_ID = 'tblC77nllNrprHBY'
 ROSTER_NAMESPACE = 'personnel_daily_roster'
+ROSTER_PARSER_VERSION = 4
 TZ = dt.timezone(dt.timedelta(hours=8))
 ROSTER_FIELDS = ['姓名', '员工姓名', '员工工号', '机楼/专业', '体系岗位', '岗位',
                  '账号性质', '离职/异动情况', '班组', '班次']
@@ -128,7 +129,7 @@ def daily_roster(service, day, *, force=False):
             if valid:
                 return copy.deepcopy(cached)
             raise ValueError('员工信息池的班次仅表示今天；所选日期尚无已保存排班快照，不能套用今天的名单。')
-        if valid and cached.get('parser_version') == 2 and not force and 0 <= time.time() - cached.get('observed_at', 0) < 60:
+        if valid and cached.get('parser_version') == ROSTER_PARSER_VERSION and not force and 0 <= time.time() - cached.get('observed_at', 0) < 60:
             return copy.deepcopy(cached)
         rows = read_records(service)
         people, issues = [], []
@@ -144,18 +145,23 @@ def daily_roster(service, day, *, force=False):
             if kind == '待核对' or not name or len(scopes) != 1:
                 reason = '班组或班次待核对' if kind == '待核对' else '姓名缺失' if not name else '归属楼栋待核对'
                 issues.append({'record_id': row['record_id'], 'name': name, 'scope': scopes[0] if len(scopes) == 1 else '',
-                               'duty_kind': kind, 'group': text(fields.get('班组')), 'reason': reason})
+                               'duty_kind': kind, 'group': text(fields.get('班组')), 'reason': reason,
+                               'position': text(fields.get('岗位'))})
                 continue
             user = MaintenancePortalService._signature_user_info(fields.get('员工姓名'))
             oid = user.get('open_id', '')
+            employee = fields.get('员工姓名')
+            if isinstance(employee, dict) and 'value' in employee:
+                employee = employee['value']
             people.append({'record_id': row['record_id'], 'name': name, 'employee_no': text(fields.get('员工工号')),
                 'open_id': oid if re.fullmatch(r'ou_[A-Za-z0-9]+', oid) else '',
+                'employee_linked': bool(employee),
                 'scope': scopes[0], 'shift': '白' if kind == '长白' else kind,
-                'group': text(fields.get('班组')), 'duty_kind': kind})
+                'group': text(fields.get('班组')), 'duty_kind': kind, 'position': text(fields.get('岗位'))})
         # Do not label yesterday's lookup result as today's after a midnight page read.
         if dt.datetime.now(TZ).date().isoformat() != day:
             raise ValueError('人员排班读取跨越零点，请重新读取。')
-        result = {'date': day, 'source': TABLE_ID, 'app_id': config.app_id, 'complete': True, 'parser_version': 2,
+        result = {'date': day, 'source': TABLE_ID, 'app_id': config.app_id, 'complete': True, 'parser_version': ROSTER_PARSER_VERSION,
                   'observed_at': time.time(), 'people': people, 'issues': issues}
         service._state_store.put_document(ROSTER_NAMESPACE, day, result)
         return copy.deepcopy(result)

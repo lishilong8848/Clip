@@ -1,0 +1,33 @@
+/* The expanded navigation floats over the workspace; content never resizes. */
+html.workspace-v2 .v2-shell.has-rail:not(.is-print){--head-height:0px;--nav-width:72px}
+html.workspace-v2 .v2-shell.has-rail>.v2-sidebar.v2-rail{position:fixed;inset:0 auto 0 0;width:72px;height:100dvh;border-radius:20px;display:flex;flex-direction:column;overflow:hidden;z-index:80;border-right:1px solid var(--v2-border);transition:width 220ms ease-out,box-shadow 220ms ease-out;background:linear-gradient(165deg,var(--v2-nav-side),var(--v2-nav-side-bottom))}
+html.workspace-v2 .v2-shell.has-rail>.v2-rail[data-collapsed=false]{width:240px;box-shadow:8px 0 24px #10202e26}
+.v2-rail-brand{height:72px;display:flex;align-items:center;gap:8px;padding:12px;flex:none;overflow:hidden}
+.v2-rail-brand>button:first-child{border:0;background:transparent;display:flex;align-items:center;gap:12px;padding:0;cursor:pointer;color:var(--v2-nav-text)}
+.v2-rail-brand img{width:48px;height:auto;flex:none}.v2-rail-brand strong{font-size:21px;white-space:nowrap;width:100px;text-align:left}
+.v2-rail-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--v2-palette-border) transparent}
+.v2-rail-scroll>.n-menu{margin:0 0 12px}.v2-rail .n-menu-item-content{margin-inline:8px;min-height:42px;border-radius:7px}
+.v2-rail .n-menu-item-content-header{min-width:0}.v2-rail .n-menu-item-content__icon{flex:none}
+.v2-rail[data-collapsed=false] .n-menu-item-content-header{display:inline!important}
+.v2-rail[data-collapsed=false] .n-menu-item-group-title{display:block!important}
+.v2-rail .n-menu-item-group-title{height:32px;line-height:32px;font-size:11px;padding-inline:20px!important;overflow:hidden;white-space:nowrap}
+.v2-rail-footer{flex:none;padding:10px 12px max(10px,env(safe-area-inset-bottom));border-top:1px solid color-mix(in srgb,var(--v2-nav-text) 18%,transparent);overflow:hidden}
+.v2-rail-footer .v2-rail-user.n-button{width:100%;height:44px;padding:0 12px;justify-content:flex-start}
+.v2-rail-user .n-button__content{display:flex;gap:12px;justify-content:flex-start;width:100%;min-width:0}.v2-rail-user svg{flex:none}.v2-rail-user span.v2-rail-label{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;text-align:left}
+.v2-rail-appearance{display:flex;align-items:center;gap:12px;white-space:nowrap;font-size:12px;color:var(--v2-palette-nav-muted)}.v2-rail-appearance .v2-theme-toggle.n-button{width:44px;height:44px}
+.v2-rail .v2-rail-label,.v2-rail .n-menu-item-content-header,.v2-rail .n-menu-item-content__arrow{opacity:1;transition:opacity 150ms ease-out 80ms}
+.v2-rail[data-collapsed=true] :is(.v2-rail-label,.n-menu-item-content-header,.n-menu-item-content__arrow){opacity:0;pointer-events:none;transition-delay:0ms}
+.v2-rail[data-collapsed=true] .n-menu-item-group-title{height:8px;line-height:0;font-size:0;padding:0!important}
+.v2-rail[data-collapsed=true] .n-menu-item-content{padding-left:16px!important;padding-right:0!important}
+.v2-rail[data-collapsed=true] .v2-rail-user.n-button{padding-inline:12px}
+.v2-rail :focus-visible{outline:2px solid var(--v2-nav-text);outline-offset:-2px}
+@media(min-width:761px){html.workspace-v2 .v2-shell.has-rail{grid-template:0 minmax(0,1fr)/72px minmax(0,1fr);transition:none}html.workspace-v2 .v2-shell.has-rail.has-impersonation{grid-template-rows:0 auto minmax(0,1fr)}html.workspace-v2 .v2-shell.has-rail.has-impersonation>.impersonation-banner{grid-area:2/2}}
+@media(max-width:760px),(hover:none) and (max-width:1024px){
+ html.workspace-v2 .v2-shell.is-mobile-workspace{--head-height:0px;--nav-width:0px;--v2-content-sticky-top:0px;padding-top:0;display:block;height:auto;overflow-x:clip}
+ html.workspace-v2 .v2-shell.is-mobile-workspace>.v2-main{margin-left:0;padding-top:10px}
+ .v2-mobile-profile-tools{display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}
+ .v2-mobile-profile-tools .n-button{width:44px;height:44px}
+ .v2-profile-name{flex:1;min-width:0}
+}
+@media(prefers-reduced-motion:reduce){html.workspace-v2 .v2-shell.has-rail>.v2-rail,.v2-rail .v2-rail-label,.v2-rail .n-menu-item-content-header,.v2-rail .n-menu-item-content__arrow{transition:none}}
+@media print{.v2-rail{display:none!important}}

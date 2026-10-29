@@ -1,5 +1,6 @@
 """Isolated permission approval tests. No real messages, grants or directory writes."""
 import asyncio
+import json
 import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -44,6 +45,18 @@ class PermissionReviewTests(levels.AccountLevelTests):
         private = self.cards.request(data["request_id"])
         return {"union_id": "on_Review", "reply_to_message_id": "om_Approval", "review": {
             "request_id": data["request_id"], "token": private["review_card_token"], "action": action, "reason": reason}}
+
+    def test_seven_day_card_limit_stops_notify_and_approval_keeps_web_request(self):
+        data = self.application()
+        private = self.cards.request(data['request_id'])
+        future = private['created_at_ts'] + 7 * 86400
+        with patch('time.time', return_value=future):
+            asyncio.run(self.cards.notify(data['request_id']))
+            self.assertEqual(self.cards.request(data['request_id'])['notification_status'], 'expired')
+            with self.assertRaisesRegex(Exception, '7天'):
+                asyncio.run(self.cards.handle(self.message(data)))
+            self.assertNotIn('form_action_type', json.dumps(card(private)))
+        self.assertEqual(self.cards.request(data['request_id'])['status'], 'pending')
 
     def test_selected_approver_validation_and_token_redaction(self):
         with self.assertRaises(PortalError):

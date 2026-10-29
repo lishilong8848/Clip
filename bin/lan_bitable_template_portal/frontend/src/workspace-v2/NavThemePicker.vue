@@ -1,5 +1,5 @@
 <template>
-  <NPopover trigger="click" placement="bottom-end" :show-arrow="false" :width="304" style="max-width:calc(100vw - 24px)">
+  <NPopover trigger="click" placement="right-end" :show="panelOpen" :show-arrow="false" :width="304" style="max-width:calc(100vw - 24px)" @update:show="setOpen">
     <template #trigger><NButton data-v2-navigation quaternary circle class="v2-theme-toggle" title="主题配色" aria-label="导航配色"><Palette :size="18" /></NButton></template>
     <section class="v2-theme-picker" aria-label="导航配色设置" data-v2-navigation>
       <strong>主题配色</strong>
@@ -20,9 +20,12 @@ import {computed,ref,watch} from 'vue';
 import {NButton,NColorPicker,NPopover,NSwitch} from 'naive-ui';
 import {Check,Palette,Moon,Sun} from 'lucide-vue-next';
 import {PALETTES,paletteId,activeColors,nightMode,saveNightMode,validColor,applyPalette,loadPalette,savePalette} from './theme';
-const props=defineProps<{userId:string}>();
-const emit=defineEmits<{change:[color:string]}>();
+const props=defineProps<{userId:string;closeSignal?:number}>();
+const emit=defineEmits<{change:[color:string];open:[value:boolean]}>();
 const color=computed(()=>activeColors.value.accent),storageError=ref(false);
+const panelOpen=ref(false);
+function setOpen(value:boolean){panelOpen.value=value;emit('open',value);}
+watch(()=>props.closeSignal,()=>setOpen(false));
 function preview(value:string|null){if(validColor(value))applyPalette('custom',value);}
 function choose(value:string|null){if(validColor(value))storageError.value=!savePalette(props.userId,'custom',value.toLowerCase());}
 function choosePreset(id:string){storageError.value=!savePalette(props.userId,id);}

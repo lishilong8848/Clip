@@ -66,6 +66,22 @@ class SharingTests(unittest.TestCase):
         return self.core.submit({'attempt_id': attempt['id'], 'ticket': attempt['ticket']}, kwargs.get('fields', fields),
             {'union_id': kwargs.get('uid', attempt['union_id'])}, kwargs.get('app_id', 'cli_bot'), kwargs.get('allowed', lambda oid: True))
 
+    def test_expired_card_preserves_answers_and_web_can_still_submit(self):
+        self.publish()
+        attempt = self.core.attempts(self.bid)[0]
+        batch = self.core.batch(self.bid)
+        qs = {q['id']: q for q in batch['questions']}
+        answers = {qid: '现场操作说明' if qs[qid]['type'] == 'interview' else [str(i) for i in qs[qid]['correct']] for qid in attempt['question_ids']}
+        with patch.object(sharing, 'now', return_value=TODAY + dt.timedelta(days=7)):
+            result = self.submit(attempt)
+            self.assertIn('7天', result['toast'])
+            self.assertFalse(self.learning._get('sharing_attempt', attempt['id'])['submitted_at'])
+            self.assertNotIn('callback', json.dumps(sharing.exercise_card(batch, attempt)))
+            actor = {'id': attempt['open_id']}
+            self.core.answer(self.bid, {'answers': answers, 'page': 0, 'target_page': 0, 'version': 0,
+                'operation_id': 'web-after-card-expiry', 'submit': True}, actor, lambda _: True)
+        self.assertTrue(self.learning._get('sharing_attempt', attempt['id'])['submitted_at'])
+
     def test_create_idempotency_and_admin_gate(self):
         self.assertEqual(self.core.create(URL, 'operation-fixture-01', ADMIN, ['single', 'multiple'])['id'], self.bid)
         with self.assertRaises(LearningError): self.core.create(URL, 'operation-fixture-01', {'id': 'ou_person0'})

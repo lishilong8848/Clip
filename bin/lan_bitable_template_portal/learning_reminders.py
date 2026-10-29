@@ -10,6 +10,7 @@ VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
 ROSTER_VERSION = 6
+ROSTER_POLICY_VERSION = 2
 APP_ACCESS_URL = 'https://applink.feishu.cn/T9aTCORtUJLb'
 
 
@@ -44,13 +45,20 @@ def duty_recipients(service):
     return targets
 
 
+def excluded_long_day(person):
+    # 岗位 is the source of this daily-learning exception; 体系岗位=实习生
+    # includes other jobs (e.g. FOC) and must not broaden the recipient set.
+    return (person.get('duty_kind') == '长白' or person.get('group') == '长白'
+            or person.get('shift') == '长白') and person.get('position') != '运维实习生'
+
+
 def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False, with_status=False):
     from .personnel_source import daily_roster
     snapshot = daily_roster(service, day)
     people = [dict(person) for person in snapshot['people'] if person['scope'] in scopes
-              and (include_long_day or person.get('duty_kind') != '长白')]
+              and (include_long_day or not excluded_long_day(person))]
     issues = [dict(issue) for issue in snapshot.get('issues', []) if (not issue.get('scope') or issue['scope'] in scopes)
-              and (include_long_day or issue.get('group') != '长白')]
+              and (include_long_day or not excluded_long_day(issue))]
     return {'people': people, 'issues': issues} if with_status else people
 
 
@@ -67,17 +75,31 @@ def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
         names[str(row.get('name') or '').strip()].append(row)
     resolved, warnings = {}, []
     for person in people:
-        candidates = names[person['name']]
-        linked = [row for row in candidates if person['open_id'] and person['open_id'] in (row.get('login_ids') or [])]
-        candidates = [row for row in linked or candidates
-                      if _hr_active(row) and person['scope'] in allowed_scopes
+        if person.get('employee_linked') is False:
+            continue
+        record_id = person.get('record_id')
+        if record_id:
+            candidates = [row for rid, row in directory.items()
+                          if rid == record_id or row.get('id') == record_id]
+            # An explicitly cleared employee link is not a reason to try a
+            # namesake or a historical account. The learner record stays intact.
+            if len(candidates) == 1 and not candidates[0].get('login_ids'):
+                continue
+        else:
+            candidates = names[person['name']]
+            linked = [row for row in candidates if person['open_id'] and person['open_id'] in (row.get('login_ids') or [])]
+            candidates = linked or candidates
+        candidates = [row for row in candidates
+                      if str(row.get('name') or '').strip() == person['name']
+                      and _hr_active(row) and person['scope'] in allowed_scopes
                       and list(dict.fromkeys(s for s in row.get('scopes') or [] if s)) == [person['scope']]]
         ids = []
         if len(candidates) == 1:
             ids = [oid for oid in candidates[0].get('login_ids') or []
                    if isinstance(oid, str) and re.fullmatch(r'ou_[A-Za-z0-9]+', oid)
                    and owners[oid] == 1 and oid not in shared]
-        open_id = person['open_id'] if person['open_id'] in ids else ids[0] if len(ids) == 1 else ''
+        open_id = (ids[0] if len(ids) == 1 else '') if record_id else (
+            person['open_id'] if person['open_id'] in ids else ids[0] if len(ids) == 1 else '')
         if not open_id:
             warnings.append(f"{person['scope']}楼{person['shift']}班 {person['name']}：未找到唯一的在岗人员飞书身份")
             continue
@@ -93,9 +115,11 @@ def roster_snapshot(service, day):
             and snapshot.get('version') in {3, 4, 5, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
         return snapshot
     if (snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION
+            or snapshot.get('policy_version') != ROSTER_POLICY_VERSION
             or time.time() - float(snapshot.get('observed_at') or 0) >= 300):
         retry = service._get('local', 'shift_roster_retry:' + day) or service._get('local', 'shift_roster_retry') or {}
         if (snapshot.get('version') in (None, ROSTER_VERSION)
+                and retry.get('policy_version') == ROSTER_POLICY_VERSION
                 and retry.get('date') == day and retry.get('retry_at', 0) > time.time()):
             return
         try:
@@ -106,11 +130,13 @@ def roster_snapshot(service, day):
                 raise ValueError('invalid roster snapshot')
         except Exception:
             with service.transaction() as conn:
-                service._put('local', 'shift_roster_retry', {'date': day, 'retry_at': time.time() + 300}, conn, False)
-                service._put('local', 'shift_roster_retry:' + day, {'date': day, 'retry_at': time.time() + 300}, conn, False)
+                retry = {'date': day, 'retry_at': time.time() + 300, 'policy_version': ROSTER_POLICY_VERSION}
+                service._put('local', 'shift_roster_retry', retry, conn, False)
+                service._put('local', 'shift_roster_retry:' + day, retry, conn, False)
             service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
             return
-        snapshot = {'date': day, 'people': people, 'issues': issues, 'version': ROSTER_VERSION, 'observed_at': time.time()}
+        snapshot = {'date': day, 'people': people, 'issues': issues, 'version': ROSTER_VERSION,
+                    'policy_version': ROSTER_POLICY_VERSION, 'observed_at': time.time()}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
             service._put('local', 'shift_roster:' + day, snapshot, conn, False)
@@ -149,6 +175,7 @@ def shift_learners(service, day, shift):
 
 def enqueue_shift_reminders(service, current):
     from .learning_personal import _login_directory
+    from .pre_shift_checks import windows
 
     times = shift_times(service.settings())
     if not service._shift_roster_reader or current.strftime('%H:%M') < min(times.values()):
@@ -173,12 +200,16 @@ def enqueue_shift_reminders(service, current):
         for person in people:
             if current.strftime('%H:%M') < times[person['shift']]:
                 continue
+            expires_at = windows(day, person['shift'])[1].timestamp() if person.get('duty_kind') == '长白' else None
+            if expires_at is not None and current.timestamp() >= expires_at:
+                continue
             key = f"shift:{day}:{person['shift']}:{person['open_id']}"
             existing = service._get('notification', key, conn)
             if existing and existing.get('status') not in {'skipped_role', 'skipped_roster'}:
                 continue
             service._put('notification', key, {'id': key, 'kind': 'shift', 'scope': '', 'date': day,
                 'open_id': person['open_id'], 'shift': person['shift'], 'status': 'pending',
+                **({'expires_at': expires_at} if expires_at is not None else {}),
                 'message': f"【画像学练】{day} {person['shift']}班\n请登录本人的灯塔账号，进入今日学练完成答题。"}, conn)
     return {(person['shift'], person['open_id']) for person in people}
 

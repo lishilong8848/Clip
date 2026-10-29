@@ -20,6 +20,7 @@ import './header.css';
 import './account.css';
 import './scrollbars.css';
 import './night.css';
+import './rail.css';
 import './surfaces.css';
 import { installFeedbackMotion } from './feedbackMotion';
 import { installActionMotion } from './actionMotion';

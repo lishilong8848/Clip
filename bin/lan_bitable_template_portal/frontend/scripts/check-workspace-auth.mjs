@@ -1,3 +1,4 @@
+import {openWorkspaceRail,selectWorkspaceAccount,selectWorkspaceSetting} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
@@ -58,10 +59,10 @@ try{
   await page.getByRole('button',{name:'切换新版',exact:true}).click();await page.getByRole('button',{name:'放弃填写并切换',exact:true}).click();await page.waitForURL(url=>url.pathname===entry);
   assert.equal(await page.locator('#personnel-password').inputValue(),'');
   await page.setViewportSize({width:390,height:844});await page.screenshot({path:path.join(output,'login-validation-mobile.png'),fullPage:true});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
-  loggedIn=true;await page.goto(origin+entry+'?account=password');await page.locator('#personnel-current-password').fill('oldFixture');await page.locator('#personnel-change-new-password').fill('newFixture123');await page.locator('#personnel-change-confirm-password').fill('newFixture123');
-  await version.click();await page.getByRole('button',{name:'继续填写',exact:true}).click();
-  await submit().click();await page.waitForFunction(()=>[...document.querySelectorAll('.v2-header-actions button')].find(el=>el.textContent.trim()==='切换旧版')?.disabled);assert.equal(await version.isDisabled(),true);assert(writes.includes('/api/auth/password/change'));
-  await answerFailure();await page.waitForFunction(()=>{const el=document.querySelector('#personnel-current-password');return document.activeElement===el&&el.selectionEnd-el.selectionStart===10;});
+  loggedIn=true;await page.setViewportSize({width:1440,height:900});await page.goto(origin+entry+'?account=password');await page.locator('#personnel-current-password').fill('oldFixture');await page.locator('#personnel-change-new-password').fill('newFixture123');await page.locator('#personnel-change-confirm-password').fill('newFixture123');
+  await selectWorkspaceAccount(page,'切换旧版');await page.getByRole('button',{name:'继续填写',exact:true}).click();
+  await page.mouse.move(800,300);await page.waitForTimeout(250);await submit().click();await openWorkspaceRail(page);await page.getByRole('button',{name:/^账户菜单：/}).click();assert.equal(await page.locator('.n-dropdown-menu').getByRole('menuitem',{name:'切换旧版',exact:true}).getAttribute('aria-disabled'),'true');await page.keyboard.press('Escape');assert(writes.includes('/api/auth/password/change'));
+  await answerFailure();await page.waitForFunction(()=>!document.querySelector('.pp-login-form button[type=submit]')?.disabled);assert.equal(await page.locator('#personnel-current-password').inputValue(),'oldFixture','changing account-menu focus never discards the password form');
   assert.deepEqual(await page.evaluate(()=>window.invalidMotion||[]),[],'password forms never use three-stage motion');
   assert.deepEqual(errors,[]);
   console.log('PASS: real login validation, no false success, busy/dirty version guards in both versions, password focus and user override, centered desktop/mobile, change-password guard; isolated responses only.');
