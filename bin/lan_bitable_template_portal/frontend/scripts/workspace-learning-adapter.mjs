@@ -18,16 +18,16 @@ const has = name => node => classes(node).includes(name);
 export function adaptLearningPage(source) {
   let code = source.replaceAll('\r\n', '\n');
   code = code.replace('<section class="learning-page"','<section class="learning-page" :data-v2-learning-tab="tab"');
-  code = replaceNode(code, has('page-head'), `<header class="page-head v2-learning-head">
+  code = replaceNode(code, has('page-head'), `<header v-if="!isLearningHub || canViewBuildings || isAdmin" class="page-head v2-learning-head">
     <div class="v2-learning-identity-tabs" data-v2-navigation>
       <VnetBackButton :to="undefined" :disabled="busy" @click="handleBack" />
       <strong v-if="ready">{{learner?learner.name:scopeLabel+'学习汇总'}}</strong>
-      <NRadioGroup v-if="ready && canViewBuildings && boot.can_answer" :value="viewMode" size="small" aria-label="答题与画像" :disabled="busy" @update:value="value => value === 'practice' ? goPractice() : goOverview()"><NRadioButton value="practice">我的答题</NRadioButton><NRadioButton value="overview">楼栋画像</NRadioButton></NRadioGroup>
+      <NRadioGroup v-if="ready && canViewBuildings && boot.can_answer" :value="viewMode" size="small" aria-label="答题与画像" :disabled="busy" @update:value="value => value === 'practice' ? goPractice() : goOverview()"><NRadioButton value="practice">个人学习</NRadioButton><NRadioButton value="overview">学习管理</NRadioButton></NRadioGroup>
       <NButton v-if="ready && viewMode==='overview' && canViewBuildings" size="small" text :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
     </div>
     <div class="actions" data-v2-navigation>
       <span v-if="ready && isAdmin" class="sync-label" :class="{danger: !!boot.sync?.error, pending: !!boot.sync?.pending}"><Loader2 v-if="syncActive" :size="15" class="spin" />{{syncLabel}}<template v-if="boot.sync?.pending"> · {{boot.sync.pending}} 项待同步</template></span>
-      <NDropdown v-if="ready && v2AuxOptions.length" :options="v2AuxOptions" @select="v2OpenSection"><NButton secondary size="small" :disabled="busy">{{ v2AuxTitle }}<ChevronDown :size="14" /></NButton></NDropdown>
+      <NDropdown v-if="ready && !isLearningHub && v2AuxOptions.length" :options="v2AuxOptions" @select="v2OpenSection"><NButton secondary size="small" :disabled="busy">{{ v2AuxTitle }}<ChevronDown :size="14" /></NButton></NDropdown>
       <span :data-v2-layout-tools="tab==='profile'?'learning-profile':'learning-practice'" class="v2-toolbar-end"></span>
     </div>
   </header>`);
@@ -36,29 +36,28 @@ export function adaptLearningPage(source) {
     <NSelect v-else :value="scope" :options="overviewScopes" aria-label="学练楼栋" :disabled="busy" @update:value="v2Building" />
   </div>`);
   code = replaceNode(code, has('learner-strip'), '');
-  code = replaceNode(code, has('tabs'), `<nav v-if="ready && tab !== 'sharing'" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
+  code = replaceNode(code, has('tabs'), `<nav v-if="ready && !isLearningHub" class="tabs v2-learning-tabs" aria-label="学练页面" data-v2-navigation><NButton v-for="item in v2PrimaryTabs" :key="item.id" :type="tab===item.id?'primary':'default'" :quaternary="tab!==item.id" :aria-current="tab===item.id?'page':undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="16" />{{item.label}}</NButton></nav>`);
   code = replaceNode(code, node => node.tag === 'div' && has('toolbar')(node) && node.loc.source.includes('studyMode'), `<div class="toolbar v2-learning-studybar" data-v2-navigation>
     <div v-if="reading && tab!=='today'" class="actions"><NButton v-if="completionReturn" secondary :disabled="busy" @click="returnToCompletion"><ChevronLeft :size="16" />返回每日完成</NButton><NButton v-else secondary :disabled="busy" @click="saveDraft(); reading=false; loadView()"><ChevronLeft :size="16" />返回{{tab==='review'?'复习列表':'学习历史'}}</NButton><span>{{paper?.date}} · {{paper?.scope}}楼</span></div>
     <template v-else>
       <NRadioGroup v-if="viewMode==='practice' && boot.can_answer" :value="studyMode" size="small" aria-label="学练方式" :disabled="busy || loading" @update:value="value => switchStudyMode(value as 'daily'|'practice')"><NRadioButton value="daily">每日题单</NRadioButton><NRadioButton value="practice">自主练习</NRadioButton></NRadioGroup>
       <span class="v2-learning-progress-label">{{date}}<template v-if="paper"> · 已答 {{answered}} / {{validCount}} 题</template></span>
       <div v-if="viewMode==='practice' && boot.can_answer" class="actions">
-        <NButton v-if="studyMode==='daily'" class="v2-learning-daily-action" :class="{'has-paper':!!paper}" type="primary" :loading="busy || loading" :disabled="busy || loading" @click="v2Resume('daily')">{{paper ? paper.status==='completed'?'查看今日题单':'继续今日答题':'开始今日答题'}}</NButton>
-        <template v-else><NButton v-if="paper && paper.status!=='completed'" secondary :disabled="busy || loading" @click="v2Resume('practice')">继续本次练习</NButton><NButton type="primary" :loading="busy" :disabled="busy || loading" @click="v2NewPractice">新练习15题</NButton></template>
+        <NButton v-if="studyMode==='daily' && !paper?.questions?.length" class="v2-learning-daily-action" type="primary" :loading="busy || loading" :disabled="busy || loading" @click="v2Resume('daily')">开始今日答题</NButton>
+        <NButton v-if="studyMode==='practice'" type="primary" :loading="busy" :disabled="busy || loading" @click="v2NewPractice">新练习15题</NButton>
       </div>
     </template>
   </div>
   <section v-if="tab==='today' && v2Completed && !v2CompletionHidden && !loading" class="v2-learning-completion" aria-label="题单完成结果">
     <CheckCircle2 :size="27" /><div><strong>{{studyMode==='practice'?'本次练习已完成':'今日题单已完成'}}</strong><p>已答 {{answered}} 题 · 首次选择题正确 {{v2PaperStats.correct}} / {{v2PaperStats.choices}}<template v-if="v2PaperStats.interviews"> · 问答 {{v2PaperStats.interviews}} 题</template></p></div>
-    <div class="actions" data-v2-navigation><NButton size="small" secondary @click="switchTab('review')">查看错题</NButton><NButton size="small" secondary @click="switchTab('profile')">我的画像</NButton><NButton size="small" type="primary" :disabled="busy" @click="v2NewPractice">新练习15题</NButton><NButton quaternary circle aria-label="收起完成结果" @click="v2CompletionHidden=true"><X :size="17" /></NButton></div>
+    <div class="actions" data-v2-navigation><NButton size="small" secondary @click="switchTab('review')">查看错题</NButton><NButton quaternary circle aria-label="收起完成结果" @click="v2CompletionHidden=true"><X :size="17" /></NButton></div>
   </section>`);
   code = replaceNode(code, has('question-rail'), old => `<details class="question-rail v2-learning-rail" :open="!v2Mobile || v2AnswerCard"><summary data-v2-navigation @click.prevent="v2AnswerCard=!v2AnswerCard"><span>答题卡</span><strong>{{index+1}} / {{paper.questions.length}}</strong><ChevronDown :size="16" /></summary>${old.slice(old.indexOf('>')+1,old.lastIndexOf('</aside>')).replaceAll('@click="selectQuestion(Number(n))"','@click="v2Question(Number(n))"')}</details>`);
-  code = replaceNode(code, has('answer-actions'), old => old.replace(/<button v-if="!locked"[\s\S]*?<\/button>/, ''));
-  code = replaceNode(code, has('answer-tools'), `<div class="answer-tools actions" data-v2-navigation><NButton v-if="canAnswer" secondary :disabled="busy" @click="reveal('answer')"><Eye :size="16" />答案与解析</NButton><NDropdown v-if="canAnswer" :options="v2AnswerTools" @select="v2AnswerTool"><NButton quaternary :disabled="busy">更多<ChevronDown :size="15" /></NButton></NDropdown></div>`);
+    code = replaceNode(code, has('answer-tools'), `<div class="answer-tools actions" data-v2-navigation><NButton v-if="canAnswer" secondary :disabled="busy" @click="reveal('answer')"><Eye :size="16" />答案与解析</NButton><NDropdown v-if="canAnswer" :options="v2AnswerTools" @select="v2AnswerTool"><NButton quaternary :disabled="busy">更多<ChevronDown :size="15" /></NButton></NDropdown></div>`);
   code = replaceNode(code, has('notes'), old => old.replace('<details ', '<details :open="v2NotesOpen" '));
-  code = replaceNode(code, has('question-footer'), `<Teleport to="body" :disabled="!v2Mobile"><footer class="question-footer v2-learning-answerbar" data-v2-navigation aria-label="答题操作">
+  code = replaceNode(code, node=>node.tag==='Teleport' && node.loc.source.includes('class="question-footer learning-fixed-bar"'), `<Teleport to="body"><footer class="question-footer v2-learning-answerbar" data-v2-navigation aria-label="答题操作">
     <NButton secondary :disabled="busy || loading || index===0" aria-label="上一题" @click="v2Question(index-1)"><ChevronLeft :size="17" /><span class="v2-learning-prev-text">上一题</span></NButton>
-    <NButton v-if="!locked" type="primary" :loading="busy" :disabled="busy || loading" @click="submitAnswer">{{practice?'提交本次复习':'确认作答'}}</NButton><span v-else>{{index+1}} / {{paper.questions.length}}</span>
+    <NButton v-if="canAnswer" type="primary" :loading="busy" :disabled="busy || loading || locked" @click="submitAnswer">{{current.invalid?'题目已失效':locked?'已确认作答':practice?'提交本次复习':'确认作答'}}</NButton><span v-else>{{index+1}} / {{paper.questions.length}}</span>
     <NButton secondary :disabled="busy || loading || index===paper.questions.length-1" @click="v2Question(index+1)">下一题<ChevronRight :size="17" /></NButton>
   </footer></Teleport>`);
   code = replaceNode(code, has('profile-toolbar'), `<form class="toolbar profile-toolbar v2-learning-profile-filter" @submit.prevent="loadView" data-v2-navigation>
@@ -119,8 +118,8 @@ const v2MediaChange=()=>v2Mobile.value=v2Media.matches;
 onMounted(()=>v2Media.addEventListener('change',v2MediaChange));
 onBeforeUnmount(()=>v2Media.removeEventListener('change',v2MediaChange));
 watch(()=>paper.value?.id,()=>{v2CompletionHidden.value=false;v2AnswerCard.value=false;});
-const v2PrimaryTabs=computed(()=>['today','review','profile','history'].flatMap(id=>tabs.value.filter(item=>item.id===id).map(item=>({...item,label:id==='today'?'答题':id==='review'?'错题':id==='history'?'历史':item.label}))));
-const v2AuxOptions=computed(()=>tabs.value.filter(item=>!['today','review','profile','history'].includes(item.id)).map(item=>({key:item.id,label:item.label,disabled:busy.value})));
+const v2PrimaryTabs=computed(()=>['home','today','review','profile','history'].flatMap(id=>tabs.value.filter(item=>item.id===id).map(item=>({...item,label:id==='today'?'答题':id==='review'?'错题':id==='history'?'历史':item.label}))));
+const v2AuxOptions=computed(()=>tabs.value.filter(item=>!['home','today','review','profile','history'].includes(item.id)).map(item=>({key:item.id,label:item.label,disabled:busy.value})));
 const v2AuxTitle=computed(()=>v2AuxOptions.value.find(item=>item.key===tab.value)?.label|| (isAdmin.value?'学练管理':'更多'));
 function v2OpenSection(key:string){if(tabs.value.some(item=>item.id===key))void switchTab(key as Tab);}
 function v2Building(value:string){const row=overviewScopes.value.find(item=>item.value===value);if(row)void changeScope(row.label);}

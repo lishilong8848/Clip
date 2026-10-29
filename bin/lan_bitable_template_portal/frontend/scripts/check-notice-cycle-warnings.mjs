@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { parse,compileScript } from '@vue/compiler-sfc';
 import { createServer } from 'vite';
+import { listenTestServer } from './test-server.mjs';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
 import ts from 'typescript';
@@ -115,7 +116,7 @@ const plugin={name:'isolated-cycle-fixture',configureServer(server){server.middl
  if(!req.url.startsWith('/__cycle'))return next();res.setHeader('Content-Type','text/html;charset=utf-8');res.end(await server.transformIndexHtml(req.url,html));
 });}};
 const server=await createServer({root,configFile:false,plugins:[vue(),plugin],logLevel:'error',server:{host:'127.0.0.1',port:0}});
-await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port;
+await listenTestServer(server);const origin='http://127.0.0.1:'+server.httpServer.address().port;
 if(process.argv.includes('--serve')){console.log(origin+'/__cycle?mode=workspace');await new Promise(()=>{});}
 const browser=await chromium.launch({headless:true});
 const helper=await build({entryPoints:[path.join(root,'src/workspace-v2/noticeForm.ts')],bundle:true,write:false,format:'iife',globalName:'noticeHelpers'});

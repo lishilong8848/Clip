@@ -6,7 +6,7 @@
     <script>
       window.addEventListener('unhandledrejection', event => {
         const reason = event.reason;
-        if (reason instanceof DOMException && reason.name === 'AbortError' && reason.message === 'Transition was skipped') event.preventDefault();
+        if (reason instanceof DOMException && ((reason.name === 'AbortError' && reason.message === 'Transition was skipped') || (reason.name === 'InvalidStateError' && reason.message === 'Transition was aborted because of invalid state. ViewTransition opt-in disabled'))) event.preventDefault();
       });
       for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
         for (const state of ['ready', 'finished', 'updateCallbackDone']) event.viewTransition?.[state]?.catch(() => {});

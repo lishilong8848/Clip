@@ -312,6 +312,58 @@ def _visual_profile(knowledge, profile, model):
         and model_capabilities(selected)['image_input']) else None
 
 
+def export_photos(knowledge, actor, items, *, profile, files, sources):
+    """Attach source photos with their original locations; no OCR or model calls."""
+    _current(knowledge, actor, items, profile)
+    groups, outputs, seen = {}, [], set()
+    deadline, incomplete = time.monotonic() + 8, False
+    for candidate in items[:MAX_ITEMS]:
+        item = _context(knowledge, actor, candidate, MAX_ITEM_TEXT, True)
+        key = (item['document_id'], item['version'])
+        group = groups.setdefault(key, {'item': item, 'locations': set()})
+        sheet = re.search(r'工作表「[^」]+」', item['location'])
+        group['locations'].update(_base_location(part['location']).removesuffix(' · 模型摘要')
+                                  for part in item['context'] if not sheet or sheet[0] in part['location'])
+    for group in groups.values():
+        item = group['item']
+        if Path(item['name']).suffix.lower() not in _VISUAL_SUFFIXES:
+            continue
+        if time.monotonic() >= deadline or len(outputs) >= 8:
+            incomplete = True
+            break
+        try:
+            content, name = _read_source(knowledge, actor, item)
+            with closing(_pictures(content, name, ' '.join(sorted(group['locations'])))) as pictures:
+                for raw, image_name, anchor in pictures:
+                    identity = (item['document_id'], item['version'], anchor, hashlib.sha256(raw).hexdigest())
+                    if identity in seen:
+                        continue
+                    if time.monotonic() >= deadline or len(outputs) >= 8:
+                        incomplete = True
+                        break
+                    seen.add(identity)
+                    try:
+                        image = _jpeg(raw, image_name)
+                    except (AssistantError, OSError, ValueError, ImportError, RuntimeError):
+                        incomplete = True
+                        continue
+                    _current(knowledge, actor, [item], profile)
+                    label = re.sub(r'[\\/:*?"<>|\s]+', '_', anchor)[:150]
+                    file = files.upload(actor, f'{label}_现场照片{len(outputs)+1}.jpg', image,
+                                        extract=False, source_modules=['knowledge'])
+                    knowledge.bind_source_artifacts({'sources': sources, 'output_files': [file]})
+                    outputs.append({**file, 'inline_image': True})
+            _read_source(knowledge, actor, item)
+        except AssistantError as exc:
+            if exc.status in {401, 403, 404, 409, 410}:
+                raise
+            incomplete = True
+        except (OSError, ValueError, ImportError, KeyError, RuntimeError, ET.ParseError, zipfile.BadZipFile):
+            incomplete = True
+    _current(knowledge, actor, items, profile)
+    return {'files': outputs, 'incomplete': incomplete}
+
+
 def _observe(knowledge, actor, item, image, location, profile, model, visual_profile, deadline):
     record = {'location': location, 'document_id': item['document_id'], 'version': item['version'],
               'source_sha256': item['source_version']['sha256'],
@@ -358,7 +410,7 @@ def _observe(knowledge, actor, item, image, location, profile, model, visual_pro
     return record
 
 
-def answer_evidence(knowledge, actor, items, *, profile, model):
+def answer_evidence(knowledge, actor, items, *, profile, model, include_visual=True):
     """Return {items, warning, warnings, coverage}; no image bytes or paths escape.
 
     Pass returned items back unchanged to reuse signed evidence on retries. The
@@ -380,7 +432,7 @@ def answer_evidence(knowledge, actor, items, *, profile, model):
         item = _context(knowledge, actor, candidate, budget, index < MAX_EXPANDED)
         suffix = Path(item['name']).suffix.lower()
         supported = suffix in _VISUAL_SUFFIXES
-        if supported and not profile_resolved:
+        if supported and (include_visual or candidate.get('visual_evidence')) and not profile_resolved:
             visual_profile, profile_resolved = _visual_profile(knowledge, profile, model), True
         item_profile = visual_profile if supported else None
         receipt = candidate.get('_evidence_receipt')
@@ -405,6 +457,10 @@ def answer_evidence(knowledge, actor, items, *, profile, model):
             item['coverage']['missing'].remove('visual_coverage_unknown')
             if suffix in {'.tif', '.tiff', '.odt', '.ods', '.odp', '.epub', '.html', '.htm'}:
                 item['coverage']['missing'].append('visual_format_unsupported')
+            continue
+        if not include_visual:
+            item['coverage']['missing'].remove('visual_coverage_unknown')
+            item['coverage']['visual_mode'] = 'attachments_only'
             continue
         if index >= MAX_EXPANDED or image_count >= MAX_IMAGES or key in opened or time.monotonic() >= deadline:
             item['coverage']['missing'].append('visual_budget_or_duplicate_source')

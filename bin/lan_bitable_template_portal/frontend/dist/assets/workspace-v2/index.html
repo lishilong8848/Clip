@@ -1,16 +1,16 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>灯塔 · 个人工作台</title><link rel="icon" href="/assets/clipflow-favicon.svg"><link rel="stylesheet" href="/assets/page-navigation.css"><script src="/assets/connection-guard.js" data-workspace-v2="1" defer></script>
-<style>body{margin:0;background:#f5f5f7;color:#1d1d1f;font:14px system-ui,sans-serif}.entry-loading{min-height:80vh;display:grid;place-content:center;gap:16px;text-align:center;padding:20px}.entry-loading a{color:#0071e3}.entry-loading button{justify-self:center;min-height:44px;padding:0 20px;border:0;border-radius:8px;background:#0071e3;color:#fff;font:inherit;cursor:pointer}.entry-loading button[hidden]{display:none}.entry-loading strong{max-width:32em;line-height:1.7}.entry-spinner{width:24px;height:24px;border:3px solid #e5e5ea;border-top-color:#0071e3;border-radius:50%;animation:spin 1s linear infinite;margin:auto}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}</style></head>
-<body><div id="app"><div class="entry-loading" role="status" aria-live="polite"><span class="entry-spinner"></span><strong id="entry-status">正在打开新版工作台</strong><button id="entry-retry" type="button" hidden>重新加载新版</button><a href="/?frontend=legacy">返回旧版</a></div></div>
-<script>
+<html lang="zh-CN"><head><meta charset="utf-8"><script>
   window.addEventListener('unhandledrejection', event => {
     const reason = event.reason;
-    if (reason instanceof DOMException && reason.name === 'AbortError' && reason.message === 'Transition was skipped') event.preventDefault();
+    if (reason instanceof DOMException && ((reason.name === 'AbortError' && reason.message === 'Transition was skipped') || (reason.name === 'InvalidStateError' && reason.message === 'Transition was aborted because of invalid state. ViewTransition opt-in disabled'))) event.preventDefault();
   });
   for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
     for (const state of ['ready', 'finished', 'updateCallbackDone']) event.viewTransition?.[state]?.catch(() => {});
   });
-</script>
+</script><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>灯塔 · 个人工作台</title><link rel="icon" href="/assets/clipflow-favicon.svg"><link rel="stylesheet" href="/assets/page-navigation.css"><script src="/assets/connection-guard.js" data-workspace-v2="1" defer></script>
+<style>body{margin:0;background:#f5f5f7;color:#1d1d1f;font:14px system-ui,sans-serif}.entry-loading{min-height:80vh;display:grid;place-content:center;gap:16px;text-align:center;padding:20px}.entry-loading a{color:#0071e3}.entry-loading button{justify-self:center;min-height:44px;padding:0 20px;border:0;border-radius:8px;background:#0071e3;color:#fff;font:inherit;cursor:pointer}.entry-loading button[hidden]{display:none}.entry-loading strong{max-width:32em;line-height:1.7}.entry-spinner{width:24px;height:24px;border:3px solid #e5e5ea;border-top-color:#0071e3;border-radius:50%;animation:spin 1s linear infinite;margin:auto}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}</style></head>
+<body><div id="app"><div class="entry-loading" role="status" aria-live="polite"><span class="entry-spinner"></span><strong id="entry-status">正在打开新版工作台</strong><button id="entry-retry" type="button" hidden>重新加载新版</button><a href="/?frontend=legacy">返回旧版</a></div></div>
+
 <script type="module">
   const base = '/assets/workspace-v2/';
   const controller = new AbortController();

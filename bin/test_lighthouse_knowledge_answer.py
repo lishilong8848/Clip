@@ -69,7 +69,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response['sources'][0]['kind'], 'company_knowledge')
                 self.assertEqual(response['sources'][0]['data']['version'], 2)
                 self.assertIn('[1]', response['answer'])
-                self.kb.search.assert_called_with(user, '公司出差规定', profile=self.profile)
+                self.kb.search.assert_called_with(user, '公司出差规定', profile=self.profile, prefer_local=True)
             factory.assert_not_called()
             self.assertEqual(len(self.model.complete.call_args.args[0]), 2)
             self.assertEqual(self.model.complete.call_args.kwargs['profile'], self.profile)
@@ -115,7 +115,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
         question = '包间湿度现在是91%，该用哪个EOP？'
         response = await answer_company(self.engine, self.actor, {'_profile': self.profile}, question,
                                         self.emit, AsyncMock(return_value=self.actor))
-        self.kb.search.assert_called_once_with(self.actor, question, profile=self.profile)
+        self.kb.search.assert_called_once_with(self.actor, question, profile=self.profile, prefer_local=True)
         messages = self.model.complete.call_args.args[0]
         packet = json.loads(messages[1]['content'])
         self.assertEqual(packet['question'], question)

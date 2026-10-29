@@ -191,7 +191,7 @@
                   <p v-if="!turn.answer && turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
                   <p v-else-if="!turn.answer && turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
-                  <div v-if="turn.output_files?.length" class="message-files output-files"><div v-for="file in turn.output_files" :key="file.id" class="output-file"><button type="button" :aria-label="'预览 ' + file.name" @click="openArtifact(file)"><FileText :size="18" /><span>{{ file.name }}</span></button><a :href="safeAttachmentUrl(file.url)" download :aria-label="'下载 ' + file.name" title="下载文件"><Download :size="16" /></a></div></div>
+                  <div v-if="turn.output_files?.length" class="message-files output-files"><div v-for="file in turn.output_files" :key="file.id" class="output-file" :class="{ 'photo-file': file.inline_image && file.is_image }"><button type="button" :aria-label="'预览 ' + file.name" @click="openArtifact(file)"><img v-if="file.inline_image && file.is_image" :src="safeAttachmentUrl(file.url)" :alt="file.name" loading="lazy" /><FileText v-else :size="18" /><span>{{ file.name }}</span></button><a :href="safeAttachmentUrl(file.url)" download :aria-label="'下载 ' + file.name" title="下载文件"><Download :size="16" /></a></div></div>
                   <LighthouseDownloads :items="turn.downloads" />
                   <LighthouseQuestion v-if="turn.clarification&&!turn.plan&&turnIsComplete(turn)" :id="'assistant-question-'+turn.operation_id" :question="turn.clarification" :disabled="state.busy||sending||loading||uploading||state.turns.at(-1)?.operation_id!==turn.operation_id" @reply="answerQuestion(turn,$event)" />
                   <button v-if="turn.plan && planTurns.get(turn.plan.id) !== turn" type="button" class="plan-reference" @click="locatePlan(turn.plan.id)"><ListChecks :size="14" />查看这项操作的最新状态</button>
@@ -2836,6 +2836,7 @@ button:hover:not(:disabled) { background: var(--lh-surface-hover); }button:disab
 .output-file button { display:flex; align-items:center; gap:8px; min-width:0; min-height:38px; padding:8px 10px; color:inherit; background:transparent; border:0; border-radius:6px; cursor:pointer; }
 .output-file button span { overflow-wrap:anywhere; text-align:left; }
 .output-file a { flex:none; padding:8px; min-height:38px; border-left:1px solid var(--lh-border); }
+.output-file.photo-file{width:min(280px,100%);align-items:stretch}.output-file.photo-file button{flex:1;flex-direction:column;align-items:flex-start}.output-file.photo-file img{width:100%;height:160px;object-fit:contain}.output-file.photo-file a{display:grid;place-items:center}
 .output-file button:hover,.output-file a:hover { background:var(--lh-surface-hover); }
 .operation-plan { border: 1px solid var(--lh-border-strong); border-radius: 8px; padding: 12px; margin-top: 12px; background: var(--lh-surface-subtle); font-size: 13px; }
 .plan-title { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }

@@ -88,6 +88,38 @@ class EvidenceTests(unittest.TestCase):
         with self.kb.connect(readonly=True) as db:
             self.assertEqual(list(db.iterdump()), before)
 
+    def test_text_answer_does_not_open_photos_or_call_ocr_or_vision(self):
+        item = self.image()
+        with patch.object(evidence, '_read_source', side_effect=AssertionError('Photos must not delay text')):
+            result = self.kb.answer_evidence(self.actor, [item], profile=TEXT, model=self.model, include_visual=False)
+        self.assertIn('needle diagram text', result['items'][0]['text'])
+        self.assertEqual(result['items'][0]['visual_evidence'], [])
+        self.model.complete.assert_not_called()
+        self.model.settings.assert_not_called()
+        self.ocr.assert_not_called()
+
+    def test_original_step_photos_are_exported_without_interpretation_and_keep_source_acl(self):
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as ExcelImage
+        book = Workbook(); sheet = book.active; sheet.title = '步骤'
+        sheet.append(['步骤', '操作说明']); sheet.append(['1', '核对现场状态'])
+        sheet.add_image(ExcelImage(io.BytesIO(png())), 'C2')
+        other = book.create_sheet('无关照片'); other.append(['不属于本段'])
+        other.add_image(ExcelImage(io.BytesIO(png('blue'))), 'A1')
+        buffer = io.BytesIO(); book.save(buffer)
+        item = self.upload('步骤照片.xlsx', buffer.getvalue(), managed=True)
+        sources = [{'kind': 'company_knowledge', 'number': 1, 'data': item}]
+        files = Mock(); files.upload.return_value = {'id': 'a' * 32, 'name': 'fixture.jpg', 'is_image': True}
+        result = self.kb.export_photos(self.actor, [item, item], profile=TEXT, files=files, sources=sources)
+        self.assertEqual(len(result['files']), 1)
+        self.assertTrue(result['files'][0]['inline_image'])
+        self.assertIn('图片行2', files.upload.call_args.args[1])
+        self.assertFalse(files.upload.call_args.kwargs['extract'])
+        self.model.complete.assert_not_called(); self.ocr.assert_not_called()
+        self.assertTrue(self.kb.artifact_current(self.actor, 'a' * 32))
+        self.allowed = False
+        self.assertFalse(self.kb.artifact_current(self.actor, 'a' * 32))
+
     def test_table_header_and_later_rows_are_preserved(self):
         from openpyxl import Workbook
         workbook = Workbook()

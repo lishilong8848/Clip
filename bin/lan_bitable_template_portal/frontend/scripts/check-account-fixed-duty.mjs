@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
+import { listenTestServer } from './test-server.mjs';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
 
@@ -26,7 +27,7 @@ const server = await createServer({ root, configFile: false, cacheDir, logLevel:
       });
     },
   }] });
-await server.listen();
+await listenTestServer(server);
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 try {

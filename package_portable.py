@@ -1728,6 +1728,7 @@ def _run_preflight_test_shards(args: list[str], **kwargs) -> None:
 
 
 FRONTEND_PREFLIGHT_SCRIPTS = (
+    "check-test-server-ports.mjs",
     "check-workspace-navigation.mjs", "check-login-version-switch.mjs", "check-legacy-module-entry.mjs",
     "check-notice-photo-paste.mjs", "check-legacy-notice-cycle.mjs", "check-notice-cycle-warnings.mjs",
     "check-account-fixed-duty.mjs", "check-assistant-shared-query.mjs", "check-repair-overview.mjs",

@@ -95,7 +95,7 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
                     turn = {'question': question, '_profile': self.profile, 'submitted_commands': []}
                     result = await engine.answer(self.actor, turn, [], None, self.emit, self.authorize, {})
                     self.kb.search.assert_called_with({**self.actor, 'allowed_scopes': self.actor['scopes']},
-                                                      question, profile=self.profile)
+                                                      question, profile=self.profile, prefer_local=True)
                     self.assertEqual(result['sources'][0]['kind'], 'company_knowledge')
                     self.assertNotIn('_review_sources', result)
         model_factory.assert_not_called()

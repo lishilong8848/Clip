@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
+import { listenTestServer } from './test-server.mjs';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
 import { adaptLearningSharing } from './workspace-sharing-adapter.mjs';
@@ -52,7 +53,7 @@ try {
           }
           return reply({}, 403);
         }); } }, vue()], server: { host: '127.0.0.1', port: 0 } });
-    await server.listen();
+    await listenTestServer(server);
     const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
     const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());

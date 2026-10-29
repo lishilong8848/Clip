@@ -148,3 +148,7 @@
 .workspace-v2 .learning-page>.page-head{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-bottom:10px}
 .workspace-v2 .v2-learning-identity-tabs .n-radio-group{flex:none}
 @media(max-width:760px){.workspace-v2 .learning-page>.page-head{flex-wrap:wrap}.workspace-v2 .v2-learning-identity-tabs{gap:6px}.workspace-v2 .v2-learning-identity-tabs>strong{max-width:110px;font-size:14px}.workspace-v2 .v2-learning-identity-tabs .n-radio-button{padding-inline:9px}.workspace-v2 .learning-page>.page-head>.actions{margin-left:auto}}
+
+@media(min-width:761px){.workspace-v2 .v2-learning-answerbar{position:fixed;z-index:100;left:240px;right:20px;bottom:16px;max-width:780px;margin:0 auto;padding:10px 14px;border:1px solid #dce5df;border-radius:12px;background:var(--cf-surface,#fff);box-shadow:0 -4px 18px #253b2815;box-sizing:border-box}.workspace-v2 .learning-page:has(.practice-layout){padding-bottom:110px}}
+.workspace-v2 .question-footer.v2-learning-answerbar{display:grid;grid-template-columns:1fr 1.3fr 1fr;gap:10px;height:66px;box-sizing:border-box;align-items:center}.workspace-v2 .v2-learning-answerbar .n-button{height:44px;min-height:44px;max-height:44px;width:100%;min-width:0;box-sizing:border-box}.workspace-v2 .v2-learning-answerbar>span{text-align:center}
+@media(max-width:760px){.workspace-v2 .v2-learning-tabs .n-button{font-size:12px;gap:2px}.workspace-v2 .v2-learning-tabs .n-button svg{display:none}}

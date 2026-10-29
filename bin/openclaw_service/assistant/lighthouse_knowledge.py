@@ -1597,10 +1597,11 @@ class KnowledgeBase:
             _, original = self._document_version(db, actor, identity, version)
             return self._path(original['path']), original['name']
 
-    def answer_evidence(self, actor, items, *, profile, model):
+    def answer_evidence(self, actor, items, *, profile, model, include_visual=True):
         """Read bounded current-version context; return items, warnings and coverage."""
         from .lighthouse_knowledge_evidence import answer_evidence
-        return answer_evidence(self, actor, items, profile=profile, model=model)
+        return answer_evidence(self, actor, items, profile=profile, model=model,
+                               include_visual=include_visual)
 
     def model_allowed(self, profile):
         endpoint_origin = origin(profile.get('endpoint', ''))
@@ -1608,6 +1609,10 @@ class KnowledgeBase:
         approved = config.get('approved_origins', [])
         # Profiles come from the authenticated account's existing model settings, not browser input.
         return endpoint_origin in approved or not approved
+
+    def export_photos(self, actor, items, *, profile, files, sources):
+        from .lighthouse_knowledge_evidence import export_photos
+        return export_photos(self, actor, items, profile=profile, files=files, sources=sources)
 
     @staticmethod
     def _search_context(db, item):
@@ -1681,7 +1686,7 @@ class KnowledgeBase:
         return {'items': safe_data(items), 'revision': revision, 'acl_revision': acl_revision, 'complete': False,
                 'note': '仅按文件名查找的候选，不是适用或已读取原文的结论。接着检索候选文件段落并核对；文件名不明确或依据不足时补查全库。'}
 
-    def search(self, actor, query, *, profile=None, document_refs=None):
+    def search(self, actor, query, *, profile=None, document_refs=None, prefer_local=False):
         check_actor(actor)
         if not isinstance(query, str) or not 2 <= len(query.strip()) <= 1000 or sensitive_document(query):
             raise AssistantError('请输入2至1000字的检索内容，不要包含私人信息或凭证。')
@@ -1709,7 +1714,7 @@ class KnowledgeBase:
                 self._acl_sql(db, actor)
                 file_candidates = self._filename_candidates(db, query)
         indexready = False
-        if document_refs is None and self._vector_mode(config):
+        if document_refs is None and not prefer_local and self._vector_mode(config):
             try:
                 with self.connect() as db:
                     vector_rev = self._vector_revision(db)
@@ -1740,7 +1745,7 @@ class KnowledgeBase:
         expanded = list(terms)
         for term in terms:
             if re.fullmatch(r'[\u4e00-\u9fff]{4,}', term):
-                expanded.extend(term[i:i + 3] for i in range(min(len(term) - 2, 12)))
+                expanded.extend(term[i:i + size] for size in (2, 3) for i in range(min(len(term) - size + 1, 12)))
         expanded = list(dict.fromkeys(expanded))[:24]
         selected = {}
 
@@ -1794,16 +1799,20 @@ class KnowledgeBase:
                 if expanded:
                     match = ' OR '.join('"' + term.replace('"', '""') + '"' for term in expanded)
                     if file_candidates:
-                        ids = [item['document_id'] for item in file_candidates]
                         passage_terms = list(dict.fromkeys([*expanded, *(term[i:i + 2] for term in terms
                             if re.fullmatch(r'[\u4e00-\u9fff]{3,}', term) for i in range(len(term) - 1))]))[:64]
                         condition = ' OR '.join('instr(lower(c.text),lower(?))>0' for _ in passage_terms)
-                        rows = db.execute('SELECT ' + fields + ' FROM chunks c' + joins +
-                            'WHERE ' + active + ' AND c.document_id IN (' + ','.join('?' for _ in ids) +
-                            ') AND (' + condition + ') ORDER BY c.document_id,c.ordinal LIMIT 24',
-                            [*scope_args, *ids, *passage_terms]).fetchall()
-                        for rank, row in enumerate(rows):
-                            add(row, 'filename', rank)
+                        relevance = ' + '.join('(CASE WHEN instr(lower(c.text),lower(?))>0 THEN ? ELSE 0 END)' for _ in passage_terms)
+                        # Keep filename relevance, then rank passages inside each file.
+                        # UUID order and a long first document must not displace the relevant file.
+                        for document_rank, candidate in enumerate(file_candidates):
+                            rows = db.execute('SELECT ' + fields + ' FROM chunks c' + joins +
+                                'WHERE ' + active + ' AND c.document_id=? AND (' + condition +
+                                ') ORDER BY (' + relevance + ') DESC,c.ordinal LIMIT 4',
+                                [*scope_args, candidate['document_id'], *passage_terms,
+                                 *[value for term in passage_terms for value in (term, len(term))]]).fetchall()
+                            for rank, row in enumerate(rows):
+                                add(row, 'filename', document_rank * 4 + rank)
                     rows = db.execute('SELECT ' + fields + ' FROM chunks_fts f JOIN chunks c ON c.id=f.rowid' + joins +
                         'WHERE chunks_fts MATCH ? AND ' + active + ' ORDER BY bm25(chunks_fts) LIMIT 40', [match, *scope_args]).fetchall()
                     for rank, row in enumerate(rows):
@@ -1821,6 +1830,8 @@ class KnowledgeBase:
                     self._search_context(db, item)
         except sqlite3.Error:
             raise AssistantError('知识库检索暂忙，未取得完整结果，请缩小问题范围后重试。', 503) from None
+        if prefer_local and not items and document_refs is None and self._vector_mode(config):
+            return self.search(actor, query, profile=profile)
         for item in items:
             item.pop('id', None)
             item['source_kind'] = 'document_library' if item.pop('source_key', '') else 'shared'

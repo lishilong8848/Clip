@@ -675,17 +675,18 @@ class FeishuMessenger:
         raise AssistantError('飞书暂未提供你的人员姓名，无法关联灯塔账号。请管理员检查机器人读取人员或群成员信息的权限。',
                              403, category='feishu_sender_name_unavailable')
 
-    async def upload_file(self, name, content):
+    async def upload_file(self, name, content, *, image=False):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard()["real_write_allowed"]:
             raise AssistantError("当前运行模式不允许发送真实飞书文件。", 403)
         if not content or len(content) > 20 * 1024 * 1024:
             raise AssistantError('发送文件须非空且不超过20MiB。', 413)
         client = await self.client()
-        response = await client.post('https://open.feishu.cn/open-apis/im/v1/files', headers=await self.headers(),
-            data={'file_type': 'stream', 'file_name': name}, files={'file': (name, content, 'application/octet-stream')}, timeout=90)
+        response = await client.post('https://open.feishu.cn/open-apis/im/v1/' + ('images' if image else 'files'), headers=await self.headers(),
+            data={'image_type': 'message'} if image else {'file_type': 'stream', 'file_name': name},
+            files={('image' if image else 'file'): (name, content, 'image/jpeg' if image else 'application/octet-stream')}, timeout=90)
         data = response.json()
-        key = (data.get('data') or {}).get('file_key')
+        key = (data.get('data') or {}).get('image_key' if image else 'file_key')
         if data.get('code') != 0 or not key:
             from upload_event_module.services.http_client import classify_feishu_error
             if classify_feishu_error(getattr(response, 'status_code', 0), data.get('code')) == 'permission':
@@ -695,7 +696,7 @@ class FeishuMessenger:
             raise AssistantError('飞书文件上传未完成，将保留文件重试。', 503)
         return key
 
-    async def send(self, message, reply, *, checkpoint=None, authorize=None):
+    async def send(self, message, reply, *, checkpoint=None, authorize=None, text_only=False):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard()["real_write_allowed"]:
             raise AssistantError("当前运行模式不允许发送真实飞书消息。", 403)
@@ -710,7 +711,7 @@ class FeishuMessenger:
         live = reply.get('live_reply')
         if isinstance(live, dict):
             if live.get('message_id'):
-                if reply.get('awaiting_turn') or not (reply.get('files') or reply.get('long_text_file_key')):
+                if text_only or reply.get('awaiting_turn') or not (reply.get('files') or reply.get('long_text_file_key')):
                     await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
             else:
                 placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {},
@@ -728,9 +729,12 @@ class FeishuMessenger:
         if reply.get('file_notice'):
             parts.append(('attachment-stopped', 'interactive',
                           {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': reply['file_notice']}]}}))
-        if reply.get('long_text_file_key'):
+        if reply.get('long_text_file_key') and not text_only:
             parts.append(('long-text', 'file', {'file_key': reply['long_text_file_key']}))
-        parts.extend(('file:' + file['id'], 'file', {'file_key': file['file_key']}) for file in reply.get('files', []) if file.get('file_key'))
+        parts.extend(('file:' + file['id'], 'file', {'file_key': file['file_key']}) for file in ([] if text_only else reply.get('files', [])) if file.get('file_key'))
+        parts.extend(('file:' + file['id'], 'post', {'zh_cn': {'title': file['name'],
+            'content': [[{'tag': 'img', 'image_key': file['image_key']}]]}})
+            for file in ([] if text_only else reply.get('files', [])) if file.get('image_key') and not file.get('file_key'))
         for part, kind, content in parts:
             if part in reply.get('sent_parts', []):
                 continue
@@ -1549,7 +1553,7 @@ class FeishuAssistant:
         reply = {"text": _reply_text(text), **({'card': card} if card else {}), 'actor_id': actor['id'],
                 'conversation_id': conversation['conversation_id'],
                 'delivery_access': access,
-                'files': [{'id': file['id'], 'name': file['name']} for file in ([] if pending_reads else turn.get('output_files', []))
+                'files': [{'id': file['id'], 'name': file['name'], **({'inline_image': True} if file.get('inline_image') is True else {})} for file in ([] if pending_reads else turn.get('output_files', []))
                           if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
         if not pending_reads:
             from openclaw_service.assistant.lighthouse_knowledge_answer import document_references
@@ -1726,9 +1730,11 @@ class FeishuAssistant:
         uploaded = False
         for file in pending:
             metadata = await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
-            if not file.get('file_key'):
+            inline = file.get('inline_image') is True and metadata.get('is_image') is True
+            key = 'image_key' if inline else 'file_key'
+            if not file.get(key):
                 content = await _assistant_download(self, request, actor, file['id'])
-                file['file_key'] = await self.messenger.upload_file(metadata['name'], content)
+                file[key] = await self.messenger.upload_file(metadata['name'], content, **({'image': True} if inline else {}))
                 await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
                 uploaded = True
         if uploaded:
@@ -2318,11 +2324,17 @@ class FeishuAssistant:
                     reply = await self._recover_answer(message, reply)
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
                 await self._validate_delivery(message, reply)
+                async def checkpoint():
+                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
+                if (reply.get('files') and all(file.get('inline_image') for file in reply['files'])
+                        and not reply.get('awaiting_turn') and len(json.dumps(_live_card(reply), ensure_ascii=False).encode('utf-8')) < 24000):
+                    # Confirmed text must not wait for optional photo uploads. Keep the
+                    # full attachment queue and ordinary delivery receipts in SQLite.
+                    await self.messenger.send(message, reply, checkpoint=checkpoint,
+                        authorize=lambda: self._validate_delivery(message, reply), text_only=True)
                 await self._prepare_reply_files(message, reply)
                 if reply.get('files'):
                     await self._validate_delivery(message, reply)
-                async def checkpoint():
-                    await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
                 await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(message, reply))
                 if not reply.get('awaiting_turn'):
                     await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)

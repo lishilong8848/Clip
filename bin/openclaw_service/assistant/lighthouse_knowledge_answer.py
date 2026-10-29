@@ -283,11 +283,12 @@ async def public_company_fallback(engine, actor, turn, reason, emit, authorize):
 
 async def answer_company(engine, actor, turn, question, emit, authorize, *, business_sources=None, document_query=None):
     deadline = time.monotonic() + 60
-    async def read(function, *args, **kwargs):
+    async def read(function, *args, _budget=None, **kwargs):
         if time.monotonic() >= deadline:
             raise asyncio.TimeoutError
+        remaining = max(.001, deadline - time.monotonic())
         return await asyncio.wait_for(asyncio.to_thread(function, *args, **kwargs),
-                                      max(.001, deadline - time.monotonic()))
+                                      min(remaining, _budget) if _budget is not None else remaining)
 
     turn.pop('_quality_review', None)
     async def reply(text, sources=None):
@@ -356,7 +357,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             found['items'] = merge_company_hits([found['items'], [{**item, 'text': ''} for item in references]])
         else:
             await emit('status', {'label': '正在检索公司知识库'})
-            found = await read(knowledge.search, current, search_question, profile=profile)
+            found = await read(knowledge.search, current, search_question, profile=profile, prefer_local=True)
     except AssistantError as exc:
         return await reply(str(exc))
     except asyncio.TimeoutError:
@@ -436,8 +437,12 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if callable(expand):
             await emit('status', {'label': '正在读取相关资料原文'})
             try:
-                expanded = await read(knowledge.answer_evidence, current, items, profile=profile, model=model)
-            except asyncio.TimeoutError:
+                expanded = await read(knowledge.answer_evidence, current, items, profile=profile,
+                    model=model, include_visual=False, _budget=max(.1, min(15, deadline - time.monotonic() - 25)))
+            except asyncio.TimeoutError as exc:
+                from ..diagnostics import capture
+                await asyncio.to_thread(capture, 'assistant', 'deadline', run_id=turn.get('run_id', ''),
+                                        category='knowledge_text_timeout', error=exc)
                 generation_problem = '相关资料读取超时，尚未完成本次答复核验。'
                 gaps = gaps or ['补充原文尚未完成读取']
                 break
@@ -479,6 +484,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             '图片解释不是原文保证；visual_evidence标为OCR时只能使用识别文字，不能猜测连线或场景。'
             '分别核对文字和图片：图片失败不否定已读取的正文或单元格文字，visual_read_failed等只表示对应图片的覆盖缺口。'
             '正文独立支持结论时直接引用正文；仅当本题的关键步骤、连线或条件确实只在未读图片中时，才将该部分列入gaps。'
+            '本流程仅读取正文和表格步骤，不解析文档中的图片。现场照片会按原文位置作为附件提供，不参与推理或核验。'
+            '不要因未解析现场照片而否定已经读取的文字步骤；如果关键文字本身缺失，只说明具体缺失，不能编造图片内容。'
             'coverage.complete=false只描述读取范围，不能据此推断本题缺少依据，也不要假设未读图片里存在额外条件。'
             'context中的model_summary只是索引摘要，不能当作原文；OCR转录须标明性质，不能冒充视觉理解。'
             '不附加与本题无关文档的图片警告，不把候选命中当成适用文件；缺口必须具体说明所缺条件或步骤，不能笼统称无依据。'
@@ -701,8 +708,28 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     if compound and missing:
         answer += '\n\n以下主题尚未检索到公司资料依据：' + '、'.join(missing) + '。未用其他主题的流程代替。'
     cited = {int(value) for value in re.findall(r'\[(\d{1,3})\]', answer)}
-    result = await reply(answer, [source for source in sources
-        if source.get('kind') != 'company_knowledge' or source['number'] in cited])
+    final_sources = [source for source in sources
+        if source.get('kind') != 'company_knowledge' or source['number'] in cited]
+    photos = []
+    if callable(getattr(type(knowledge), 'export_photos', None)) and getattr(engine.portal, 'files', None):
+        await emit('status', {'label': '正在附上原文步骤对应的现场照片'})
+        selected = [item for source, item in zip(sources[offset:], items) if source['number'] in cited]
+        try:
+            attached = await asyncio.to_thread(knowledge.export_photos, current, selected,
+                profile=profile, files=engine.portal.files, sources=final_sources)
+            photos = attached['files']
+            if attached.get('incomplete'):
+                answer += '\n\n部分现场照片未能附上，可通过引用打开原文查看；上述文字答复不受影响。'
+        except AssistantError as exc:
+            if exc.status in {401, 403, 404, 409, 410}:
+                raise
+            answer += '\n\n现场照片暂未附上，可通过引用打开原文查看。'
+        current = await authorize()
+        if current['id'] != actor['id'] or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current):
+            raise AssistantError('附图期间资料或授权已变化，请重新查询。', 403)
+    result = await reply(answer, final_sources)
+    if photos:
+        result.update(output_files=photos, file_ids=[file['id'] for file in photos])
     if reviewed:
         result['answer_review'] = {**reviewed, 'repairs': reviewed.get('repairs', 0) + rewrites}
     result['_review_sources'] = review_sources(sources, items)

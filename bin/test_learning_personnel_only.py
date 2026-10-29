@@ -209,6 +209,36 @@ class PersonnelOnlyTests(unittest.TestCase):
             self.assertEqual(row['content'], b'original attachment')
         self.assertIsNotNone(self.service._get('paper', 'paper'))
 
+    def test_old_building_papers_and_answers_are_archived_and_removed_without_person_lookup(self):
+        key = '2026-09-29_A'
+        paper = {'id': key, 'date': '2026-09-29', 'scope': 'A', 'questions': [support.LearningTests.question(self, 1)]}
+        self.cloud.entities['paper', key] = paper
+        self.cloud.entities['record', key] = {'id': key, 'date': paper['date'], 'scope': 'A', 'entries': {}}
+        storage.prepare(self.service)
+        rows = self.cloud.list_entity_records()
+        for row in rows:
+            self.put('local', 'shift_history_issue:' + row['record_id'], {'record_id': row['record_id'], 'reason': '原记录没有可核验的人员姓名'}, False)
+        self.directory = {}
+        storage.cleanup(self.service)
+        self.assertFalse(self.cloud.entities)
+        self.assertEqual(len(self.cloud.deleted), 2)
+        self.assertIsNotNone(self.service._get('paper', key))
+        self.assertIsNotNone(self.service._get('record', key))
+        self.assertEqual(self.service.sync_status(include_history_issues=True)['history_issue_count'], 0)
+        self.restart(); storage.cleanup(self.service)
+        self.assertEqual(len(self.cloud.deleted), 2)
+        with closing(self.service._connect()) as conn:
+            self.assertEqual(conn.execute('SELECT count(*) FROM learning_cloud_archive WHERE removed=1 AND files_ready=1').fetchone()[0], 2)
+
+    def test_missing_name_alone_does_not_allow_personal_record_cleanup(self):
+        row = {'kind': 'paper', 'key': '2026-09-29_A', 'payload': {'id': '2026-09-29_A', 'date': '2026-09-29', 'scope': 'A'}}
+        self.assertTrue(cloud.LearningCloud.legacy_building_history(row))
+        for change in ({'person_id':'unknown'}, {'person':{'id':'unknown'}}, {'claimed_by_name':'one'}, {'id':'personal:unknown'}, {'date':'2099-01-01'}):
+            self.assertFalse(cloud.LearningCloud.legacy_building_history({**row,'payload':{**row['payload'],**change}}))
+        for field in ('姓名', '人员', '人员标识'):
+            self.assertFalse(cloud.LearningCloud.legacy_building_history({**row,'fields':{field:'protected'}}))
+        self.assertFalse(cloud.LearningCloud.legacy_building_history({**row,'kind':'shift_person'}))
+
     def test_new_column_is_captured_in_backup_before_system_record_cleanup(self):
         self.cloud.entities['settings', 'main'] = {'enabled': True}
 
@@ -497,6 +527,20 @@ class PersonnelCloudProtocolTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaisesRegex(cloud.LearningCloudError, '人员答题历史'):
                 self.remote.delete_archived_entity({'record_id': 'recProtected', 'kind': kind}, expected_app_id='cli_current')
         self.assertFalse(self.fake.calls)
+
+    def test_verified_old_building_history_can_be_removed_but_concurrent_changes_block_deletion(self):
+        self.enterContext(patch('upload_event_module.services.feishu_token_manager.token_manager._credentials',
+                                return_value=('cli_current', 'synthetic-secret')))
+        key = '2026-09-29_A'
+        original = self.row('paper', key, {'id': key, 'date': '2026-09-29', 'scope': 'A', 'questions': []})
+        archived = self.remote.list_entity_records(include_fields=True)[0]
+        original['fields']['姓名'] = 'new owner'
+        with self.assertRaises(cloud.LearningCloudConflict):
+            self.remote.delete_archived_entity(archived, expected_app_id='cli_current')
+        self.assertFalse(any(call[0] == 'DELETE' for call in self.fake.calls))
+        original['fields'].pop('姓名')
+        self.fake.before = lambda request: self.fake.response({'record_id': archived['record_id'], 'deleted': True}) if request.method == 'DELETE' else None
+        self.assertTrue(self.remote.delete_archived_entity(archived, expected_app_id='cli_current')['deleted'])
 
     def test_feishu_json_error_and_empty_download_are_not_valid_backups(self):
         for response in (shift_support.httpx.Response(200, json={'code': 1254302, 'msg': 'not permitted'}),

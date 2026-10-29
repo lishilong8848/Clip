@@ -11,7 +11,7 @@ import {adaptLearningPage} from './workspace-learning-adapter.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url)),out=path.resolve(root,'../../../output/playwright/workspace-learning');
 const oldPath=path.join(root,'src/components/LearningPage.vue'),oldPage=await readFile(oldPath,'utf8');
 const adapted=adaptLearningPage(oldPage),parsed=parse(adapted);assert.deepEqual(parsed.errors,[]);
-assert.equal(parsed.descriptor.script.content,parse(oldPage).descriptor.script.content,'module-level question/import helpers remain unchanged');
+assert.equal(parsed.descriptor.script.content,parse(oldPage.replaceAll('\r\n','\n')).descriptor.script.content,'module-level question/import helpers remain unchanged');
 compileScript(parsed.descriptor,{id:'learning-v2',inlineTemplate:true});
 assert(adapted.includes('v2Resume(\'daily\')')&&adapted.includes('v2NewPractice'));
 const buildCache=path.join(out,'build');await mkdir(buildCache,{recursive:true});
@@ -88,11 +88,11 @@ try{
   const page=await context.newPage();auditPage=page;page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error'||event.type()==='warning')console.log('Browser:',event.text());});
   async function go(search){await page.goto(origin+entry+'?__page=/learning&'+search);await page.locator('.learning-page').waitFor();await page.waitForFunction(()=>document.querySelector('.learning-page')?.getAttribute('aria-busy')==='false');}
   async function noOverflow(){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'page has no horizontal overflow');}
-  await go('view=practice');await page.getByRole('button',{name:'继续今日答题',exact:true}).waitFor();
+  await go('view=practice');await page.waitForFunction(()=>document.querySelector('.stem')?.textContent.includes('第2题'));
   assert.equal(writes.filter(row=>row.body.mode==='practice').length,0);
-  assert.equal(await page.locator('.v2-learning-tabs button').count(),4);
+  assert.equal(await page.locator('.v2-learning-tabs button').count(),5);
   assert.equal(await page.getByRole('button',{name:'发布设置',exact:true}).count(),0,'management is not a primary tab');
-  await page.getByRole('button',{name:'继续今日答题',exact:true}).click();await page.waitForFunction(()=>document.querySelector('.stem')?.textContent.includes('第2题'));
+  assert.equal(await page.getByRole('button',{name:'继续今日答题',exact:true}).count(),0,'open questions do not require a second entry');
   assert.equal(writes.filter(row=>row.p.endsWith('/claim')).length,1,'continue never generates an extra paper');
   await page.waitForTimeout(300);await page.screenshot({path:path.join(out,'pc-daily.png'),fullPage:true});
   await page.locator('.v2-learning-studybar .n-radio-button').filter({hasText:'自主练习'}).click();await page.getByRole('button',{name:'新练习15题',exact:true}).click();
@@ -140,13 +140,13 @@ try{
   const calendar=await page.locator('.n-date-panel').boundingBox();assert(calendar.x>=-1&&calendar.x+calendar.width<=440+1,'mobile calendar fits its screen');await page.keyboard.press('Escape');
   await page.setViewportSize({width:1440,height:900});await go('view=overview&scope=A');await noOverflow();
   await page.setViewportSize({width:1920,height:1080});await noOverflow();
-  await page.getByRole('button',{name:'学练管理',exact:true}).click();await page.locator('.n-dropdown-option').filter({hasText:'发布设置'}).click();await page.locator('.settings-form .n-time-picker').first().waitFor();assert.equal(await page.locator('.settings-form .n-time-picker').count(),2,'day and night publication use the same mature picker');
+  await page.getByRole('region',{name:'学习管理工作台'}).getByRole('button',{name:/发布与提醒/}).click();await page.locator('.settings-form .n-time-picker').first().waitFor();assert.equal(await page.locator('.settings-form .n-time-picker').count(),2,'day and night publication use the same mature picker');
   for(const width of [1440,402,440]){await page.setViewportSize({width,height:900});await noOverflow();const boxes=await page.locator('.shift-publish-row').evaluateAll(nodes=>nodes.map(n=>n.getBoundingClientRect().y));if(width===1440)assert(Math.abs(boxes[0]-boxes[1])<2,'day/night settings share a desktop row');await page.screenshot({path:path.join(out,`settings-${width}.png`),fullPage:true});}
   const writesBefore=writes.length;await go('view=overview&scope=A&person_id=other-learning');
   await page.locator('.v2-learning-tabs').getByRole('button',{name:'错题',exact:true}).click();
   assert.equal(writes.length,writesBefore,'viewing another person is read-only');
-  role='personal';await go('view=practice');assert.equal(await page.getByRole('radio',{name:'楼栋画像',exact:true}).count(),0);
-  role='duty';await go('view=overview&scope=A');assert.equal(await page.getByRole('radio',{name:'我的答题',exact:true}).count(),0);assert.equal(await page.locator('.v2-learning-studybar').count(),0);
+  role='personal';await go('view=practice');assert.equal(await page.getByRole('radio',{name:'学习管理',exact:true}).count(),0);
+  role='duty';await go('view=overview&scope=A');assert.equal(await page.getByRole('radio',{name:'个人学习',exact:true}).count(),0);assert.equal(await page.locator('.v2-learning-studybar').count(),0);
   await noOverflow();assert.deepEqual(errors,[]);assert.equal(await readFile(oldPath,'utf8'),oldPage,'legacy source is unchanged');
   console.log('PASS: V2 in-memory production build; daily/practice actions, saved progress, busy guard, unordered multi-select, inline grading, chart/date drill-down, compact mobile answer card/footer, completion, mobile roster, read-only person view and role gates. No real business writes.');
 }catch(error){

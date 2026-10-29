@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from bin.test_feishu_assistant import event
 from bin.test_lighthouse_stream import Store
@@ -45,6 +45,34 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(len(json.dumps(body).encode()) < 30000 for _, body in self.calls))
         self.assertEqual(len(set(body['uuid'] for _, body in self.calls)), len(self.calls))
         self.messenger.upload_file.assert_not_awaited()
+
+    async def test_step_photo_is_visible_in_original_topic_and_retry_does_not_send_twice(self):
+        reply = {'text': '已核验的步骤说明。[1]', 'files': [
+            {'id': 'a' * 32, 'name': '原文工作表_图片行2_现场照片.jpg', 'image_key': 'img_step'}]}
+        await self.messenger.send(self.message, reply, text_only=True)
+        self.assertEqual([body['msg_type'] for _, body in self.calls], ['interactive'])
+        self.assertEqual(len(reply['files']), 1)
+        await self.messenger.send(self.message, reply)
+        await self.messenger.send(self.message, reply)
+        photos = [json.loads(body['content']) for _, body in self.calls if body['msg_type'] == 'post']
+        self.assertEqual(len(photos), 1)
+        self.assertIn('图片行2', photos[0]['zh_cn']['title'])
+        self.assertEqual(photos[0]['zh_cn']['content'][0][0]['image_key'], 'img_step')
+        self.assertTrue(all(url.endswith('/om_Root/reply') and body['reply_in_thread'] for url, body in self.calls))
+        self.assertEqual(len(self.calls), 2)
+
+    async def test_step_photo_upload_receipt_is_reused_and_authorized_again(self):
+        upload = AsyncMock(return_value='img_receipt')
+        bot = SimpleNamespace(_reply_file_context=AsyncMock(return_value=(object(), {'id': 'owner'})),
+            _call=AsyncMock(return_value={'name': '步骤2.jpg', 'is_image': True}),
+            messenger=SimpleNamespace(upload_file=upload), inbox=Mock())
+        reply = {'text': '步骤说明', 'files': [{'id': 'a' * 32, 'name': '步骤2.jpg', 'inline_image': True}]}
+        with patch('lan_bitable_template_portal.feishu_assistant_files._assistant_download', new=AsyncMock(return_value=b'checked image')):
+            await FeishuAssistant._prepare_reply_files(bot, self.message, reply)
+            await FeishuAssistant._prepare_reply_files(bot, self.message, reply)
+        upload.assert_awaited_once_with('步骤2.jpg', b'checked image', image=True)
+        self.assertEqual(reply['files'][0]['image_key'], 'img_receipt')
+        self.assertEqual(bot._call.await_count, 3)
 
     async def test_html_disclosure_keeps_names_and_basis_readable_in_original_topic(self):
         reply = {'text': '夜班名单\n<details><summary>口径说明</summary>测试甲、测试乙；排班口径。</details>'}

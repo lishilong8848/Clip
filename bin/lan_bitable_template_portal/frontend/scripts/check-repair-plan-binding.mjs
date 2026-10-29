@@ -33,7 +33,7 @@ print(json.dumps({'manual':manual,'pending':pending,'details':{'manual':extract_
 assert.equal(generated.status,0,generated.stderr);
 const fixtures=JSON.parse(generated.stdout);
 await writeFile(path.join(output,'fixtures.json'),generated.stdout);
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:19130}});
+const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const png=Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6oDQAAAAASUVORK5CYII=','base64');

@@ -52,6 +52,26 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(texts, [result['answer']])
         self.assertNotIn('设备不符', result['answer'])
 
+    async def test_web_and_feishu_only_expand_text_before_answering(self):
+        base = self.kb
+        expansion = Mock(side_effect=lambda actor, items, **kwargs: {'items': items})
+        class TextFirst:
+            search = base.search
+            evidence_current = base.evidence_current
+            def answer_evidence(self, actor, items, *, profile, model, include_visual=True):
+                if include_visual:
+                    raise TimeoutError('Photo interpretation must not be called')
+                return expansion(actor, items, include_visual=include_visual)
+        self.engine.portal.get_knowledge = lambda: TextFirst()
+        for channel in ('web', 'feishu:topic'):
+            self.actor['channel'] = channel
+            self.model.complete.return_value = candidate('该流程只适用于设备甲。[1]')
+            result = await self.answer()
+            self.assertIn('设备甲', result['answer'])
+            self.assertNotIn('超时', result['answer'])
+        self.assertEqual(expansion.call_count, 2)
+        self.assertTrue(all(call.kwargs['prefer_local'] for call in base.search.call_args_list))
+
     def test_identical_chunks_merge_without_losing_other_locations_versions_or_images(self):
         duplicate = {**self.first, 'ordinal': 1}
         other_location = {**duplicate, 'ordinal': 2, 'location': '第2段'}
@@ -75,7 +95,7 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         class OverlappingEvidence:
             search = base.search
             evidence_current = base.evidence_current
-            def answer_evidence(self, actor, items, *, profile, model):
+            def answer_evidence(self, actor, items, *, profile, model, include_visual=True):
                 return {'items': [{**item, 'text': 'same authorized original section',
                                   'location': f"第1段（片段{item['ordinal'] + 1}）"} for item in items]}
         self.kb = OverlappingEvidence()
@@ -224,7 +244,7 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         class TextWithUnavailableImages:
             search = base.search
             evidence_current = base.evidence_current
-            def answer_evidence(self, actor, items, *, profile, model):
+            def answer_evidence(self, actor, items, *, profile, model, include_visual=True):
                 return {'items': [{**item, 'coverage': {'missing': ['visual_read_failed']},
                                   'context': [{'kind': 'original_text', 'text': item['text']}],
                                   'visual_evidence': []} for item in items],
@@ -395,7 +415,7 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         class ExpandingKnowledge:
             search = base.search
             evidence_current = base.evidence_current
-            def answer_evidence(self, actor, items, *, profile, model):
+            def answer_evidence(self, actor, items, *, profile, model, include_visual=True):
                 return {'items': items, 'warning': ''}
         self.kb = ExpandingKnowledge()
         self.auth.side_effect = [self.actor, self.actor, {**self.actor, 'modules': []}]

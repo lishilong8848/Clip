@@ -63,6 +63,21 @@ class LocalTestCase(unittest.TestCase):
 
 
 class FreshLocalDefaultsTests(LocalTestCase):
+    def test_local_filename_then_passage_does_not_wait_for_vectors(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        for n in range(14):
+            self.kb.upload(self.admin, *_text('应急处理流程，按授权流程处理。', f'其他设备应急处理{n}.txt'))
+            self.kb.process_one()
+        with patch('openclaw_service.assistant.lighthouse_knowledge.uuid.uuid4', return_value=SimpleNamespace(hex='f' * 32)):
+            target = self.kb.upload(self.admin, *_text('机房湿度超限时，应急处理先核对现场状态。', '机房局部高湿应急处理流程.txt'))
+        self.kb.process_one()
+        before = len(self.embedder.calls)
+        result = self.kb.search(self.user, '包间湿度97%需要怎么应急处理？', prefer_local=True)
+        self.assertEqual(result['items'][0]['document_id'], target['id'])
+        self.assertIn('湿度超限', result['items'][0]['text'])
+        self.assertEqual(len(self.embedder.calls), before)
+
     def test_fresh_kb_defaults_local_faiss_and_uses_vectors(self):
         self.assertEqual(self.kb.configuration().get("mode"), MODE)
         result = self.kb.upload(self.admin, *_text("公司报销流程", "报销.txt"))

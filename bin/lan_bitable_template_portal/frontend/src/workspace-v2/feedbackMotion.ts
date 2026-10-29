@@ -134,7 +134,7 @@ export function installFeedbackMotion() {
     const pending=[...unique.values()].filter(e=>!e.dismissed).sort((a,b)=>b.order-a.order);
     const recalled=[...unique.values()].filter(e=>e.dismissed&&e.persistent);
     if(offset>=pending.length)offset=0;
-    const visible=pending.slice(offset,offset+3);
+    const visible=pending.slice(offset,offset+(innerWidth<=760?1:3));
     let bottom=innerWidth<=760?82:20;
     const actionFooter=[...document.querySelectorAll<HTMLElement>('.v2-notice-editor-footer,.v2-mop-workspace.preview-open .floating-upload-box,.account-editor .editor-footer,.drill-page .sticky-actions,.v2-learning-answerbar')].filter(el=>{const box=el.getBoundingClientRect();return box.width>0&&box.height>0&&box.top<innerHeight&&box.bottom>0;}).sort((a,b)=>a.getBoundingClientRect().top-b.getBoundingClientRect().top)[0]||null;
     if(actionFooter!==observedFooter){if(observedFooter)resize.unobserve(observedFooter);observedFooter=actionFooter;if(actionFooter)resize.observe(actionFooter);}
@@ -163,7 +163,7 @@ export function installFeedbackMotion() {
       bottom+=item.el.getBoundingClientRect().height+10;startTimer(item);
     }
   }
-  counter.addEventListener('click',()=>{const hidden=[...entries.values()].filter(e=>e.dismissed&&e.persistent);if(hidden.length){for(const e of hidden){e.dismissed=false;e.order=++order;}offset=0;}else offset+=3;schedule();});
+  counter.addEventListener('click',()=>{const hidden=[...entries.values()].filter(e=>e.dismissed&&e.persistent);if(hidden.length){for(const e of hidden){e.dismissed=false;e.order=++order;}offset=0;}else offset+=innerWidth<=760?1:3;schedule();});
   function visibility(){for(const item of entries.values())document.hidden?stopTimer(item):startTimer(item);schedule();}
   observer.observe(document.body,{childList:true,subtree:true,characterData:true,attributes:true,attributeFilter:['class','style','hidden','aria-hidden','data-v2-feedback-kind']});
   scan(document.body);window.addEventListener('resize',schedule);document.addEventListener('visibilitychange',visibility);

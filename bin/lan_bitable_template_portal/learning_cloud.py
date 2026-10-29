@@ -981,10 +981,26 @@ class LearningCloud:
         result.update(bundled)
         return list(result.values())
 
+    @staticmethod
+    def legacy_building_history(row):
+        payload = row.get('payload')
+        if row.get('kind') not in {'paper', 'record'} or not isinstance(payload, dict):
+            return False
+        try:
+            day = dt.date.fromisoformat(payload.get('date', ''))
+        except (TypeError, ValueError):
+            return False
+        fields = row.get('fields') or {}
+        return (day < dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).date()
+                and payload.get('scope') in {'A', 'B', 'C', 'D', 'E', 'H', '110'}
+                and row.get('key') == payload.get('id') == f"{day.isoformat()}_{payload['scope']}"
+                and not any((payload.get('person_id'), payload.get('person'), payload.get('claimed_by_name'),
+                             row.get('display_name'), fields.get('姓名'), fields.get('人员'), fields.get('人员标识'))))
+
     def delete_archived_entity(self, row, *, expected_app_id):
         self._require_write()
         record_id = _identifier(row.get("record_id"), "record_id", r"rec[A-Za-z0-9]+")
-        if row.get("kind") in {"shift_person", "paper", "record", "sharing_attempt", "daily_progress"}:
+        if row.get("kind") in {"shift_person", "paper", "record", "sharing_attempt", "daily_progress"} and not self.legacy_building_history(row):
             raise LearningCloudError("人员答题历史及班次汇总不得作为系统记录清理")
         with self._entity_operation(expected_app_id):
             table = self._find_entity_table()

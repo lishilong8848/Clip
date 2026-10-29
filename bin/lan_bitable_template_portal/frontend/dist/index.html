@@ -6,7 +6,7 @@
     <script>
       window.addEventListener('unhandledrejection', event => {
         const reason = event.reason;
-        if (reason instanceof DOMException && reason.name === 'AbortError' && reason.message === 'Transition was skipped') event.preventDefault();
+        if (reason instanceof DOMException && ((reason.name === 'AbortError' && reason.message === 'Transition was skipped') || (reason.name === 'InvalidStateError' && reason.message === 'Transition was aborted because of invalid state. ViewTransition opt-in disabled'))) event.preventDefault();
       });
       for (const type of ['pageswap', 'pagereveal']) window.addEventListener(type, event => {
         for (const state of ['ready', 'finished', 'updateCallbackDone']) event.viewTransition?.[state]?.catch(() => {});
@@ -16,7 +16,7 @@
     <link rel="stylesheet" href="/assets/page-navigation.css" />
     <title>南通基地-运维灯塔工作台</title>
     <script src="/assets/connection-guard.js" defer></script>
-    <script type="module" crossorigin src="/assets/index-f-Ezhcfj.js"></script>
+    <script type="module" crossorigin src="/assets/index-Bugnl10_.js"></script>
     <link rel="modulepreload" crossorigin href="/assets/c-xWaq51p2.js">
     <link rel="stylesheet" crossorigin href="/assets/a-CZddtSMc.css">
     <link rel="stylesheet" crossorigin href="/assets/a-CuQ3iOwe.css">

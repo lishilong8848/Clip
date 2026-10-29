@@ -31,7 +31,7 @@ print(json.dumps({'html':html,'detail':extract_workbench_lite_fragments(html)['d
 }finally{assert.equal(path.dirname(scratch),os.tmpdir());assert(path.basename(scratch).startsWith('clipflow-convergence-ui-'));await rm(scratch,{recursive:true,force:true});}
 assert.equal(result.status,0,result.stderr);
 const fixture=JSON.parse(result.stdout);
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:19144,strictPort:true}});
+const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0,strictPort:true}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 try{

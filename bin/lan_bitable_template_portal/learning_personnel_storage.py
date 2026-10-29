@@ -166,7 +166,7 @@ def cleanup(service, limit=8):
         cursor = row['record_id']
         try:
             pair = (row['kind'], row['key'])
-            if row['kind'] in HISTORY_KINDS:
+            if row['kind'] in HISTORY_KINDS and not cloud.LearningCloud.legacy_building_history(row):
                 if pair in history_errors:
                     raise core.LearningError(history_errors[pair], 503)
                 if not directory_ready:

@@ -3,6 +3,7 @@ import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createServer} from 'vite';
+import {listenTestServer} from './test-server.mjs';
 import vue from '@vitejs/plugin-vue';
 import {chromium} from 'playwright';
 import {adaptLearningSharing} from './workspace-sharing-adapter.mjs';
@@ -57,7 +58,7 @@ try {
           if(url.pathname==='/api/learning/sharing/fixture'&&req.method==='GET')return ok(batch);
           throw new Error('Unexpected fixture request '+req.method+' '+url.pathname);
         });}},vue()],server:{host:'127.0.0.1',port:Number(process.env.CLIPFLOW_SHARING_TEST_PORT||0),strictPort:!!process.env.CLIPFLOW_SHARING_TEST_PORT,hmr:false}});
-    await server.listen();const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
+    await listenTestServer(server);const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
     const context=await browser.newContext({viewport:{width:1440,height:900},reducedMotion:'reduce'});
     await context.route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort());
     const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));

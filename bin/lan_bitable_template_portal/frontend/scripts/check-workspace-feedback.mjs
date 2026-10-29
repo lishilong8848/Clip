@@ -130,7 +130,9 @@ try {
   await page.emulateMedia({reducedMotion:'reduce'});
   await page.setViewportSize({width:390,height:844});
   await set([{id:'mobile',tone:'error',text:'无法读取通告，请重试。',action:true},{id:'mobile-long',tone:'warning',text:'请核对现场信息。'.repeat(60)}]);
-  await assertStack(2);
+  await assertStack(1);
+  assert(await visible().evaluateAll(nodes=>nodes.every(n=>n.getBoundingClientRect().height<=140&&n.getBoundingClientRect().width<=320)),'mobile toast stays compact');
+  await page.getByRole('button',{name:'查看其它 1 条提示',exact:true}).click();await assertStack(1);
   assert.equal(await visible().evaluateAll(nodes=>nodes.some(n=>n.getAnimations().length>0)),false,'reduced motion skips movement');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:path.join(output,'mobile-toasts.png')});

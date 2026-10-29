@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { createServer, preview } from 'vite';
 import { chromium } from 'playwright';
+import { listenTestServer } from './test-server.mjs';
 
 // All API responses in this harness are isolated fixtures. No production service is contacted.
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -11,6 +12,8 @@ const output = path.join(process.env.TEMP || root, 'lighthouse-workspace-check')
 const requests = [], owners = new Map();
 const builtDirectory = process.argv.find(value => value.startsWith('--built-dir='))?.slice('--built-dir='.length);
 const markdownMode = process.argv.includes('--markdown');
+const photoMode = process.argv.includes('--photos');
+const photoFile = { id: 'c'.repeat(32), name: '原文步骤_工作表行2_现场照片.jpg', url: '/api/assistant/files/' + 'c'.repeat(32), is_image: true, inline_image: true };
 const markdownFile = { id: 'b'.repeat(32), name: '完整回答.md', url: '/api/assistant/files/' + 'b'.repeat(32) };
 const markdownText = '# 完整答复\n\n- 检查项目甲\n- 检查项目乙\n\n```python\nprint("保留中文")\n```\n\n' + '完整正文。\n'.repeat(800) + '\n最后一行。\n<img src=x onerror="window.unsafe=true">';
 let voiceAvailable = true, voiceAdmin = true, newReply = false, failEdit = false, deferUpload, deferWorkspace;
@@ -32,6 +35,7 @@ async function api(req, res) {
   const payload = body ? JSON.parse(body) : {};
   requests.push({ path: url.pathname, method: req.method, owner, payload });
   const send = (data, status = 200) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.setHeader('Cache-Control', 'no-store'); res.end(JSON.stringify(status === 200 ? { ok: true, data } : { ok: false, error: data })); };
+  if (url.pathname === photoFile.url) { res.setHeader('Content-Type','image/png');res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aNNkAAAAASUVORK5CYII=','base64'));return; }
   if (url.pathname === '/api/auth/status') return send({ logged_in: true, user: { open_id: owner, name: '验收账号', modules: ['assistant'], role: 'admin' } });
   if (url.pathname === '/api/assistant/voice') {
     if (req.method === 'PUT') return send(speechConfig);
@@ -77,7 +81,7 @@ async function api(req, res) {
     return send('未实现的测试操作', 400);
   }
   if (url.pathname === '/api/assistant/conversation') return send({ conversation_id: 'conversation-' + owner, configured: true, enabled: true, can_manage_settings: voiceAdmin, busy: false, turns: [
-    { operation_id: 'reply', run_id: 'complete-run', status: 'completed', question: '问候', answer: '这是已完成的回复。', ...(markdownMode ? { output_files: [markdownFile] } : {}) },
+    { operation_id: 'reply', run_id: 'complete-run', status: 'completed', question: '问候', answer: '这是已完成的回复。', ...(markdownMode ? { output_files: [markdownFile] } : photoMode ? {output_files:[photoFile]} : {}) },
     { operation_id: 'research', run_id: 'research-run', status: 'stopped', question: '/深入研究 测试问题', answer: '研究尚未完成。', resume_available: true },
     ...(newReply ? [{ operation_id: 'new-reply', run_id: 'new-run', status: 'completed', question: '新问题', answer: '新增完成回复' }] : []),
   ] });
@@ -114,9 +118,26 @@ const attachFixture = vite => { vite.middlewares.use(async (req, res, next) => {
 }); };
 const fixturePlugin = { name: 'assistant-check-fixture', configureServer: attachFixture, configurePreviewServer: attachFixture };
 const server = builtDirectory ? await preview({ root, logLevel: 'error', build: { outDir: builtDirectory }, preview: { host: '127.0.0.1', port: 0 }, plugins: [fixturePlugin] }) : await createServer({ root, logLevel: 'error', server: { host: '127.0.0.1', port: process.env.PORT ? Number(process.env.PORT) : 0 }, plugins: [fixturePlugin] });
-if (!builtDirectory) await server.listen();
+if (!builtDirectory) await listenTestServer(server);
 const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
-if (process.argv.includes('--serve')) { console.log(origin + '/__assistant-workspace-check?' + (markdownMode ? 'markdown=1' : 'workspace=1')); }
+if (process.argv.includes('--serve')) { console.log(origin + '/__assistant-workspace-check?' + (markdownMode ? 'markdown=1' : photoMode ? 'photos=1' : 'workspace=1')); }
+else if (photoMode) {
+  const browser = await chromium.launch({headless:true});
+  try {
+    await mkdir(output,{recursive:true});
+    const page=await browser.newPage(),errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto(origin+'/__assistant-workspace-check');
+    for(const size of [{width:402,height:874},{width:440,height:956},{width:1440,height:900}]){
+      await page.setViewportSize(size);
+      const img=page.locator('.output-file.photo-file img');await img.waitFor();
+      await page.waitForFunction(()=>document.querySelector('.output-file.photo-file img')?.naturalWidth>0);
+      const box=await img.boundingBox();assert(box.x>=0&&box.x+box.width<=size.width&&box.height<=160);
+      assert.equal(await page.getByRole('button',{name:'预览 '+photoFile.name,exact:true}).count(),1);
+      await page.screenshot({path:path.join(output,'source-photo-'+size.width+'.png'),fullPage:true});
+    }
+    assert.deepEqual(errors,[]);console.log('PASS: source photo thumbnails and row captions at 402/440/1440; all APIs isolated.');
+  } finally {await browser.close();if(builtDirectory)await new Promise(resolve=>server.httpServer.close(resolve));else await server.close();}
+}
 else if (markdownMode) {
   const browser = await chromium.launch({ headless: true });
   try {
