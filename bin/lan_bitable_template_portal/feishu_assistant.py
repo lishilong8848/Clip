@@ -57,13 +57,37 @@ def _reply_chunks(text):
     # Keep each serialized card comfortably below Feishu's message-size limit.
     chunks = []
     while len(text) > 3500:
-        end = text.rfind('\n', 0, 3501)
-        end = end + 1 if end >= 1750 else 3500
+        # Keep complete paragraphs/steps together whenever they fit one card.
+        paragraph = text.rfind('\n\n', 0, 3501)
+        end = paragraph + 2 if paragraph >= 900 else text.rfind('\n', 0, 3501) + 1
+        end = end if end >= 900 else 3500
         chunks.append(text[:end])
         text = text[end:]
     if text:
         chunks.append(text)
     return chunks
+
+
+def _company_source_footer(sources):
+    grouped = {}
+    for source in sources:
+        data = source.get('data')
+        data = data if isinstance(data, dict) else {}
+        identity = (data.get('document_id'), data.get('version'))
+        if not isinstance(identity[0], str) or not identity[0] or type(identity[1]) is not int:
+            identity = ('source', source.get('number'))
+        name = data.get('name')
+        if not isinstance(name, str) or not name:
+            name = source.get('title') or '原文资料'
+        entry = grouped.setdefault(identity, {'numbers': [], 'name': name})
+        if source.get('number') not in entry['numbers']:
+            entry['numbers'].append(source['number'])
+    lines = []
+    for entry in grouped.values():
+        # File names are labels, never Markdown instructions or link destinations.
+        name = re.sub(r'([\\`*_\[\]<>])', r'\\\1', str(entry['name']).replace('\n', ' '))
+        lines.append('- ' + ''.join(f'[{number}]' for number in entry['numbers']) + ' ' + name)
+    return '\n\n**资料来源**\n' + '\n'.join(lines) if lines else ''
 
 
 def _card_text(card):
@@ -92,8 +116,8 @@ def _public_phase(turn):
         ('switching', ('当前模型',)),
         ('connecting', ('正在连接', '正在准备', '正在恢复原回答')),
         ('query', ('正在查询', '正在检索', '正在补查', '正在读取')),
-        ('checking', ('正在核对', '正在检查', '正在验证', '正在匹配')),
-        ('finishing', ('正在整理答复', '正在整理资料答复', '正在生成答复')),
+        ('checking', ('正在核对', '正在检查', '正在验证', '正在匹配', '正在修正资料引用', '正在重新生成并核对')),
+        ('finishing', ('正在整理答复', '正在整理资料答复', '正在生成答复', '正在整理现有依据')),
         ('thinking', ('正在思考', '正在分析', '正在整理上下文', '正在自动整理上下文')),
     ):
         if label.startswith(prefixes):
@@ -108,6 +132,12 @@ def _live_card(reply):
         text = _reply_text(reply.get('text'))
     elements = [{'tag': 'markdown', 'content': chunk} for chunk in _reply_chunks(text)]
     return {'schema': '2.0', 'config': {'update_multi': True}, 'body': {'elements': elements}}
+
+
+def _split_live_reply(reply):
+    return (isinstance(reply.get('live_reply'), dict) and not reply.get('awaiting_turn')
+            and len(json.dumps({'content': json.dumps(_live_card(reply), ensure_ascii=False)},
+                               ensure_ascii=False).encode('utf-8')) > 27000)
 
 
 def _live_result(previous, result, *, incomplete=False):
@@ -709,9 +739,11 @@ class FeishuMessenger:
                   else 'answer:inline' if reply.get('long_text_file_key') else 'answer')
         parts = []
         live = reply.get('live_reply')
+        split_text = _split_live_reply(reply)
         if isinstance(live, dict):
             if live.get('message_id'):
-                if text_only or reply.get('awaiting_turn') or not (reply.get('files') or reply.get('long_text_file_key')):
+                if not split_text and (text_only or reply.get('awaiting_turn')
+                        or not (reply.get('files') or reply.get('long_text_file_key'))):
                     await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
             else:
                 placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {},
@@ -719,7 +751,7 @@ class FeishuMessenger:
                 parts.append(('live:0', 'interactive', _live_card(placeholder)))
         # A form is supplementary: it must not replace the answer or its sources.
         card_text = _card_text(card)
-        if live is None and (not card_text.strip() or text not in _reply_text(card_text)):
+        if (live is None or split_text) and (not card_text.strip() or text not in _reply_text(card_text)):
             parts.extend((prefix if not card and index == 0 and prefix in {'attachment-stopped', 'answer:fallback'}
                           else prefix + (':text:' if card else ':') + str(index), 'interactive',
                           {'schema': '2.0', 'body': {'elements': [{'tag': 'markdown', 'content': chunk}]}})
@@ -762,7 +794,7 @@ class FeishuMessenger:
                 if data.get('code') in {230071, 230072} and not reply.get('thread_fallback'):
                     reply['thread_fallback'] = True
                     if checkpoint: await checkpoint()
-                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
+                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize, text_only=text_only)
                 if part == 'live:0' and data.get('code') in {230001, 230099}:
                     raise AssistantError('飞书拒绝可更新的占位卡片，未发送不能继续更新的替代消息。',
                                          403, category='feishu_delivery_permanent')
@@ -774,12 +806,12 @@ class FeishuMessenger:
                         reply['fallback_text'] += '\n\n' + text
                     if checkpoint:
                         await checkpoint()
-                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
+                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize, text_only=text_only)
                 if kind == 'interactive' and data.get('code') in {230001, 230099}:
                     reply.setdefault('plain_parts', []).append(part)
                     if checkpoint:
                         await checkpoint()
-                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize)
+                    return await self.send(message, reply, checkpoint=checkpoint, authorize=authorize, text_only=text_only)
                 if data["code"] in {99991663, 99991664, 99991665}: self.expires = 0
                 if data['code'] in {230001, 230002, 230006, 230013, 230038, 230050, 230054, 230055, 230075, 230099, 230110, 230111, 232009, 99991672, 99991679}:
                     raise AssistantError('飞书回复无法送达（权限、目标或消息格式不可用），已停止自动重试。返回码：' + str(data['code']),
@@ -809,7 +841,10 @@ class FeishuMessenger:
             reply.setdefault('sent_parts', []).append(part)
             if checkpoint: await checkpoint()
         if isinstance(live, dict) and not reply.get('awaiting_turn'):
-            await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
+            # Every segment uses the existing durable send receipt/UUID. Only
+            # mark the placeholder complete once all text segments were sent.
+            display = {**reply, 'text': '完整文字答复已发送，请查看下方分段消息。'} if split_text else reply
+            await self.update(message, display, checkpoint=checkpoint, authorize=authorize)
 
     async def update(self, message, reply, *, checkpoint=None, authorize=None):
         from .portal_service import external_real_write_guard
@@ -1540,7 +1575,7 @@ class FeishuAssistant:
         company_sources = [source for source in turn.get('sources', [])
                            if source.get('kind') == 'company_knowledge' and source.get('number') in cited]
         if company_sources:
-            text += '\n\n公司资料来源：\n' + '\n'.join(f"[{source['number']}] {source['title']}" for source in company_sources)
+            text += _company_source_footer(company_sources)
         from .feishu_assistant_questions import prepare_question_card
         try:
             card = await asyncio.to_thread(prepare_question_card, self, message, actor, conversation, turn)
@@ -1632,6 +1667,10 @@ class FeishuAssistant:
         current = await self._call(request, actor, 'conversation')
         if current.get('conversation_id') != reply.get('conversation_id'):
             raise AssistantError('原会话已清空，旧回复不再发送。', 410, category='delivery_revoked')
+        operation = 'feishu_' + hashlib.sha256(message['message_id'].encode()).hexdigest()[:40]
+        if any(turn.get('operation_id') == operation and turn.get('knowledge_access_changed')
+               for turn in current.get('turns', []) if isinstance(turn, dict)):
+            raise AssistantError('来源资料或授权已变化，原答复不再发送。', 403, category='delivery_revoked')
 
     async def _topic_plan(self, message, request, actor, conversation, topic):
         from .feishu_notice_cards import bind_shared_card
@@ -1713,18 +1752,6 @@ class FeishuAssistant:
         return request, actor
 
     async def _prepare_reply_files(self, message, reply):
-        if (reply.get('live_reply') is not None and not reply.get('awaiting_turn')
-                and len(json.dumps({'content': json.dumps(_live_card(reply), ensure_ascii=False)},
-                                   ensure_ascii=False).encode('utf-8')) > 27000):
-            request, actor = await self._reply_file_context(message, reply)
-            from .feishu_assistant_files import _upload
-            name = '未完成的回答.md' if reply['live_reply'].get('notice') else '完整回答.md'
-            fid = await _upload(self, request, actor, name, _reply_text(reply['text']).encode('utf-8'))
-            if not re.fullmatch(r'[a-f0-9]{32}', str(fid)):
-                raise AssistantError('完整回答文件未返回有效回执，原回答已保留。', 503)
-            reply.setdefault('files', []).append({'id': fid, 'name': name})
-            reply['text'] = '完整内容已保存为「' + name + '」，请查看本会话附件。'
-            await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
         pending = [file for file in reply.get('files', []) if 'file:' + file['id'] not in reply.get('sent_parts', [])]
         if not pending:
             return
@@ -1742,9 +1769,14 @@ class FeishuAssistant:
                 uploaded = True
         if uploaded:
             # A slow cloud upload can outlive the original conversation or authorization.
-            request, actor = await self._reply_file_context(message, reply)
-            for file in pending:
-                await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
+            await self._validate_reply_files(message, reply)
+
+    async def _validate_reply_files(self, message, reply):
+        # Permission checks precede text delivery; only the download/cloud upload
+        # may be delayed. Never expose text tied to a revoked source attachment.
+        request, actor = await self._reply_file_context(message, reply)
+        for file in reply.get('files', []):
+            await self._call(request, actor, 'files/' + file['id'], params={'metadata': '1'})
 
     async def _feishu_plan_command(self, message, request, actor, plans, conversation=None):
         """Deterministic Feishu text commands for the existing plan edit APIs.
@@ -2329,12 +2361,16 @@ class FeishuAssistant:
                 await self._validate_delivery(message, reply)
                 async def checkpoint():
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
-                if (reply.get('files') and all(file.get('inline_image') for file in reply['files'])
-                        and not reply.get('awaiting_turn') and len(json.dumps(_live_card(reply), ensure_ascii=False).encode('utf-8')) < 24000):
-                    # Confirmed text must not wait for optional photo uploads. Keep the
+                if (reply.get('files') and not reply.get('awaiting_turn')
+                        and (not reply.get('card') or all(file.get('inline_image') for file in reply['files']))):
+                    # Confirmed text must not wait for file uploads. Keep the
                     # full attachment queue and ordinary delivery receipts in SQLite.
+                    await self._validate_reply_files(message, reply)
                     await self.messenger.send(message, reply, checkpoint=checkpoint,
                         authorize=lambda: self._validate_delivery(message, reply), text_only=True)
+                    # The delivered text and its document references can support
+                    # a followup even if a subsequent attachment upload fails.
+                    await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
                 await self._prepare_reply_files(message, reply)
                 if reply.get('files'):
                     await self._validate_delivery(message, reply)

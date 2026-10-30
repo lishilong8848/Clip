@@ -209,7 +209,6 @@ const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(
 function dismissAccountPopovers(){accountMenuOpen.value=false;appearanceOpen.value=false;sidebarCloseKey.value++;}
 const accountOptions=computed(()=>[
  ...(desktopNavigation.value?[{key:'profile',label:'个人信息',icon:()=>h(UserRound,{size:17})}]:[]),
- ...(desktopNavigation.value&&visibleSettings.value.length?[{key:'settings',label:user.value.role==='admin'?'系统设置':'账号与权限',icon:()=>h(Settings,{size:17})}]:[]),
  {key:'legacy',label:'切换旧版',icon:()=>h(PanelLeft,{size:17}),disabled:versionBusy.value},
  {type:'divider' as const,key:'divider'},
  {key:'switch',label:'切换账号',icon:()=>h(UsersRound,{size:17})},

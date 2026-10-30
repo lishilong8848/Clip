@@ -32,7 +32,7 @@
 .workspace-v2 .accounts { gap: 14px; }
 .workspace-v2 .accounts .filters { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 10px; }
 .workspace-v2 .accounts .filters .search { grid-column: 1/-1; }
-.v2-account-scope { display:flex; gap:12px 20px; flex-wrap:wrap; padding:14px 0; border-block:1px solid var(--v2-border); font-size:13px; }
+.v2-account-scope { display:flex; gap:6px 14px; flex-wrap:wrap; padding:8px 0; border-block:1px solid var(--v2-border); font-size:13px; line-height:1.5; overflow-wrap:anywhere; }
 .v2-account-scope span { color:var(--v2-muted); }
 .workspace-v2 .accounts .filters label { min-width: 0; }
 .workspace-v2 .accounts .filters label>span { white-space: nowrap; }
@@ -69,3 +69,72 @@
 }
 .workspace-v2 .admin-settings-layout.accounts-only .account-header>strong{display:none}
 .workspace-v2 .admin-settings-layout.accounts-only .account-header>.muted{margin-right:auto}
+
+/* F02: remove the duplicate business-block heading, retaining layout controls
+   and the complete heading when the user customizes the page. */
+.workspace-v2 [data-page-layout="accounts"]:not(.is-customizing) [data-widget-id="block_settings"] > .v2-widget > .v2-widget-head > h2 { display:none; }
+.workspace-v2 [data-page-layout="accounts"]:not(.is-customizing) [data-widget-id="block_settings"] > .v2-widget > .v2-widget-head:not(:has(button)) { display:none; }
+.workspace-v2 .accounts .account-header > .muted { margin-right:auto; }
+.workspace-v2 .accounts .v2-account-filter-bar { display:grid; gap:8px; min-width:0; }
+.workspace-v2 .accounts .filters.v2-account-search { display:block; padding:0; margin:0; }
+.workspace-v2 .accounts .filters.v2-account-search .search { display:flex; width:100%; min-width:0; box-sizing:border-box; background:var(--v2-palette-surface); }
+.workspace-v2 .accounts .v2-account-advanced > summary { width:fit-content; min-height:36px; padding:6px 0; box-sizing:border-box; color:var(--v2-muted); font-size:13px; cursor:pointer; }
+.workspace-v2 .accounts .v2-account-advanced[open] > summary { color:var(--v2-blue); }
+.workspace-v2 .accounts .filters.v2-account-advanced-fields { padding:8px 0 0; margin:0; }
+.workspace-v2 .accounts .v2-account-advanced-fields label { display:grid; align-content:start; gap:6px; }
+.workspace-v2 .accounts .v2-account-advanced-fields .v2-single-select { width:100%; min-width:0; }
+.workspace-v2 .accounts .v2-account-mobile-list { display:none; }
+.workspace-v2 .accounts summary:focus-visible { outline:2px solid var(--v2-blue); outline-offset:2px; }
+.workspace-v2 .accounts .v2-account-bulk-actions { display:flex; flex-wrap:wrap; gap:8px; }
+.workspace-v2 .accounts .v2-account-bulk-help { min-width:0; }
+.workspace-v2 .accounts .v2-account-bulk-help > summary { width:fit-content; min-height:36px; padding:8px 0; box-sizing:border-box; color:var(--v2-muted); font-size:12px; white-space:nowrap; cursor:pointer; }
+.workspace-v2 .accounts .v2-account-bulk-help[open] { flex-basis:100%; }
+.workspace-v2 .accounts .v2-account-bulk-help .account-bulk-limit { display:block; margin:0; padding-bottom:4px; line-height:1.5; }
+
+@media(min-width:761px) {
+  .workspace-v2 .accounts .v2-account-filter-bar { position:relative; gap:0; }
+  .workspace-v2 .accounts .filters.v2-account-search { margin-right:180px; min-height:36px; }
+  .workspace-v2 .accounts .v2-account-advanced > summary { position:absolute; top:0; right:0; white-space:nowrap; }
+}
+
+@media(max-width:760px) {
+  .workspace-v2 .accounts { gap:10px; }
+  .workspace-v2 .v2-main .admin-settings-layout { padding-top:10px; gap:10px; }
+  .workspace-v2 .accounts .account-header { gap:6px 8px; }
+  .workspace-v2 .accounts .account-header > .muted { font-size:12px; }
+  .workspace-v2 .accounts .account-header > button,
+  .workspace-v2 .accounts .tabs > button,
+  .workspace-v2 .accounts .v2-account-mode-bar > button { min-height:44px; }
+  .workspace-v2 .accounts .tabs { gap:14px; }
+  .workspace-v2 .accounts .v2-account-advanced > summary { min-height:44px; padding-block:10px; }
+  .workspace-v2 .accounts .filters.v2-account-advanced-fields { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+  .workspace-v2 .accounts .account-bulk-bar { gap:6px 8px; padding:8px 0; }
+  .workspace-v2 .accounts .account-bulk-bar > .check { flex-basis:auto; }
+  .workspace-v2 .accounts .v2-account-bulk-actions { flex-basis:100%; order:1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .workspace-v2 .accounts .v2-account-bulk-actions > button { min-height:44px; min-width:0; padding-inline:8px; }
+  .workspace-v2 .accounts .v2-account-bulk-help > summary { min-height:44px; padding-block:12px; }
+  .workspace-v2 .accounts .account-bulk-limit { width:100%; line-height:1.5; }
+  .workspace-v2 .accounts .v2-account-mode-bar { margin:0 0 8px; }
+  .workspace-v2 .accounts .table-wrap.v2-account-desktop-table { display:none; }
+  .workspace-v2 .accounts .v2-account-mobile-list { display:grid; gap:10px; }
+  .workspace-v2 .accounts .v2-account-person-card { min-width:0; padding:10px 12px; border:1px solid var(--v2-border); border-radius:10px; background:var(--v2-palette-surface); }
+  .workspace-v2 .accounts .v2-account-person-heading { display:flex; align-items:center; gap:8px; }
+  .workspace-v2 .accounts .v2-account-person-name { flex:1; min-width:0; overflow-wrap:anywhere; }
+  .workspace-v2 .accounts .v2-account-person-name b { font-size:15px; }
+  .workspace-v2 .accounts .v2-account-person-name small { display:block; margin-top:3px; }
+  .workspace-v2 .accounts .v2-account-person-state { flex:none; }
+  .workspace-v2 .accounts .v2-account-person-summary,
+  .workspace-v2 .accounts .v2-account-person-details dl { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 12px; margin:8px 0; font-size:13px; }
+  .workspace-v2 .accounts .v2-account-person-summary > div,
+  .workspace-v2 .accounts .v2-account-person-details dl > div { min-width:0; }
+  .workspace-v2 .accounts .v2-account-person-scopes { grid-column:1 / -1; }
+  .workspace-v2 .accounts .v2-account-person-card dt { margin-bottom:3px; color:var(--v2-muted); font-size:12px; }
+  .workspace-v2 .accounts .v2-account-person-card dd { margin:0; overflow-wrap:anywhere; line-height:1.5; }
+  .workspace-v2 .accounts .v2-account-person-card .tag { max-width:100%; white-space:normal; overflow-wrap:anywhere; box-sizing:border-box; }
+  .workspace-v2 .accounts .v2-account-person-card dd small { display:block; margin-top:4px; }
+  .workspace-v2 .accounts .account-actions.v2-account-person-actions { display:flex; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--v2-border); white-space:normal; }
+  .workspace-v2 .accounts .v2-account-person-actions > button { min-height:44px; padding-inline:10px; }
+  .workspace-v2 .accounts .v2-account-person-details > summary { min-height:44px; padding:12px 0 8px; box-sizing:border-box; color:var(--v2-muted); font-size:12px; cursor:pointer; }
+  .workspace-v2 .accounts .pagination { gap:6px; }
+  .workspace-v2 .accounts .pagination > button { min-height:44px; }
+}

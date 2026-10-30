@@ -6,6 +6,23 @@
    compact single-row presentation. Original counts, state actions and rack palette
    stay untouched. */
 .all-export-retry { margin: 4px 0 8px; color: var(--v2-muted); font-size: 12px; overflow-wrap: anywhere; }
+/* Preserve the five desktop cards; phones compare floors in compact rows. */
+@media (max-width: 760px) {
+  .cabinet-page .buildings { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .cabinet-page .buildings .building { min-height: 0; padding: 12px; display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 7px 12px; text-align: left; }
+  .cabinet-page .building .building-title { grid-column: 1; gap: 6px; }
+  .cabinet-page .building .building-title h2 { margin: 0; font-size: 17px; }
+  .cabinet-page .building .building-title>svg:first-child { width: 19px; height: 19px; }
+  .cabinet-page .building .building-title>svg:last-child { display: none; }
+  .cabinet-page .building>strong { font-size: 21px; margin: 0; justify-self: end; }
+  .cabinet-page .building>strong small { font-size: 11px; margin-left: 4px; }
+  .cabinet-page .building .v2-cabinet-building-rate { font-size: 12px; white-space: nowrap; }
+  .cabinet-page .building .building-stats { grid-column: 1/-1; display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0; margin: 0; }
+  .cabinet-page .building .building-stats span { display: inline-flex; align-items: baseline; gap: 5px; font-size: 12px; }
+  .cabinet-page .building .building-stats b { font-size: 13px; margin: 0; }
+  .cabinet-page .building>p { grid-column: 1/-1; margin: 0; font-size: 11px; line-height: 1.5; }
+  .cabinet-page .building .building-loading { grid-column: 2/-1; min-height: 0; padding: 0; }
+}
 .metrics.v2-cabinet-status {
   display: flex;
   align-items: center;

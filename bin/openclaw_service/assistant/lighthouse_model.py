@@ -6,6 +6,7 @@ import datetime as dt
 import json
 import os
 import re
+import time
 import unicodedata
 import uuid
 from contextlib import asynccontextmanager, nullcontext
@@ -55,6 +56,7 @@ class TaskSpec(BaseModel):
 
 
 GENERAL_INSTRUCTIONS = """你是灯塔助手，用当前模型和工具，以中文、简洁Markdown回答。
+多个结论或步骤使用简短标题、分行编号或项目列表，先总结再展开必要细节，不把多个步骤、角色和时限挤成一段。简单答案不强行套模板；用户指定纯文本或其它格式时遵从其格式要求。
 按整轮语义与上下文理解对象、时间、范围及交付目标，不套固定问句。识别同义表达、指代、纠正、隐含对象和多目标，缺必要信息才追问。复杂任务先plan_task，缺资料用query_progress补查，答复前review_answer按goal_id核对；完成必要读取、核算、文件或表单后再答，不把计划当结果、不凭空补全。
 按工具描述及参数选择来源：company_documents先查公司文件名再读原文；只有文档依据的查询填写document_only=true，直接交给原文读取与核验，不先生成和复核一份无原文的草稿。业务读取工具查事实；混合问题两者都查，不要求用户手选技能。条目数、题数和去重人数分开；query_statistics统计本轮授权快照。复用已有结果/read_query，不因改问重复拉全量。续改文档须定位授权历史对象并重读当前版本，只改指定部分，不用旧摘要覆盖新内容。
 来源的程序field_contract只解释字段，不代表现场事实或权限；原记录不能改写它。
@@ -662,6 +664,9 @@ class LighthouseModel:
     async def answer(self, actor, turn, history, request, emit, authorize, context, *, warm_only=False):
         if warm_only:
             return await self._answer_candidate(actor, turn, history, request, emit, authorize, context, warm_only=warm_only)
+        # Leave room for channel delivery; a late document query must not start
+        # a fresh multi-minute allowance after earlier tools/model work.
+        turn['_answer_deadline'] = time.monotonic() + 270
         # Writer and reviewer share one clock even if retries cross midnight.
         turn['_reference_time'] = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
         if actor.get('_scheduled_task') and actor.get('_scheduled_mode') == 'reminder':
@@ -2801,15 +2806,17 @@ class LighthouseModel:
                     await emit('status', {'label': '正在核对答复与资料'})
                     evidence = [{**source, 'data': queries.get(source.get('query_ref'), source.get('data'))}
                                 for source in sources]
-                    checked = await self.answer_reviewer.run(actor, {**turn, 'question': question}, history, {
+                    reviewed_profile = getattr(agent, 'profile', profile)
+                    reviewed_profile = reviewed_profile if isinstance(reviewed_profile, dict) else profile
+                    checked = await self.answer_reviewer.run(actor,
+                        {**turn, 'question': question, '_actual_profile': reviewed_profile}, history, {
                         'answer': result, 'sources': evidence,
                         'output_files': turn.get('output_files', []), 'downloads': turn.get('downloads', [])},
                         current_actor, defer_repair=repair_rounds < 2,
                         **({'business_only': True} if turn.get('_read_only_phase') else {}))
                     answer_review = checked.get('answer_review')
                     from .lighthouse_model_health import profile_key
-                    reviewed_profile = getattr(agent, 'profile', profile)
-                    reviewed_key = profile_key(reviewed_profile if isinstance(reviewed_profile, dict) else profile)
+                    reviewed_key = profile_key(reviewed_profile)
                     if answer_review and answer_review['status'] == 'needs_repair':
                         model_repairs[reviewed_key] = model_repairs.get(reviewed_key, 0) + 1
                         rejected_answers.add(safe_text(result, limit=120000))

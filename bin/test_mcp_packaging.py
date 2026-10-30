@@ -16,7 +16,7 @@ spec.loader.exec_module(package)
 
 class PackagingTests(unittest.TestCase):
     def test_notice_navigation_browser_checks_are_mandatory_and_failure_stops(self):
-        expected = ['check-test-server-ports.mjs', 'check-workspace-navigation.mjs', 'check-login-version-switch.mjs', 'check-legacy-module-entry.mjs',
+        expected = ['check-test-server-ports.mjs', 'check-workspace-palettes.mjs', 'check-workspace-navigation.mjs', 'check-login-version-switch.mjs', 'check-legacy-module-entry.mjs',
                     'check-notice-photo-paste.mjs', 'check-legacy-notice-cycle.mjs',
                     'check-notice-cycle-warnings.mjs', 'check-account-fixed-duty.mjs',
                     'check-assistant-shared-query.mjs', 'check-repair-overview.mjs',

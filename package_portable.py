@@ -3381,7 +3381,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--full-preflight", action="store_true",
-        help="Run FULL preflight for this release instead of automatic layered selection.",
+        help="Opt in to FULL preflight tests before building and publishing (tests are off by default).",
     )
     parser.add_argument(
 
@@ -3389,7 +3389,7 @@ def main() -> None:
 
         action="store_true",
 
-        help="Skip mandatory packaging preflight checks. Only use for local debugging.",
+        help="Compatibility flag: normal packaging already skips preflight tests.",
 
     )
     parser.add_argument(
@@ -3440,9 +3440,12 @@ def main() -> None:
 
         return
 
-    if not args.skip_preflight:
-
+    # Normal releases build and publish without invoking the development suites.
+    # Explicit preflight modes remain available for separately requested checks.
+    if args.full_preflight:
         _run_packaging_preflight_tests()
+    else:
+        log("直接打包模式：不运行自动测试；保留前端构建、运行依赖及补丁上传回读校验。")
 
     journal, release_draft = _prepare_release_notes(args)
 

@@ -49,20 +49,24 @@ def _current(knowledge, actor, items, profile):
             or not knowledge.evidence_current(items, profile, actor=actor)):
         raise AssistantError('知识库权限或来源版本已变化，请重新查询。', 409)
     with knowledge.connect(readonly=True) as db:
+        checked = {}
         for item in items:
-            row, original = knowledge._document_version(db, actor, item['document_id'], item['version'])
+            key = (item['document_id'], item['version'])
+            if key not in checked:
+                row, original = knowledge._document_version(db, actor, *key)
+                if row['source_key']:
+                    source = db.execute('SELECT payload FROM source_versions WHERE document_id=? AND version=?', key).fetchone()
+                    try:
+                        valid = source and knowledge.source_current and knowledge.source_current(json.loads(source[0]))
+                    except Exception:
+                        valid = False
+                    if not valid:
+                        raise AssistantError('知识库来源版本已变化，请重新查询。', 409)
+                checked[key] = original
+            original = checked[key]
             expected = item.get('source_version', {}).get('sha256')
             if expected and original['hash'] != expected:
                 raise AssistantError('知识库原件版本已变化，请重新查询。', 409)
-            if row['source_key']:
-                source = db.execute('SELECT payload FROM source_versions WHERE document_id=? AND version=?',
-                                    (item['document_id'], item['version'])).fetchone()
-                try:
-                    valid = source and knowledge.source_current and knowledge.source_current(json.loads(source[0]))
-                except Exception:
-                    valid = False
-                if not valid:
-                    raise AssistantError('知识库来源版本已变化，请重新查询。', 409)
 
 
 def _base_location(location):

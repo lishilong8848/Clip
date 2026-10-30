@@ -46,7 +46,8 @@ REASONS = {
 
 # Enumerated diagnostic scalars: closed sets only, never free-form text.
 DETAIL_INTS = frozenset({'payloads', 'tools', 'compactions', 'reasoning_retries', 'empty_retries',
-    'missing_retries', 'request_bytes', 'response_bytes'})
+    'missing_retries', 'request_bytes', 'response_bytes',
+    'knowledge_documents', 'knowledge_chunks', 'elapsed_ms', 'budget_ms', 'model_attempt'})
 DETAIL_BOOLS = frozenset({'has_assistant', 'has_current_assistant', 'replay_safe'})
 DETAIL_ENUMS = {
     'stop_reason': frozenset({'stop', 'end_turn', 'toolUse', 'tool_use', 'tool_calls', 'length', 'max_tokens',

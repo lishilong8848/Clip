@@ -9,6 +9,7 @@ import { adaptBrowserReferences } from './scripts/workspace-build-adapter.mjs';
 import { adaptEventPeriodPage } from './scripts/workspace-event-adapter.mjs';
 // @ts-ignore V2-only presentation adapter, covered by browser tests.
 import { adaptCabinetBatchPage, adaptCabinetPage } from './scripts/workspace-cabinet-adapter.mjs';
+import { adaptAssistantLayout } from './scripts/workspace-assistant-layout-adapter.mjs';
 // @ts-ignore marks binary settings only, never selection groups.
 import { markBinaryControls, adaptPasswordLogin, fuseLearningCharts, portalFloatingControls, adaptMotionControls } from './scripts/workspace-controls-adapter.mjs';
 // @ts-ignore V2-only response adaptation; the legacy client source stays unchanged.
@@ -72,6 +73,8 @@ export default defineConfig({
       if(path===root+'src/api/client.ts')return {code:adaptNoticeParserClient(code),map:null};
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
       let result=code;
+      if(path===root+'src/components/LighthouseAssistant.vue')result=adaptAssistantLayout(result);
+      if(path===root+'src/components/RiskInspectionPage.vue')result=result.replace('aria-label="风险排查"','aria-label="专项排查"').replace("'发布风险排查'", "'发布专项排查'").replace("detail?.name||'风险排查'", "detail?.name||'专项排查'");
       if(path===root+'src/components/HistoryMemoryPage.vue')result=adaptHistoryMemory(result,readFileSync(join(root,'src/workspace-v2/HistoryMemoryWorkspace.vue'),'utf8'));
       if(path===root+'src/components/LearningPage.vue')result=adaptLearningPage(result);
       if(path===root+'src/components/LearningPage.vue')result=result.replace('<VnetBackButton :to="undefined"', '<VnetBackButton :within-module="viewMode === \'overview\' && !!learner" :to="undefined"');
@@ -88,7 +91,7 @@ export default defineConfig({
       if(path===root+'src/components/AdminAccounts.vue')result=adaptAccounts(result);
       if(path===root+'src/components/AdminTools.vue')result=adaptAdminAccountLoading(result);
       if(path===root+'src/components/RepairManagementPage.vue')result=adaptRepairController(result,'management',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairWorkspace.vue'),'utf8')));
-      if(path===root+'src/components/RepairFollowupPanel.vue')result=adaptRepairController(result,'followup',controllerBindings(readFileSync(join(root,'src/workspace-v2/RepairFollowups.vue'),'utf8')));
+      if(path===root+'src/components/RepairFollowupPanel.vue')result=adaptRepairController(result,'followup',controllerBindings(['RepairFollowups.vue','RepairHistoryPicker.vue'].map(name=>readFileSync(join(root,'src/workspace-v2',name),'utf8')).join('\n')));
       if(path===root+'src/components/EventManagementPage.vue')result=adaptEventPeriodPage(result);
       if(path===root+'src/components/CabinetPowerBatchPage.vue')result=adaptCabinetBatchPage(result);
       if(path===root+'src/components/CabinetPowerPage.vue')result=adaptCabinetPage(result);

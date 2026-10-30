@@ -2,14 +2,20 @@
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
     <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" />更多办理</NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" />刷新</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation type="primary" @click="newNotice(kind)"><Plus :size="17" />手填{{ typeLabel(kind) }}</NButton><NDropdown v-else :options="newOptions" trigger="click" @select="newNotice"><NButton data-v2-navigation type="primary"><Plus :size="17" />新建通告</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation @click="newNotice('paste')">粘贴原文</NButton></div></header>
     <div class="v2-notice-type-filters"><nav ref="typeNavigation" class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
-    <form class="v2-notice-filters" :class="{'has-scopes':!selectedScopes&&buildingOptions.length>1}" aria-label="通告筛选" @submit.prevent="filter"><WidgetScopePicker v-if="!selectedScopes&&buildingOptions.length>1" :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><NSelect v-model:value="month" :options="months" aria-label="计划月份" /><NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="专业筛选" /><NButton attr-type="submit" :loading="loading">筛选</NButton></form>
+    <div v-if="!selectedScopes&&buildingOptions.length>1" class="v2-notice-global-scope"><WidgetScopePicker :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><small>适用于计划与进行中通告</small></div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" />正在同步源表，当前仍可查看已加载的通告。</NAlert>
     <NTabs v-model:value="list" class="v2-notice-mobile-tabs" type="line" animated><NTab name="planned" role="tab" :aria-selected="list==='planned'">计划通告<span class="v2-notice-count">{{ total('planned') }}</span></NTab><NTab name="ongoing" role="tab" :aria-selected="list==='ongoing'">进行中<span class="v2-notice-count">{{ total('ongoing') }}</span></NTab></NTabs>
     <PageCanvas page="notices" label="通告办理" :active="active" :blocks="lanes.map(lane=>({id:lane.id,title:lane.label,w:6,h:11,minW:4,minH:5}))">
       <template v-for="lane in lanes" :key="lane.id" #[lane.id]>
       <section class="v2-notice-section" :class="{'is-mobile-hidden':list!==lane.id}" :data-list="lane.id" :aria-label="lane.label">
-        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2><form v-if="lane.id==='planned'" class="v2-notice-plan-search" @submit.prevent="filter"><NInput v-model:value="search" clearable size="small" placeholder="搜索计划名称" :input-props="{'aria-label':'搜索通告'}" @clear="search='';filter()"><template #prefix><Search :size="16" /></template><template #suffix><NButton text data-v2-navigation aria-label="搜索计划" @click="filter"><ArrowRight :size="15" /></NButton></template></NInput></form></header>
+        <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2></header>
+        <form v-if="lane.id==='planned'" class="v2-notice-filters v2-notice-plan-filters" aria-label="仅筛选计划通告" @submit.prevent="filter">
+          <NInput v-model:value="search" clearable size="small" placeholder="搜索计划名称" :input-props="{'aria-label':'搜索计划通告'}" @clear="search='';filter()"><template #prefix><Search :size="16" /></template></NInput>
+          <NSelect v-model:value="month" :options="months" aria-label="计划月份" />
+          <NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="计划专业" />
+          <NButton attr-type="submit" :loading="loading" aria-label="筛选计划通告">筛选</NButton>
+        </form>
         <p v-if="lane.id==='planned'&&filtersDirty" class="v2-notice-filter-note" role="status">计划筛选已修改，点击“筛选”后更新。</p>
         <NSkeleton v-if="loading&&!lane.rows.length" :repeat="6" height="72px" class="v2-notice-skeleton" />
         <NList v-else class="v2-notice-list" :aria-busy="loading">
@@ -101,7 +107,7 @@ import { activateCard } from './cardActivation';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
-import { ArrowRight,CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
+import { CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
@@ -631,6 +637,12 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-section>.v2-notice-filters.has-scopes{grid-template-columns:repeat(3,minmax(0,1fr)) auto}
 .v2-notice-section>.v2-notice-filters>.n-input{grid-column:1/-1}
 .v2-notice-section>.v2-notice-filters>.n-select{min-width:0}
+.v2-notice-global-scope{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px}
+.v2-notice-global-scope small{font-size:12px;color:var(--v2-muted)}
+.workspace-v2 .v2-notice-section>.v2-notice-plan-filters{display:grid;grid-template-columns:minmax(85px,1fr) minmax(100px,1.3fr) auto;gap:8px;align-items:center;margin:0 0 10px}
+.workspace-v2 .v2-notice-plan-filters>.n-input{grid-column:1/-1;min-width:0}
+.workspace-v2 .v2-notice-plan-filters>.n-button{min-height:36px}
+@container notice-lane (min-width:560px){.workspace-v2 .v2-notice-section>.v2-notice-plan-filters{grid-template-columns:minmax(180px,1fr) 100px minmax(110px,.7fr) auto}.workspace-v2 .v2-notice-plan-filters>.n-input{grid-column:auto}}
 .v2-notice-submit-group{display:flex;align-items:center;justify-content:flex-end;gap:10px;min-width:0}
 .v2-notice-submit-group>.n-radio-group{white-space:nowrap}
 .v2-notice-context-controls>:is([data-notice-section="relations"],[data-notice-section="binding"]){padding:8px 0}

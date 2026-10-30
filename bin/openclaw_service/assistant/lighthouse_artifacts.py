@@ -3,6 +3,7 @@ import asyncio
 import io
 import hashlib
 import json
+import logging
 import math
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -17,6 +18,7 @@ CODE_EXTENSIONS = {'.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.sql',
 OFFICE_EXTENSIONS = {'.docx', '.xlsx', '.pptx', '.pdf'}
 MAX_CONTENT = 512 * 1024
 LONG_REPLY = 3500
+INLINE_REPLY = 12000
 PREVIEW_CHARS = 80000
 _WORKERS = ThreadPoolExecutor(max_workers=2, thread_name_prefix='assistant-documents')
 
@@ -214,12 +216,26 @@ def package_long_reply(files, actor, result):
             except (AssistantError, OSError):
                 continue
     if file is None:
-        file = files.upload(actor, '完整回答.md', content, extract=False, source_scopes=scopes)
+        try:
+            file = files.upload(actor, '完整回答.md', content, extract=False, source_scopes=scopes)
+        except (AssistantError, OSError) as exc:
+            if isinstance(exc, AssistantError) and exc.status < 500:
+                raise
+            # Creating an optional text copy is not answer generation. Keep the
+            # whole checked answer when local storage is temporarily unavailable.
+            logging.getLogger(__name__).warning('Long reply attachment unavailable: %s', type(exc).__name__)
+            return {**result, 'answer': text + '\n\n完整回答附件暂未生成，以上文字已完整保留。'}
     outputs = list(result.get('output_files') or [])
     if not any(saved.get('id') == file['id'] for saved in outputs):
         outputs.append(file)
-    return {**result, 'answer': f'回复超过{LONG_REPLY}字符，完整内容已保存为「{file["name"]}」，请打开附件查看。',
-            'answer_document': {'id': file['id'], 'characters': len(text), 'threshold': LONG_REPLY, 'sha256': digest},
+    cited = {int(value) for value in re.findall(r'\[(\d{1,3})\]', text)}
+    source_numbers = sorted({source['number'] for source in result.get('sources', [])
+                             if isinstance(source, dict) and type(source.get('number')) is int
+                             and source['number'] in cited})
+    return {**result, 'answer': text if len(text) <= INLINE_REPLY else
+            f'完整内容已保存为「{file["name"]}」，请打开附件查看。',
+            'answer_document': {'id': file['id'], 'characters': len(text), 'threshold': LONG_REPLY,
+                                'sha256': digest, 'source_numbers': source_numbers},
             'output_files': outputs,
             'file_ids': list(dict.fromkeys([*(result.get('file_ids') or []), file['id']]))}
 

@@ -232,6 +232,7 @@
   font-weight: 600;
   color: var(--v2-text);
   margin-right: auto;
+  margin-block: 0;
 }
 .v2-admin-toolbar-title .v2-admin-role-note {
   color: var(--v2-muted);
@@ -320,6 +321,7 @@
   color: var(--v2-text);
   font-variant-numeric: tabular-nums;
 }
+.v2-signature-summary > span { white-space: nowrap; }
 .v2-signature-actions {
   display: flex;
   align-items: center;
@@ -423,4 +425,56 @@
   .v2-account-native-tree .n-tree-node-switcher__icon {
     transition: none !important;
   }
+}
+
+/* F06: keep search and the two frequent filters visible. Less frequent source
+   filters and full sync diagnostics remain available in native disclosures. */
+.workspace-v2 .signature-management .filters.v2-signature-filters {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto;
+  align-items: start;
+  gap: 8px 12px;
+  padding: 0 16px 10px;
+}
+.workspace-v2 .v2-signature-filters > .search-field { grid-column: auto; min-width: 0; }
+.workspace-v2 .v2-signature-primary-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; min-width: 0; }
+.workspace-v2 .v2-signature-filters label { min-width: 0; }
+.workspace-v2 .v2-signature-filters .v2-single-select { width: 100%; min-width: 0; }
+.workspace-v2 .v2-signature-filter-extra { display: flex; align-items: flex-start; flex-wrap: wrap; gap: 8px; padding-top: 22px; }
+.workspace-v2 .v2-signature-advanced > summary { min-height: 36px; padding: 8px 0; box-sizing: border-box; color: var(--v2-muted); font-size: 13px; cursor: pointer; }
+.workspace-v2 .v2-signature-advanced[open] > summary { color: var(--v2-blue); }
+.workspace-v2 .v2-signature-advanced-fields { min-width: 150px; padding: 6px 0; }
+.workspace-v2 .directory-panel.v2-directory-scroll .v2-signature-sync { margin: 0 16px; border-block: 1px solid var(--v2-border); }
+.workspace-v2 .v2-signature-sync > summary { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; min-height: 36px; padding: 6px 0; box-sizing: border-box; font-size: 12px; color: var(--v2-muted); cursor: pointer; list-style: none; }
+.workspace-v2 .v2-signature-sync > summary::-webkit-details-marker { display: none; }
+.workspace-v2 .v2-signature-sync > summary > span { white-space: nowrap; }
+.workspace-v2 .v2-signature-sync-hint { margin-left: auto; text-decoration: underline; text-underline-offset: 3px; }
+.workspace-v2 .directory-panel.v2-directory-scroll .v2-signature-sync .source-status { margin: 0; padding: 8px 0; border: 0; background: transparent; font-size: 12px; }
+.workspace-v2 .v2-signature-sync .source-status > span { overflow-wrap: anywhere; min-width: 0; }
+.workspace-v2 .signature-management :is(.v2-signature-sync, .v2-signature-advanced) > summary:focus-visible { outline: 2px solid var(--v2-blue); outline-offset: 2px; }
+
+@media (max-width: 1100px) {
+  .workspace-v2 .signature-management .filters.v2-signature-filters { grid-template-columns: minmax(0, 1fr); }
+  .workspace-v2 .v2-signature-filter-extra { padding-top: 0; }
+}
+@media (max-width: 760px) {
+  .workspace-v2 .signature-management .v2-signature-toolbar { gap: 8px; padding-bottom: 10px; margin-bottom: 8px; }
+  .workspace-v2 .v2-signature-title { gap: 6px; }
+  .workspace-v2 .v2-signature-summary { width: 100%; gap: 4px 10px; font-size: 12px; }
+  .workspace-v2 .v2-signature-actions { gap: 6px 8px; }
+  .workspace-v2 .v2-signature-actions > .btn,
+  .workspace-v2 .v2-signature-actions > a { flex: 0 1 auto; min-height: 44px; padding-inline: 10px; }
+  .workspace-v2 .v2-signature-actions > .v2-signature-toolbar-anchor { margin-left: auto; min-height: 44px; }
+  .workspace-v2 .directory-panel.v2-directory-scroll > .section-head { padding: 12px 12px 8px; gap: 8px; align-items: center; }
+  .workspace-v2 .directory-panel.v2-directory-scroll > .section-head h3 { font-size: 15px; }
+  .workspace-v2 .signature-management .filters.v2-signature-filters { padding: 0 12px 6px; gap: 8px; }
+  .workspace-v2 .v2-signature-primary-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+  .workspace-v2 .v2-signature-filter-extra { justify-content: space-between; gap: 6px; }
+  .workspace-v2 .v2-signature-advanced { flex: 1; }
+  .workspace-v2 .v2-signature-advanced > summary { min-height: 44px; padding-block: 12px; }
+  .workspace-v2 .v2-signature-filter-extra > .clear-filter { min-height: 44px; }
+  .workspace-v2 .v2-signature-advanced-fields { width: min(100%, 240px); min-width: 0; }
+  .workspace-v2 .directory-panel.v2-directory-scroll .v2-signature-sync { margin-inline: 12px; }
+  .workspace-v2 .v2-signature-sync > summary { min-height: 44px; gap: 4px 8px; }
+  .workspace-v2 .signature-management .v2-signature-filters .search-input > button { width: 44px; min-width: 44px; min-height: 44px; }
 }

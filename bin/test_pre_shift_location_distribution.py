@@ -222,6 +222,7 @@ class LocationDistributionTests(unittest.TestCase):
         self.assertLess(main.index('_ensure_photo_location_distribution('), main.index('build_patch('))
         self.assertIn('publish=not args.skip_upload', main)
         self.assertNotIn('_ensure_photo_location_distribution', inspect.getsource(package._run_packaging_preflight_tests))
+        self.assertNotIn('_ensure_photo_location_distribution', inspect.getsource(package._run_packaging_preflight_tests_once))
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder); meta = root / 'bin/lan_bitable_template_portal/photo-location-distribution.json'
             meta.parent.mkdir(parents=True); meta.write_text('{}')

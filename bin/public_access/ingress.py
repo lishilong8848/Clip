@@ -106,6 +106,7 @@ class PublicGuard:
                 return await reject(scope, receive, send, 429, '公网登录请求较多，请稍后重试。')
             self.auth_times.append(now)
         scope = {**scope, 'client': ('192.0.2.1', 0), 'scheme': 'https',
+                 'state': {**scope.get('state', {}), 'clipflow_public_ingress': True},
                  'headers': clean_headers(scope['headers']) + [(b'x-forwarded-proto', b'https')]}
         needs_session = path.startswith('/api/') and (method, path) not in ANONYMOUS
         session = await asyncio.to_thread(self.session_reader, Request(scope)) if needs_session else None

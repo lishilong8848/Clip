@@ -571,22 +571,28 @@ class CustomModel:
                 raise AssistantError("当前模型不支持图片输入，保留原图并使用可靠OCR文字。", 502, category="vision_unsupported") from None
             if category in {"token", "permission"}:
                 message = "模型认证失败，请在本人模型设置中核对 API Key。"
+                failure_category = 'model_auth'
             elif category == "rate_limit":
                 message = "模型请求较多，请稍后重试。"
+                failure_category = 'model_busy'
             elif status in {400, 404, 405, 422}:
                 message = "模型接口或请求配置无效，请核对接口地址及模型名称。"
+                failure_category = 'model_request'
             elif category == "business":
                 message = "模型接口返回格式无效，请核对是否为 chat/completions 接口。"
+                failure_category = 'model_protocol'
             elif category == "remote":
                 message = "模型服务暂时不可用，问题已保留，可稍后重试。"
+                failure_category = 'model_connection'
             else:
                 message = "模型连接失败或响应超时，问题已保留，可重试。"
-            raise AssistantError(message, 502) from None
+                failure_category = 'model_connection'
+            raise AssistantError(message, 502, category=failure_category) from None
         finally:
             if injected is None:
                 client.close()
         if not isinstance(payload, dict) or payload.get("error"):
-            raise AssistantError("模型服务未完成回答，请稍后重试。", 502)
+            raise AssistantError("模型服务未完成回答，请稍后重试。", 502, category='model_protocol')
         try:
             choice = payload["choices"][0]
             if not isinstance(choice, dict):
@@ -600,6 +606,8 @@ class CustomModel:
             raise AssistantError("模型未返回有效回答，请稍后重试。", 502, category='model_protocol')
         # Never expose reasoning blocks, credentials or personal identifiers.
         answer = re.sub(r"<think>.*?</think>", "", answer, flags=re.S | re.I).strip()
+        if not answer:
+            raise AssistantError("模型未返回有效回答，请稍后重试。", 502, category='model_protocol')
         if private_identifier(answer) or CONTACT.search(answer):
             return PRIVATE_REPLY
         if structured:

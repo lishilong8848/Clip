@@ -326,8 +326,8 @@ def history_identity(state, item):
     names = [item.get('display_name'), original.get('name')]
     if kind in {'person', 'sharing_attempt', 'sharing_delivery'}:
         names.append(value.get('name'))
-    if kind == 'paper':
-        names.append(value.get('claimed_by_name'))
+    # claimed_by_name is the login account's display name (possibly a nickname),
+    # not a second authoritative name for the paper's recipient.
     if kind == 'shift_person':
         names.append((value.get('summary') or {}).get('name'))
     linked_person = linked.get('person') or {}

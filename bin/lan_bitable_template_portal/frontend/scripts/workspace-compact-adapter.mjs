@@ -34,6 +34,15 @@ export function adaptCompactWorkspaces(input,filename){
     source=replace(source,byClass('v2-sop-filters'),text=>text.replace('</div>',host('sops')+'</div>'));
     source=replace(source,node=>node.tag==='aside',text=>text.replace('>',`><div class="v2-sop-list-search" data-v2-filter>${search}</div>`));
   }else if(file==='EngineerMopPage.vue'){
+    // Reuse the controller's verified route match; an unmatched link must not
+    // open a different notice just because the list picked its first row.
+    const routeSelected='      routeNoticePreselectApplied.value = true;';
+    if(source.split(routeSelected).length!==2)throw new Error('MOP route selection anchor changed');
+    source=source.replace(routeSelected,routeSelected+'\n      v2MopWorkOpen.value = true;');
+    additions=`import { inject as v2Inject, provide as v2Provide } from 'vue';
+const v2MopWorkOpen=v2Inject('workspace-v2:mop-work-open',ref(false));
+v2Provide('workspace-v2:mop-work-open',v2MopWorkOpen);
+`;
     const header=nodes(source,node=>node.tag==='MopPageHeader')[0].loc.source;
     source=replace(source,node=>node.tag==='MopPageHeader','');
     source=replace(source,node=>node.tag==='MopFlowSteps','');
@@ -50,6 +59,15 @@ export function adaptCompactWorkspaces(input,filename){
     source=replace(source,byClass('floating-upload-action-row'),text=>text.replace('>','><slot name="signatures" />'));
   }else if(file==='MopBindingWorkspace.vue'){
     source=slot(source,'MopNoticeList','<template #tools><slot name="tools" /></template>');
+    source=replace(source,node=>node.tag==='MopSummaryStrip',text=>`<MopMobileNavigation :selected-notice="selectedNotice" :busy="busy || localUploadBusy" />\n${text.replace('<MopSummaryStrip','<MopSummaryStrip :class="{\'v2-mop-summary-in-work\':v2MopWorkOpen && selectedNotice}"')}`);
+    source=source.replace('<section class="mop-layout">','<section class="mop-layout" :data-v2-mop-panel="v2MopWorkOpen && selectedNotice ? \'work\' : \'list\'">');
+    source=source.replace('@select="$emit(\'select-notice\', $event)"','@select="$emit(\'select-notice\', $event); v2MopWorkOpen=true"');
+    additions=`import { inject, ref } from 'vue';
+import MopMobileNavigation from '../workspace-v2/MopMobileNavigation.vue';
+const v2MopWorkOpen=inject('workspace-v2:mop-work-open',ref(false));
+`;
+  }else if(file==='MopSelectedFileCard.vue'){
+    source=source.replace('<small>{{ attachmentLabel }}</small>','<small :class="{\'v2-mop-attachment-repeated\':attachments.length>0}">{{ attachmentLabel }}</small>');
   }else if(file==='MopNoticeList.vue'){
     source=replace(source,node=>node.tag==='aside',text=>text.replace('>','><slot name="tools" />'));
   }else if(file==='MopPageHeader.vue'){

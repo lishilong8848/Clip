@@ -36,6 +36,11 @@
 
       <AdminAccounts v-if="!systemAdmin" :pending-count="0" :permissions="[]" />
 
+      <section v-else-if="tab === 'status' && statusUnavailable" class="admin-status-unavailable" role="status">
+        <p>{{ statusUnavailable }}</p>
+        <button type="button" class="btn ghost" :disabled="busy" @click="loadStatus">重新读取访问状态</button>
+      </section>
+
       <AdminStatusPane
         v-else-if="tab === 'status'"
         :stats="stats"
@@ -170,6 +175,8 @@ const buildingScopes = adminBuildingScopes;
 const tab = ref<AdminTabKey>("permissions");
 const busy = ref(false);
 const message = ref("");
+const statusUnavailable = ref("");
+const statusLoading = ref(false);
 const stats = ref<Dict>({});
 const perf = ref<Dict>({});
 const queues = ref<Dict>({});
@@ -349,9 +356,21 @@ function openHistoryMemory(): void {
 }
 
 async function loadStatus(): Promise<void> {
+  if (statusLoading.value || props.systemAdmin === false) return;
+  statusLoading.value = true;
   message.value = "";
   busy.value = true;
   try {
+    const auth = await api('/api/auth/status', { cache: 'no-store' });
+    if (!auth.logged_in || auth.user?.role !== 'admin') {
+      statusUnavailable.value = '当前账号没有后台诊断权限，请使用有权限的账号登录。';
+      return;
+    }
+    if (auth.backend_diagnostics_available === false) {
+      statusUnavailable.value = '后台诊断仅在运行灯塔的电脑或局域网开放，请从局域网地址查看。账号与权限等其它设置仍可正常使用。';
+      return;
+    }
+    statusUnavailable.value = '';
     let auditLoadWarning = "";
     const auditRequest = api("/api/backend/operation-audits?limit=30").catch(
       (error: any) => {
@@ -377,6 +396,7 @@ async function loadStatus(): Promise<void> {
   } catch (error: any) {
     message.value = error?.message || "状态加载失败";
   } finally {
+    statusLoading.value = false;
     busy.value = false;
   }
 }

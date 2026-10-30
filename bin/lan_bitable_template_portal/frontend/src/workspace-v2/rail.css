@@ -7,6 +7,11 @@ html.workspace-v2 .v2-shell.has-rail>.v2-rail[data-collapsed=false]{width:240px;
 .v2-rail-brand img{width:48px;height:auto;flex:none}.v2-rail-brand strong{font-size:21px;white-space:nowrap;width:100px;text-align:left}
 .v2-rail-scroll{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--v2-palette-border) transparent}
 .v2-rail-scroll>.n-menu{margin:0 0 12px}.v2-rail .n-menu-item-content{margin-inline:8px;min-height:42px;border-radius:7px}
+/* Menu already has an outer gutter: keep its fill and selection marker together. */
+.workspace-v2 .v2-rail .n-menu-item-content::before{inset:0;border-radius:7px}
+.workspace-v2 .v2-rail .n-menu-item-content--selected::after{left:0;top:10px;bottom:10px}
+.workspace-v2 .v2-shell>.v2-rail[data-collapsed=true] .n-menu-item-content--child-active::before{background:var(--v2-nav-active)!important}
+.workspace-v2 .v2-rail[data-collapsed=true] .n-menu-item-content--child-active::after{content:'';position:absolute;left:0;top:10px;bottom:10px;width:3px;border-radius:2px;background:var(--v2-blue)}
 .v2-rail .n-menu-item-content-header{min-width:0}.v2-rail .n-menu-item-content__icon{flex:none}
 .v2-rail[data-collapsed=false] .n-menu-item-content-header{display:inline!important}
 .v2-rail[data-collapsed=false] .n-menu-item-group-title{display:block!important}

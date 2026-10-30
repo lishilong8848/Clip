@@ -41,12 +41,17 @@ _LABELS = {"assistant": "灯塔助手", "feishu": "飞书智能体", "startup": 
     "gateway": "运行层详情", "model_request": "模型接口请求", "incomplete_turn": "回答未完整结束",
     "reasoning_only": "模型仅返回思考内容", "empty_response": "模型返回空内容",
     "missing_response": "缺少最终回答", "invalid_provider_response": "模型接口返回格式异常",
-    "stream_interrupted": "模型传输中断", "response_limit": "模型响应超限"}
+    "stream_interrupted": "模型传输中断", "response_limit": "模型响应超限",
+    "timeout": "模型调用超时", "knowledge_text_timeout": "资料原文读取超时",
+    "model_request": "模型请求被拒绝", "model_protocol": "模型返回格式异常",
+    "model_output": "模型输出未完整结束"}
 _DETAIL_LABELS = {'stop_reason': '结束原因', 'payloads': '输出段数', 'tools': '工具数',
     'compactions': '上下文整理次数', 'reasoning_retries': '思考续答次数', 'empty_retries': '空答重试次数',
     'missing_retries': '缺答重试次数', 'has_assistant': '存在回答', 'has_current_assistant': '当前尝试存在回答',
     'replay_safe': '可安全重试', 'request_bytes': '请求字节', 'response_bytes': '响应字节',
-    'response_type': '响应类型', 'model_family': '模型系列'}
+    'response_type': '响应类型', 'model_family': '模型系列',
+    'knowledge_documents': '引用文档数', 'knowledge_chunks': '引用片段数',
+    'elapsed_ms': '实际耗时毫秒', 'budget_ms': '允许耗时毫秒', 'model_attempt': '模型尝试序号'}
 
 
 def _seconds(value):

@@ -350,6 +350,10 @@ def _document_context(engine, actor, turn, previous, questions):
     if not candidates or not callable(factory) or 'knowledge' not in actor.get('modules', []):
         return []
     knowledge = factory()
+    # Normal followups cite several chunks from the same few documents. Check
+    # them in one read; isolate stale references only when the batch is invalid.
+    if knowledge.evidence_current(candidates, turn['_profile'], actor=actor):
+        return [{'number': i + 1, **ref} for i, ref in enumerate(candidates)]
     return [{'number': i + 1, **ref} for i, ref in enumerate(candidates)
             if knowledge.evidence_current([ref], turn['_profile'], actor=actor)]
 

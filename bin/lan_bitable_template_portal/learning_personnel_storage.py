@@ -159,7 +159,7 @@ def cleanup(service, limit=8):
     ordered = sorted([*candidates, *history], key=lambda row: row['record_id'])
     cursor = progress.get('cursor', '')
     ordered = [r for r in ordered if r['record_id'] > cursor] + [r for r in ordered if r['record_id'] <= cursor]
-    failures, removed, enriched = [], 0, 0
+    failures, removed, enriched, deferred = [], 0, 0, 0
     for row in ordered[:limit]:
         if service._stop.is_set():
             break
@@ -172,9 +172,18 @@ def cleanup(service, limit=8):
                 if not directory_ready:
                     raise core.LearningError('人员目录尚未就绪，保留历史答题记录等待补齐。', 503)
                 fields = shifts.history_fields(state, *pair, directory)
-                oid, reason, _ = shifts.resolve_history_identity(shifts.history_identity(state, row), directory)
+                identity = shifts.history_identity(state, row)
+                oid, reason, people = shifts.resolve_history_identity(identity, directory)
                 if reason:
-                    raise core.LearningError(reason, 503)
+                    # A deterministic identity conflict is not a failed upload.
+                    # Keep it in the existing admin review list and continue
+                    # synchronizing other people without retrying this write.
+                    with service.transaction() as conn:
+                        shifts._history_issue(service, conn, {
+                            'record_id': row['record_id'], 'kind': row['kind'],
+                            'fields': fields, 'identity': identity}, reason, people)
+                    deferred += 1
+                    continue
                 fields['人员'] = [{'id': oid}] if oid else []
                 service.cloud.enrich_entity_record(row['record_id'], *pair, fields,
                     expected_payload_sha256=row['payload_sha256'], expected_app_id=app_id,
@@ -205,7 +214,7 @@ def cleanup(service, limit=8):
     reasons = list(dict.fromkeys(failures))
     with service.transaction() as conn:
         service._put('local', PROGRESS_KEY, {'prepared': True, 'complete': complete,
-                     'retry_at': time.time() + 60 if failures else 0,
+                     'retry_at': time.time() + (60 if failures else 300) if failures or deferred else 0,
                      'remaining': len(candidates) - removed + len(history) - enriched, 'cursor': cursor,
                      'error': '；'.join(reasons[:3])}, conn, False)
     if failures:

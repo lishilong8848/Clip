@@ -598,15 +598,22 @@ class KnowledgeBase:
         return self.settings(actor)
 
     # ------------------------------------------------------------------ public rows
-    def _acl_sql(self, db, actor):
-        allowed = {row[0]: False for row in db.execute("SELECT id FROM documents WHERE source_key<>''")}
-        for row in db.execute('SELECT document_id,payload,enabled FROM document_sources'):
+    def _acl_sql(self, db, actor, *, document_ids=None):
+        # Searches need the full ACL map. Reading already selected evidence only
+        # needs those identities, not every attached record in the library again.
+        identities = None if document_ids is None else frozenset(document_ids)
+        params = tuple(identities or ())
+        restriction = '' if identities is None else ' AND id IN (' + ','.join('?' for _ in params) + ')'
+        source_restriction = '' if identities is None else ' WHERE document_id IN (' + ','.join('?' for _ in params) + ')'
+        allowed = {row[0]: False for row in db.execute("SELECT id FROM documents WHERE source_key<>''" + restriction, params)}
+        for row in db.execute('SELECT document_id,payload,enabled FROM document_sources' + source_restriction, params):
             try:
                 allowed[row['document_id']] = bool(actor and row['enabled'] and self.source_acl
                     and self.source_acl(actor, json.loads(row['payload'])))
             except Exception:
                 allowed[row['document_id']] = False
-        db.create_function('knowledge_visible', 1, lambda identity: int(allowed.get(identity, True)))
+        db.create_function('knowledge_visible', 1, lambda identity: int(
+            (identities is None or identity in identities) and allowed.get(identity, True)))
         stamp = hashlib.sha256(json.dumps(allowed, sort_keys=True).encode()).hexdigest()
         db.create_function('knowledge_acl_stamp', 0, lambda: stamp)
         return 'knowledge_visible(documents.id)=1'
@@ -625,7 +632,10 @@ class KnowledgeBase:
         if not sources:
             return True
         with self.connect(readonly=True) as db:
-            self._acl_sql(db, actor)
+            # History/attachment checks only need the documents actually cited
+            # by this turn, not the entire connected library on every poll.
+            identities = {(source.get('data') or {}).get('document_id') for source in sources}
+            self._acl_sql(db, actor, document_ids=identities)
             for source in sources:
                 data = source.get('data') or {}
                 row = db.execute('SELECT source_key,deleted,active_version,knowledge_visible(id) AS visible FROM documents WHERE id=?', (data.get('document_id'),)).fetchone()
@@ -662,7 +672,19 @@ class KnowledgeBase:
         return not row or self.cached_turn_current(actor, {'sources': json.loads(row[0])})
 
     def _require_visible(self, db, actor, row):
-        if not row or not db.execute('SELECT 1 FROM documents WHERE id=? AND ' + self._acl_sql(db, actor), (row['id'],)).fetchone():
+        if not row:
+            raise AssistantError('知识库文件不存在或当前无权访问。', 404)
+        # Do not replace the connection's search-wide visibility function with a
+        # single-file map: callers can continue using that same connection.
+        visible = not row['source_key']
+        source = db.execute('SELECT payload,enabled FROM document_sources WHERE document_id=?', (row['id'],)).fetchone()
+        if source:
+            try:
+                visible = bool(actor and source['enabled'] and self.source_acl
+                               and self.source_acl(actor, json.loads(source['payload'])))
+            except Exception:
+                visible = False
+        if not visible:
             raise AssistantError('知识库文件不存在或当前无权访问。', 404)
 
     @staticmethod
@@ -1848,8 +1870,8 @@ class KnowledgeBase:
     def evidence_current(self, items, profile, *, actor=None):
         if not self.model_allowed(profile):
             return False
-        with self.connect() as db:
-            self._acl_sql(db, actor)
+        with self.connect(readonly=True) as db:
+            self._acl_sql(db, actor, document_ids={item['document_id'] for item in items})
             for item in items:
                 row = db.execute('SELECT deleted,active_version FROM documents WHERE id=? AND knowledge_visible(id)=1', (item['document_id'],)).fetchone()
                 if not row or row['deleted'] or row['active_version'] != item['version']:

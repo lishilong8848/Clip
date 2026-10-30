@@ -1988,6 +1988,12 @@ class FastAPIPortalController:
                 ),
             }
             status_user = payload['data'].get('user') or {}
+            # PublicGuard still denies internal diagnostics, even to an admin.
+            # Advertise that boundary before the UI starts its parallel reads.
+            payload['data']['backend_diagnostics_available'] = (
+                not request.scope.get('state', {}).get('clipflow_public_ingress', False)
+                and PortalRuntime.auth_manager.is_admin(session)
+            )
             if session:
                 from lan_bitable_template_portal.risk_inspection_routes import risk_task_access
                 if await asyncio.to_thread(risk_task_access, PortalRuntime, session):

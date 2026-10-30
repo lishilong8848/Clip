@@ -220,7 +220,7 @@ class ReleaseJournalTests(unittest.TestCase):
     def test_preflight_registers_new_backend_suites(self):
         tree = ast.parse(Path(packaging.__file__).read_text(encoding="utf-8-sig"))
         preflight = next(node for node in tree.body
-                         if isinstance(node, ast.FunctionDef) and node.name == "_run_packaging_preflight_tests")
+                         if isinstance(node, ast.FunctionDef) and node.name == "_run_packaging_preflight_tests_once")
         registered = {node.value for node in ast.walk(preflight)
                       if isinstance(node, ast.Constant) and isinstance(node.value, str)}
         required = {"bin.test_" + name for name in (
@@ -252,7 +252,7 @@ class ReleaseJournalTests(unittest.TestCase):
             sys.modules.pop("unittest", None)
             os.environ.pop("PYTEST_CURRENT_TEST", None)
             self.review_dialog(confirm=True, action=packaging.main)
-            preflight.assert_called_once_with()
+            preflight.assert_not_called()
             upload.assert_called_once()
             publish.assert_called_once()
         manifest = journal_module.read_json(self.build / "latest_patch.json")

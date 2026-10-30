@@ -3,8 +3,11 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick } from 'vue';
+import { nextTick, provide, ref } from 'vue';
 import EngineerMopPage from '../components/EngineerMopPage.vue';
+
+// Keep mobile navigation alive while the original controller opens/closes the editor.
+provide('workspace-v2:mop-work-open', ref(false));
 
 const props = defineProps<{
   checking: boolean;
@@ -16,8 +19,7 @@ const props = defineProps<{
 async function followSelection(event: MouseEvent) {
   if (!matchMedia('(max-width: 900px)').matches || !(event.target instanceof Element)) return;
   const root = event.currentTarget as HTMLElement;
-  const target = event.target.closest('.notice-row') ? '.binding-panel' :
-    event.target.closest('.mop-row') ? '.mop-selected-file-card' : '';
+  const target = event.target.closest('.mop-row') ? '.mop-selected-file-card' : '';
   if (!target) return;
   await nextTick();
   root.querySelector(target)?.scrollIntoView({
@@ -162,6 +164,21 @@ async function followSelection(event: MouseEvent) {
   .v2-mop-workspace :deep(.notice-panel) { padding: 0; border-right: 0; }
   .v2-mop-workspace :deep(.notice-list) { max-height: 300px; min-height: 100px; }
   .v2-mop-workspace :deep(.binding-panel) { scroll-margin-top: calc(var(--head-height, 68px) + 12px); }
+  /* Display changes preserve the list, selectors and the controller's in-memory draft. */
+  .v2-mop-workspace :deep(.mop-summary.v2-mop-summary-in-work) { display: none; }
+  .v2-mop-workspace :deep([data-v2-mop-panel="work"] > .notice-panel),
+  .v2-mop-workspace :deep([data-v2-mop-panel="list"] > .binding-panel),
+  .v2-mop-workspace :deep([data-v2-mop-panel="work"] .v2-page-canvas:not(.is-customizing) [data-widget-id="block_notices"]),
+  .v2-mop-workspace :deep([data-v2-mop-panel="list"] .v2-page-canvas:not(.is-customizing) [data-widget-id="block_binding"]),
+  .v2-mop-workspace :deep([data-v2-mop-panel="work"] .v2-embedded-block:has(>.notice-panel)),
+  .v2-mop-workspace :deep([data-v2-mop-panel="list"] .v2-embedded-block:has(>.binding-panel)) { display: none !important; }
+  .v2-mop-workspace :deep([data-v2-mop-panel] .v2-page-canvas:not(.is-customizing) > .v2-widget-grid) { display: flex !important; flex-direction: column; height: auto !important; min-height: 0 !important; gap: 12px; }
+  .v2-mop-workspace :deep([data-v2-mop-panel] .v2-page-canvas:not(.is-customizing) .grid-stack-item) { position: relative !important; inset: auto !important; width: 100% !important; height: auto !important; min-height: 0 !important; transform: none !important; }
+  .v2-mop-workspace :deep([data-v2-mop-panel] .v2-page-canvas:not(.is-customizing) :is(.v2-widget,.v2-widget-body,.v2-module-block)) { position: relative; inset: auto; height: auto !important; min-height: 0 !important; max-height: none !important; overflow: visible; }
+  .v2-mop-workspace :deep([data-v2-mop-panel="work"] .selected-notice) { display: none; }
+  .v2-mop-workspace :deep([data-v2-mop-panel="work"] .binding-panel) { grid-template-columns: minmax(0,1fr); grid-template-rows: auto; grid-template-areas: 'heading' 'chosen' 'upload' 'search' 'count' 'candidates'; }
+  .v2-mop-workspace :deep(.selected-file-main .v2-mop-attachment-repeated) { display: none; }
+  .v2-mop-workspace :deep(.selected-file-main strong) { display: block; overflow: visible; -webkit-line-clamp: unset; overflow-wrap: anywhere; }
 }
 @container mop-selection (max-width: 680px) {
   .v2-mop-workspace :deep(.binding-panel) { grid-template-columns: minmax(0,1fr); grid-template-rows: auto; grid-template-areas: 'heading' 'notice' 'chosen' 'upload' 'search' 'count' 'candidates'; }

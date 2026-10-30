@@ -10,7 +10,7 @@ class QualityPackaging(unittest.TestCase):
     def test_knowledge_concurrency_checks_run_alone_before_heavy_shards(self):
         tree = ast.parse((ROOT / 'package_portable.py').read_text(encoding='utf-8-sig'))
         preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                         and node.name == '_run_packaging_preflight_tests')
+                         and node.name == '_run_packaging_preflight_tests_once')
         groups = []
         configured = ast.literal_eval(next(node.value for node in preflight.body if isinstance(node, ast.Assign)
             and any(isinstance(target, ast.Name) and target.id == 'test_groups' for target in node.targets)))
@@ -32,7 +32,7 @@ class QualityPackaging(unittest.TestCase):
     def test_quality_regressions_are_part_of_the_default_preflight(self):
         tree = ast.parse((ROOT / 'package_portable.py').read_text(encoding='utf-8-sig'))
         preflight = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                         and node.name == '_run_packaging_preflight_tests')
+                         and node.name == '_run_packaging_preflight_tests_once')
         strings = {node.value for node in ast.walk(preflight) if isinstance(node, ast.Constant)
                    and isinstance(node.value, str)}
         for name in ('knowledge_repair', 'knowledge_evidence', 'claim_review', 'answer_quality_replay', 'quality_packaging',

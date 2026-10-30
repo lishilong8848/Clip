@@ -82,7 +82,7 @@ onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();if(v2StatsTimer)clearTi
 `;
 
 const followupExtras = `
-const v2HistoryOpen = ref(false), v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
+const v2EditingHistory = ref(false), v2EquipmentOpen = ref(false);
 const v2ReadError = ref(''), v2Ready = ref(false);
 const v2Locked = computed(() => props.readOnly || Boolean(editingRecordId.value) && !v2EditingHistory.value);
 const v2Submission = useRepairSubmission(() => 'followup:' + props.userId + ':' + props.scope + ':' + props.summaryRecordId, result => {

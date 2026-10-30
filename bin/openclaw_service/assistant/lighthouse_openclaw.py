@@ -357,7 +357,10 @@ class OpenClawToolAgent:
         original_session = self.session_key
         try:
             # Bound the entire inference chain, not 190 seconds per alternative.
-            async with asyncio.timeout(240), AsyncExitStack() as stack:
+            remaining = min(240, self.turn.get('_answer_deadline', float('inf')) - time.monotonic())
+            if remaining <= 0:
+                raise TimeoutError
+            async with asyncio.timeout(remaining), AsyncExitStack() as stack:
                 await self.engine.wait_warmup(self.actor, self.emit)
                 self._fallback_attempt = 0
                 self._routing_failure = ''

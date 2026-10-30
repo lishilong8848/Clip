@@ -18,7 +18,7 @@
       <template v-if="task">
         <div class="v2-check-status" :class="{'is-complete':task.submitted}">
           <CheckCircle2 v-if="task.submitted" :size="20" /><ClipboardCheck v-else :size="20" />
-          <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small>{{ task.submitted ? completionLabel(task) + ' · ' + task.actor_name + ' · ' + dateLabel(task.submitted) : (task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员') + ' · 任意一人提交即可' }}</small></div>
+          <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small v-if="task.submitted||!compact">{{ task.submitted ? completionLabel(task) + ' · ' + task.actor_name + ' · ' + dateLabel(task.submitted) : (task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员') + ' · 任意一人提交即可' }}</small><details v-else class="v2-check-people"><summary>本楼任意一名有权限人员提交即可</summary><small>{{ task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员' }}</small></details></div>
           <span v-if="!task.submitted">{{ answered }} / {{ task.items.length }}</span>
           <NButton v-else-if="task.can_edit" secondary size="small" @click="recordId=task.id"><template #icon><Pencil :size="15" /></template>修改记录</NButton>
         </div>
@@ -175,7 +175,24 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 .v2-shift-check{display:flex;flex-direction:column;gap:12px;min-height:0;font-size:14px}.v2-check-toolbar,.v2-check-toolbar>div,.v2-check-shifts,.v2-check-status,.v2-check-form>footer,.v2-check-editor-actions{display:flex;align-items:center;gap:8px}.v2-check-toolbar{justify-content:space-between}.v2-check-toolbar>.n-select{max-width:140px}.v2-check-shifts{flex-wrap:wrap}.v2-check-status{padding:10px 12px;background:#eef4ff;color:#2457a7;border-radius:8px}.v2-check-status.is-complete{background:#edf7f0;color:#267047}.v2-check-status>div{flex:1;min-width:0}.v2-check-status strong,.v2-check-status small{display:block}.v2-check-status small{margin-top:3px;color:#586577;font-size:12px;overflow-wrap:anywhere}.v2-check-sync,.v2-check-times{font-size:12px;color:#53636e;line-height:1.6}.v2-check-items{display:flex;flex-direction:column}.v2-check-item{border:0;border-bottom:1px solid #e8ecf0;margin:0;padding:12px 0;min-width:0;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:center}.v2-check-item legend{float:left;display:block;padding:0;overflow-wrap:anywhere;line-height:1.6}.v2-check-item legend span{display:inline-flex;width:24px;height:24px;align-items:center;justify-content:center;margin-right:8px;border-radius:50%;background:#f0f3f6;color:#637184;font-size:12px}.v2-check-note{grid-column:1/-1}.v2-check-note label{display:block;margin-bottom:5px;font-size:12px;color:#98482c}.v2-check-form>footer{justify-content:space-between;padding:12px 0;background:#fff}.v2-check-form>footer>span{font-size:12px;color:#5a6a7b}.v2-check-editor.n-card{width:min(650px,calc(100vw - 24px));max-height:85dvh}.v2-check-editor .n-card-content{overflow-y:auto}.v2-check-edit-note{font-size:13px;color:#647487;line-height:1.6;margin:0 0 16px}.v2-check-edit-row{display:grid;grid-template-columns:20px minmax(0,1fr) 36px;gap:8px;align-items:center;margin:10px 0}.v2-check-editor-actions{justify-content:flex-end}.v2-check-note-enter-active,.v2-check-note-leave-active{transition:opacity 180ms ease-out,transform 180ms ease-out}.v2-check-note-enter-from,.v2-check-note-leave-to{opacity:0;transform:translateY(-5px)}@media(max-width:760px){.v2-check-item{grid-template-columns:1fr}.v2-check-item .n-radio-button{min-height:40px;display:inline-flex;align-items:center}.v2-check-item .n-radio-group{justify-self:end}.v2-check-toolbar .n-button{min-height:40px}}@media(prefers-reduced-motion:reduce){.v2-check-note-enter-active,.v2-check-note-leave-active{transition:opacity 100ms}}
 </style>
 <style>
-.workspace-v2 .v2-check-choice{min-height:88px;padding:12px}
+.workspace-v2 .v2-check-choice{min-height:64px;padding:8px 10px;gap:2px}
+.workspace-v2 .v2-check-choice>span{font-size:14px}
+.workspace-v2 .v2-check-choice small{font-size:11px;line-height:1.45}
+.workspace-v2 .v2-check-workspace>.v2-check-shifts{grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr));gap:6px;align-items:stretch}
+.workspace-v2 .v2-check-people{font-size:12px;line-height:1.6;color:var(--v2-muted);margin-top:2px}
+.workspace-v2 .v2-check-people summary{cursor:pointer}
+.workspace-v2 .v2-check-form>footer{position:sticky;bottom:0;z-index:3;padding:8px 0;border-top:1px solid var(--v2-border);background:var(--n-color,var(--v2-bg));gap:8px}
+.workspace-v2 .v2-check-form>footer .n-button{min-height:42px;flex:none}
+.workspace-v2 .v2-check-form{scroll-margin-bottom:64px}
+.workspace-v2 .v2-check-items{max-height:min(420px,43dvh);scroll-padding-bottom:20px}
+@media(max-width:760px){
+  /* The mobile canvas grows with content; do not create an unused scroll owner
+     that prevents the submit bar from avoiding the fixed bottom navigation. */
+  .workspace-v2 .v2-widget:has(.v2-shift-check){overflow:visible}
+  .workspace-v2 .v2-check-form>footer{bottom:calc(62px + env(safe-area-inset-bottom));box-shadow:0 -4px 10px color-mix(in srgb,var(--v2-ink) 5%,transparent)}
+  .workspace-v2 .v2-check-items{padding-bottom:80px;scroll-padding-bottom:80px}
+}
+@container shift-check (min-width:650px){.workspace-v2 .v2-check-workspace>.v2-check-shifts{grid-template-columns:minmax(0,1fr)}}
 .v2-check-items{max-height:min(480px,58dvh);overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable;padding:4px 8px 12px 4px;scroll-padding-block:12px}
 .v2-check-form-error{color:#b42318;font-size:13px;line-height:1.5;margin:8px 0}
 .v2-check-items:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}

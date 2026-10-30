@@ -1,5 +1,14 @@
 /* Paged content uses the work area; bounded lists hand the wheel back at their edges. */
 @media screen {
+  /* Normal work-area scrollers pass the wheel/touch gesture to their parent.
+     Modal subtrees retain their own boundary so the background stays still. */
+  html.workspace-v2 .v2-main :where(*):not(:where(
+    [role="dialog"],[aria-modal="true"],.n-modal,.n-drawer,.modal,.overlay,.modal-overlay,.drawer-overlay
+  )):not(:where(
+    [role="dialog"],[aria-modal="true"],.n-modal,.n-drawer,.modal,.overlay,.modal-overlay,.drawer-overlay
+  ) *) {
+    overscroll-behavior-y: auto !important;
+  }
   .workspace-v2 .v2-main > :is(.admin-shell,.drill-page) {
     min-height: 0;
   }

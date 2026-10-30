@@ -1,0 +1,4 @@
+- status [ref=e3]:
+  - strong [ref=e5]: 正在打开新版工作台
+  - link "返回旧版" [ref=e6] [cursor=pointer]:
+    - /url: /?frontend=legacy

@@ -23,7 +23,7 @@
       <NAlert v-if="r.messageText && !r.projectDrawerOpen && !r.v2RecordError" :type="tone(r.messageTone)" :bordered="false" role="status">{{r.messageText}}</NAlert>
       <div class="v2-repair-body">
         <section ref="listElement" class="v2-repair-list" aria-label="维修项目列表">
-          <div class="v2-repair-list-head" aria-hidden="true"><span>维修项目 / 楼栋与专业</span><span>维修状态 / 进度</span><span>跟进记录</span></div>
+          <div class="v2-repair-list-head"><span>维修项目</span><span>点击记录填写维修单或跟进</span></div>
           <div v-if="r.loading && r.records.length" class="v2-repair-refreshing" role="status"><NSpin :size="15" />正在读取“{{r.v2StateLabel}}”，暂显示原列表</div>
           <div class="record-list" :aria-busy="r.loading">
             <div v-if="r.loading&&!r.records.length" class="v2-repair-skeleton"><NSkeleton v-for="i in 5" :key="i" height="90px" :sharp="false" /></div>
@@ -61,7 +61,7 @@
                 <div v-if="r.editingRecordId&&r.followupPanelMounted" v-show="r.activeWorkspaceTab==='followups'"><RepairFollowups :ref="value=>r.v2FollowupApi=value" embedded :scope="scope" :user-id="userId" :summary-record-id="r.editingRecordId" :summary-title="r.selectedRecordTitle" :read-only="r.selectedRecordReadOnly" :can-delete="canDelete" :refresh-version="r.repairSourceRefreshVersion" @changed="r.handleFollowupChanged" @source-refreshed="r.handleRepairSourceRefreshed" @dirty-changed="r.followupHasUnsavedChanges=$event" @count-changed="r.updateSelectedFollowupCount" @busy="r.v2FollowupBusy=$event" /></div>
                 <div v-show="r.activeWorkspaceTab==='project'" class="v2-repair-project-form">
                   <section class="v2-repair-source-flow" aria-label="关联资料自动填写" :aria-busy="r.prefillLoading">
-                    <details :key="r.editingRecordId||'new'" :open="!r.sourceEventId||!r.selectedRepairIds.length||r.prefillLoading">
+                    <details :key="(r.editingRecordId||'new')+':'+(r.selectedRepairIds.length?'linked':'unlinked')" :open="!r.sourceEventId||!r.selectedRepairIds.length||r.prefillLoading">
                     <summary><span><strong>关联资料</strong><small>{{r.sourceEventId?'已关联事件':'未关联事件'}} · {{r.selectedRepairIds.length?'已关联 '+r.selectedRepairIds.length+' 条检修通告':'未关联检修通告'}}</small></span><span class="v2-repair-source-toggle">查看 / 调整<ChevronDown :size="16" /></span></summary>
                     <ol>
                       <li :class="{'is-complete':r.sourceEventId}"><span class="v2-repair-source-step"><Check v-if="r.sourceEventId" :size="17" /><template v-else>1</template></span><div class="v2-repair-source-copy"><strong>关联事件</strong><p>{{r.sourceEventId?r.selectedEventSummary:'待选择事件'}}</p><div v-if="!r.selectedRecordReadOnly" class="v2-repair-source-actions"><NButton data-v2-navigation :type="r.sourceEventId?'default':'primary'" :disabled="r.saving||r.prefillLoading" @click="r.openSourcePicker('event')">{{r.sourceEventId?'更换事件':'选择事件并带入资料'}}</NButton><NButton v-if="r.sourceEventId" data-v2-navigation quaternary :disabled="r.saving||r.prefillLoading" aria-label="解除关联事件" @click="r.clearEventSelection">解除</NButton></div></div></li>

@@ -1,0 +1,589 @@
+- generic [ref=e1]:
+  - generic [ref=e773]:
+    - generic [aria-hidden]:
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+      - generic: 内部资料 · 布局验收管理员 · 2026-10-30
+    - main [ref=e774]:
+      - generic [ref=e7]:
+        - generic [ref=e8]:
+          - generic [ref=e9]:
+            - heading "签名管理" [level=2] [ref=e10]
+            - generic "签名状态统计" [ref=e11]:
+              - generic [ref=e12]: 13 已有可用签名
+              - generic [ref=e13]: 10 未签名
+              - generic [ref=e14]: 10 需重签
+              - generic [ref=e15]: 33 当前筛选
+          - generic [ref=e16]:
+            - button "刷新签名" [ref=e17] [cursor=pointer]
+            - group [ref=e23]:
+              - generic "更多管理" [active] [ref=e24] [cursor=pointer]
+            - button "自定义签名管理布局" [ref=e30] [cursor=pointer]:
+              - generic [ref=e31]: 自定义布局
+        - generic "签名管理布局" [ref=e34]:
+          - region "人员目录" [ref=e36]:
+            - generic [ref=e39]:
+              - generic [ref=e40]:
+                - heading "人员目录" [level=3] [ref=e42]
+                - generic [ref=e43]: 1–33 / 33 人
+              - generic [ref=e44]:
+                - generic [ref=e45]:
+                  - generic [ref=e46]: 搜索人员
+                  - searchbox "搜索人员" [ref=e51]
+                - generic [ref=e52]:
+                  - generic [ref=e53]:
+                    - generic [ref=e54]: 楼栋
+                    - generic [ref=e55]:
+                      - combobox [aria-hidden]
+                      - combobox "楼栋" [ref=e56]:
+                        - generic [ref=e58] [cursor=pointer]:
+                          - generic "全部楼栋" [ref=e59]
+                          - img "loading" [ref=e61]
+                  - generic [ref=e68]:
+                    - generic [ref=e69]: 签名状态
+                    - generic [ref=e70]:
+                      - combobox [aria-hidden]
+                      - combobox "签名状态" [ref=e71]:
+                        - generic [ref=e73] [cursor=pointer]:
+                          - generic "全部状态" [ref=e74]
+                          - img "loading" [ref=e76]
+                - group [ref=e84]:
+                  - generic "更多筛选" [ref=e85] [cursor=pointer]
+              - group [ref=e86]:
+                - generic "人员目录同步状态，展开查看完整时间及异常详情" [ref=e87] [cursor=pointer]:
+                  - generic "2026/10/30 08:34:52" [ref=e88]: 正式：08:34
+                  - generic "2026/10/30 08:34:52" [ref=e89]: 临时：08:34
+                  - generic [ref=e90]: 同步详情
+              - generic [ref=e91]:
+                - article [ref=e92]:
+                  - generic [ref=e93]:
+                    - generic [ref=e94]: 布
+                    - generic [ref=e95]:
+                      - strong [ref=e96]: 布局验收管理员
+                      - generic [ref=e97]: AUDIT-000 A楼
+                  - generic [ref=e98]:
+                    - generic [ref=e99]: 正式人员
+                    - generic [ref=e100]: 经理
+                    - generic [ref=e101]: 外部账号
+                    - generic [ref=e102]: 可直接收消息
+                  - generic [ref=e103]:
+                    - generic [ref=e104]: 已有可用签名
+                    - generic [ref=e108]: 默认使用正式表签名
+                    - generic [ref=e109]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e113]:
+                    - button "查看签名" [ref=e114] [cursor=pointer]
+                    - button "重新签名" [ref=e118] [cursor=pointer]
+                - article [ref=e119]:
+                  - generic [ref=e120]:
+                    - generic [ref=e121]: 演
+                    - generic [ref=e122]:
+                      - strong [ref=e123]: 演示经理01
+                      - generic [ref=e124]: AUDIT-001 H楼
+                  - generic [ref=e125]:
+                    - generic [ref=e126]: 正式人员
+                    - generic [ref=e127]: 经理
+                    - generic [ref=e128]: VNET
+                    - generic [ref=e129]: 可直接收消息
+                  - generic [ref=e130]: 未签名
+                  - button "发送签名链接" [ref=e135] [cursor=pointer]
+                - article [ref=e136]:
+                  - generic [ref=e137]:
+                    - generic [ref=e138]: 演
+                    - generic [ref=e139]:
+                      - strong [ref=e140]: 演示工程师02
+                      - generic [ref=e141]: AUDIT-002 H楼
+                  - generic [ref=e142]:
+                    - generic [ref=e143]: 正式人员
+                    - generic [ref=e144]: 工程师
+                    - generic [ref=e145]: VNET
+                    - generic [ref=e146]: 可直接收消息
+                  - generic [ref=e147]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e150] [cursor=pointer]
+                - article [ref=e151]:
+                  - generic [ref=e152]:
+                    - generic [ref=e153]: 演
+                    - generic [ref=e154]:
+                      - strong [ref=e155]: 演示主管03
+                      - generic [ref=e156]: AUDIT-003 110站
+                  - generic [ref=e157]:
+                    - generic [ref=e158]: 正式人员
+                    - generic [ref=e159]: 主管
+                    - generic [ref=e160]: 外部账号
+                    - generic [ref=e161]: 可直接收消息
+                  - generic [ref=e162]:
+                    - generic [ref=e163]: 已有可用签名
+                    - generic [ref=e167]: 默认使用正式表签名
+                    - generic [ref=e168]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e172]:
+                    - button "查看签名" [ref=e173] [cursor=pointer]
+                    - button "重新签名" [ref=e177] [cursor=pointer]
+                - article [ref=e178]:
+                  - generic [ref=e179]:
+                    - generic [ref=e180]: 演
+                    - generic [ref=e181]:
+                      - strong [ref=e182]: 演示工程师04
+                      - generic [ref=e183]: AUDIT-004 110站
+                  - generic [ref=e184]:
+                    - generic [ref=e185]: 正式人员
+                    - generic [ref=e186]: 工程师
+                    - generic [ref=e187]: VNET
+                    - generic [ref=e188]: 可直接收消息
+                  - generic [ref=e189]: 未签名
+                  - button "发送签名链接" [ref=e194] [cursor=pointer]
+                - article [ref=e195]:
+                  - generic [ref=e196]:
+                    - generic [ref=e197]: 演
+                    - generic [ref=e198]:
+                      - strong [ref=e199]: 演示值班员05
+                      - generic [ref=e200]: AUDIT-005 110站
+                  - generic [ref=e201]:
+                    - generic [ref=e202]: 正式人员
+                    - generic [ref=e203]: 值班员
+                    - generic [ref=e204]: VNET
+                    - generic [ref=e205]: 可直接收消息
+                  - generic [ref=e206]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e209] [cursor=pointer]
+                - article [ref=e210]:
+                  - generic [ref=e211]:
+                    - generic [ref=e212]: 演
+                    - generic [ref=e213]:
+                      - strong [ref=e214]: 演示值班长06
+                      - generic [ref=e215]: AUDIT-006 110站
+                  - generic [ref=e216]:
+                    - generic [ref=e217]: 正式人员
+                    - generic [ref=e218]: 值班长
+                    - generic [ref=e219]: 外部账号
+                    - generic [ref=e220]: 可直接收消息
+                  - generic [ref=e221]:
+                    - generic [ref=e222]: 已有可用签名
+                    - generic [ref=e226]: 默认使用正式表签名
+                    - generic [ref=e227]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e231]:
+                    - button "查看签名" [ref=e232] [cursor=pointer]
+                    - button "重新签名" [ref=e236] [cursor=pointer]
+                - article [ref=e237]:
+                  - generic [ref=e238]:
+                    - generic [ref=e239]: 演
+                    - generic [ref=e240]:
+                      - strong [ref=e241]: 演示主管08
+                      - generic [ref=e242]: AUDIT-008 A楼
+                  - generic [ref=e243]:
+                    - generic [ref=e244]: 正式人员
+                    - generic [ref=e245]: 主管
+                    - generic [ref=e246]: VNET
+                    - generic [ref=e247]: 可直接收消息
+                  - generic [ref=e248]: 未签名
+                  - button "发送签名链接" [ref=e253] [cursor=pointer]
+                - article [ref=e254]:
+                  - generic [ref=e255]:
+                    - generic [ref=e256]: 演
+                    - generic [ref=e257]:
+                      - strong [ref=e258]: 演示工程师09
+                      - generic [ref=e259]: AUDIT-009 A楼
+                  - generic [ref=e260]:
+                    - generic [ref=e261]: 正式人员
+                    - generic [ref=e262]: 工程师
+                    - generic [ref=e263]: 外部账号
+                    - generic [ref=e264]: 可直接收消息
+                  - generic [ref=e265]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e268] [cursor=pointer]
+                - article [ref=e269]:
+                  - generic [ref=e270]:
+                    - generic [ref=e271]: 演
+                    - generic [ref=e272]:
+                      - strong [ref=e273]: 演示值班员10
+                      - generic [ref=e274]: AUDIT-010 A楼
+                  - generic [ref=e275]:
+                    - generic [ref=e276]: 正式人员
+                    - generic [ref=e277]: 值班员
+                    - generic [ref=e278]: VNET
+                    - generic [ref=e279]: 可直接收消息
+                  - generic [ref=e280]:
+                    - generic [ref=e281]: 已有可用签名
+                    - generic [ref=e285]: 默认使用正式表签名
+                    - generic [ref=e286]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e290]:
+                    - button "查看签名" [ref=e291] [cursor=pointer]
+                    - button "重新签名" [ref=e295] [cursor=pointer]
+                - article [ref=e296]:
+                  - generic [ref=e297]:
+                    - generic [ref=e298]: 演
+                    - generic [ref=e299]:
+                      - strong [ref=e300]: 演示值班长11
+                      - generic [ref=e301]: AUDIT-011 A楼
+                  - generic [ref=e302]:
+                    - generic [ref=e303]: 正式人员
+                    - generic [ref=e304]: 值班长
+                    - generic [ref=e305]: VNET
+                    - generic [ref=e306]: 可直接收消息
+                  - generic [ref=e307]: 未签名
+                  - button "发送签名链接" [ref=e312] [cursor=pointer]
+                - article [ref=e313]:
+                  - generic [ref=e314]:
+                    - generic [ref=e315]: 演
+                    - generic [ref=e316]:
+                      - strong [ref=e317]: 演示主管13
+                      - generic [ref=e318]: AUDIT-013 B楼
+                  - generic [ref=e319]:
+                    - generic [ref=e320]: 正式人员
+                    - generic [ref=e321]: 主管
+                    - generic [ref=e322]: VNET
+                    - generic [ref=e323]: 可直接收消息
+                  - generic [ref=e324]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e327] [cursor=pointer]
+                - article [ref=e328]:
+                  - generic [ref=e329]:
+                    - generic [ref=e330]: 演
+                    - generic [ref=e331]:
+                      - strong [ref=e332]: 演示工程师14
+                      - generic [ref=e333]: AUDIT-014 B楼
+                  - generic [ref=e334]:
+                    - generic [ref=e335]: 正式人员
+                    - generic [ref=e336]: 工程师
+                    - generic [ref=e337]: VNET
+                    - generic [ref=e338]: 可直接收消息
+                  - generic [ref=e339]:
+                    - generic [ref=e340]: 已有可用签名
+                    - generic [ref=e344]: 默认使用正式表签名
+                    - generic [ref=e345]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e349]:
+                    - button "查看签名" [ref=e350] [cursor=pointer]
+                    - button "重新签名" [ref=e354] [cursor=pointer]
+                - article [ref=e355]:
+                  - generic [ref=e356]:
+                    - generic [ref=e357]: 演
+                    - generic [ref=e358]:
+                      - strong [ref=e359]: 演示值班员15
+                      - generic [ref=e360]: AUDIT-015 B楼
+                  - generic [ref=e361]:
+                    - generic [ref=e362]: 正式人员
+                    - generic [ref=e363]: 值班员
+                    - generic [ref=e364]: 外部账号
+                    - generic [ref=e365]: 可直接收消息
+                  - generic [ref=e366]: 未签名
+                  - button "发送签名链接" [ref=e371] [cursor=pointer]
+                - article [ref=e372]:
+                  - generic [ref=e373]:
+                    - generic [ref=e374]: 演
+                    - generic [ref=e375]:
+                      - strong [ref=e376]: 演示值班长16
+                      - generic [ref=e377]: AUDIT-016 B楼
+                  - generic [ref=e378]:
+                    - generic [ref=e379]: 正式人员
+                    - generic [ref=e380]: 值班长
+                    - generic [ref=e381]: VNET
+                    - generic [ref=e382]: 可直接收消息
+                  - generic [ref=e383]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e386] [cursor=pointer]
+                - article [ref=e387]:
+                  - generic [ref=e388]:
+                    - generic [ref=e389]: 演
+                    - generic [ref=e390]:
+                      - strong [ref=e391]: 演示主管18
+                      - generic [ref=e392]: AUDIT-018 C楼
+                  - generic [ref=e393]:
+                    - generic [ref=e394]: 正式人员
+                    - generic [ref=e395]: 主管
+                    - generic [ref=e396]: 外部账号
+                    - generic [ref=e397]: 可直接收消息
+                  - generic [ref=e398]:
+                    - generic [ref=e399]: 已有可用签名
+                    - generic [ref=e403]: 默认使用正式表签名
+                    - generic [ref=e404]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e408]:
+                    - button "查看签名" [ref=e409] [cursor=pointer]
+                    - button "重新签名" [ref=e413] [cursor=pointer]
+                - article [ref=e414]:
+                  - generic [ref=e415]:
+                    - generic [ref=e416]: 演
+                    - generic [ref=e417]:
+                      - strong [ref=e418]: 演示工程师19
+                      - generic [ref=e419]: AUDIT-019 C楼
+                  - generic [ref=e420]:
+                    - generic [ref=e421]: 正式人员
+                    - generic [ref=e422]: 工程师
+                    - generic [ref=e423]: VNET
+                    - generic [ref=e424]: 可直接收消息
+                  - generic [ref=e425]: 未签名
+                  - button "发送签名链接" [ref=e430] [cursor=pointer]
+                - article [ref=e431]:
+                  - generic [ref=e432]:
+                    - generic [ref=e433]: 演
+                    - generic [ref=e434]:
+                      - strong [ref=e435]: 演示值班员20
+                      - generic [ref=e436]: AUDIT-020 C楼
+                  - generic [ref=e437]:
+                    - generic [ref=e438]: 正式人员
+                    - generic [ref=e439]: 值班员
+                    - generic [ref=e440]: VNET
+                    - generic [ref=e441]: 可直接收消息
+                  - generic [ref=e442]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e445] [cursor=pointer]
+                - article [ref=e446]:
+                  - generic [ref=e447]:
+                    - generic [ref=e448]: 演
+                    - generic [ref=e449]:
+                      - strong [ref=e450]: 演示值班长21
+                      - generic [ref=e451]: AUDIT-021 C楼
+                  - generic [ref=e452]:
+                    - generic [ref=e453]: 正式人员
+                    - generic [ref=e454]: 值班长
+                    - generic [ref=e455]: 外部账号
+                    - generic [ref=e456]: 可直接收消息
+                  - generic [ref=e457]:
+                    - generic [ref=e458]: 已有可用签名
+                    - generic [ref=e462]: 默认使用正式表签名
+                    - generic [ref=e463]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e467]:
+                    - button "查看签名" [ref=e468] [cursor=pointer]
+                    - button "重新签名" [ref=e472] [cursor=pointer]
+                - article [ref=e473]:
+                  - generic [ref=e474]:
+                    - generic [ref=e475]: 演
+                    - generic [ref=e476]:
+                      - strong [ref=e477]: 演示主管23
+                      - generic [ref=e478]: AUDIT-023 D楼
+                  - generic [ref=e479]:
+                    - generic [ref=e480]: 正式人员
+                    - generic [ref=e481]: 主管
+                    - generic [ref=e482]: VNET
+                    - generic [ref=e483]: 可直接收消息
+                  - generic [ref=e484]: 未签名
+                  - button "发送签名链接" [ref=e489] [cursor=pointer]
+                - article [ref=e490]:
+                  - generic [ref=e491]:
+                    - generic [ref=e492]: 演
+                    - generic [ref=e493]:
+                      - strong [ref=e494]: 演示工程师24
+                      - generic [ref=e495]: AUDIT-024 D楼
+                  - generic [ref=e496]:
+                    - generic [ref=e497]: 正式人员
+                    - generic [ref=e498]: 工程师
+                    - generic [ref=e499]: 外部账号
+                    - generic [ref=e500]: 可直接收消息
+                  - generic [ref=e501]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e504] [cursor=pointer]
+                - article [ref=e505]:
+                  - generic [ref=e506]:
+                    - generic [ref=e507]: 演
+                    - generic [ref=e508]:
+                      - strong [ref=e509]: 演示值班员25
+                      - generic [ref=e510]: AUDIT-025 D楼
+                  - generic [ref=e511]:
+                    - generic [ref=e512]: 正式人员
+                    - generic [ref=e513]: 值班员
+                    - generic [ref=e514]: VNET
+                    - generic [ref=e515]: 可直接收消息
+                  - generic [ref=e516]:
+                    - generic [ref=e517]: 已有可用签名
+                    - generic [ref=e521]: 默认使用正式表签名
+                    - generic [ref=e522]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e526]:
+                    - button "查看签名" [ref=e527] [cursor=pointer]
+                    - button "重新签名" [ref=e531] [cursor=pointer]
+                - article [ref=e532]:
+                  - generic [ref=e533]:
+                    - generic [ref=e534]: 演
+                    - generic [ref=e535]:
+                      - strong [ref=e536]: 演示值班长26
+                      - generic [ref=e537]: AUDIT-026 D楼
+                  - generic [ref=e538]:
+                    - generic [ref=e539]: 正式人员
+                    - generic [ref=e540]: 值班长
+                    - generic [ref=e541]: VNET
+                    - generic [ref=e542]: 可直接收消息
+                  - generic [ref=e543]: 未签名
+                  - button "发送签名链接" [ref=e548] [cursor=pointer]
+                - article [ref=e549]:
+                  - generic [ref=e550]:
+                    - generic [ref=e551]: 演
+                    - generic [ref=e552]:
+                      - strong [ref=e553]: 演示主管28
+                      - generic [ref=e554]: AUDIT-028 E楼
+                  - generic [ref=e555]:
+                    - generic [ref=e556]: 正式人员
+                    - generic [ref=e557]: 主管
+                    - generic [ref=e558]: VNET
+                    - generic [ref=e559]: 可直接收消息
+                  - generic [ref=e560]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e563] [cursor=pointer]
+                - article [ref=e564]:
+                  - generic [ref=e565]:
+                    - generic [ref=e566]: 演
+                    - generic [ref=e567]:
+                      - strong [ref=e568]: 演示工程师29
+                      - generic [ref=e569]: AUDIT-029 E楼
+                  - generic [ref=e570]:
+                    - generic [ref=e571]: 正式人员
+                    - generic [ref=e572]: 工程师
+                    - generic [ref=e573]: VNET
+                    - generic [ref=e574]: 可直接收消息
+                  - generic [ref=e575]:
+                    - generic [ref=e576]: 已有可用签名
+                    - generic [ref=e580]: 默认使用正式表签名
+                    - generic [ref=e581]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e585]:
+                    - button "查看签名" [ref=e586] [cursor=pointer]
+                    - button "重新签名" [ref=e590] [cursor=pointer]
+                - article [ref=e591]:
+                  - generic [ref=e592]:
+                    - generic [ref=e593]: 演
+                    - generic [ref=e594]:
+                      - strong [ref=e595]: 演示值班员30
+                      - generic [ref=e596]: AUDIT-030 E楼
+                  - generic [ref=e597]:
+                    - generic [ref=e598]: 正式人员
+                    - generic [ref=e599]: 值班员
+                    - generic [ref=e600]: 外部账号
+                    - generic [ref=e601]: 可直接收消息
+                  - generic [ref=e602]: 未签名
+                  - button "发送签名链接" [ref=e607] [cursor=pointer]
+                - article [ref=e608]:
+                  - generic [ref=e609]:
+                    - generic [ref=e610]: 演
+                    - generic [ref=e611]:
+                      - strong [ref=e612]: 演示值班长31
+                      - generic [ref=e613]: AUDIT-031 E楼
+                  - generic [ref=e614]:
+                    - generic [ref=e615]: 正式人员
+                    - generic [ref=e616]: 值班长
+                    - generic [ref=e617]: VNET
+                    - generic [ref=e618]: 可直接收消息
+                  - generic [ref=e619]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e622] [cursor=pointer]
+                - article [ref=e623]:
+                  - generic [ref=e624]:
+                    - generic [ref=e625]: 演
+                    - generic [ref=e626]:
+                      - strong [ref=e627]: 演示主管33
+                      - generic [ref=e628]: AUDIT-033 H楼
+                  - generic [ref=e629]:
+                    - generic [ref=e630]: 正式人员
+                    - generic [ref=e631]: 主管
+                    - generic [ref=e632]: 外部账号
+                    - generic [ref=e633]: 可直接收消息
+                  - generic [ref=e634]:
+                    - generic [ref=e635]: 已有可用签名
+                    - generic [ref=e639]: 默认使用正式表签名
+                    - generic [ref=e640]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e644]:
+                    - button "查看签名" [ref=e645] [cursor=pointer]
+                    - button "重新签名" [ref=e649] [cursor=pointer]
+                - article [ref=e650]:
+                  - generic [ref=e651]:
+                    - generic [ref=e652]: 演
+                    - generic [ref=e653]:
+                      - strong [ref=e654]: 演示工程师34
+                      - generic [ref=e655]: AUDIT-034 H楼
+                  - generic [ref=e656]:
+                    - generic [ref=e657]: 正式人员
+                    - generic [ref=e658]: 工程师
+                    - generic [ref=e659]: VNET
+                    - generic [ref=e660]: 可直接收消息
+                  - generic [ref=e661]: 未签名
+                  - button "发送签名链接" [ref=e666] [cursor=pointer]
+                - article [ref=e667]:
+                  - generic [ref=e668]:
+                    - generic [ref=e669]: 演
+                    - generic [ref=e670]:
+                      - strong [ref=e671]: 演示值班员35
+                      - generic [ref=e672]: AUDIT-035 H楼
+                  - generic [ref=e673]:
+                    - generic [ref=e674]: 正式人员
+                    - generic [ref=e675]: 值班员
+                    - generic [ref=e676]: VNET
+                    - generic [ref=e677]: 可直接收消息
+                  - generic [ref=e678]:
+                    - generic [ref=e679]:
+                      - text: 需重新签名
+                      - button "收起此提示" [ref=e680] [cursor=pointer]
+                    - generic [ref=e684]: 演示：待重新签名
+                  - button "发送签名链接" [ref=e686] [cursor=pointer]
+                - article [ref=e687]:
+                  - generic [ref=e688]:
+                    - generic [ref=e689]: 演
+                    - generic [ref=e690]:
+                      - strong [ref=e691]: 演示值班长36
+                      - generic [ref=e692]: AUDIT-036 H楼
+                  - generic [ref=e693]:
+                    - generic [ref=e694]: 正式人员
+                    - generic [ref=e695]: 值班长
+                    - generic [ref=e696]: 外部账号
+                    - generic [ref=e697]: 可直接收消息
+                  - generic [ref=e698]:
+                    - generic [ref=e699]: 已有可用签名
+                    - generic [ref=e703]: 默认使用正式表签名
+                    - generic [ref=e704]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e708]:
+                    - button "查看签名" [ref=e709] [cursor=pointer]
+                    - button "重新签名" [ref=e713] [cursor=pointer]
+                - article [ref=e714]:
+                  - generic [ref=e715]:
+                    - generic [ref=e716]: 演
+                    - generic [ref=e717]:
+                      - strong [ref=e718]: 演示外协人员
+                      - generic [ref=e719]: AUDIT-EXT-A C楼
+                  - generic [ref=e720]:
+                    - generic [ref=e721]: 临时人员
+                    - generic [ref=e722]: 临时人员
+                  - generic [ref=e723]:
+                    - generic [ref=e724]: 已有可用签名
+                    - generic [ref=e728]: 默认使用临时表签名
+                    - generic [ref=e729]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e733]:
+                    - button "查看签名" [ref=e734] [cursor=pointer]
+                    - button "重新签名" [ref=e738] [cursor=pointer]
+                    - button "关联正式人员" [ref=e739] [cursor=pointer]
+                - article [ref=e740]:
+                  - generic [ref=e741]:
+                    - generic [ref=e742]: 演
+                    - generic [ref=e743]:
+                      - strong [ref=e744]: 演示外协人员
+                      - generic [ref=e745]: AUDIT-EXT-B C楼
+                  - generic [ref=e746]:
+                    - generic [ref=e747]: 临时人员
+                    - generic [ref=e748]: 临时人员
+                  - generic [ref=e749]:
+                    - generic [ref=e750]: 已有可用签名
+                    - generic [ref=e754]: 默认使用临时表签名
+                    - generic [ref=e755]: 签名由本人保存，按人员管理权限预览
+                  - generic [ref=e759]:
+                    - button "查看签名" [ref=e760] [cursor=pointer]
+                    - button "重新签名" [ref=e764] [cursor=pointer]
+                    - button "关联正式人员" [ref=e765] [cursor=pointer]
+              - generic [ref=e766]:
+                - generic [ref=e767]: 共 33 人
+                - generic [ref=e768]:
+                  - button "上一页" [disabled] [ref=e769]
+                  - generic [ref=e770]: 第 1 / 1 页
+                  - button "下一页" [disabled] [ref=e771]
+    - navigation "手机导航" [ref=e783]:
+      - button "首页" [ref=e784] [cursor=pointer]
+      - button "待办" [ref=e790] [cursor=pointer]
+      - button "功能" [ref=e796] [cursor=pointer]
+      - button "我的" [ref=e801] [cursor=pointer]
+  - generic:
+    - button "打开灯塔助手"
+  - generic:
+    - complementary

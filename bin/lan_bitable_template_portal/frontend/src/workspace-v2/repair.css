@@ -9,9 +9,23 @@
 .v2-repair-overview span{font-size:13px;color:var(--repair-muted)}.v2-repair-overview strong{font-size:25px;line-height:1.2;font-variant-numeric:tabular-nums}
 .v2-repair-overview .is-pending strong{color:#966319}.v2-repair-overview .is-progress strong{color:#0065cb}.v2-repair-overview .is-completed strong{color:#13785d}
 .v2-repair-list-head{display:grid;grid-template-columns:minmax(0,1fr) 130px 104px;gap:14px;padding:10px 16px;background:var(--repair-soft);border-bottom:1px solid var(--repair-line);font-size:12px;color:var(--repair-muted)}
+.workspace-v2 .v2-repair-list>.v2-repair-list-head{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+/* Card columns follow the actual widget width, including resized workbench widgets. */
+.workspace-v2 .v2-repair-list .record-page-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,420px),1fr));gap:10px;padding:10px;align-items:stretch}
+.workspace-v2 .v2-repair-list .record-page-list>.record-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-content:space-between;min-width:0;padding:14px;border:1px solid var(--repair-line);border-radius:8px;background:var(--repair-panel)}
+.workspace-v2 .v2-repair-list .record-page-list>.record-row:hover{background:var(--repair-soft)}
+.workspace-v2 .v2-repair-list .record-page-list>.record-row.active{background:var(--repair-input-bg)}
+.workspace-v2 .v2-repair-list .v2-repair-row-copy{grid-column:1/-1}
+.workspace-v2 .v2-repair-list .v2-repair-row-copy>strong{-webkit-line-clamp:2;font-size:15px;line-height:1.5}
+.workspace-v2 .v2-repair-list .v2-repair-row-meta{flex-wrap:wrap;gap:4px 10px}
+.workspace-v2 .v2-repair-list .v2-repair-row-meta span:last-child{max-width:100%;white-space:normal;overflow-wrap:anywhere}
+.workspace-v2 .v2-repair-list .v2-repair-row-state{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.workspace-v2 .v2-repair-list .v2-repair-row-progress{width:110px;max-width:100%}
 html.workspace-v2[data-v2-theme="dark"] .v2-repair-workspace{--repair-input-bg:#24374c!important;--repair-input-border:#6c88a5!important;--repair-readonly-bg:#252a30!important;--repair-readonly-text:#b2bdc9!important}
 .v2-main>.v2-context~.v2-repair-workspace{--repair-offset:349px}
 .v2-repair-heading,.v2-repair-detail-head,.v2-repair-followup-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.workspace-v2 .v2-repair-followup-heading{flex-wrap:wrap}
+.workspace-v2 .v2-repair-followup-heading>.v2-repair-inline-actions{max-width:100%;flex-wrap:wrap;gap:6px}
 .v2-repair-heading h1{font-size:23px;line-height:1.3;margin:0;font-weight:650}.v2-repair-heading p{margin:3px 0 0;color:var(--repair-muted);font-size:13px}
 .v2-repair-actions,.v2-repair-inline-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.v2-repair-actions .n-button__content,.v2-repair-inline-actions .n-button__content,.v2-repair-flow-actions>.n-button .n-button__content,.record-followup-button .n-button__content{gap:6px}
 .v2-repair-actions>.v2-repair-refresh{margin-left:auto;flex:none}.v2-repair-followup-heading>.v2-repair-inline-actions{margin-left:auto;justify-content:flex-end}.v2-repair-followup-section>header h3{margin-bottom:0}.v2-repair-followup-heading .n-button__content{gap:6px}
