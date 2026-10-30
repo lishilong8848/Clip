@@ -561,8 +561,14 @@ class LighthouseStream:
             'file_ids': turn.get('submitted_file_ids', []), 'commands': turn.get('submitted_commands', [])}, request, authorize)
 
     async def conversation(self, actor, *, operation=None):
-        if operation is not None and (not isinstance(operation, str) or not re.fullmatch(r'feishu_[a-f0-9]{40}', operation)):
-            raise AssistantError('消息编号无效。')
+        if operation is not None:
+            regular = isinstance(operation, str) and re.fullmatch(r'feishu_[a-f0-9]{40}', operation)
+            scheduled = (isinstance(operation, str)
+                and re.fullmatch(r'[a-f0-9]{32}', str(actor.get('_scheduled_task') or ''))
+                and re.fullmatch(r'[a-f0-9]{32}', str(actor.get('_scheduled_run_id') or ''))
+                and operation == 'schedule_' + actor['_scheduled_run_id'])
+            if not regular and not scheduled:
+                raise AssistantError('消息编号无效。', category='schedule_operation_invalid' if actor.get('_scheduled_task') else '')
         async with self._lock(actor):
             state = await asyncio.to_thread(self._read, actor)
             identity = self._lane(state, actor).get("active_run_id")

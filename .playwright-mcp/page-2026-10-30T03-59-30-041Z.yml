@@ -1,0 +1,55 @@
+- generic [ref=e4]:
+  - img "logo" [ref=e6] [cursor=pointer]
+  - generic [ref=e7]:
+    - generic [ref=e8]:
+      - generic [ref=e12]:
+        - generic [ref=e14]:
+          - generic [ref=e15]: 扫码登录
+          - generic [ref=e16]:
+            - text: 请使用
+            - strong [ref=e17]: 豆包/飞书移动端
+            - text: 扫码
+        - img "logo" [ref=e24]
+        - generic [aria-hidden] [ref=e30]: 扫码成功
+        - link "切换至Lark登录" [ref=e31] [cursor=pointer]:
+          - /url: https://www.larksuite.com/accounts/cross_login/auth?app_id=169&origin_web_did=80cc729b0bdcb7b12c8cd32cd2dedb90&redirect_uri=https%3A%2F%2Fvnet.feishu.cn%2Fpage%2FRh7YmmeFPdY9nfax0Z8c25C9n4g
+      - generic [ref=e33] [cursor=pointer]
+    - generic [ref=e39]:
+      - text: 还没有账号？
+      - button "立即注册" [ref=e40] [cursor=pointer]
+  - generic [ref=e41]:
+    - generic [ref=e42]: 简体中文
+    - generic:
+      - list:
+        - listitem [ref=e48] [cursor=pointer]:
+          - generic [ref=e49]: 简体中文
+        - listitem [ref=e51] [cursor=pointer]:
+          - generic [ref=e52]: 繁體中文（中國香港）
+        - listitem [ref=e53] [cursor=pointer]:
+          - generic [ref=e54]: 繁體中文（中國台灣）
+        - listitem [ref=e55] [cursor=pointer]:
+          - generic [ref=e56]: English
+        - listitem [ref=e57] [cursor=pointer]:
+          - generic [ref=e58]: 日本語
+        - listitem [ref=e59] [cursor=pointer]:
+          - generic [ref=e60]: Bahasa Indonesia
+        - listitem [ref=e61] [cursor=pointer]:
+          - generic [ref=e62]: Bahasa Melayu
+        - listitem [ref=e63] [cursor=pointer]:
+          - generic [ref=e64]: Deutsch
+        - listitem [ref=e65] [cursor=pointer]:
+          - generic [ref=e66]: Español
+        - listitem [ref=e67] [cursor=pointer]:
+          - generic [ref=e68]: Français
+        - listitem [ref=e69] [cursor=pointer]:
+          - generic [ref=e70]: Italiano
+        - listitem [ref=e71] [cursor=pointer]:
+          - generic [ref=e72]: Português (Brasil)
+        - listitem [ref=e73] [cursor=pointer]:
+          - generic [ref=e74]: Русский
+        - listitem [ref=e75] [cursor=pointer]:
+          - generic [ref=e76]: Tiếng Việt
+        - listitem [ref=e77] [cursor=pointer]:
+          - generic [ref=e78]: ภาษาไทย
+        - listitem [ref=e79] [cursor=pointer]:
+          - generic [ref=e80]: 한국어

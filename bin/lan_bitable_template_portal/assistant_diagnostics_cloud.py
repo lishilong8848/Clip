@@ -31,6 +31,8 @@ _EVENT_KEYS = frozenset({"module", "stage", "version", "run_id", "category", "er
 _FORMATS = {"run_id": r"(?:[0-9a-f]{8}|[0-9a-f]{32})", "category": r"[a-z][a-z_]{0,50}",
     "error_type": r"[A-Za-z_]{1,80}", "native_fingerprint": r"[0-9a-f]{64}"}
 _LABELS = {"assistant": "灯塔助手", "feishu": "飞书智能体", "startup": "程序启动",
+    'schedule_execution': '定时任务执行失败', 'schedule_operation_invalid': '定时任务会话编号校验失败',
+    'schedule_answer_pending': '定时任务原回答待核验',
     "answer": "回答生成", "model_attempt": "模型调用", "delivery": "消息投递", "deadline": "请求超时",
     "startup_failed": "启动失败", "service_failed": "服务失败", "runtime_auth_failed": "运行环境认证失败",
     "tools_not_registered": "查询工具未注册", "context_limit": "模型上下文超限", "output_limit": "模型输出超限",

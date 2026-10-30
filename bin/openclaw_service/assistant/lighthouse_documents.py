@@ -1,4 +1,4 @@
-"""Read explicitly supplied Feishu docx links through the portal's existing client."""
+"""Classify supplied Feishu links and read supported documents with Qt auth."""
 import re
 import time
 from urllib.parse import urlsplit
@@ -74,7 +74,7 @@ def document_url(value):
     try:
         url = urlsplit(value)
         if (url.scheme != 'https' or url.netloc.lower() != 'vnet.feishu.cn'
-                or not re.fullmatch(r'/docx/[A-Za-z0-9]+/?', url.path)):
+                or not re.fullmatch(r'/(?:docx|wiki|page)/[A-Za-z0-9]+/?', url.path)):
             return None
     except ValueError:
         return None
@@ -100,14 +100,22 @@ def read_document(service, actor, url, offset=0):
     from .lighthouse_files import text_excerpt
     target = document_url(url)
     if not target or type(offset) is not int or not 0 <= offset <= 1000000:
-        raise AssistantError('请提供有效的飞书新版文档链接，读取位置须为非负整数。')
+        raise AssistantError('请提供有效的飞书文档链接，读取位置须为非负整数。')
+    kind = urlsplit(target).path.split('/')[1]
+    if kind == 'page':
+        # Interactive pages are not docx document IDs or Wiki node tokens.
+        # Do not guess a resource ID or send private links to public search.
+        raise AssistantError('这是飞书交互页面链接，当前文档读取通道尚不支持其正文。'
+                             '这不表示附件为空或上传失败；已粘贴的文字仍可分析。'
+                             '如需核对页面内明细，可粘贴正文或导出文件后提供。',
+                             422, category='unsupported_document_type')
     token = target.rsplit('/', 1)[1]
     base = 'https://open.feishu.cn/open-apis/docx/v1/documents/' + token
     request = document_reader(service, '助手飞书文档读取')
 
-    def get(suffix=''):
+    def fetch(endpoint, params=None):
         try:
-            result = request(base + suffix, {'lang': 1} if suffix else {})
+            result = request(endpoint, params or {})
         except AssistantError:
             raise
         except Exception as exc:
@@ -127,6 +135,21 @@ def read_document(service, actor, url, offset=0):
         if not isinstance(result.get('data'), dict):
             raise AssistantError('飞书文档响应缺少正文数据。', 502)
         return result['data']
+
+    if kind == 'wiki':
+        node = fetch('https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node',
+                     {'token': token}).get('node')
+        if (not isinstance(node, dict) or not isinstance(node.get('obj_token'), str)
+                or not re.fullmatch(r'[A-Za-z0-9]+', node['obj_token'])):
+            raise AssistantError('飞书知识库节点响应不完整，未猜测目标文档。', 502)
+        if node.get('obj_type') != 'docx':
+            raise AssistantError('该飞书知识库链接指向的不是新版文档，当前文档通道尚不支持此类型的正文。'
+                                 '这不是空附件；可提供可读取的文档或导出文件。',
+                                 422, category='unsupported_document_type')
+        base = 'https://open.feishu.cn/open-apis/docx/v1/documents/' + node['obj_token']
+
+    def get(suffix=''):
+        return fetch(base + suffix, {'lang': 1} if suffix else {})
 
     document = get().get('document')
     if not isinstance(document, dict) or not isinstance(document.get('title'), str):

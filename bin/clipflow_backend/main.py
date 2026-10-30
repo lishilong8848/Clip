@@ -789,6 +789,8 @@ class FastAPIPortalController:
         install_message_delivery_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.notice_panel_routes import install_notice_panel_routes
         install_notice_panel_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.notice_history_routes import install_notice_history_routes
+        install_notice_history_routes(app, self, PortalRuntime)
 
         @app.api_route("/api/notice-cards/{legacy_path:path}", methods=["GET", "POST", "PUT", "DELETE"])
         async def retired_notice_cards(legacy_path: str):

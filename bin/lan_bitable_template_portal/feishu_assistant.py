@@ -1649,13 +1649,19 @@ class FeishuAssistant:
         return {'scopes': sorted(actor.get('scopes', [])), 'modules': sorted(actor.get('modules', [])),
                 'is_admin': bool(actor.get('is_admin'))}
 
-    async def _validate_delivery(self, message, reply):
+    async def _validate_delivery(self, message, reply, *, schedule=None):
         await self._require_current_config()
         if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
             raise AssistantError('原消息属于此前的飞书应用，已停止发送。', 403, category='delivery_revoked')
         if not reply.get('actor_id'):
             return  # Transport/authentication error notices contain no model result.
         request, actor = await self._request_context(message)
+        if schedule is not None:
+            await asyncio.to_thread(self.runtime.assistant_scheduler.validate, schedule)
+            request.state.assistant_schedule = copy.deepcopy(schedule)
+            request.state.assistant_schedule_id = schedule['id']
+            actor.update(_scheduled_task=schedule['id'], _scheduled_mode=schedule['mode'],
+                         _scheduled_run_id=schedule['run_id'], _execution_lane='schedule:' + schedule['id'])
         prior = reply.get('delivery_access')
         from .portal_auth import topic_access_allowed
         if (actor['id'] != reply['actor_id'] or not isinstance(prior, dict)
@@ -1664,10 +1670,16 @@ class FeishuAssistant:
                 or prior.get('is_admin') and not actor.get('is_admin')
                 or isinstance(prior, dict) and not topic_access_allowed(prior, actor)):
             raise AssistantError('原回复权限已变化，请在当前会话重新提问。', 403, category='delivery_revoked')
-        current = await self._call(request, actor, 'conversation')
+        operation = ('schedule_' + schedule['run_id'] if schedule is not None else
+                     'feishu_' + hashlib.sha256(message['message_id'].encode()).hexdigest()[:40])
+        current = await self._call(request, actor, 'conversation',
+                                   **({'params': {'operation_id': operation}} if schedule is not None else {}))
         if current.get('conversation_id') != reply.get('conversation_id'):
             raise AssistantError('原会话已清空，旧回复不再发送。', 410, category='delivery_revoked')
-        operation = 'feishu_' + hashlib.sha256(message['message_id'].encode()).hexdigest()[:40]
+        if schedule is not None and not any(turn.get('operation_id') == operation
+                for turn in current.get('turns', []) if isinstance(turn, dict)):
+            raise AssistantError('原定时回答暂未准确读回，已保留投递任务等待核验。', 503,
+                                 category='schedule_answer_pending')
         if any(turn.get('operation_id') == operation and turn.get('knowledge_access_changed')
                for turn in current.get('turns', []) if isinstance(turn, dict)):
             raise AssistantError('来源资料或授权已变化，原答复不再发送。', 403, category='delivery_revoked')

@@ -61,8 +61,18 @@
     <UiTransition name="ui-page" :css="!isDrillPrintPage && !isMorningMeetingPrintPage">
     <template v-if="!isWorkbenchLitePage && !pageAccessDenied">
 
+    <NoticeHistory
+      v-if="isNoticeHistoryPage && auth.loggedIn"
+      :key="String(auth.user?.open_id || '') + ':' + routeParams.toString()"
+      ref="rootNoticeHistory"
+      :scope="routeParams.get('scope') || currentScope || 'ALL'"
+      :work-type="routeParams.get('work_type') || 'all'"
+      @close="closeNoticeHistoryPage"
+      @changed="refreshHomeAfterWrite"
+    />
+
     <HistoryMemoryPage
-      v-if="isHistoryMemoryPage"
+      v-else-if="isHistoryMemoryPage"
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :is-admin="isAdmin"
@@ -276,9 +286,10 @@ import AppTopbar from "./components/AppTopbar.vue";
 import ImpersonationBanner, { impersonationIdentity } from './components/ImpersonationBanner.vue';
 import { LighthouseAssistant } from './lighthouseEntry';
 import AsyncPageState from "./components/AsyncPageState.vue";
+import NoticeHistory from './components/NoticeHistory.vue';
 import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, setImpersonationContext, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
 import { setModulePermissions } from "./api/modulePermissions";
-import { navigate, navigateHard } from "./navigation";
+import { navigate, navigateHard, registerNavigationGuard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
 import type { LooseDict, ScopeOption } from "./types";
@@ -425,6 +436,17 @@ const refreshCooldownTimers = new Map<string, number>();
 const isHistoryMemoryPage = computed(() => routePath.value === "/admin/history-memory");
 const isAdminSettingsPage = computed(() => routePath.value.replace(/\/$/, '') === '/admin/settings');
 const isWorkbenchLitePage = computed(() => routePath.value === "/workbench-lite");
+const isNoticeHistoryPage = computed(() => routePath.value === '/' && routeParams.value.get('view') === 'notice_history');
+const rootNoticeHistory = ref<InstanceType<typeof NoticeHistory> | null>(null);
+let unregisterHistoryGuard: (() => void) | undefined;
+watch([isNoticeHistoryPage, () => auth.loggedIn], ([active, loggedIn]) => {
+  unregisterHistoryGuard?.(); unregisterHistoryGuard = undefined;
+  if (active && loggedIn) unregisterHistoryGuard = registerNavigationGuard((_target, proceed) => rootNoticeHistory.value?.guardNavigation(proceed) ?? true);
+}, { immediate: true });
+function closeNoticeHistoryPage(): void {
+  if (!isNoticeHistoryPage.value || !auth.loggedIn) return;
+  navigate('/workbench-lite?' + new URLSearchParams({ scope: routeParams.value.get('scope') || currentScope.value || 'ALL', work_type: routeParams.value.get('work_type') || 'all', frontend: 'legacy' }), { replace: true });
+}
 const workbenchVisited = ref(isWorkbenchLitePage.value);
 const lastWorkbenchSearch = ref(windowLocationSearch.value);
 watch([isWorkbenchLitePage, windowLocationSearch], ([active, search]) => {
@@ -1230,6 +1252,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   appDisposed = true;
+  unregisterHistoryGuard?.();
   homeReadAbort.abort();
   clearHomeReadIssues();
   pageAnimation?.cancel();

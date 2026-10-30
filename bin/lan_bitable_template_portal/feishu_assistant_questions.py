@@ -47,7 +47,9 @@ def prepare_question_card(bot, message, actor, conversation, turn):
             if saved.get('owner') == actor['id'] and saved.get('expires', 0) < time.time():
                 store.delete_document(NAMESPACE, item['key'])
                 store.delete_document(NAMESPACE, 'ticket:' + saved.get('ticket', ''))
-    elements = [{'tag': 'markdown', 'content': safe_text(turn.get('answer') or '请补充以下信息', limit=4000)}]
+    # The normal reply carries the complete question, including in live updates.
+    # Keep this supplementary form from displaying the same answer a second time.
+    elements = [{'tag': 'markdown', 'content': '请在下方补充信息，也可以直接回复消息。'}]
     if options:
         elements.append({'tag': 'multi_select_static' if clarification.get('multiple') else 'select_static',
             'name': 'choice', 'placeholder': {'tag': 'plain_text', 'content': '选择回答'},

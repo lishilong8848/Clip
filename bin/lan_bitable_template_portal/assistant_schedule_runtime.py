@@ -67,6 +67,7 @@ class AssistantScheduler:
     async def run(self):
         while not self.closing:
             try:
+                await self.db(self.tasks.recover_protocol_failures)
                 while len(self.running) < 4:
                     claimed = await self.db(self.tasks.claim, self.worker)
                     if not claimed:
@@ -121,7 +122,8 @@ class AssistantScheduler:
         await self.db(self.validate, schedule)
         request.state.assistant_schedule = schedule
         request.state.assistant_schedule_id = task['id']
-        actor.update(_scheduled_task=task['id'], _scheduled_mode=task['spec']['kind'], _execution_lane='schedule:' + task['id'])
+        actor.update(_scheduled_task=task['id'], _scheduled_mode=task['spec']['kind'],
+                     _scheduled_run_id=job['id'], _execution_lane='schedule:' + task['id'])
         return request, actor, message
 
     async def call(self, request, actor, path, body=None, params=None):
@@ -188,10 +190,17 @@ class AssistantScheduler:
                                 raise AssistantError('原会话已清空，定时任务已暂停。', 409)
                             turn = next((row for row in conversation.get('turns', []) if row.get('operation_id') == operation), None)
                         if not turn:
-                            await self.db(self.tasks.checkpoint, job, claim, phase='submitted')
+                            if not job.get('question'):
+                                heading = f"【定时任务：{task['spec']['title']}】\n"
+                                if job.get('phase') != 'submitted' and time.time() - job['due_at'] > 60:
+                                    from datetime import datetime
+                                    from .assistant_schedules import TZ
+                                    heading += '补发提醒，原定时间：' + datetime.fromtimestamp(job['due_at'], TZ).strftime('%Y-%m-%d %H:%M:%S') + '（北京时间）。\n'
+                                await self.db(self.tasks.checkpoint, job, claim,
+                                    phase='submitted', question=heading + task['spec']['instruction'])
                             conversation = await self.call(request, actor, 'chat', {
                                 'conversation_id': task['origin']['conversation_id'], 'operation_id': operation, 'attempt_id': operation,
-                                'question': f"【定时任务：{task['spec']['title']}】\n" + task['spec']['instruction']})
+                                'question': job['question']})
                             if conversation.get('conversation_id') != task['origin']['conversation_id']:
                                 raise AssistantError('原会话已变化，定时任务已暂停。', 409)
                             turn = next((row for row in conversation.get('turns', []) if row.get('operation_id') == operation), None)
@@ -212,28 +221,31 @@ class AssistantScheduler:
                     phase='ready', reply=reply, answer_status=turn.get('status'), answer_error=turn.get('error', ''), completed_at=time.time())
             if message:
                 reply = job['reply']
-                if job.get('delivery_started') and time.time() - job['delivery_started'] >= 3600:
+                if job.get('delivery_started') and not job.get('delivered_at') and time.time() - job['delivery_started'] >= 3600:
                     raise AssistantError('原飞书投递结果未确认，已暂停补发以避免重复消息，请核对原话题。', 409)
                 bot = self.runtime.feishu_assistant_channel
                 await self.db(self.validate, request.state.assistant_schedule)
-                await bot._validate_delivery(message, reply)
+                await bot._validate_delivery(message, reply, schedule=request.state.assistant_schedule)
                 if reply.get('files'):
                     # Cached file keys still require fresh access checks on each retry.
                     await bot._prepare_reply_files(message, reply)
                 await self.db(self.tasks.checkpoint, job, claim,
-                    delivery_started=job.get('delivery_started') or time.time())
+                    phase='delivering', delivery_started=job.get('delivery_started') or time.time())
                 async def checkpoint():
                     await self.db(self.tasks.checkpoint, job, claim, reply=copy.deepcopy(reply))
                 async def authorize():
                     await self.db(self.tasks.checkpoint, job, claim)
                     await self.db(self.validate, request.state.assistant_schedule)
-                    await self.runtime.feishu_assistant_channel._validate_delivery(message, reply)
+                    await self.runtime.feishu_assistant_channel._validate_delivery(message, reply, schedule=request.state.assistant_schedule)
                 await self.runtime.feishu_assistant_channel.messenger.send(message, reply, checkpoint=checkpoint, authorize=authorize)
+                await self.db(self.tasks.checkpoint, job, claim, phase='delivered', delivered_at=job.get('delivered_at') or time.time())
                 inbox = self.runtime.feishu_assistant_channel.inbox
                 if inbox is not None:
                     await self.db(inbox.set, message['message_id'], 'done', reply)
                     await self.db(inbox.remember_public_reply, message, reply)
             await self.db(self.tasks.finish, job, claim)
+            logging.getLogger(__name__).info('Assistant schedule completed id=%s run=%s channel=%s',
+                task['id'], job['id'], 'feishu' if message else 'web')
         except asyncio.CancelledError:
             await self.db(self.tasks.finish, job, claim, error='执行已中断，将在领取恢复后继续原定时任务。')
             raise
@@ -242,7 +254,7 @@ class AssistantScheduler:
             error = str(exc) if isinstance(exc, AssistantError) else '定时任务连接暂未完成，保留原任务重试。'
             await self.db(self.tasks.finish, job, claim, error=error, permanent=permanent)
             from openclaw_service.diagnostics import capture
-            capture('assistant', 'service_failed', run_id=job['id'], category='schedule_execution', error=exc)
+            capture('assistant', 'service_failed', run_id=job['id'], category=getattr(exc, 'category', '') or 'schedule_execution', error=exc)
             logging.getLogger(__name__).warning('Assistant schedule failed id=%s type=%s permanent=%s', task['id'], type(exc).__name__, permanent)
         finally:
             pulse.cancel()

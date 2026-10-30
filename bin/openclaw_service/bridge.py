@@ -6,6 +6,7 @@ import base64
 from contextvars import ContextVar
 import copy
 import json
+import re
 import threading
 
 import httpx
@@ -60,7 +61,10 @@ class PortalBridge:
             raise AssistantError('灯塔业务响应无效，原输入已保留。', 502) from None
         if not isinstance(value, dict) or not value.get('ok'):
             error = value.get('error') if isinstance(value, dict) else None
-            raise AssistantError(error or '灯塔业务连接未完成，未自动重发。', status if status >= 400 else 502)
+            category = value.get('category', '') if isinstance(value, dict) else ''
+            category = category if isinstance(category, str) and re.fullmatch(r'[a-z][a-z_]{0,63}', category) else ''
+            raise AssistantError(error or '灯塔业务连接未完成，未自动重发。',
+                                 status if status >= 400 else 502, category=category)
         return value.get('data')
 
     def call(self, action, payload=None, context=None):

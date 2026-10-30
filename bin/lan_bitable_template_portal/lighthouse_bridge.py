@@ -158,6 +158,7 @@ class PortalAuthority:
         current = shared_query_actor(current)
         if schedule:
             current.update(_scheduled_task=schedule['id'], _scheduled_mode=schedule['mode'],
+                           _scheduled_run_id=schedule.get('run_id', ''),
                            _execution_lane='schedule:' + schedule['id'])
         return context, current
 

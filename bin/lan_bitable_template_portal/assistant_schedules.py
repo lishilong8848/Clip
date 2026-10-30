@@ -238,6 +238,42 @@ class ScheduledTasks:
             self.write(conn, 'run:' + job['id'], job)
         return True
 
+    def recover_protocol_failures(self, now=None):
+        """Resume only the known pre-submit operation-id rejection, never a user pause."""
+        now = time.time() if now is None else now
+        recovered = 0
+        with self.transaction() as conn:
+            rows = conn.execute("""SELECT run.payload_json FROM json_documents AS run
+                JOIN json_documents AS task ON task.namespace=run.namespace
+                  AND task.key='task:' || json_extract(run.payload_json,'$.task_id')
+                WHERE run.namespace=? AND run.key LIKE 'run:%'
+                  AND json_extract(run.payload_json,'$.status')='blocked'
+                  AND json_extract(run.payload_json,'$.phase')='queued'
+                  AND json_extract(run.payload_json,'$.error')='消息编号无效。'
+                  AND json_extract(task.payload_json,'$.status')='paused'
+                  AND json_extract(task.payload_json,'$.revision')=json_extract(run.payload_json,'$.revision')
+                  AND json_extract(task.payload_json,'$.active_run')=json_extract(run.payload_json,'$.id')
+                  AND json_extract(task.payload_json,'$.last_status')='blocked'
+                  AND json_extract(task.payload_json,'$.last_error')='消息编号无效。'
+                ORDER BY run.updated_at LIMIT 100""", (NAMESPACE,)).fetchall()
+            for (raw,) in rows:
+                job = json.loads(raw)
+                task = self.read(conn, 'task:' + job['task_id'])
+                if (not task or task['status'] != 'paused' or task['revision'] != job['revision']
+                        or task.get('active_run') != job['id'] or task.get('last_status') != 'blocked'
+                        or task.get('last_error') != job['error'] or job.get('reply')
+                        or job.get('delivery_started') or job.get('completed_at') or job.get('answer_status')):
+                    continue
+                if self._expire(conn, task, now, job):
+                    continue
+                job.update(status='pending', lease='', claim_token='', lease_until=0, retry_at=0,
+                           recovered_at=now, recovery_error=job['error'], error='')
+                task.update(status='active', last_status='pending', last_error='会话编号问题已修复，等待继续原任务。')
+                self.write(conn, 'run:' + job['id'], job)
+                self.write(conn, 'task:' + task['id'], task)
+                recovered += 1
+        return recovered
+
     @staticmethod
     def _valid_claim(current, task, job, worker, now):
         return bool(current and task and worker and current.get('claim_token') == worker

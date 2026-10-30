@@ -5,18 +5,23 @@
       <AsyncPageState :error="error ? new Error(error) : undefined" :retry="reload" />
     </div>
     <p v-if="navigationError" class="navigation-error" role="alert">{{ navigationError }}</p>
+    <NoticeHistory ref="history" :scope="historyContext.scope" :work-type="historyContext.workType" :show="historyOpen" @close="historyOpen=false" @changed="historyChanged" />
   </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AsyncPageState from './AsyncPageState.vue';
+import NoticeHistory from './NoticeHistory.vue';
 import { navigate, registerNavigationGuard } from '../navigation';
 
 const props = withDefaults(defineProps<{ search: string; active?: boolean }>(), { active: true });
 const frame = ref<HTMLIFrameElement | null>(null), loading = ref(true), error = ref('');
 const navigationError = ref('');
 const nativeSearch = ref(props.search), retry = ref(0);
+const history = ref<InstanceType<typeof NoticeHistory> | null>(null), historyOpen = ref(false);
+const historyContext = ref({ scope: new URLSearchParams(props.search).get('scope') || 'ALL', workType: new URLSearchParams(props.search).get('work_type') || 'all' });
+function historyChanged(): void { window.dispatchEvent(new Event('clipflow-business-changed')); }
 let loadTimer = 0;
 watch(loading, busy => {
   window.clearTimeout(loadTimer);
@@ -74,6 +79,15 @@ function onMessage(event: MessageEvent): void {
     window.dispatchEvent(new Event('clipflow-business-changed')); return;
   }
   if (!props.active) return;
+  if (event.data.type === 'clipflow:notice-history') {
+    if (historyOpen.value || typeof event.data.url !== 'string') return;
+    let url: URL;
+    try { url = clean(event.data.url); } catch { return; }
+    if (url.origin !== location.origin || url.username || url.password || url.pathname !== '/' || url.searchParams.get('view') !== 'notice_history') return;
+    historyContext.value = { scope: url.searchParams.get('scope') || 'ALL', workType: url.searchParams.get('work_type') || 'all' };
+    historyOpen.value = true;
+    return;
+  }
   if (event.data.type === 'clipflow:workbench-pointer') {
     const { x, y } = event.data, rect = frame.value?.getBoundingClientRect();
     if (rect && Number.isFinite(x) && Number.isFinite(y) && x >= 0 && y >= 0 && x <= rect.width && y <= rect.height) {
@@ -101,6 +115,15 @@ function setGuard(): void {
   setVisibility();
   if (!props.active) return;
   unregister = registerNavigationGuard((_target, proceed) => {
+    const resume = () => { historyOpen.value = false; if (guardNativeNavigation(proceed)) proceed(); };
+    if (historyOpen.value && history.value) {
+      if (!history.value.guardNavigation(resume)) return false;
+      historyOpen.value = false;
+    }
+    return guardNativeNavigation(proceed);
+  });
+}
+function guardNativeNavigation(proceed: () => void): boolean {
     let child: (Window & { prepareLiteNavigation?: () => Promise<boolean>; isLiteNavigationDirty?: () => boolean }) | null;
     try {
       child = frame.value?.contentWindow as typeof child;
@@ -109,9 +132,8 @@ function setGuard(): void {
     } catch { return true; }
     void child.prepareLiteNavigation().then(allowed => { if (allowed) proceed(); }).catch(() => { navigationError.value = '通告草稿未保存，请在通告中核对后再离开。'; });
     return false;
-  });
 }
-watch(() => [props.search, props.active] as const, ([search, active]) => { setGuard(); if (active) void syncSearch(search); });
+watch(() => [props.search, props.active] as const, ([search, active]) => { setGuard(); if (active) void syncSearch(search); else historyOpen.value = false; });
 onMounted(() => { window.addEventListener('message', onMessage); setGuard(); });
 onBeforeUnmount(() => { window.clearTimeout(loadTimer); unregister?.(); window.removeEventListener('message', onMessage); });
 </script>

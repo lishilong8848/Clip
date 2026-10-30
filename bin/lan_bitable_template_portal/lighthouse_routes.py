@@ -5,6 +5,7 @@ import asyncio
 import hmac
 import json
 import logging
+import re
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -132,7 +133,9 @@ def install_lighthouse_routes(app, controller, runtime):
     runtime.generate_sharing_questions = generate_sharing_questions
 
     def failure(exc):
-        return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status,
+        category = getattr(exc, 'category', '')
+        details = {'category': category} if isinstance(category, str) and re.fullmatch(r'[a-z][a-z_]{0,63}', category) else {}
+        return JSONResponse({'ok': False, 'error': str(exc), **details}, status_code=exc.status,
             headers={'Cache-Control': 'no-store'})
 
     async def business_bridge(request: Request):

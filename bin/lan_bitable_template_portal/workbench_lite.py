@@ -3574,6 +3574,7 @@ def render_workbench_lite(
     </section><!--LITE_FRAGMENT:summary:END-->
     <!--LITE_FRAGMENT:toolbar:START--><section class="toolbar">
       <div class="type-tabs">{type_tabs}</div>
+      <a class="btn primary" data-notice-history href="{_e(_query_url('/', view='notice_history', scope=scope, work_type=view_work, frontend='legacy'))}" aria-haspopup="dialog">历史通告</a>
       <div class="manual-picker" id="manual-picker">
         <button class="btn ghost" id="manual-open" type="button" aria-expanded="false" aria-controls="manual-menu">纯手填</button>
         <div class="manual-menu" id="manual-menu">
@@ -3827,6 +3828,16 @@ def render_workbench_lite(
       }}
       location.assign(url.href);
     }}
+    document.addEventListener('click', async event => {{
+      const link = event.target instanceof Element ? event.target.closest('a[data-notice-history]') : null;
+      if (!link || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0 || link.target === '_blank') return;
+      const url = new URL(link.href, location.origin);
+      if (url.origin !== location.origin || url.pathname !== '/' || url.searchParams.get('view') !== 'notice_history') return;
+      event.preventDefault(); event.stopImmediatePropagation();
+      if (liteAssistantFrame) {{
+        window.parent.postMessage({{ type: 'clipflow:notice-history', url: url.pathname + url.search }}, location.origin);
+      }} else if (await prepareLiteNavigation()) litePageNavigate(url.href);
+    }}, true);
     if (liteAssistantFrame) {{
       let pointerFrame = 0, latestPointer = null;
       document.addEventListener('pointermove', event => {{
