@@ -834,6 +834,11 @@ def claim(service, actor, payload):
     date = day.isoformat()
     requested = payload.get('date', date)
     shift = payload.get('shift')
+    if 'date' not in payload and not shift:
+        from .learning_schedule import active_night_date
+        night_date = active_night_date(service, self_person, current)
+        if night_date:
+            requested, shift = night_date, '夜'
     if requested != date and not shift:
         raise LearningError('只能领取今日题单。')
     if not service._restored:
@@ -842,7 +847,7 @@ def claim(service, actor, payload):
         raise LearningError('学习记录正在恢复，完成后即可领取；不会重复分配。', 503)
     if shift:
         from .learning_reminders import shift_learners
-        from .pre_shift_checks import windows
+        from .learning_schedule import windows
         if shift not in ('白', '夜'):
             raise LearningError('排班日期或班次无效。')
         try:

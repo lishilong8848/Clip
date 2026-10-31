@@ -85,6 +85,7 @@ for kind,base in VALID_STARTS.items():
     args=dict(payload={'records':records,'ongoing':ongoing},session={'role':'admin','can_delete_business':True,'allowed_modules':list(VALID_STARTS),'user':{'name':'布局验收管理员','open_id':'ou_responsive_fixture'}},scope=scope,work_type=kind,month=str(int(day[5:7]))+'月',scope_options=[{'value':scope,'label':scope+'楼'}])
     html=render_workbench_lite(**args)
     details={}
+    details['_manual']=extract_workbench_lite_fragments(render_workbench_lite(**{**args,'payload':{'records':records,'ongoing':[]}},manual=True))['detail']
     for row in records:
         details[row['record_id']]=extract_workbench_lite_fragments(render_workbench_lite(**args,record_id=row['record_id']))['detail']
     for row in ongoing:
@@ -312,7 +313,7 @@ export async function coreFixture({ url, method = 'GET', body }) {
       const all = Object.values(pages); return ok({ records: all.flatMap(v => v.payload.records), ongoing: all.flatMap(v => v.payload.ongoing), records_pagination: { total: 18, page: 1, page_size: 30 }, ongoing_pagination: { total: 18, page: 1, page_size: 30 } });
     }
     const id = q.get('active_item_id') || q.get('record_id');
-    const detail = page.details[id] || page.details['audit-plan-' + scope + '-' + kind + '-0'];
+    const detail = page.details[q.get('manual') === '1' ? '_manual' : id] || page.details['audit-plan-' + scope + '-' + kind + '-0'];
     return ok({ canonical_url: '/workbench-lite?' + q, fragments: p.endsWith('lite-detail') ? { detail } : { ...page.fragments, detail } });
   }
   if (p === '/api/workbench/draft') {

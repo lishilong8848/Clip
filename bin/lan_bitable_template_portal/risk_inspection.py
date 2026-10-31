@@ -539,7 +539,7 @@ class RiskInspections:
                     break
             return public
 
-    def list(self, actor, page=1, scope='', view='all'):
+    def list(self, actor, page=1, scope='', view='all', q='', state=''):
         self.check(actor)
         try:
             page = max(1, int(page))
@@ -547,6 +547,11 @@ class RiskInspections:
             raise RiskError('页码无效。') from None
         if view not in {'all', 'published', 'mine', 'review'}:
             raise RiskError('排查列表范围无效。')
+        if state not in {'', 'active', 'review', 'overdue', 'completed', 'publishing'}:
+            raise RiskError('排查任务状态无效。')
+        query = str(q or '').strip().casefold()
+        filtering = bool(query or state)
+        now = time.time() * 1000
         if view == 'published' and not manager(actor):
             view = 'mine'
         if scope and scope != 'ALL' and scope not in SCOPES:
@@ -589,9 +594,16 @@ class RiskInspections:
                 candidate_args = [*candidate_args, scope]
             sql = " FROM risk_releases r WHERE json_extract(r.data,'$.status')!='deleted' AND EXISTS(SELECT 1 FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=r.id AND " + candidate + ')'
             total = db.execute('SELECT COUNT(*)' + sql, candidate_args).fetchone()[0]
-            rows = db.execute('SELECT r.data' + sql + ' ORDER BY r.created DESC,r.id LIMIT 20 OFFSET ?', [*candidate_args, (page - 1) * 20]).fetchall()
+            # Search only the same permission/view-filtered candidates. Paginate
+            # after filtering their visible counts so totals never include hidden work.
+            rows = db.execute('SELECT r.data' + sql + ' ORDER BY r.created DESC,r.id'
+                              + ('' if filtering else ' LIMIT 20 OFFSET ?'),
+                              candidate_args if filtering else [*candidate_args, (page - 1) * 20]).fetchall()
             for row in rows:
                 data = json.loads(row[0])
+                reviewer_names = '、'.join(p['name'] for p in reviewer_list(data))
+                if query and query not in (data['name'] + ' ' + reviewer_names).casefold():
+                    continue
                 counts = db.execute("""SELECT COUNT(*) AS total, COUNT(DISTINCT p.person_id) AS people_count,
                     COALESCE(SUM(json_extract(i.value,'$.status') IN ('submitted','approved')),0) AS submitted,
                     COALESCE(SUM(json_extract(i.value,'$.status')='approved'),0) AS approved
@@ -599,15 +611,27 @@ class RiskInspections:
                     WHERE p.release_id=? AND NOT json_extract(p.data,'$.revoked')
                     AND json_extract(i.value,'$.status')!='revoked' AND """ + visible,
                     [data['id'], *args]).fetchone()
+                if state and not {
+                    'active': data['status'] == 'active' and counts['approved'] < counts['total'],
+                    'review': counts['submitted'] > counts['approved'],
+                    'overdue': data['status'] == 'active' and counts['total'] > counts['approved'] and data['deadline'] < now,
+                    'completed': counts['total'] > 0 and counts['approved'] == counts['total'],
+                    'publishing': data['status'] == 'publishing',
+                }[state]:
+                    continue
                 full_control = self.controls(actor, data) and all(can_scope(actor, r[0]) for r in db.execute(
                     "SELECT DISTINCT COALESCE(json_extract(i.value,'$.scope'),p.scope) FROM risk_people p,json_each(p.data,'$.items') i WHERE p.release_id=?", (data['id'],)))
                 result.append({**{k: data[k] for k in ('id', 'name', 'deadline', 'status')},
-                               'owner': data['owner']['name'], 'reviewer': '、'.join(p['name'] for p in reviewer_list(data)), **dict(counts),
+                               'owner': data['owner']['name'], 'reviewer': reviewer_names, **dict(counts),
                                'reviewers': [{k: p[k] for k in ('id', 'name')} for p in reviewer_list(data)],
                                'is_reviewer': any(p['id'] == actor['id'] for p in reviewer_list(data)),
                                'can_manage_release': full_control, 'can_delete_release': full_control,
                                'can_claim': manager(actor) and data['owner']['id'] == actor['id']
                                    and data['status'] == 'active' and not db.execute('SELECT 1 FROM risk_people WHERE release_id=? AND person_id=?', (data['id'], actor['id'])).fetchone()})
+        if filtering:
+            total = len(result)
+            page = min(page, max(1, (total + 19) // 20))
+            result = result[(page - 1) * 20:page * 20]
         return {'items': result, 'total': total, 'page': page, 'view': view, 'is_manager': manager(actor),
                 'can_edit_template': manager(actor) and actor.get('level') in {'L0', 'L1'}}
 

@@ -934,7 +934,14 @@ class LearningService:
                         message += "，请使用本人账号登录答题，每人15题。"
                     elif outstanding:
                         message += f"，已领取的{len(outstanding)}份个人题单待完成。"
-                    url = f"{link}/learning?view=practice" if notification['kind'] == 'shift' else f"{link}/learning?scope={notification['scope']}"
+                    if notification['kind'] == 'shift':
+                        from urllib.parse import urlencode
+                        from .learning_schedule import windows
+                        end = windows(notification['date'], notification['shift'])[1]
+                        message += '\n答题截止：' + end.strftime('%Y-%m-%d %H:%M') + '（北京时间）。'
+                        url = link + '/learning?' + urlencode({'view': 'practice', 'date': notification['date'], 'shift': notification['shift']})
+                    else:
+                        url = f"{link}/learning?scope={notification['scope']}"
                     card = reminder_card(message, url)
                     if notification['kind'] == 'app_access':
                         card = reminder_card(message, APP_ACCESS_URL, button='申请使用小塔飞书应用')
@@ -1292,6 +1299,11 @@ class LearningService:
                 scope = ""
         if query.get("today") == "1":
             query = {**query, "date": now().date().isoformat()}
+            if person_id and query.get('mode', 'daily') == 'daily':
+                from .learning_schedule import active_night_date
+                night_date = active_night_date(self, self._get('person', person_id), now())
+                if night_date:
+                    query['date'] = night_date
         query = self._date_filters(query)
         papers = [p for p in self._documents("paper", scope=scope, person_id=person_id,
             start=query.get("date") or query.get("from", ""), end=query.get("date") or query.get("to", ""), legacy=legacy) if not p.get("deleted_at")]

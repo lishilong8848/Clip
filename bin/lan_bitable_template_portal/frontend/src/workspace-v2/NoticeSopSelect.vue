@@ -1,12 +1,14 @@
 <template>
-  <NSelect ref="select" v-bind="$attrs" :value="modelValue??value??null" :options="optionList()" :disabled="disabled" filterable :placeholder="placeholder||'请选择'" :status="error?'error':undefined" :input-props="{id:inputId||id,'aria-label':label||String($attrs['aria-label']||''),'aria-required':required?'true':undefined}" @update:value="change" />
+  <NSelect ref="select" size="small" v-bind="$attrs" :value="selectedValue" :options="optionList()" :disabled="disabled" :to="true" :menu-props="{style:{zIndex:menuZIndex||10010}}" filterable :placeholder="placeholder||'请选择'" :status="error?'error':undefined" :input-props="{id:inputId||id,'aria-label':label||String($attrs['aria-label']||''),'aria-required':required?'true':undefined}" @update:value="change" />
 </template>
 <script setup lang="ts">
-import {ref,useSlots,type VNode} from 'vue';
+import {computed,ref,useSlots,type VNode} from 'vue';
 import {NSelect,type SelectInst} from 'naive-ui';
 defineOptions({inheritAttrs:false});
 const props=defineProps<{value?:string|number;modelValue?:string;options?:string[];disabled?:boolean;id?:string;inputId?:string;label?:string;placeholder?:string;required?:boolean;menuZIndex?:number}>();
 const emit=defineEmits<{'update:modelValue':[value:string];change:[event:Event]}>(),slots=useSlots(),select=ref<SelectInst|null>(null),error=ref('');
+// NSelect treats an empty string as an actual selected value and hides the hint.
+const selectedValue=computed(()=>{const value=props.modelValue??props.value;return value===''||value==null?null:value;});
 function optionList(){
   if(props.options)return props.options.map(value=>({value,label:value}));
   const result:{value:string|number;label:string;disabled:boolean}[]=[];

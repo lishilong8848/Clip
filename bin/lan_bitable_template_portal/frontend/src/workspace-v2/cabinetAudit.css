@@ -1,0 +1,37 @@
+.v2-room-cards,.v2-batch-cards{display:none}
+.v2-cabinet-more{position:relative}
+.v2-cabinet-more>summary{display:flex;align-items:center;justify-content:center;min-height:36px;padding:6px 12px;border:1px solid var(--v2-border);border-radius:6px;cursor:pointer;color:var(--v2-ink);background:var(--cf-surface,#fff);list-style:none}
+.v2-cabinet-more>summary::-webkit-details-marker{display:none}
+.v2-cabinet-more>div{position:absolute;right:0;top:calc(100% + 6px);z-index:20;display:grid;gap:6px;min-width:180px;padding:8px;border:1px solid var(--v2-border);border-radius:8px;background:var(--cf-surface,#fff);box-shadow:0 8px 24px #0002}
+.v2-cabinet-more>div>button{width:100%;justify-content:flex-start}
+.v2-cabinet-more summary:focus-visible,.v2-room-cards summary:focus-visible,.v2-batch-cards summary:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
+@media(max-width:760px){
+  .cabinet-page>.heading>.actions.v2-cabinet-actions{display:flex;flex-wrap:wrap;width:100%;gap:6px}
+  .v2-cabinet-actions>button,.v2-cabinet-more>summary,.v2-cabinet-more>div>button{min-height:44px}
+  .v2-cabinet-more{margin-left:auto}
+  .v2-cabinet-more>summary{font-size:13px;padding:8px}
+  .v2-room-summary>table,.table-wrap>.batch-list-table{display:none!important}
+  .v2-room-cards,.v2-batch-cards{display:grid;gap:10px;min-width:0;width:100%}
+  .v2-room-card,.v2-batch-card,.v2-room-totals{min-width:0;padding:12px;border:1px solid var(--v2-border);border-radius:8px;background:var(--cf-surface,#fff);color:var(--v2-ink)}
+  .v2-room-card>header,.v2-batch-card>header,.v2-room-links,.v2-room-power,.v2-batch-card>footer{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .v2-room-card>header>button:first-child{text-align:left;flex:1;min-width:0}
+  .v2-room-card small{display:block;color:var(--v2-muted);font-size:12px}
+  .v2-room-key-counts,.v2-batch-card>dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:10px 0 0}
+  .v2-batch-card>dl{grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:8px}
+  .v2-room-cards dt,.v2-batch-cards dt{font-size:12px;color:var(--v2-muted)}
+  .v2-room-cards dd,.v2-batch-cards dd{margin:4px 0 0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+  .v2-room-key-counts dd{min-height:44px;display:flex;align-items:center}
+  .v2-room-key-counts dd,.v2-room-key-counts button,.v2-batch-cards dd{font-size:17px;font-weight:600}
+  .v2-room-cards button,.v2-batch-cards button,.v2-room-cards summary,.v2-batch-cards summary{min-height:44px;white-space:normal;overflow-wrap:anywhere}
+  .v2-room-cards summary,.v2-batch-cards summary{align-content:center;cursor:pointer;font-size:13px}
+  .v2-room-links{border-bottom:1px solid var(--v2-border)}
+  .v2-room-type{margin:8px 0;font-size:12px;line-height:1.6}
+  .v2-batch-card>header{align-items:flex-start;flex-wrap:wrap}
+  .v2-batch-card>header>strong{flex:1;min-width:120px;overflow-wrap:anywhere;font-size:14px}
+  .v2-batch-card p,.v2-room-totals p{font-size:12px;color:var(--v2-muted);overflow-wrap:anywhere;line-height:1.6}
+  .v2-batch-card>footer{flex-wrap:wrap}
+  .v2-batch-card>footer>details{flex:1;min-width:0}
+  .v2-batch-card>footer>button{align-self:flex-start}
+  .v2-batch-card>footer>details>summary{text-align:right}
+  .v2-batch-card .batch-name{min-width:0;overflow-wrap:anywhere}
+}

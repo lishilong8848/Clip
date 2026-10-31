@@ -205,7 +205,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                 data = await asyncio.to_thread(remote.edit_field, actor, body) if request.method == 'POST' else await asyncio.to_thread(remote.read_template)
             elif not path:
                 if request.method == 'GET':
-                    data = await asyncio.to_thread(svc.list, actor, request.query_params.get('page', 1), request.query_params.get('scope', ''), request.query_params.get('view', 'all'))
+                    data = await asyncio.to_thread(svc.list, actor, request.query_params.get('page', 1), request.query_params.get('scope', ''), request.query_params.get('view', 'all'),
+                                                   request.query_params.get('q', ''), request.query_params.get('state', ''))
                 else:
                     if not manager(actor):
                         raise RiskError('无权发布风险排查。', 403)

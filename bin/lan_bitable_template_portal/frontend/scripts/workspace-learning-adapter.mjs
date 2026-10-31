@@ -98,7 +98,7 @@ export function adaptLearningPage(source) {
   const setup = parse(code).descriptor.scriptSetup;
   if(!setup)throw new Error('Learning V2 requires the existing setup controller');
   code = code.slice(0,setup.loc.end.offset)+learningExtras+'\n'+code.slice(setup.loc.end.offset);
-  return modernizeControls(code);
+  return modernizeControls(code.replaceAll('质疑', '反馈').replaceAll('人员反馈', '题目反馈').replaceAll('问题中心', '题目反馈').replaceAll('题目有疑问', '题目反馈'));
 }
 
 export function modernizeControls(source) {

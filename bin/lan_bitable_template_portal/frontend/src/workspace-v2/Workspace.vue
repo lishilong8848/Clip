@@ -58,12 +58,12 @@
                     <NButton data-v2-navigation secondary @click="navigate('/?view=permission')"><ShieldCheck :size="17" /><span>申请权限</span><ChevronRight :size="16" /></NButton>
                   </div>
                 </section>
-                <section class="v2-profile-access" aria-label="功能权限"><h2><ShieldCheck :size="17" />功能权限<NTag size="small" :bordered="false">{{ granted.length }} 项</NTag></h2><div v-for="group in profileGroups" :key="group.name" class="v2-profile-group"><h3>{{ group.name }}</h3><div class="v2-profile-modules"><NTag v-for="item in group.items" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag></div></div><NEmpty v-if="!granted.length" description="暂无已授权功能" /></section>
+                <section class="v2-profile-access" aria-label="功能权限"><h2><ShieldCheck :size="17" />功能权限<NTag size="small" :bordered="false">{{ profileGroups.reduce((sum, group) => sum + group.items.length, 0) }} 项</NTag></h2><div v-for="group in profileGroups" :key="group.name" class="v2-profile-group"><h3>{{ group.name }}</h3><div class="v2-profile-modules"><NTag v-for="item in group.items" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag></div></div><NEmpty v-if="!granted.length" description="暂无已授权功能" /></section>
               </div>
               <AccountCertificate v-if="user.role==='admin'&&['L0','L1'].includes(user.level)" :key="identityKey" />
               <AccountSignature v-if="granted.includes('signatures')" :key="identityKey" class="v2-my-signatures" />
             </section>
-            <section v-else-if="view === 'handover' && route.pathname === '/'" class="v2-links"><h2>交接班审核</h2><PageCanvas page="handover" label="交接班审核" :blocks="[{id:'reviews',title:'楼栋审核',w:12,h:5,minW:4,minH:4}]"><template #reviews><NSpin :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url, scope) in handovers" :key="scope" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{ scope }}楼审核</NButton></div><NEmpty v-if="!handoverLoading && !Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin></template></PageCanvas></section>
+            <section v-else-if="view === 'handover' && route.pathname === '/'" class="v2-links"><h2>交接班审核</h2><PageCanvas plain page="handover" label="交接班审核" :blocks="[{id:'reviews',title:'楼栋审核',w:12,h:5,minW:4,minH:4}]"><template #reviews><NSpin :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url, scope) in handovers" :key="scope" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{ scope }}楼审核</NButton></div><NEmpty v-if="!handoverLoading && !Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin></template></PageCanvas></section>
             <section v-else-if="view === 'assistant' && route.pathname === '/'" class="v2-links"><h2>灯塔助手</h2><NButton type="primary" @click="openAssistant">打开会话</NButton></section>
             <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
@@ -73,7 +73,7 @@
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>
         </main>
-        <MobileNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="route.pathname === '/' && !route.searchParams.get('mode') ? view : 'functions'" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
+        <MobileNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
         <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
         <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
         <NModal v-model:show="accountConfirm" preset="dialog" :title="accountAction==='switch'?'切换账号':'退出登录'" :content="accountAction==='switch'?'将退出当前账号并返回登录页，已保存的资料会保留。':'确定退出当前账号？已保存的资料会保留。'" positive-text="继续" negative-text="取消" @positive-click="confirmAccountAction" />
@@ -170,6 +170,7 @@ const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? use
 const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
 const homeViews = ['home', 'tasks', 'functions'];
+const mobileActive = computed(() => route.value.pathname === '/' && (route.value.searchParams.get('account') === 'password' || ['my', 'permission'].includes(view.value)) ? 'my' : route.value.pathname === '/' && !route.value.searchParams.get('mode') && homeViews.includes(view.value) ? view.value : 'functions');
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
@@ -203,7 +204,7 @@ const permittedModules = computed(() => navigationModules(granted.value).filter(
 const menuOptions = computed(() => [
   { label: '个人工作台', key: 'home', icon: () => h(House, {size:19}) },
   ...[...new Set(permittedModules.value.map(m => m.group))].map(group => ({ key: group, label: group, type: 'group' as const, children: permittedModules.value.filter(m => m.group === group).map(m => ({ key: m.id, label:m.label, icon:() => h(moduleIcons[m.icon as keyof typeof moduleIcons],{size:18}) })) })),
-  ...(desktopNavigation.value&&visibleSettings.value.length?[{key:'settings',label:user.value.role==='admin'?'系统设置':'账号与权限',icon:()=>h(Settings,{size:18}),children:visibleSettings.value.map(item=>({key:'settings:'+item.key,label:item.label}))}]:[]),
+  ...(desktopNavigation.value&&visibleSettings.value.length?(visibleSettings.value.length===1?[{key:'settings:'+visibleSettings.value[0]!.key,label:visibleSettings.value[0]!.label,icon:()=>h(Settings,{size:18})}]:[{key:'settings',label:'系统设置',icon:()=>h(Settings,{size:18}),children:visibleSettings.value.map(item=>({key:'settings:'+item.key,label:item.label}))}]):[]),
 ]);
 const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false),appearanceOpen=ref(false),sidebarCloseKey=ref(0);
 function dismissAccountPopovers(){accountMenuOpen.value=false;appearanceOpen.value=false;sidebarCloseKey.value++;}
@@ -214,7 +215,7 @@ const accountOptions=computed(()=>[
  {key:'switch',label:'切换账号',icon:()=>h(UsersRound,{size:17})},
  {key:'logout',label:'退出登录',icon:()=>h(LogOut,{size:17})},
 ]);
-function accountNodeProps(option:Dict){return {role:option.type==='divider'?'separator':'menuitem','aria-disabled':option.disabled?true:undefined};}
+function accountNodeProps(option:Dict){return {role:option.type==='divider'?'separator':'menuitem','aria-disabled':option.disabled?'true' as const:undefined};}
 function selectAccountAction(key:string){
  accountMenuOpen.value=false;
  if(window.matchMedia('(max-width:760px)').matches)collapsed.value=true;

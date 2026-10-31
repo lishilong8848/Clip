@@ -12,8 +12,8 @@ const plans={
   'LearningPage.vue':[{container:'practice-layout',id:'learning-practice',label:'我的答题',blocks:[['questions','题目导航',['question-rail'],4,9],['answer','答题与解析',['question-body'],8,14]]}],
   'LearningDashboard.vue':[{container:'dashboard-panels',id:'learning-profile',label:'学练画像',blocks:[['completion','完成进度',['completion-panel'],4,7],['method','作答方式',['answer-method-panel'],4,7],['interview','问答自评',['interview-panel'],4,7],['trend','答题趋势',['section'],12,8]]}],
   'CabinetPowerPage.vue':[{container:'template',has:'metrics',id:'cabinet',label:'机柜管理',blocks:[['summary','机柜状态',['metrics'],12,2,void 0,2],['workspace','包间、平面图与台账',['nav','section'],12,13]]}],
-  'EventManagementPage.vue':[{container:'event-page',id:'events',label:'事件管理',blocks:[['overview','事件概览',['event-command-card'],12,7],['trend','事件趋势',['EventCharts'],12,7],['records','事件明细',['v2-event-detail-toggle','event-list-panel'],12,10]]}],
-  'DailyTaskChecklistPage.vue':[{container:'daily-page',id:'daily',label:'每日任务',blocks:[['summary','任务概览',['summary-grid'],12,4],['tasks','任务办理',['category-tabs','task-content'],12,10]]}],
+  'EventManagementPage.vue':[{container:'event-page',id:'events',label:'事件管理',blocks:[['overview','事件概览',['event-command-card'],12,4,void 0,2],['trend','事件趋势',['EventCharts'],12,6,void 0,2],['records','事件明细',['v2-event-detail-toggle','event-list-panel'],12,10,void 0,2]]}],
+  'DailyTaskChecklistPage.vue':[{container:'daily-page',id:'daily',label:'每日任务',blocks:[['summary','任务概览',['summary-grid'],12,2,void 0,2],['tasks','任务办理',['category-tabs','task-content'],12,10]]}],
   'LinkDirectoryPage.vue':[{container:'link-directory-page',id:'links',label:'多维表导航',blocks:[['links','链接目录',['table-wrap','table-footer'],12,11]]}],
   'SignatureManagementPage.vue':[{container:'template',has:'directory-panel',id:'signatures',label:'签名管理',blocks:[['people','人员目录',['directory-panel'],12,12],['duplicates','重复人员核对',['duplicates'],12,9,'showDuplicates']]}],
   'AdminTools.vue':[{container:'admin-settings-layout',id:'accounts',label:'账号与设置',blocks:[['settings','账号与权限',['admin-settings-content'],12,12]]}],
@@ -49,6 +49,7 @@ export function adaptPageLayouts(source,filename){
   const file=filename.replaceAll('\\','/').split('/').pop(),entries=plans[file];
   if(!entries||source.includes('page-layout-adapted'))return source;
   let code=source;
+  if(file==='DailyTaskChecklistPage.vue')code=code.replace('<small>今日任务</small>', '<small>{{ selectedDate === today ? \'今日任务\' : \'当日任务\' }}</small>').replace('{{ scopeLabel }}今日工作', '{{ scopeLabel }}{{ selectedDate === today ? \'今日工作\' : selectedDate + \'工作\' }}');
   for(const plan of entries){
     const {descriptor}=parse(code),part=descriptor.template;
     const group=find(part.ast,node=>has(node,plan.container)&&(!plan.has||(node.children||[]).some(child=>child.type===1&&has(child,plan.has))));

@@ -7,18 +7,18 @@
     <NEmpty v-if="!selected.length" size="small" description="请选择要显示的待办业务" />
     <section v-for="(kind,index) in selected" :key="kind" class="v2-todo-group" :aria-label="label(kind)+'待办'">
       <header><h3><span class="v2-todo-order">{{index+1}}</span>{{label(kind)}}</h3><span v-if="groupRows(kind).length||states[kind]?.ready&&!groupErrors(kind)">{{groupRows(kind).length}} 条<template v-if="hasMore(kind)||groupErrors(kind)">已读取</template></span><span v-else>{{groupErrors(kind)?'待核验':'正在读取'}}</span><NSpin v-if="states[kind]?.loading" :size="13" /></header>
-      <NAlert v-if="groupErrors(kind)" type="warning" :bordered="false" role="alert" class="v2-todo-error">{{groupErrors(kind)}}<NButton text :disabled="states[kind]?.loading" @click="loadGroup(kind)">重新读取</NButton></NAlert>
+      <NAlert v-if="groupErrors(kind)" type="warning" :bordered="false" role="alert" class="v2-todo-error">{{groupErrors(kind)}}<NButton text :disabled="states[kind]?.loading" @click="loadGroup(kind)">重试当前读取</NButton></NAlert>
       <NSkeleton v-if="states[kind]?.loading&&!states[kind]?.ready" :repeat="3" height="48px" class="v2-todo-skeleton" />
       <ul v-else class="v2-todo-list">
         <li v-for="row in groupRows(kind)" :key="row.key">
           <button type="button" data-v2-navigation class="v2-todo-row" @click="openRow(row)">
-            <span class="v2-todo-row-copy"><strong>{{row.title}}</strong><span><span>{{scopeText(row.scope)}}</span><span v-if="row.detail">{{row.detail}}</span><time v-if="row.time">{{row.time}}</time><time v-if="row.dueAt">截止 {{dateText(row.dueAt)}}</time></span></span>
+            <span class="v2-todo-row-copy"><strong>{{row.title}}</strong><span><span>{{scopeText(row.scope)}}</span><span v-if="row.detail">{{row.detail}}</span><time v-if="row.time" :title="todoTimeLabel(row.time, true)">{{todoTimeLabel(row.time)}}</time><time v-if="row.dueAt">截止 {{dateText(row.dueAt)}}</time></span></span>
             <span class="v2-todo-row-state"><NTag size="small" :bordered="false" :type="row.dueAt&&row.dueAt<Date.now()?'warning':'default'">{{row.status}}</NTag><span>办理<ChevronRight :size="15" /></span></span>
           </button>
         </li>
       </ul>
       <p v-if="states[kind]?.ready&&!groupRows(kind).length&&!groupErrors(kind)" class="v2-todo-empty">{{hasMore(kind)?'已读取记录中暂无待办，可继续读取。':states[kind]?.sources.length?'当前没有未完成事项':'当前楼栋未接入此业务'}}</p>
-      <footer v-if="hasMore(kind)||groupNotes(kind)"><span>{{groupNotes(kind)}}</span><NButton v-if="hasMore(kind)" size="small" secondary :loading="states[kind]?.loading" @click="loadGroup(kind)">继续读取待办</NButton></footer>
+      <footer v-if="!groupErrors(kind)&&(hasMore(kind)||groupNotes(kind))"><span>{{groupNotes(kind)}}</span><NButton v-if="hasMore(kind)" size="small" secondary :loading="states[kind]?.loading" @click="loadGroup(kind)">加载更多</NButton></footer>
     </section>
     <NModal v-if="active" :show="true" :mask-closable="false" :close-on-esc="false" :auto-focus="false" @update:show="shown=>{if(!shown)closeHandler()}">
       <section class="v2-todo-handler" role="dialog" aria-modal="true" :aria-label="'办理：'+active.title">
@@ -33,6 +33,7 @@ import { computed,defineAsyncComponent,onBeforeUnmount,onMounted,ref,watch } fro
 import { NAlert,NButton,NEmpty,NModal,NSkeleton,NSpin,NTag } from 'naive-ui';
 import { ChevronRight,RefreshCw,X } from 'lucide-vue-next';
 import { requestJson,type Dict } from './client';
+import { todoTimeLabel } from './todoTime';
 import { requestEmbeddedChange } from './navigation';
 import { widget } from './dashboard/layout';
 import { todoCatalog,todoSelection,todoSources,sortTodos,type TodoKind,type TodoRow,type TodoSource } from './businessTodos';

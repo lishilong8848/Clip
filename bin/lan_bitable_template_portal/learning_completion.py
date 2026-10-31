@@ -7,7 +7,7 @@ from collections import Counter, defaultdict
 from contextlib import closing
 
 from . import learning as core
-from .pre_shift_checks import windows
+from .learning_schedule import windows
 
 KIND = 'daily_progress'
 VERSION = 1
@@ -340,6 +340,8 @@ def project(service, date, *, current=None, data=None, scope=''):
                 if (task.get('source') == 'roster' and (not scope or task.get('scope') == scope)
                         and task['task_id'] not in known and not any(t['shift'] == task['shift'] and t['scope'] == task['scope'] for t in tasks)):
                     task = copy.deepcopy(task)
+                    if task.get('shift') in {'白', '夜'}:
+                        task['due_at'] = windows(date, task['shift'])[1].isoformat()
                     task['status'] = _status(task, current)
                     tasks.append(task)
         practice_sources = add_practice(tasks, person_papers, records, date, current)

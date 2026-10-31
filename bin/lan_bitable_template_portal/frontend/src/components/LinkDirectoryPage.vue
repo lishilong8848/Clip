@@ -1,5 +1,5 @@
 <template>
-  <section ref="pageElement" class="link-directory-page" :aria-busy="loading" @pointermove="pointerMove" @pointerup="pointerDrop" @pointercancel="endDrag" @lostpointercapture="endDrag">
+  <section ref="pageElement" class="link-directory-page" :class="{ 'v2-compact-links': workspaceV2 }" :aria-busy="loading" @pointermove="pointerMove" @pointerup="pointerDrop" @pointercancel="endDrag" @lostpointercapture="endDrag">
     <VnetBackButton to="/" title="返回首页" />
 
     <header class="page-head">
@@ -129,6 +129,18 @@
             <td class="purpose-cell">{{ row.purpose || '—' }}</td>
             <td class="sort-cell">{{ (page - 1) * PAGE_SIZE + index + 1 }}</td>
             <td v-if="canEdit" class="ops-cell">
+              <details v-if="workspaceV2" class="v2-link-menu">
+                <summary :aria-label="'更多操作：' + (row.name || '未命名链接')">更多</summary>
+                <div class="v2-link-menu-actions">
+                  <button type="button" :disabled="saving || loading" @click="openEdit(row)"><Pencil :size="16" aria-hidden="true" />编辑</button>
+                  <button type="button" class="danger" :disabled="saving || loading" @click="askDelete(row)"><Trash2 :size="16" aria-hidden="true" />删除</button>
+                  <button type="button" :disabled="saving || loading" :aria-expanded="mobileSortId === String(row.id)" @click="mobileSortId = mobileSortId === String(row.id) ? '' : String(row.id)">调整顺序</button>
+                  <template v-if="mobileSortId === String(row.id)">
+                    <button type="button" class="v2-link-move" :disabled="saving || loading || String(sortedFiltered[0]?.id) === String(row.id)" @click="moveByKeyboard(row, -1)">上移</button>
+                    <button type="button" class="v2-link-move" :disabled="saving || loading || String(sortedFiltered[sortedFiltered.length - 1]?.id) === String(row.id)" @click="moveByKeyboard(row, 1)">下移</button>
+                  </template>
+                </div>
+              </details>
               <div class="row-actions">
                 <button
                   type="button"
@@ -287,6 +299,9 @@ import VnetBackButton from "./VnetBackButton.vue";
 import LoadingIndicator from "./LoadingIndicator.vue";
 import UiTransition from "./UiTransition.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
+
+const workspaceV2 = document.documentElement.classList.contains('workspace-v2');
+const mobileSortId = ref('');
 
 type LinkDirectoryItem = {
   id: string | number;
@@ -457,7 +472,8 @@ async function moveEntry(id: string, target: string, placement: "before" | "afte
     orderMessage.value="顺序已保存";
     saving.value=false;reordering.value=false;
     await nextTick();
-    const handle=document.querySelector<HTMLElement>(".link-table tr.moved .drag-handle");
+    const mobile = workspaceV2 && window.matchMedia('(max-width:760px)').matches;
+    const handle=document.querySelector<HTMLElement>(mobile ? '.link-table tr.moved .v2-link-menu summary' : '.link-table tr.moved .drag-handle');
     handle?.focus({preventScroll:true});
     handle?.closest("tr")?.scrollIntoView({behavior:"smooth",block:"nearest"});
   } catch(e) {
@@ -1353,5 +1369,33 @@ button:disabled {
   .link-modal {
     max-height: calc(100dvh - 20px);
   }
+}
+</style>
+<style scoped>
+.v2-link-menu{display:none}
+@media(max-width:760px){
+  .v2-compact-links .table-wrap{overflow:visible;min-width:0}
+  .v2-compact-links .link-table{display:block;min-width:0;width:100%;table-layout:auto}
+  .v2-compact-links .link-table thead{position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%)}
+  .v2-compact-links .link-table tbody{display:block}
+  .v2-compact-links .link-table tr{display:grid;grid-template-columns:minmax(0,1fr) auto;grid-template-areas:'name ops' 'category ops' 'purpose purpose';gap:4px 8px;padding:12px;border-bottom:1px solid var(--v2-border,#d9dde3)}
+  .v2-compact-links .link-table tr:last-child{border-bottom:0}
+  .v2-compact-links .link-table td{min-width:0;padding:0;border:0;white-space:normal;overflow-wrap:anywhere}
+  .v2-compact-links .name-cell{grid-area:name}
+  .v2-compact-links .link-name{min-height:44px;max-width:100%;white-space:normal;overflow-wrap:anywhere}
+  .v2-compact-links .link-name>span:last-child{min-width:0;white-space:normal;overflow-wrap:anywhere}
+  .v2-compact-links .category-cell{grid-area:category;color:var(--v2-muted,#64748b)}
+  .v2-compact-links .category-cell::before{content:'分类：'}
+  .v2-compact-links .purpose-cell{grid-area:purpose;line-height:1.6;color:var(--v2-muted,#64748b)}
+  .v2-compact-links .sort-cell,.v2-compact-links .row-actions{display:none}
+  .v2-compact-links .ops-cell{grid-area:ops;align-self:start}
+  .v2-compact-links .v2-link-menu{display:block;max-width:112px}
+  .v2-link-menu summary{display:flex;align-items:center;justify-content:center;min-height:44px;min-width:44px;padding:0 8px;cursor:pointer;border:1px solid var(--v2-border,#d9dde3);border-radius:6px;color:var(--v2-accent,#2f6fed);list-style:none}
+  .v2-link-menu summary::-webkit-details-marker{display:none}
+  .v2-link-menu-actions{display:grid;gap:8px;margin-top:8px}
+  .v2-link-menu-actions button{display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:6px 8px;font:inherit;cursor:pointer;color:inherit;background:var(--cf-surface,#fff);border:1px solid var(--v2-border,#d9dde3);border-radius:6px}
+  .v2-link-menu-actions .danger{color:var(--v2-danger,#c43b41)}
+  .v2-link-menu-actions button:disabled{opacity:.5;cursor:default}
+  .v2-link-menu summary:focus-visible,.v2-link-menu-actions button:focus-visible{outline:2px solid var(--v2-accent,#2f6fed);outline-offset:2px}
 }
 </style>

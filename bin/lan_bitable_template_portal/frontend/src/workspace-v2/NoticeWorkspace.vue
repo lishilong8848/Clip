@@ -1,6 +1,6 @@
 <template>
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
-    <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NButton data-v2-navigation type="primary" secondary @click="historyOpen=true">历史通告</NButton><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" />更多办理</NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" />刷新</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation type="primary" @click="newNotice(kind)"><Plus :size="17" />手填{{ typeLabel(kind) }}</NButton><NDropdown v-else :options="newOptions" trigger="click" @select="newNotice"><NButton data-v2-navigation type="primary"><Plus :size="17" />新建通告</NButton></NDropdown><NButton v-if="kind!=='all'" data-v2-navigation @click="newNotice('paste')">粘贴原文</NButton></div></header>
+    <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NButton class="v2-notice-history-action" data-v2-navigation secondary aria-label="查看历史通告" @click="historyOpen=true"><History :size="16" /><span>历史通告</span></NButton><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton class="v2-notice-more-action" data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" /><span>更多办理</span></NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton class="v2-notice-refresh-action" :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" /><span>刷新</span></NButton></NDropdown><NDropdown :options="newOptions" trigger="click" @select="newNotice"><NButton class="v2-notice-create-action" data-v2-navigation type="primary" aria-label="新建通告"><Plus :size="17" /><span>新建通告</span></NButton></NDropdown></div></header>
     <div class="v2-notice-type-filters"><nav ref="typeNavigation" class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
     <div v-if="!selectedScopes&&buildingOptions.length>1" class="v2-notice-global-scope"><WidgetScopePicker :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><small>适用于计划与进行中通告</small></div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
@@ -108,7 +108,7 @@ import { activateCard } from './cardActivation';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NList,NListItem,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTab,NTabs,NTag,useDialog,useMessage } from 'naive-ui';
-import { CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
+import { CalendarDays,CheckCircle2,ChevronRight,CircleAlert,Clock3,Ellipsis,History,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
@@ -155,8 +155,8 @@ const selectedBuildings=computed(()=>{const requested=props.selectedScopes||para
 const scopeLabel=computed(()=>selectedBuildings.value?selectedBuildings.value.map(value=>scopeOptions.value.find(option=>option.value===value)?.label||value).join('、'):scopeOptions.value.find(s=>s.value===props.scope)?.label||props.scope);
 const buildingOptions=computed(()=>props.scopes.filter(s=>['110',...'ABCDEH'].includes(s.value)));
 const sopTypes=computed(()=>types.value.filter(t=>['maintenance','polling','adjust'].includes(t.id)).map(t=>({value:t.id,label:t.label})));
-const newOptions=computed(()=>[...types.value.filter(t=>t.id!=='all').map(t=>({key:t.id,label:'手填'+t.label})),{type:'divider',key:'divider'},{key:'paste',label:'粘贴原文解析'}]);
-const moreOptions=computed(()=>[{key:'paste',label:'粘贴原文'},{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...(sopTypes.value.length?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...((props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维护单管理'}]:[]),...((props.user.modules||[]).includes('accounts')?[{key:'memory',label:'历史记忆管理'}]:[])]);
+const newOptions=computed(()=>[...types.value.filter(t=>t.id!=='all'&&(kind.value==='all'||t.id===kind.value)).map(t=>({key:t.id,label:'手动填写'+t.label})),{type:'divider',key:'divider'},{key:'paste',label:'粘贴原文解析'}]);
+const moreOptions=computed(()=>[{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...(sopTypes.value.length?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...((props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维护单管理'}]:[]),...((props.user.modules||[]).includes('accounts')?[{key:'memory',label:'历史记忆管理'}]:[])]);
 const refreshOptions=computed(()=>[{key:'page',label:'刷新本页'},...types.value.filter(t=>['maintenance','change','repair'].includes(t.id)).map(t=>({key:t.id,label:'同步'+t.label+'源表'}))]);
 const changeOpen=ref(false),pasteOpen=ref(false),pasteText=ref(''),pasteError=ref(''),parsing=ref(false),syncing=ref(false);
 const recordsOpen=ref(false),historyOpen=ref(false);
@@ -573,12 +573,11 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 @container notice-workspace (max-width:620px){
  .workspace-v2 .v2-notices>.v2-notice-command{--filter-height:44px}
  .workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-types{gap:8px}
- .workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-tools{justify-self:stretch;gap:8px}
+ .workspace-v2 .v2-notices>.v2-notice-command>.v2-notice-tools{justify-self:stretch;gap:6px}
  .workspace-v2 .v2-notice-command .n-button{min-width:44px;min-height:44px}
  .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button{flex:1;min-width:0}
- .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(-n+2){flex:none;width:44px;padding-inline:0}
- .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(-n+2) .n-button__content{font-size:0;gap:0}
- .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:nth-child(4){display:none}
+ .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:is(.v2-notice-more-action,.v2-notice-refresh-action){flex:none;width:44px;padding-inline:0}
+ .workspace-v2 .v2-notice-command>.v2-notice-tools>.n-button:is(.v2-notice-more-action,.v2-notice-refresh-action) .n-button__content>span{display:none}
  .workspace-v2 .v2-notice-command>.v2-toolbar-end .n-button{width:44px;padding-inline:0}
  .workspace-v2 .v2-notice-command>.v2-toolbar-end .n-button__content{font-size:0;gap:0}
  .workspace-v2 .v2-notices>.v2-notice-filters,.workspace-v2 .v2-notices>.v2-notice-filters.has-scopes{--filter-height:44px;grid-template-columns:repeat(2,minmax(0,1fr))}

@@ -132,7 +132,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .learning_delivery_status import _delivery
     from .learning_engagement import recipients
     from .learning_shift_storage import person_open_id
-    from .pre_shift_checks import windows
+    from .learning_schedule import windows
     from .learning_reminders import excluded_long_day
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),

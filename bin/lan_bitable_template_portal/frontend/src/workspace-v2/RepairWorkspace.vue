@@ -11,7 +11,7 @@
       </nav>
       <div class="v2-repair-filters">
         <NInput :value="r.searchText" placeholder="搜索维修名称、设备、位置或专业" clearable :input-props="{'aria-label':'搜索维修项目'}" @update:value="r.searchText=$event"><template #prefix><Search :size="16" /></template></NInput>
-        <span v-if="r.v2RecordsReady" class="v2-repair-total">{{r.total}} 项</span><NSkeleton v-else width="64px" height="18px" />
+
       </div>
       <div class="v2-repair-state-row">
         <span class="v2-repair-list-caption">{{r.v2StateLabel}}<template v-if="r.v2RecordsReady"> · {{r.total}} 项</template></span>
@@ -23,7 +23,7 @@
       <NAlert v-if="r.messageText && !r.projectDrawerOpen && !r.v2RecordError" :type="tone(r.messageTone)" :bordered="false" role="status">{{r.messageText}}</NAlert>
       <div class="v2-repair-body">
         <section ref="listElement" class="v2-repair-list" aria-label="维修项目列表">
-          <div class="v2-repair-list-head"><span>维修项目</span><span>点击记录填写维修单或跟进</span></div>
+
           <div v-if="r.loading && r.records.length" class="v2-repair-refreshing" role="status"><NSpin :size="15" />正在读取“{{r.v2StateLabel}}”，暂显示原列表</div>
           <div class="record-list" :aria-busy="r.loading">
             <div v-if="r.loading&&!r.records.length" class="v2-repair-skeleton"><NSkeleton v-for="i in 5" :key="i" height="90px" :sharp="false" /></div>
@@ -36,7 +36,7 @@
               </article>
             </div>
           </div>
-          <footer class="v2-repair-pager"><span v-if="r.v2RecordsReady">{{r.total}} 项</span><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>changePage(r,value)" /></footer>
+          <footer class="v2-repair-pager"><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>changePage(r,value)" /></footer>
         </section>
       </div>
       <Teleport to="body">

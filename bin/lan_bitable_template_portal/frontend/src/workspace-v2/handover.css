@@ -56,6 +56,11 @@
   .workspace-v2 .work-handover .handover-responsibility-head { align-items: start; gap: 10px; }
   .workspace-v2 .work-handover .handover-responsibility-head > .handover-tools { justify-content: space-between; width: 100%; }
   .workspace-v2 .work-handover .handover-item-toolbar > .handover-tools { width: 100%; justify-content: flex-end; }
+  .workspace-v2 .work-handover .handover-item-toolbar:has(.handover-refresh) { display: grid; grid-template-columns: minmax(0, 1fr) 44px; padding-right: 0; }
+  .workspace-v2 .work-handover .handover-item-toolbar:has(.handover-refresh) > .handover-tabs { min-width: 0; }
+  .workspace-v2 .work-handover .handover-item-toolbar:has(.handover-refresh) > .handover-tools { position: static; width: 44px; }
+  .workspace-v2 .work-handover .handover-item-toolbar:has(.handover-refresh) .handover-tabs button { min-height: 44px; padding-inline: 3px; }
+  .workspace-v2 .work-handover .handover-refresh { width: 44px; min-width: 44px; min-height: 44px; }
   .workspace-v2 .work-handover .handover-item { padding-block: 11px; }
   .workspace-v2 .work-handover .handover-item-actions { gap: 15px; }
   .workspace-v2 .work-handover .handover-item-meta small { display: none; }

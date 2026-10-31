@@ -55,3 +55,13 @@
  .workspace-v2 .drill-page .building-toolbar label{width:calc(50% - 4px)}.workspace-v2 .learning-page .toolbar>.filters>.vnet-select{width:calc(50% - 4px)}
  .workspace-v2 .learning-page .toolbar>.filters>label{min-width:100%}.workspace-v2 .v2-plan-command .pc-tabs{width:100%;display:flex}.workspace-v2 .v2-plan-command .pc-tabs>button{flex:1;padding-inline:5px;font-size:12px}
 }
+
+/* The daily task toolbar keeps related short controls together on phones. */
+@media(max-width:760px){
+ .workspace-v2 .daily-header{gap:8px}
+ .workspace-v2 .daily-header__actions{display:flex;flex-direction:row!important;flex-wrap:wrap;gap:8px;width:100%}
+ .workspace-v2 .daily-header__actions>button{min-height:44px;width:auto!important;flex:0 0 auto}
+ .workspace-v2 .daily-header__actions>:is(.vnet-select,.v2-string-select){width:auto!important;min-width:120px;flex:1 1 150px}
+ .workspace-v2 .daily-header__actions>.btn.primary{flex-basis:100%}
+ .workspace-v2 .daily-page .summary-grid{min-height:0;padding-block:8px}
+}

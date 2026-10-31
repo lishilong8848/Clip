@@ -25,11 +25,13 @@ import { NAlert,NButton,NEmpty,NSkeleton,NStatistic } from 'naive-ui';
 import { Building2,ChevronRight,RefreshCw } from 'lucide-vue-next';
 import { requestJson,type Dict } from './client';
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
-import { waterBuildingTrend,waterDay,waterNumberText,waterScopes,waterTrend } from './water';
+import { validWaterDate,waterBuildingTrend,waterDay,waterNumberText,waterScopes,waterTrend } from './water';
+import { logicalUrl } from './version';
 const WaterBuildingTrend=defineAsyncComponent(()=>import('./WaterBuildingTrend.vue'));
 const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[]}>();
-const emit=defineEmits<{open:[scope:string]}>();
-const data=ref<Dict>({}),loading=ref(false),error=ref(''),selectedDay=ref('');
+const emit=defineEmits<{open:[context:{scope:string;startDate:string;endDate:string;frequency:'日';selectedDay:string}]}>();
+const initialDay=logicalUrl().searchParams.get('water_overview_day')||'';
+const data=ref<Dict>({}),loading=ref(false),error=ref(''),selectedDay=ref(validWaterDate(initialDay)&&initialDay.slice(0,7)===waterDay().slice(0,7)&&initialDay<=waterDay()?initialDay:'');
 const available=computed(()=>props.scopeOptions.filter(row=>waterScopes.has(row.value)));
 const periodRows=computed<Dict[]>(()=>data.value.records||[]);
 const endDay=ref(waterDay()),monthStart=computed(()=>endDay.value.slice(0,7)+'-01');
@@ -41,7 +43,7 @@ const scopeLabel=computed(()=>available.value.length>1?'授权楼栋':available.
 const totalUsage=computed(()=>ready.value&&!trend.value.missing?trend.value.items.reduce((sum,row)=>sum+row.value,0):null),recordCount=computed(()=>ready.value?periodRows.value.length:null);
 const latestDate=computed(()=>!ready.value?null:Math.max(0,...periodRows.value.map(row=>Date.parse(String(row.statistic_date_key||row.statistic_date).slice(0,10)+'T00:00:00+08:00')||0)));
 function dateText(value:number|null){return value?new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date(value)):'—';}
-function open(scope:string){if(available.value.some(row=>row.value===scope))emit('open',scope);}
+function open(scope:string){if(available.value.some(row=>row.value===scope))emit('open',{scope,startDate:selectedDay.value||monthStart.value,endDate:selectedDay.value||endDay.value,frequency:'日',selectedDay:selectedDay.value});}
 let read:AbortController|undefined,disposed=false,poll=0;
 async function load(fresh=false){
   if(disposed||document.hidden||!available.value.length)return;

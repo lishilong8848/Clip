@@ -65,12 +65,19 @@
         <span v-if="filterError" class="document-error" role="alert">{{ filterError }}</span>
       </div>
       <div v-if="canReindex" class="document-selection" aria-label="资料选择">
-        <NButton :disabled="busy || listLoading || !selectableRecords.length" @click="selectPage"><ListChecks :size="16" />选择本页</NButton>
-        <NButton :disabled="busy || listLoading || total === undefined || total === 0" @click="selectAll"><ListChecks :size="16" />选择全部匹配记录（跨页）</NButton>
-        <NButton :disabled="busy || !hasSelection" @click="clearSelection"><X :size="16" />清空选择</NButton>
-        <NButton type="primary" :disabled="busy || listLoading || !hasSelection" @click="confirmReindex()"><RefreshCw :size="16" />重新向量化选中</NButton>
-        <NSelect v-model:value="reindexMode" :options="[{ value: 'all', label: '全部重建' }, { value: 'failed', label: '仅重试失败项' }, { value: 'missing', label: '仅补齐缺失项' }]" :disabled="busy" aria-label="向量化处理方式" class="document-reindex-mode" />
-        <span class="document-selection-summary" role="status">{{ selectionLabel }}</span>
+        <NButton v-if="workspaceV2 && !selectingRecords && !hasSelection" :disabled="busy || listLoading || !records.length" @click="selectingRecords = true"><ListChecks :size="16" />选择资料</NButton>
+        <template v-if="!workspaceV2 || selectingRecords || hasSelection">
+          <NButton :disabled="busy || listLoading || !selectableRecords.length" @click="selectPage"><ListChecks :size="16" />选择本页</NButton>
+          <NButton :disabled="busy || listLoading || total === undefined || total === 0" @click="selectAll"><ListChecks :size="16" />选择全部匹配记录（跨页）</NButton>
+          <NButton :disabled="busy || !hasSelection" @click="clearSelection"><X :size="16" />清空选择</NButton>
+          <NButton v-if="workspaceV2 && !hasSelection" :disabled="busy" @click="selectingRecords = false">退出选择</NButton>
+          <template v-if="!workspaceV2 || hasSelection">
+            <NButton type="primary" :disabled="busy || listLoading || !hasSelection" @click="confirmReindex()"><RefreshCw :size="16" />{{ reindexAction }}{{ workspaceV2 ? '' : '选中' }}</NButton>
+            <NSelect v-model:value="reindexMode" :options="[{ value: 'all', label: '全部重建' }, { value: 'failed', label: '仅重试失败项' }, { value: 'missing', label: '仅补齐缺失项' }]" :disabled="busy" :aria-label="workspaceV2 ? '索引更新方式' : '向量化处理方式'" class="document-reindex-mode" />
+            <span class="document-selection-summary" role="status">{{ selectionLabel }}</span>
+            <span v-if="workspaceV2" class="document-selection-summary">更新本机全文与附件的知识库索引（向量化），不修改飞书记录。</span>
+          </template>
+        </template>
       </div>
       <NAlert v-if="listPending" type="info" :bordered="false" role="status">来源资料正在后台同步{{ records.length ? '，当前显示已缓存资料。' : '，完成后自动显示列表。' }}</NAlert>
       <span v-if="activeTable && listCache?.updated_at" class="document-muted">本地记录更新于 {{ timeText(listCache.updated_at) }}</span>
@@ -81,20 +88,20 @@
         <div v-if="records.length" class="document-results" :aria-busy="listLoading">
           <div class="document-table-wrap">
             <table class="document-table">
-              <thead><tr><th v-if="canReindex" class="document-check" scope="col"><span class="document-sr-only">选择</span></th><th v-for="field in displayFields" :key="field.id" scope="col">{{ field.name }}</th><th scope="col">附件 / 本地向量</th><th scope="col"><span class="document-sr-only">操作</span></th></tr></thead>
+              <thead><tr><th v-if="showRecordSelection" class="document-check" scope="col"><span class="document-sr-only">选择</span></th><th v-for="field in displayFields" :key="field.id" scope="col">{{ field.name }}</th><th scope="col">附件 / 本地向量</th><th scope="col"><span class="document-sr-only">操作</span></th></tr></thead>
               <tbody><tr v-for="record in records" :key="record.record_id">
-                <td v-if="canReindex" class="document-check"><NCheckbox :checked="isSelected(record)" :disabled="busy || listLoading || !record.capabilities.reindex" :aria-label="'选择资料：' + title(record)" @update:checked="value => toggleRecord(record, value)" /></td>
+                <td v-if="showRecordSelection" class="document-check"><NCheckbox :checked="isSelected(record)" :disabled="busy || listLoading || !record.capabilities.reindex" :aria-label="'选择资料：' + title(record)" @update:checked="value => toggleRecord(record, value)" /></td>
                 <td v-for="(field, index) in displayFields" :key="field.id">
                   <button v-if="index === 0" class="document-record-title" type="button" :disabled="busy" :aria-label="'查看资料：' + title(record)" @click="openRecord(record.record_id)"><FileText :size="17" /><DocumentLibraryField :field="field" :model-value="record.fields[field.id]" :interactive="false" /></button>
                   <DocumentLibraryField v-else :field="field" :model-value="record.fields[field.id]" />
                 </td>
                 <td><div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }}</span><span>{{ cacheLabel(record) }}</span><NTag :type="vectorType(record)" :bordered="false" size="small">{{ indexLabel(record) }}</NTag><span>{{ vectorProgress(record) }}</span></div></td>
-                <td><div class="document-row-actions"><NButton v-if="canReindex && record.capabilities.reindex" quaternary :disabled="busy" :aria-label="'重新向量化：' + title(record)" title="重新向量化" @click="confirmReindex(record)"><RefreshCw :size="17" /></NButton><NButton quaternary :disabled="busy" :aria-label="'打开资料：' + title(record)" title="查看详情" @click="openRecord(record.record_id)"><ChevronRight :size="17" /></NButton></div></td>
+                <td><div class="document-row-actions"><NButton v-if="canReindex && record.capabilities.reindex" quaternary :disabled="busy" :aria-label="reindexAction + '：' + title(record)" :title="reindexAction" @click="confirmReindex(record)"><RefreshCw :size="17" /></NButton><NButton quaternary :disabled="busy" :aria-label="'打开资料：' + title(record)" title="查看详情" @click="openRecord(record.record_id)"><ChevronRight :size="17" /></NButton></div></td>
               </tr></tbody>
             </table>
           </div>
           <div class="document-mobile-list"><article v-for="record in records" :key="record.record_id">
-            <div class="document-mobile-heading"><NCheckbox v-if="canReindex" :checked="isSelected(record)" :disabled="busy || listLoading || !record.capabilities.reindex" :aria-label="'选择资料：' + title(record)" @update:checked="value => toggleRecord(record, value)" /><button class="document-mobile-title" type="button" :disabled="busy" @click="openRecord(record.record_id)"><FileText :size="20" /><strong>{{ title(record) }}</strong><ChevronRight :size="17" /></button><NButton v-if="canReindex && record.capabilities.reindex" quaternary :disabled="busy" :aria-label="'重新向量化：' + title(record)" title="重新向量化" @click="confirmReindex(record)"><RefreshCw :size="16" /></NButton></div>
+            <div class="document-mobile-heading"><NCheckbox v-if="showRecordSelection" :checked="isSelected(record)" :disabled="busy || listLoading || !record.capabilities.reindex" :aria-label="'选择资料：' + title(record)" @update:checked="value => toggleRecord(record, value)" /><button class="document-mobile-title" type="button" :disabled="busy" @click="openRecord(record.record_id)"><FileText :size="20" /><strong>{{ title(record) }}</strong><ChevronRight :size="17" /></button><NButton v-if="canReindex && record.capabilities.reindex" quaternary :disabled="busy" :aria-label="reindexAction + '：' + title(record)" :title="reindexAction" @click="confirmReindex(record)"><RefreshCw :size="16" /></NButton></div>
             <dl><template v-for="field in displayFields.slice(1, 4)" :key="field.id"><dt>{{ field.name }}</dt><dd><DocumentLibraryField :field="field" :model-value="record.fields[field.id]" /></dd></template></dl>
             <div class="document-record-meta"><span><Paperclip :size="14" />{{ record.attachments?.length || 0 }} 个附件</span><span>{{ cacheLabel(record) }}</span><NTag :type="vectorType(record)" size="small" :bordered="false">{{ indexLabel(record) }}</NTag><span>{{ vectorProgress(record) }}</span></div>
           </article></div>
@@ -118,7 +125,7 @@
             <div v-if="detailLoading" class="document-loading" role="status" aria-label="正在读取详情"><NSkeleton v-for="index in 4" :key="index" height="44px" /></div>
             <template v-else-if="detail || creating">
               <div class="document-record-source"><FolderOpen :size="16" /><span>所属数据表</span><strong>{{ activeTable?.name }}</strong></div>
-              <div v-if="detail" class="document-detail-bar"><NTag :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="!editing && canReindex && detail.capabilities.reindex" :disabled="busy || !!pendingUpload" title="重新向量化此资料" aria-label="重新向量化此资料" @click="confirmReindex(detail)"><RefreshCw :size="15" />重新向量化</NButton><NButton :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload || !!fieldConflicts.length" :title="editing ? '重新读取资料，保留输入' : '重新读取资料'" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
+              <div v-if="detail" class="document-detail-bar"><NTag :bordered="false" size="small" :title="detail.revision">修订 {{ detail.revision.slice(0, 10) }}</NTag><NButton v-if="!editing && detail.capabilities.edit" :disabled="busy || !!pendingUpload" @click="editing = true"><Pencil :size="15" />编辑资料</NButton><NButton v-if="!editing && canReindex && detail.capabilities.reindex" :disabled="busy || !!pendingUpload" :title="reindexAction + '此资料'" :aria-label="reindexAction + '此资料'" @click="confirmReindex(detail)"><RefreshCw :size="15" />{{ reindexAction }}</NButton><NButton :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload || !!fieldConflicts.length" :title="editing ? '重新读取资料，保留输入' : '重新读取资料'" aria-label="重新读取资料" @click="readLatest"><RefreshCw :size="15" /></NButton></div>
               <NTabs v-if="!creating" :value="detailTab" type="line" @update:value="selectDetailTab"><NTab name="fields">资料详情</NTab><NTab v-if="detail" name="versions" :disabled="editing || busy">附件版本</NTab></NTabs>
               <form v-if="detailTab === 'fields'" id="document-record-form" ref="recordForm" class="document-field-grid" :class="{ 'document-read-fields': !editing }" @submit.prevent="saveRecord">
                 <label v-for="field in formFields" :key="field.id" class="document-detail-field" :class="{ 'document-wide': ['url', 'files', 'readonly'].includes(fieldKind(field)) }" :data-field-id="field.id"><span>{{ field.name }}<span v-if="editing && requiredField(field) && canEditField(field)" class="document-required"> *</span><LockKeyhole v-if="editing && !canEditField(field)" :size="12" aria-label="只读字段" /></span><DocumentLibraryField :field="field" :model-value="editing ? draft[field.id] : detail?.fields[field.id]" :editing="editing && canEditField(field)" :disabled="busy || !!pendingWrite || conflict" @update:model-value="value => updateField(field.id, value)" /><small v-if="field.read_only_reason" class="document-muted">{{ field.read_only_reason }}</small><small v-if="fieldErrors[field.id]" class="document-error" role="alert">{{ fieldErrors[field.id] }}</small></label>
@@ -149,12 +156,12 @@
       </div></NModal>
       <NModal v-model:show="storageOpen" preset="dialog" title="本地附件缓存" :mask-closable="!storageBusy" :close-on-esc="!storageBusy" :closable="!storageBusy"><NAlert v-if="storageError" type="error" :bordered="false">{{ storageError }}</NAlert><dl v-if="storageInfo" class="document-storage"><dt>已缓存</dt><dd>{{ storageInfo.files }} 个 · {{ sizeText(storageInfo.bytes) }}</dd><dt>可安全清理</dt><dd>{{ storageInfo.orphan_files }} 个 · {{ sizeText(storageInfo.orphan_bytes) }}</dd><dt>磁盘可用</dt><dd>{{ sizeText(storageInfo.free_bytes) }}</dd></dl><p class="document-muted">仅清理超过一天、且没有记录、历史版本或待处理任务引用的原件缓存，不删除飞书文件。</p><template #action><NButton :disabled="storageBusy" @click="storageOpen = false">关闭</NButton><NButton type="warning" :loading="storageBusy" :disabled="!storageInfo?.orphan_files || storageBusy" @click="cleanStorage">清理无引用缓存</NButton></template></NModal>
       <DocumentLibraryTableSettings :show="settingsOpen" :initial="settingsNew ? undefined : activeTable" :schema="settingsNew ? undefined : schema || undefined" :scopes="configurationScopes" @close="closeSettings" @saved="configurationSaved" />
-      <NModal :show="maintenanceOpen" preset="dialog" class="document-maintenance-dialog" :style="{ ...styles, width: 'min(520px, calc(100vw - 32px))' }" :title="maintenanceIntent?.kind === 'remove' ? '移除本地接入？' : '确认重新向量化？'" :mask-closable="!maintenanceBusy" :close-on-esc="!maintenanceBusy" :closable="!maintenanceBusy" @update:show="value => { if (!value) closeMaintenance() }">
+      <NModal :show="maintenanceOpen" preset="dialog" class="document-maintenance-dialog" :style="{ ...styles, width: 'min(520px, calc(100vw - 32px))' }" :title="maintenanceIntent?.kind === 'remove' ? '移除本地接入？' : '确认' + reindexAction + '？'" :mask-closable="!maintenanceBusy" :close-on-esc="!maintenanceBusy" :closable="!maintenanceBusy" @update:show="value => { if (!value) closeMaintenance() }">
         <p>{{ maintenanceIntent?.label }}</p>
         <p v-if="maintenanceIntent?.kind === 'remove'">仅移除本地接入和该来源索引，不删除飞书记录，不影响手动知识库文件。来源索引可能继续在后台清理。</p>
         <p v-else>将在本机重新生成记录全文和全部附件的向量，可能占用较多 CPU；不修改飞书记录。</p>
         <NAlert v-if="maintenanceError" type="error" :bordered="false" role="alert">{{ maintenanceError }}</NAlert>
-        <template #action><NButton :disabled="maintenanceBusy" @click="closeMaintenance">{{ maintenanceUncertain ? '稍后核验' : '取消' }}</NButton><NButton :type="maintenanceIntent?.kind === 'remove' ? 'error' : 'primary'" :loading="maintenanceBusy" :disabled="maintenanceBusy" @click="runMaintenance">{{ maintenanceUncertain ? '按原操作重试' : maintenanceIntent?.kind === 'remove' ? '确认移除本地接入' : '确认重新向量化' }}</NButton></template>
+        <template #action><NButton :disabled="maintenanceBusy" @click="closeMaintenance">{{ maintenanceUncertain ? '稍后核验' : '取消' }}</NButton><NButton :type="maintenanceIntent?.kind === 'remove' ? 'error' : 'primary'" :loading="maintenanceBusy" :disabled="maintenanceBusy" @click="runMaintenance">{{ maintenanceUncertain ? '按原操作重试' : maintenanceIntent?.kind === 'remove' ? '确认移除本地接入' : '确认' + reindexAction }}</NButton></template>
       </NModal>
       <NModal v-model:show="discardOpen" preset="dialog" title="离开未保存的资料？" :content="pendingWrite || pendingUpload ? '操作回执尚未确认，离开后请先核验资料，避免重复新增。' : '未保存的输入将被放弃。'" positive-text="离开" negative-text="继续填写" @positive-click="confirmDiscard" />
     </section>
@@ -175,6 +182,9 @@ import DocumentLibraryTableSettings from './DocumentLibraryTableSettings.vue';
 import VnetBackButton from './VnetBackButton.vue';
 
 const props = defineProps<{ scope?: string }>();
+const workspaceV2 = document.documentElement.classList.contains('workspace-v2');
+const reindexAction = workspaceV2 ? '更新知识库索引' : '重新向量化';
+const selectingRecords = ref(false);
 const theme = useThemeVars();
 const styles = computed(() => ({ '--doc-ink': theme.value.textColor1, '--doc-muted': theme.value.textColor3,
   '--doc-line': theme.value.borderColor, '--doc-surface': theme.value.cardColor, '--doc-soft': theme.value.tableHeaderColor,
@@ -206,6 +216,7 @@ const canReindex = computed(() => activeTable.value?.capabilities?.reindex === t
 const selectedIds = ref<string[]>([]), allSelected = ref(false);
 const selectableRecords = computed(() => records.value.filter(record => record.capabilities.reindex === true));
 const hasSelection = computed(() => allSelected.value || selectedIds.value.length > 0);
+const showRecordSelection = computed(() => canReindex.value && (!workspaceV2 || selectingRecords.value || hasSelection.value));
 const filterLabel = computed(() => `搜索：${appliedQuery.value || '不限'}；楼栋：${scopeOptions.value.find(option => option.value === scope.value)?.label || '全部授权楼栋'}`
   + appliedFilters.value.map(filter => `；${schema.value?.fields.find(field => field.id === filter.field)?.name || filter.field} ${filterOperators(filter).find(op => op.value === filter.op)?.label || ''} ${filter.value ?? ''}`).join(''));
 const selectionLabel = computed(() => allSelected.value
@@ -381,7 +392,7 @@ function attemptLeave(action: () => void): boolean {
 }
 function confirmDiscard() { const action = leaveAction; leaveAction = undefined; discardOpen.value = false; action?.(); }
 function beforeUnload(event: BeforeUnloadEvent) { if (busy.value || hasUnsaved()) { event.preventDefault(); event.returnValue = ''; } }
-function clearSelection() { selectedIds.value = []; allSelected.value = false; }
+function clearSelection() { selectedIds.value = []; allSelected.value = false; if (workspaceV2) selectingRecords.value = false; }
 function isSelected(record: LibraryRecord) { return record.capabilities.reindex === true && (allSelected.value || selectedIds.value.includes(record.record_id)); }
 function selectPage() { allSelected.value = false; selectedIds.value = [...new Set([...selectedIds.value, ...selectableRecords.value.map(record => record.record_id)])]; }
 function selectAll() { clearSelection(); allSelected.value = true; }

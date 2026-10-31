@@ -12,8 +12,16 @@ export function adaptNoticeSopControls(code) {
   if(nativeCount!==7||(code.match(/<VnetSelect\b/g)||[]).length!==2)throw new Error('Notice SOP control contract changed');
   let result=code.replaceAll('<select ', '<NoticeSopSelect ').replaceAll('</select>', '</NoticeSopSelect>')
     .replaceAll('<VnetSelect ', '<NoticeSopSelect ').replaceAll('class="lhs-input"', '')
-    .replace('import VnetSelect from "./VnetSelect.vue";', 'import NoticeSopSelect from "../workspace-v2/NoticeSopSelect.vue";\nimport {NCheckbox} from "naive-ui";');
+    .replace('import VnetSelect from "./VnetSelect.vue";', 'import NoticeSopSelect from "../workspace-v2/NoticeSopSelect.vue";\nimport "../workspace-v2/noticeSop.css";');
   const exempt='<label class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>';
   if(!result.includes(exempt))throw new Error('Notice SOP exemption control changed');
-  return result.replace(exempt,'<NCheckbox :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @update:checked="checked=>onExempt({target:{checked}} as unknown as Event)">{{ exemptLabel }}</NCheckbox>');
+  // Keep the browser's native label/checkbox behaviour and the original change
+  // handler. In particular, do not manufacture a DOM Event for a component event.
+  return result.replace(exempt,`<div class="v2-sop-choice">
+    <label class="lhs-exempt" :class="{'is-selected':local.exempt}"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>
+    <span v-if="local.exempt" class="v2-sop-exempt-status" role="status">已选择 · 本次不创建工单</span>
+  </div>`)
+    .replace('class="lhs"', 'class="lhs v2-notice-sop"')
+    .replace('placeholder="添加操作人（可多选）"', 'placeholder="添加操作人"')
+    .replace('placeholder="请选择现场审核人"', 'placeholder="选择审核人"');
 }

@@ -16,7 +16,7 @@ export function adaptKnowledgeFolders(source,filename){
   visit(descriptor.template.ast);
   if(!selection||!pane||!navigation||!folders||!fileName)throw new Error('Knowledge navigation or file list anchor changed');
   const offset=pane.loc.start.offset+pane.loc.source.indexOf('>')+1;
-  const location='<div class="v2-kb-location" role="status"><FolderOpen :size="16" /><strong>{{ groupFilter===\'all\'?\'全部文件\':groupFilter===\'ungrouped\'?\'未分组\':groupOptions.find(option=>option.value===groupFilter)?.label||\'文件夹\' }}</strong><span>{{ total }} 个文件</span></div>';
+  const location='<div class="v2-kb-location" role="status"><FolderOpen :size="16" /><strong>{{ recycle?\'回收站 · 全部已删除文件\':groupFilter===\'all\'?\'全部文件\':groupFilter===\'ungrouped\'?\'未分组\':groupOptions.find(option=>option.value===groupFilter)?.label||\'文件夹\' }}</strong><span>{{ total }} 个文件</span></div>';
   // Reuse every existing event binding, including the original confirmation targets.
   const folderNavigation=folders.loc.source.replace('<KnowledgeFolders ', '<KnowledgeFolderNavigation v-if="!recycle" ');
   const edits=[

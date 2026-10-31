@@ -11,8 +11,36 @@ function replaceOnce(source, from, to) {
 // Reuse the complete legacy controller; only the V2 template and styles change.
 export function adaptDrillPresentation(source, filename) {
   const file = filename.replaceAll('\\', '/').split('/').pop();
-  if (file === 'LifeGuidePage.vue') return source + '\n<style scoped src="../workspace-v2/lifeGuide.css"></style>\n';
+  if (file === 'LifeGuidePage.vue') {
+    source = replaceOnce(source, 'import guideHtml from "../assets/HowToLiveBetter.html?raw";', `import originalGuideHtml from "../assets/HowToLiveBetter.html?raw";
+// Only change the first-visit default; explicit open/closed preferences take precedence.
+const guideHtml = originalGuideHtml.replace("if (railOpen === null) railOpen = innerWidth > 960 ? '1' : '0';", "if (railOpen === null) railOpen = innerWidth > 960 && TODOS.length > 0 ? '1' : '0';");`);
+    return source + '\n<style scoped src="../workspace-v2/lifeGuide.css"></style>\n';
+  }
   if (file !== 'DrillManagementPage.vue') return source;
+  source = replaceOnce(source, `          <label>
+            <span>年份</span>
+            <input v-model.trim="uploadForm.year" inputmode="numeric" maxlength="4" required pattern="\\d{4}" />
+          </label>
+          <label>
+            <span>月份</span>
+            <input v-model="uploadForm.month" type="month" required />
+          </label>`, `          <label>
+            <span>演练年月</span>
+            <input v-model="uploadForm.month" type="month" required :disabled="busy" />
+          </label>`);
+  source = replaceOnce(source, '  uploading.value = true;\n  error.value = "";\n  try {\n    const form = new FormData();', `  const uploadMonth = uploadForm.month;
+  if (!/^\\d{4}-(0[1-9]|1[0-2])$/.test(uploadMonth)) {
+    setNotice("请选择有效的演练年月。", "warning");
+    return;
+  }
+  uploading.value = true;
+  error.value = "";
+  try {
+    const form = new FormData();`);
+  source = replaceOnce(source, 'form.append("year", uploadForm.year);', 'form.append("year", uploadMonth.split("-")[0]);');
+  source = replaceOnce(source, 'form.append("month", String(Number(uploadForm.month.split("-")[1] || 0)));', 'form.append("month", String(Number(uploadMonth.split("-")[1])));');
+  source = replaceOnce(source, 'selectedMonth.value = uploadForm.month;', 'selectedMonth.value = uploadMonth;');
   source=replaceOnce(source,'uniquePeople([...selectedParticipants.value, ...commanderPeople.value])','uniquePeople(selectedParticipants.value)');
   source=replaceOnce(source,'  navigate("/drill-management?mode=admin");','  navigate("/drill-management?mode=admin&return_scope="+encodeURIComponent(activeScope.value)+"&month="+encodeURIComponent(selectedMonth.value));');
   source=replaceOnce(source,'const buildingDrills = computed',`const v2DrillReturnScope=ref(normalizeBuilding(routeParams.get('return_scope')||''));

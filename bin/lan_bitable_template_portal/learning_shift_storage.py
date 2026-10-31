@@ -66,7 +66,7 @@ class Snapshot:
         return values
 
     def at_time(self, pid, timestamp):
-        from .pre_shift_checks import windows
+        from .learning_schedule import windows
         try:
             moment = dt.datetime.fromisoformat(timestamp)
             moment = moment.astimezone(core.TZ) if moment.tzinfo else moment.replace(tzinfo=core.TZ)
@@ -162,7 +162,7 @@ class Snapshot:
         if owner and owner[1] == '未归班':
             original = self.owner('paper', paper['id'])
             if original and original[1] in SHIFTS:
-                from .pre_shift_checks import windows
+                from .learning_schedule import windows
                 moment = dt.datetime.fromisoformat(timestamp)
                 moment = moment.astimezone(core.TZ) if moment.tzinfo else moment.replace(tzinfo=core.TZ)
                 start, end = windows(original[0], original[1])

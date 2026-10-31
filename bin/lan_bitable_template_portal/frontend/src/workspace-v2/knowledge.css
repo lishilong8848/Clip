@@ -1,11 +1,11 @@
-.workspace-v2 .kb-page .kb-layout{display:grid;grid-template-columns:minmax(230px,280px) minmax(0,1fr)!important;gap:14px;align-items:start}.workspace-v2 .kb-pane{min-width:0;width:100%}
+.workspace-v2 .kb-page .kb-layout{display:grid;grid-template-columns:minmax(0,1fr)!important;gap:14px;align-items:start}.workspace-v2 .kb-page .kb-layout.has-folders{grid-template-columns:minmax(230px,280px) minmax(0,1fr)!important}.workspace-v2 .kb-pane{min-width:0;width:100%}
 .workspace-v2 .kb-tree-pane{min-width:0;padding:12px;border:1px solid var(--v2-border,#d9dde3);border-radius:8px;background:var(--cf-surface,#fff);position:sticky;top:14px}
 .workspace-v2 .kb-tree-pane-head{display:flex;gap:6px;flex-wrap:wrap;margin:0 0 10px}
 .workspace-v2 .kb-tree-pane-head button{margin:0;padding:6px 12px;border:1px solid var(--v2-border,#d9dde3);border-radius:6px;background:var(--v2-bg);color:var(--v2-ink,#1f2329);font:inherit;font-size:12px;font-weight:500;cursor:pointer}
 .workspace-v2 .kb-tree-pane-head button:hover:not(.active){border-color:var(--v2-accent,#2f6fed);color:var(--v2-accent,#2f6fed)}
 .workspace-v2 .kb-tree-pane-head button.active{background:var(--v2-accent,#2f6fed);border-color:var(--v2-accent,#2f6fed);color:#fff}
 .workspace-v2 .kb-tree-pane-folders .v2-kb-folders{max-height:none;overflow:visible}
-@media(max-width:860px){.workspace-v2 .kb-page .kb-layout{grid-template-columns:minmax(0,1fr)!important}.workspace-v2 .kb-tree-pane{position:static}}
+@media(max-width:860px){.workspace-v2 .kb-page .kb-layout,.workspace-v2 .kb-page .kb-layout.has-folders{grid-template-columns:minmax(0,1fr)!important}.workspace-v2 .kb-tree-pane{position:static}}
 .workspace-v2 .v2-kb-reader{width:min(1040px,calc(100vw - 32px));max-height:calc(100dvh - 48px);background:var(--cf-surface,#fff);color:var(--v2-ink);border:1px solid var(--v2-border);border-radius:8px;box-shadow:0 18px 60px #0003;overflow:hidden}
 .workspace-v2 .v2-kb-reader-body{position:static!important;display:flex;flex-direction:column;width:100%;max-height:calc(100dvh - 48px);border:0!important;box-shadow:none!important;padding:0!important}
 .workspace-v2 .v2-kb-reader .kb-detail-head{padding:16px 20px;flex:none;border-bottom:1px solid var(--v2-border)}

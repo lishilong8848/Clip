@@ -18,6 +18,7 @@
       <span class="v2-event-range" aria-live="polite"><CalendarDays :size="14" aria-hidden="true" />{{ range.caption }}</span>
       <span class="v2-event-period-note">按事件发生时间 · 北京时间</span>
     </div>
+    <slot />
   </div>
 </template>
 

@@ -1,4 +1,5 @@
 // V2 presentation reuses the shared text-first input mode and business handlers.
+import {adaptCabinetAudit} from './workspace-cabinet-audit-adapter.mjs';
 export function adaptCabinetBatchPage(source) {
   let code = source.replaceAll('\r\n', '\n');
   const replace = (before, after) => {
@@ -26,7 +27,7 @@ export function adaptCabinetBatchPage(source) {
   replace('(textReview.value===\'duplicates\'?textDuplicateIds.value.has(row.row_id):Boolean(textRowMessage(row)))', "(textReview.value==='ready'?!textRowMessage(row):textReview.value==='review_only'?!textDuplicateIds.value.has(row.row_id)&&Boolean(textRowMessage(row)):textReview.value==='duplicates'?textDuplicateIds.value.has(row.row_id):Boolean(textRowMessage(row)))");
   replace('<option value="issues">待核对（{{ textIssueCount }}）</option>', '<option value="ready">已识别</option><option value="review_only">待核对（不含重复）</option><option value="issues">全部待核对（{{ textIssueCount }}）</option>');
   replace("'识别并创建待办' }}<span v-if=\"!uploading && textRows.length\">", "'确认并创建待办' }}<span v-if=\"!uploading && textRows.length\">");
-  return code;
+  return adaptCabinetAudit(code,'batch');
 }
 
 export function adaptCabinetPage(source) {
@@ -108,5 +109,5 @@ const allExportStatusLabel = computed(() => {
     '        </div>\n' +
     '      </section>');
   code += '\n<style scoped src="../workspace-v2/cabinetStatus.css"></style>\n';
-  return code;
+  return adaptCabinetAudit(code,'page');
 }

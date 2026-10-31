@@ -175,7 +175,7 @@ def shift_learners(service, day, shift):
 
 def enqueue_shift_reminders(service, current):
     from .learning_personal import _login_directory
-    from .pre_shift_checks import windows
+    from .learning_schedule import windows
 
     times = shift_times(service.settings())
     if not service._shift_roster_reader or current.strftime('%H:%M') < min(times.values()):

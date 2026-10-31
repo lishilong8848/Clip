@@ -1,0 +1,42 @@
+/* Isolated V2 presentation; the shared SOP data and validation stay unchanged. */
+.lhs.v2-notice-sop{container:notice-sop / inline-size}
+.lhs.v2-notice-sop .v2-sop-choice{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px}
+.lhs.v2-notice-sop .lhs-exempt{align-self:flex-start;min-height:36px;padding:2px 8px;border:1px solid var(--v2-border);border-radius:6px;box-sizing:border-box;gap:8px;line-height:1.5}
+.lhs.v2-notice-sop .lhs-exempt input{width:18px;height:18px;margin:0;cursor:inherit;accent-color:var(--v2-blue)}
+.lhs.v2-notice-sop .lhs-exempt.is-selected{border-color:var(--v2-blue);background:color-mix(in srgb,var(--v2-blue) 8%,transparent);color:var(--v2-ink)}
+.lhs.v2-notice-sop .lhs-exempt:focus-within{outline:2px solid var(--v2-blue);outline-offset:2px}
+.lhs.v2-notice-sop .v2-sop-exempt-status{font-size:12px;color:var(--v2-muted)}
+.lhs.v2-notice-sop .lhs-grid{grid-template-columns:minmax(0,1fr);gap:10px 16px}
+.lhs.v2-notice-sop .lhs-block{gap:6px}
+.lhs.v2-notice-sop .lhs-h{min-height:32px}
+.lhs.v2-notice-sop .lhs-query input{width:132px;min-height:32px}
+.lhs.v2-notice-sop .lhs-pick-head{min-height:24px;flex-wrap:wrap;gap:4px}
+.lhs.v2-notice-sop .lhs-pick>.lhs-label{min-height:24px;display:flex;align-items:center}
+.lhs.v2-notice-sop .lhs-people-cols{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 12px}
+.lhs.v2-notice-sop .lhs-operator-chips:empty{display:none}
+.lhs.v2-notice-sop .lhs-pick small{font-size:12px;line-height:1.5;color:var(--v2-muted)}
+.lhs.v2-notice-sop .lhs-runs{display:flex;flex-direction:row;align-items:flex-start;flex-wrap:wrap;gap:10px 16px}
+.lhs.v2-notice-sop .lhs-runs-count{align-items:flex-start;flex-direction:column;gap:4px;flex:0 0 88px}
+.lhs.v2-notice-sop .lhs-runs-count>.n-select{width:88px}
+.lhs.v2-notice-sop .lhs-run{flex:1 1 240px;max-width:540px}
+.lhs.v2-notice-sop .lhs-cool-block{width:min(100%,740px)}
+.lhs.v2-notice-sop .lhs-cool-row{grid-template-columns:repeat(3,minmax(0,1fr))}
+@container notice-sop (min-width:800px){
+  .lhs.v2-notice-sop .lhs-grid{grid-template-columns:minmax(240px,1fr) minmax(0,2fr)}
+  .lhs.v2-notice-sop .lhs-sop,.lhs.v2-notice-sop .lhs-people{grid-column:auto}
+  /* Align the three selectors while keeping the people search beside its label. */
+  .lhs.v2-notice-sop .lhs-sop>.lhs-h{min-height:64px;align-items:flex-end;padding-bottom:6px;box-sizing:border-box}
+}
+@media(max-width:760px){
+  .lhs.v2-notice-sop .lhs-exempt{min-height:44px}
+  .lhs.v2-notice-sop .lhs-icon-btn{width:36px;height:36px;flex-basis:36px}
+  .lhs.v2-notice-sop .lhs-query input{min-height:36px}
+  .lhs.v2-notice-sop .lhs-quick{min-height:32px}
+  .lhs.v2-notice-sop .n-base-selection{--n-height:40px!important}
+  .lhs.v2-notice-sop .lhs-pick-head{display:contents}
+  .lhs.v2-notice-sop .lhs-pick-head>.lhs-label{min-height:24px;display:flex;align-items:center}
+  .lhs.v2-notice-sop .lhs-pick-head>.lhs-quick{order:2;align-self:flex-start}
+  .lhs.v2-notice-sop .lhs-cool-row{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .lhs.v2-notice-sop .lhs-cool-row>.lhs-run-field:first-child{grid-column:1/-1;max-width:180px}
+}
+@container notice-sop (max-width:300px){.lhs.v2-notice-sop .lhs-people-cols{grid-template-columns:1fr}}

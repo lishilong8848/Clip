@@ -78,7 +78,7 @@ def supervisors(service):
 def repeated_reminders(service, current):
     from .learning_completion import daily_progress
     from .learning_personal import candidates
-    from .pre_shift_checks import windows
+    from .learning_schedule import windows
 
     contexts, unavailable = {}, set()
     if not service._restored or not service.settings()['timeout_reminder_enabled']:

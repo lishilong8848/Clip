@@ -129,7 +129,14 @@ function adaptAdminAccounts(source) {
 `;
   const tree = `
         </template>
-        <AccountHierarchy v-else :accounts="filtered" :directory="items" :mode="'tree'" :show-toggle="false" :level-label="levelLabel" :building-label="value=>scopesLabel([value])" :category-label="categoryLabel" @select="openAccount" />
+        <template v-else>
+          <div class="account-bulk-bar" aria-label="列表已选人员摘要">
+            <span role="status">列表已选 {{ selectedIds.size }} / 300 人（含其他页及筛选条件下的选择）</span>
+            <span>树形分组用于查看人员，批量选择和设置请返回列表。</span>
+            <button type="button" :disabled="loading || saving" @click="v2AccountMode = 'list'">返回列表处理</button>
+          </div>
+          <AccountHierarchy :accounts="filtered" :directory="items" :mode="'tree'" :show-toggle="false" :level-label="levelLabel" :building-label="value=>scopesLabel([value])" :category-label="categoryLabel" @select="openAccount" />
+        </template>
       </template>
 `;
   const region = loading.loc.source + bar + tableSource + accountCards(table) + footer.loc.source + tree;
@@ -149,12 +156,15 @@ function adaptAdminAccounts(source) {
   const bulkButtons = bulk.children.filter(node => node.type === 1 && node.tag === 'button');
   const bulkLimit = bulk.children.find(node => has(node, 'account-bulk-limit'));
   const limitCondition = bulkLimit?.props.find(p => p.type === 7 && p.name === 'if')?.loc.source;
-  if (bulkButtons.length !== 2 || !bulkLimit || !limitCondition) throw new Error('AdminAccounts bulk toolbar changed');
+  const bulkCondition = bulk.props.find(p => p.type === 7 && p.name === 'if');
+  if (bulkButtons.length !== 2 || !bulkLimit || !limitCondition || !bulkCondition?.exp) throw new Error('AdminAccounts bulk toolbar changed');
 
   const edits = [
     [loading.loc.start.offset, footer.loc.end.offset, region],
     [title.loc.start.offset, title.loc.end.offset, ''],
     [filters.loc.start.offset, filters.loc.end.offset, filterSource],
+    [bulkCondition.loc.start.offset, bulkCondition.loc.end.offset,
+      `v-if="v2AccountMode === 'list' && (${bulkCondition.exp.content})"`],
     [bulkButtons[0].loc.start.offset, bulkButtons[1].loc.end.offset,
       `<div v-if="selectedIds.size > 0" class="v2-account-bulk-actions">${bulkButtons.map(node => node.loc.source).join('\n')}</div>`],
     [bulkLimit.loc.start.offset, bulkLimit.loc.end.offset,

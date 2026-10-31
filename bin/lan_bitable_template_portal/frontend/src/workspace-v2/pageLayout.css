@@ -10,6 +10,8 @@
 .v2-page-canvas .v2-widget{box-shadow:none;border-radius:8px}.v2-page-canvas .v2-widget-head{height:38px;min-height:38px;padding-inline:12px}.v2-page-canvas .v2-widget-head h2{font-size:13px}
 .v2-responsive-body{container:widget-body / inline-size;position:relative;scroll-padding-block:12px;overscroll-behavior:auto}
 .v2-page-canvas .v2-responsive-body{padding:10px 12px;overflow:auto}.v2-page-canvas .v2-module-block{min-width:0;width:100%;min-height:0}
+.v2-page-canvas .grid-stack-item[data-content-sized] .v2-responsive-body{padding:0;overflow:visible}
+.v2-page-canvas .grid-stack-item[data-content-sized] .v2-module-block{padding:10px 12px;box-sizing:border-box}
 .v2-module-block> :is(section,main,aside,article,form,div){min-width:0;width:100%;max-width:none;margin:0;box-sizing:border-box}
 .v2-module-block.is-business-block> :is(section,main,aside,article,form,div){box-shadow:none!important;border-radius:0!important;border:0!important;padding:0!important;background:transparent!important}
 .v2-page-canvas :is(.notice-list,.drill-list,.task-list,.pc-records,.kb-pane,.mop-candidate-list,.v2-repair-list,.v2-repair-list-scroll,.question-rail){height:auto!important;max-height:none!important;overflow-y:visible!important;overscroll-behavior:auto}

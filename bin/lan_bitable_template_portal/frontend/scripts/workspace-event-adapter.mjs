@@ -25,7 +25,7 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
             <span>月份</span>
             <input v-model="selectedMonth" type="month" :disabled="loading || refreshing" />
           </label>`, '');
-  replace('      <MessageBanner v-if="errorText"', '      <EventPeriodFilter v-model="eventPeriod" v-model:month="selectedMonth" v-model:dates="eventDates" :range="eventRange" :disabled="refreshing || eventTransferBusy" />\n      <MessageBanner v-if="errorText"');
+  replace('      <MessageBanner v-if="errorText"', '      <EventPeriodFilter v-model="eventPeriod" v-model:month="selectedMonth" v-model:dates="eventDates" :range="eventRange" :disabled="refreshing || eventTransferBusy"><NButton size="small" class="v2-event-overview-link" :disabled="loading || Boolean(errorText) || configMissing" @click="showEventRows">查看事件明细</NButton></EventPeriodFilter>\n      <MessageBanner v-if="errorText"');
   replace('<EventStatsCards :cards="statCards"', '<EventStatsCards :cards="statCards" :loading="loading" :failed="Boolean(errorText) || configMissing"');
   replace('import EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";', 'import EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport EventCharts from "../workspace-v2/EventCharts.vue";');
   replace('import EventCharts from "../workspace-v2/EventCharts.vue";', 'import EventCharts from "../workspace-v2/EventCharts.vue";\nimport RepairFlowSteps from "../workspace-v2/RepairFlowSteps.vue";\nimport { canUseModule } from "../api/modulePermissions";');
@@ -82,14 +82,14 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
   const surface = code.indexOf('<div v-show="!errorText && !configMissing" class="event-work-surface"');
   const surfaceEnd = code.indexOf('      </div>', surface) + '      </div>'.length;
   if(surface < 0 || surfaceEnd < surface)throw new Error('Event priority layout changed');
-  code = code.slice(0,surface) + `<section class="v2-event-buildings" aria-label="楼栋事件条数" :aria-busy="loading">
+  code = code.slice(0,surface) + `<details class="v2-event-building-details"><summary>各楼栋事件数量</summary><section class="v2-event-buildings" aria-label="楼栋事件条数" :aria-busy="loading">
         <NButton v-for="card in buildingCards.filter(item=>item.allowed)" :key="card.code" data-v2-navigation
           :disabled="loading || Boolean(errorText) || configMissing" :aria-label="'查看'+card.label+eventRange.label+'事件'"
           :aria-pressed="detailScope===card.code" @click="openBuilding(card.code);showEventRows()">
           <span>{{ card.label }}</span><NSkeleton v-if="loading" width="28px" height="20px" />
           <strong v-else>{{ errorText || configMissing ? '—' : card.total }}</strong><small>件</small>
         </NButton>
-      </section>` + code.slice(surfaceEnd);
+      </section></details>` + code.slice(surfaceEnd);
   const { descriptor } = parse(code);
   const block = descriptor.scriptSetup;
   const tree = ts.createSourceFile('Event.vue.ts', block.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
