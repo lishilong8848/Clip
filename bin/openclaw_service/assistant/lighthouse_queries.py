@@ -248,11 +248,12 @@ def query_result_state(result):
         for key in ("records", "ongoing"):
             rows, meta = raw.get(key), raw.get(key + "_pagination")
             if isinstance(rows, list) and isinstance(meta, dict) and (
-                    meta.get("has_more") or type(meta.get("total")) is int and meta["total"] > len(rows)
+                    meta.get("has_more") or meta.get("next_cursor") not in (None, "")
+                    or type(meta.get("total")) is int and meta["total"] > len(rows)
                     or type(meta.get("page")) is int and meta["page"] > 1):
                 return "partial", "当前工作台列表只是一页，请保留楼栋、类型及日期条件补读缺失页；计划与进行中通告分别计数。"
         if (raw.get("complete") is False or raw.get("truncated") or raw.get("has_more")
-                or raw.get("next_offset") is not None):
+                or raw.get("next_offset") is not None or raw.get("next_cursor") not in (None, "")):
             return "partial", "资料尚未读取完整，保留原查询条件继续读取后页；不能按当前名单或total推断完整人数。" + source_note
         lists = [raw[key] for key in ("records", "items", "rows", "tasks", "pending", "ongoing", "participants") if isinstance(raw.get(key), list)]
         if lists and not any(lists):

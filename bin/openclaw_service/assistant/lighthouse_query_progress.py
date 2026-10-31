@@ -13,7 +13,8 @@ def query_progress(sources, queries):
     receipts = []
     for source in latest.values():
         data = queries.get(source.get('query_ref'), source.get('data'))
-        state, guidance = query_result_state({'ok': source.get('available', True), 'data': data})
+        state, guidance = query_result_state({'ok': source.get('available', True), 'data': data,
+            **{key: source[key] for key in ('api_id', 'source_kind', 'complete', 'truncated') if key in source}})
         receipt = {key: source.get(key) for key in ('query_ref', 'title', 'query_conditions', 'queried_at')}
         receipt.update(state=state, guidance=guidance)
         if isinstance(data, dict):

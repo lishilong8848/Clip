@@ -23,7 +23,8 @@ from .lighthouse_sources import codes
 
 
 MAX_QUERY = 2000
-MAX_HISTORY = 4
+MAX_HISTORY = 8
+MAX_HISTORY_CHARS = 8000
 MAX_SECONDS = 10.0
 ATTEMPT_SECONDS = 4.0
 _TASK_TYPES = {'knowledge': 'document', 'mixed': 'mixed', 'business': 'statistics',
@@ -247,6 +248,8 @@ def _history_questions(history, actor):
         question = _text(item.get('question'))
         if not question or _original_flow(item, question, classify_actions=True):
             break
+        if sum(map(len, result)) + len(question) > MAX_HISTORY_CHARS:
+            break
         result.append(question)
     return list(reversed(result))
 
@@ -280,6 +283,8 @@ def _public_topic_questions(actor, turn):
     for value in reversed(questions):
         question = _text(value)
         if not question or _original_flow({}, question, classify_actions=True):
+            break
+        if sum(map(len, result)) + len(question) > MAX_HISTORY_CHARS:
             break
         result.append(question)
     return list(reversed(result))

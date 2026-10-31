@@ -186,7 +186,7 @@
                       </li>
                     </ol>
                   </details>
-                  <div v-if="turn.status === 'pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span><span>正在思考</span></div>
+                  <div v-if="turn.status === 'pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span><span>{{ assistantProgressText(turn) }}</span></div>
                   <LighthouseReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" :streaming="!!turn.run_id && turn.run_id === state.active_run_id" />
                   <p v-if="!turn.answer && turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
                   <p v-else-if="!turn.answer && turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
@@ -344,6 +344,7 @@
 </template>
 
 <script setup lang="ts">
+import { assistantProgressText } from '../assistantProgress';
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
 import type { Chat } from '@ai-sdk/vue';
@@ -1238,6 +1239,7 @@ async function attachStream(runId: string): Promise<void> {
       if (part.type === 'data-progress') {
         state.value.phase = value.label || '';
         if (turn && Array.isArray(value.process)) turn.process = value.process;
+        if (turn && value.runtime && typeof value.runtime === 'object') turn.runtime = value.runtime;
       } else if (part.type === 'data-turn' && turn) {
         const follow = isNearBottom();
         const newFiles = (value.output_files?.length || 0) > (turn.output_files?.length || 0);

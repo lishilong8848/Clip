@@ -7,6 +7,7 @@ import time
 
 from .lighthouse_ai import AssistantError, safe_data, safe_text, private_identifier, CONTACT, PRIVATE_REPLY
 from .lighthouse_knowledge import company_question, sensitive_document
+from .lighthouse_knowledge_reads import DocumentReads
 
 _DOCUMENT_FOLLOWUP = re.compile(
     r'(?:那|那么)?(?:请)?(?:继续|还有呢|详细点|再详细一点|简短些|总结一下|有哪些|分别是哪些|'
@@ -297,12 +298,30 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         return await asyncio.wait_for(asyncio.to_thread(function, *args, **kwargs),
                                       min(remaining, _budget if _budget is not None else 20))
 
+    document_reads = DocumentReads()
+
+    async def evidence_current(items, profile, current):
+        try:
+            if callable(getattr(type(knowledge), 'answer_evidence', None)):
+                from .lighthouse_knowledge_evidence import _current
+                await read(_current, knowledge, current, items, profile)
+                return True
+            return await read(knowledge.evidence_current, items, profile, actor=current)
+        except AssistantError as exc:
+            if exc.status not in {401, 403, 404, 409, 410}:
+                raise
+        except asyncio.TimeoutError:
+            pass
+        return False
+
     turn.pop('_quality_review', None)
     async def reply(text, sources=None):
         await emit('text', {'delta': text})
         # A source failure is not a draft for the reviewer to replace with old conversation facts.
         return {'answer': text, 'sources': sources or [], **({} if sources else {
-            'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable', 'repairs': 0}})}
+            'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable', 'repairs': 0}}),
+            **({'knowledge_retrieval': {'complete': False, 'read_receipts': list(document_reads.receipts.values())}}
+               if document_reads.receipts else {})}
 
     business_sources = list(business_sources or [])
     from .lighthouse_queries import QUERY_TIME_GUIDANCE
@@ -328,16 +347,22 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
 
     def review_sources(sources, items):
         return business_review + [{**source, 'data': {**source['data'], 'text': item['text'],
-            **{key: item[key] for key in ('coverage', 'source_version', 'visual_evidence') if key in item},
+            **{key: item[key] for key in ('coverage', 'source_version', 'visual_evidence', 'read_receipt') if key in item},
             'context': _text_context(item)}}
             for source, item in zip(sources[offset:], items)]
 
     async def review(candidate, sources, items, *, defer):
         await emit('status', {'label': '正在核对资料答复'})
-        return await reviewer.run(actor, {**turn, 'question': question}, [], {'answer': candidate,
+        # Semantic routes bind the contract/effective query to the original
+        # question hash. Let task_question resolve it, including all mixed goals.
+        # Explicit company commands keep their stripped document-query semantics.
+        review_turn = turn if turn.get('_query_intent') else {**turn, 'question': question}
+        return await reviewer.run(actor, review_turn, [], {'answer': candidate,
             'sources': review_sources(sources, items), 'knowledge_retrieval': {
                 'repair_rounds': repairs, 'searches': int(not reused) + len(topic_results),
-                'complete': not bool(gaps), 'gaps': gaps, 'suggested_queries': requested}},
+                'complete': not bool(gaps or document_reads.incomplete or found.get('warning')),
+                'read_receipts': list(document_reads.receipts.values()),
+                'gaps': gaps, 'suggested_queries': requested}},
             authorize, defer_repair=defer, defer_reads=defer,
             timeout=max(0, deadline - time.monotonic()), model_allowed=knowledge.model_allowed)
 
@@ -349,7 +374,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         raise AssistantError('登录身份已变化，请重新提问。', 403)
     if 'modules' in current and 'knowledge' not in current['modules']:
         raise AssistantError('当前账号尚未获授共享知识库权限。', 403)
-    knowledge = await asyncio.to_thread(factory)
+    knowledge = await read(factory)
     profile = turn['_profile']
     # Reuse the existing health-aware router for automatic selection. This path
     # supplies text evidence only; attached step photos are delivered separately.
@@ -363,7 +388,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         profile = preferred
     references = (turn.get('_query_intent') or {}).get('document_references', [])
     reused = bool(references and callable(getattr(type(knowledge), 'answer_evidence', None))
-                  and await asyncio.to_thread(knowledge.evidence_current, references, profile, actor=current))
+                  and await evidence_current(references, profile, current))
     if references and not reused:
         return await reply('已引用的公司资料或授权已变化，请重新查询；未沿用旧版内容。')
     try:
@@ -417,12 +442,14 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                     result = {'items': [], 'warning': str(exc)}
                 except asyncio.TimeoutError:
                     result = {'items': [], 'warning': '补充资料检索超时，尚未完成核验。'}
+                except OSError:
+                    result = {'items': [], 'warning': '补充资料暂不可用，尚未完成核验。'}
                 topic_results.append({'query': topic, **result})
             if compound:
                 found = {**found, 'items': merge_company_hits(
                     [result['items'] for result in topic_results] + [found['items']])}
             elif topic_results:
-                found = topic_results[0]
+                found = {**found, 'items': merge_company_hits([found['items'], topic_results[0]['items']])}
             warnings = list(dict.fromkeys(result['warning'] for result in [found, *topic_results]
                                          if result.get('warning')))
             found['warning'] = '；'.join(warnings)
@@ -439,8 +466,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     repairs, rewrites, invalid_answer, generation_problem = 0, 0, False, ''
     unresolved_repair = False
     retrieval_stalled = False
+    retry_failed = False
     attempted_profiles = set()
-    expanded_items, expanded_profile = None, None
     # Only read repair is allowed here; no tools that send messages or mutate business records.
     for attempt in range(3):
         if time.monotonic() >= deadline:
@@ -448,58 +475,47 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             gaps = gaps or ['补充答复尚未完成核验']
             break
         current = await authorize()
-        if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-                or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+        if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']):
             return await reply('公司资料或授权已变化，旧内容未发送给模型，请重新查询。')
         model = model or engine.assistant.model_for(current)
         expand = getattr(type(knowledge), 'answer_evidence', None)
         if callable(expand):
-            reuse_expansion = items is expanded_items and profile == expanded_profile
-            await emit('status', {'label': '正在核对已读资料版本' if reuse_expansion else '正在读取相关资料原文'})
+            await emit('status', {'label': '正在读取并核对相关资料原文'})
             read_started = time.monotonic()
             # Keep time for generation/review without collapsing a late but valid
             # document read to 100 ms after a slower search.
             read_budget = min(15, max(.1, (deadline - read_started) / 4))
-            try:
-                if reuse_expansion:
-                    from .lighthouse_knowledge_evidence import _current
-                    await read(_current, knowledge, current, items, profile, _budget=read_budget)
-                    expanded = {'items': items}
-                else:
-                    expanded = await read(knowledge.answer_evidence, current, items, profile=profile,
-                        model=model, include_visual=False, _budget=read_budget)
-            except asyncio.TimeoutError as exc:
-                from ..diagnostics import capture
-                await asyncio.to_thread(capture, 'assistant', 'deadline', run_id=turn.get('run_id', ''),
-                                        category='knowledge_text_timeout', error=exc, details={
-                                            'knowledge_documents': len({item['document_id'] for item in items}),
-                                            'knowledge_chunks': len(items),
-                                            'elapsed_ms': int((time.monotonic() - read_started) * 1000),
-                                            'budget_ms': int(read_budget * 1000),
-                                        })
-                generation_problem = '相关资料读取超时，尚未完成本次答复核验。'
+            expanded = await document_reads.expand(knowledge, actor, items, profile=profile, model=model,
+                read=read, authorize=authorize, deadline=deadline, budget=read_budget, retry_failed=retry_failed)
+            retry_failed = False
+            if not expanded:
+                generation_problem = '相关资料原文未完成读取，尚未完成本次答复核验。'
                 gaps = gaps or ['补充原文尚未完成读取']
+                if attempt < 2 and document_reads.retry_pending and deadline - time.monotonic() >= 35:
+                    repairs += 1
+                    retry_failed = True
+                    continue
                 break
-            items = merge_company_hits([expanded['items']])
-            # Reuse only this turn's unchanged expansion. Full authority/source
-            # checks still run on every attempt, including model retries.
-            expanded_items, expanded_profile = items, dict(profile)
+            items = merge_company_hits([expanded])
             seen_evidence.update(_evidence_signature(item) for item in items)
             # Per-source visual gaps stay in coverage; unrelated images must not veto usable text.
             current = await authorize()
             if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-                    or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+                    or not await evidence_current(items, profile, current)):
                 raise AssistantError('读取原文期间资料或授权已变化，请重新查询。', 403)
+        elif not await evidence_current(items, profile, current):
+            return await reply('公司资料或授权已变化，旧内容未发送给模型，请重新查询。')
         stamp = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))).isoformat(timespec='seconds')
         sources = business_public + [{'number': i, 'kind': 'company_knowledge', 'title': f"{item['name']} · 版本{item['version']} · {item['location']}",
                     'url': item['url'], 'queried_at': stamp, 'scopes': [], 'available': True,
                     'data': {key: item[key] for key in ('document_id', 'version', 'ordinal', 'name', 'location',
-                        'source_created_at') if key in item}
-                        | {'source_kind': item.get('source_kind', 'shared')}}
+                        'source_created_at', 'source_version') if key in item}
+                        | {'source_kind': item.get('source_kind', 'shared')}
+                        | ({'read_receipt': item['read_receipt']} if 'read_receipt' in item else {})}
                    for i, item in enumerate(items, offset + 1)]
         evidence = [{'number': i, 'queried_at': stamp, **{key: item[key] for key in (
                     'name', 'version', 'location', 'text', 'source_hash', 'source_created_at',
-                    'coverage', 'source_version', 'visual_evidence') if key in item}, 'context': _text_context(item)}
+                    'coverage', 'source_version', 'visual_evidence', 'read_receipt') if key in item}, 'context': _text_context(item)}
                     for i, item in enumerate(items, offset + 1)]
         topic_evidence = [{'topic': result['query'], 'candidate_sources': [i for i, item in enumerate(items, offset + 1)
                           if any((item['document_id'], item['version'], item['ordinal']) ==
@@ -528,6 +544,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             '本流程仅读取正文和表格步骤，不解析文档中的图片。现场照片会按原文位置作为附件提供，不参与推理或核验。'
             '不要因未解析现场照片而否定已经读取的文字步骤；如果关键文字本身缺失，只说明具体缺失，不能编造图片内容。'
             'coverage.complete=false只描述读取范围，不能据此推断本题缺少依据，也不要假设未读图片里存在额外条件。'
+            'read_receipts逐文档记录本轮实际读取结果；read仅表示有界文字节选读取成功，不代表全文或所有文件均已查完。'
+            'timeout、unavailable、not_current或not_attempted的文档没有提供本轮原文，不能据此断言其内容或声称所有相关资料已核实；保留其它文档支持的结论。'
             'context中的model_summary只是索引摘要，不能当作原文；OCR转录须标明性质，不能冒充视觉理解。'
             '不附加与本题无关文档的图片警告，不把候选命中当成适用文件；缺口必须具体说明所缺条件或步骤，不能笼统称无依据。'
             '用户同时提出多个故障或主题时逐一覆盖，分别核对各主题的文档依据，再给综合思路，不能只回答其中一项。'
@@ -555,6 +573,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                     'branch_queries': {key: (turn.get('_query_intent') or {}).get(key, '')
                                        for key in ('business_query', 'document_query')},
                     'documents': evidence, 'previous_queries': sorted(seen_queries),
+                    'read_receipts': list(document_reads.receipts.values()),
                     'business_evidence': business_context, 'review_feedback': review_feedback,
                     'previous_candidate': _previous_candidate(partial, partial_sources, sources),
                     'remaining_gaps': gaps, 'retrieval_stalled': retrieval_stalled}, ensure_ascii=False)}]
@@ -621,7 +640,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             break
         current = await authorize()
         if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-                or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+                or not await evidence_current(items, profile, current)):
             return await reply('回答期间公司资料或授权已变化，旧内容未用于回答，请重新查询。')
         if requested and not gaps:
             gaps = ['补查涉及的资料仍待核对']
@@ -644,6 +663,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                     reviewed, reviewed_answer = None, None
                     if not requested and attempt < 2 and time.monotonic() < deadline:
                         rewrites += 1
+                        retry_failed = document_reads.retry_pending and deadline - time.monotonic() >= 35
                         continue
                 else:
                     partial = checked['answer']
@@ -670,6 +690,13 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         if attempt == 2 or time.monotonic() >= deadline:
             unresolved_repair = bool(requested or gaps)
             break
+        if document_reads.retry_pending and deadline - time.monotonic() >= 35:
+            # Retry the actual failed documents before replacing them with another
+            # search. They remain locators until the existing reader returns text.
+            repairs += 1
+            retry_failed = True
+            await emit('status', {'label': '正在重试未完成读取的资料'})
+            continue
         if not requested:
             try:
                 timeout = min(6, max(.001, deadline - time.monotonic()))
@@ -704,6 +731,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
                 extra = {'items': [], 'warning': str(exc)}
             except asyncio.TimeoutError:
                 extra = {'items': [], 'warning': '补查资料超时，尚未完成核验。'}
+            except OSError:
+                extra = {'items': [], 'warning': '补查资料暂不可用，尚未完成核验。'}
             if _AUTH_WARNING.search(extra.get('warning', '')):
                 raise AssistantError('资料授权已变化，补查已停止。', 403)
             groups.append(extra['items'])
@@ -747,7 +776,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     answer, sources, items = partial, partial_sources, partial_items
     current = await authorize()
     if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-            or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+            or not await evidence_current(items, profile, current)):
         return await reply('回答期间公司资料或授权已变化，请重新查询。')
     # The candidate is already bounded. Do not cut off verified steps, safety
     # conditions or citations; channel delivery handles long replies separately.
@@ -773,10 +802,12 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     if reviewer:
         current = await authorize()
         if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
-                or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current)):
+                or not await evidence_current(items, profile, current)):
             raise AssistantError('复核期间资料或授权已变化，未发送原答复。', 403)
     if found.get('warning'):
         answer += '\n\n' + found['warning']
+    if document_reads.incomplete:
+        answer += '\n\n本次仅依据已读取的文字节选；部分候选文档未完成原文读取或文字覆盖受限，未确认全部相关资料。'
     uncovered, covered = [], re.sub(r'\W+', '', answer.casefold())
     for gap in gaps:
         normalized = re.sub(r'\W+', '', gap.casefold())
@@ -795,7 +826,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         await emit('status', {'label': '正在附上原文步骤对应的现场照片'})
         selected = [item for source, item in zip(sources[offset:], items) if source['number'] in cited]
         try:
-            attached = await asyncio.to_thread(knowledge.export_photos, current, selected,
+            attached = await read(knowledge.export_photos, current, selected,
                 profile=profile, files=engine.portal.files, sources=final_sources)
             photos = attached['files']
             if attached.get('incomplete'):
@@ -804,8 +835,11 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             if exc.status in {401, 403, 404, 409, 410}:
                 raise
             answer += '\n\n现场照片暂未附上，可通过引用打开原文查看。'
+        except (OSError, asyncio.TimeoutError):
+            answer += '\n\n现场照片暂未附上，可通过引用打开原文查看。'
         current = await authorize()
-        if current['id'] != actor['id'] or not await asyncio.to_thread(knowledge.evidence_current, items, profile, actor=current):
+        if (current['id'] != actor['id'] or 'modules' in current and 'knowledge' not in current['modules']
+                or not await evidence_current(items, profile, current)):
             raise AssistantError('附图期间资料或授权已变化，请重新查询。', 403)
     result = await reply(answer, final_sources)
     if photos:
@@ -816,6 +850,8 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
     result['_knowledge_evidence'] = [dict(source['data']) for source in sources[offset:]]
     result['knowledge_retrieval'] = {'repair_rounds': repairs, 'searches': int(not reused) + len(topic_results),
                                    'reused_document_refs': reused,
-                                   'sources': len(sources), 'complete': not bool(gaps or unresolved_repair or (compound and missing))
+                                   'read_receipts': list(document_reads.receipts.values()),
+                                   'sources': len(sources), 'complete': not bool(gaps or unresolved_repair
+                                       or generation_problem or document_reads.incomplete or found.get('warning') or (compound and missing))
                                    and (reviewer is None or (reviewed or {}).get('status') in {'passed', 'corrected', 'limited'})}
     return result

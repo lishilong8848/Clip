@@ -3,6 +3,7 @@ import asyncio
 import copy
 import json
 import logging
+import math
 import re
 import time
 import traceback
@@ -19,6 +20,87 @@ RUNS = "lighthouse_runs"
 MESSAGES = "lighthouse_messages"
 ACTIVE = {"queued", "running"}
 PROTECTED_PLANS = {"running", "submitted", "completed"}
+RUNTIME_PHASES = {"queued": "等待处理", "context": "正在整理上下文", "model": "正在生成回答",
+                  "tool": "正在查询或处理资料", "checking": "正在核对结果", "finalizing": "正在整理答复",
+                  "completed": "回答完成", "failed": "处理未完成", "stopped": "已停止"}
+
+
+def runtime_counts(turn):
+    """Project parent-owned, validated progress to numeric receipts only."""
+    context = turn.get('_task_context')
+    progress = context.get('progress') if isinstance(context, dict) else None
+    result = {}
+    if isinstance(progress, dict):
+        goals = progress.get('goals')
+        goals = [goal for goal in goals[:8] if isinstance(goal, dict)] if isinstance(goals, list) else []
+        counts = {'goal_count': len(goals), 'completed_count': sum(goal.get('status') == 'complete' for goal in goals)}
+        for key, ceiling in (('source_count', 1000000), ('source_gaps', 1000000), ('reviewed_count', 8)):
+            value = progress.get(key)
+            if type(value) is int and value >= 0:
+                counts[key] = min(value, ceiling)
+        result['task'] = counts
+    metrics = turn.get('_intelligence_metrics')
+    value = metrics.get('read_ms') if isinstance(metrics, dict) else None
+    if type(value) in (int, float) and 0 <= value <= 86400000 and math.isfinite(value):
+        result['read_ms'] = round(value)
+    return result
+
+
+def runtime_progress(run):
+    """Bounded public timings; monotonic clocks and engine payloads stay private."""
+    timing = copy.deepcopy(run.get('runtime', {}))
+    timing.update(runtime_counts(run.get('_turn') or {}))
+    if timing and not timing.get('finished_at') and '_runtime_clock' in run:
+        now = time.monotonic()
+        timing['elapsed_ms'] = max(0, int((now - run['_runtime_clock']) * 1000))
+        timing['phase_elapsed_ms'] = max(0, int((now - run['_phase_clock']) * 1000))
+        if timing['phase'] == 'queued':
+            timing['queue_ms'] = timing['elapsed_ms']
+    return timing
+
+
+def runtime_milestone(run, phase):
+    """Record observed phases only, never model reasoning, tool arguments or labels."""
+    if phase not in RUNTIME_PHASES or (run.get('runtime') or {}).get('phase') == phase:
+        return
+    now, stamp = time.monotonic(), time.time()
+    if '_runtime_clock' not in run:
+        previous = run.get('runtime') or {}
+        elapsed = previous.get('elapsed_ms', 0)
+        run['_runtime_clock'] = now - max(elapsed, (stamp - previous.get('queued_at', stamp)) * 1000) / 1000
+        run['_phase_clock'] = now
+    timing = runtime_progress(run)
+    elapsed = max(0, int((now - run['_runtime_clock']) * 1000))
+    if not timing:
+        timing = {'queued_at': stamp, 'queue_ms': 0, 'milestones': []}
+    if phase != 'queued' and 'started_at' not in timing and phase not in {'completed', 'failed', 'stopped'}:
+        timing.update(started_at=stamp, queue_ms=elapsed)
+    if phase in {'completed', 'failed', 'stopped'}:
+        timing['finished_at'] = stamp
+    milestone = {'phase': phase, 'at': stamp, 'elapsed_ms': elapsed}
+    timing['milestones'].append(milestone)
+    del timing['milestones'][:-48]
+    timing.update(phase=phase, elapsed_ms=elapsed, phase_elapsed_ms=0)
+    run['runtime'], run['_phase_clock'] = timing, now
+    run['revision'] = run.get('revision', 0) + 1
+    logging.getLogger(__name__).info('Assistant runtime: run=%s phase=%s elapsed_ms=%s', run['id'], phase, elapsed,
+                                   extra={'assistant_runtime': {'run_id': run['id'], **milestone}})
+
+
+def runtime_status_phase(data):
+    # Optional explicit phase is an allowlisted contract for engine status callbacks.
+    if data.get('phase') in {'context', 'model', 'tool', 'checking', 'finalizing'}:
+        return data['phase']
+    label = str(data.get('label') or '')
+    for phase, prefixes in (
+            ('context', ('正在整理上下文', '正在自动整理上下文')),
+            ('tool', ('正在查询', '正在检索', '正在读取', '正在补查', '正在调用', '正在本地', '正在增强读取', '正在隔离沙箱')),
+            ('checking', ('正在核对', '正在检查', '正在验证', '正在匹配', '正在修正', '正在重新生成并核对')),
+            ('model', ('正在思考', '正在连接', '正在准备回答', '当前模型')),
+            ('finalizing', ('正在整理答复', '正在整理资料答复', '正在生成答复', '正在整理现有依据'))):
+        if label.startswith(prefixes):
+            return phase
+    return None
 
 
 def failure_detail(exc):
@@ -48,6 +130,9 @@ def failure_detail(exc):
 def public_turn(turn):
     result = {key: copy.deepcopy(value) for key, value in turn.items()
               if not key.startswith("_") and key not in {"prompt", "file_ids", "submitted_file_ids"}}
+    counts = runtime_counts(turn)
+    if counts:
+        result['runtime'] = {**result.get('runtime', {}), **counts}
     if result.get('error'):
         from .lighthouse_context import reply_failure
         result['error'] = reply_failure(result['error'], result.get('error_code'), turn.get('question', ''))
@@ -96,6 +181,7 @@ class LighthouseStream:
 
     def _save_run(self, run):
         snapshot = {key: copy.deepcopy(value) for key, value in tuple(run.items()) if not key.startswith("_")}
+        snapshot['runtime'] = runtime_progress(run)
         with self.assistant._lock:
             saved = self.store.get_document(RUNS, run["id"])
             if not saved or saved.get("revision", 0) <= snapshot["revision"]:
@@ -111,6 +197,7 @@ class LighthouseStream:
                 return False
             turn.update(copy.deepcopy(changes))
             turn["process"] = copy.deepcopy(run.get("process", []))
+            turn['runtime'] = runtime_progress(run)
             self.store.put_document(MESSAGES, state["id"] + ":" + turn["operation_id"], turn)
             lane = self._lane(state, actor)
             if lane.get("active_run_id") == run["id"]:
@@ -240,6 +327,8 @@ class LighthouseStream:
                         self.store.put_document("lighthouse_agent_plans", raw["id"], raw)
                     plan.update(status="cancelled", error="用户补充信息，原确认已失效。")
             run_id = uuid.uuid4().hex
+            observed = {'id': run_id}
+            runtime_milestone(observed, 'queued')
             turn = old or {"operation_id": operation, "at": time.time()}
             if old:
                 turn.setdefault("attempts", []).append({key: copy.deepcopy(old.get(key)) for key in ("run_id", "answer", "status", "error", "at")})
@@ -263,6 +352,7 @@ class LighthouseStream:
                         access_modules=list(actor.get('modules', [])),
                         source_channel='feishu' if actor.get('channel', '').startswith('feishu:') else 'web',
                         run_id=run_id, attempt_id=attempt, model_name=profile["name"], plan=None, clarification=None,
+                        runtime=runtime_progress(observed),
                         _clarification_reply=clarification_reply or bool(old and old['question'] == clean_question and old.get('_clarification_reply')))
             if not old:
                 state["turns"].append(turn)
@@ -278,7 +368,7 @@ class LighthouseStream:
             state.update(streaming=True, revision=state.get("revision", 0) + 1)
             self.store.put_document(NAMESPACE, self.assistant._key(actor), state)
             self.assistant._active.add(actor["id"])
-            run = {"id": run_id, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
+            run = {**observed, "owner": actor["id"], "conversation_id": state["id"], "operation_id": operation,
                    "execution_lane": execution_lane(actor),
                    "source_channel": turn['source_channel'], "feishu_topic": topic_id,
                    "scopes": scopes, "access_scopes": actor["scopes"], "access_modules": list(actor.get('modules', [])),
@@ -306,6 +396,7 @@ class LighthouseStream:
             previous_run = self.live.get(self._lane(previous_state, actor).get("active_run_id"))
             if previous_run and previous_run["status"] in ACTIVE:
                 previous_run.update(status="stopped", label="已采用补充信息", revision=previous_run["revision"] + 1)
+                runtime_milestone(previous_run, 'stopped')
                 await asyncio.to_thread(self._save_run, previous_run)
             if previous and not previous.done():
                 previous.cancel()
@@ -358,6 +449,8 @@ class LighthouseStream:
                 await asyncio.to_thread(self._patch_turn, actor, run, {'reply_mode': run['reply_mode']})
                 return
             if kind == "text":
+                if 'first_text_ms' not in run['runtime']:
+                    run['runtime']['first_text_ms'] = runtime_progress(run)['elapsed_ms']
                 run['_candidate_answer'] = run.get('_candidate_answer', '') + data['delta']
                 if run.get('reply_mode') == 'live':
                     current = await authorize()
@@ -367,13 +460,17 @@ class LighthouseStream:
                     run['answer'] += data['delta']
                     chunk(TextDeltaChunk(id=text_id, delta=data['delta']))
             else:
+                phase = runtime_status_phase(data)
+                if phase:
+                    runtime_milestone(run, phase)
                 run["label"] = safe_text(data.get("label", "正在处理"), limit=120) or "正在处理"
                 process = run.setdefault("process", [])
                 if not process or process[-1]["label"] != run["label"]:
-                    process.append({"label": run["label"], "at": time.time()})
+                    process.append({"label": run["label"], "at": time.time(),
+                                    'phase': run['runtime']['phase'], 'elapsed_ms': runtime_progress(run)['elapsed_ms']})
                     del process[:-24]
                 chunk(DataChunk(type="data-progress", data={"run_id": run["id"], "operation_id": run["operation_id"],
-                    "label": run["label"], "process": copy.deepcopy(process)}, transient=True))
+                    "label": run["label"], "process": copy.deepcopy(process), 'runtime': runtime_progress(run)}, transient=True))
             # Checkpoint status without exposing drafts or rewriting SQLite per token burst.
             if time.monotonic() - last_flush > 2:
                 last_flush = time.monotonic()
@@ -389,6 +486,9 @@ class LighthouseStream:
                 await emit('status', {'label': '正在等待助手可用，原问题已保留'})
             async with (self.slots if self.slots is not None else nullcontext()):
                 run["status"] = "running"
+                runtime_milestone(run, 'context')
+                await emit('status', {'label': '正在准备回答', 'phase': 'context'})
+                await asyncio.to_thread(self._save_run, run)
                 context = run["_context"]
                 if set(context.get("scopes", [])) - set(run["scopes"]) or not self.assistant._allowed(context, actor):
                     context = {}
@@ -412,7 +512,10 @@ class LighthouseStream:
                         model_history = eligible[-6:]
                     except Exception:
                         await emit("status", {"label": "上下文整理暂未完成，保留原记录继续"})
+                runtime_milestone(run, 'model')
                 result = await self.engine.answer(public_actor, run["_turn"], model_history, request, emit, authorize, context)
+                run['runtime'].update(runtime_counts(result))
+                runtime_milestone(run, 'finalizing')
                 if not str(result.get('answer') or run.get('_candidate_answer') or '').strip() and not (
                         result.get('plan') or result.get('output_files') or run.get('output_files')):
                     raise AssistantError('模型未返回可见回答。', 502, category='model_protocol')
@@ -439,17 +542,20 @@ class LighthouseStream:
                     raise AssistantError('来源资料或授权已变化，本次回答未发布。', 403)
                 published = run['answer']
                 run.update(status="completed", answer=result.get("answer") or run["answer"], label="回答完成")
+                runtime_milestone(run, 'completed')
                 if run['answer'] and run['answer'].startswith(published):
                     remaining = run['answer'][len(published):]
                     if remaining:
                         chunk(TextDeltaChunk(id=text_id, delta=remaining))
-                changes = {**result, "status": "completed", "error": "", "error_code": "", "answer": run["answer"], "process": run["process"]}
+                changes = {**result, "status": "completed", "error": "", "error_code": "", "answer": run["answer"], "process": run["process"],
+                           'runtime': runtime_progress(run)}
                 await asyncio.to_thread(self._patch_turn, actor, run, changes, finish=True)
                 chunk(DataChunk(type="data-turn", data={"operation_id": run["operation_id"], "run_id": run["id"], **public_turn(changes)}, transient=True))
                 chunk(TextEndChunk(id=text_id))
                 chunk(FinishChunk(finish_reason="stop"))
         except asyncio.CancelledError:
             run.update(status="stopped", label="已停止")
+            runtime_milestone(run, 'stopped')
             await asyncio.to_thread(self._patch_turn, actor, run, {"status": "stopped", "answer": run["answer"],
                 "_draft_answer": run.get('_candidate_answer', ''),
                 "resume_available": bool(run['_turn'].get('_research_mode')),
@@ -465,7 +571,9 @@ class LighthouseStream:
             logging.getLogger(__name__).warning("Assistant run failed: run=%s category=%s type=%s http_status=%s frames=%s",
                 run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", getattr(exc, 'status', None)), ",".join(frames))
             run.update(status="failed", label="处理未完成", error=error, error_code=error_code)
+            runtime_milestone(run, 'failed')
             changes = {"status": "failed", "error": error, "error_code": error_code, "answer": run["answer"], "process": run["process"],
+                       'runtime': runtime_progress(run),
                        "_draft_answer": run.get('_candidate_answer', ''),
                        "resume_available": bool(run['_turn'].get('_research_mode'))}
             await asyncio.to_thread(self._patch_turn, actor, run, changes, finish=True)
@@ -520,6 +628,7 @@ class LighthouseStream:
                     await asyncio.gather(task, return_exceptions=True)
                 if run["status"] in ACTIVE:
                     run.update(status="stopped", label="已停止", revision=run["revision"] + 1)
+                    runtime_milestone(run, 'stopped')
                     await asyncio.to_thread(self._patch_turn, actor, run, {"status": "stopped", "error": "上次回答已中断，可继续。"}, finish=True)
                     await asyncio.to_thread(self._save_run, run)
             return {"run_id": identity, "status": "stopped" if run["status"] in ACTIVE else run["status"]}
@@ -555,6 +664,7 @@ class LighthouseStream:
             return {'conversation_id': state['id'], 'run_id': identity, 'turn': public_turn(turn)}
         if run['status'] in ACTIVE:
             run.update(status='stopped', label='已保存研究检查点', revision=run['revision'] + 1)
+            runtime_milestone(run, 'stopped')
             await asyncio.to_thread(self._save_run, run)
         return await self.submit(current, {'conversation_id': state['id'], 'operation_id': turn['operation_id'],
             'attempt_id': uuid.uuid4().hex, 'question': turn['question'],
@@ -584,6 +694,7 @@ class LighthouseStream:
                 if run["status"] in ACTIVE:
                     pending = next((t for t in state['turns'] if t.get('run_id') == identity), {})
                     run.update(status="stopped", revision=run["revision"] + 1)
+                    runtime_milestone(run, 'stopped')
                     await asyncio.to_thread(self._patch_turn, actor, run,
                         {"status": "stopped", "answer": run.get("answer", ""),
                          'resume_available': bool(pending.get('_research_mode')),
@@ -612,6 +723,7 @@ class LighthouseStream:
                 if turn.get("run_id") == active["id"] and turn.get("status") == "pending":
                     turn["answer"] = active.get("answer", "")
                     turn["process"] = copy.deepcopy(active.get("process", []))
+                    turn['runtime'] = runtime_progress(active)
         result["turns"] = [public_turn(t) for t in await asyncio.to_thread(self._knowledge_turns, actor, result['turns'])]
         if operation is not None:
             turn = next((t for t in result['turns'] if t.get('operation_id') == operation), None)
@@ -624,7 +736,7 @@ class LighthouseStream:
             live = self.live.get((turn or {}).get('run_id'))
             if live and turn.get('status') == 'pending':
                 turn = {**turn, 'answer': live.get('answer', ''), 'reply_mode': live.get('reply_mode', 'validated'),
-                        'process': copy.deepcopy(live.get('process', []))}
+                        'process': copy.deepcopy(live.get('process', [])), 'runtime': runtime_progress(live)}
             result['turns'] = [public_turn(await asyncio.to_thread(self._knowledge_turn, actor, turn))] if turn else []
         return result
 
@@ -655,7 +767,7 @@ class LighthouseStream:
         # Replays start from the canonical message ID. The SDK builds a fresh
         # message, and the UI replaces that run's reply rather than appending twice.
         run = await asyncio.to_thread(self.get_run, actor, identity)
-        cursor, last_auth = 0, 0.0
+        cursor, last_auth, last_progress = 0, 0.0, 0.0
         while True:
             if time.monotonic() - last_auth > 1:
                 try:
@@ -682,6 +794,16 @@ class LighthouseStream:
             if run["status"] not in ACTIVE:
                 yield "data: " + DoneChunk().encode(6) + "\n\n"
                 break
+            # Transient heartbeat on the existing socket, never an extra worker or replay entry.
+            if run.get('runtime') and time.monotonic() - last_progress >= 5:
+                timing = runtime_progress(run)
+                label = RUNTIME_PHASES[timing['phase']]
+                seconds = timing['elapsed_ms'] // 1000
+                yield 'data: ' + json.dumps({'type': 'data-progress', 'transient': True, 'data': {
+                    'run_id': run['id'], 'operation_id': run['operation_id'],
+                    'label': f'{label}（已用时{seconds}秒）', 'process': copy.deepcopy(run.get('process', [])),
+                    'runtime': timing}}, ensure_ascii=False, separators=(',', ':')) + '\n\n'
+                last_progress = time.monotonic()
             await asyncio.sleep(.08)
 
     async def close(self):

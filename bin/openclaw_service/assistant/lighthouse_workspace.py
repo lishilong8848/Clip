@@ -8,6 +8,7 @@ Never pass a model's claim of confirmation as this keyword argument.
 
 Actions and payload fields (in addition to action):
   document.list / package.list / memory.list: offset=0, limit=20
+  memory.list supports limit up to MAX_MEMORIES (100); other lists up to 50.
   package.list also accepts keyword='' (title/instructions/attachment names)
   document.create: title, content
   document.read: id, version=None (historical revision)
@@ -149,12 +150,76 @@ def _identity(value):
     return value
 
 
-def _page(items, payload):
+def _page(items, payload, maximum=MAX_PAGE):
     offset = _integer(payload.get('offset', 0), 'offset', 0, MAX_OFFSET)
-    limit = _integer(payload.get('limit', 20), 'limit', 1, MAX_PAGE)
+    limit = _integer(payload.get('limit', 20), 'limit', 1, maximum)
     end = offset + limit
     return {'items': items[offset:end], 'total': len(items), 'offset': offset,
             'next_offset': end if end < len(items) else None}
+
+
+def relevant_memories(items, question, limit=8):
+    """Select detached, confirmed memories from an ALREADY authorized memory.list.
+
+    This is ranking only, not an ACL check: do not pass cross-owner/topic items.
+    Uses local Unicode keywords and concept synonyms, without model/network I/O.
+    Task/building-specific rules require a matching question; global expression
+    preferences remain weak fallbacks. Latest user instructions always prevail.
+    """
+    _integer(limit, 'limit', 0, MAX_MEMORIES)
+    question = _normalized(_text(question, 'question', 12000)).casefold()
+    if not isinstance(items, list) or len(items) > MAX_MEMORIES:
+        raise AssistantError('记忆候选列表无效或超过数量上限。')
+    if not limit:
+        return []
+    concepts = (
+        ('表格', '表形式', 'table', 'tabular', '对比', '比较'),
+        ('分点', '列表', '逐条', 'bullet', 'list'),
+        ('简洁', '简短', '精简', 'concise', 'brief'),
+        ('详细', '展开', '细节', 'detail'),
+        ('报告', '汇报', '总结', 'report', 'summary'),
+        ('邮件', 'email', 'e-mail'),
+        ('文档', '手册', '说明书', 'document', 'manual'),
+        ('维保', '维护', '维修', 'maintenance', 'repair'),
+        ('上电', '送电', 'power on'), ('下电', '断电', 'power off'),
+    )
+
+    def features(text):
+        words = set(re.findall(r'[a-z0-9]+(?:[-_][a-z0-9]+)*', text))
+        for run in re.findall(r'[\u3400-\u9fff]+', text):
+            words.update(run[i:i + 2] for i in range(len(run) - 1))
+        return words, {i for i, aliases in enumerate(concepts) if any(alias in text for alias in aliases)}
+
+    def buildings(text):
+        return {match.upper() for match in re.findall(r'(?<![a-z0-9])([abcdeh])\s*[楼栋]', text)} | (
+            {'110'} if re.search(r'110\s*(?:站|楼)', text) else set())
+
+    words, meanings = features(question)
+    scopes = buildings(question)
+    ranked = []
+    for index, item in enumerate(items):
+        if (not isinstance(item, dict) or item.get('kind') not in {'preference', 'writing_rule'}
+                or type(item.get('confirmed_at')) not in (int, float) or not item['confirmed_at'] > 0):
+            continue
+        try:
+            content = _normalized(Workspace._memory_content(item.get('content'))).casefold()
+        except AssistantError:
+            continue
+        scoped = buildings(content)
+        if scoped and not scoped <= scopes:
+            continue
+        tokens, semantic = features(content)
+        # A rule about an email/report/document or business operation is conditional.
+        conditional = semantic & {4, 5, 6, 7, 8, 9}
+        if conditional and not conditional & meanings:
+            continue
+        score = 3 * len(semantic & meanings) + len(tokens & words)
+        if not conditional and re.search(r'以后|回答|回复|输出|默认|一律|始终|always|responses?|answers?|prefer|default', content):
+            score += 1
+        if score:
+            ranked.append((score, index, item))
+    ranked.sort(key=lambda entry: (-entry[0], entry[1]))
+    return [{'kind': item['kind'], 'content': item['content']} for _, _, item in ranked[:limit]]
 
 
 class Workspace:
@@ -434,7 +499,7 @@ class Workspace:
                         view['source_count'] = len(item['sources'])
                     items.append(view)
                 items.sort(key=lambda i: (-i['updated_at'], i['id']))
-                return _page(items, payload)
+                return _page(items, payload, MAX_MEMORIES if group == 'memory' else MAX_PAGE)
 
             if action == 'document.create':
                 title = _material_text(payload.get('title'), '标题', 200, nonempty=True)

@@ -926,7 +926,6 @@ class AnswerReviewer:
                         [{'role': 'system', 'content': REWRITE}, {'role': 'user', 'content': feedback}],
                         profile=dict(repair_profile, reasoning=False), structured=True, max_tokens=4000,
                         timeout=repair_budget), repair_budget)
-                    recovered = []
                     await current_actor()
                     if not isinstance(revised, str) or not revised.strip():
                         raise ValueError('empty corrected answer')
@@ -944,6 +943,7 @@ class AnswerReviewer:
                     # Commit only a usable revision, preserving the prior
                     # candidate and supported claims if generation fails.
                     answer = revised
+                    recovered = []
                     repairs += 1
         except AssistantError as exc:
             if exc.status in {401, 403}:

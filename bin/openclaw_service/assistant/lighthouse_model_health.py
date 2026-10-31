@@ -82,8 +82,11 @@ def record_task_quality(assistant, actor, turn, profile, *, score, evidence, con
             return False
     except (AssistantError, KeyError, TypeError, ValueError):
         return False
+    deadline = turn.get('_answer_deadline')
+    latency = max(0, min(270, 270 + time.monotonic() - deadline)) if type(deadline) in (int, float) else None
     return model_health(assistant).record_quality(
-        _quality_key(actor, profile, task_category(turn)), score=score, evidence=evidence, observation_id=observation_id)
+        _quality_key(actor, profile, task_category(turn)), score=score, evidence=evidence,
+        observation_id=observation_id, latency=latency)
 
 
 def ingest_task_evaluation(assistant, actor, *, model_id, fingerprint, task_type, score, confirmed=False,
@@ -157,9 +160,14 @@ def select_task_profile(assistant, actor, turn, profile, *, required=None, attem
         # 50 is an unmeasured routing baseline, never an evaluation result.
         score = (-(quality['score'] if quality.get('eligible') else 50),
                  -context_window if context else 0, capabilities['reasoning'] != reasoning,
-                 state.get('latency', 30), initial and item['id'] != profile.get('id'),
+                 quality.get('latency'), state.get('latency', 30), initial and item['id'] != profile.get('id'),
                  sum(capabilities[key] != required[key] for key in ('tool_calls', 'image_input')), index)
         candidates.append((score, candidate))
+    # Unknown whole-task latency is neutral, never a transport-time "30s" sample.
+    timings = sorted(score[3] for score, _ in candidates if score[3] is not None)
+    baseline = timings[len(timings) // 2] if timings else 0
+    candidates = [(score[:3] + (score[3] if score[3] is not None else baseline,) + score[4:], candidate)
+                  for score, candidate in candidates]
     selected = min(candidates, key=lambda pair: pair[0])[1] if candidates else None
     if selected is not None and profile.get('_automatic_selection') is True:
         selected['_automatic_selection'] = True
@@ -204,6 +212,10 @@ class ModelHealth:
                      and sample[1] in ('deterministic_eval', 'reviewer')]
             if valid:
                 entries[key] = {'updated': updated, 'samples': valid}
+                latencies = entry.get('latencies', [])
+                if isinstance(latencies, list):
+                    entries[key]['latencies'] = [value for value in latencies[-self.QUALITY_MAX_SAMPLES:]
+                        if value is None or type(value) in (int, float) and 0 <= value <= 600]
                 seen = entry.get('seen', {})
                 if isinstance(seen, dict):
                     seen = {identity: timestamp for identity, timestamp in seen.items()
@@ -246,17 +258,22 @@ class ModelHealth:
 
     def quality_snapshot(self, key):
         try:
-            samples = self._quality_update().get(key, {}).get('samples', [])
+            entry = self._quality_update().get(key, {})
+            samples = entry.get('samples', [])
         except (OSError, sqlite3.Error, TypeError, ValueError):
             return {}
         if not samples:
             return {}
         counts = {source: sum(sample[1] == source for sample in samples)
                   for source in ('deterministic_eval', 'reviewer')}
-        return {'score': sum(sample[0] for sample in samples) / len(samples), 'samples': len(samples),
-                'eligible': len(samples) >= self.QUALITY_MIN_SAMPLES, **counts}
+        result = {'score': sum(sample[0] for sample in samples) / len(samples), 'samples': len(samples),
+                  'eligible': len(samples) >= self.QUALITY_MIN_SAMPLES, **counts}
+        latencies = [value for value in entry.get('latencies', []) if value is not None]
+        if len(latencies) >= self.QUALITY_MIN_SAMPLES:
+            result['latency'] = sum(latencies) / len(latencies)
+        return result
 
-    def record_quality(self, key, *, score, evidence, observation_id=None):
+    def record_quality(self, key, *, score, evidence, observation_id=None, latency=None):
         if (not isinstance(key, str) or not re.fullmatch(r'[0-9a-f]{64}', key)
                 or type(score) not in (int, float) or not 0 <= score <= 100
                 or evidence not in ('deterministic_eval', 'reviewer')
@@ -272,6 +289,9 @@ class ModelHealth:
                 seen[observation_id] = self._wall_clock()
             entries[key] = {'updated': self._wall_clock(),
                             'samples': [*entry.get('samples', []), [score, evidence]][-self.QUALITY_MAX_SAMPLES:]}
+            latencies = list(entry.get('latencies', []))
+            latencies.append(latency if type(latency) in (int, float) and 0 <= latency <= 600 else None)
+            entries[key]['latencies'] = latencies[-self.QUALITY_MAX_SAMPLES:]
             if seen:
                 entries[key]['seen'] = seen
         try:

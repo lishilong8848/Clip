@@ -1,0 +1,1 @@
+import{ci as t,b3 as i,b2 as s,bx as c}from"./app-v2-Bhip-Pax.js";function m(){const o=t(i,null);return s(()=>{if(o===null)return c;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||c;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{m as u};

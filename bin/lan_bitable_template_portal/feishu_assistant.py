@@ -128,6 +128,22 @@ def _public_phase(turn):
 def _live_card(reply):
     if reply.get('awaiting_turn'):
         text = _LIVE_PHASE_PHRASES.get(reply.get('live_phase'), _LIVE_UNKNOWN_PHRASE)
+        # Coarse elapsed buckets avoid a card edit on every one-second poll.
+        timing = reply.get('runtime')
+        timing = timing if isinstance(timing, dict) else {}
+        elapsed = timing.get('elapsed_ms')
+        if type(elapsed) not in (int, float) or not 0 <= elapsed <= 86400000:
+            started = reply.get('wait_started')
+            elapsed = (max(0, min(86400000, (time.time() - started) * 1000))
+                       if type(started) in (int, float) and math.isfinite(started) else 0)
+        seconds = int(elapsed // 15000) * 15
+        if seconds:
+            text += f'（已用时{seconds}秒）'
+        counts = timing.get('task')
+        counts = counts if isinstance(counts, dict) else {}
+        total, completed = counts.get('goal_count'), counts.get('completed_count')
+        if type(total) is int and type(completed) is int and 0 <= completed <= total <= 8 and total:
+            text += f'\n已核实目标：{completed}/{total}'
     else:
         text = _reply_text(reply.get('text'))
     elements = [{'tag': 'markdown', 'content': chunk} for chunk in _reply_chunks(text)]
@@ -747,7 +763,8 @@ class FeishuMessenger:
                     await self.update(message, reply, checkpoint=checkpoint, authorize=authorize)
             else:
                 placeholder = {'text': '正在生成回答，请稍候。', 'awaiting_turn': True, 'live_reply': {},
-                               'live_phase': reply.get('live_phase', 'waiting')}
+                               'live_phase': reply.get('live_phase', 'waiting'),
+                               'runtime': reply.get('runtime', {}), 'wait_started': reply.get('wait_started')}
                 parts.append(('live:0', 'interactive', _live_card(placeholder)))
         # A form is supplementary: it must not replace the answer or its sources.
         card_text = _card_text(card)
@@ -1590,6 +1607,8 @@ class FeishuAssistant:
             access['source_owner'] = actor['id']
         reply = {"text": _reply_text(text), **({'card': card} if card else {}), 'actor_id': actor['id'],
                 'conversation_id': conversation['conversation_id'],
+                **({'runtime': copy.deepcopy(turn['runtime'])} if isinstance(turn.get('runtime'), dict) else {}),
+                **({'run_id': turn['run_id']} if re.fullmatch('[a-f0-9]{32}', str(turn.get('run_id') or '')) else {}),
                 'delivery_access': access,
                 'files': [{'id': file['id'], 'name': file['name'], **({'inline_image': True} if file.get('inline_image') is True else {})} for file in ([] if pending_reads else turn.get('output_files', []))
                           if isinstance(file, dict) and re.fullmatch('[a-f0-9]{32}', str(file.get('id', '')))]}
@@ -1619,6 +1638,10 @@ class FeishuAssistant:
                 live.pop('partial', None)
                 live['notice'] = ''
                 reply['live_phase'] = _public_phase(turn)
+                if isinstance(turn.get('runtime'), dict):
+                    reply['runtime'] = copy.deepcopy(turn['runtime'])
+                if re.fullmatch('[a-f0-9]{32}', str(turn.get('run_id') or '')):
+                    reply['run_id'] = turn['run_id']
             reply['text'] = '正在整理完整回答，请稍候。'
             return reply
         final = await self._turn_reply(message, request, actor, conversation, turn,
@@ -2357,6 +2380,8 @@ class FeishuAssistant:
                 self.topic_locks.pop(key, None)
 
     async def _process_message(self, message):
+        delivery_started = time.monotonic()
+        send_started = None
         await self._require_current_config()
         if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
             await asyncio.to_thread(self.inbox.set, message['message_id'], 'stopped')
@@ -2378,16 +2403,24 @@ class FeishuAssistant:
                     # Confirmed text must not wait for file uploads. Keep the
                     # full attachment queue and ordinary delivery receipts in SQLite.
                     await self._validate_reply_files(message, reply)
+                    send_started = time.monotonic()
+                    self._delivery_milestone(message, reply, 'sending', delivery_started)
                     await self.messenger.send(message, reply, checkpoint=checkpoint,
                         authorize=lambda: self._validate_delivery(message, reply), text_only=True)
+                    self._delivery_milestone(message, reply, 'text_delivered', delivery_started, send_started)
                     # The delivered text and its document references can support
                     # a followup even if a subsequent attachment upload fails.
                     await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
                 await self._prepare_reply_files(message, reply)
                 if reply.get('files'):
                     await self._validate_delivery(message, reply)
+                if not reply.get('awaiting_turn'):
+                    if send_started is None:
+                        send_started = time.monotonic()
+                        self._delivery_milestone(message, reply, 'sending', delivery_started)
                 await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(message, reply))
                 if not reply.get('awaiting_turn'):
+                    self._delivery_milestone(message, reply, 'delivered', delivery_started, send_started)
                     await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)
                     # A history outage must not hold back an already authorized answer.
                     await self._sync_reply_history(message, reply)
@@ -2400,6 +2433,7 @@ class FeishuAssistant:
                 await asyncio.to_thread(self.inbox.retire_topic_plan, route_message, reply['topic_plan_id'])
             await asyncio.to_thread(self.inbox.set, message["message_id"], "done")
         except Exception as exc:
+            self._delivery_milestone(message, reply, 'deferred', delivery_started, send_started)
             if isinstance(exc, AssistantError) and (exc.category == 'delivery_revoked' or exc.status in {401, 403, 404, 410} and reply.get('actor_id') and exc.category != 'feishu_file_upload_permission'):
                 if exc.category == 'feishu_delivery_permanent':
                     await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'], permanent=True, reason=str(exc))
@@ -2429,6 +2463,18 @@ class FeishuAssistant:
             await asyncio.to_thread(self.inbox.defer_delivery, message['message_id'],
                                     permanent=isinstance(exc, AssistantError) and exc.category == 'feishu_delivery_permanent',
                                     reason=str(exc) if isinstance(exc, AssistantError) else type(exc).__name__)
+
+    @staticmethod
+    def _delivery_milestone(message, reply, phase, started, send_started=None):
+        # Use existing logging; an attempted send is never reported as delivered.
+        record = {'message_ref': hashlib.sha256(message['message_id'].encode()).hexdigest()[:16],
+                  'phase': phase, 'elapsed_ms': max(0, int((time.monotonic() - started) * 1000))}
+        if send_started is not None:
+            record['send_ms'] = max(0, int((time.monotonic() - send_started) * 1000))
+        if re.fullmatch('[a-f0-9]{32}', str(reply.get('run_id') or '')):
+            record['run_id'] = reply['run_id']
+        logging.getLogger(__name__).info('Feishu delivery: message=%s phase=%s elapsed_ms=%s',
+            record['message_ref'], phase, record['elapsed_ms'], extra={'assistant_delivery': record})
 
     async def _answer_message(self, message):
         diagnostic = hashlib.sha256(message['message_id'].encode()).hexdigest()[:8]
