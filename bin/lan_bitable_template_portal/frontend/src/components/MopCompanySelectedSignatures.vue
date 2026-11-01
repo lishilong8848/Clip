@@ -8,10 +8,10 @@
       <div class="bulk-actions">
         <button type="button"
           :disabled="!confirmableCount || confirmSending"
-          title="向已签名但尚未确认的人员发送本次使用确认"
+          title="向已签名但尚未确认的人员发送飞书确认卡片，可直接确认或拒绝，也可打开灯塔处理；最长7天有效"
           @click="emit('send-confirmations')"
         >
-          {{ confirmSending ? "发送中" : `发送待确认 ${confirmableCount}` }}
+          {{ confirmSending ? "发送中" : `发送确认卡片 ${confirmableCount}` }}
         </button>
       </div>
     </header>

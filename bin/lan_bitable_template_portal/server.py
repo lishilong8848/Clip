@@ -4407,6 +4407,7 @@ class PortalRuntime:
                 data = self.service.engineer_mop_bootstrap(
                     scope=scope,
                     ongoing_items=ongoing,
+                    month=(qs.get("month") or [""])[0],
                 )
                 return self._send_json(
                     200,

@@ -1,5 +1,21 @@
 import type { Dict } from "./api/client";
 
+export function mopMonthOptions(now = new Date()): Array<{ value: string; label: string }> {
+  const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric' }).formatToParts(now);
+  const year = Number(parts.find(part => part.type === 'year')?.value);
+  const month = Number(parts.find(part => part.type === 'month')?.value);
+  return [0, 1].map(offset => {
+    const date = new Date(Date.UTC(year, month - 1 - offset, 1));
+    const value = `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+    return { value, label: `${offset ? '上月' : '本月'} · ${value}` };
+  });
+}
+
+export function normalizeMopMonth(value: unknown): string {
+  const options = mopMonthOptions();
+  return options.find(option => option.value === value)?.value || options[0].value;
+}
+
 export function normalizeMopScope(value: string | null | undefined, fallback = "ALL"): string {
   const text = String(value || "").trim().toUpperCase();
   if (!text) return fallback;

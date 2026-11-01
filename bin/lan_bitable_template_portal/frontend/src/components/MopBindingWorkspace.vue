@@ -1,5 +1,6 @@
 <template>
   <MopSummaryStrip
+    :notice-month="noticeMonth"
     :notices="noticesCount"
     :pending="pending"
     :bound="bound"
@@ -9,6 +10,7 @@
 
   <section class="mop-layout">
     <MopNoticeList
+      :notice-month="noticeMonth"
       :notice-search="noticeSearch"
       :notice-status-filter="noticeStatusFilter"
       :items="items"
@@ -54,6 +56,7 @@ import MopNoticeList from "./MopNoticeList.vue";
 import MopSummaryStrip from "./MopSummaryStrip.vue";
 
 defineProps<{
+  noticeMonth?: string;
   noticesCount: number;
   pending: number;
   bound: number;

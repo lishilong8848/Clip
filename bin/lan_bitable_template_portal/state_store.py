@@ -11694,7 +11694,8 @@ class LanPortalStateStore:
         mop_record_id = self._text(payload.get("mop_record_id"))
         if not notice_key or not mop_record_id:
             raise ValueError("MOP绑定缺少 notice_key 或 mop_record_id。")
-        binding_seed = template_key or notice_key
+        # A recurring template can serve several months; keep each notice's binding.
+        binding_seed = notice_key
         binding_id = self._text(payload.get("binding_id")) or f"mop:{uuid.uuid5(uuid.NAMESPACE_URL, binding_seed).hex}"
         now = time.time()
         with self._lock:

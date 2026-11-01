@@ -360,7 +360,17 @@ export async function coreFixture({ url, method = 'GET', body }) {
   if (p === '/api/events/overview') { const records = eventsFor(url); return ok({ stats: eventStats(records), building_stats: codes.map(code => ({ scope: code, building: code + '楼', ...eventStats(records.filter(row => row.scope === code)) })), last_refreshed_at: now, snapshot_exists: true, unknown_time_count: 0 }); }
   if (p === '/api/events/transfer-repair' || p === '/api/events/refresh') return ok({ mock_external: true, completed: true });
 
-  if (p === '/api/engineer/mop/bootstrap') return ok({ notices: mopNotices.filter(row => inScope(row, q.get('scope'))).map(row => ({ ...row, ...(bindings.get(row.notice_key) || {}) })), mop_candidates: mopCandidates, warnings: [], auth: { user } });
+  if (p === '/api/engineer/mop/bootstrap') {
+    const selectedMonth = q.get('month') || day.slice(0, 7);
+    const previousMonth = selectedMonth !== day.slice(0, 7);
+    const notices = mopNotices.filter(row => inScope(row, q.get('scope'))).map(row => {
+      const notice = previousMonth ? { ...row, notice_key: row.notice_key + '-' + selectedMonth,
+        source_record_id: row.source_record_id + '-' + selectedMonth, status: '已结束',
+        start_time: selectedMonth + '-15 09:00', end_time: selectedMonth + '-15 18:30' } : row;
+      return { ...notice, mop_binding: bindings.get(notice.notice_key) || null };
+    });
+    return ok({ month: selectedMonth, notices, mop_candidates: mopCandidates, warnings: [], auth: { user } });
+  }
   if (p === '/api/engineer/mop/bind') { bindings.set(data.notice_key, data); return ok({ binding: data }); }
   if (p === '/api/engineer/mop/upload-local') return ok({ local_mop_candidate: { ...mopCandidates[0], record_id: 'audit-local-mop', source: 'local_upload', local_upload: true, upload_id: 'audit-local-upload', attachments: [{ upload_id: 'audit-local-upload', file_token: 'audit-local-file', name: mopTitles[0] + '.xlsx' }] }, file_name: mopTitles[0] + '.xlsx', warnings: [] });
   if (p === '/api/engineer/mop/preview') return ok({ local_file: { path: 'audit.xlsx', relative_path: 'engineer_mop_files/audit/preview.xlsx', file_name: mopTitles[0] + '.xlsx' }, mop_title: mopTitles[0], attachment: { name: mopTitles[0] + '.xlsx' }, sheets: [sheet, { name: '封面', is_cover: true, row_count: 1, column_count: 2, rows: [['设备维护作业', scope + '楼']] }], warnings: [] });

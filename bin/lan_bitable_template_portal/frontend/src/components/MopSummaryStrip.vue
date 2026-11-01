@@ -1,7 +1,7 @@
 <template>
   <section class="mop-summary">
     <article>
-      <span>本月维保</span>
+      <span>{{ noticeMonth ? noticeMonth + ' 维保' : '本月维保' }}</span>
       <strong>{{ notices }}</strong>
     </article>
     <article>
@@ -25,6 +25,7 @@
 
 <script setup lang="ts">
 defineProps<{
+  noticeMonth?: string;
   notices: number;
   pending: number;
   bound: number;

@@ -1,4 +1,5 @@
 import { downloadFile, requestJson, type Dict } from "./api/client";
+import { normalizeMopMonth } from './mopSelectionUtils';
 
 const MOP_BOOTSTRAP_CACHE_TTL_MS = 10_000;
 const mopBootstrapCache = new Map<string, { expiresAt: number; data: Dict }>();
@@ -13,8 +14,8 @@ function clonePayload(payload: Dict): Dict {
   return JSON.parse(JSON.stringify(payload)) as Dict;
 }
 
-function bootstrapCacheKey(scope: unknown): string {
-  return String(scope || "").trim().toUpperCase();
+function bootstrapCacheKey(scope: unknown, month: unknown = ''): string {
+  return `${String(scope || '').trim().toUpperCase()}:${normalizeMopMonth(month)}`;
 }
 
 function nextBootstrapGeneration(cacheKey: string): number {
@@ -24,29 +25,25 @@ function nextBootstrapGeneration(cacheKey: string): number {
 }
 
 export function invalidateEngineerMopBootstrap(scope = ""): void {
-  const cacheKey = bootstrapCacheKey(scope);
-  if (cacheKey) {
-    nextBootstrapGeneration(cacheKey);
-    mopBootstrapCache.delete(cacheKey);
-    mopBootstrapInflight.delete(cacheKey);
-    return;
-  }
+  const selectedScope = String(scope || '').trim().toUpperCase();
   for (const key of new Set([
     ...mopBootstrapCache.keys(),
     ...mopBootstrapInflight.keys(),
     ...mopBootstrapGeneration.keys(),
   ])) {
+    if (selectedScope && !key.startsWith(selectedScope + ':')) continue;
     nextBootstrapGeneration(key);
+    mopBootstrapCache.delete(key);
+    mopBootstrapInflight.delete(key);
   }
-  mopBootstrapCache.clear();
-  mopBootstrapInflight.clear();
 }
 
 export function fetchEngineerMopBootstrap(
   scope: string,
-  options: { force?: boolean; signal?: AbortSignal } = {},
+  options: { force?: boolean; signal?: AbortSignal; month?: string } = {},
 ): Promise<Dict> {
-  const cacheKey = bootstrapCacheKey(scope);
+  const month = normalizeMopMonth(options.month);
+  const cacheKey = bootstrapCacheKey(scope, month);
   const now = Date.now();
   const cached = mopBootstrapCache.get(cacheKey);
   if (!options.force && cached && cached.expiresAt > now) {
@@ -63,7 +60,7 @@ export function fetchEngineerMopBootstrap(
   const requestGeneration = nextBootstrapGeneration(cacheKey);
 
   const request = requestJson(
-    `/api/engineer/mop/bootstrap?scope=${encodeURIComponent(scope)}`,
+    `/api/engineer/mop/bootstrap?${new URLSearchParams({ scope, month })}`,
     { signal: options.signal },
   ).then((data) => {
     if (mopBootstrapGeneration.get(cacheKey) === requestGeneration) {

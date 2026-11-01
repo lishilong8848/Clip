@@ -61,8 +61,13 @@ def dispatch(manager, operation, payload, *, actor, auth, base_url, send_text):
             items.append(_item(row, row["operation_id"], person, request))
         return {"items": items}
 
-    notices = manager.s._engineer_month_maintenance_notices(scope=scope, ongoing_items=None)
+    notices = manager.s._engineer_month_maintenance_notices(
+        scope=scope, ongoing_items=None, month=manager.s._engineer_mop_month())
     notice = next((item for item in notices if item.get("notice_key") == notice_key), None)
+    if notice is None:
+        previous_month = manager.s._recent_month_pairs()[1][1]
+        notices = manager.s._engineer_month_maintenance_notices(scope=scope, ongoing_items=None, month=previous_month)
+        notice = next((item for item in notices if item.get("notice_key") == notice_key), None)
     notice_scopes = manager.s._building_codes_from_value(
         (notice or {}).get("building_codes") or (notice or {}).get("building"))
     available = [s for s in scopes if s in notice_scopes]

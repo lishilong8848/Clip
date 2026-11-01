@@ -6,6 +6,8 @@
     <MopPageHeader
       v-if="!previewMode"
       v-model:scope="scope"
+      v-model:month="month"
+      :month-options="monthOptions"
       :scope-options="scopeOptions"
       :loading="loading"
       :preview-loading="previewLoading"
@@ -281,6 +283,7 @@
 
       <template v-else>
         <MopBindingWorkspace
+          :notice-month="month"
           v-model:notice-search="noticeSearch"
           v-model:notice-status-filter="noticeStatusFilter"
           v-model:selected-attachment-token="selectedAttachmentToken"
@@ -373,6 +376,8 @@ import {
   mopNoticeNeedsAction,
   mopSpecialtyText,
   normalizeMopScope,
+  normalizeMopMonth,
+  mopMonthOptions,
   noticeIsEnded,
   noticeMopUploaded,
   sortMopNoticesForAction,
@@ -433,6 +438,8 @@ const props = defineProps<{
 }>();
 
 const routeParams = new URLSearchParams(window.location.search);
+const month = ref(normalizeMopMonth(routeParams.get('month')));
+const monthOptions = ref(mopMonthOptions());
 const initialSourceRecordId = String(routeParams.get("source_record_id") || "").trim();
 const initialNoticeKey = String(routeParams.get("notice_key") || "").trim();
 const scope = ref(normalizeMopScope(routeParams.get("scope") || props.scopeOptions[0]?.value || "ALL"));
@@ -620,6 +627,64 @@ const mopEditSessionLock = useMopEditSessionLock({
 });
 const claimMopEditSession = mopEditSessionLock.claim;
 const releaseMopEditSession = mopEditSessionLock.release;
+
+type MopFileOperation = "bind" | "preview" | "fill" | "upload" | "reset" | "localUpload";
+let mopFileGeneration = 0;
+let mopFileRequestSeq = 0;
+let mopFilePageDisposed = false;
+const mopFileRequests = new Map<MopFileOperation, number>();
+
+function mopFilePageContext(): string {
+  return JSON.stringify([
+    scope.value, month.value, selectedNoticeKey.value, selectedNoticeSourceRecordId.value,
+    props.loggedIn,
+  ]);
+}
+
+function mopFileTargetContext(): string {
+  return JSON.stringify([
+    selectedMopRecordId.value, selectedAttachmentToken.value,
+    mopAttachmentKey(selectedAttachment.value || {}), activeSheetName.value,
+    preview.value?.local_file?.path || "",
+  ]);
+}
+
+function beginMopFileRequest(operation: MopFileOperation) {
+  const generation = mopFileGeneration;
+  const requestId = ++mopFileRequestSeq;
+  const pageContext = mopFilePageContext();
+  const targetContext = mopFileTargetContext();
+  let responseAccepted = false;
+  mopFileRequests.set(operation, requestId);
+  const isCurrent = () => (
+    !mopFilePageDisposed
+    && generation === mopFileGeneration
+    && mopFileRequests.get(operation) === requestId
+    && pageContext === mopFilePageContext()
+    && (responseAccepted || targetContext === mopFileTargetContext())
+  );
+  return {
+    isCurrent,
+    acceptResponse(): boolean {
+      if (!isCurrent()) return false;
+      // Accepted responses may synchronously select their newly returned file/sheet.
+      responseAccepted = true;
+      return true;
+    },
+  };
+}
+
+function invalidateMopFileRequests(): void {
+  mopFileGeneration += 1;
+  mopFileRequests.clear();
+  saving.value = false;
+  previewLoading.value = false;
+  mopFillSaving.value = false;
+  mopUploadSaving.value = false;
+  mopResetting.value = false;
+  localMopUpload.finish();
+}
+
 const filteredMopCandidates = computed(() => {
   const query = compactSearchText(mopSearch.value);
   const specialty = selectedNoticeSpecialty.value;
@@ -2073,23 +2138,28 @@ async function loadSignaturePeople(options: { silent?: boolean } = {}): Promise<
 
 async function downloadMopFile(): Promise<void> {
   if (mopUploadSaving.value || mopFillSaving.value || mopResetting.value || fillMopDisabledReason.value) return;
+  const request = beginMopFileRequest("fill");
   mopFillSaving.value = true;
   mopUploadMessage.value = "正在生成当前填写内容和签名，请稍候。";
   mopUploadMessageType.value = "info";
   try {
     await downloadFilledEngineerMop(buildMopRequestPayload());
+    if (!request.acceptResponse()) return;
     mopUploadMessage.value = "最新 MOP 已生成，浏览器已开始下载。";
     mopUploadMessageType.value = "success";
   } catch (error) {
+    if (!request.isCurrent()) return;
     mopUploadMessage.value = error instanceof Error ? error.message : "下载 MOP 失败";
     mopUploadMessageType.value = "failed";
   } finally {
-    mopFillSaving.value = false;
+    if (request.isCurrent()) mopFillSaving.value = false;
   }
 }
 
 async function fillMopSignatures(): Promise<void> {
+  if (mopFillSaving.value || mopUploadSaving.value || mopResetting.value) return;
   if (!canFillMopSignatures.value || !preview.value?.local_file?.path) return;
+  const request = beginMopFileRequest("fill");
   mopFillSaving.value = true;
   mopUploadMessage.value = "";
   mopUploadMessageType.value = "info";
@@ -2097,41 +2167,47 @@ async function fillMopSignatures(): Promise<void> {
   signatureMessageType.value = "";
   try {
     const data = await fillEngineerMop(buildMopRequestPayload());
+    if (!request.acceptResponse()) return;
     filledMopResult.value = data;
     signedMopUploadedAt.value = "";
     signatureMessage.value = `已写入本地 MOP：${data.relative_path || data.file_name || "本地文件"}`;
     signatureMessageType.value = "success";
   } catch (error) {
+    if (!request.isCurrent()) return;
     signatureMessage.value = error instanceof Error ? error.message : "签名写入 MOP 失败";
     signatureMessageType.value = "failed";
   } finally {
-    mopFillSaving.value = false;
+    if (request.isCurrent()) mopFillSaving.value = false;
   }
 }
 
 async function uploadSignedMop(): Promise<void> {
+  if (mopUploadSaving.value || mopFillSaving.value || mopResetting.value) return;
   const disabledReason = uploadSignedMopDisabledReason.value;
   if (disabledReason || !preview.value?.local_file?.path || !selectedNotice.value) {
     mopUploadMessage.value = disabledReason || "当前维护单尚未准备完成，请重新打开填写后再试。";
     mopUploadMessageType.value = "failed";
     return;
   }
+  const request = beginMopFileRequest("upload");
   mopUploadSaving.value = true;
   signatureMessage.value = "";
   signatureMessageType.value = "";
   mopUploadMessage.value = "正在生成最新维护单并上传多维，请勿重复点击。";
   mopUploadMessageType.value = "info";
   try {
-    const data = await uploadSignedEngineerMop(buildMopRequestPayload({
-        operation_id: createMopUploadOperationId(),
-        source_record_id: selectedNoticeSourceRecordId.value,
-        notice_title: selectedNotice.value.title || "",
-        notice_key: selectedNotice.value.notice_key || "",
-      }));
+    const payload = buildMopRequestPayload({
+      operation_id: createMopUploadOperationId(),
+      source_record_id: selectedNoticeSourceRecordId.value,
+      notice_title: selectedNotice.value.title || "",
+      notice_key: selectedNotice.value.notice_key || "",
+    });
+    const data = await uploadSignedEngineerMop(payload);
+    if (!request.acceptResponse()) return;
     filledMopResult.value = data.filled_file || filledMopResult.value;
     signedMopUploadedAt.value = String(data.uploaded_at || new Date().toISOString());
-    const sourceRecordId = String(data.source_record_id || selectedNoticeSourceRecordId.value || "").trim();
-    const noticeKey = String(data.notice_key || selectedNotice.value.notice_key || "").trim();
+    const sourceRecordId = String(data.source_record_id || payload.source_record_id || "").trim();
+    const noticeKey = String(data.notice_key || payload.notice_key || "").trim();
     const notice = notices.value.find((item) => (
       (noticeKey && String(item.notice_key || "") === noticeKey)
       || (sourceRecordId && String(item.source_record_id || item.record_id || "") === sourceRecordId)
@@ -2152,17 +2228,20 @@ async function uploadSignedMop(): Promise<void> {
     mopUploadMessage.value = signatureMessage.value;
     mopUploadMessageType.value = "success";
   } catch (error) {
+    if (!request.isCurrent()) return;
     signatureMessage.value = error instanceof Error ? error.message : "上传已签名 MOP 失败";
     signatureMessageType.value = "failed";
     mopUploadMessage.value = signatureMessage.value;
     mopUploadMessageType.value = "failed";
   } finally {
-    mopUploadSaving.value = false;
+    if (request.isCurrent()) mopUploadSaving.value = false;
   }
 }
 
 async function resetMopSigning(): Promise<void> {
+  if (mopResetting.value || mopFillSaving.value || mopUploadSaving.value) return;
   if (!filledMopResult.value || !preview.value || !selectedMop.value) return;
+  const request = beginMopFileRequest("reset");
   mopResetting.value = true;
   mopUploadMessage.value = "";
   mopUploadMessageType.value = "info";
@@ -2177,6 +2256,7 @@ async function resetMopSigning(): Promise<void> {
       fileToken: mopAttachmentKey(attachment),
       fileName: String(attachment.name || ""),
     });
+    if (!request.acceptResponse()) return;
     clearMopFillState({ clearSignatures: true });
     preview.value = data;
     const sheets = Array.isArray(data.sheets) ? data.sheets : [];
@@ -2184,10 +2264,11 @@ async function resetMopSigning(): Promise<void> {
     signatureMessage.value = "已删除旧签名文件，并重新下载干净 MOP。";
     signatureMessageType.value = "success";
   } catch (error) {
+    if (!request.isCurrent()) return;
     signatureMessage.value = error instanceof Error ? error.message : "重新下载干净 MOP 失败";
     signatureMessageType.value = "failed";
   } finally {
-    mopResetting.value = false;
+    if (request.isCurrent()) mopResetting.value = false;
   }
 }
 
@@ -2230,9 +2311,10 @@ async function sendSignatureUsageConfirmationsForRole(role: MopSignatureRole): P
     });
     const sent = Number(data.sent_count || data.sent || 0);
     const failed = Number(data.failed_count || 0);
-    signatureMessage.value = failed
-      ? `已发送 ${sent} 个签名使用确认，${failed} 个失败。`
-      : `已发送 ${sent} 个签名使用确认。`;
+    signatureMessage.value = (failed
+      ? `已发送 ${sent} 张签名使用确认卡片，${failed} 人发送失败。`
+      : `已发送 ${sent} 张签名使用确认卡片。`)
+      + "收件人可在飞书卡片中直接确认或拒绝，也可点击“打开灯塔处理”；最长7天有效。";
     signatureMessageType.value = failed ? "failed" : "success";
     updateFormalSignaturePolling();
   } catch (error) {
@@ -2449,6 +2531,7 @@ function selectDefaultMopCandidate(): void {
 }
 
 function selectNotice(noticeKey: string): void {
+  invalidateMopFileRequests();
   closeMopTransientUi();
   releaseMopEditSession();
   selectedNoticeKey.value = noticeKey;
@@ -2513,7 +2596,9 @@ async function loadPage(force = false): Promise<void> {
   messageType.value = "";
   try {
     const requestedScope = scope.value;
+    const requestedMonth = month.value;
     const data = await fetchEngineerMopBootstrap(requestedScope, {
+      month: requestedMonth,
       force,
       signal: abortController.signal,
     });
@@ -2521,7 +2606,9 @@ async function loadPage(force = false): Promise<void> {
       abortController.signal.aborted
       || loadVersion !== mopPageLoadVersion
       || requestedScope !== scope.value
+      || requestedMonth !== month.value
     ) return;
+    if (Array.isArray(data.month_options) && data.month_options.length) monthOptions.value = data.month_options;
     currentAuthUser.value = (data.auth?.user || data.user || {}) as Dict;
     notices.value = Array.isArray(data.notices) ? data.notices : [];
     mopCandidates.value = Array.isArray(data.mop_candidates) ? data.mop_candidates : [];
@@ -2553,7 +2640,9 @@ async function loadPage(force = false): Promise<void> {
 }
 
 async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | null> {
+  if (saving.value) return null;
   if (!canBind.value || !selectedNotice.value || !selectedMop.value) return null;
+  const request = beginMopFileRequest("bind");
   saving.value = true;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
@@ -2587,6 +2676,7 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
       selected_sheet: activeSheetName.value,
     };
     const data = await bindEngineerMop(payload);
+    if (!request.acceptResponse()) return null;
     const binding = data.binding || {};
     const notice = selectedNotice.value;
     if (notice) notice.mop_binding = binding;
@@ -2597,6 +2687,7 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
     }
     return binding;
   } catch (error) {
+    if (!request.isCurrent()) return null;
     const errorMessage = error instanceof Error ? error.message : "自动绑定 MOP 失败";
     mopBindingError.value = errorMessage;
     if (!options.silent) {
@@ -2605,7 +2696,7 @@ async function saveBinding(options: { silent?: boolean } = {}): Promise<Dict | n
     }
     return null;
   } finally {
-    saving.value = false;
+    if (request.isCurrent()) saving.value = false;
   }
 }
 
@@ -2635,9 +2726,8 @@ async function uploadLocalMopFile(file: File): Promise<void> {
     handleLocalMopUploadInvalid(fileError);
     return;
   }
+  const request = beginMopFileRequest("localUpload");
   localMopUpload.begin();
-  const requestScope = scope.value;
-  const requestNoticeKey = selectedNoticeKey.value;
   mopBindingStatus.value = "";
   mopBindingError.value = "";
   try {
@@ -2648,10 +2738,7 @@ async function uploadLocalMopFile(file: File): Promise<void> {
     formData.append("notice_key", String(selectedNotice.value.notice_key || ""));
     formData.append("notice_title", String(selectedNotice.value.title || ""));
     const data = await uploadLocalEngineerMop(formData);
-    if (scope.value !== requestScope || selectedNoticeKey.value !== requestNoticeKey) {
-      localMopUpload.reset();
-      return;
-    }
+    if (!request.acceptResponse()) return;
     const candidate = data.local_mop_candidate || {};
     const recordId = String(candidate.record_id || "");
     if (!recordId) throw new Error("本地 MOP 上传成功但未返回可选记录。");
@@ -2666,30 +2753,35 @@ async function uploadLocalMopFile(file: File): Promise<void> {
       warnings.value = [...new Set([...warnings.value, ...data.warnings.map((item: unknown) => String(item))])];
     }
   } catch (error) {
+    if (!request.isCurrent()) return;
     const text = localMopUpload.failFromError(error);
     message.value = text;
     messageType.value = "failed";
   } finally {
-    localMopUpload.finish();
+    if (request.isCurrent()) localMopUpload.finish();
   }
 }
 
 async function startMopPreview(): Promise<void> {
+  if (openMopBusy.value || localMopUploadBusy.value || mopFillSaving.value || mopUploadSaving.value || mopResetting.value) return;
   if (!canPreview.value || !selectedMop.value) return;
-  const binding = await saveBinding({ silent: true });
-  if (!binding) return;
+  const request = beginMopFileRequest("preview");
+  const attachment = selectedAttachment.value || {};
+  const previewParams = {
+    scope: scope.value,
+    mopRecordId: String(selectedMop.value.record_id || ""),
+    fileToken: mopAttachmentKey(attachment),
+    fileName: String(attachment.name || ""),
+    uploadId: String(selectedMop.value.upload_id || attachment.upload_id || ""),
+  };
   previewLoading.value = true;
-  message.value = "";
-  messageType.value = "";
   try {
-    const attachment = selectedAttachment.value || {};
-    const data = await previewEngineerMop({
-      scope: scope.value,
-      mopRecordId: String(selectedMop.value.record_id || ""),
-      fileToken: mopAttachmentKey(attachment),
-      fileName: String(attachment.name || ""),
-      uploadId: String(selectedMop.value.upload_id || attachment.upload_id || ""),
-    });
+    const binding = await saveBinding({ silent: true });
+    if (!binding || !request.isCurrent()) return;
+    message.value = "";
+    messageType.value = "";
+    const data = await previewEngineerMop(previewParams);
+    if (!request.acceptResponse()) return;
     clearMopFillState({ clearSignatures: true });
     preview.value = data;
     const sheets = Array.isArray(data.sheets) ? data.sheets : [];
@@ -2721,26 +2813,40 @@ async function startMopPreview(): Promise<void> {
     }
     void loadTemporarySignatures({ silent: true });
   } catch (error) {
+    if (!request.isCurrent()) return;
     message.value = error instanceof Error ? error.message : "读取 MOP 表格失败";
     messageType.value = "failed";
   } finally {
-    previewLoading.value = false;
+    if (request.isCurrent()) previewLoading.value = false;
   }
 }
 
-watch(scope, () => {
+watch(
+  [scope, month, selectedNoticeKey, selectedNoticeSourceRecordId, () => props.loggedIn],
+  invalidateMopFileRequests,
+  { flush: "sync" },
+);
+// File/sheet selection made by an accepted response finishes before this watch runs.
+watch(mopFileTargetContext, invalidateMopFileRequests);
+
+watch([scope, month], () => {
   closeMopTransientUi();
   releaseMopEditSession();
   const url = new URL(window.location.href);
   url.searchParams.set("scope", scope.value);
+  url.searchParams.set("month", month.value);
   window.history.replaceState({}, "", url);
   selectedNoticeKey.value = "";
+  notices.value = [];
   selectedMopRecordId.value = "";
   selectedAttachmentToken.value = "";
   mopBindingStatus.value = "";
   mopBindingError.value = "";
   preview.value = null;
   previewMode.value = false;
+  clearMopOutputState();
+  localMopUpload.reset();
+  resetOtherSignatures();
   void loadPage();
 });
 
@@ -2770,6 +2876,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  mopFilePageDisposed = true;
+  invalidateMopFileRequests();
   signatureManagerCloseAnimation?.cancel();
   signatureManagerCloseAnimation = undefined;
   temporarySignatureRequestSeq += 1;

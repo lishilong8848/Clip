@@ -2668,6 +2668,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.engineer_mop_bootstrap,
                     scope=scope,
                     ongoing_items=ongoing,
+                    month=str(request.query_params.get("month") or ""),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:

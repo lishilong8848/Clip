@@ -2,7 +2,7 @@
   <aside class="panel notice-panel">
     <div class="panel-head">
       <div>
-        <h2>本月维保通告</h2>
+        <h2>{{ noticeMonth ? noticeMonth + ' 维保通告' : '本月维保通告' }}</h2>
       </div>
       <span>{{ items.length }}</span>
     </div>
@@ -57,6 +57,7 @@ import { computed } from "vue";
 import type { Dict } from "../api/client";
 
 const props = defineProps<{
+  noticeMonth?: string;
   items: Dict[];
   selectedNoticeKey: string;
   noticeSearch: string;

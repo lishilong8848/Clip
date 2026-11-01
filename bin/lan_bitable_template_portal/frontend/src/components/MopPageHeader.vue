@@ -4,6 +4,12 @@
       <strong>工程师 MOP 填写</strong>
     </div>
     <div class="head-actions">
+      <label class="month-select">
+        通告月份
+        <select :value="month" :disabled="loading || previewLoading" aria-label="通告月份" @change="$emit('update:month', ($event.target as HTMLSelectElement).value)">
+          <option v-for="item in monthOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
+        </select>
+      </label>
       <label v-if="scopeOptions.length" class="scope-select">
         楼栋
         <select :value="scope" :disabled="loading || previewLoading" aria-label="切换楼栋" @change="updateScope">
@@ -29,6 +35,8 @@
 import { normalizeMopScope } from "../mopSelectionUtils";
 
 defineProps<{
+  month: string;
+  monthOptions: Array<{ value: string; label: string }>;
   scope: string;
   scopeOptions: Array<{ value: string; label: string }>;
   loading: boolean;
@@ -36,6 +44,7 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
+  "update:month": [value: string];
   "update:scope": [value: string];
   refresh: [];
 }>();
@@ -69,17 +78,29 @@ function updateScope(event: Event): void {
 .head-actions {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: flex-end;
   gap: 10px;
 }
 
-.scope-select {
-  display: inline-flex;
+.scope-select, .month-select {
+  display: grid;
   align-items: center;
   gap: 8px;
   color: #475569;
   font-size: 13px;
   font-weight: 700;
+}
+
+.month-select { min-width: 148px; }
+
+@media (max-width: 700px) {
+  .mop-head { flex-wrap: wrap; gap: 12px; padding: 18px 16px; }
+  .head-actions { flex: 1 1 100%; align-items: end; gap: 8px; }
+  .month-select { min-width: 140px; }
+  .scope-select { min-width: 72px; flex: 0 1 88px; }
+  .scope-select select { width: 100%; min-width: 0; }
+  .scope-select :deep(.v2-single-select) { width: 100%; min-width: 0; }
+  .refresh-mini { padding-inline: 10px; }
 }
 
 select {

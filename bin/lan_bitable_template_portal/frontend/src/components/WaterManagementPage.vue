@@ -15,6 +15,7 @@
           :options="availableScopes.map((item) => item.value)"
           input-id="water-scope-switch"
           label="楼栋"
+          :disabled="saving || photoUploading"
           @update:model-value="switchScope"
         />
         <span class="refresh-time">{{ snapshotText }}</span>
@@ -239,7 +240,7 @@
                 v-model="form.statisticDate"
                 type="date"
                 required
-                :disabled="recordEditingLocked"
+                :disabled="saving || recordEditingLocked"
                 @input="markDrawerDirty"
               />
             </label>
@@ -251,7 +252,7 @@
                 input-id="water-form-meter"
                 label="水表"
                 required
-                :disabled="recordEditingLocked"
+                :disabled="saving || recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -263,7 +264,7 @@
                 input-id="water-form-frequency"
                 label="统计频次"
                 required
-                :disabled="recordEditingLocked"
+                :disabled="saving || recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -275,7 +276,7 @@
                 input-id="water-form-shift"
                 label="班次"
                 required
-                :disabled="recordEditingLocked"
+                :disabled="saving || recordEditingLocked"
                 @change="markDrawerDirty"
               />
             </label>
@@ -283,12 +284,11 @@
               <span>水表数值 <b>*</b></span>
               <input
                 v-model="form.meterValue"
-                type="number"
-                min="0"
-                step="any"
+                type="text"
+                inputmode="decimal"
                 placeholder="请输入非负数"
                 required
-                :disabled="recordEditingLocked"
+                :disabled="saving || recordEditingLocked"
                 @input="markDrawerDirty"
               />
             </label>
@@ -304,10 +304,10 @@
                 <span class="sr-only">当期耗水量（修正）</span>
                 <input
                   v-model="form.correctedUsage"
-                  type="number"
-                  step="any"
+                  type="text"
+                  inputmode="decimal"
                   placeholder="选填，留空使用公式结果"
-                  :disabled="recordEditingLocked"
+                  :disabled="saving || recordEditingLocked"
                   @input="markDrawerDirty"
                 />
               </label>
@@ -347,13 +347,13 @@
               type="file"
               accept="image/*"
               multiple
-              :disabled="recordEditingLocked"
+              :disabled="saving || recordEditingLocked"
               @change="handleFileInput"
             />
             <div
               class="photo-dropzone"
               :class="{ dragging: photoDragging, disabled: photoUploading || saving || recordEditingLocked }"
-              :tabindex="recordEditingLocked ? -1 : 0"
+              :tabindex="photoUploading || saving || recordEditingLocked ? -1 : 0"
               :aria-disabled="photoUploading || saving || recordEditingLocked"
               @click="openFilePicker"
               @dragenter.prevent="photoDragging = true"
@@ -384,7 +384,7 @@
                 <button
                   type="button"
                   aria-label="移除照片"
-                  :disabled="recordEditingLocked"
+                  :disabled="saving || recordEditingLocked"
                   @click="askRemoveRetainedPhoto(photo)"
                 >
                   <X :size="15" />
@@ -405,7 +405,7 @@
                 <button
                   type="button"
                   aria-label="移除照片"
-                  :disabled="photo.uploading || recordEditingLocked"
+                  :disabled="photo.uploading || saving || recordEditingLocked"
                   @click="removeStagedPhoto(photo.localId)"
                 >
                   <X :size="15" />
@@ -558,6 +558,7 @@ import {
 } from "lucide-vue-next";
 import { requestBinaryJson, requestJson } from "../api/client";
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
+import { parseWaterNumberText } from "../waterNumberInput";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
@@ -637,7 +638,7 @@ const confirmState = reactive({
   message: "",
   details: [] as string[],
   confirmLabel: "确认",
-  action: "" as "" | "close" | "remove-photo",
+  action: "" as "" | "close" | "remove-photo" | "switch-scope",
   targetId: "",
 });
 const filters = reactive({
@@ -670,7 +671,7 @@ let filterTimer: number | null = null;
 let snapshotPollTimer: number | null = null;
 let refreshBaselineVersion = 0;
 
-const scopeCode = computed(() => normalizeScope(props.scope));
+const scopeCode = ref(normalizeScope(props.scope));
 const buildingLabel = computed(() => `${scopeCode.value}楼`);
 const availableScopes = computed(() => props.scopeOptions
   .map((item) => ({ ...item, value: normalizeScope(item.value) }))
@@ -939,7 +940,29 @@ function changePage(nextPage: number): void {
 function switchScope(scope: string): void {
   const normalized = normalizeScope(scope);
   if (!WATER_SCOPES.has(normalized) || normalized === scopeCode.value) return;
-  emit("switch-scope", normalized);
+  if (saving.value || photoUploading.value) {
+    if (normalizeScope(props.scope) !== scopeCode.value) emit("switch-scope", scopeCode.value);
+    return;
+  }
+  if (drawerOpen.value && drawerDirty.value) {
+    Object.assign(confirmState, {
+      open: true,
+      tone: "warning",
+      title: "切换楼栋并放弃未保存修改？",
+      message: "切换后，本次填写和刚上传但尚未保存的照片不会写入水耗记录。",
+      details: [],
+      confirmLabel: "放弃并切换",
+      action: "switch-scope",
+      targetId: normalized,
+    });
+    return;
+  }
+  applyScope(normalized);
+}
+
+function applyScope(scope: string): void {
+  scopeCode.value = scope;
+  emit("switch-scope", scope);
 }
 
 function resetForm(): void {
@@ -961,6 +984,7 @@ function resetForm(): void {
 }
 
 function openCreate(): void {
+  if (saving.value || photoUploading.value) return;
   if (!canCreateRecord.value) {
     setMessage("只有管理员可以新增水耗记录。", "warning");
     return;
@@ -974,6 +998,7 @@ function openCreate(): void {
 }
 
 async function openEdit(recordId: string): Promise<void> {
+  if (saving.value || photoUploading.value) return;
   const normalizedRecordId = String(recordId || "").trim();
   if (!normalizedRecordId) return;
   detailController?.abort();
@@ -1064,9 +1089,13 @@ function validateForm(): string {
   if (!form.frequency) return "请选择统计频次。";
   if (!form.shift) return "请选择班次。";
   if (!form.statisticDate) return "请选择统计日期。";
-  const meterValue = Number(form.meterValue);
-  if (form.meterValue === "" || !Number.isFinite(meterValue) || meterValue < 0) {
+  const meterValue = parseWaterNumberText(form.meterValue);
+  if (meterValue === null || !Number.isFinite(meterValue) || meterValue < 0) {
     return "水表数值必须是大于或等于 0 的数字。";
+  }
+  const correctedUsage = parseWaterNumberText(form.correctedUsage);
+  if (correctedUsage !== null && !Number.isFinite(correctedUsage)) {
+    return "当期耗水量（修正）必须是有效数字，或留空使用公式结果。";
   }
   if (photoUploading.value) return "照片仍在上传，请稍候。";
   if (!retainedPhotos.value.length && !stagedPhotos.value.some((item) => item.uploadId)) {
@@ -1156,8 +1185,8 @@ async function saveRecord(
     frequency: form.frequency,
     shift: form.shift,
     statistic_date: form.statisticDate,
-    meter_value: form.meterValue,
-    corrected_usage: form.correctedUsage === "" ? null : form.correctedUsage,
+    meter_value: parseWaterNumberText(form.meterValue),
+    corrected_usage: parseWaterNumberText(form.correctedUsage),
     upload_ids: stagedPhotos.value.map((item) => item.uploadId).filter(Boolean),
     retained_image_ids: retainedPhotos.value.map((item) => item.image_id).filter(Boolean),
     large_change_confirmed: largeChangeConfirmed,
@@ -1184,7 +1213,7 @@ async function saveRecord(
           : "水耗记录已保存。",
       warnings.length ? "warning" : "success",
     );
-    await Promise.all([loadBootstrap(), loadRecords()]);
+    void Promise.all([loadBootstrap(), loadRecords()]);
     return true;
   } catch (saveError: any) {
     const errorPayload = saveError?.payload || {};
@@ -1349,6 +1378,14 @@ function resolveConfirmation(confirmed: boolean): void {
   confirmState.action = "";
   confirmState.targetId = "";
   confirmState.details = [];
+  if (action === "switch-scope") {
+    if (confirmed && !saving.value && !photoUploading.value && WATER_SCOPES.has(targetId)) {
+      applyScope(targetId);
+    } else if (normalizeScope(props.scope) !== scopeCode.value) {
+      emit("switch-scope", scopeCode.value);
+    }
+    return;
+  }
   if (!confirmed) return;
   if (action === "close") {
     drawerDirty.value = false;
@@ -1419,6 +1456,11 @@ watch(
 
 watch(
   () => props.scope,
+  switchScope,
+);
+
+watch(
+  scopeCode,
   async () => {
     bootstrapController?.abort();
     recordsController?.abort();
@@ -2365,6 +2407,7 @@ th {
   position: sticky;
   bottom: 0;
   z-index: 4;
+  flex-direction: row-reverse;
   justify-content: space-between;
   gap: 12px;
   margin: 0 -18px;

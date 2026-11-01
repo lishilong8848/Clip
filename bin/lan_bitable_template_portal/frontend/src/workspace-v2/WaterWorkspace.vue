@@ -112,7 +112,7 @@ const retained=ref<Dict[]>([]),photos=ref<WaterPhoto[]>([]),errors=reactive<Reco
 const editor=ref<InstanceType<typeof WaterRecordEditor>>(),mobileEditor=ref<InstanceType<typeof WaterRecordEditor>>();
 const admin=computed(()=>bootstrap.value.permissions?.is_admin===true||detail.value.edit_policy?.is_admin===true);
 const locked=computed(()=>!!recordId.value&&!admin.value&&detail.value.edit_policy?.can_edit!==true);
-const draftStamp=()=>JSON.stringify([form,retained.value.map(photo=>photo.image_id),photos.value.map(photo=>[photo.localId,photo.uploadId])]);
+const draftStamp=()=>JSON.stringify([form,retained.value.map(photo=>photo.image_id),photos.value.map(photo=>[photo.localId,photo.uploadId])],(_key,value)=>typeof value==='number'&&!Number.isFinite(value)?'invalid-number':value);
 const dirty=computed(()=>editorOpen.value&&baseline.value!==draftStamp());
 const busy=computed(()=>saving.value||uploading.value);
 const editorProps=computed(()=>({scope:scope.value,recordId:recordId.value,form,detail:detail.value,options:bootstrap.value.options||{},retained:retained.value,photos:photos.value,errors,error:editorError.value,loading:editorLoading.value,saving:saving.value,uploading:uploading.value,locked:locked.value,admin:admin.value,dirty:dirty.value,uncertain:uncertain.value}));
@@ -215,7 +215,11 @@ async function readRecord(id:string){
 }
 function openRecord(id:string){if(editorOpen.value&&recordId.value===id)return;leaveEditing(()=>{void readRecord(id);});}
 function reloadEditor(){const id=recordId.value;if(id)leaveEditing(()=>{void readRecord(id);});}
-function fieldChanged(field:string){delete errors[field];if(!uncertain.value){operation='';pendingSave=null;}editorError.value='';}
+function fieldChanged(field:string){
+  delete errors[field];
+  if((field==='meterValue'||field==='correctedUsage')&&form[field]!==null&&!Number.isFinite(form[field]))errors[field]='请填写有效数字，例如 1234.56。';
+  if(!uncertain.value){operation='';pendingSave=null;}editorError.value='';
+}
 function validate(){
   for(const key of Object.keys(errors))delete errors[key];
   if(!form.meter)errors.meter='请选择水表。';if(!form.frequency)errors.frequency='请选择统计频次。';if(!form.shift)errors.shift='请选择班次。';if(!validWaterDate(form.statisticDate))errors.statisticDate='请选择有效的统计日期。';

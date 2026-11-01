@@ -30486,9 +30486,9 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _maintenance_record_matches_mop_month_window(
         self, record: dict[str, Any], month: str = ""
     ) -> bool:
-        if self._maintenance_record_matches_month_window(record, month):
-            return True
-        month_key = self._specific_recent_month_key(month)
+        requested_key = str(month or "").strip()
+        label = dict((key, label) for label, key in self._recent_month_pairs()).get(requested_key, month)
+        month_key = self._specific_recent_month_key(label)
         if month_key is None:
             return False
         fields = record.get("display_fields") or {}
@@ -30503,6 +30503,11 @@ class MaintenancePortalService(RepairOperationsMixin):
             fields.get("维护完成时间"),
             fields.get("审核确认时间"),
         )
+        if self._maintenance_record_matches_month_window(record, label):
+            # Keep year-qualified dates when present; a December label alone
+            # must not mix last year's records into the January previous month.
+            dated_months = {key for key in record_keys if month_key and key[-2:] == month_key[-2:]}
+            return not dated_months or month_key in dated_months
         if month_key:
             return month_key in record_keys
         return bool(record_keys & self._recent_month_keys())
@@ -36748,8 +36753,18 @@ class MaintenancePortalService(RepairOperationsMixin):
             str(item.get("updated_at") or ""),
         )
 
+    def _engineer_mop_month(self, month: str = "") -> str:
+        pairs = self._recent_month_pairs()
+        value = str(month or "").strip()
+        if not value:
+            return pairs[0][1]
+        for label, key in pairs:
+            if value in {label, key}:
+                return key
+        raise PortalError("维护单月份请选择本月或上月。")
+
     def _engineer_month_maintenance_notices(
-        self, *, scope: str, ongoing_items: list[dict[str, Any]] | None
+        self, *, scope: str, ongoing_items: list[dict[str, Any]] | None, month: str = ""
     ) -> list[dict[str, Any]]:
         merged_ongoing = self._merge_ongoing_items(scope, ongoing_items or [])
         notices_by_key: dict[str, dict[str, Any]] = {}
@@ -36767,6 +36782,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                         break
             if match_key not in notices_by_key and template_key:
                 for key, existing in notices_by_key.items():
+                    if month and source_record_id and existing.get("source_record_id") and source_record_id != existing["source_record_id"]:
+                        continue
                     if str(existing.get("mop_template_key") or "").strip() == template_key:
                         match_key = key
                         break
@@ -36778,10 +36795,16 @@ class MaintenancePortalService(RepairOperationsMixin):
             else:
                 notices_by_key[match_key or uuid.uuid4().hex] = notice
 
-        current_month = self._current_month_label()
+        current_month = self._engineer_mop_month(month)
+        available_records = list(self._records or [])
+        if month:
+            by_id = {str(record.get("record_id") or ""): record
+                     for record in (self._source_snapshot_records(scope) or [])}
+            by_id.update({str(record.get("record_id") or ""): record for record in available_records})
+            available_records = list(by_id.values())
         source_records = [
             record
-            for record in list(self._records or [])
+            for record in available_records
             if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
             and self._maintenance_record_matches_mop_month_window(record, current_month)
             and self._scope_matches_building(
@@ -36795,14 +36818,31 @@ class MaintenancePortalService(RepairOperationsMixin):
                 for record in (self._source_snapshot_records(scope) or [])
                 if self._record_work_type(record) == WORK_TYPE_MAINTENANCE
                 and self._maintenance_record_matches_mop_month_window(record, current_month)
+                and self._scope_matches_building(scope, (record.get("display_fields") or {}).get("楼栋"))
             ]
         for record in source_records:
             notice = self._serialize_engineer_source_maintenance_notice(record)
             if notice:
                 upsert_notice(notice)
 
+        source_ids = {str(record.get("record_id") or "") for record in source_records}
+        known_source_ids = {str(record.get("record_id") or "") for record in available_records}
+        def in_selected_month(item: dict[str, Any]) -> bool:
+            source_id = str(item.get("source_record_id") or "")
+            if not month or source_id in source_ids:
+                return True
+            if source_id and source_id in known_source_ids:
+                return False
+            for field in ("started_at", "start_time", "time", "ended_at", "end_time"):
+                keys = self._year_month_keys_from_values(item.get(field))
+                if keys:
+                    return current_month in keys
+            return False
+
         for item in merged_ongoing:
             if self._item_work_type(item) != WORK_TYPE_MAINTENANCE:
+                continue
+            if not in_selected_month(item):
                 continue
             notice = self._serialize_engineer_notice(item, status="进行中")
             upsert_notice(notice)
@@ -36811,6 +36851,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not isinstance(item, dict):
                 continue
             if self._item_work_type(item) != WORK_TYPE_MAINTENANCE:
+                continue
+            if not in_selected_month(item):
                 continue
             notice = self._serialize_engineer_notice(item)
             existing = notices_by_key.get(notice["notice_key"])
@@ -37082,12 +37124,14 @@ class MaintenancePortalService(RepairOperationsMixin):
         return candidates, warnings, settings
 
     def engineer_mop_bootstrap(
-        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None
+        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None, month: str = ""
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
+        selected_month = self._engineer_mop_month(month)
         notices = self._engineer_month_maintenance_notices(
             scope=scope,
             ongoing_items=ongoing_items,
+            month=selected_month if month else "",
         )
         mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
         self._maybe_start_daily_attachment_cache_refresh()
@@ -37174,6 +37218,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             "scope": scope,
             "scope_label": self._scope_label(scope),
             "date": dt.date.today().isoformat(),
+            "month": selected_month,
+            "month_options": [{"value": key, "label": ("本月" if index == 0 else "上月") + " · " + key}
+                              for index, (_label, key) in enumerate(self._recent_month_pairs())],
             "notices": notices,
             "mop_candidates": mop_candidates,
             "bindings": bindings,
@@ -40736,7 +40783,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
 
         self.ensure_snapshot_loaded()
-        record = self._find_record_by_id(source_record_id, WORK_TYPE_MAINTENANCE)
+        record = self._find_engineer_mop_source_record(source_record_id, scope=scope)
         display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
         building_codes = self._building_codes_from_value(display_fields.get("楼栋"))
         normalized_scope = self._normalize_scope(scope)
@@ -41380,7 +41427,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 raise PortalError("当前楼栋与本地 MOP 上传记录不匹配，请重新上传。")
             stored_source_record_id = str(stored.get("source_record_id") or "").strip()
             if stored_source_record_id:
-                record = self._find_record_by_id(stored_source_record_id, WORK_TYPE_MAINTENANCE)
+                record = self._find_engineer_mop_source_record(stored_source_record_id, scope=scope)
                 display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
                 if not self._scope_matches_buildings(request_scope, self._building_codes_from_value(display_fields.get("楼栋"))):
                     raise PortalError("当前账号无权预览该本地 MOP 文件。")
@@ -42196,7 +42243,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         source_record_id = str(source_record_id or "").strip()
         if not source_record_id:
             raise PortalError("缺少维保源表记录 ID，无法上传已签名 MOP。")
-        record = self._find_record_by_id(source_record_id, WORK_TYPE_MAINTENANCE)
+        record = self._find_engineer_mop_source_record(source_record_id, scope=scope)
         display_fields = record.get("display_fields") or {}
         building_codes = self._building_codes_from_value(display_fields.get("楼栋"))
         normalized_scope = self._normalize_scope(scope)
@@ -42362,6 +42409,18 @@ class MaintenancePortalService(RepairOperationsMixin):
             "reset_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         return preview
+
+    def _find_engineer_mop_source_record(self, record_id: str, *, scope: str) -> dict[str, Any]:
+        for record in self._records or []:
+            if str(record.get("record_id") or "") == record_id:
+                return record
+        # Historical notices may exist only in the authorized building snapshot.
+        for snapshot_scope in dict.fromkeys((self._normalize_scope(scope), "ALL")):
+            for record in self._source_snapshot_records(snapshot_scope) or []:
+                if (self._record_work_type(record) == WORK_TYPE_MAINTENANCE
+                        and str(record.get("record_id") or "") == record_id):
+                    return record
+        raise PortalError(f"未找到记录: {record_id}")
 
     def _find_record_by_id(self, record_id: str, work_type: str = WORK_TYPE_MAINTENANCE) -> dict[str, Any]:
         if work_type == WORK_TYPE_CHANGE:
