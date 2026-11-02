@@ -6,17 +6,17 @@
       :aria-pressed="currentRole === item.role"
       :class="{
         active: currentRole === item.role,
-        ready: item.totalCount > 0 && notReadyCount(item) === 0,
-        pending: notReadyCount(item) > 0
+        ready: readyCount(item) > 0,
+        pending: item.totalCount > 0 && readyCount(item) === 0
       }"
       @click="$emit('select', item.role)"
     >
       <div class="role-title-row">
         <span>{{ item.label }}</span>
-        <b>{{ item.totalCount ? `${readyCount(item)}/${item.totalCount}` : "未选" }}</b>
+        <b>{{ item.totalCount ? `${readyCount(item)} 个可用` : "未选" }}</b>
       </div>
       <div class="role-state-row">
-        <strong :class="{ ok: item.totalCount > 0 && notReadyCount(item) === 0, warn: notReadyCount(item) > 0 }">
+        <strong :class="{ ok: readyCount(item) > 0, warn: item.totalCount > 0 && readyCount(item) === 0 }">
           {{ roleStateText(item) }}
         </strong>
         <small v-if="item.totalCount">公司 {{ item.companyCount }} · 临时 {{ item.temporaryCount }}</small>
@@ -32,6 +32,7 @@ export type MopSignatureRoleSummaryItem = {
   role: MopSignatureRole;
   label: string;
   totalCount: number;
+  readyCount: number;
   companyCount: number;
   companyMissingSignature: number;
   companyPendingConfirmation: number;
@@ -61,12 +62,8 @@ function rejectedCount(item: MopSignatureRoleSummaryItem): number {
   return Math.max(0, item.companyRejected);
 }
 
-function notReadyCount(item: MopSignatureRoleSummaryItem): number {
-  return missingSignatureCount(item) + pendingConfirmationCount(item) + rejectedCount(item);
-}
-
 function readyCount(item: MopSignatureRoleSummaryItem): number {
-  return Math.max(0, item.totalCount - notReadyCount(item));
+  return Math.max(0, item.readyCount);
 }
 
 function roleStateText(item: MopSignatureRoleSummaryItem): string {
@@ -74,12 +71,12 @@ function roleStateText(item: MopSignatureRoleSummaryItem): string {
   const missing = missingSignatureCount(item);
   const pending = pendingConfirmationCount(item);
   const rejected = rejectedCount(item);
-  if (!missing && !pending && !rejected) return "全部可用";
+  if (!missing && !pending && !rejected) return "可用于本次维护单";
   const statuses: string[] = [];
   if (missing) statuses.push(`未签 ${missing}`);
   if (pending) statuses.push(`待确认 ${pending}`);
   if (rejected) statuses.push(`已拒绝 ${rejected}`);
-  return statuses.join(" · ");
+  return `${readyCount(item) > 0 ? '另有人员' : ''}${statuses.join(" · ")}`;
 }
 </script>
 

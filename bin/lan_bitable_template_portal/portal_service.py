@@ -40448,6 +40448,61 @@ class MaintenancePortalService(RepairOperationsMixin):
         return col_index + 1
 
     @classmethod
+    def _mop_row_has_check_description(
+        cls,
+        *,
+        rows: list[list[str]],
+        row_index: int,
+        merges: list[dict[str, int]] | None = None,
+    ) -> bool:
+        headers = {
+            "序号", "编号", "设备/编号", "设备编号", "设备名称",
+            "检查项", "检查项目", "维护项", "维护项目", "检查内容", "维护内容",
+            "检查结果", "维护结果", "维护步骤", "操作步骤", "检查步骤",
+            "检查要求", "维护要求", "备注", "异常备注", "复核备注", "数据记录", "测量数据",
+        }
+
+        def has_description(value: Any) -> bool:
+            text = cls._mop_plain_text(value)
+            options = sorted(
+                cls._mop_choice_options(value),
+                key=lambda option: len(str(option.get("label") or "")),
+                reverse=True,
+            )
+            for option in options:
+                label = re.escape(str(option.get("label") or ""))
+                if option.get("style") == "prefix_checkbox":
+                    text = re.sub(r"[□☐■☑√✔✓]" + label + r"(?!\w)", "", text)
+                else:
+                    text = re.sub(r"(?<!\w)" + label + r"\[[^\]]*\]", "", text)
+            text = text.strip("_—–-/\\:：;；,，.。()（）[]【】□☐■☑√✔✓")
+            number = re.sub(r"[.．、()（）#\-—_]+", "", text)
+            return bool(
+                text and text not in headers and not number.isnumeric()
+                and not cls._is_mop_datetime_placeholder(text)
+            )
+
+        if any(has_description(value) for value in rows[row_index]):
+            return True
+        # A vertical merge supplies the description for genuine continuation rows.
+        # Resolve its anchor only for classification; never copy or renumber cells.
+        for merge in merges or []:
+            try:
+                anchor_row = int(merge.get("row") or 0)
+                anchor_col = int(merge.get("col") or 0)
+                rowspan = max(1, int(merge.get("rowspan") or 1))
+            except (TypeError, ValueError):
+                continue
+            if (
+                0 <= anchor_row <= row_index < anchor_row + rowspan
+                and anchor_row < len(rows)
+                and 0 <= anchor_col < len(rows[anchor_row])
+                and has_description(rows[anchor_row][anchor_col])
+            ):
+                return True
+        return False
+
+    @classmethod
     def _extract_mop_sheet_targets(
         cls,
         *,
@@ -40476,29 +40531,36 @@ class MaintenancePortalService(RepairOperationsMixin):
         same_column_time_labels = {"维护完成时间", "审核确认时间"}
         checkbox_columns: list[int] = []
         for row_index, row in enumerate(rows):
+            checkbox_candidates = []
             for col_zero, value in enumerate(row):
-                if cls._is_mop_checkbox_cell(value):
-                    if col_zero not in checkbox_columns:
-                        checkbox_columns.append(col_zero)
-                    options = cls._mop_choice_options(value)
-                    option_labels = {str(item.get("label") or "") for item in options}
-                    checkbox_cells.append(
-                        {
-                            "sheet": sheet_name,
-                            "row": row_index,
-                            "row_number": row_index + 1,
-                            "col": col_zero,
-                            "column": cls._column_label(col_zero + 1),
-                            "cell_ref": f"{cls._column_label(col_zero + 1)}{row_index + 1}",
-                            "value": str(value or ""),
-                            "kind": (
-                                "normal_abnormal"
-                                if {"正常", "异常"}.issubset(option_labels)
-                                else "choice_group"
-                            ),
-                            "options": options,
-                        }
-                    )
+                options = cls._mop_choice_options(value)
+                if options:
+                    checkbox_candidates.append((col_zero, value, options))
+            if not checkbox_candidates or not cls._mop_row_has_check_description(
+                rows=rows, row_index=row_index, merges=merges,
+            ):
+                continue
+            for col_zero, value, options in checkbox_candidates:
+                if col_zero not in checkbox_columns:
+                    checkbox_columns.append(col_zero)
+                option_labels = {str(item.get("label") or "") for item in options}
+                checkbox_cells.append(
+                    {
+                        "sheet": sheet_name,
+                        "row": row_index,
+                        "row_number": row_index + 1,
+                        "col": col_zero,
+                        "column": cls._column_label(col_zero + 1),
+                        "cell_ref": f"{cls._column_label(col_zero + 1)}{row_index + 1}",
+                        "value": str(value or ""),
+                        "kind": (
+                            "normal_abnormal"
+                            if {"正常", "异常"}.issubset(option_labels)
+                            else "choice_group"
+                        ),
+                        "options": options,
+                    }
+                )
         for row_index, row in enumerate(rows):
             for col_index, value in enumerate(row):
                 text = cls._mop_plain_text(value)
@@ -40563,8 +40625,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if not datetime_placeholder:
                         continue
                     if any(
-                        int(field.get("row") or -1) == row_index
-                        and int(field.get("value_col") or -1) == col_index
+                        cls._mop_cell_int(field.get("row"), -1) == row_index
+                        and cls._mop_cell_int(field.get("value_col"), -1) == col_index
                         for field in maintenance_fields
                     ):
                         continue
@@ -41000,6 +41062,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if not parsed:
                         continue
                     row1, col1, row2, col2 = parsed
+                    if (max_rows and row2 > max_rows) or (max_cols and col2 > max_cols):
+                        truncated = True
                     if (max_rows and row1 > max_rows) or (max_cols and col1 > max_cols):
                         continue
                     row2 = min(row2, max_rows) if max_rows else row2
@@ -41015,7 +41079,23 @@ class MaintenancePortalService(RepairOperationsMixin):
                             "colspan": col2 - col1 + 1,
                         }
                     )
+                # Merge-only tails stay in metadata, as before; do not allocate blank rows for them.
                 for row in sheet_root.findall("main:sheetData/main:row", ns):
+                    raw_row_number = row.attrib.get("r")
+                    row_number = (
+                        self._mop_cell_int(raw_row_number, -1)
+                        if raw_row_number is not None else len(rows_out) + 1
+                    )
+                    if not 1 <= row_number <= 1_048_576 or (
+                        raw_row_number is not None
+                        and not re.fullmatch(r"\+?[0-9]+", raw_row_number.strip())
+                    ):
+                        raise PortalError(f"工作表“{name}”包含无效行号，行号必须为 1 至 1048576 的整数。")
+                    if max_rows and row_number > max_rows:
+                        while len(rows_out) < max_rows:
+                            rows_out.append([])
+                        truncated = True
+                        break
                     row_values: list[str] = []
                     for cell in row.findall("main:c", ns):
                         col_index = self._column_index(cell.attrib.get("r", "")) or len(row_values) + 1
@@ -41036,7 +41116,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                                 value = raw
                         row_values.append(value)
                     max_width = max(max_width, len(row_values))
-                    rows_out.append(row_values[:max_cols] if max_cols else row_values)
+                    while len(rows_out) < row_number:
+                        rows_out.append([])
+                    rows_out[row_number - 1] = row_values[:max_cols] if max_cols else row_values
                     if max_rows and len(rows_out) >= max_rows:
                         truncated = True
                         break
@@ -41584,9 +41666,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         checkboxes = [item for item in (checkboxes or []) if isinstance(item, dict)]
         cell_edits = [item for item in (cell_edits or []) if isinstance(item, dict)]
         signatures = [item for item in (signatures or []) if isinstance(item, dict)]
-        signatures = self.signature_management.references(signatures)
-        if not signatures:
-            raise PortalError("请选择至少一个维护实施人或维护审核人签名。")
+        if signatures:
+            signatures = self.signature_management.references(signatures)
         signature_context_key = str(signature_context_key or notice_key or "").strip()
         self._ensure_mop_staff_signature_usage_confirmed(
             signatures=signatures,
@@ -41778,7 +41859,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 )
                 worksheet.add_image(excel_image)
                 inserted += len(role_images)
-            if not inserted:
+            if signatures and not inserted:
                 raise PortalError("没有可插入的签名。")
             scope_part = self._safe_mop_path_part(self._scope_label(self._normalize_scope(scope)) or scope, "ALL")
             date_part = dt.date.today().isoformat()
@@ -41789,7 +41870,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             output_dir = Path(get_data_file_path(os.path.join("engineer_mop_filled", date_part, scope_part)))
             output_dir.mkdir(parents=True, exist_ok=True)
             output_path = output_dir / (
-                f"{stem}_已签名_{dt.datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
+                f"{stem}_{'已签名' if inserted else '已填写'}_{dt.datetime.now().strftime('%H%M%S')}_{uuid.uuid4().hex[:8]}"
                 f"{source_path.suffix}"
             )
             workbook.save(output_path)

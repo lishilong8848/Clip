@@ -6,7 +6,7 @@
         <small :class="{ ready: allReady && !disabledReason }">{{ footerStateLabel }}</small>
       </div>
       <div class="floating-upload-summary">
-        <span :class="{ ready: timeReady }">
+        <span v-if="timeItems.length" :class="{ ready: timeReady }">
           <b>{{ timeReady ? "完成" : "待补" }}</b>
           <em>时间</em>
           <strong>{{ timeReadyCount }}/{{ timeItems.length || 0 }}</strong>
@@ -144,7 +144,7 @@ const footerStateLabel = computed(() => {
 const uploadButtonText = computed(() => {
   if (props.saving) return "上传中";
   if (!props.disabled) return "上传已签名MOP";
-  if (missingCount.value > 0) return "补齐后上传";
+  if (missingCount.value > 0) return "签名后上传";
   return "暂不能上传";
 });
 const uploadReadinessHint = computed(() => {

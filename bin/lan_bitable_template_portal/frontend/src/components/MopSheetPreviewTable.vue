@@ -5,7 +5,20 @@
       <Table2 v-if="!showOriginal" :size="17" /><PenLine v-else :size="17" />{{ showOriginal ? '返回填写' : '查看原表' }}
     </button>
   </div>
+  <MopTableFillToolbar
+    v-if="activeSheet && !activeSheet.is_cover"
+    :bulk-count="bulkCount"
+    :filled-count="filledCount"
+    :total-count="fillTargets.length"
+    :pending-targets="pendingTargets"
+    :column-label="columnLabel"
+    :show-editing-tools="!mobileLayout || showOriginal"
+    @mark-all-normal="emit('mark-all-normal')"
+    @next-missing="locateNextMissing"
+    @locate-missing="emit('locate-missing', $event)"
+  />
   <MopMobileFillForm
+    ref="mobileFormRef"
     v-if="mobileLayout && !showOriginal && activeSheet"
     :sheet="activeSheet"
     :step="mobileStep"
@@ -15,16 +28,11 @@
     :cell-merge-span="cellMergeSpan"
     :checkbox-state-label="checkboxStateLabel"
     :maintenance-field-at="maintenanceFieldAt"
+    :pending-keys="pendingKeys"
     @mark-all-normal="emit('mark-all-normal')"
     @edit-raw="(row, col, value) => emit('edit-raw', row, col, value)"
     @edit-checkbox="(row, col, value) => emit('edit-checkbox', row, col, value)"
     @edit-field="(field, value) => emit('edit-field', field, value)"
-  />
-  <MopTableFillToolbar
-    v-if="activeSheet && !activeSheet.is_cover && (!mobileLayout || showOriginal)"
-    :bulk-count="bulkCount"
-    :filled-count="filledCount"
-    @mark-all-normal="emit('mark-all-normal')"
   />
   <table v-if="activeSheet && (!mobileLayout || showOriginal)" ref="tableRef" :class="{ 'mobile-sheet': mobileLayout }">
     <thead>
@@ -40,7 +48,7 @@
       </tr>
     </thead>
     <tbody>
-      <tr v-for="(row, rowIndex) in renderedRows" :key="rowIndex">
+      <tr v-for="{row, rowIndex} in renderedRows" :key="rowIndex">
         <th class="row-head">{{ rowIndex + 1 }}</th>
         <template
           v-for="cell in rowCells(row, rowIndex)"
@@ -61,10 +69,12 @@
               'active-cell': cell.active,
               'signature-cell': Boolean(cell.signatureRole),
               'signature-cell-empty': Boolean(cell.signatureRole) && !cell.signatures.length,
+              'cell-pending': cell.pending,
               normal: cell.checkboxLabel.includes('正常'),
               abnormal: cell.checkboxLabel.includes('异常')
             }"
             :tabindex="mobileLayout && cell.canEdit ? 0 : undefined"
+            :aria-label="cell.pending ? `${columnLabel(cell.colIndex)}${rowIndex + 1} 未填写` : undefined"
             @mousedown.left="startCell(rowIndex, cell.colIndex, $event)"
             @click="mobileLayout && emit('cell-activate', rowIndex, cell.colIndex)"
             @keydown.enter.stop.prevent="mobileLayout && emit('cell-activate', rowIndex, cell.colIndex)"
@@ -148,6 +158,8 @@ import { PenLine, Table2 } from 'lucide-vue-next';
 import MopMobileFillForm from './MopMobileFillForm.vue';
 import MopCellPopover, { type MopCellPopoverMode } from "./MopCellPopover.vue";
 import MopTableFillToolbar from "./MopTableFillToolbar.vue";
+import { mopPreviewRowIndexes, type MopFillTarget } from '../mopFillProgress';
+import { mopChoicePlaceholder } from '../mopMobileFields';
 
 type Dict = Record<string, any>;
 
@@ -157,6 +169,7 @@ const props = defineProps<{
   columnIndexes: number[];
   bulkCount: number;
   filledCount: number;
+  fillTargets: MopFillTarget[];
   signatureManagerOpen: boolean;
   activeMopCellPosition: { row: number; col: number } | null;
   activeMopCellKey: string;
@@ -191,24 +204,55 @@ const loadMoreRowRef = ref<HTMLElement | null>(null);
 let loadMoreObserver: IntersectionObserver | null = null;
 let loadMoreFrame = 0;
 const tableRef = ref<HTMLTableElement | null>(null);
+const mobileFormRef = ref<InstanceType<typeof MopMobileFillForm> | null>(null);
 const mobileQuery = window.matchMedia('(max-width: 720px)');
 const mobileLayout = ref(mobileQuery.matches);
 const showOriginal = ref(false);
+const lastMissingPosition = ref<{row: number; col: number} | null>(null);
 watch(() => props.mobileStep, () => { showOriginal.value = false; });
 function updateMobileLayout(): void { mobileLayout.value = mobileQuery.matches; }
 
 const activeRows = computed<unknown[][]>(() => (
   Array.isArray(props.activeSheet?.rows) ? props.activeSheet.rows : []
 ));
-const renderedRows = computed(() => activeRows.value.slice(0, renderedRowLimit.value));
-const hasMoreRows = computed(() => renderedRowLimit.value < activeRows.value.length);
+const pendingTargets = computed(() => props.fillTargets.filter(target => !target.done));
+const requiredPendingTargets = computed(() => pendingTargets.value.filter(target => target.required));
+const pendingKeys = computed(() => requiredPendingTargets.value.map(target => `${target.row}:${target.col}`));
+const pendingKeySet = computed(() => new Set(pendingKeys.value));
+const compactRowIndexes = computed(() => {
+  if (!props.activeSheet) return [];
+  const targets = new Set(props.fillTargets.map(target => target.row));
+  const emptyChecks = new Map<number, Set<number>>();
+  for (const cell of props.activeSheet.checkbox_cells || []) {
+    const row = Number(cell.row), col = Number(cell.col);
+    if (props.checkboxCellAt(row, col)) continue;
+    const cols = emptyChecks.get(row) || new Set<number>();
+    cols.add(col); emptyChecks.set(row, cols);
+  }
+  return mopPreviewRowIndexes(props.activeSheet, row => {
+    if (targets.has(row)) return true;
+    const ignored = new Set(emptyChecks.get(row));
+    activeRows.value[row]?.forEach((value, col) => {
+      if (mopChoicePlaceholder(value)) ignored.add(col);
+    });
+    return props.columnIndexes.some(col => {
+      const value = displayValue(row, col).trim();
+      if (props.mopCellHasOverride(row, col)) return Boolean(value);
+      if (!value || ignored.has(col)) return false;
+      return !ignored.size || !/^\d+[.、．)]?$/.test(value);
+    });
+  });
+});
+const visibleRowIndexes = compactRowIndexes;
+const renderedRows = computed(() => visibleRowIndexes.value.slice(0, renderedRowLimit.value).map(rowIndex => ({row: activeRows.value[rowIndex], rowIndex})));
+const hasMoreRows = computed(() => renderedRowLimit.value < visibleRowIndexes.value.length);
 function displayValue(row: number, col: number): string {
   return props.mopCellHasOverride(row, col) ? props.cellOverrideValue(row, col) : String(activeRows.value[row]?.[col] ?? '');
 }
 const editablePositions = computed(() => {
   const positions: Array<{ row: number; col: number }> = [];
   if (!mobileLayout.value) return positions;
-  activeRows.value.forEach((_row, row) => {
+  visibleRowIndexes.value.forEach(row => {
     for (const col of props.columnIndexes) {
       if (props.cellMergeSpan(row, col)?.hidden || props.signatureRoleAtCell(row, col)) continue;
       if (props.checkboxCellAt(row, col) || props.maintenanceFieldAt(row, col) || props.editableCellAt(row, col)) {
@@ -242,14 +286,38 @@ async function moveMobileCell(direction: number): Promise<void> {
   if (activeEditIndex.value < 0) return;
   const position = editablePositions.value[activeEditIndex.value + direction];
   if (!position) return;
-  renderedRowLimit.value = Math.max(renderedRowLimit.value, position.row + 1);
-  emit('cell-activate', position.row, position.col);
+  await focusCell(position.row, position.col);
+}
+
+function locateNextMissing(): void {
+  const position = lastMissingPosition.value;
+  const candidates = requiredPendingTargets.value.length ? requiredPendingTargets.value : pendingTargets.value;
+  const target = (position && candidates.find(item => item.row > position.row || item.row === position.row && item.col > position.col)) || candidates[0];
+  if (!target) return;
+  lastMissingPosition.value = target;
+  emit('locate-missing', target);
+}
+
+async function focusCell(row: number, col: number): Promise<void> {
+  lastMissingPosition.value = {row, col};
+  if (mobileLayout.value && !showOriginal.value) {
+    await nextTick();
+    if (await mobileFormRef.value?.focusCell(row, col)) return;
+    showOriginal.value = true;
+    await nextTick();
+  }
+  if (!visibleRowIndexes.value.includes(row)) return;
+  renderedRowLimit.value = Math.max(renderedRowLimit.value, visibleRowIndexes.value.indexOf(row) + 1);
   await nextTick();
-  const key = props.mopCellKey(position.row, position.col);
+  emit('cell-activate', row, col);
+  await nextTick();
+  const key = props.mopCellKey(row, col);
   const cell = tableRef.value?.querySelector<HTMLElement>(`[data-mop-cell-key="${CSS.escape(key)}"]`);
   cell?.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'auto' });
   observeLoadMoreRow();
 }
+
+defineExpose({focusCell});
 
 function cellView(row: unknown[], rowIndex: number, colIndex: number) {
   const merge = props.cellMergeSpan(rowIndex, colIndex) || {};
@@ -263,7 +331,8 @@ function cellView(row: unknown[], rowIndex: number, colIndex: number) {
     colIndex,
     key,
     hidden: Boolean(merge.hidden),
-    rowspan: Number(merge.rowspan || 1),
+    rowspan: Number(merge.rowspan || 1) > 1
+      ? Math.max(1, visibleRowIndexes.value.filter(row => row >= rowIndex && row < rowIndex + Number(merge.rowspan)).length) : 1,
     colspan: Number(merge.colspan || 1),
     checkbox,
     checkboxLabel: checkbox ? props.checkboxStateLabel(checkbox) : "",
@@ -271,6 +340,7 @@ function cellView(row: unknown[], rowIndex: number, colIndex: number) {
     rawEditable: Boolean(props.editableCellAt(rowIndex, colIndex)),
     modified,
     selected: props.isMopCellSelected(rowIndex, colIndex),
+    pending: pendingKeySet.value.has(`${rowIndex}:${colIndex}`),
     active: props.activeMopCellKey === key,
     signatureRole,
     canEdit: Boolean(checkbox || signatureRole || props.maintenanceFieldAt(rowIndex, colIndex) || props.editableCellAt(rowIndex, colIndex)),
@@ -295,7 +365,7 @@ function loadNextRows(): void {
   loadMoreFrame = window.requestAnimationFrame(() => {
     loadMoreFrame = 0;
     renderedRowLimit.value = Math.min(
-      activeRows.value.length,
+      visibleRowIndexes.value.length,
       renderedRowLimit.value + renderStepRows,
     );
     void nextTick(observeLoadMoreRow);
@@ -311,8 +381,9 @@ function observeLoadMoreRow(): void {
 watch(loadMoreRowRef, observeLoadMoreRow, { flush: 'post' });
 
 watch(
-  () => `${props.activeSheet?.name || ""}:${activeRows.value.length}`,
+  () => props.activeSheet,
   () => {
+    lastMissingPosition.value = null;
     renderedRowLimit.value = Math.min(initialRenderRows, activeRows.value.length || initialRenderRows);
     void nextTick(observeLoadMoreRow);
   },
@@ -340,6 +411,7 @@ onBeforeUnmount(() => {
 
 const emit = defineEmits<{
   "mark-all-normal": [];
+  'locate-missing': [target: MopFillTarget];
   "cell-mousedown": [rowIndex: number, colIndex: number, event: MouseEvent];
   "cell-activate": [rowIndex: number, colIndex: number];
   "edit-raw": [row: number, col: number, value: string];
@@ -502,6 +574,19 @@ td.selected-cell.cell-modified {
 
 td.selected-cell.active-cell {
   outline: 2px solid rgba(30, 99, 255, 0.5);
+}
+
+td.cell-pending:not(.active-cell) {
+  background: #fff7ed;
+  box-shadow: inset 0 0 0 2px #f2b77f;
+  animation: mop-cell-breathe 2s ease-in-out infinite;
+}
+@keyframes mop-cell-breathe {
+  0%, 100% { box-shadow: inset 0 0 0 1px #f2b77f; }
+  50% { box-shadow: inset 0 0 0 3px #e88039; }
+}
+@media (prefers-reduced-motion: reduce) {
+  td.cell-pending:not(.active-cell) { animation: none; }
 }
 
 .sheet-cell-signatures {

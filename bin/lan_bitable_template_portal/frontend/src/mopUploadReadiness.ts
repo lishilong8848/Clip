@@ -1,11 +1,6 @@
 import { mopPersonHasUsableSignature } from "./mopSignatureUtils";
 import type { LooseDict } from "./types";
 
-export type MopInvolvedPeopleRequirement = {
-  count: number;
-  cell_ref: string;
-};
-
 export type MopStatusItem = {
   key: string;
   label: string;
@@ -32,28 +27,6 @@ export function selectedSignaturesReady(people: LooseDict[]): boolean {
   return people.length > 0 && people.every((person) => mopPersonHasUsableSignature(person));
 }
 
-export function maintenanceTimeValidationMessage(input: {
-  startText: string;
-  finishText: string;
-  auditText: string;
-  timeOrderInvalid: boolean;
-}): string {
-  if (!input.startText) return "请填写维护开始时间";
-  if (!input.finishText) return "请填写维护完成时间";
-  if (!input.auditText) return "请填写审核确认时间";
-  if (input.timeOrderInvalid) return "维护开始时间不能晚于维护完成时间";
-  return "";
-}
-
-export function requiredImplementerSignatureCount(input: {
-  involvedPeopleCount: number;
-  selectedImplementerCount: number;
-}): number {
-  return input.involvedPeopleCount > 0
-    ? input.involvedPeopleCount
-    : input.selectedImplementerCount;
-}
-
 export function signatureDisplayCount(input: {
   signedCount: number;
   requiredCount: number;
@@ -66,15 +39,9 @@ export function signatureDisplayCount(input: {
 export function fillMopDisabledReason(input: {
   hasLocalFile: boolean;
   hasActiveSheet: boolean;
-  timeValidationMessage: string;
-  selectedPeopleCount: number;
-  unsignedPeopleCount: number;
 }): string {
   if (!input.hasLocalFile) return "请先打开 MOP 表格";
   if (!input.hasActiveSheet) return "请先选择需要填写的 Sheet";
-  if (input.timeValidationMessage) return input.timeValidationMessage;
-  if (!input.selectedPeopleCount) return "请至少选择一个签名人员";
-  if (input.unsignedPeopleCount > 0) return `还有 ${input.unsignedPeopleCount} 个已选人员未签名`;
   return "";
 }
 
@@ -83,27 +50,15 @@ export function uploadSignedMopDisabledReason(input: {
   hasActiveSheet: boolean;
   hasSelectedNotice: boolean;
   hasSourceRecordId: boolean;
-  timeValidationMessage: string;
   hasImplementerSignature: boolean;
   hasAuditorSignature: boolean;
-  unsignedPeopleCount: number;
-  involvedPeopleRequirement: MopInvolvedPeopleRequirement;
-  signedImplementerCount: number;
 }): string {
   if (!input.hasLocalFile) return "请先打开 MOP 表格";
-  if (!input.hasActiveSheet) return "请先选择需要填写的 Sheet";
+  if (!input.hasActiveSheet) return "请先选择包含签名位置的维护单填写页，封面为只读页";
   if (!input.hasSelectedNotice) return "请先选择左侧通告";
   if (!input.hasSourceRecordId) return "当前通告未关联维保计划事项，无法确定维护单的归档位置。请在通告办理中绑定对应维保计划，再刷新本页上传；若已经绑定，请重新读取通告。";
-  if (input.timeValidationMessage) return input.timeValidationMessage;
   if (!input.hasImplementerSignature) return "请至少选择一个维护实施人签名";
   if (!input.hasAuditorSignature) return "请至少选择一个维护审核人签名";
-  if (input.unsignedPeopleCount > 0) return `还有 ${input.unsignedPeopleCount} 个已选人员未签名`;
-  if (
-    input.involvedPeopleRequirement.count > 0
-    && input.signedImplementerCount < input.involvedPeopleRequirement.count
-  ) {
-    return `${input.involvedPeopleRequirement.cell_ref || "涉及人数"}为 ${input.involvedPeopleRequirement.count} 人，维护实施人至少需要 ${input.involvedPeopleRequirement.count} 个已签名人员`;
-  }
   return "";
 }
 
@@ -114,10 +69,6 @@ export function canUploadSignedMop(input: {
   hasSourceRecordId: boolean;
   hasImplementerSignature: boolean;
   hasAuditorSignature: boolean;
-  allSelectedSignaturesReady: boolean;
-  timeValidationMessage: string;
-  involvedPeopleRequirement: MopInvolvedPeopleRequirement;
-  signedImplementerCount: number;
 }): boolean {
   return Boolean(
     input.hasLocalFile
@@ -126,12 +77,6 @@ export function canUploadSignedMop(input: {
     && input.hasSourceRecordId
     && input.hasImplementerSignature
     && input.hasAuditorSignature
-    && input.allSelectedSignaturesReady
-    && !input.timeValidationMessage
-    && (
-      input.involvedPeopleRequirement.count <= 0
-      || input.signedImplementerCount >= input.involvedPeopleRequirement.count
-    )
   );
 }
 
@@ -163,9 +108,9 @@ export function buildMopCompletionItems(input: {
     },
     {
       key: "fields",
-      label: "表格填写",
+      label: "表格选填",
       text: input.fillTotal ? `${input.filledCount}/${input.fillTotal}` : "无待填项",
-      done: input.fillTotal === 0 || input.filledCount >= input.fillTotal,
+      done: true,
     },
   ];
 }
@@ -213,36 +158,12 @@ export function buildMopRequirementItems(input: {
 }
 
 export function buildMopUploadFooterItems(input: {
-  startText: string;
-  finishText: string;
-  auditText: string;
-  startReady: boolean;
-  finishReady: boolean;
-  auditReady: boolean;
   implementerText: string;
   implementerReady: boolean;
   auditorText: string;
   auditorReady: boolean;
 }): MopUploadFooterItem[] {
   return [
-    {
-      key: "start_time",
-      label: "开始时间",
-      text: input.startText || "未填",
-      ready: input.startReady,
-    },
-    {
-      key: "finish_time",
-      label: "完成时间",
-      text: input.finishText || "未填",
-      ready: input.finishReady,
-    },
-    {
-      key: "audit_time",
-      label: "审核时间",
-      text: input.auditText || "未填",
-      ready: input.auditReady,
-    },
     {
       key: "implementer",
       label: "实施人",

@@ -213,11 +213,13 @@
           @mouseleave="finishMopCellSelection"
         >
           <MopSheetPreviewTable
+            ref="mopSheetTableRef"
             :active-sheet="activeSheet || null"
             :mobile-step="mopMobileStep"
             :column-indexes="activeSheetColumnIndexes"
             :bulk-count="bulkFillCheckboxCells.length"
             :filled-count="mopFilledCount"
+            :fill-targets="mopFillTargets"
             :signature-manager-open="signatureManagerOpen"
             :active-mop-cell-position="activeMopCellPosition"
             :active-mop-cell-key="activeMopCellKey"
@@ -244,6 +246,7 @@
             :checkbox-state-label="checkboxStateLabel"
             :cell-override-value="cellOverrideValue"
             @mark-all-normal="markAllCheckboxes('normal')"
+            @locate-missing="locateMopMissing"
             @cell-mousedown="startMopCellSelection"
             @cell-activate="activateMopCell"
             @edit-raw="setEditableCellValue"
@@ -326,6 +329,8 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowRight, ClipboardCheck, UsersRound } from 'lucide-vue-next';
 import { requestJson, type Dict } from "../api/client";
+import { mopCheckboxCells, mopCheckLabels } from '../mopMobileFields';
+import { mopSelectedChoice, uniqueMopFillTargets, type MopFillTarget } from '../mopFillProgress';
 import {
   bindEngineerMop,
   downloadFilledEngineerMop,
@@ -348,7 +353,6 @@ import {
   normalizeMopRequiredTimeText,
   parseMopComparableDate,
   parseMopClipboardMatrix,
-  parsePeopleCount,
   roleForMopMaintenanceLabel,
   selectedMopCellBounds as calculateSelectedMopCellBounds,
 } from "../mopSheetUtils";
@@ -389,8 +393,6 @@ import {
   buildMopUploadFooterItems,
   canUploadSignedMop as resolveCanUploadSignedMop,
   fillMopDisabledReason as resolveFillMopDisabledReason,
-  maintenanceTimeValidationMessage,
-  requiredImplementerSignatureCount as resolveRequiredImplementerSignatureCount,
   signatureDisplayCount,
   uploadSignedMopDisabledReason as resolveUploadSignedMopDisabledReason,
 } from "../mopUploadReadiness";
@@ -517,6 +519,7 @@ const activeMopCellKey = mopCellSelection.activeKey;
 const selectedMopCellKeys = mopCellSelection.selectedKeys;
 const activeMopCellOverlayStyle = mopCellSelection.overlayStyle;
 const sheetScrollRef = mopCellSelection.sheetScrollRef;
+const mopSheetTableRef = ref<InstanceType<typeof MopSheetPreviewTable> | null>(null);
 const signatureMessage = ref("");
 const signatureMessageType = ref("");
 const mopUploadMessage = ref("");
@@ -726,7 +729,7 @@ const mopFlowSteps = computed(() => {
   const noticeReady = Boolean(selectedNotice.value);
   const mopReady = Boolean(selectedMop.value && selectedAttachment.value);
   const previewReady = Boolean(previewMode.value && preview.value?.local_file?.path && activeSheet.value);
-  const signaturesReady = Boolean(hasImplementerSignature.value && hasAuditorSignature.value && allSelectedSignaturesReady.value);
+  const signaturesReady = Boolean(hasImplementerSignature.value && hasAuditorSignature.value);
   const uploadReady = Boolean(canUploadSignedMop.value);
   const uploaded = Boolean(signedMopUploadedAt.value);
   return [
@@ -802,6 +805,7 @@ const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => 
     role,
     label,
     totalCount: selectedSignaturePeople(role).length,
+    readyCount: selectedSignaturePeople(role).filter(person => personReadyForMop(person)).length,
     companyCount: selectedFormalSignaturePeople(role).length,
     companyMissingSignature: selectedFormalSignatureMissingSignatureCount(role),
     companyPendingConfirmation: selectedFormalSignaturePendingConfirmationCount(role),
@@ -812,15 +816,16 @@ const signatureRoleSummaryItems = computed<MopSignatureRoleSummaryItem[]>(() => 
 ));
 const signatureTaskSummaryText = computed(() => {
   const items: string[] = [];
-  if (mopMaintenanceTimeValidationMessage.value) items.push("时间待补");
   if (!implementerSignatureReady.value) {
     items.push(`实施人 ${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value || 1}`);
   }
   if (!auditorSignatureReady.value) {
     items.push(`审核人 ${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`);
   }
-  if (unsignedSelectedSignatureCount.value > 0) items.push(`${unsignedSelectedSignatureCount.value} 人待处理`);
-  return items.length ? items.join(" · ") : "签名已齐全，可写入 MOP";
+  const readyText = items.length ? items.join(" · ") : "签名已齐全，可写入 MOP";
+  return unsignedSelectedSignatureCount.value > 0
+    ? `${readyText}；另 ${unsignedSelectedSignatureCount.value} 人待签名或确认，暂不写入`
+    : readyText;
 });
 const currentUserOpenId = computed(() => String(currentAuthUser.value?.open_id || "").trim());
 function isCurrentUserSignaturePerson(person: Dict | null | undefined): boolean {
@@ -858,42 +863,15 @@ const allSelectedSignaturePeople = computed(() => [
   ...selectedSignaturePeople("implementer"),
   ...selectedSignaturePeople("auditor"),
 ]);
-const allSelectedSignaturesReady = computed(() => allSelectedSignaturePeople.value.every((person) => personReadyForMop(person)));
 const canFillMopSignatures = computed(() => {
-  if (!preview.value?.local_file?.path || !activeSheet.value) return false;
-  return allSelectedSignaturesReady.value;
+  return Boolean(preview.value?.local_file?.path && activeSheet.value);
 });
 const hasImplementerSignature = computed(() => selectedSignaturePeople("implementer").some((person) => personReadyForMop(person)));
 const hasAuditorSignature = computed(() => selectedSignaturePeople("auditor").some((person) => personReadyForMop(person)));
 const signedImplementerCount = computed(() => selectedSignaturePeople("implementer").filter((person) => personReadyForMop(person)).length);
 const signedAuditorCount = computed(() => selectedSignaturePeople("auditor").filter((person) => personReadyForMop(person)).length);
 const unsignedSelectedSignatureCount = computed(() => allSelectedSignaturePeople.value.filter((person) => !personReadyForMop(person)).length);
-const involvedPeopleRequirement = computed(() => detectInvolvedPeopleRequirement());
-const mopMaintenanceStartTimeText = computed(() => maintenanceFieldValueByLabel("维护开始时间"));
-const mopMaintenanceFinishTimeText = computed(() => maintenanceFieldValueByLabel("维护完成时间"));
-const mopAuditConfirmTimeText = computed(() => maintenanceFieldValueByLabel("审核确认时间"));
-const mopMaintenanceStartDate = computed(() => parseMopComparableDate(mopMaintenanceStartTimeText.value));
-const mopMaintenanceFinishDate = computed(() => parseMopComparableDate(mopMaintenanceFinishTimeText.value));
-const mopMaintenanceTimeOrderInvalid = computed(() => Boolean(
-  mopMaintenanceStartDate.value
-  && mopMaintenanceFinishDate.value
-  && mopMaintenanceStartDate.value.getTime() > mopMaintenanceFinishDate.value.getTime()
-));
-const mopMaintenanceStartTimeReady = computed(() => Boolean(mopMaintenanceStartTimeText.value) && !mopMaintenanceTimeOrderInvalid.value);
-const mopMaintenanceFinishTimeReady = computed(() => Boolean(mopMaintenanceFinishTimeText.value) && !mopMaintenanceTimeOrderInvalid.value);
-const mopAuditConfirmTimeReady = computed(() => Boolean(mopAuditConfirmTimeText.value));
-const mopMaintenanceTimeValidationMessage = computed(() => maintenanceTimeValidationMessage({
-  startText: mopMaintenanceStartTimeText.value,
-  finishText: mopMaintenanceFinishTimeText.value,
-  auditText: mopAuditConfirmTimeText.value,
-  timeOrderInvalid: mopMaintenanceTimeOrderInvalid.value,
-}));
-const requiredImplementerSignatureCount = computed(() => (
-  resolveRequiredImplementerSignatureCount({
-    involvedPeopleCount: involvedPeopleRequirement.value.count,
-    selectedImplementerCount: selectedSignaturePeople("implementer").length,
-  })
-));
+const requiredImplementerSignatureCount = computed(() => 1);
 const requiredAuditorSignatureCount = computed(() => 1);
 const implementerSignatureReady = computed(() => (
   requiredImplementerSignatureCount.value > 0
@@ -915,22 +893,15 @@ const auditorSignatureDisplayCount = computed(() => (
 const fillMopDisabledReason = computed(() => resolveFillMopDisabledReason({
   hasLocalFile: Boolean(preview.value?.local_file?.path),
   hasActiveSheet: Boolean(activeSheet.value),
-  timeValidationMessage: mopMaintenanceTimeValidationMessage.value,
-  selectedPeopleCount: allSelectedSignaturePeople.value.length,
-  unsignedPeopleCount: unsignedSelectedSignatureCount.value,
 }));
 const canUploadSignedMop = computed(() => Boolean(
   resolveCanUploadSignedMop({
     hasLocalFile: Boolean(preview.value?.local_file?.path),
-    hasActiveSheet: Boolean(activeSheet.value),
+    hasActiveSheet: Boolean(activeSheet.value && !activeSheet.value.is_cover),
     hasSelectedNotice: Boolean(selectedNotice.value),
     hasSourceRecordId: Boolean(selectedNoticeSourceRecordId.value),
     hasImplementerSignature: hasImplementerSignature.value,
     hasAuditorSignature: hasAuditorSignature.value,
-    allSelectedSignaturesReady: allSelectedSignaturesReady.value,
-    timeValidationMessage: mopMaintenanceTimeValidationMessage.value,
-    involvedPeopleRequirement: involvedPeopleRequirement.value,
-    signedImplementerCount: signedImplementerCount.value,
   })
 ));
 const signedMopUploadedAtText = computed(() => (
@@ -938,23 +909,18 @@ const signedMopUploadedAtText = computed(() => (
 ));
 const uploadSignedMopDisabledReason = computed(() => resolveUploadSignedMopDisabledReason({
   hasLocalFile: Boolean(preview.value?.local_file?.path),
-  hasActiveSheet: Boolean(activeSheet.value),
+  hasActiveSheet: Boolean(activeSheet.value && !activeSheet.value.is_cover),
   hasSelectedNotice: Boolean(selectedNotice.value),
   hasSourceRecordId: Boolean(selectedNoticeSourceRecordId.value),
-  timeValidationMessage: mopMaintenanceTimeValidationMessage.value,
   hasImplementerSignature: hasImplementerSignature.value,
   hasAuditorSignature: hasAuditorSignature.value,
-  unsignedPeopleCount: unsignedSelectedSignatureCount.value,
-  involvedPeopleRequirement: involvedPeopleRequirement.value,
-  signedImplementerCount: signedImplementerCount.value,
 }));
 const activeSheet = computed(() => {
   const sheets = Array.isArray(preview.value?.sheets) ? preview.value?.sheets : [];
   return sheets.find((item: Dict) => item.name === activeSheetName.value) || sheets[0] || null;
 });
 const activeSheetCheckboxCells = computed(() => {
-  const items = activeSheet.value?.checkbox_cells;
-  return Array.isArray(items) ? items : [];
+  return activeSheet.value ? mopCheckboxCells(activeSheet.value) : [];
 });
 const activeSheetCheckboxCellMap = computed(() => {
   const map = new Map<string, Dict>();
@@ -997,16 +963,28 @@ const activeSheetMaintenanceProtectedCellSet = computed(() => {
   }
   return set;
 });
-const mopFilledCount = computed(() => {
-  const sheetName = String(activeSheet.value?.name || "");
-  if (!sheetName) return 0;
-  const checkboxCount = activeSheetCheckboxCells.value.filter((cell) => Boolean(mopCheckboxStates.value[checkboxKey(cell)])).length;
-  const fieldCount = activeSheetMaintenanceFields.value.filter((field) => Boolean(mopMaintenanceValues.value[maintenanceKey(field)])).length;
-  const editCount = Object.keys(mopCellEdits.value).filter((key) => key.startsWith(`${sheetName}:`)).length;
-  return checkboxCount + fieldCount + editCount;
+const mopFillTargets = computed<MopFillTarget[]>(() => {
+  if (!activeSheet.value || activeSheet.value.is_cover) return [];
+  const targets: MopFillTarget[] = activeSheetCheckboxCells.value.map(cell => ({
+    row: Number(cell.row), col: Number(cell.col), kind: 'check',
+    label: mopCheckLabels(activeSheet.value!, Number(cell.row), Number(cell.col)).join(' · ') || '检查结果',
+    done: Boolean(checkboxStateLabel(cell)),
+  }));
+  for (const field of activeSheetMaintenanceFields.value) {
+    const row = Number(field.row), col = Number(field.value_col);
+    const role = roleForMaintenanceLabel(field.label);
+    const value = sheetCellDisplayText(row, col);
+    const done = role ? cellSignatures(row, col).length > 0
+      : maintenanceFieldIsTime(field) ? Boolean(normalizeMopRequiredTimeText(value) && parseMopComparableDate(value))
+      : maintenanceFieldIsCompletion(field) ? Boolean(mopSelectedChoice(value.replace(/^\s*维护完成情况\s*[:：]?\s*/, ''), ['已完成', '未完成']))
+      : Boolean(value.trim() && value.trim() !== String(field.label || '').trim());
+    targets.push({ row, col, label: String(field.label || '维护信息'), kind: role ? 'signature' : 'field', required: Boolean(role), done });
+  }
+  return uniqueMopFillTargets(targets);
 });
+const mopFilledCount = computed(() => mopFillTargets.value.filter(target => target.done).length);
 const mopCompletionItems = computed(() => {
-  const fillTotal = activeSheetCheckboxCells.value.length + activeSheetMaintenanceFields.value.length;
+  const fillTotal = mopFillTargets.value.length;
   return buildMopCompletionItems({
     hasLocalFile: Boolean(preview.value?.local_file?.path),
     implementerCount: signedImplementerCount.value,
@@ -1025,12 +1003,6 @@ const mopRequirementItems = computed(() => buildMopRequirementItems({
 }));
 
 const mopUploadFooterItems = computed(() => buildMopUploadFooterItems({
-  startText: mopMaintenanceStartTimeText.value,
-  finishText: mopMaintenanceFinishTimeText.value,
-  auditText: mopAuditConfirmTimeText.value,
-  startReady: mopMaintenanceStartTimeReady.value,
-  finishReady: mopMaintenanceFinishTimeReady.value,
-  auditReady: mopAuditConfirmTimeReady.value,
   implementerText: `${implementerSignatureDisplayCount.value}/${requiredImplementerSignatureCount.value}`,
   implementerReady: implementerSignatureReady.value,
   auditorText: `${auditorSignatureDisplayCount.value}/${requiredAuditorSignatureCount.value}`,
@@ -1184,57 +1156,11 @@ function isRecommendedMop(mop: Dict): boolean {
   return Boolean(recommendedMopRecordId.value && String(mop?.record_id || "") === recommendedMopRecordId.value);
 }
 
-function maintenanceFieldValueByLabel(labelText: string): string {
-  const fields = activeSheetMaintenanceFields.value.filter((item) => String(item.label || "").includes(labelText));
-  for (const field of fields) {
-    const row = Number(field.row);
-    const valueCol = Number(field.value_col ?? field.label_col ?? -1);
-    const rowValues = Array.isArray(activeSheet.value?.rows?.[row]) ? activeSheet.value?.rows?.[row] : [];
-    const candidates = [
-      mopMaintenanceValues.value[maintenanceKey(field)],
-      field.fill_value,
-      Object.prototype.hasOwnProperty.call(mopCellEdits.value, rawCellKey(row, valueCol))
-        ? mopCellEdits.value[rawCellKey(row, valueCol)]
-        : "",
-      field.value,
-      rowValues?.[valueCol],
-    ];
-    for (const candidate of candidates) {
-      const normalized = normalizeMopRequiredTimeText(candidate);
-      if (normalized) return normalized;
-    }
-  }
-  return "";
-}
-
 function sheetCellDisplayText(rowIndex: number, colIndex: number): string {
   if (mopCellHasOverride(rowIndex, colIndex)) {
     return String(cellOverrideValue(rowIndex, colIndex));
   }
   return String(activeSheet.value?.rows?.[rowIndex]?.[colIndex] ?? "");
-}
-
-function detectInvolvedPeopleRequirement(): { count: number; cell_ref: string } {
-  const rows = Array.isArray(activeSheet.value?.rows) ? activeSheet.value?.rows : [];
-  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
-    for (const colIndex of activeSheetColumnIndexes.value) {
-      const text = sheetCellDisplayText(rowIndex, colIndex);
-      if (!String(text || "").includes("涉及人数")) continue;
-      const inlineCount = parsePeopleCount(text);
-      if (inlineCount > 0) {
-        return { count: inlineCount, cell_ref: `${columnLabel(colIndex)}${rowIndex + 1}` };
-      }
-      for (const offset of [1, 2, 3]) {
-        const nextCol = colIndex + offset;
-        if (!activeSheetColumnIndexes.value.includes(nextCol)) continue;
-        const count = parsePeopleCount(sheetCellDisplayText(rowIndex, nextCol));
-        if (count > 0) {
-          return { count, cell_ref: `${columnLabel(nextCol)}${rowIndex + 1}` };
-        }
-      }
-    }
-  }
-  return { count: 0, cell_ref: "" };
 }
 
 function checkboxKey(cell: Dict): string {
@@ -1246,7 +1172,13 @@ function maintenanceKey(field: Dict): string {
 }
 
 function checkboxState(cell: Dict): string {
-  return mopCheckboxStates.value[checkboxKey(cell)] || "";
+  const key = checkboxKey(cell);
+  if (Object.prototype.hasOwnProperty.call(mopCheckboxStates.value, key)) return mopCheckboxStates.value[key] || '';
+  const row = Number(cell.row), col = Number(cell.col);
+  const editKey = rawCellKey(row, col);
+  const value = Object.prototype.hasOwnProperty.call(mopCellEdits.value, editKey)
+    ? mopCellEdits.value[editKey] : activeSheet.value?.rows?.[row]?.[col] ?? cell.value;
+  return mopSelectedChoice(value, checkboxOptions(cell).map(checkboxOptionValue));
 }
 
 function checkboxOptions(cell: Dict): Dict[] {
@@ -1346,6 +1278,21 @@ async function setMopMobileStep(step: 'details' | 'checks'): Promise<void> {
   mopMobileStep.value = step;
   await nextTick();
   mopMobileStepsRef.value?.scrollIntoView({ block: 'start', behavior: 'auto' });
+}
+
+async function locateMopMissing(target: MopFillTarget): Promise<void> {
+  if (mopFillSaving.value || mopUploadSaving.value || mopResetting.value) return;
+  if (target.kind === 'signature') {
+    const role = signatureRoleAtCell(target.row, target.col);
+    if (role) openSignatureManager(role);
+    return;
+  }
+  closeSignatureManager();
+  clearMopCellSelection();
+  const field = maintenanceFieldAt(target.row, target.col);
+  mopMobileStep.value = field && maintenanceFieldIsTime(field) ? 'details' : 'checks';
+  await nextTick();
+  await mopSheetTableRef.value?.focusCell(target.row, target.col);
 }
 
 function activateMopCell(rowIndex: number, colIndex: number): void {
@@ -1788,11 +1735,11 @@ function checkboxDisplayValue(cell: Dict): string {
   for (const label of labels) {
     const mark = label === state ? "☑" : "□";
     const prefixPattern = new RegExp(`[□☐■☑√✔✓]\\s*${escapeRegExp(label)}`, "g");
-    const bracketPattern = new RegExp(`${escapeRegExp(label)}\\[[^\\]]*\\]`, "g");
+    const bracketPattern = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(label)}\\[[^\\]]*\\]`, "gu");
     if (prefixPattern.test(text)) {
       text = text.replace(prefixPattern, `${mark}${label}`);
     } else if (bracketPattern.test(text)) {
-      text = text.replace(bracketPattern, `${label}[${label === state ? "√" : " "}]`);
+      text = text.replace(bracketPattern, `$1${label}[${label === state ? "√" : " "}]`);
     }
   }
   return text;
@@ -3829,7 +3776,7 @@ watch(() => props.scopeOptions, (items) => {
   .mop-preview-page .preview-scroll:has(.mop-mobile-form) { max-height: none; min-height: 0; overflow: visible; }
   .mop-preview-page :deep(.table-fill-toolbar) { position: sticky; left: 0; top: auto; box-sizing: border-box; width: 100%; padding: 8px; }
   .mop-preview-page :deep(.table-fill-toolbar-row) { flex-direction: row; align-items: center; flex-wrap: wrap; gap: 8px; }
-  .mop-preview-page :deep(.table-fill-title span) { display: none; }
+  .mop-preview-page :deep(.table-fill-title .fill-instructions) { display: none; }
   .mop-preview-page :deep(.table-fill-actions) { flex-wrap: wrap; gap: 8px; }
   .mop-preview-page :deep(.table-fill-actions button) { min-height: 44px; }
   .mop-preview-page :deep(.floating-upload-compact) { grid-template-columns: minmax(0, 1fr) auto; }

@@ -1,16 +1,16 @@
 <template>
-  <section class="mop-mobile-form" aria-label="维护单快捷填写" data-v2-inline-feedback>
+  <section ref="formRef" class="mop-mobile-form" aria-label="维护单快捷填写" data-v2-inline-feedback>
     <div v-if="sheet.is_cover" class="mobile-cover">{{ sheet.name }}<span>只读</span></div>
     <template v-else>
       <section v-if="commonFields.length" class="quick-fields">
-        <label v-for="field in commonFields" :key="`${field.row}:${field.col}`">
+        <label v-for="field in commonFields" :key="`${field.row}:${field.col}`" :data-mop-mobile-cell="`${field.row}:${field.col}`">
           <span>{{ field.label }}</span>
           <textarea :value="fieldValue(field)" :rows="field.label.includes('备注') ? 2 : 1" @input="writeText(field, ($event.target as HTMLTextAreaElement).value)" />
         </label>
       </section>
       <section v-if="step === 'checks'" class="quick-checks">
         <div class="quick-check-head">
-          <div><strong>检查结果</strong><span>{{ completedCount }} / {{ fields.checks.length }} 项</span></div>
+          <div><strong>检查结果（选填）</strong><span>{{ completedCount }} / {{ fields.checks.length }} 项</span></div>
           <button v-if="bulkCount" type="button" class="quick-normal" @click="emit('mark-all-normal')"><CheckCheck :size="19" />第10行后全正常</button>
         </div>
         <details v-if="fields.checks.length" class="quick-note-section" open>
@@ -19,19 +19,19 @@
           <label class="quick-check-picker">
             <span>检查项</span>
             <select v-model="selectedKey" aria-label="选择检查项">
-              <option v-for="item in filteredChecks" :key="checkKey(item)" :value="checkKey(item)">{{ item.row + 1 }}行 · {{ item.title }}</option>
+              <option v-for="item in filteredChecks" :key="checkKey(item)" :value="checkKey(item)">{{ item.row + 1 }}行 · {{ item.title }} · {{ checkState(item) ? '已填' : '未填' }}</option>
             </select>
           </label>
           <p v-if="!filteredChecks.length" class="quick-empty">没有匹配的检查项</p>
           <template v-if="selectedCheck">
             <details v-if="selectedCheck.detail" class="quick-requirement"><summary>检查要求</summary><p>{{ selectedCheck.detail }}</p></details>
-            <div class="quick-result-row"><span>本项结果</span><div class="quick-result-options" role="group" aria-label="本项检查结果">
+            <div class="quick-result-row" :class="{ 'mop-pending': checkPending(selectedCheck) }" :data-mop-mobile-cell="checkKey(selectedCheck)"><span>本项结果<small v-if="checkPending(selectedCheck)" class="quick-pending-text">未填写</small></span><div class="quick-result-options" role="group" aria-label="本项检查结果">
               <button v-for="option in selectedCheck.options" :key="option.value" type="button"
                 :class="{ chosen: checkState(selectedCheck) === option.value, abnormal: option.value.includes('异常') }"
                 :aria-pressed="checkState(selectedCheck) === option.value"
                 @click="emit('edit-checkbox', selectedCheck.row, selectedCheck.col, option.value)">{{ option.label }}</button>
             </div></div>
-            <label v-for="field in selectedCheck.fields" :key="`${field.row}:${field.col}`">
+            <label v-for="field in selectedCheck.fields" :key="`${field.row}:${field.col}`" :data-mop-mobile-cell="`${field.row}:${field.col}`">
               <span>{{ field.label }}</span>
               <textarea :value="fieldValue(field)" :aria-label="`${selectedCheck.title} ${field.label}`" rows="2" @input="writeText(field, ($event.target as HTMLTextAreaElement).value)" />
             </label>
@@ -44,9 +44,9 @@
         </details>
       </section>
       <section v-if="metadata.length" class="quick-fields quick-time-fields">
-        <strong v-if="step === 'details'">维护时间</strong>
-        <label v-for="field in metadata" :key="`${field.row}:${field.value_col}:${field.label}`" :class="{ 'quick-inline-field': String(field.label).includes('维护完成情况') }">
-          <span>{{ field.label }}</span>
+        <strong v-if="step === 'details'">维护时间（选填）</strong>
+        <label v-for="field in metadata" :key="`${field.row}:${field.value_col}:${field.label}`" :class="{ 'quick-inline-field': String(field.label).includes('维护完成情况'), 'mop-pending': metadataPending(field) }" :data-mop-mobile-cell="`${field.row}:${field.value_col}`">
+          <span>{{ field.label }}<small v-if="metadataPending(field)" class="quick-pending-text">未填写</small></span>
           <select v-if="String(field.label).includes('维护完成情况')" :aria-label="String(field.label)" :value="completionValue(field)" @change="emit('edit-field', field, ($event.target as HTMLSelectElement).value)">
             <option value="">未填写</option><option value="已完成[√] 未完成[ ]">已完成</option><option value="已完成[ ] 未完成[√]">未完成</option>
           </select>
@@ -58,14 +58,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { CheckCheck, ChevronLeft, ChevronRight, Search } from 'lucide-vue-next';
 import type { Dict } from '../api/client';
 import { mopMobileFields, type MopMobileCheck, type MopMobileField } from '../mopMobileFields';
 import { formatMopDateTime, parseMopComparableDate } from '../mopSheetUtils';
+import { mopSelectedChoice } from '../mopFillProgress';
 
 const props = defineProps<{
   sheet: Dict; bulkCount: number; step: 'details' | 'checks';
+  pendingKeys?: string[];
   cellValue: (row: number, col: number) => string;
   editableCellAt: (row: number, col: number) => boolean;
   cellMergeSpan: (row: number, col: number) => Dict;
@@ -79,6 +81,8 @@ const emit = defineEmits<{
   'edit-field': [field: Dict, value: string];
 }>();
 const fields = computed(() => mopMobileFields(props.sheet, props.editableCellAt, props.cellMergeSpan));
+const formRef = ref<HTMLElement | null>(null);
+const pending = computed(() => new Set(props.pendingKeys || []));
 const commonFields = computed(() => fields.value.common.filter(field => field.label.includes('备注') === (props.step === 'checks')));
 const metadata = computed<Dict[]>(() => (props.sheet.maintenance_fields || []).filter((field: Dict) => (
   props.maintenanceFieldAt(Number(field.row), Number(field.value_col)) && String(field.label).includes('维护完成情况') === (props.step === 'checks')
@@ -95,6 +99,7 @@ watch(filteredChecks, checks => { if (!checks.some(item => checkKey(item) === se
 watch(() => props.sheet.name, () => { search.value = ''; selectedKey.value = fields.value.checks[0] ? checkKey(fields.value.checks[0]) : ''; });
 const checkboxMap = computed(() => new Map<string, Dict>((props.sheet.checkbox_cells || []).map((cell: Dict) => [`${cell.row}:${cell.col}`, cell])));
 function checkState(item: MopMobileCheck) { return props.checkboxStateLabel(checkboxMap.value.get(checkKey(item)) || item); }
+function checkPending(item: MopMobileCheck) { return pending.value.has(checkKey(item)) && !checkState(item); }
 const completedCount = computed(() => fields.value.checks.filter(item => !!checkState(item)).length);
 function fieldValue(field: MopMobileField) {
   const value = props.cellValue(field.row, field.col);
@@ -109,14 +114,46 @@ function dateValue(field: Dict) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 function completionValue(field: Dict) {
-  const value = props.cellValue(Number(field.row), Number(field.value_col));
-  if (/未完成\s*\[\s*[√✓]\s*\]/.test(value)) return '已完成[ ] 未完成[√]';
-  return /已完成\s*\[\s*[√✓]\s*\]/.test(value) ? '已完成[√] 未完成[ ]' : '';
+  const value = props.cellValue(Number(field.row), Number(field.value_col)).replace(/^\s*维护完成情况\s*[:：]?\s*/, '');
+  const selected = mopSelectedChoice(value, ['已完成', '未完成']);
+  return selected === '未完成' ? '已完成[ ] 未完成[√]' : selected === '已完成' ? '已完成[√] 未完成[ ]' : '';
 }
+function metadataPending(field: Dict) {
+  return pending.value.has(`${field.row}:${field.value_col}`)
+    && !(String(field.label).includes('维护完成情况') ? completionValue(field) : dateValue(field));
+}
+
+// The owner selects the target's details/checks step before requesting focus.
+async function focusCell(row: number, col: number): Promise<boolean> {
+  if (!Number.isInteger(row) || !Number.isInteger(col) || row < 0 || col < 0) return false;
+  await nextTick();
+  const key = `${row}:${col}`;
+  const check = fields.value.checks.find(item => checkKey(item) === key || item.fields.some(field => `${field.row}:${field.col}` === key));
+  const visibleCheck = props.step === 'checks' ? check : undefined;
+  if (!visibleCheck && !commonFields.value.some(field => `${field.row}:${field.col}` === key)
+    && !metadata.value.some(field => `${field.row}:${field.value_col}` === key)) return false;
+  search.value = '';
+  if (visibleCheck) selectedKey.value = checkKey(visibleCheck);
+  await nextTick();
+  const root = formRef.value;
+  const target = root?.querySelector<HTMLElement>(`[data-mop-mobile-cell="${key}"]`);
+  if (!root || !target) return false;
+  for (let details = target.closest('details'); details && root.contains(details); details = details.parentElement?.closest('details') || null) {
+    details.open = true;
+  }
+  const control = target.querySelector<HTMLElement>('textarea, input, select, button');
+  if (!control) return false;
+  control.focus({ preventScroll: true });
+  await nextTick();
+  target.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+  // V2 的原生 select 会把焦点转交给同一标签内的可见选择器。
+  return target.contains(root.ownerDocument.activeElement);
+}
+defineExpose({ focusCell });
 </script>
 
 <style scoped>
-.mop-mobile-form { display: grid; gap: 14px; padding: 12px; color: #1e293b; font-size: 14px; }
+.mop-mobile-form { --mop-pending-duration: 2.6s; display: grid; gap: 14px; padding: 12px; color: #1e293b; font-size: 14px; }
 .quick-fields, .quick-checks { display: grid; gap: 12px; min-width: 0; }
 .quick-fields > strong, .quick-check-head strong { font-size: 15px; font-weight: 650; }
 .quick-check-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px 12px; }
@@ -154,5 +191,10 @@ details > :not(summary) { margin-top: 10px; }
 .quick-empty { color: #64748b; }
 .mobile-cover { display: flex; justify-content: space-between; }
 .mobile-cover span { color: #64748b; }
-@media (prefers-reduced-motion: reduce) { summary::after { transition: none; } }
+.quick-pending-text { margin-left: 8px; color: #946200; font-size: 12px; font-weight: 500; }
+.mop-pending { position: relative; }
+/* 只让未填控件外围的提示边框呼吸，文字和输入区域保持稳定。 */
+.mop-pending::before { content: ''; position: absolute; inset: -4px; border: 1px solid #b88a28; border-radius: 8px; pointer-events: none; animation: mop-pending-breathe var(--mop-pending-duration) ease-in-out infinite; }
+@keyframes mop-pending-breathe { 0%, 100% { opacity: .25; } 50% { opacity: .8; } }
+@media (prefers-reduced-motion: reduce) { summary::after { transition: none; } .mop-pending::before { animation: none; opacity: .65; } }
 </style>
