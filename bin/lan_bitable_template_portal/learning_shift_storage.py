@@ -43,10 +43,19 @@ class Snapshot:
         self._resolved = {}
         self.dependencies = defaultdict(set)
         self._duties = {}
+        self._daily_projections = {}
         self.records_by_person = defaultdict(list)
+        self._sharing_data = {'_sharing_batches': {}, '_sharing_by_person': defaultdict(list), '_paper_delivery': {}}
         for (kind, identity), row in documents.items():
+            value = row['payload']
             if kind == 'record':
                 self.records_by_person[self.get('paper', identity).get('person_id')].append((identity, row))
+            elif kind == 'sharing_batch' and value.get('status') in {'published', 'closed'}:
+                self._sharing_data['_sharing_batches'][identity] = value
+            elif kind == 'sharing_attempt':
+                self._sharing_data['_sharing_by_person'][value.get('person_id')].append(value)
+            elif kind == 'sharing_delivery' and value.get('kind') == 'paper':
+                self._sharing_data['_paper_delivery'][value.get('attempt_id')] = value
 
     def legacy(self, kind, identity):
         return not self.include_legacy and self.get('local', 'shift_legacy:' + kind + ':' + identity).get('legacy') is True
@@ -170,6 +179,20 @@ class Snapshot:
                     return original
         return owner
 
+    def daily_projection(self, date, current):
+        if date not in self._daily_projections:
+            kinds = ('person', 'paper', 'record', completion.KIND, 'notification',
+                     'sharing_batch', 'sharing_attempt', 'sharing_delivery')
+            data = {kind: [] for kind in kinds}
+            for (kind, identity), row in self.documents.items():
+                if kind in data and not self.legacy(kind, identity):
+                    data[kind].append(row['payload'])
+            view = SimpleNamespace(_get=self.get)
+            view.settings = lambda: core.LearningService.settings(view)
+            self._daily_projections[date] = {row['person_id']: row for row in
+                completion.project(view, date, current=current, data=data)}
+        return self._daily_projections[date]
+
     def groups(self):
         groups, errors = defaultdict(list), {}
         for pair, row in self.documents.items():
@@ -243,8 +266,25 @@ class Snapshot:
         daily = self.get('daily_progress', completion.key(date, pid))
         known = {task['task_id'] for task in tasks}
         for task in daily.get('tasks', []):
-            if (task.get('shift') or '未归班') == shift and task['task_id'] not in known:
+            if (task.get('source') != 'sharing' and (task.get('shift') or '未归班') == shift
+                    and task['task_id'] not in known):
                 tasks.append(copy.deepcopy(task))
+                scopes.add(task.get('scope', ''))
+        # A valid roster and autonomous answers need not wait for daily_progress
+        # to be persisted before their shift summary can reflect completion.
+        if any(duty['shift'] == shift and not any(task['scope'] == duty['scope'] and task['shift'] == shift
+                                                  for task in tasks) for duty in self.duties(pid, date)):
+            for task in self.daily_projection(date, current).get(pid, {}).get('tasks', []):
+                if (task['source'] == 'roster' and task['shift'] == shift
+                        and not any(t['scope'] == task['scope'] and t['shift'] == shift for t in tasks)):
+                    tasks.append(copy.deepcopy(task))
+                    scopes.add(task['scope'])
+        # Sharing answers can be committed before the background daily projection.
+        # Build their state from the actual attempt rather than uploading a stale task.
+        for task in completion._sharing_tasks(self._sharing_data, pid, date, current):
+            attempt_owner = self.owner('sharing_attempt', task['task_id'])
+            if attempt_owner == owner:
+                tasks.append(task)
                 scopes.add(task.get('scope', ''))
         completion.add_practice(tasks,
             [row['payload'] for (kind, _), row in self.documents.items()

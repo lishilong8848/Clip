@@ -50,6 +50,56 @@ class DocumentReads:
                 selected[key] = group
         groups = selected
         stop = min(deadline, time.monotonic() + budget)
+        # Independent documents can be read together; evidence is still merged in
+        # retrieval order below, with the original shared text/coverage limits.
+        parallelism = 3
+        semaphore = asyncio.Semaphore(parallelism)
+        allowance_per_document = max(0, stop - time.monotonic()) / max(1, (len(groups) + parallelism - 1) // parallelism)
+        timings = {}
+
+        async def load(key, candidates):
+            async with semaphore:
+                started = time.monotonic()
+                allowance = max(0, min(allowance_per_document, stop - started))
+                timings[key] = {'started': started, 'allowance': allowance}
+                if allowance <= 0:
+                    return None
+                try:
+                    async with asyncio.timeout(allowance):
+                        current = await authorize()
+                        if (current['id'] != actor['id']
+                                or 'modules' in current and 'knowledge' not in current['modules']):
+                            raise AssistantError('登录身份或知识库权限已变化，请重新提问。', 403)
+                        cached = self.cache.get(key)
+                        if (cached and cached['actor'] == current and cached['profile'] == profile
+                                and cached['ordinals'] == [row['ordinal'] for row in candidates]):
+                            await read(_current, knowledge, current, copy.deepcopy([*candidates, *cached['items']]),
+                                       profile, _budget=allowance)
+                            expanded = copy.deepcopy(cached['items'])
+                        else:
+                            # Late worker threads only hold private copies. This
+                            # text-only path never runs image/model interpretation.
+                            inputs = copy.deepcopy(candidates)
+                            for row in inputs:
+                                row.pop('_evidence_receipt', None)
+                                row.pop('read_receipt', None)
+                                row['visual_evidence'] = []
+                            found = await read(knowledge.answer_evidence, copy.deepcopy(current), inputs,
+                                               profile=copy.deepcopy(profile), model=model,
+                                               include_visual=False, _budget=allowance)
+                            expanded = found['items']
+                        return current, expanded
+                finally:
+                    timings[key]['elapsed_ms'] = int((time.monotonic() - started) * 1000)
+
+        tasks = [asyncio.create_task(load(key, candidates)) for key, candidates in groups.items()]
+        try:
+            loaded = dict(zip(groups, await asyncio.gather(*tasks, return_exceptions=True)))
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
         result, remaining = [], MAX_TEXT
         for index, (key, candidates) in enumerate(groups.items()):
             # Account authorization errors must never become document read failures.
@@ -57,8 +107,8 @@ class DocumentReads:
             if (current['id'] != actor['id']
                     or 'modules' in current and 'knowledge' not in current['modules']):
                 raise AssistantError('登录身份或知识库权限已变化，请重新提问。', 403)
-            started = time.monotonic()
-            allowance = max(0, stop - started) / (len(groups) - index)
+            started = timings[key]['started']
+            allowance = timings[key]['allowance']
             document_deadline = started + allowance
             receipt = {'document_id': key[0], 'version': key[1], 'status': 'not_attempted',
                        'requested_ordinals': [row['ordinal'] for row in candidates],
@@ -76,26 +126,10 @@ class DocumentReads:
                 self.retried.add(key)
             receipt['attempts'] += 1
             try:
-                cached = self.cache.get(key)
-                if (cached and cached['actor'] == current and cached['profile'] == profile
-                        and cached['ordinals'] == receipt['requested_ordinals']):
-                    # _current checks ACL, active/external version and stored hash;
-                    # it does not open raw files, expand context or interpret images.
-                    await read(_current, knowledge, current, copy.deepcopy([*candidates, *cached['items']]), profile,
-                               _budget=allowance)
-                    expanded = copy.deepcopy(cached['items'])
-                else:
-                    # Timeout cannot stop a worker thread. Give it private inputs so
-                    # a late return cannot mutate evidence retained by this answer.
-                    inputs = copy.deepcopy(candidates)
-                    for row in inputs:
-                        row.pop('_evidence_receipt', None)
-                        row.pop('read_receipt', None)
-                        row['visual_evidence'] = []
-                    found = await read(knowledge.answer_evidence, copy.deepcopy(current), inputs,
-                                       profile=copy.deepcopy(profile), model=model,
-                                       include_visual=False, _budget=allowance)
-                    expanded = found['items']
+                value = loaded[key]
+                if isinstance(value, BaseException):
+                    raise value
+                current, expanded = value
                 expected = {(row['document_id'], row['version'], row['ordinal']) for row in candidates}
                 identities = [(row['document_id'], row['version'], row['ordinal']) for row in expanded]
                 if (not expanded or len(set(identities)) != len(identities) or any(
@@ -160,7 +194,7 @@ class DocumentReads:
                 receipt['status'] = 'not_current' if exc.status in {404, 409, 410} else 'unavailable'
             except (OSError, ValueError, TypeError, KeyError, RuntimeError):
                 receipt['status'] = 'unavailable'
-            receipt['elapsed_ms'] = int((time.monotonic() - started) * 1000)
+            receipt['elapsed_ms'] = timings[key].get('elapsed_ms', 0)
             pending = {row['ordinal']: row for row in self.pending.get(key, [])}
             pending.update({row['ordinal']: row for row in self._locators(candidates)})
             if receipt['status'] == 'read':

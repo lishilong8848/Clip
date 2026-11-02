@@ -8,6 +8,7 @@ import time
 from .lighthouse_ai import AssistantError, safe_data, safe_text, private_identifier, CONTACT, PRIVATE_REPLY
 from .lighthouse_knowledge import company_question, sensitive_document
 from .lighthouse_knowledge_reads import DocumentReads
+from .lighthouse_response_style import RESPONSE_STYLE
 
 _DOCUMENT_FOLLOWUP = re.compile(
     r'(?:那|那么)?(?:请)?(?:继续|还有呢|详细点|再详细一点|简短些|总结一下|有哪些|分别是哪些|'
@@ -567,7 +568,7 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
             '不再提出相同检索要求，不把未读内容或未确认现场情况补写成事实。'
             '只输出JSON：{"answer":"带引用的答复","queries":["补查词"],"gaps":["尚缺依据的事项"]}。完整时后两项为空。'
             '不能查询实时业务、联网、执行操作，也不要把模型常识当作公司制度。'
-            '不返回身份证号、家庭住址、私密联系方式或密钥。' + QUERY_TIME_GUIDANCE)},
+            '不返回身份证号、家庭住址、私密联系方式或密钥。' + RESPONSE_STYLE + QUERY_TIME_GUIDANCE)},
         {'role': 'user', 'content': json.dumps({'question': question, 'topics': topic_evidence,
                     'query_context': {'reference_time': turn.get('_reference_time')},
                     'branch_queries': {key: (turn.get('_query_intent') or {}).get(key, '')

@@ -192,9 +192,9 @@ def add_practice(tasks, papers, records, date, current):
     return sources
 
 
-def daily_progress(service, date, current, conn=None):
+def daily_progress(service, date, current, conn=None, *, data=None):
     grouped = defaultdict(list)
-    for row in project(service, date, current=current, data=_data(service, conn)):
+    for row in project(service, date, current=current, data=data if data is not None else _data(service, conn)):
         for task in row['tasks']:
             if task['source'] in {'paper', 'roster'}:
                 grouped[row['person_id'], task['scope'], task['shift']].append(task)

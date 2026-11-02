@@ -4,8 +4,8 @@
       <div v-for="item in metrics" :key="item.label"><NSkeleton v-if="loading && !ready" height="58px" /><NButton v-else text data-v2-navigation :disabled="disabled || !ready" :aria-label="item.label+'，'+item.value+'，'+item.action" @click="metricAction(item.kind)"><span>{{item.label}}</span><strong>{{item.value}}</strong><small>{{item.action}}<ChevronRight :size="12" /></small></NButton></div>
     </div>
     <div v-if="ready" class="v2-learning-today">
-      <template v-if="person"><span>今日 {{numberText(today.task_answered)}} / {{numberText(today.assigned)}} 题</span><span>复习 {{numberText(summary.practice_count)}} 次</span><NButton v-if="showContinue" data-v2-navigation type="primary" size="small" :disabled="disabled || !data.published" @click="emit('continue')">{{today.papers?'继续今日答题':'开始今日答题'}}</NButton></template>
-      <template v-else><span>今日已答 {{numberText(today.answered_people)}} 人</span><span>已完成 {{numberText(today.completed_people)}} 人</span><span>已领取未开始 {{numberText(today.not_started_people)}} 人</span></template>
+      <template v-if="person"><span>{{learningProgressLabel(personProgress)}}<small v-if="learningProgressDetail(personProgress)">{{learningProgressDetail(personProgress)}}</small></span><span>复习 {{numberText(summary.practice_count)}} 次</span><NButton v-if="showContinue" data-v2-navigation type="primary" size="small" :disabled="disabled || !data.published" @click="emit('continue')">{{today.papers?'继续今日答题':'开始今日答题'}}</NButton></template>
+      <template v-else><span>今日已答 {{numberText(today.learning_activity_people??today.answered_people)}} 人</span><span>已完成 {{numberText(today.completed_people)}} 人</span><span>当班尚未开始 {{numberText(today.not_started_people)}} 人</span></template>
       <NTag v-if="failed" size="small" type="warning">本次读取失败，显示上次数据</NTag>
     </div>
     <div class="v2-learning-chart-head" data-v2-navigation><h2>学习分析</h2><NSelect v-model:value="chart" :options="chartOptions" aria-label="学练统计维度" :disabled="disabled" /><NRadioGroup v-if="chart==='trend'" v-model:value="metric" size="small" aria-label="趋势指标"><NRadioButton value="answered">{{person?'作答次数':'参与人数'}}</NRadioButton><NRadioButton value="accuracy">正确率</NRadioButton></NRadioGroup><NRadioGroup v-if="chart==='wrong'" v-model:value="classification" size="small" aria-label="错题分类"><NRadioButton value="banks">按题库</NRadioButton><NRadioButton value="topics">按专业</NRadioButton></NRadioGroup></div>
@@ -22,7 +22,7 @@
       <header data-v2-navigation><h2>{{allScopes?'全员学习汇总':'人员学习汇总'}} <small>{{filtered.length}} 人</small></h2><NInput v-model:value="search" placeholder="姓名 / 工号" aria-label="搜索人员" clearable @update:value="page=1"><template #prefix><Search :size="15" /></template></NInput><NSelect v-model:value="sort" :options="sortOptions" aria-label="人员汇总排序" @update:value="page=1" /><NCheckbox v-model:checked="includeUnanswered" @update:checked="page=1">{{allScopes?'包括未作答人员':'包括已领取未作答'}}</NCheckbox><NButton v-if="bucket" text @click="bucket='';page=1">{{bucket}} · 清除筛选<X :size="13" /></NButton></header>
       <NDataTable v-if="!mobile" size="small" :columns="columns" :data="visible" :row-key="row=>row.person_id" :loading="loading" :scroll-x="allScopes?860:780" />
       <div v-else class="v2-learning-person-list">
-        <article v-for="row in visible" :key="row.person_id"><div class="v2-learning-person-title"><strong>{{row.name}}</strong><span>{{row.scope?row.scope+'楼':''}}</span><NButton text type="primary" data-v2-navigation :disabled="disabled" :aria-label="'查看'+row.name+'个人画像'" @click="selectPerson(row)">个人画像<ChevronRight :size="14" /></NButton></div><div class="v2-learning-person-values"><span>今日 <b>{{row.today?numberText(row.today.answered)+' / '+numberText(row.today.total):'未领取'}}</b></span><span>正确率 <b>{{percent(row.summary?.accuracy)}}</b></span><span>答题 <b>{{numberText(row.summary?.answered)}}</b></span></div><details><summary>更多记录</summary><p>工号 {{row.employee_no || '未填写'}} · 错题 {{numberText(row.summary?.wrong)}} · 复习 {{numberText(row.summary?.practice_count)}} 次</p><p>最近作答 {{String(row.last_answered_at||'尚未作答').replace('T',' ').slice(0,16)}}</p></details></article>
+        <article v-for="row in visible" :key="row.person_id"><div class="v2-learning-person-title"><strong>{{row.name}}</strong><span>{{row.scope?row.scope+'楼':''}}</span><NButton text type="primary" data-v2-navigation :disabled="disabled" :aria-label="'查看'+row.name+'个人画像'" @click="selectPerson(row)">个人画像<ChevronRight :size="14" /></NButton></div><div class="v2-learning-person-values"><span><b>{{learningProgressLabel(row.today)}}</b><small v-if="learningProgressDetail(row.today)">{{learningProgressDetail(row.today)}}</small></span><span>正确率 <b>{{percent(row.summary?.accuracy)}}</b></span><span>答题 <b>{{numberText(row.summary?.answered)}}</b></span></div><details><summary>更多记录</summary><p>工号 {{row.employee_no || '未填写'}} · 错题 {{numberText(row.summary?.wrong)}} · 复习 {{numberText(row.summary?.practice_count)}} 次</p><p>最近作答 {{String(row.last_answered_at||'尚未作答').replace('T',' ').slice(0,16)}}</p></details></article>
         <NSkeleton v-if="loading && !ready" height="110px" /><NEmpty v-else-if="!visible.length" description="没有匹配人员" />
       </div>
       <footer data-v2-navigation><span>每页20人</span><NPagination v-model:page="page" :item-count="filtered.length" :page-size="20" :page-slot="mobile?3:7" :show-quick-jumper="!mobile" :disabled="loading" /></footer>
@@ -34,11 +34,13 @@ import {computed,h,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {NButton,NCheckbox,NDataTable,NEmpty,NInput,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NTag,type DataTableColumns} from 'naive-ui';
 import {ChevronRight,Search,X} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
+import {learningProgressLabel,learningProgressDetail,hasLearningActivity} from '../learningProgress';
 import type {ChartItem,ChartView} from './vipboard';
 import MotionChart from './MotionChart.vue';
 import LearningTrend from './LearningTrend.vue';
 const props=defineProps<{data:Dict;person?:Dict|null;disabled?:boolean;showContinue?:boolean;allScopes?:boolean;loading?:boolean;failed?:boolean}>();
 const emit=defineEmits<{continue:[];select:[person:Dict];drill:[value:Dict]}>();
+const personProgress=computed(()=>props.data.people?.find((row:Dict)=>row.person_id===props.person?.id)?.today);
 const chart=ref('trend'),metric=ref('answered'),classification=ref('banks'),search=ref(''),sort=ref('recent'),page=ref(1),includeUnanswered=ref(false),bucket=ref('');
 const mobile=ref(matchMedia('(max-width:760px)').matches),peopleHost=ref<HTMLElement>();
 const media=matchMedia('(max-width:760px)'),resize=()=>mobile.value=media.matches;
@@ -84,7 +86,7 @@ const chartNote=computed(()=>({trend:'无选择题成绩的日期不计为0%。'
 const sortOptions=[{value:'recent',label:'最近作答'},{value:'name',label:'姓名'},{value:'answered',label:'答题量'}];
 const buckets:Record<string,[number,number]>={'0-59%':[0,59.999],'60-79%':[60,79.999],'80-99%':[80,99.999],'100%':[100,100]};
 const filtered=computed<Dict[]>(()=>[...(props.data.people||[])].filter((row:Dict)=>{
-  if(!includeUnanswered.value&&!(Number(row.summary?.attempt_count??row.summary?.answered)>0))return false;
+  if(!includeUnanswered.value&&!hasLearningActivity(row))return false;
   if(!String(row.name+' '+(row.employee_no||'')).includes(search.value.trim()))return false;
   const bounds=buckets[bucket.value],rate=number(row.summary?.accuracy);
   return !bounds||rate!==null&&rate>=bounds[0]&&rate<=bounds[1];
@@ -97,7 +99,7 @@ const columns=computed<DataTableColumns<Dict>>(()=>[
   {title:'首次答题',key:'answered',width:85,render:row=>numberText(row.summary?.answered)},
   {title:'选择题错题',key:'wrong',width:100,render:row=>numberText(row.summary?.wrong)},
   {title:'正确率',key:'accuracy',width:125,render:row=>percent(row.summary?.accuracy)},
-  {title:'今日进度',key:'today',width:95,render:row=>row.today?numberText(row.today.answered)+' / '+numberText(row.today.total):'未领取'},
+  {title:'今日学习 / 当班进度',key:'today',width:175,render:row=>h('div',[learningProgressLabel(row.today),h('small',learningProgressDetail(row.today))])},
   {title:'最近作答',key:'last_answered_at',width:150,render:row=>String(row.last_answered_at||'尚未作答').replace('T',' ').slice(0,16)},
   {title:'',key:'action',width:100,render:row=>h(NButton,{text:true,type:'primary',disabled:props.disabled,'data-v2-navigation':'',onClick:()=>selectPerson(row)},()=> '个人画像')},
 ]);

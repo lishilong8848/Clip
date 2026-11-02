@@ -945,6 +945,82 @@ def claim_practice(service, actor, payload):
     return service.public_paper(paper, actor)
 
 
+def _today_learning(service, current, data, scope='', identity=''):
+    """Keep duty completion separate from today's actual learning activity."""
+    from . import learning_completion as completion
+    today = current.date().isoformat()
+    tasks = completion.daily_progress(service, today, current, data=data)
+    # The answer entry retains the previous night until 09:00; portraits must too.
+    if current.hour < 9:
+        previous = (current.date() - dt.timedelta(days=1)).isoformat()
+        for key, task in completion.daily_progress(service, previous, current, data=data).items():
+            if key[2] == '夜' and dt.datetime.fromisoformat(task['due_at']) > current:
+                if key not in tasks or dt.datetime.fromisoformat(tasks[key]['start_at']) > current:
+                    tasks[key] = {**task, 'date': previous}
+    tasks = {key: {**task, 'date': task.get('date', today)} for key, task in tasks.items()
+             if (not identity or key[0] == identity) and (not scope or key[1] == scope)
+             and task['status'] != '未安排'}
+    people = defaultdict(lambda: {'date': today, 'total': 0, 'answered': 0, 'tasks': [],
+        'practice_total': 0, 'practice_answered': 0, 'activity_answered': 0, 'review_count': 0,
+        'sharing_total': 0, 'sharing_answered': 0, 'sharing_uncertain': False, 'last_answered_at': ''})
+    for (pid, _, _), task in tasks.items():
+        progress = people[pid]
+        progress['tasks'].append(task)
+        progress['total'] += task.get('assigned') or 0
+        progress['answered'] += task['answered']
+    records = {item['id']: item for item in data['record']}
+    for paper in data['paper']:
+        pid = paper.get('person_id')
+        if (not pid or paper.get('deleted_at') or identity and pid != identity
+                or scope and paper.get('scope') != scope):
+            continue
+        record = records.get(paper['id'], {})
+        if record.get('person_id') not in (None, '', pid):
+            continue
+        practice_today = paper.get('mode') == 'practice' and paper.get('date') == today
+        for question in paper.get('questions', []):
+            if question.get('invalid'):
+                continue
+            entry = record.get('entries', {}).get(question['id'], {})
+            attempt = entry.get('attempt')
+            if practice_today:
+                people[pid]['practice_total'] += 1
+                people[pid]['practice_answered'] += int(bool(attempt) and not entry.get('needs_review'))
+            if attempt and not entry.get('needs_review') and completion.date_of(attempt.get('submitted_at')) == today:
+                people[pid]['activity_answered'] += 1
+                people[pid]['last_answered_at'] = max(people[pid]['last_answered_at'], attempt['submitted_at'])
+            people_reviews = sum(completion.date_of(a.get('submitted_at')) == today for a in entry.get('practice', []))
+            if people_reviews:
+                people[pid]['review_count'] += people_reviews
+                people[pid]['last_answered_at'] = max(people[pid]['last_answered_at'],
+                    *(a['submitted_at'] for a in entry.get('practice', []) if completion.date_of(a.get('submitted_at')) == today))
+    batches = {b['id']: b for b in data['sharing_batch'] if b.get('status') in {'published', 'closed'}}
+    sharing_by_person, sharing_dates = defaultdict(list), set()
+    for attempt in data['sharing_attempt']:
+        sharing_by_person[attempt.get('person_id')].append(attempt)
+        pid, batch = attempt.get('person_id'), batches.get(attempt.get('batch_id'))
+        if (not pid or not batch or identity and pid != identity or scope and attempt.get('scope') != scope
+                or attempt.get('open_id') in batch.get('excluded_open_ids', [])):
+            continue
+        issued_date = batch.get('business_date') or completion.date_of(batch.get('published_at')) or batch.get('date')
+        if issued_date == today or completion.date_of(attempt.get('submitted_at')) == today:
+            sharing_dates.add((pid, issued_date))
+    sharing_data = {'_sharing_batches': batches, '_sharing_by_person': sharing_by_person,
+                    '_paper_delivery': {j.get('attempt_id'): j for j in data['sharing_delivery'] if j.get('kind') == 'paper'}}
+    sharing_attempts = {a['id']: a for a in data['sharing_attempt']}
+    for pid, issued_date in sharing_dates:
+        for task in completion._sharing_tasks(sharing_data, pid, issued_date, current):
+            if scope and task['scope'] != scope:
+                continue
+            progress = people[pid]
+            progress['sharing_total'] += task.get('assigned') or 0
+            progress['sharing_answered'] += task['answered']
+            progress['sharing_uncertain'] |= task['status'] == '待核对'
+            if task['answered']:
+                progress['last_answered_at'] = max(progress['last_answered_at'], sharing_attempts[task['task_id']].get('submitted_at', ''))
+    return tasks, dict(people)
+
+
 def profile(service, actor, query):
     access = service._access(actor, scope=query.get('scope'), person_id=str(query.get('person_id') or ''))
     scope, identity = access['scope'], access['person_id']
@@ -962,11 +1038,27 @@ def profile(service, actor, query):
     for column, value, op in (('scope', scope, '='), ('person_id', identity, '='), ('day', start, '>='), ('day', end, '<=')):
         if value:
             clauses.append(column + op + '?'); args.append(value)
+    current = core.now()
+    today = current.date().isoformat()
+    from . import learning_completion as completion
     with closing(service._connect()) as conn:
+        conn.execute('BEGIN')
         results = [dict(row) for row in conn.execute('SELECT * FROM learning_results WHERE ' + ' AND '.join(clauses), args)]
         practices = [dict(row) for row in conn.execute('SELECT * FROM learning_practice WHERE ' + ' AND '.join(c for c in clauses if c != 'invalid=0'), args)]
-    papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=start, end=end) if not p.get('deleted_at')]
-    records = {p['id']: service._get('record', p['id']) or {} for p in papers}
+        today_clauses, today_args = ["person_id<>''", 'invalid=0', 'day=?'], [today]
+        for column, value in (('scope', scope), ('person_id', identity)):
+            if value:
+                today_clauses.append(column + '=?'); today_args.append(value)
+        today_rows = [dict(row) for row in conn.execute('SELECT * FROM learning_results WHERE ' + ' AND '.join(today_clauses), today_args)]
+        today_practices = [dict(row) for row in conn.execute('SELECT * FROM learning_practice WHERE ' + ' AND '.join(c for c in today_clauses if c != 'invalid=0'), today_args)]
+        data = completion._data(service, conn)
+        today_tasks, today_people = _today_learning(service, current, data, scope, identity)
+    all_papers = [p for p in data['paper'] if p.get('person_id') and not p.get('deleted_at')
+                  and (not scope or p.get('scope') == scope) and (not identity or p['person_id'] == identity)]
+    papers = sorted((p for p in all_papers if start <= p.get('date', '') <= end), key=lambda p: (p['date'], p['id']))
+    records = {item['id']: item for item in data['record']}
+    for paper in all_papers:
+        records.setdefault(paper['id'], {})
     # Older papers can have practice submissions inside the requested period.
     for paper_id in {r['paper_id'] for r in practices}:
         if paper_id not in records:
@@ -983,7 +1075,8 @@ def profile(service, actor, query):
         practices_by_day[row['day']].append(row)
     ratio = lambda a, b: round(a * 100 / b, 1) if b else None
     def summarize(rows, assigned, *, pid='', building='', practice_rows=None):
-        choices = [r for r in rows if r['type'] != 'interview']
+        valid_rows = [r for r in rows if not r['needs_review']]
+        choices = [r for r in valid_rows if r['type'] != 'interview']
         independent = [r for r in choices if not r['assisted']]
         completed = sum(service._completed(p, records[p['id']]) for p in assigned)
         task_answered = sum(bool(records[p['id']].get('entries', {}).get(q['id'], {}).get('attempt')) and not records[p['id']].get('entries', {}).get(q['id'], {}).get('needs_review') for p in assigned for q in p['questions'] if not q.get('invalid'))
@@ -991,17 +1084,17 @@ def profile(service, actor, query):
         if practice_rows is None:
             practice_rows = practices_by_person.get(pid, []) if pid else practices
         own_practices = [r for r in practice_rows if (not pid or r['person_id'] == pid) and (not building or r['scope'] == building)]
-        activity = rows + own_practices
+        activity = valid_rows + own_practices
         practice_count = len(own_practices)
         return {'answered': sum(not r['needs_review'] for r in rows), 'wrong': sum(r['correct'] == 0 for r in choices), 'correct': sum(r['correct'] == 1 for r in choices),
             'hinted': sum(bool(r['assisted']) for r in rows if not r['needs_review']),
             'independent_correct': sum(r['correct'] == 1 for r in independent), 'independent_answered': len(independent),
             'choice_answered': len(choices), 'accuracy': ratio(sum(r['correct'] == 1 for r in choices), len(choices)),
             'independent_accuracy': ratio(sum(r['correct'] == 1 for r in independent), len(independent)),
-            'hint_rate': ratio(sum(bool(r['assisted']) for r in rows), len(rows)), 'learning_days': len({r['day'] for r in activity}),
-            'interview_total': sum(r['type'] == 'interview' for r in rows), 'practice_count': practice_count,
-            'attempt_count': len(rows) + practice_count,
-            'interview_ratings': dict(Counter(r['self_rating'] for r in rows if r['type'] == 'interview')),
+            'hint_rate': ratio(sum(bool(r['assisted']) for r in valid_rows), len(valid_rows)), 'learning_days': len({r['day'] for r in activity}),
+            'interview_total': sum(r['type'] == 'interview' for r in valid_rows), 'practice_count': practice_count,
+            'attempt_count': len(valid_rows) + practice_count,
+            'interview_ratings': dict(Counter(r['self_rating'] for r in valid_rows if r['type'] == 'interview')),
             'review_total': sum(r['correct'] == 0 or r['type'] == 'interview' or r['needs_review'] for r in rows),
             'assigned': total, 'task_answered': task_answered, 'papers': len(assigned), 'completed': completed,
             'completion_rate': ratio(task_answered, total), 'received_people': len({p['person_id'] for p in assigned}),
@@ -1015,11 +1108,8 @@ def profile(service, actor, query):
     if actor.get('is_admin') and not scope and not identity and query.get('all_people') == '1':
         directory = {p['id']: p for p in service._all('person')}
         ids.update(p['id'] for p in directory.values() if p.get('active') and set(p.get('scopes') or []) & set(SCOPES))
-    today = core.now().date().isoformat()
-    from .learning_completion import daily_progress
-    today_tasks = {key: task for key, task in daily_progress(service, today, core.now()).items()
-                   if (not identity or key[0] == identity) and (not scope or key[1] == scope)
-                   and task['status'] != '未安排'}
+    if start <= today <= end:
+        ids.update(today_people)
     for pid in sorted(ids):
         own = [p for p in papers if p['person_id'] == pid]
         latest = own[-1] if own else {}
@@ -1027,32 +1117,28 @@ def profile(service, actor, query):
         rows = [r for r in results if r['person_id'] == pid]
         activity = rows + practices_by_person.get(pid, [])
         latest_activity = max(activity, key=lambda r: r['submitted_at'], default={})
-        today_paper = service._get('paper', 'personal:' + today + ':' + pid)
-        progress = service.public_paper(today_paper, actor)['stats'] if today_paper and not today_paper.get('deleted_at') and (not scope or today_paper['scope'] == scope) else None
-        own_tasks = [task for key, task in today_tasks.items() if key[0] == pid]
-        if own_tasks:
-            progress = {**(progress or {}), 'total': sum(t.get('assigned') or 0 for t in own_tasks),
-                        'answered': sum(t['answered'] for t in own_tasks)}
+        progress = today_people.get(pid)
         people_rows.append({'person_id': pid, 'name': p['name'], 'employee_no': p.get('employee_no', ''),
             'scope': latest.get('scope') or latest_activity.get('scope') or '、'.join(p.get('scopes') or []), 'summary': summarize(rows, own, pid=pid), 'today': progress,
-            'last_answered_at': latest_activity.get('submitted_at', '')})
+            'last_answered_at': max(latest_activity.get('submitted_at', ''),
+                                    (progress or {}).get('last_answered_at', '') if start <= today <= end else '')})
     for code in SCOPES:
         if not scope or scope == code:
             buildings.append({'scope': code, **summarize([r for r in results if r['scope'] == code], [p for p in papers if p['scope'] == code], building=code)})
     topics = []
     for topic in sorted({r['topic'] for r in results}):
-        rows = [r for r in results if r['topic'] == topic and r['type'] != 'interview']
+        rows = [r for r in results if r['topic'] == topic and r['type'] != 'interview' and not r['needs_review']]
         topics.append({'topic': topic, 'answered': len(rows), 'wrong': sum(r['correct'] == 0 for r in rows), 'accuracy': ratio(sum(r['correct'] == 1 for r in rows), len(rows))})
     bank_rows = []
     for bank, label in BANKS.items():
-        rows = [r for r in results if r['bank'] == bank and r['type'] != 'interview']
+        rows = [r for r in results if r['bank'] == bank and r['type'] != 'interview' and not r['needs_review']]
         bank_rows.append({'bank': bank, 'label': label, 'answered': len(rows), 'wrong': sum(r['correct'] == 0 for r in rows)})
     first = dt.date.fromisoformat(start or min((r['day'] for r in results), default=today))
     last = dt.date.fromisoformat(end)
     trend = []
     for offset in range(min(367, max(0, (last - first).days + 1))):
         day = (first + dt.timedelta(days=offset)).isoformat()
-        rows = [r for r in results if r['day'] == day]
+        rows = [r for r in results if r['day'] == day and not r['needs_review']]
         practice_rows = practices_by_day.get(day, [])
         choices = [r for r in rows if r['type'] != 'interview']
         trend.append({'date': day, 'answered': len(rows), 'practice_count': len(practice_rows), 'attempt_count': len(rows) + len(practice_rows),
@@ -1062,16 +1148,13 @@ def profile(service, actor, query):
     questions = []
     if actor.get('is_admin'):
         for qid in sorted({r['question_id'] for r in results}):
-            own = [r for r in results if r['question_id'] == qid and r['type'] != 'interview']
+            own = [r for r in results if r['question_id'] == qid and r['type'] != 'interview' and not r['needs_review']]
             if own:
                 questions.append({'id': qid, 'stem': own[0]['stem'], 'answered': len(own), 'wrong': sum(r['correct'] == 0 for r in own)})
     available = candidates(service, None) if actor.get('is_admin') else []
     inventory = {bank: {'available': len({q['family_id'] for q in available if q['bank'] == bank})} for bank in BANKS}
-    today_rows = [r for r in results if r['day'] == today]
-    today_papers = [p for p in service._documents('paper', scope=scope, person_id=identity, start=today, end=today) if not p.get('deleted_at') and p.get('mode') != 'practice']
-    for p in today_papers:
-        records.setdefault(p['id'], service._get('record', p['id']) or {})
-    today_summary = summarize(today_rows, today_papers, practice_rows=practices_by_day.get(today, []))
+    today_papers = [p for p in all_papers if p.get('date') == today and p.get('mode') != 'practice']
+    today_summary = summarize(today_rows, today_papers, practice_rows=today_practices)
     if today_tasks:
         assigned = sum(t.get('assigned') or 0 for t in today_tasks.values())
         answered = sum(t['answered'] for t in today_tasks.values())
@@ -1084,6 +1167,10 @@ def profile(service, actor, query):
             completed_people=sum(all(t['status'] == '已完成' for t in tasks) for tasks in by_person.values()),
             received_people=len(by_person), not_started_people=sum(not any(t['answered'] or t.get('started') for t in tasks)
                                                                  for tasks in by_person.values()))
+        today_summary['has_uncertain_tasks'] = any(t['status'] == '待核对' for t in today_tasks.values())
+        if identity and all(t['date'] != today for t in today_tasks.values()):
+            today_summary['task_label'] = '昨夜夜班学练'
+    today_summary['learning_activity_people'] = sum(bool(p['activity_answered'] or p['review_count'] or p['sharing_answered']) for p in today_people.values())
     return {'person': learner, 'summary': summary, 'today_summary': today_summary,
             'buildings': [] if ordinary else buildings, 'people': people_rows, 'trend': trend,
             'topics': topics, 'banks': bank_rows, 'distribution': [] if ordinary else distribution,

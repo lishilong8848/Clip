@@ -23,6 +23,7 @@ from .lighthouse_queries import past_action_question, query_result_state, QUERY_
 from .lighthouse_basics import calculate as calculate_value, CalculationError, calculation_request, date_time as time_value, time_request, public_capability_request, current_user_request, assistant_capability_request
 from .lighthouse_message_delivery import MESSAGE_INTENT, feishu_delivery_requested
 from .lighthouse_task_runtime import clear_goal_assessments, finish_progress, prioritize_tools, read_timeout, task_progress
+from .lighthouse_response_style import RESPONSE_STYLE, RESPONSE_WORKFLOW
 
 _NEW_READ_TIME = object()
 
@@ -57,7 +58,7 @@ class TaskSpec(BaseModel):
     remaining_gaps: list[str] = Field(default_factory=list, max_length=20)
 
 
-GENERAL_INSTRUCTIONS = """你是灯塔助手，用当前模型和工具，以中文、简洁Markdown回答。
+GENERAL_INSTRUCTIONS = RESPONSE_STYLE + RESPONSE_WORKFLOW + """你是灯塔助手，用当前模型和工具，以中文、简洁Markdown回答。
 多个结论或步骤使用简短标题、分行编号或项目列表，先总结再展开必要细节，不把多个步骤、角色和时限挤成一段。简单答案不强行套模板；用户指定纯文本或其它格式时遵从其格式要求。
 按整轮语义与上下文理解对象、时间、范围及交付目标，不套固定问句。识别同义表达、指代、纠正、隐含对象和多目标，缺必要信息才追问。复杂任务先plan_task，缺资料用query_progress补查，答复前review_answer按goal_id核对；完成必要读取、核算、文件或表单后再答，不把计划当结果、不凭空补全。
 按工具描述及参数选择来源：company_documents先查公司文件名再读原文；只有文档依据的查询填写document_only=true，直接交给原文读取与核验，不先生成和复核一份无原文的草稿。业务读取工具查事实；混合问题两者都查，不要求用户手选技能。条目数、题数和去重人数分开；query_statistics统计本轮授权快照。复用已有结果/read_query，不因改问重复拉全量。续改文档须定位授权历史对象并重读当前版本，只改指定部分，不用旧摘要覆盖新内容。
@@ -682,7 +683,12 @@ class LighthouseModel:
         for key in ('_query_intent', '_company_requested', '_actual_profile', '_quality_review', 'task_type'):
             turn.pop(key, None)
         intent = {}
-        if company_request(turn) is None and not turn.get('_read_only_phase'):
+        # Existing exact local tools need no semantic model classification. This
+        # does not classify records/documents or bypass their evidence review.
+        local_request = (not any(turn.get(key) for key in ('file_ids', 'preview_file', '_command_context', '_research_mode'))
+                         and (calculation_request(turn['question']) is not None or time_request(turn['question'])
+                              or current_user_request(turn['question']) or assistant_capability_request(turn['question'])))
+        if not local_request and company_request(turn) is None and not turn.get('_read_only_phase'):
             intent = await resolve_query_intent(self, actor, turn, history, authorize)
             if intent.get('kind') != 'unknown' or intent.get('attempts', 0):
                 turn['_query_intent'] = intent
@@ -754,12 +760,12 @@ class LighthouseModel:
         result = await candidate(hold_text)
         if live:
             return finish_progress(turn, {**result, 'answer_review': {'status': 'live_general', 'repairs': 0}})
-        await emit('status', {'label': '正在核对答复是否完整'})
         review_sources = result.pop('_review_sources', None)
         # Keep the original question hash bound to its task contract. The
         # reviewer reads the validated effective query through task_question.
         review_turn = turn
         if 'answer_review' not in result:
+            await emit('status', {'label': '正在核对答复是否完整'})
             if review_sources is not None:
                 public_sources = result['sources']
                 result = await self.answer_reviewer.run(actor, review_turn, history,
@@ -951,7 +957,8 @@ class LighthouseModel:
             answer = f"当前登录人：**{name}**（{role}）。"
             answer += f"\n\n工号：{employee_no}。" if employee_no else "\n\n当前登录信息未提供工号，不作推测。"
             await emit('text', {'delta': answer})
-            return {'answer': answer, 'sources': []}
+            return {'answer': answer, 'sources': [],
+                    'answer_review': {'status': 'original_flow', 'reason': 'current_login_identity', 'repairs': 0}}
 
         if not warm_only and not turn.get('file_ids') and assistant_capability_request(question):
             current = await current_actor()
@@ -981,7 +988,8 @@ class LighthouseModel:
             lines.append('你可以直接告诉我要处理什么；需要补充信息时我会继续询问。')
             answer = '\n'.join(lines)
             await emit('text', {'delta': answer})
-            return {'answer': answer, 'sources': []}
+            return {'answer': answer, 'sources': [],
+                    'answer_review': {'status': 'original_flow', 'reason': 'current_capabilities', 'repairs': 0}}
 
         selected_context = [item for item in turn.get('_command_context', [])
                             if item.get('name') != 'company-knowledge']
@@ -1292,10 +1300,12 @@ class LighthouseModel:
             result = add_source("完整未结束通告", data, "/workbench-lite", public_data=visible)
             return data, {**result, "complete": data['complete'], "message_path": "message_text"}
 
-        async def direct(answer):
+        async def direct(answer, *, local_verified=False):
             await current_actor()
             await emit("text", {"delta": answer})
-            return {"answer": answer, "sources": sources, "_references": references}
+            return {"answer": answer, "sources": sources, "_references": references,
+                    **({'answer_review': {'status': 'original_flow', 'reason': 'local_tool', 'repairs': 0}}
+                       if local_verified else {})}
 
         async def table_read(action, query=None, **options):
             nonlocal read_blocked
@@ -1425,12 +1435,12 @@ class LighthouseModel:
                 try:
                     value = calculate_value(expression)
                 except CalculationError as exc:
-                    return await direct(str(exc))
-                return await direct('计算结果：**' + value['result'] + '**。')
+                    return await direct(str(exc), local_verified=True)
+                return await direct('计算结果：**' + value['result'] + '**。', local_verified=True)
             if time_request(question):
                 await current_actor()
                 value = time_value()
-                return await direct('北京时间 **' + value['now'].replace('T', ' ').removesuffix('+08:00') + '**，' + value['weekday'] + '。')
+                return await direct('北京时间 **' + value['now'].replace('T', ' ').removesuffix('+08:00') + '**，' + value['weekday'] + '。', local_verified=True)
 
         if not warm_only and form_requested and not message_requested and re.search(r"【(?:维保通告|变更通告|设备检修|设备轮巡|设备调整|上电通告|下电通告)】", question):
             await current_actor()
@@ -3085,6 +3095,12 @@ class LighthouseModel:
                 await emit("text", {"delta": tail})
             warnings = list(dict.fromkeys(warning for source in sources for warning in source.get("warnings", [])))
             progress = task_progress(turn, query_sources.values(), queries)
+            # Feishu intentionally buffers complete replies, but a plain general
+            # answer does not become a business answer just because it is buffered.
+            if (not answer_review and semantic_general and not buffer_business and not requires_source
+                    and not sources and not query_sources and not selected_context and not plan
+                    and not clarification and not requested_company_query):
+                answer_review = {'status': 'original_flow', 'reason': 'general_answer', 'repairs': 0}
             return {"answer": final_answer or text.text, "sources": sources, "_references": references,
                     **({'_requested_company_query': requested_company_query} if requested_company_query else {}),
                     **({'_query_evidence': [{**source, 'data': safe_data(
