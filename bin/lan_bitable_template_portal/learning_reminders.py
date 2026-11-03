@@ -10,7 +10,7 @@ VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
 ROSTER_VERSION = 6
-ROSTER_POLICY_VERSION = 2
+ROSTER_POLICY_VERSION = 3
 APP_ACCESS_URL = 'https://applink.feishu.cn/T9aTCORtUJLb'
 
 

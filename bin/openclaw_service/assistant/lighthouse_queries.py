@@ -27,6 +27,8 @@ LEARNING_COMPLETION_MEANING = (
     'GET /api/learning/completion按排班日统计：total是人员日记录数，summary是整个人员日的状态分布，不是参与人数。'
     'shift只筛选含该班次任务的人员日，不裁剪tasks；行answered和status仍可能包含其他班次，不能直接当作所选班次结果。'
     '须按tasks中的scope、shift核对answered，已答大于0才算该班次参与，按person_id去重；仅待答、开始或已发送不算参与。'
+    '未安排不是未领取或未开始答题，不代表已派发任务；未安排、未到时、待核对须单列，不加到已安排但未作答或未完成的人数。'
+    '查未开始时逐人检查已安排任务的answered和started，区分尚未打开与已打开但未有效作答；summary不能代替姓名明细。'
     '夜班跨零点仍属原排班日；自主练习按实际提交日另列，任务班次或资料未确认时说明限制，不推断为零。')
 LEARNING_PARTICIPATION_MEANING = (
     'learning_participation是按实际提交日期的参与统计，不按班次。summary.participants及participants为已去重人数与名单；'
@@ -39,6 +41,11 @@ def source_field_contract(api_id='', source_kind=''):
     """Program-owned field meanings, selected by source identity, never question text."""
     if api_id is not None and not isinstance(api_id, str):
         return None
+    if api_id == 'GET /api/learning/completion':
+        return {'subject': '人员排班日学练完成情况', 'count_unit': '人员日记录',
+                'state_fields': ['items[].status', 'items[].tasks[].status'], 'count_fields': ['total', 'summary'],
+                'state_labels': {state: state for state in ('未安排', '未到时', '待答', '答题中', '已完成', '逾期', '待核对')},
+                'limits': [LEARNING_COMPLETION_MEANING]}
     paths = {
         'GET /api/cabinet-power/overview': (['racks[].state'], ['counts', 'rooms[].counts']),
         'GET /api/cabinet-power/rooms': (['racks[].state'], ['counts', 'rooms[].counts']),
@@ -67,6 +74,29 @@ def source_field_contract(api_id='', source_kind=''):
             'unknown及未识别状态不得归入off；未配置、未就绪、缺失字段和读取失败不等于实际零。',
             '字段路径相对每楼原响应；列表片段须结合原path定位。只解释本来源字段，不证明已读全或授予权限。'],
     }
+
+
+def learning_status_issue(answer, sources):
+    completion_sources = [source for source in sources if source.get('api_id') == 'GET /api/learning/completion']
+    if not completion_sources:
+        return ''
+    details = False
+    for source in completion_sources:
+        data = source.get('data')
+        rows = data.get('items') if isinstance(data, dict) else None
+        if isinstance(rows, list) and any(isinstance(row, dict) and row.get('tasks') for row in rows):
+            details = True
+            break
+    if (not details and re.search(r'(?:未开始(?:答题|作答)?|尚未开始(?:答题|作答)?)[^\d\n。]{0,16}\d+\s*人', answer)
+            and not re.search(r'无法确认|不能确定|尚未核实|不代表', answer)):
+        return '本轮只有人员日摘要，没有可核验的任务开始和作答明细，不能据此确定未开始人数。先用现有query_ref续读tasks与姓名，缺后续页时保持原日期、班次及范围只读补查；无法读取时只说明已核实的状态分布。'
+    for paragraph in re.split(r'\n\s*\n|[。；;]', answer):
+        if (re.search(r'未安排|未到时|待核对', paragraph)
+                and re.search(r'未开始|未答|未完成|未参与|未作答|没有开始', paragraph)
+                and re.search(r'[+＋=＝]|计入|算作|合并|相加|加上|包含', paragraph)
+                and not re.search(r'不能|不应|不计入|不包含|不合并|不相加|不得|不等于|并非|不是', paragraph)):
+            return '学练未安排、未到时或待核对不能合并为已安排但未开始或未完成。按本轮tasks逐人核对班次、answered和started；摘要不足以给姓名时续读现有明细，不编造人数或名单。'
+    return ''
 COUNT = re.compile(r"多少|几(?:条|个|项|份|单|件|道|台|柜|起|宗|次)|数量|总数")
 DETAIL = re.compile(r"明细|详情|哪些|哪几(?:条|个|项)|列出|列一下|清单|列表|逐条|分别(?:是|哪些|什么)|具体(?:是|有)?什么|(?:还有|有)(?:什么|啥)(?:工作|任务|活|事)")
 PENDING = re.compile(r"未(?:结束|完成|闭环|处理|提交|开始|发|答题|作答)|待(?:完成|处理|提交|开始|发|答题|作答)|进行中|处理中|维修中|待办|没(?:做完|完成|答题)|维修.{0,16}(?:还没好|没修好|尚未修复|没有修好)")

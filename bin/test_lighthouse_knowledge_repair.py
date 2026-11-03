@@ -29,15 +29,15 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         self.first = hit('candidate', '该流程只适用于设备甲。')
         self.second = hit('applicable', '设备乙应先核实现场状态，再联系负责人员。')
         self.kb = SimpleNamespace(search=Mock(return_value={'items': [self.first], 'warning': ''}),
-                                  evidence_current=Mock(return_value=True))
+                                  evidence_current=Mock(return_value=True), model_allowed=Mock(return_value=True))
         self.model = Mock()
         self.engine = SimpleNamespace(portal=SimpleNamespace(get_knowledge=lambda: self.kb),
                                       assistant=SimpleNamespace(model_for=lambda actor: self.model))
         self.emit = AsyncMock()
         self.auth = AsyncMock(return_value=self.actor)
 
-    async def answer(self, question='设备乙异常应如何处理？'):
-        return await answer_company(self.engine, self.actor, {'question': question, '_profile': self.profile},
+    async def answer(self, question='设备乙异常应如何处理？', **turn_options):
+        return await answer_company(self.engine, self.actor, {'question': question, '_profile': self.profile, **turn_options},
                                     question, self.emit, self.auth)
 
     async def test_irrelevant_hits_are_retrieved_again_and_only_final_answer_is_emitted(self):
@@ -153,16 +153,30 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
             clock[0] += 30
             return candidate('先核实现场状态。[1]')
         reviewer = Mock(spec=AnswerReviewer)
-        reviewer.run = AsyncMock(side_effect=lambda actor, turn, history, result, authorize, **kw: {
-            **result, 'answer_review': {'status': 'passed', 'repairs': 0}})
+        async def review(actor, turn, history, result, authorize, *, timeout, **kwargs):
+            clock[0] += timeout
+            return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
+        reviewer.run = AsyncMock(side_effect=review)
         self.engine.answer_reviewer = reviewer
         self.kb.search.side_effect = search
         self.model.complete.side_effect = generate
         with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time', SimpleNamespace(monotonic=lambda: clock[0])):
-            result = await self.answer()
-        self.assertLessEqual(reviewer.run.call_args.kwargs['timeout'], 5)
-        self.assertLessEqual(self.model.complete.call_args.kwargs['timeout'], 35)
+            result = await self.answer(_answer_deadline=90)
+        self.assertEqual(clock[0], 82)
+        self.assertEqual(reviewer.run.call_args.kwargs['timeout'], 27)
+        self.assertEqual(self.model.complete.call_args.kwargs['timeout'], 32)
         self.assertIn('现场状态', result['answer'])
+        self.assertEqual(result['sources'][0]['number'], 1)
+        self.assertGreaterEqual(self.kb.evidence_current.call_count, 4)
+
+    async def test_final_evidence_timeout_is_not_reported_as_revocation(self):
+        self.model.complete.return_value = candidate('先核实现场状态。[1]')
+        self.kb.evidence_current.side_effect = [True, True, TimeoutError('isolated store timeout')]
+        with self.assertRaises(AssistantError) as caught:
+            await self.answer()
+        self.assertEqual(caught.exception.category, 'knowledge_verification_timeout')
+        self.assertIn('核验超时', str(caught.exception))
+        self.assertFalse(any(call.args[0] == 'text' for call in self.emit.call_args_list))
 
     async def test_expired_search_budget_does_not_start_model_generation(self):
         clock = [0]
@@ -171,7 +185,7 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
             return {'items': [self.first], 'warning': ''}
         self.kb.search.side_effect = search
         with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time', SimpleNamespace(monotonic=lambda: clock[0])):
-            result = await self.answer()
+            result = await self.answer(_answer_deadline=60)
         self.model.complete.assert_not_called()
         self.assertIn('超时', result['answer'])
         self.assertEqual(result['sources'], [])
@@ -326,8 +340,8 @@ class KnowledgeRepair(unittest.IsolatedAsyncioTestCase):
         with patch('openclaw_service.assistant.lighthouse_knowledge_answer.time',
                    SimpleNamespace(monotonic=lambda: clock[0])), \
              patch('openclaw_service.assistant.lighthouse_model_health.select_task_profile', return_value=None):
-            result = await self.answer()
-        self.assertEqual([call.kwargs['timeout'] for call in self.model.complete.call_args_list], [45, 10])
+            result = await self.answer(_answer_deadline=80)
+        self.assertEqual([call.kwargs['timeout'] for call in self.model.complete.call_args_list], [72, 22])
         self.kb.search.assert_called_once()
         self.assertIn('未完整生成', result['answer'])
 

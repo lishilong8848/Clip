@@ -291,13 +291,17 @@ async def public_company_fallback(engine, actor, turn, reason, emit, authorize):
 async def answer_company(engine, actor, turn, question, emit, authorize, *, business_sources=None, document_query=None):
     # Retrieval, up to three model attempts and independent review share a hard
     # ceiling, but a slow first attempt must not leave second-long retries.
-    deadline = min(time.monotonic() + 180, turn.get('_answer_deadline', float('inf')))
-    async def read(function, *args, _budget=None, **kwargs):
-        if time.monotonic() >= deadline:
+    started = time.monotonic()
+    release_deadline = min(started + 180, turn.get('_answer_deadline', float('inf')))
+    # Reserve time to recheck local evidence after generation, review and optional photos.
+    deadline = release_deadline - min(8, max(0, release_deadline - started) / 10)
+
+    async def read(function, *args, _budget=20, _until=None, **kwargs):
+        remaining = (deadline if _until is None else _until) - time.monotonic()
+        if remaining <= 0:
             raise asyncio.TimeoutError
-        remaining = max(.001, deadline - time.monotonic())
         return await asyncio.wait_for(asyncio.to_thread(function, *args, **kwargs),
-                                      min(remaining, _budget if _budget is not None else 20))
+                                      min(remaining, _budget))
 
     document_reads = DocumentReads()
 
@@ -305,14 +309,16 @@ async def answer_company(engine, actor, turn, question, emit, authorize, *, busi
         try:
             if callable(getattr(type(knowledge), 'answer_evidence', None)):
                 from .lighthouse_knowledge_evidence import _current
-                await read(_current, knowledge, current, items, profile)
+                await read(_current, knowledge, current, items, profile, _until=release_deadline, _budget=8)
                 return True
-            return await read(knowledge.evidence_current, items, profile, actor=current)
+            return await read(knowledge.evidence_current, items, profile, actor=current,
+                              _until=release_deadline, _budget=8)
         except AssistantError as exc:
             if exc.status not in {401, 403, 404, 409, 410}:
                 raise
-        except asyncio.TimeoutError:
-            pass
+        except asyncio.TimeoutError as exc:
+            raise AssistantError('公司资料核验超时，暂未发布答复，请重新查询。', 504,
+                                 category='knowledge_verification_timeout') from exc
         return False
 
     turn.pop('_quality_review', None)

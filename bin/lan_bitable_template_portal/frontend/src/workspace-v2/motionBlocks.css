@@ -86,7 +86,6 @@
 .workspace-v2 .v2-sidebar-improved .n-menu-item-content {transition:background-color var(--mb-fast),color var(--mb-fast),transform var(--mb-fast) var(--mb-io)}
 .workspace-v2 .v2-sidebar-improved .n-menu-item-content--selected::after {animation:v2-mb-nav 250ms var(--mb-spring) both;transform-origin:center}
 .workspace-v2 .v2-sidebar-improved .n-menu-item-content__arrow {transition:transform var(--mb-mid) var(--mb-spring)}
-.workspace-v2 .v2-word.cword {animation:v2-word-in 380ms var(--mb-ease) both}
 .workspace-v2 .message-row.assistant .answer {border-bottom-left-radius:4px}
 .workspace-v2 .lighthouse:not(.is-open) {pointer-events:none}
 .workspace-v2 .turn.is-pending .message-row.assistant .answer {animation:v2-mb-bubble 250ms var(--mb-ease) both}

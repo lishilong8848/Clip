@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, parse_qsl, quote, unquote, urlencode, urlspli
 
 from upload_event_module.services.http_client import FeishuHTTPError, FeishuHttpClient
 from .lighthouse_response_style import RESPONSE_STYLE
+from .lighthouse_output import public_answer
 
 ENDPOINT = "https://wan.vnet.com/v1/chat/completions"
 MODEL = "WanWu/Deepseek-Auto"
@@ -1086,6 +1087,7 @@ class LighthouseAssistant:
                 state["phase"] = "answering"
                 self._save_state(actor, state)
                 answer = model.complete(messages, profile=profile)
+            answer = public_answer(answer)
             turn.update(answer=answer, sources=sources, warnings=warnings, status="completed", error="")
         except AssistantError as exc:
             turn.update(status="failed", error=str(exc))

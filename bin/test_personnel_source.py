@@ -76,6 +76,17 @@ class PersonnelSourceTests(unittest.TestCase):
             self.assertEqual(source.shift_kind({'班组': group, '班次': {'type': 3, 'value': [shift] if shift else []}}), expected)
         self.assertEqual(source.shift_kind({'班组':'A班', '班次':{'value':['白','夜']}}), '待核对')
 
+    def test_operations_intern_long_day_shift_is_working_but_empty_shift_is_not(self):
+        for group in ('长白', 'A班', ''):
+            for shift in ('长白', ['长白'], {'type': 3, 'value': ['长白']}, [{'text': '长白'}]):
+                with self.subTest(group=group, shift=shift):
+                    self.assertEqual(source.shift_kind({'班组': group, '班次': shift,
+                        '岗位': {'value': ['运维实习生']}}), '长白')
+        for shift in (None, '', ' ', [], {'value': []}, {'value': [' ']}):
+            self.assertEqual(source.shift_kind({'班组': '长白', '班次': shift, '岗位': '运维实习生'}), '')
+        self.assertEqual(source.shift_kind({'班组': 'A班', '班次': ['长白', '夜'], '岗位': '运维实习生'}), '待核对')
+        self.assertEqual(source.shift_kind({'班次': '长白', '岗位': 'FOC', '体系岗位': '实习生'}), '待核对')
+
     def test_full_table_read_projects_fields_and_rejects_incomplete_pages(self):
         service = Mock()
         service._request_json.side_effect = [
@@ -133,6 +144,7 @@ class PersonnelSourceTests(unittest.TestCase):
         today = dt.datetime.now(source.TZ).date().isoformat()
         rows = [
             row('recIntern', name='当班实习', 班组='长白', 班次={'value':['白']}, 岗位=['运维实习生'], 体系岗位=''),
+            row('recLongShift', name='长白班次实习', 班组='', 班次={'value':['长白']}, 岗位='运维实习生'),
             row('recRest', name='休班实习', 班组='长白', 班次={'value':[]}, 岗位='运维实习生'),
             row('recFoc', name='其他岗位', 班组='长白', 班次='白', 岗位='FOC', 体系岗位='实习生'),
             row('recEngineer', name='工程师', 班组='长白', 班次='白', 岗位='电气工程师'),
@@ -145,14 +157,20 @@ class PersonnelSourceTests(unittest.TestCase):
             raw = source.daily_roster(service, today)
             self.assertEqual(next(p for p in raw['people'] if p['name']=='当班实习')['duty_kind'], '长白')
             eligible = read_roster(service, today, scopes=['B'], with_status=True)
-            self.assertEqual([p['name'] for p in eligible['people']], ['当班实习','普通白班','普通夜班'])
+            self.assertEqual([p['name'] for p in eligible['people']], ['当班实习','长白班次实习','普通白班','普通夜班'])
             self.assertEqual([p['name'] for p in eligible['issues']], ['楼栋待核对实习'])
-            self.assertEqual(len(read_roster(service, today, scopes=['B'], include_long_day=True)), 5)
-            # Upgrade a still-fresh raw snapshot which predates the 岗位 field.
-            old = copy.deepcopy(raw); old['parser_version'] = 2
+            self.assertEqual(len(read_roster(service, today, scopes=['B'], include_long_day=True)), 6)
+            # Refresh a fresh snapshot with missing job fields and a previously rejected long-day shift.
+            old = copy.deepcopy(raw); old['parser_version'] = source.ROSTER_PARSER_VERSION - 1
             for person in old['people']: person.pop('position', None)
+            old['people'] = [p for p in old['people'] if p['record_id'] != 'recLongShift']
+            old['issues'].append({'record_id': 'recLongShift', 'name': '长白班次实习',
+                                 'scope': 'B', 'reason': '班组或班次待核对'})
             service._state_store.put_document(source.ROSTER_NAMESPACE, today, old)
-            self.assertEqual(read_roster(service, today, scopes=['B'])[0]['position'], '运维实习生')
+            refreshed = read_roster(service, today, scopes=['B'], with_status=True)
+            self.assertEqual(refreshed['people'][0]['position'], '运维实习生')
+            self.assertIn('长白班次实习', [p['name'] for p in refreshed['people']])
+            self.assertNotIn('长白班次实习', [p['name'] for p in refreshed['issues']])
             self.assertEqual(fetch.call_count, 2)
 
     def test_migration_does_not_merge_duplicate_names_or_employee_numbers(self):

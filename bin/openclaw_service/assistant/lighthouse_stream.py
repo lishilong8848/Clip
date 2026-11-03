@@ -15,6 +15,7 @@ from .lighthouse_model import LighthouseModel
 from .lighthouse_scope import resolve_scopes
 from .lighthouse_queries import DATE_TOKEN, query_refinement, named_clarification_reply
 from .lighthouse_context import task_context, task_followup, reply_preferences, execution_key, execution_lane
+from .lighthouse_output import presentation_issue, public_result, public_answer
 
 RUNS = "lighthouse_runs"
 MESSAGES = "lighthouse_messages"
@@ -464,6 +465,8 @@ class LighthouseStream:
                 if phase:
                     runtime_milestone(run, phase)
                 run["label"] = safe_text(data.get("label", "正在处理"), limit=120) or "正在处理"
+                if presentation_issue(run['label']):
+                    run['label'] = '正在处理你的问题'
                 process = run.setdefault("process", [])
                 if not process or process[-1]["label"] != run["label"]:
                     process.append({"label": run["label"], "at": time.time(),
@@ -514,6 +517,7 @@ class LighthouseStream:
                         await emit("status", {"label": "上下文整理暂未完成，保留原记录继续"})
                 runtime_milestone(run, 'model')
                 result = await self.engine.answer(public_actor, run["_turn"], model_history, request, emit, authorize, context)
+                result = public_result(result)
                 run['runtime'].update(runtime_counts(result))
                 runtime_milestone(run, 'finalizing')
                 if not str(result.get('answer') or run.get('_candidate_answer') or '').strip() and not (
@@ -567,6 +571,7 @@ class LighthouseStream:
             await asyncio.to_thread(capture, 'assistant', 'answer', run_id=run['id'], category=error_code, error=exc)
             from .lighthouse_context import reply_failure
             error = reply_failure(error, error_code, run['_turn'].get('prompt') or run['_turn']['question'])
+            error = public_answer(error)
             frames = [f"{frame.name}:{frame.lineno}" for frame in traceback.extract_tb(exc.__traceback__)[-6:]]
             logging.getLogger(__name__).warning("Assistant run failed: run=%s category=%s type=%s http_status=%s frames=%s",
                 run["id"], error_code, type(exc).__name__, getattr(exc, "status_code", getattr(exc, 'status', None)), ",".join(frames))

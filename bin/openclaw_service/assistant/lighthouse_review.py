@@ -102,6 +102,7 @@ REVIEW += '\n对于含算术、比例、换算或增减结果的断言，在该c
 
 REVIEW += '\n' + QUERY_TIME_GUIDANCE
 REVIEW += '\nbranch_queries是原问题的分项查询口径：业务记录和文档可以有不同对象、楼栋和日期，仅共享确实适用的条件。逐项核对，不把文档设备名反向套成业务过滤条件，不把业务状态、计数要求当成文档筛选条件。'
+REVIEW += '\n面向用户的说明必须为中文，内部自述、写作计划和遵循指令的过程不能作为答复。学练未安排、未到时、待核对不等于已安排但未开始或未完成，须依原任务字段核对，不能相加推断。'
 
 REWRITE = """根据原问题、已有授权证据和独立复核意见，补充或重写候选答复，只返回最终正文（可用Markdown），不返回评审过程。
 数值修订须同时核对原值、单位及关系；比例说明分子和分母的含义，不能仅交换数字或留下与正文矛盾的括号、表格和补充说明。分母为零或未知时说明无法计算，不填0%；不把百分点变化与相对增长率混用。
@@ -112,6 +113,7 @@ visual证据须表述为图片观察，ocr须表述为识别文字，保留图�
 
 
 REWRITE += '\n使用简短Markdown标题、分行编号或项目列表，避免把多个步骤拼成一段。无法确定现场场景时，用文档明确支持的条件分支说明，并列出执行前需确认的现场信息；不将条件式介绍误写为现场结论，也不因未选择分支而删除可安全说明的内容。'
+REWRITE += '\n最终说明一律用中文，删除内部自述及写作打算。姓名、数字、型号、文件名、链接、代码、引用原文和来源编号保持原值；只修正表达及经证据确认的错误，不编造名单或把未安排学练任务计为未开始。'
 
 _EVIDENCE_MARKER = re.compile(r'\[(?:原资料后续未纳入复核节选|内容过长,未发送|节选深度限制|复核[^\]]*未核验|敏感信息已隐藏|凭证已隐藏)\]')
 
@@ -400,8 +402,10 @@ def _citation_numbers(answer, sources):
 
 def _answer_issues(answer, sources):
     from .lighthouse_context import answer_evidence_issue
+    from .lighthouse_output import presentation_issue
+    from .lighthouse_queries import learning_status_issue
     numbers = {str(source['number']) for source in sources if type(source.get('number')) is int}
-    issues = []
+    issues = [issue for issue in (presentation_issue(answer), learning_status_issue(answer, sources)) if issue]
     if any(number not in numbers for number in _citation_numbers(answer, sources)):
         issues.append('答复引用了本轮未提供的来源编号，须删除或改为真实且适用的出处。')
     issue = answer_evidence_issue(answer, sources)
@@ -961,6 +965,7 @@ class AnswerReviewer:
                 **_claim_summary(list({(item['claim'], item['status']): item
                     for item in [*claims, *confirmed_rejections]}.values())),
                 **({'preserved_claim_count': len(preserved)} if preserved else {})}}
+        from .lighthouse_output import public_result
         warning = '独立复核本次未完成，本条答复尚未经独立核验，请以原始资料为准。'
-        return {**result, 'answer': safe_text(result['answer'], limit=None) + '\n\n' + warning,
-                'answer_review': {'status': 'unavailable', 'repairs': repairs}}
+        return public_result({**result, 'answer': safe_text(result['answer'], limit=None) + '\n\n' + warning,
+                              'answer_review': {'status': 'unavailable', 'repairs': repairs}})

@@ -24,6 +24,7 @@ from .lighthouse_basics import calculate as calculate_value, CalculationError, c
 from .lighthouse_message_delivery import MESSAGE_INTENT, feishu_delivery_requested
 from .lighthouse_task_runtime import clear_goal_assessments, finish_progress, prioritize_tools, read_timeout, task_progress
 from .lighthouse_response_style import RESPONSE_STYLE, RESPONSE_WORKFLOW
+from .lighthouse_output import presentation_issue, public_result, pending_english_start
 
 _NEW_READ_TIME = object()
 
@@ -520,6 +521,9 @@ class PublicText:
         self.text = ""
         self.line = ''
         self.redacted_line = False
+        self.fence_count = 0
+        self.line_fence_count = 0
+        self.trailing_ticks = 0
 
     def push(self, value, final=False):
         self.pending += value
@@ -537,6 +541,18 @@ class PublicText:
                 end = identifier.start()
         if not end:
             return ""
+        # Check only the current line/chunk; rescanning the entire growing reply
+        # per token would make long live replies increasingly expensive.
+        prefix = '```\n' if self.live and (self.fence_count - self.line_fence_count) % 2 else ''
+        visible = prefix + self.line + self.pending[:end]
+        if presentation_issue(visible):
+            return ''
+        if self.live and not final:
+            pending = pending_english_start(visible)
+            if pending is not None:
+                end = min(end, max(0, pending - len(prefix) - len(self.line)))
+                if not end:
+                    return ''
         part, self.pending = self.pending[:end], self.pending[end:]
         pieces = []
         for line in part.splitlines(keepends=True):
@@ -553,6 +569,13 @@ class PublicText:
                 if line.endswith('\n'):
                     self.redacted_line = False
         clean = ''.join(pieces)
+        for char in clean:
+            self.trailing_ticks = self.trailing_ticks + 1 if char == '`' else 0
+            if self.trailing_ticks and self.trailing_ticks % 3 == 0:
+                self.fence_count += 1
+                self.line_fence_count += 1
+            if char == '\n':
+                self.line_fence_count = 0
         self.text += clean
         return clean
 
@@ -749,7 +772,7 @@ class LighthouseModel:
         if self.answer_reviewer is None:
             result = await candidate(emit)
             result.pop('_review_sources', None)
-            return finish_progress(turn, await self._check_company_delivery(actor, turn, result, authorize))
+            return finish_progress(turn, public_result(await self._check_company_delivery(actor, turn, result, authorize)))
         live = False
         async def hold_text(kind, data):
             nonlocal live
@@ -759,7 +782,7 @@ class LighthouseModel:
                 await emit(kind, data)
         result = await candidate(hold_text)
         if live:
-            return finish_progress(turn, {**result, 'answer_review': {'status': 'live_general', 'repairs': 0}})
+            return finish_progress(turn, public_result({**result, 'answer_review': {'status': 'live_general', 'repairs': 0}}))
         review_sources = result.pop('_review_sources', None)
         # Keep the original question hash bound to its task contract. The
         # reviewer reads the validated effective query through task_question.
@@ -780,6 +803,7 @@ class LighthouseModel:
         if private_identifier(result.get('answer', '')) or CONTACT.search(result.get('answer', '')):
             result['answer'] = PRIVATE_REPLY
         result = await self._check_company_delivery(actor, turn, result, authorize)
+        result = public_result(result)
         result = finish_progress(turn, result)
         from .lighthouse_artifacts import render_file_markers
         result['answer'] = render_file_markers(result.get('answer', ''), result.get('output_files', []))
@@ -2685,6 +2709,9 @@ class LighthouseModel:
                 if plan is not None:
                     return {"ok": False, "error": "已有待填写或待确认表单，请在原表单补充，不另行询问或执行。"}
                 choices = options or []
+                issue = presentation_issue(question)
+                if issue:
+                    raise ModelRetry(issue + '用中文询问必要条件，选项中的真实业务名称保留。')
                 if (not question.strip() or len(question) > 300 or len(choices) > 5
                         or any(not choice.strip() or len(choice) > 160 for choice in choices)
                         or input_type not in {'text', 'textarea', 'date', 'time', 'datetime-local', 'number'}
@@ -2768,6 +2795,13 @@ class LighthouseModel:
                     raise ModelRetry('当前没有保存定时操作的真实回执。用户确实要求定时操作时请调用scheduled_tasks；否则说明尚未设置，不得声称已创建、修改或取消。')
                 from .lighthouse_artifacts import render_file_markers
                 result = render_file_markers(result, turn.get('output_files', []))
+                issue = presentation_issue(result)
+                if issue:
+                    raise ModelRetry(issue + '基于本轮已有回执修正最终表达，已有完整资料不重查，不重新生成文件或准备、提交任何业务。')
+                from .lighthouse_queries import learning_status_issue
+                issue = learning_status_issue(result, list(query_sources.values()))
+                if issue:
+                    raise ModelRetry(issue)
                 if review_issues:
                     raise ModelRetry('请按已有回执修正交付核验，并再次调用review_answer；未能完成的目标明确标记限制，不重做业务。' + '；'.join(review_issues))
                 if research_mode and not research_called and not clarification:

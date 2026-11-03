@@ -4,7 +4,7 @@
       <button type="button" :aria-label="collapsed?'展开导航':'灯塔首页'" @click="collapsed?emit('update:collapsed',false):choose('home')"><img src="/assets/vnet-logo.png" alt="VNET" /><strong class="v2-rail-label">灯塔</strong></button>
     </div>
     <div ref="menuScroll" class="v2-rail-scroll">
-      <NMenu :options="options" :value="selected" :indent="20" :theme-overrides="{itemHeight:'42px'}" :expanded-keys="collapsed?[]:expandedKeys" :node-props="menuNodeProps" @update:expanded-keys="expandedKeys=$event" @update:value="choose" />
+      <NMenu :options="options" :value="selected" :indent="20" :theme-overrides="{itemHeight:'42px'}" :expanded-keys="expandedKeys" :node-props="menuNodeProps" @update:expanded-keys="expandedKeys=$event" @update:value="choose" />
     </div>
     <footer class="v2-rail-footer"><slot name="footer" /></footer>
   </aside>
@@ -27,9 +27,21 @@ function focusIn(){if(keyboardNavigation&&matchMedia('(min-width:761px)').matche
 function focusOut(){void nextTick(()=>{if(!sidebar.value?.contains(document.activeElement)&&!sidebar.value?.matches(':hover'))leave();});}
 watch(()=>props.holdOpen,value=>{if(!value&&!sidebar.value?.matches(':hover'))leave();});
 function choose(value:string){emit('select',value);if(!desktop())emit('update:collapsed',true);}
-watch(()=>props.collapsed,value=>{if(value)emit('dismiss-popovers');});
+watch(()=>props.collapsed,value=>{
+  if(!value)return;
+  emit('dismiss-popovers');
+  const scroll=menuScroll.value;
+  const submenu=scroll?.querySelector<HTMLElement>('.n-submenu-children');
+  const parentRow=submenu?.previousElementSibling;
+  if(!scroll||!parentRow)return;
+  // If the viewport contains only submenu text, bring its parent icon back into view.
+  const top=scroll.getBoundingClientRect().top;
+  const row=parentRow.getBoundingClientRect();
+  if(row.bottom<=top)scroll.scrollTop+=row.top-top;
+});
 function menuNodeProps(option:MenuOption){return {'aria-label':typeof option.label==='string'?option.label:undefined};}
-watch(()=>[props.selected,props.collapsed],async()=>{
+// Hover changes the rail width, while navigation to another module may reveal its selected row.
+watch(()=>props.selected,async()=>{
  if(props.selected.startsWith('settings:')&&!expandedKeys.value.includes('settings'))expandedKeys.value.push('settings');
  if(props.collapsed)return;
  await nextTick();const root=menuScroll.value,active=root?.querySelector<HTMLElement>('.n-menu-item-content--selected');

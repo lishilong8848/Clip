@@ -14,7 +14,7 @@ URL = f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}'
 EXTERNAL_APP_TOKEN = 'HU38bc1vnamMK9sCeOgclUvXnFc'
 EXTERNAL_TABLE_ID = 'tblC77nllNrprHBY'
 ROSTER_NAMESPACE = 'personnel_daily_roster'
-ROSTER_PARSER_VERSION = 4
+ROSTER_PARSER_VERSION = 5
 TZ = dt.timezone(dt.timedelta(hours=8))
 ROSTER_FIELDS = ['姓名', '员工姓名', '员工工号', '机楼/专业', '体系岗位', '岗位',
                  '账号性质', '离职/异动情况', '班组', '班次']
@@ -54,6 +54,8 @@ def shift_kind(fields):
         return ''
     group = text(fields.get('班组'))
     if len(shifts) == 1:
+        if shifts[0] == '长白' and text(fields.get('岗位')) == '运维实习生':
+            return '长白'
         if group == '长白' and shifts[0] == '白':
             return '长白'
         if group in {'A班', 'B班', 'C班', 'D班'} and shifts[0] in {'白', '夜'}:

@@ -24,6 +24,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from openclaw_service.assistant.lighthouse_ai import AssistantError, safe_text, private_identifier, unprotect_key
+from openclaw_service.assistant.lighthouse_output import public_answer
 from . import feishu_notice_forms as notice_forms
 from .portal_auth import AUTH_COOKIE_NAME, AUTH_SESSION_TTL_SECONDS
 
@@ -1582,6 +1583,9 @@ class FeishuAssistant:
             text = '本条消息仍在处理中，原会话和操作任务已保留，请查看原任务，不要重复提交。'
         else:
             text = turn.get("answer") or turn.get("error") or "本轮没有生成有效回答，请重新提问。"
+        # Also protect restored/replayed replies from an older release. User
+        # business fields, filenames and native form data are appended unchanged.
+        text = public_answer(text)
         pending_reads = await asyncio.to_thread(consent.pending, actor, question)
         if pending_reads:
             destination = '原群内公开回复' if message['chat_type'] == 'group' else '本私聊回复'

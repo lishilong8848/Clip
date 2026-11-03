@@ -59,7 +59,7 @@ import Assistant from '/src/components/LighthouseAssistant.vue';
 import {requestJson,assistantClientId,requestBinaryJson,uploadJson,requestFile} from '/src/api/client.ts';
 import '/src/workspace-v2/workspace.css';
 import '/src/workspace-v2/motionBlocks.css';
-document.documentElement.classList.add('workspace-v2');
+document.documentElement.classList.toggle('workspace-v2',!new URLSearchParams(location.search).has('legacy'));
 const app=createApp({render:()=>h(Assistant,{userId:'shared-fixture-person',userName:'Offline fixture'})});
 app.mount('#app');
 window.fixture={vm:app._instance.subTree.component.setupState,requestJson,assistantClientId,requestBinaryJson,uploadJson,requestFile};
@@ -70,8 +70,7 @@ if(new URLSearchParams(location.search).has('preview')){
 const server = await createServer({ root, configFile: false, publicDir: false, logLevel: 'error',
   cacheDir: path.join(output, 'vite-cache'), server: { host: '127.0.0.1', port: 0 },
   plugins: [{ name: 'isolated-concurrent-assistant', enforce: 'pre',
-    resolveId(source, importer) {
-      if (source.endsWith('/LighthouseReply.vue') && importer?.replaceAll('\\', '/').endsWith('/components/LighthouseAssistant.vue')) return path.join(root, 'src/workspace-v2/AnimatedReply.vue');
+    resolveId(source) {
       if (source === '/__assistant-concurrent.ts') return source;
     },
     load(id) { if (id === '/__assistant-concurrent.ts') return moduleSource.replace("'/node_modules/.vite/deps/vue.js'", "'vue'"); },
@@ -140,10 +139,10 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
   await context.addInitScript(() => { try { window.initialClient = sessionStorage.getItem('lighthouse_client'); } catch {} });
   await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
-  async function page(viewport) {
+  async function page(viewport, query = '') {
     const target = await context.newPage(); if (viewport) await target.setViewportSize(viewport);
     target.setDefaultTimeout(10000); target.on('pageerror', error => errors.push(error.message));
-    await target.goto(origin + '/__assistant-concurrent');
+    await target.goto(origin + '/__assistant-concurrent' + query);
     await target.waitForFunction(() => !!window.fixture);
     await target.evaluate(() => window.fixture.vm.openAssistant()); return target;
   }
@@ -244,7 +243,22 @@ try {
   for (const request of requests.filter(request => request.path.startsWith('/api/assistant/'))) assert.match(request.lane, /^[A-Za-z0-9_-]{16,80}$/, request.path);
   assert(requests.some(request => request.path === '/api/assistant/files' && request.type.startsWith('multipart/form-data; boundary=')), 'upload keeps its browser-generated multipart boundary');
   assert.deepEqual(errors, []);
-  console.log('PASS: independent channels, real incremental SSE, stale snapshots, verified final replacement, cancel/resume, upload headers, Chinese word fade, caret, scroll, reduced motion and storage recovery.');
+  const legacy = await page({ width: 402, height: 874 }, '?legacy=1');
+  const legacyRun = await send(legacy, 'legacy live reply');
+  delta(legacyRun, chinese);
+  const liveWord = legacy.locator('.turn').filter({ hasText: 'legacy live reply' }).locator('.v2-word').first();
+  await liveWord.waitFor({ state: 'attached' });
+  assert.equal(await liveWord.evaluate(node => getComputedStyle(node).animationDuration), '0.38s');
+  assert.equal(legacyRun.status, 'pending');
+  finish(legacyRun);
+  const buffered = await send(legacy, 'legacy buffered reply');
+  finish(buffered, 'completed', chinese.repeat(8));
+  const completedReply = legacy.locator('.turn').filter({ hasText: 'legacy buffered reply' }).locator('.v2-reply');
+  await completedReply.locator('.v2-word[hidden]').first().waitFor({ state: 'attached' });
+  await legacy.waitForFunction(() => !document.querySelector('.turn:last-child .v2-reply [hidden]'));
+  assert.equal(await completedReply.locator('.v2-reply-caret').isVisible(), false);
+  await legacy.close();
+  console.log('PASS: independent channels, real incremental SSE, stale snapshots, verified final replacement, cancel/resume, upload headers, Chinese word fade, legacy live and buffered replies, caret, scroll, reduced motion and storage recovery.');
   if (process.argv.includes('--real-page')) {
     console.log('Building the full workspace into the isolated output directory.');
     const previousOutput = process.env.CLIPFLOW_WORKSPACE_BUILD_DIR; process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = realBuild;

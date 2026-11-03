@@ -187,7 +187,7 @@
                     </ol>
                   </details>
                   <div v-if="turn.status === 'pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i /><i /><i /></span><span>{{ assistantProgressText(turn) }}</span></div>
-                  <LighthouseReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" :streaming="!!turn.run_id && turn.run_id === state.active_run_id" />
+                  <AnimatedReply v-if="(turn.answer || turn.status === 'pending') && turn.plan?.status !== 'failed'" :text="turn.answer || ''" :streaming="turn.status === 'pending' && turn.reply_mode !== 'validated' && !!turn.run_id && turn.run_id === state.active_run_id" />
                   <p v-if="!turn.answer && turn.status === 'superseded'" class="muted">已结合补充信息继续处理</p>
                   <p v-else-if="!turn.answer && turn.status !== 'pending' && !turn.plan" class="failure">{{ turn.error || '上次回答已中断，可重试。' }}</p>
                   <p v-if="turn.answer && ['stopped', 'failed'].includes(turn.status)" class="muted">{{ turn.error || '回答未完成' }}</p>
@@ -355,7 +355,7 @@ import { canUseModule } from '../api/modulePermissions';
 import { repairDeviceDependentPatch, repairDraftInputValue } from '../repairManagementUtils';
 import { navigate } from '../navigation';
 import ConfirmDialog from './ConfirmDialog.vue';
-import LighthouseReply from './LighthouseReply.vue';
+import AnimatedReply from '../workspace-v2/AnimatedReply.vue';
 import LighthouseArtifactPreview from './LighthouseArtifactPreview.vue';
 import LighthouseDownloads from './LighthouseDownloads.vue';
 import LighthouseQuestion from './LighthouseQuestion.vue';

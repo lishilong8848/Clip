@@ -47,7 +47,7 @@ function decorate(animate:boolean){
       if(animate&&(offset>revealed||began!==undefined&&now-began<380)){
         const span=document.createElement('span');span.textContent=part;span.hidden=offset>revealed;
         if(words++<600)span.className='v2-word cword';
-        if(props.streaming){
+        if(props.streaming||began!==undefined){
           const at=began??now;nextFading.set(start,at);
           // Keep an in-flight fade at its elapsed time when Markdown replaces the DOM.
           span.style.animationDelay=Math.min(0,at-now)+'ms';
@@ -85,3 +85,29 @@ function motionChanged(){if(reduced.matches){animation?.cancel();reveal();}}
 onMounted(()=>reduced.addEventListener('change',motionChanged));
 onBeforeUnmount(()=>{disposed=true;window.clearTimeout(timer);queue=[];observer?.disconnect();animation?.cancel();reduced.removeEventListener('change',motionChanged);});
 </script>
+
+<style>
+.v2-reply .v2-word.cword {
+  animation: v2-word-in 380ms cubic-bezier(.16, 1, .3, 1) both;
+}
+@keyframes v2-word-in {
+  from { opacity: 0; filter: blur(3px); }
+  to { opacity: 1; filter: blur(0); }
+}
+.v2-reply .v2-reply-caret { display: none; }
+.turn.is-pending .v2-reply .v2-reply-caret,
+.v2-reply[data-revealing=true] .v2-reply-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  vertical-align: -2px;
+  margin-left: 3px;
+  background: var(--lh-accent, #0071e3);
+  animation: v2-caret 1s steps(2, end) infinite;
+}
+@keyframes v2-caret { 50% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) {
+  .v2-reply .v2-word.cword,
+  .v2-reply .v2-reply-caret { animation: none !important; }
+}
+</style>

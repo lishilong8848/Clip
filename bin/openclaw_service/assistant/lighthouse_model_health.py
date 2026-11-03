@@ -13,6 +13,8 @@ from contextlib import closing
 _QUALITY_LOCK = threading.RLock()
 _QUALITY_DOCUMENT = 'task_model_quality:v1'
 _TASK_CATEGORIES = frozenset({'statistics', 'document', 'mixed', 'general'})
+_SPEED_QUALITY_FLOOR = 90
+_SPEED_QUALITY_MARGIN = 3
 _REASONING = re.compile(r'分析|比较|对比|排查|诊断|推理|计算|统计|汇总|方案|\b(?:analy[sz]e|compare|debug|diagnose|calculate|reason|plan)\b', re.I)
 
 
@@ -131,7 +133,7 @@ def select_task_profile(assistant, actor, turn, profile, *, required=None, attem
     reasoning = bool(_REASONING.search(str(turn.get('prompt') or turn.get('question') or '')[:2000]))
     context = bool(context or turn.get('file_ids'))
     health = model_health(assistant)
-    candidates = []
+    candidates, verified_quality = [], {}
     for index, item in enumerate(settings.get('models', [])):
         if not item.get('configured') or explicit and item['id'] != profile.get('id'):
             continue
@@ -163,6 +165,15 @@ def select_task_profile(assistant, actor, turn, profile, *, required=None, attem
                  quality.get('latency'), state.get('latency', 30), initial and item['id'] != profile.get('id'),
                  sum(capabilities[key] != required[key] for key in ('tool_calls', 'image_input')), index)
         candidates.append((score, candidate))
+        if quality.get('eligible') and quality['score'] >= _SPEED_QUALITY_FLOOR:
+            verified_quality[profile_key(candidate)] = quality['score']
+    # Use observed latency to break near-equal, independently verified quality.
+    # Unmeasured / weak models never gain this shortcut; explicit choices,
+    # capability requirements, context capacity and cooldowns remain unchanged.
+    if verified_quality:
+        best = max(verified_quality.values())
+        candidates = [(((-best if verified_quality.get(profile_key(candidate), -1) >= best - _SPEED_QUALITY_MARGIN
+                         else score[0]), *score[1:]), candidate) for score, candidate in candidates]
     # Unknown whole-task latency is neutral, never a transport-time "30s" sample.
     timings = sorted(score[3] for score, _ in candidates if score[3] is not None)
     baseline = timings[len(timings) // 2] if timings else 0

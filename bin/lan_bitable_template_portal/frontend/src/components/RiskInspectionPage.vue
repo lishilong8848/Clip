@@ -7,7 +7,11 @@
       <strong>{{editor==='publish'?'发布风险排查':editor==='base'?'基础模板库':editor==='choose'?'选择基础模板':editor==='history'?'历史模板库':detail?.name||'风险排查'}}</strong>
       <div class="risk-tools"><NButton v-if="!libraryMode" :disabled="busy||unsaved||!!pendingPublication" :loading="loading" title="刷新" aria-label="刷新" @click="reload"><RefreshCw :size="16" /></NButton><template v-if="isManager&&activeView==='published'&&!detail&&!editor"><NButton :disabled="busy||loading" @click="openEditor('base')"><Settings2 :size="16" />基础模板</NButton><NButton :disabled="busy||loading" @click="openEditor('history')"><Library :size="16" />历史模板库</NButton><NButton type="primary" :disabled="busy||loading" @click="openEditor('publish')"><Plus :size="16" />发布排查</NButton></template></div>
     </header>
-    <NTabs v-if="!detail&&!editor" :value="activeView" type="segment" aria-label="排查工作区" role="tablist" data-v2-navigation @update:value="changeView"><NTab v-if="isManager" name="published" role="tab" :aria-selected="activeView==='published'" tabindex="0" @keydown.enter.prevent="changeView('published')" @keydown.space.prevent="changeView('published')">发布管理</NTab><NTab name="mine" role="tab" :aria-selected="activeView==='mine'" tabindex="0" @keydown.enter.prevent="changeView('mine')" @keydown.space.prevent="changeView('mine')">我的排查任务</NTab><NTab name="review" role="tab" :aria-selected="activeView==='review'" tabindex="0" @keydown.enter.prevent="changeView('review')" @keydown.space.prevent="changeView('review')">我的审核任务</NTab></NTabs>
+    <NTabs v-if="!detail&&!editor" class="risk-view-tabs" :value="activeView" type="segment" aria-label="排查工作区" role="tablist" data-v2-navigation @update:value="changeView">
+      <NTab v-if="isManager" name="published" role="tab" :aria-selected="activeView==='published'" tabindex="0" @keydown.enter.prevent="changeView('published')" @keydown.space.prevent="changeView('published')">发布管理</NTab>
+      <NTab name="mine" role="tab" :aria-selected="activeView==='mine'" tabindex="0" @keydown.enter.prevent="changeView('mine')" @keydown.space.prevent="changeView('mine')">我的排查任务</NTab>
+      <NTab name="review" role="tab" :aria-selected="activeView==='review'" tabindex="0" @keydown.enter.prevent="changeView('review')" @keydown.space.prevent="changeView('review')">我的审核任务</NTab>
+    </NTabs>
     <NAlert v-if="error&&!confirmation&&!fieldEditor&&!feedbackOpen&&!pendingPublication" type="error" :bordered="false" role="alert">{{error}} <NButton v-if="detail" text :disabled="busy" @click="readLatest">重新读取，保留填写</NButton></NAlert>
     <NAlert v-if="message&&!feedbackOpen" type="info" :bordered="false" role="status">{{message}}</NAlert>
     <NSpin :show="loading">
@@ -270,6 +274,55 @@ onMounted(async()=>{await reload();if(disposed)return;const id=props.releaseId||
 onBeforeUnmount(()=>{disposed=true;cancelTaskListRead();read?.abort();unregister();window.clearInterval(timer);window.removeEventListener('beforeunload',leaving);});
 </script>
 <style scoped>
+.risk-view-tabs {
+  --risk-tab-accent: var(--v2-blue, var(--cf-brand-blue, #2563eb));
+  --risk-tab-on-accent: var(--v2-on-accent, #fff);
+}
+.risk-view-tabs :deep(.n-tabs-rail) {
+  box-sizing: border-box;
+  gap: 4px;
+  background: var(--table-header-color);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+}
+/* Keep selection visible when the manager tab is added after the initial read. */
+.risk-view-tabs :deep(.n-tabs-capsule) { display: none; }
+.risk-view-tabs :deep(.n-tabs-tab-wrapper) { min-width: 0; align-self: stretch; }
+.risk-view-tabs :deep(.n-tabs-tab-wrapper .n-tabs-tab) {
+  box-sizing: border-box;
+  min-height: 36px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  color: var(--text-color);
+  line-height: 1.4;
+  text-align: center;
+  white-space: normal;
+}
+.risk-view-tabs :deep(.n-tabs-tab[aria-selected="false"]:hover) {
+  background: color-mix(in srgb, var(--risk-tab-accent) 10%, transparent);
+  color: var(--risk-tab-accent);
+}
+.risk-view-tabs :deep(.n-tabs-tab-wrapper .n-tabs-tab[aria-selected="true"]) {
+  --n-tab-text-color-hover: var(--risk-tab-on-accent);
+  background: var(--risk-tab-accent);
+  border-color: var(--risk-tab-accent);
+  color: var(--risk-tab-on-accent);
+  font-weight: 700;
+}
+.risk-view-tabs :deep(.n-tabs-tab:focus-visible) { outline: 2px solid currentColor; outline-offset: -4px; }
+@media(max-width:700px) {
+  .risk-view-tabs :deep(.n-tabs-tab-wrapper .n-tabs-tab) { min-height: 44px; padding-inline: 4px; }
+}
+@media(forced-colors:active) {
+  .risk-view-tabs :deep(.n-tabs-tab-wrapper .n-tabs-tab[aria-selected="true"]) {
+    forced-color-adjust: none;
+    background: Highlight;
+    border-color: Highlight;
+    color: HighlightText;
+    --n-tab-text-color-hover: HighlightText;
+  }
+}
 .risk-role-view{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
 .risk-mobile-tasks{display:none}.risk-task-list :deep(.risk-task-actions){display:flex;align-items:center;gap:8px}
 .risk-mobile-task.risk-clickable-row,.risk-task-list :deep(.risk-clickable-row){cursor:pointer}.risk-mobile-task.risk-clickable-row:hover,.risk-mobile-task.risk-clickable-row:focus-within{background:var(--table-header-color,#f3f6fa)}
