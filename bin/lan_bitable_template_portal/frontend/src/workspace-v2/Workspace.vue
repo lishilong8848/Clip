@@ -131,7 +131,8 @@ const pages: Record<string, any> = {
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
-  risk_inspection: lazy(() => import('../components/RiskInspectionPage.vue')),
+  risk_inspection: lazy(() => import('../components/InspectionWorkspace.vue')),
+  tool_management: lazy(() => import('../components/ToolSelfCheckPage.vue')),
   cabinet: lazy(() => import('../components/CabinetPowerPage.vue')),
   cabinet_batch: lazy(() => import('../components/CabinetPowerBatchPage.vue')),
   drills: lazy(() => import('../components/DrillManagementPage.vue')),
@@ -165,7 +166,8 @@ function refreshAuth(){cancelAuth();void loadAuth();}
 const watermarkDay=beijingDate();
 function preventSignatureDrag(event:DragEvent){const image=(event.target as Element)?.closest?.('img');if(image&&(image.src.includes('/api/signatures/')||image.alt.includes('签名')))event.preventDefault();}
 const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value, impersonationIdentity(user.value)]));
-const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&granted.value.includes(item.permission||item.id))})).filter(group=>group.items.length));
+const toolManagementAvailable = computed(() => user.value.tool_management_enabled === true);
+const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&granted.value.includes(item.permission||item.id)&&(item.id!=='tool_management'||toolManagementAvailable.value))})).filter(group=>group.items.length));
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
 const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
@@ -174,7 +176,7 @@ const mobileActive = computed(() => route.value.pathname === '/' && (route.value
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
-const denied = computed(() => loggedIn.value && !publicLink.value && (!!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const denied = computed(() => loggedIn.value && !publicLink.value && (activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');
@@ -200,7 +202,7 @@ const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',eng
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
 const selectedMenu = computed(() => activeModule.value==='accounts'?'settings:'+(route.value.searchParams.get('tab')||'permissions'):NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
-const permittedModules = computed(() => navigationModules(granted.value).filter(m=>m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest')));
+const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value).filter(m=>m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest')));
 const menuOptions = computed(() => [
   { label: '个人工作台', key: 'home', icon: () => h(House, {size:19}) },
   ...[...new Set(permittedModules.value.map(m => m.group))].map(group => ({ key: group, label: group, type: 'group' as const, children: permittedModules.value.filter(m => m.group === group).map(m => ({ key: m.id, label:m.label, icon:() => h(moduleIcons[m.icon as keyof typeof moduleIcons],{size:18}) })) })),
@@ -274,6 +276,7 @@ const componentProps = computed(() => {
   switch(componentName.value) {
     case 'work_handover': return {handoverId:p.get('id')||''};
     case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
+    case 'tool_management': return {scope:p.get('scope')||''};
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':

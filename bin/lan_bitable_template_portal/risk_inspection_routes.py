@@ -19,6 +19,25 @@ MAX_FILE = 20 * 1024 * 1024
 EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.md', '.txt', '.csv', '.jpg', '.jpeg', '.png', '.webp'}
 
 
+def tool_management_enabled():
+    return os.environ.get('CLIPFLOW_TOOL_SELF_CHECK_ENABLED') == '1'
+
+
+def tool_management_access(runtime, session, user):
+    from .cabinet_guest import is_cabinet_guest
+    service = getattr(runtime, 'tool_management', None)
+    if is_cabinet_guest(session) or not callable(service):
+        return False
+    try:
+        actor = runtime.risk_inspection_actor(user.get('open_id'), user.get('name'))
+        return service().available_to(actor)
+    except RiskError:
+        return False
+    except Exception:
+        logging.exception('Tool management access unavailable')
+        return False
+
+
 def risk_task_access(runtime, session, rid=''):
     from .cabinet_guest import is_cabinet_guest
     if not session or is_cabinet_guest(session):
@@ -39,9 +58,10 @@ def risk_task_access(runtime, session, rid=''):
 
 
 def install_risk_inspection_routes(app, controller, runtime):
-    service = cloud = None
+    service = cloud = tool_checks = None
+    tool_checks_enabled = tool_management_enabled()
     lock, stop = threading.Lock(), threading.Event()
-    worker = None
+    worker = tool_worker = None
 
     def actor_for(open_id, name=''):
         if not open_id:
@@ -55,7 +75,8 @@ def install_risk_inspection_routes(app, controller, runtime):
             raise RiskError('当前账号已停用，不能处理排查任务。', 403)
         profile = auth.account_profile(open_id)
         actor = {**profile, 'id': person.get('id') or 'account:' + open_id,
-                 'open_id': open_id, 'name': person.get('name') or name or '当前人员'}
+                 'open_id': open_id, 'name': person.get('name') or name or '当前人员',
+                 'position': person.get('position') or ''}
         RiskInspections.check(actor)
         return actor
 
@@ -110,6 +131,21 @@ def install_risk_inspection_routes(app, controller, runtime):
     def response(data=None, error=None):
         return JSONResponse({'ok': error is None, **({'data': data} if error is None else {'error': str(error)})},
                             status_code=error.status if error else 200, headers={'Cache-Control': 'no-store'})
+
+    def get_tool_checks():
+        nonlocal tool_checks
+        inspection, remote = get_services()
+        with lock:
+            if tool_checks is None:
+                tool_checks = ToolManagement(inspection, ToolCloud(remote))
+        return tool_checks
+
+    if tool_checks_enabled:
+        from .tool_management import ToolManagement
+        from .tool_management_cloud import ToolCloud, run_tool_jobs
+        from .tool_self_check_routes import install_tool_self_check_routes
+        runtime.tool_management = get_tool_checks
+        install_tool_self_check_routes(app, controller, get_tool_checks, read_actor, same_origin, response)
 
     async def endpoint(request: Request):
         try:
@@ -190,7 +226,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                         result.append({'id': person['id'], 'name': person['name'], 'employee_no': row.get('employee_no', ''),
                                        'scopes': scopes, 'home_scope': person.get('home_scope', ''), 'can_review': True,
                                        'final_scopes': [s for s in scopes if can_scope(person, s)],
-                                       'category': person.get('category', ''), 'can_receive_final': final_manager(person)})
+                                       'category': person.get('category', ''), 'position': person.get('position', ''),
+                                       'can_receive_final': final_manager(person)})
                     if not any(p['id'] == actor['id'] for p in result):
                         result.insert(0, {'id': actor['id'], 'name': actor['name'], 'employee_no': '',
                                          'scopes': [s for s in SCOPES if can_scope(actor, s)],
@@ -348,17 +385,30 @@ def install_risk_inspection_routes(app, controller, runtime):
                         logging.exception('Risk inspection receipt unavailable; persisted lease will recover the job')
             stop.wait(.25 if job else 5)
 
+    def run_tools():
+        while not stop.is_set():
+            try:
+                if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
+                    run_tool_jobs(get_tool_checks(), stop)
+                    return
+            except Exception:
+                logging.exception('Tool management initialization deferred')
+            stop.wait(5)
+
     def start_worker():
-        nonlocal worker
+        nonlocal worker, tool_worker
         if worker is None:
             worker = threading.Thread(target=run, name='risk-inspection-sync', daemon=True)
             worker.start()
+        if tool_checks_enabled and tool_worker is None:
+            tool_worker = threading.Thread(target=run_tools, name='tool-management-sync', daemon=True)
+            tool_worker.start()
 
     async def stop_worker():
         stop.set()
-        if worker:
-            await asyncio.to_thread(worker.join, 40)
-        if cloud and (not worker or not worker.is_alive()):
+        workers = [thread for thread in (worker, tool_worker) if thread]
+        await asyncio.gather(*(asyncio.to_thread(thread.join, 40) for thread in workers))
+        if cloud and not any(thread.is_alive() for thread in workers):
             cloud.close()
 
     app.add_event_handler('startup', start_worker)

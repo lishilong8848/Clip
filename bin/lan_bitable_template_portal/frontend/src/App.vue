@@ -247,6 +247,7 @@
       @water="enterWaterManagement"
       @critical-guard="enterCriticalGuard()"
       @risk-inspection="(scope?: string) => navigate('/risk-inspections' + (scope ? '?scope=' + encodeURIComponent(scope) : ''))"
+      @tool-management="navigate('/risk-inspections?view=tool-self-check')"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
       @knowledge="navigate('/knowledge-base')"
@@ -330,7 +331,7 @@ const CabinetPowerPage = asyncPage(() => import("./components/CabinetPowerPage.v
 const CabinetPowerBatchPage = asyncPage(() => import("./components/CabinetPowerBatchPage.vue"));
 const WorkbenchLitePage = asyncPage(() => import("./components/WorkbenchLitePage.vue"));
 const WorkHandoverPage = asyncPage(() => import("./components/WorkHandoverPage.vue"));
-const RiskInspectionPage = asyncPage(() => import("./components/RiskInspectionPage.vue"));
+const RiskInspectionPage = asyncPage(() => import("./components/InspectionWorkspace.vue"));
 
 type Dict = LooseDict;
 

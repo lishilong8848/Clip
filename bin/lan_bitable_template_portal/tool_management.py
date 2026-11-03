@@ -1,0 +1,558 @@
+"""Tool inventory, periodic work orders and durable Feishu ledger synchronization."""
+
+import calendar
+import datetime as dt
+import hashlib
+import io
+import json
+import os
+import re
+from tempfile import NamedTemporaryFile
+import time
+import uuid
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+
+from .risk_inspection import RiskError, can_scope, digest, text
+from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
+
+
+CYCLES = {'每月': 1, '季度': 3, '半年': 6, '一年': 12, '两年': 24, '三年': 36, '四年': 48, '五年': 60}
+KINDS = {'self': '自检', 'external': '送检'}
+OUTCOMES = {'normal': '正常', 'repair': '检修中', 'repaired': '检修完成',
+            'scrap': '待报废审批', 'scrapped': '已批准报废', 'rejected': '报废未通过'}
+DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档表', 'repair': '检修跟踪表',
+                'scrap': '工具报废表', 'change': '异动台账'}
+MAX_REPORT = 12 * 1024 * 1024
+
+
+def clock():
+    return dt.datetime.now(TZ)
+
+
+def month_offset(day, months):
+    year, index = divmod(day.year * 12 + day.month - 1 + months, 12)
+    return dt.date(year, index + 1, min(day.day, calendar.monthrange(year, index + 1)[1]))
+
+
+def date_value(value, *, required=False):
+    if not value and not required:
+        return ''
+    try:
+        parsed = dt.date.fromisoformat(text(value, 10, True))
+        if parsed.isoformat() != value:
+            raise ValueError
+    except ValueError:
+        raise RiskError('请输入有效日期。') from None
+    return value
+
+
+def report_file(name, data):
+    name = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', text(name, 180, True)).strip('. ')
+    if not data or len(data) > MAX_REPORT:
+        raise RiskError('请选择 12 MB 以内的非空报告。')
+    extension = name.rpartition('.')[2].lower()
+    prefixes = {'pdf': b'%PDF-', 'png': b'\x89PNG\r\n\x1a\n', 'jpg': b'\xff\xd8\xff', 'jpeg': b'\xff\xd8\xff'}
+    if extension in {'docx', 'xlsx'}:
+        try:
+            with ZipFile(io.BytesIO(data)) as package:
+                items = set(package.namelist())
+                valid = '[Content_Types].xml' in items and (
+                    'word/document.xml' if extension == 'docx' else 'xl/workbook.xml') in items
+                valid = valid and not any(item.endswith('vbaProject.bin') for item in items)
+        except (BadZipFile, OSError, ValueError):
+            valid = False
+    else:
+        valid = extension in prefixes and data.startswith(prefixes[extension])
+    if not valid:
+        raise RiskError('请选择内容有效的 PDF、Word、Excel 或 JPG／PNG 报告。')
+    return name
+
+
+class ToolManagement(ToolSelfChecks):
+    def __init__(self, inspection, cloud):
+        super().__init__(inspection)
+        self.cloud = cloud
+        self.person_for = inspection.person_for
+        self.archive_dir = inspection.db_path.parent / 'tool_management_archives'
+        with self.connect(True) as db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS tool_inventory(
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, active INTEGER NOT NULL,
+                    config TEXT NOT NULL DEFAULT '{}', version INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS tool_management_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS tool_work_orders(
+                    id TEXT PRIMARY KEY, month TEXT NOT NULL, asset_id TEXT NOT NULL, scope TEXT NOT NULL,
+                    kind TEXT NOT NULL, due TEXT NOT NULL, asset TEXT NOT NULL, supervisor TEXT NOT NULL DEFAULT '',
+                    owner TEXT NOT NULL DEFAULT '', owner_name TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0,
+                    records TEXT NOT NULL DEFAULT '[]', draft TEXT NOT NULL DEFAULT '{}',
+                    submit_key TEXT NOT NULL DEFAULT '', report_name TEXT NOT NULL DEFAULT '', report BLOB,
+                    actual TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '',
+                    submitted_at TEXT, manager TEXT NOT NULL DEFAULT '', scrap_qty INTEGER NOT NULL DEFAULT 0,
+                    reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
+                    scrap_reason TEXT NOT NULL DEFAULT '', scrap_status TEXT NOT NULL DEFAULT '', resolved_at TEXT NOT NULL DEFAULT '',
+                    UNIQUE(month,asset_id,kind));
+                CREATE INDEX IF NOT EXISTS tool_work_orders_month ON tool_work_orders(month,scope);
+                CREATE INDEX IF NOT EXISTS tool_work_orders_asset ON tool_work_orders(asset_id,kind);
+                CREATE TABLE IF NOT EXISTS tool_work_audit(
+                    id INTEGER PRIMARY KEY, order_id TEXT NOT NULL, action TEXT NOT NULL,
+                    actor TEXT NOT NULL, name TEXT NOT NULL, at TEXT NOT NULL, detail TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS tool_work_sync(
+                    order_id TEXT NOT NULL, dest TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                    synced INTEGER NOT NULL DEFAULT 0, remote_id TEXT NOT NULL DEFAULT '',
+                    file_token TEXT NOT NULL DEFAULT '', error TEXT NOT NULL DEFAULT '', next_try INTEGER NOT NULL DEFAULT 0,
+                    lease TEXT NOT NULL DEFAULT '', lease_until INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(order_id,dest));
+                CREATE TABLE IF NOT EXISTS tool_work_archives(
+                    month TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+            """)
+
+    @staticmethod
+    def state(db, key):
+        row = db.execute('SELECT value FROM tool_management_state WHERE key=?', (key,)).fetchone()
+        return row[0] if row else ''
+
+    @staticmethod
+    def set_state(db, key, value):
+        db.execute('INSERT INTO tool_management_state VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                   (key, value))
+
+    def refresh(self):
+        assets, leaders = self.cloud.inventory()
+        with self.connect(True) as db:
+            db.execute('UPDATE tool_inventory SET active=0')
+            db.executemany('''INSERT INTO tool_inventory(id,source,active) VALUES(?,?,1)
+                ON CONFLICT(id) DO UPDATE SET source=excluded.source,active=1''',
+                           [(asset['id'], dumps(asset)) for asset in assets])
+            self.set_state(db, 'inventory_at', clock().isoformat(timespec='seconds'))
+            self.set_state(db, 'inventory_error', '')
+            self.set_state(db, 'leaders', dumps(leaders))
+
+    @staticmethod
+    def effective(row):
+        return json.loads(row['source']) | json.loads(row['config'])
+
+    def inventory(self, actor):
+        self.access(actor)
+        if not self.administrator(actor):
+            raise RiskError('仅管理员可配置工具排期。', 403)
+        with self.connect() as db:
+            assets = []
+            for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
+                source, config = json.loads(row['source']), json.loads(row['config'])
+                assets.append(source | config | {'revision': row['version'],
+                    **{f'source_{kind}_cycle': source.get(f'{kind}_cycle', '') for kind in KINDS},
+                    **{f'override_{kind}_cycle': config.get(f'{kind}_cycle', '') for kind in KINDS}})
+            all_scopes = all(can_scope(actor, s) for s in BUILDINGS)
+            return {'items': [item for item in assets if can_scope(actor, item['scope'])],
+                    'can_set_manager': all_scopes, 'manager_id': self.state(db, 'manager_id') if all_scopes else ''}
+
+    @classmethod
+    def supervisor(cls, actor, scope):
+        return can_scope(actor, scope) and (actor.get('category') == 'supervisor' or '主管' in (actor.get('position') or ''))
+
+    def available_to(self, actor):
+        scopes = [scope for scope in BUILDINGS if can_scope(actor, scope)]
+        if not scopes:
+            return False
+        if self.administrator(actor) or actor.get('category') == 'manager' or any(self.supervisor(actor, s) for s in scopes):
+            return True
+        with self.connect() as db:
+            return any(self.is_building_leader(db, actor, scope) for scope in scopes)
+
+    def configure(self, actor, identity, body):
+        self.access(actor)
+        if not self.administrator(actor):
+            raise RiskError('仅管理员可配置工具排期。', 403)
+        if identity == 'park-manager':
+            if not all(can_scope(actor, s) for s in BUILDINGS):
+                raise RiskError('仅全楼管理员可配置园区经理。', 403)
+            person = self.person_for(text(body.get('manager_id'), 120, True))
+            if person.get('category') != 'manager' or not all(can_scope(person, s) for s in BUILDINGS):
+                raise RiskError('请选择在岗且有六栋楼权限的园区经理。')
+            with self.connect(True) as db:
+                self.set_state(db, 'manager_id', person['id'])
+                db.execute("UPDATE tool_work_orders SET manager=?,revision=revision+1 WHERE outcome='scrap' AND manager<>?",
+                           (person['id'], person['id']))
+                db.execute("""UPDATE tool_work_sync SET revision=revision+1,next_try=0
+                    WHERE dest='scrap' AND order_id IN(SELECT id FROM tool_work_orders WHERE outcome='scrap')""")
+            return {'saved': True}
+        with self.connect(True) as db:
+            row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
+            if not row or not can_scope(actor, self.effective(row)['scope']):
+                raise RiskError('没有权限配置该工具。', 403)
+            scope = self.effective(row)['scope']
+            if body.get('revision') != row['version']:
+                raise RiskError('配置已更新，请刷新后重试。', 409)
+        config = {}
+        for kind in KINDS:
+            cycle = text(body.get(kind + '_cycle', ''), 10)
+            if cycle and cycle not in CYCLES and cycle != '停用':
+                raise RiskError('请选择有效周期。')
+            if cycle:
+                config[kind + '_cycle'] = cycle
+            first = date_value(body.get(kind + '_first', ''))
+            if first:
+                config[kind + '_first'] = first
+        supervisor = text(body.get('supervisor', ''), 120)
+        if supervisor:
+            if not self.supervisor(self.person_for(supervisor), scope):
+                raise RiskError('请选择对该楼栋有权限的在岗专业主管。')
+            config['supervisor'] = supervisor
+        with self.connect(True) as db:
+            row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
+            if not row or row['version'] != body['revision'] or self.effective(row)['scope'] != scope:
+                raise RiskError('配置或工具归属已更新，请刷新后重试。', 409)
+            db.execute('UPDATE tool_inventory SET config=?,version=version+1 WHERE id=?', (dumps(config), identity))
+            db.execute("""UPDATE tool_work_orders SET supervisor=?,revision=revision+1
+                WHERE asset_id=? AND scope=? AND kind='external' AND submitted_at IS NULL
+                AND outcome='' AND supervisor<>?""", (supervisor, identity, scope, supervisor))
+        return {'saved': True}
+
+    def schedule(self, current=None):
+        today = (current or clock()).astimezone(TZ).date()
+        month = today.strftime('%Y-%m')
+        end = month_offset(today.replace(day=1), 1)
+        with self.connect(True) as db:
+            if self.state(db, 'inventory_at')[:10] != today.isoformat() or db.execute(
+                    'SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+                return
+            rows = db.execute('SELECT * FROM tool_inventory WHERE active=1').fetchall()
+            for row in rows:
+                asset = self.effective(row)
+                history = db.execute("""SELECT kind,actual,outcome,submitted_at,scrap_qty FROM tool_work_orders
+                    WHERE asset_id=?""", (row['id'],)).fetchall()
+                scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
+                if asset['retired'] or scrapped >= asset['quantity'] or any(
+                        entry['outcome'] in {'repair', 'scrap'} for entry in history):
+                    continue
+                for kind in KINDS:
+                    cycle = CYCLES.get(asset.get(kind + '_cycle'))
+                    if not cycle or any(entry['kind'] == kind and not entry['submitted_at']
+                                        and entry['outcome'] != 'cancelled' for entry in history):
+                        continue
+                    latest = max([asset.get(kind + '_last', '')] +
+                                 [entry['actual'] for entry in history if entry['kind'] == kind and entry['submitted_at']])
+                    due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
+                        asset.get(kind + '_first') or today.replace(day=1).isoformat())
+                    if due >= end:
+                        continue
+                    identity = hashlib.sha256(f'{month}:{row["id"]}:{kind}'.encode()).hexdigest()[:32]
+                    db.execute("""INSERT OR IGNORE INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor)
+                        VALUES(?,?,?,?,?,?,?,?)""", (identity, month, row['id'], asset['scope'], kind,
+                                                     due.isoformat(), dumps(asset), asset.get('supervisor', '') if kind == 'external' else ''))
+
+    def is_building_leader(self, db, actor, scope):
+        leaders = json.loads(self.state(db, 'leaders') or '{}')
+        return can_scope(actor, scope) and actor['open_id'] in leaders.get(scope, ())
+
+    def eligible(self, db, actor, row):
+        return self.is_building_leader(db, actor, row['scope']) or (
+            row['kind'] == 'external' and actor['id'] == row['supervisor'] and self.supervisor(actor, row['scope']))
+
+    def visible(self, db, actor, row):
+        return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row)
+                 or actor['id'] == row['manager'] and actor.get('category') == 'manager')
+
+    def _work(self, db, actor, identity):
+        self.access(actor)
+        row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
+        if not row or not self.visible(db, actor, row):
+            raise RiskError('工单不存在或当前账号无权查看。', 404)
+        return row
+
+    def work_info(self, db, actor, row):
+        eligible = self.eligible(db, actor, row)
+        open_order = not row['submitted_at'] and row['outcome'] != 'cancelled'
+        mine = row['owner'] == actor['id'] and eligible
+        result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
+                                            'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty')}
+        sync = [{'label': DESTINATIONS[job['dest']], 'state': 'done' if job['synced'] == job['revision'] else 'pending',
+                 'error': job['error']} for job in db.execute(
+                    'SELECT dest,revision,synced,error FROM tool_work_sync WHERE order_id=?', (row['id'],))]
+        asset = json.loads(row['asset'])
+        return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
+                         'quantity': asset['quantity'], 'supervisor_assigned': bool(row['supervisor']),
+                         'assigned_to_me': row['supervisor'] == actor['id'] and eligible,
+                         'status': 'cancelled' if row['outcome'] == 'cancelled' else 'pending' if open_order else 'submitted',
+                         'can_claim': open_order and not row['owner'] and eligible,
+                         'can_edit': open_order and mine,
+                         'can_release': open_order and bool(row['owner']) and self.administrator(actor),
+                         'can_repair': row['outcome'] == 'repair' and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
+                         'can_approve': row['outcome'] == 'scrap' and row['manager'] == actor['id']
+                             and actor.get('category') == 'manager', 'sync': sync}
+
+    def list(self, actor, month=''):
+        self.access(actor)
+        if not self.available_to(actor):
+            raise RiskError('当前账号没有工具管理权限。', 403)
+        current = clock().strftime('%Y-%m')
+        month = month_key(month or current)
+        with self.connect() as db:
+            rows = db.execute("""SELECT id,month,scope,kind,due,asset,supervisor,owner,owner_name,revision,actual,outcome,
+                submitted_at,manager,scrap_qty,reason,resolution,report_name FROM tool_work_orders
+                WHERE month=? OR outcome IN('repair','scrap') ORDER BY month DESC,scope,due,kind""", (month,)).fetchall()
+            visible = [self.work_info(db, actor, row) for row in rows if self.visible(db, actor, row)]
+            admin = self.administrator(actor)
+            all_scopes = admin and all(can_scope(actor, scope) for scope in BUILDINGS)
+            archive = db.execute('SELECT created_at FROM tool_work_archives WHERE month=?', (month,)).fetchone()
+            templates = [self.template_info(row) for row in db.execute("""SELECT id,version,name,active,schema
+                FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
+                ORDER BY name""") if admin or row['active']]
+            return {'month': month, 'orders': [row for row in visible if row['month'] == month],
+                    'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap'}],
+                    'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
+                    'archived_at': archive[0] if archive and all_scopes else None,
+                    'inventory_at': self.state(db, 'inventory_at'), 'inventory_error': self.state(db, 'inventory_error'),
+                    'actor_name': actor['name']}
+
+    def detail(self, actor, identity):
+        with self.connect() as db:
+            row = self._work(db, actor, identity)
+            records = [{**record, 'template': self.template_info(self._template(db, record['template_id'], record['version']))}
+                       for record in json.loads(row['records'])]
+            history = [dict(entry) for entry in db.execute(
+                'SELECT action,name,at,detail FROM tool_work_audit WHERE order_id=? ORDER BY id', (identity,))]
+            return self.work_info(db, actor, row) | {'records': records, 'actor_name': actor['name'],
+                                                   'history': history, 'draft': json.loads(row['draft'])}
+
+    @staticmethod
+    def audit(db, identity, actor, action, detail=''):
+        db.execute('INSERT INTO tool_work_audit(order_id,action,actor,name,at,detail) VALUES(?,?,?,?,?,?)',
+                   (identity, action, actor['id'], actor['name'], clock().isoformat(timespec='seconds'), detail))
+
+    @staticmethod
+    def enqueue(db, identity, *destinations):
+        db.executemany("""INSERT INTO tool_work_sync(order_id,dest) VALUES(?,?)
+            ON CONFLICT(order_id,dest) DO UPDATE SET revision=revision+1,error='',next_try=0""",
+                       [(identity, dest) for dest in destinations])
+
+    def attach(self, actor, identity, revision, name, data):
+        name = report_file(name, data)
+        with self.connect(True) as db:
+            row = self._work(db, actor, identity)
+            info = self.work_info(db, actor, row)
+            if row['kind'] != 'external' or not info['can_edit']:
+                raise RiskError('仅已领取的送检工单可上传报告。', 403)
+            if row['report_name'] == name and row['report'] == data:
+                return info
+            self.check_revision(row, revision)
+            db.execute('UPDATE tool_work_orders SET report_name=?,report=?,revision=revision+1 WHERE id=?',
+                       (name, data, identity))
+            self.audit(db, identity, actor, '上传送检报告', name)
+            return self.work_info(db, actor, self._work(db, actor, identity))
+
+    @staticmethod
+    def check_revision(row, revision):
+        if type(revision) is not int or revision != row['revision']:
+            raise RiskError('工单已变化，请重新打开核对后再操作。', 409)
+
+    def action(self, actor, identity, action, body):
+        with self.connect(True) as db:
+            row = self._work(db, actor, identity)
+            info = self.work_info(db, actor, row)
+            submit_key = digest({k: v for k, v in body.items() if k != 'revision'}) if action == 'submit' else ''
+            if action == 'claim' and info['can_edit'] or (action == 'submit' and row['submitted_at']
+                    and row['owner'] == actor['id'] and row['submit_key'] == submit_key):
+                return info
+            self.check_revision(row, body.get('revision'))
+            now = clock().isoformat(timespec='seconds')
+            updates, dests, note = {}, (), ''
+            if action == 'claim' and info['can_claim']:
+                updates = {'owner': actor['id'], 'owner_name': actor['name']}
+                label = '领取工单'
+            elif action == 'release' and info['can_release']:
+                updates = {'owner': '', 'owner_name': ''}
+                label = '释放领取'
+            elif action in {'draft', 'submit'} and info['can_edit']:
+                if row['kind'] == 'self':
+                    records = self._records(db, body.get('records'), json.loads(row['records']), submit=action == 'submit')
+                    updates['records'] = dumps(records)
+                if action == 'draft' and row['kind'] == 'self':
+                    label = '保存草稿'
+                    draft_outcome, draft_qty = body.get('outcome'), body.get('quantity')
+                    updates['draft'] = dumps({'outcome': draft_outcome if draft_outcome in ('normal', 'repair', 'scrap') else 'normal',
+                        'quantity': draft_qty if type(draft_qty) is int and draft_qty > 0 else 1,
+                        'reason': text(body.get('reason', ''), 1000)})
+                elif action == 'submit':
+                    updates.update(submitted_at=now, submit_key=submit_key, draft='{}')
+                    label = '提交工单'
+                    if row['kind'] == 'external':
+                        if not row['report']:
+                            raise RiskError('请先上传送检报告。')
+                        updates['actual'] = date_value(body.get('actual'), required=True)
+                        dests = ('inspection',)
+                    else:
+                        outcome = body.get('outcome')
+                        if outcome not in ('normal', 'repair', 'scrap'):
+                            raise RiskError('请选择工具状态。')
+                        if outcome == 'normal' and any('否' in item['checks'] for item in records):
+                            raise RiskError('检查结果含未通过项，请核对工具状态。')
+                        updates.update(outcome=outcome, actual=max(item['checked_at'][:10] for item in records))
+                        if outcome == 'scrap':
+                            updates |= self.scrap_request(db, row, body)
+                            dests = ('scrap', 'change')
+                        elif outcome == 'repair':
+                            updates['reason'] = text(body.get('reason'), 1000, True)
+                            dests = ('repair', 'change')
+                        else:
+                            dests = ('maintenance',)
+                else:
+                    raise RiskError('送检报告已单独保存，请直接提交。')
+            elif action in {'repaired', 'repair-scrap'} and info['can_repair']:
+                note = text(body.get('reason'), 1000, True)
+                updates = {'resolution': note, 'outcome': 'repaired' if action == 'repaired' else 'scrap'}
+                label = '检修完成' if action == 'repaired' else '检修转报废'
+                dests = ('repair', 'change')
+                if action == 'repair-scrap':
+                    updates |= self.scrap_request(db, row, body)
+                    dests += ('scrap',)
+            elif action in {'approve', 'reject'} and info['can_approve']:
+                note = text(body.get('reason', ''), 1000, action == 'reject')
+                label = '通过报废审批' if action == 'approve' else '驳回报废审批'
+                repair = db.execute("SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest='repair'", (identity,)).fetchone()
+                outcome = 'scrapped' if action == 'approve' else 'repair' if repair else 'rejected'
+                updates = {'outcome': outcome, 'resolved_at': now,
+                           'scrap_status': 'approved' if action == 'approve' else 'rejected',
+                           'resolution': '\n'.join(filter(None, (row['resolution'], note)))}
+                dests = ('scrap', 'change', 'repair') if repair else ('scrap', 'change')
+                if outcome == 'scrapped':
+                    prior = db.execute("SELECT COALESCE(SUM(scrap_qty),0) FROM tool_work_orders WHERE asset_id=? AND outcome='scrapped'",
+                                       (row['asset_id'],)).fetchone()[0]
+                    if prior + row['scrap_qty'] >= json.loads(row['asset'])['quantity']:
+                        cancelled = db.execute("""SELECT id FROM tool_work_orders WHERE asset_id=?
+                            AND submitted_at IS NULL AND outcome=''""", (row['asset_id'],)).fetchall()
+                        for sibling in cancelled:
+                            db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution='工具已全部报废',
+                                revision=revision+1 WHERE id=?""", (sibling['id'],))
+                            self.audit(db, sibling['id'], actor, '取消工单', '工具已全部报废')
+            else:
+                raise RiskError('当前工单状态或账号权限不允许此操作。', 409)
+            if updates.get('actual', '') > now[:10]:
+                raise RiskError('实际检查日期不能晚于今天。')
+            sql = ','.join(f'{field}=?' for field in updates)
+            db.execute(f'UPDATE tool_work_orders SET {sql},revision=revision+1 WHERE id=?',
+                       (*updates.values(), identity))
+            self.audit(db, identity, actor, label, note or updates.get('reason') or updates.get('scrap_reason', ''))
+            self.enqueue(db, identity, *dests)
+            return self.work_info(db, actor, self._work(db, actor, identity))
+
+    def scrap_request(self, db, row, body):
+        manager_id = self.state(db, 'manager_id')
+        if not manager_id:
+            raise RiskError('请管理员先配置园区经理，再提交报废。', 409)
+        prior = db.execute("""SELECT COALESCE(SUM(scrap_qty),0) FROM tool_work_orders
+            WHERE asset_id=? AND outcome='scrapped'""", (row['asset_id'],)).fetchone()[0]
+        quantity = body.get('quantity')
+        if type(quantity) is not int or not 1 <= quantity <= json.loads(row['asset'])['quantity'] - prior:
+            raise RiskError('报废数量不能超过该工具的剩余数量。')
+        reason = text(body.get('reason'), 1000, True)
+        return {'manager': manager_id, 'scrap_qty': quantity, 'scrap_reason': reason,
+                'scrap_status': 'pending', 'resolved_at': ''}
+
+    def sync_one(self):
+        now = int(time.time())
+        lease = uuid.uuid4().hex
+        with self.connect(True) as db:
+            task = db.execute("""SELECT * FROM tool_work_sync WHERE synced<revision AND next_try<=? AND lease_until<=?
+                ORDER BY next_try,order_id,dest LIMIT 1""", (now, now)).fetchone()
+            if not task:
+                return False
+            job = dict(task)
+            identity, dest = job['order_id'], job['dest']
+            db.execute('UPDATE tool_work_sync SET lease=?,lease_until=? WHERE order_id=? AND dest=?',
+                       (lease, now + 600, identity, dest))
+            row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
+            job['from_repair'] = bool(db.execute(
+                "SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest='repair'", (identity,)).fetchone())
+
+        def save_file(token):
+            with self.connect(True) as db:
+                db.execute('UPDATE tool_work_sync SET file_token=? WHERE order_id=? AND dest=? AND lease=?',
+                           (token, identity, dest, lease))
+
+        try:
+            remote_id = self.cloud.write(dest, row, json.loads(row['asset']), job, self.person_for, save_file)
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, RiskError) else '飞书同步结果未确认，将重试原工单。'
+            with self.connect(True) as db:
+                db.execute("""UPDATE tool_work_sync SET lease='',lease_until=0,
+                    error=CASE WHEN revision=? THEN ? ELSE error END,
+                    next_try=CASE WHEN revision=? THEN ? ELSE next_try END
+                    WHERE order_id=? AND dest=? AND lease=?""",
+                           (job['revision'], error, job['revision'], int(time.time()) + 60, identity, dest, lease))
+        else:
+            with self.connect(True) as db:
+                db.execute("""UPDATE tool_work_sync SET remote_id=?,synced=?,error='',next_try=0,lease='',lease_until=0
+                    WHERE order_id=? AND dest=? AND lease=?""", (remote_id, job['revision'], identity, dest, lease))
+        return True
+
+    def package_work(self, db, month, rows, output):
+        manifest = []
+        with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
+            for row in rows:
+                folder = f'{row["scope"]}楼/{KINDS[row["kind"]]}/{row["id"]}'
+                files = []
+                for index, entry in enumerate(json.loads(row['records']), 1):
+                    if not row['submitted_at']:
+                        break
+                    template = self._template(db, entry['template_id'], entry['version'])
+                    safe = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', template['name'])
+                    name = f'{folder}/{index:02d}-{safe}.xlsx'
+                    archive.writestr(name, fill_template(template['content'], json.loads(template['schema']), entry, row['scope']))
+                    files.append(name)
+                if row['submitted_at'] and row['report']:
+                    name = f'{folder}/{row["report_name"]}'
+                    archive.writestr(name, row['report'])
+                    files.append(name)
+                manifest.append({'id': row['id'], 'tool': json.loads(row['asset'])['name'], 'scope': row['scope'],
+                    'type': KINDS[row['kind']], 'due': row['due'], 'actual': row['actual'],
+                    'outcome': OUTCOMES.get(row['outcome'], '已提交' if row['submitted_at'] else '已取消'),
+                    'submitted_at': row['submitted_at'], 'submitted_by': row['owner_name'], 'files': files})
+            archive.writestr('归档清单.json', dumps({'month': month, 'orders': manifest}).encode())
+
+    def archive_ready(self):
+        self.archive_dir.mkdir(parents=True, exist_ok=True)
+        with self.connect() as db:
+            ready = db.execute("""SELECT month FROM tool_work_orders WHERE month NOT IN(SELECT month FROM tool_work_archives)
+                GROUP BY month HAVING SUM(submitted_at IS NULL AND outcome<>'cancelled')=0 ORDER BY month LIMIT 1""").fetchone()
+            if not ready:
+                return
+            month = ready[0]
+        signature_sql = 'SELECT id,revision FROM tool_work_orders WHERE month=? ORDER BY scope,id'
+        with NamedTemporaryFile(dir=self.archive_dir, suffix='.zip.tmp', delete=False) as temporary:
+            path = self.archive_dir / os.path.basename(temporary.name)
+        try:
+            with self.connect() as db:
+                signature = db.execute(signature_sql, (month,)).fetchall()
+                rows = db.execute('SELECT * FROM tool_work_orders WHERE month=? ORDER BY scope,id', (month,))
+                self.package_work(db, month, rows, path)
+            with self.connect(True) as db:
+                actual = db.execute(signature_sql, (month,)).fetchall()
+                pending = db.execute("""SELECT 1 FROM tool_work_orders WHERE month=?
+                    AND submitted_at IS NULL AND outcome<>'cancelled' LIMIT 1""", (month,)).fetchone()
+                if actual == signature and not pending and not db.execute(
+                        'SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+                    os.replace(path, self.archive_dir / f'{month}.zip')
+                    db.execute('INSERT INTO tool_work_archives VALUES(?,?)', (month, clock().isoformat(timespec='seconds')))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def download(self, actor, month='', identity=''):
+        self.access(actor)
+        with self.connect() as db:
+            if identity:
+                row = self._work(db, actor, identity)
+                if not row['submitted_at']:
+                    raise RiskError('工单尚未提交。', 409)
+                output = io.BytesIO()
+                self.package_work(db, row['month'], [row], output)
+                return output.getvalue()
+            if not self.administrator(actor) or not all(can_scope(actor, scope) for scope in BUILDINGS):
+                raise RiskError('当前账号无权下载跨楼栋归档。', 403)
+            row = db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month_key(month),)).fetchone()
+            if not row:
+                raise RiskError('当月归档尚未生成。', 409)
+            archive = self.archive_dir / f'{month}.zip'
+            if not archive.is_file():
+                raise RiskError('本地归档文件缺失，请联系管理员。', 503)
+            return archive

@@ -1997,10 +1997,13 @@ class FastAPIPortalController:
                 and PortalRuntime.auth_manager.is_admin(session)
             )
             if session:
-                from lan_bitable_template_portal.risk_inspection_routes import risk_task_access
+                from lan_bitable_template_portal.risk_inspection_routes import risk_task_access, tool_management_access, tool_management_enabled
                 if await asyncio.to_thread(risk_task_access, PortalRuntime, session):
                     status_user['modules'] = list(dict.fromkeys([*status_user.get('modules', []), 'risk_inspection']))
                     status_user['risk_inspection_assigned'] = True
+                if tool_management_enabled() and 'risk_inspection' in status_user.get('modules', ()):
+                    if await asyncio.to_thread(tool_management_access, PortalRuntime, session, status_user):
+                        status_user['tool_management_enabled'] = True
             response = self._json_response(request, session, payload)
             response.headers["Cache-Control"] = "no-store"
             return response

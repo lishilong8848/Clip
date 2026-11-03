@@ -89,7 +89,7 @@ const columns=computed<DataTableColumns<Dict>>(()=>[
 ].filter(column=>column.key==='scope'?widgetCapacity.value.width>=600:column.key==='time'?widgetCapacity.value.width>=800:true));
 function dueTime(value:string){const normalized=String(value).replace(' ','T');return Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)?normalized:normalized+'+08:00');}
 function dueLabel(row:Dict){if(!row.dueAt||!Number.isFinite(dueTime(row.dueAt)))return '';return dueTime(row.dueAt)<Date.now()?'已过期':String(row.dueAt).slice(0,10)===today?'今日到期':'';}
-const featureGroups=computed(()=>{const entries=navigationModules(permitted.value);return [...new Set(entries.map(m=>m.group))].map(name=>({name,items:entries.filter(m=>m.group===name)}));});
+const featureGroups=computed(()=>{const entries=navigationModules(permitted.value,props.user.tool_management_enabled===true);return [...new Set(entries.map(m=>m.group))].map(name=>({name,items:entries.filter(m=>m.group===name)}));});
 function text(value:any):string {return Array.isArray(value)?value.map(text).join('、'):value&&typeof value==='object'?String(value.text||value.name||''):String(value??'');}
 function items(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('待办资料未完整返回，请重试或进入业务列表核对。');return value;}
 function rowControls(row:Dict){

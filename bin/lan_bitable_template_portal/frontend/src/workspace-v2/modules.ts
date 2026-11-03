@@ -11,6 +11,7 @@ export const modules: ModuleEntry[] = [
   { id: 'repair_management', label: '维修项目', group: '运行管理', path: '/repair-management', icon: 'wrench' },
   { id: 'critical_guard', label: '重保管理', group: '运行管理', path: '/critical-guard', icon: 'shield' },
   { id: 'risk_inspection', label: '专项排查', group: '专项功能', path: '/risk-inspections', icon: 'shield' },
+  { id: 'tool_management', label: '工具管理', group: '专项功能', path: '/risk-inspections?view=tool-self-check', icon: 'wrench', permission: 'risk_inspection' },
   { id: 'daily', label: '每日任务', group: '运行管理', path: '/daily-tasks', icon: 'task' },
   { id: 'cabinet', label: '机柜管理', group: '设备与资源', path: '/cabinet-power', icon: 'server' },
   { id: 'water', label: '水耗管理', group: '设备与资源', path: '/water-management', icon: 'water' },
@@ -28,9 +29,10 @@ export const modules: ModuleEntry[] = [
   { id: 'accounts', label: '账号与权限', group: '账号与协作', path: '/admin/settings', icon: 'settings' },
 ];
 export function modulePermission(id: string): string { return modules.find(item => item.id === id)?.permission || id; }
-export function navigationModules(permitted: string[]): ModuleEntry[] {
+export function navigationModules(permitted: string[], toolManagement = false): ModuleEntry[] {
   const notices=NOTICE_IDS.filter(id=>permitted.includes(id));
   return modules.flatMap(item=>{
+    if(item.id==='tool_management'&&!toolManagement)return [];
     if(item.id!=='signatures'&&!permitted.includes(item.permission||item.id)||item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];
     if(item.id!==notices[0])return [];
@@ -39,6 +41,7 @@ export function navigationModules(permitted: string[]): ModuleEntry[] {
   });
 }
 export function moduleForRoute(url: URL): string {
+  if (url.pathname === '/risk-inspections' && url.searchParams.get('view') === 'tool-self-check') return 'tool_management';
   if (url.pathname === '/workbench-lite') return url.searchParams.get('work_type') || 'maintenance';
   if (url.pathname === '/') {
     if (url.searchParams.get('mode') === 'events') return 'event';

@@ -130,6 +130,11 @@
           </span>
           <b>{{ tool.badge }}</b>
         </button>
+        <button v-if="activeMode === 'special' && currentUser?.tool_management_enabled === true" type="button"
+          class="tool-card blue" aria-label="选择工具管理" @click="emit('tool-management')">
+          <span class="risk-tool-icon" aria-hidden="true"><Wrench :size="24" /></span>
+          <span><strong>工具管理</strong></span><b>自检与送检</b>
+        </button>
       </div>
 
       <div
@@ -262,7 +267,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ClipboardCheck, FolderOpen, Library, ShieldCheck } from 'lucide-vue-next';
+import { ClipboardCheck, FolderOpen, Library, ShieldCheck, Wrench } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
 import { preShiftScopes, preShiftSummary } from '../preShiftUtils';
 import {
@@ -307,6 +312,7 @@ const emit = defineEmits<{
   water: [scope: string];
   "critical-guard": [];
   "risk-inspection": [scope?: string];
+  "tool-management": [];
   drill: [];
   learning: [];
   knowledge: [];
