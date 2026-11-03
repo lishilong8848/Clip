@@ -771,6 +771,8 @@ class FastAPIPortalController:
         install_risk_inspection_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.eop_scenario_editor import install_eop_scenario_routes
         install_eop_scenario_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.daily_inspection import install_daily_inspection
+        install_daily_inspection(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
@@ -1345,6 +1347,8 @@ class FastAPIPortalController:
 
         @app.get("/daily-tasks")
         @app.get("/daily-tasks/")
+        @app.get("/daily-inspection")
+        @app.get("/daily-inspection/")
         @app.get("/daily-tasks/morning-meeting/print")
         @app.get("/daily-tasks/morning-meeting/print/")
         async def morning_meeting_print_page(request: Request):
@@ -13117,6 +13121,23 @@ class FastAPIPortalController:
         except Exception as exc:
             log_warning(f"每日工作汇总发送失败: {exc}")
 
+    def _run_scheduled_daily_inspection_reminders(self) -> None:
+        if _mock_external_enabled() or self._stopping_event.is_set():
+            return
+        from lan_bitable_template_portal.daily_inspection_reminders import process_reminders
+        from lan_bitable_template_portal.personnel_source import daily_roster
+        try:
+            service = PortalRuntime.service
+            process_reminders(
+                PortalRuntime.state_store,
+                lambda day: daily_roster(service, day),
+                service._signature_public_base_url,
+                _send_text_to_open_ids_guarded,
+                stopping=self._stopping_event.is_set,
+            )
+        except Exception:
+            log_warning("日常巡检提醒暂未完成，将在重试时段内继续尝试。")
+
     def _run_scheduled_plan_deadlines(self) -> None:
         if _mock_external_enabled() or self._stopping_event.is_set():
             return
@@ -13552,6 +13573,19 @@ class FastAPIPortalController:
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_daily_inspection_reminders,
+            "cron",
+            hour="*",
+            minute="*",
+            second=0,
+            id="daily_inspection_reminders",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=60,
+            next_run_time=dt.datetime.now(dt.timezone.utc),
         )
         scheduler.add_job(
             self._run_scheduled_daily_report_recipient_refresh,

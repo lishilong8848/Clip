@@ -82,6 +82,8 @@ def make_app():
     @app.get('/api/workspace-layouts/page')
     @app.get('/api/feishu-workpartner/people')
     @app.get('/api/pre-shift-checks/history')
+    @app.get('/api/daily-inspection')
+    @app.post('/api/daily-inspection/finish')
     async def business():
         return {'ok': True}
 
@@ -169,6 +171,17 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/risk-inspections/restricted')).status_code, 403)
         self.assertEqual((await self.client.post('/api/risk-inspections', headers={'Origin': SETTINGS.public_url})).status_code, 200)
         self.assertEqual((await self.client.post('/api/risk-inspections', headers={'Origin': 'https://evil.example'})).status_code, 403)
+
+    async def test_daily_inspection_archive_follows_public_auth_and_same_origin(self):
+        endpoint = '/api/daily-inspection/finish'
+        self.session = None
+        self.assertEqual((await self.client.get('/api/daily-inspection')).status_code, 401)
+        self.assertEqual((await self.client.post(endpoint, headers={'Origin': SETTINGS.public_url})).status_code, 401)
+        self.session = {'role': 'guest'}
+        self.assertEqual((await self.client.post(endpoint, headers={'Origin': SETTINGS.public_url})).status_code, 403)
+        self.session = {'user': {'open_id': 'alice'}}
+        self.assertEqual((await self.client.post(endpoint, headers={'Origin': 'https://evil.example'})).status_code, 403)
+        self.assertEqual((await self.client.post(endpoint, headers={'Origin': SETTINGS.public_url})).status_code, 200)
 
     async def test_public_health_is_minimal_and_cookie_is_secure(self):
         self.session = None

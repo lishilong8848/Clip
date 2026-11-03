@@ -140,6 +140,11 @@
           <span class="risk-tool-icon" aria-hidden="true"><ClipboardCheck :size="24" /></span>
           <span><strong>EOP 场景维护</strong></span><b>步骤与图片</b>
         </button>
+        <button v-if="activeMode === 'tools' && hasModule('daily') && scopeOptions.some(option=>['ALL','D','E'].includes(option.value))"
+          type="button" class="tool-card blue" aria-label="选择日常巡检" @click="emit('daily-inspection')">
+          <span class="risk-tool-icon" aria-hidden="true"><ClipboardCheck :size="24" /></span>
+          <span><strong>日常巡检</strong></span><b>D、E 楼</b>
+        </button>
       </div>
 
       <div
@@ -319,6 +324,7 @@ const emit = defineEmits<{
   "risk-inspection": [scope?: string];
   "tool-management": [];
   "eop-scenarios": [];
+  "daily-inspection": [];
   drill: [];
   learning: [];
   knowledge: [];

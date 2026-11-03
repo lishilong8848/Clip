@@ -163,6 +163,7 @@
 
     <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
     <EopScenarioPage v-else-if="isEopScenarioPage" />
+    <DailyInspectionPage v-else-if="routePath === '/daily-inspection'" :key="auth.user?.open_id" />
     <KnowledgeBasePage v-else-if="isKnowledgeBasePage" />
     <DocumentLibraryPage v-else-if="isDocumentLibraryPage" />
 
@@ -250,6 +251,7 @@
       @risk-inspection="(scope?: string) => navigate('/risk-inspections' + (scope ? '?scope=' + encodeURIComponent(scope) : ''))"
       @tool-management="navigate('/risk-inspections?view=tool-self-check')"
       @eop-scenarios="navigate('/eop-scenarios')"
+      @daily-inspection="navigate('/daily-inspection')"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
       @knowledge="navigate('/knowledge-base')"
@@ -313,6 +315,7 @@ const AuthPanels = asyncPage(() => import("./components/AuthPanels.vue"));
 const EngineerMopPage = asyncPage(() => import("./components/EngineerMopPage.vue"));
 const EventManagementPage = asyncPage(() => import("./components/EventManagementPage.vue"));
 const DailyTaskChecklistPage = asyncPage(() => import("./components/DailyTaskChecklistPage.vue"));
+const DailyInspectionPage = asyncPage(() => import("./components/DailyInspectionPage.vue"));
 const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
@@ -559,6 +562,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/life-guide") return "life_guide";
   if (path === "/link-directory") return "links";
   if (path === "/eop-scenarios") return "drills";
+  if (path === "/daily-inspection") return "daily";
   if (path === "/knowledge-base" || path === "/document-library") return "knowledge";
   if (path === "/water-management") return "water";
   if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
@@ -650,6 +654,7 @@ const headerSubtitle = computed(() => {
   if (isSignatureManagementPage.value) return "人员中心 · 统一签名管理";
   if (isEventPage.value) return `${scopeLabel(currentScope.value)} · 事件管理`;
   if (isDailyTaskPage.value) return `${scopeLabel(currentScope.value)} · 每日任务清单`;
+  if (routePath.value === '/daily-inspection') return '日常巡检';
   if (isLearningPage.value) return "画像学练";
   if (isPlanConvergencePage.value) return "计划收敛审查";
   if (isLifeGuidePage.value) return "参考人生指南";

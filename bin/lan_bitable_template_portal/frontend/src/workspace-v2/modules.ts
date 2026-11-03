@@ -14,6 +14,7 @@ export const modules: ModuleEntry[] = [
   { id: 'tool_management', label: '工具管理', group: '专项功能', path: '/risk-inspections?view=tool-self-check', icon: 'wrench', permission: 'risk_inspection' },
   { id: 'eop_scenarios', label: 'EOP 场景维护', group: '专项功能', path: '/eop-scenarios', icon: 'book', permission: 'drills' },
   { id: 'daily', label: '每日任务', group: '运行管理', path: '/daily-tasks', icon: 'task' },
+  { id: 'daily_inspection', label: '日常巡检', group: '运行管理', path: '/daily-inspection', icon: 'activity', permission: 'daily' },
   { id: 'cabinet', label: '机柜管理', group: '设备与资源', path: '/cabinet-power', icon: 'server' },
   { id: 'water', label: '水耗管理', group: '设备与资源', path: '/water-management', icon: 'water' },
   { id: 'plan_convergence', label: '计划收敛审查', group: '专项功能', path: '/plan-convergence', icon: 'scan' },

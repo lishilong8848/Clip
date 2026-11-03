@@ -129,6 +129,7 @@ const pages: Record<string, any> = {
   knowledge: lazy(() => import('../components/KnowledgeBasePage.vue')),
   documents: lazy(() => import('../components/DocumentLibraryPage.vue')),
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
+  daily_inspection: lazy(() => import('../components/DailyInspectionPage.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
   risk_inspection: lazy(() => import('../components/InspectionWorkspace.vue')),
@@ -203,7 +204,9 @@ const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',eng
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
 const selectedMenu = computed(() => activeModule.value==='accounts'?'settings:'+(route.value.searchParams.get('tab')||'permissions'):NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
-const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value).filter(m=>m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest')));
+const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value).filter(m=>
+  m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest') &&
+  (m.id!=='daily_inspection'||scopes.value.some(scope=>['ALL','D','E'].includes(scope.value)))));
 const menuOptions = computed(() => [
   { label: '个人工作台', key: 'home', icon: () => h(House, {size:19}) },
   ...[...new Set(permittedModules.value.map(m => m.group))].map(group => ({ key: group, label: group, type: 'group' as const, children: permittedModules.value.filter(m => m.group === group).map(m => ({ key: m.id, label:m.label, icon:() => h(moduleIcons[m.icon as keyof typeof moduleIcons],{size:18}) })) })),

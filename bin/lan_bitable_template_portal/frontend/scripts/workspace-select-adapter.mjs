@@ -6,7 +6,7 @@ export function adaptSingleSelects(source,filename=''){
   if(/\/(?:NativeSingleSelect|SingleSelect)\.vue$/.test(filename)||!source.includes('<select'))return source;
   const {descriptor}=parse(source),edits=[];
   function visit(node){
-    if(node.tag==='NativeSingleSelectV2')return;
+    if(node.tag==='NativeSingleSelectV2'||node.props?.some(p=>p.type===6&&p.name==='data-native-select'))return;
     if(node.type===1&&node.tag==='select'&&!node.props.some(p=>p.name==='multiple'||p.name==='bind'&&(!p.arg||p.arg.content==='multiple'))){
       const structural=node.props.filter(p=>p.type===7&&['if','else-if','else','for'].includes(p.name)||p.type===7&&p.name==='bind'&&p.arg?.content==='key');
       let original=node.loc.source;for(const prop of structural)original=original.replace(prop.loc.source,'');

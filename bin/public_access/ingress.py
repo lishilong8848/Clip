@@ -16,7 +16,7 @@ DENIED = ('/api/qt/', '/api/backend/', '/api/assistant/feishu-event',
 API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records workbench '
     'workbench-actions maintenance-actions maintenance-refresh change-refresh repair-refresh '
     'refresh source-refresh-status history-summary engineer signatures events repair-management '
-    'capacity cabinet-power critical-guard drills daily-tasks learning plan-convergence '
+    'capacity cabinet-power critical-guard drills daily-tasks daily-inspection learning plan-convergence '
     'link-directory pre-shift-checks pre-shift notice-panel notice-alert-tags notice-memory '
     'notice-attachments notice-image-drafts notice-images notice-undo notice-target-candidates '
     'notice-identity ongoing-items polling-sops polling-work-orders change-confirmations '
