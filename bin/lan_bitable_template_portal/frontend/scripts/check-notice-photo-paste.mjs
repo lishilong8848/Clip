@@ -16,6 +16,7 @@ const errors=[],uploads=[],unexpected=[];
 let page,failNext=false,holdUpload,releaseUpload;
 try{
  for(const [width,height,dark=false] of [[1440,900],[402,874],[440,956],[360,640],[1440,900,true],[402,874,true]]){
+  const scope=width===440?'110':'A';
   const context=await browser.newContext({viewport:{width,height},reducedMotion:'reduce',permissions:['clipboard-read','clipboard-write']});
   await context.addInitScript(dark=>localStorage.setItem('clipflow:workspace-night-mode:ou_responsive_fixture',dark?'dark':'light'),dark);
   await context.route('**/*',async route=>{
@@ -23,6 +24,9 @@ try{
    if(url.origin!==origin)return route.abort();
    if(!url.pathname.startsWith('/api/'))return route.continue();
    if(url.pathname==='/api/notice-attachments'){
+    if(url.searchParams.has('target_record_id')){
+     return route.fulfill({status:403,json:{ok:false,error:'普通值班账号无法使用确认面板的暂存入口'}});
+    }
     uploads.push({kind:url.searchParams.get('kind'),name:url.searchParams.get('file_name'),scope:url.searchParams.get('scope'),identity:url.searchParams.get('identity')});
     if(holdUpload)await holdUpload;
     if(failNext){failNext=false;return route.fulfill({status:400,json:{ok:false,error:'隔离测试：上传失败'}});}
@@ -30,11 +34,17 @@ try{
    }
    if(req.method()!=='GET'&&!url.pathname.startsWith('/api/workspace-layouts/')){unexpected.push(url.pathname);return route.abort();}
    const result=await coreFixture({url,method:req.method(),body:req.postData()});
+   if(scope==='110'&&url.pathname==='/api/auth/status'&&result?.json?.data){
+    const data=result.json.data;
+    data.user={...data.user,name:'110站值班账号',role:'building',level:'L4',category:'duty',
+     home_scope:scope,scopes:[scope],can_manage_accounts:false,can_delete_business:false};
+    data.scope_options=data.scope_options.filter(option=>option.value===scope);
+   }
    return route.fulfill(result||{json:{ok:true,data:{items:[],records:[],available:false}}});
   });
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   let chooserCount=0;page.on('filechooser',()=>chooserCount++);
-  await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=A&work_type=change');
+  await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope='+scope+'&work_type=change');
   if(width<=760)await page.getByRole('tab',{name:/进行中/}).click();
   await page.locator('[data-list=ongoing]').getByRole('button',{name:'更新',exact:true}).first().click();
   const site=page.getByRole('group',{name:'现场照片上传区',exact:true}),ali=page.getByRole('group',{name:'阿里确认截图上传区',exact:true});
@@ -59,7 +69,7 @@ try{
    await area.getByText('本次新增 · 已就绪',{exact:true}).waitFor();
    assert.equal(uploads.length,before+1,'paste uploads exactly once');
    assert.equal(uploads.at(-1).kind,area===ali?'ali':'site','image stays in the focused category');
-   assert.equal(uploads.at(-1).scope,'A');assert(uploads.at(-1).identity);
+   assert.equal(uploads.at(-1).scope,scope);assert(uploads.at(-1).identity);
   }
   const beforeLimit=uploads.length;
   await ali.focus();await page.keyboard.press('Control+V');

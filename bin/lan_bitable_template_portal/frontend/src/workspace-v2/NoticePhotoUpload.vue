@@ -33,7 +33,9 @@ async function run(){
     if(disposed)break;entry.state='uploading';
     try{
       const file=entry.file;if(!file.type.startsWith('image/')||file.size>8*1024*1024)throw new Error('请选择8MB以内的图片');
-      const v=props.form.values,result=await requestBinaryJson('/api/notice-attachments?'+new URLSearchParams({scope:v.scope,identity:v.active_item_id||v.manual_id||v.source_record_id||v.record_id,kind:props.ali?'ali':'site',file_name:file.name,...(props.ali&&v.target_record_id?{target_record_id:v.target_record_id}:{})}),file,{headers:{'Content-Type':file.type}});
+      // The notice editor stages files as drafts. The write endpoint checks
+      // the selected change record's building and attachment ownership.
+      const v=props.form.values,result=await requestBinaryJson('/api/notice-attachments?'+new URLSearchParams({scope:v.scope,identity:v.active_item_id||v.manual_id||v.source_record_id||v.record_id,kind:props.ali?'ali':'site',file_name:file.name}),file,{headers:{'Content-Type':file.type}});
       if(disposed)break;if(!result.upload_id)throw new Error('未收到图片标识，请重试此张');
       emit('update:modelValue',props.ali?[result]:[...props.modelValue,result]);queue.value=queue.value.filter(v=>v.id!==entry.id);
       // Allow the parent model to receive this successful file before appending the next one.

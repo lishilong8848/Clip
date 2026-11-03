@@ -769,6 +769,8 @@ class FastAPIPortalController:
         install_work_handover_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes
         install_risk_inspection_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.eop_scenario_editor import install_eop_scenario_routes
+        install_eop_scenario_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
@@ -1336,6 +1338,8 @@ class FastAPIPortalController:
         @app.get("/drill-management/")
         @app.get("/drill-management/print")
         @app.get("/drill-management/print/")
+        @app.get("/eop-scenarios")
+        @app.get("/eop-scenarios/")
         async def drill_management_page(request: Request):
             return await asyncio.to_thread(self._static_file_response, request, portal_index_file(), html=True)
 
@@ -9604,6 +9608,7 @@ class FastAPIPortalController:
             pass
         previous_auth_manager = PortalRuntime.auth_manager
         PortalRuntime.auth_manager = PortalAuthManager()
+        PortalRuntime.auth_manager.ensure_station_duty_account()
         with suppress(Exception):
             previous_auth_manager.shutdown()
         PortalRuntime.state_store = PortalRuntime.service._state_store

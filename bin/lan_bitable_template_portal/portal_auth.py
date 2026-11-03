@@ -59,6 +59,9 @@ OAUTH_STATE_PREFIX = "oauth3_"
 REQUIRED_ADMIN_USERS = {
     LI_SHILONG_OPEN_ID: "李世龙",
 }
+STATION_DUTY_OPEN_ID = BUILDING_OPEN_ID_MAP["110"]
+STATION_DUTY_ACCOUNT_NAME = "110站值班账号"
+STATION_DUTY_ACCOUNT_NUMBER = "91038"
 
 
 TOPIC_EXECUTION = ContextVar('lighthouse_topic_execution', default=None)
@@ -419,6 +422,21 @@ class PortalAuthManager:
             "default_scopes": [],
             "users": users,
         }
+
+    def ensure_station_duty_account(self) -> None:
+        """Install the confirmed 110 station account grant once at portal startup."""
+        if self.current_feishu_app_id() != TARGET_APP_ID:
+            return
+        with self._lock:
+            payload = self._load_permissions_locked()
+            users = payload["users"]
+            if STATION_DUTY_OPEN_ID in users or self._identity_quarantined(STATION_DUTY_OPEN_ID):
+                return
+            users[STATION_DUTY_OPEN_ID] = {
+                "name": STATION_DUTY_ACCOUNT_NAME, "role": "building", "scopes": ["110"], "enabled": True,
+            }
+            payload["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self._save_permissions_locked(payload)
 
     def _ensure_required_admins_locked(self, payload: dict[str, Any]) -> dict[str, Any]:
         if payload.get("version", 1) < 2 and not self._state_store.get_document("account_management", "permissions_before_levels"):
@@ -886,7 +904,9 @@ class PortalAuthManager:
             user_list.append(
                 {
                     "open_id": str(open_id or "").strip(),
-                    "name": REQUIRED_ADMIN_USERS.get(open_id) or str(user_cfg.get("name") or ""),
+                    "name": STATION_DUTY_ACCOUNT_NAME if open_id == STATION_DUTY_OPEN_ID else (
+                        REQUIRED_ADMIN_USERS.get(open_id) or str(user_cfg.get("name") or "")
+                    ),
                     "role": role,
                     "scopes": scopes,
                     "enabled": open_id in REQUIRED_ADMIN_USERS or user_cfg.get("enabled") is not False,
@@ -1714,7 +1734,9 @@ class PortalAuthManager:
             "open_id": str(user.get("open_id") or ""),
             "union_id": str(user.get("union_id") or ""),
             "user_id": str(user.get("user_id") or ""),
-            "name": str(user.get("name") or user.get("en_name") or "飞书用户"),
+            "name": STATION_DUTY_ACCOUNT_NAME if open_id == STATION_DUTY_OPEN_ID else str(
+                user.get("name") or user.get("en_name") or "飞书用户"
+            ),
             "avatar_url": str(user.get("avatar_url") or user.get("avatar_thumb") or ""),
             "role": "guest" if is_cabinet_guest(session) else "admin" if self.is_admin(session) else "building",
             "login_method": "password" if session.get("source") == "personnel_password" else "feishu",
@@ -1869,6 +1891,8 @@ class PortalAuthManager:
         if self._open_id_explicitly_disabled(open_id):
             raise PortalError("当前账号已停用或人员身份待核对，请联系管理员。")
         user = {**user, "open_id": open_id}
+        if open_id == STATION_DUTY_OPEN_ID:
+            user["name"] = STATION_DUTY_ACCOUNT_NAME
         if user.get("union_id"):
             known = self._state_store.get_document("feishu_assistant_identity", user["union_id"]) or {}
             if known.get("open_id") and known["open_id"] != open_id:
@@ -1934,6 +1958,8 @@ class PortalAuthManager:
                     return None
                 session["allowed_scopes"] = self.scopes_for_open_id(open_id)
                 session["role"] = self.role_for_open_id(open_id)
+                if open_id == STATION_DUTY_OPEN_ID:
+                    session["user"]["name"] = STATION_DUTY_ACCOUNT_NAME
             if session.get("source") == "personnel_password":
                 from .personnel_password_login import DIRECTORY_NS, DIRECTORY_KEY, personnel_principal, PasswordLoginError
                 rid = str((session.get("user") or {}).get("personnel_record_id") or "")

@@ -17,7 +17,7 @@ from lan_bitable_template_portal.account_management import AccountManagement, in
 from lan_bitable_template_portal.personnel_password_login import (
     PasswordLoginError, verify_password, install_personnel_password_login,
 )
-from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
+from lan_bitable_template_portal.portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS, TARGET_APP_ID
 
 
 class AccountManagementTests(_TempDirTestCase):
@@ -50,6 +50,35 @@ class AccountManagementTests(_TempDirTestCase):
         item = item or self.item()
         data = {key: item[key] for key in ('id', 'revision', 'role', 'scopes', 'enabled')}
         return self.manager.update({'changes': [{**data, **changes}]}, self.actor)
+
+    def test_station_duty_has_peer_permissions_and_its_own_searchable_identity(self):
+        auth = self.h.auth
+        identity = BUILDING_OPEN_ID_MAP["110"]
+        payload = auth._load_permissions_locked()
+        payload["users"].pop(identity)
+        auth._save_permissions_locked(payload)
+        session = {"user": {"open_id": identity, "name": "张华"}}
+
+        auth.ensure_station_duty_account()
+        self.assertEqual(auth.session_scopes(session), [])
+        with patch.object(auth, "current_feishu_app_id", return_value=TARGET_APP_ID):
+            auth.ensure_station_duty_account()
+            profile = auth.account_profile(identity)
+            for code in "ABCDE":
+                peer = auth.account_profile(BUILDING_OPEN_ID_MAP[code])
+                self.assertEqual({key: profile[key] for key in ("level", "modules", "role", "category")},
+                                 {key: peer[key] for key in ("level", "modules", "role", "category")})
+            self.assertEqual(auth.session_scopes(session), ["110"])
+            self.assertEqual(auth.public_user(session)["name"], "110站值班账号")
+            row = self.item("account:" + identity)
+            self.assertEqual((row["name"], row["employee_no"], row["kind"], row["authorized"]),
+                             ("110站值班账号", "91038", "duty", True))
+            saved = auth._load_permissions_locked()
+            self.assertEqual({key: value for key, value in saved["users"].items() if key != identity}, payload["users"])
+            saved["users"][identity]["enabled"] = False
+            auth._save_permissions_locked(saved)
+            auth.ensure_station_duty_account()
+            self.assertFalse(auth.account_profile(identity)["enabled"])
 
     def test_unified_directory_includes_duty_positions_and_rejects_scope_change(self):
         before = copy.deepcopy(self.h.auth._load_permissions_locked())

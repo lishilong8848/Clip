@@ -12,7 +12,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from .personnel_password_login import PasswordLoginError
-from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS
+from .portal_auth import BUILDING_OPEN_ID_MAP, REQUIRED_ADMIN_USERS, STATION_DUTY_OPEN_ID, STATION_DUTY_ACCOUNT_NUMBER
 from .account_policy import (
     CATEGORY_OPTIONS,
     MODULE_OPTIONS,
@@ -99,7 +99,8 @@ class AccountManagement:
             if oid not in duties and oid in suppressed_legacy:
                 continue
             items.append({"id": "account:" + oid, "record_id": "", "open_id": oid,
-                          "name": cfg["name"], "employee_no": "", "kind": "duty" if oid in duties else "legacy",
+                          "name": cfg["name"], "employee_no": STATION_DUTY_ACCOUNT_NUMBER if oid == STATION_DUTY_OPEN_ID else "",
+                          "kind": "duty" if oid in duties else "legacy",
                           "account_nature": "值班账号" if oid in duties else "历史账号",
                           "position": "", "category": "duty" if oid in duties else "other",
                           "own_scopes": [duties[oid]] if oid in duties else [],

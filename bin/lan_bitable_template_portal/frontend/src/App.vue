@@ -106,7 +106,7 @@
     </KeepAlive>
 
     <AuthPanels
-      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage && !isDocumentLibraryPage && !assignedRiskPage)"
+      v-else-if="isPasswordSettingsPage || showPermissionRequestPanel || authChecking || auth.directoryPending || !auth.loggedIn || (auth.loggedIn && !auth.scopeOptions.length && !isLearningPage && !isKnowledgeBasePage && !isDocumentLibraryPage && !isEopScenarioPage && !assignedRiskPage)"
       :checking="authChecking || auth.directoryPending"
       :logged-in="auth.loggedIn"
       :user="auth.user"
@@ -162,6 +162,7 @@
     <LifeGuidePage v-else-if="isLifeGuidePage" />
 
     <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
+    <EopScenarioPage v-else-if="isEopScenarioPage" />
     <KnowledgeBasePage v-else-if="isKnowledgeBasePage" />
     <DocumentLibraryPage v-else-if="isDocumentLibraryPage" />
 
@@ -248,6 +249,7 @@
       @critical-guard="enterCriticalGuard()"
       @risk-inspection="(scope?: string) => navigate('/risk-inspections' + (scope ? '?scope=' + encodeURIComponent(scope) : ''))"
       @tool-management="navigate('/risk-inspections?view=tool-self-check')"
+      @eop-scenarios="navigate('/eop-scenarios')"
       @drill="enterDrillManagement()"
       @learning="navigate('/learning')"
       @knowledge="navigate('/knowledge-base')"
@@ -315,6 +317,7 @@ const LearningPage = asyncPage(() => import("./components/LearningPage.vue"));
 const PlanConvergencePage = asyncPage(() => import("./components/PlanConvergencePage.vue"));
 const LifeGuidePage = asyncPage(() => import("./components/LifeGuidePage.vue"));
 const LinkDirectoryPage = asyncPage(() => import("./components/LinkDirectoryPage.vue"));
+const EopScenarioPage = asyncPage(() => import("./components/EopScenarioPage.vue"));
 const KnowledgeBasePage = asyncPage(() => import("./components/KnowledgeBasePage.vue"));
 const DocumentLibraryPage = asyncPage(() => import("./components/DocumentLibraryPage.vue"));
 const HistoryMemoryPage = asyncPage(() => import("./components/HistoryMemoryPage.vue"));
@@ -468,6 +471,7 @@ const isLearningPage = computed(() => routePath.value === "/learning");
 const isPlanConvergencePage = computed(() => routePath.value === "/plan-convergence");
 const isLifeGuidePage = computed(() => routePath.value === "/life-guide");
 const isLinkDirectoryPage = computed(() => routePath.value === "/link-directory");
+const isEopScenarioPage = computed(() => routePath.value === "/eop-scenarios");
 const isKnowledgeBasePage = computed(() => routePath.value === "/knowledge-base");
 const isDocumentLibraryPage = computed(() => routePath.value === "/document-library");
 const isPasswordSettingsPage = computed(() => routePath.value === "/" && routeParams.value.get("account") === "password" && auth.user.login_method === 'password');
@@ -554,6 +558,7 @@ function moduleForCurrentRoute(): string {
   if (path === "/plan-convergence") return "plan_convergence";
   if (path === "/life-guide") return "life_guide";
   if (path === "/link-directory") return "links";
+  if (path === "/eop-scenarios") return "drills";
   if (path === "/knowledge-base" || path === "/document-library") return "knowledge";
   if (path === "/water-management") return "water";
   if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
@@ -649,6 +654,7 @@ const headerSubtitle = computed(() => {
   if (isPlanConvergencePage.value) return "计划收敛审查";
   if (isLifeGuidePage.value) return "参考人生指南";
   if (isLinkDirectoryPage.value) return "多维表导航";
+  if (isEopScenarioPage.value) return "EOP 场景维护";
   if (isKnowledgeBasePage.value) return "公司知识库";
   if (isDocumentLibraryPage.value) return "南通文件";
   if (isWaterManagementPage.value) return `${scopeLabel(currentScope.value)} · 水耗管理`;

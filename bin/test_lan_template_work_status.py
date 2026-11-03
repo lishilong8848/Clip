@@ -3468,13 +3468,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
 
     def test_change_confirmation_api_permissions(self):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        auth_root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        PortalRuntime.auth_manager._state_store = LanPortalStateStore(auth_root / "auth.sqlite3")
+        self._attach_current_account_hr(PortalRuntime.auth_manager, {})
         previous_sessions = dict(PortalRuntime.auth_manager._sessions)
         now = time.time() + 3600
         sessions = {
             "admin-session": {
                 "session_id": "admin-session",
                 "user": {
-                    "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+                    "open_id": LI_SHILONG_OPEN_ID,
                     "name": "管理员",
                 },
                 "role": "admin",
@@ -3634,6 +3637,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_change_confirmation_dashboard_stages_target_bound_local_image_only(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             store = LanPortalStateStore(Path(temp_dir) / "state.sqlite3")
+            PortalRuntime.auth_manager._state_store = store
+            self._attach_current_account_hr(PortalRuntime.auth_manager, {})
             images = portal_server_module.LocalNoticeImageStore(store)
             images.root = Path(temp_dir) / "notice_images"
             previous_store = PortalRuntime.state_store
@@ -3654,7 +3659,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "admin-local-image": {
                         "session_id": "admin-local-image",
                         "user": {
-                            "open_id": "ou_902e364a6c2c6c20893c02abe505a7b2",
+                            "open_id": LI_SHILONG_OPEN_ID,
                             "name": "管理员",
                         },
                         "role": "admin",

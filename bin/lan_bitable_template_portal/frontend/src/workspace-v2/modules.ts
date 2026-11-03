@@ -12,6 +12,7 @@ export const modules: ModuleEntry[] = [
   { id: 'critical_guard', label: '重保管理', group: '运行管理', path: '/critical-guard', icon: 'shield' },
   { id: 'risk_inspection', label: '专项排查', group: '专项功能', path: '/risk-inspections', icon: 'shield' },
   { id: 'tool_management', label: '工具管理', group: '专项功能', path: '/risk-inspections?view=tool-self-check', icon: 'wrench', permission: 'risk_inspection' },
+  { id: 'eop_scenarios', label: 'EOP 场景维护', group: '专项功能', path: '/eop-scenarios', icon: 'book', permission: 'drills' },
   { id: 'daily', label: '每日任务', group: '运行管理', path: '/daily-tasks', icon: 'task' },
   { id: 'cabinet', label: '机柜管理', group: '设备与资源', path: '/cabinet-power', icon: 'server' },
   { id: 'water', label: '水耗管理', group: '设备与资源', path: '/water-management', icon: 'water' },
@@ -57,7 +58,7 @@ export function moduleForRoute(url: URL): string {
 }
 export function moduleUrl(module: ModuleEntry, scope: string): string {
   const url = new URL(module.path, window.location.origin);
-  if (!['accounts', 'assistant', 'knowledge', 'documents', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning'].includes(module.id) && scope) url.searchParams.set('scope', scope);
+  if (!['accounts', 'assistant', 'knowledge', 'documents', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning', 'eop_scenarios'].includes(module.id) && scope) url.searchParams.set('scope', scope);
   return url.pathname + url.search;
 }
 export function beijingDate(): string {

@@ -39,6 +39,7 @@ PREFIXES = (
     ("/api/capacity", "water"), ("/water-management", "water"),
     ("/api/critical-guard", "critical_guard"), ("/critical-guard", "critical_guard"),
     ("/api/drills", "drills"), ("/drill-management", "drills"),
+    ("/api/eop-scenarios", "drills"), ("/eop-scenarios", "drills"),
     ("/api/daily-tasks", "daily"), ("/daily-tasks", "daily"),
     ("/api/learning", "learning"), ("/learning", "learning"),
     ("/api/plan-convergence", "plan_convergence"), ("/plan-convergence", "plan_convergence"),

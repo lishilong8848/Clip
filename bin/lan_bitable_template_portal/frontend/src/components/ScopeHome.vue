@@ -135,6 +135,11 @@
           <span class="risk-tool-icon" aria-hidden="true"><Wrench :size="24" /></span>
           <span><strong>工具管理</strong></span><b>自检与送检</b>
         </button>
+        <button v-if="activeMode === 'special' && hasModule('drills')" type="button"
+          class="tool-card blue" aria-label="选择 EOP 场景维护" @click="emit('eop-scenarios')">
+          <span class="risk-tool-icon" aria-hidden="true"><ClipboardCheck :size="24" /></span>
+          <span><strong>EOP 场景维护</strong></span><b>步骤与图片</b>
+        </button>
       </div>
 
       <div
@@ -313,6 +318,7 @@ const emit = defineEmits<{
   "critical-guard": [];
   "risk-inspection": [scope?: string];
   "tool-management": [];
+  "eop-scenarios": [];
   drill: [];
   learning: [];
   knowledge: [];
@@ -418,7 +424,7 @@ const cardModules: Record<string, string[]> = {
   risk: ["critical_guard"],
   capacity: ["water", "cabinet"],
   tools: ["daily", "power", "polling", "adjust", "handover", "knowledge"],
-  special: ["risk_inspection", "work_handover", "learning", "plan_convergence"],
+  special: ["risk_inspection", "work_handover", "learning", "plan_convergence", "drills"],
   drill: ["drills"],
 };
 const filteredModuleCards = computed(() =>
