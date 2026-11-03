@@ -31,6 +31,8 @@ STEPS, IMAGES, LINK = '原通告重点项', '图片', '步骤图片关联'
 SELECTS = MAIN[1:]
 MAX_UPLOAD = 18 * 1024 * 1024
 MAX_DOWNLOAD = 36 * 1024 * 1024
+SCHEMA_TTL = 120
+PREVIEW_WINDOW = 900
 MIME = {'PNG': 'image/png', 'JPEG': 'image/jpeg', 'GIF': 'image/gif', 'WEBP': 'image/webp'}
 NUMBER = re.compile(r'^\s*(?:第\s*\d+\s*步[：:]?|\d+[、.．）)])\s*')
 
@@ -86,6 +88,8 @@ class EopEditor:
         self.path = cloud.table_path(BASE, TABLE)
         self.key = secrets.token_bytes(32)
         self.lock = threading.RLock()
+        self.schema_lock = threading.Lock()
+        self.detail_schema = None
         self.download_slots = threading.BoundedSemaphore(3)
 
     def list(self):
@@ -122,7 +126,11 @@ class EopEditor:
         return fields
 
     def ticket(self, rid, user, token, purpose, extra=''):
-        value = base64.urlsafe_b64encode(json.dumps([rid, user, token, purpose, int(time.time()) + 7200, extra]).encode()).decode()
+        now = int(time.time())
+        expiry = now + 7200
+        if purpose == 'preview':
+            expiry -= now % PREVIEW_WINDOW
+        value = base64.urlsafe_b64encode(json.dumps([rid, user, token, purpose, expiry, extra]).encode()).decode()
         return value + '.' + hmac.new(self.key, value.encode(), 'sha256').hexdigest()
 
     def check_ticket(self, ticket, rid, user, purpose):
@@ -143,7 +151,16 @@ class EopEditor:
                        list(attachment_rows(fields))])
 
     def detail(self, rid, user, editable):
-        return self.record_detail(rid, user, editable, self.read(rid), self.schema())
+        fields = self.read(rid)
+        with self.schema_lock:
+            identity = getattr(self.cloud, 'config_hash', None)
+            cached = self.detail_schema
+            if cached and cached[0] == identity and time.monotonic() < cached[1]:
+                schema = cached[2]
+            else:
+                schema = self.schema()
+                self.detail_schema = (identity, time.monotonic() + SCHEMA_TTL, schema)
+        return self.record_detail(rid, user, editable, fields, schema)
 
     def record_detail(self, rid, user, editable, fields, schema):
         raw = plain(fields.get(STEPS))

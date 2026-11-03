@@ -1,18 +1,21 @@
 <template>
   <section class="inspection-page" aria-label="日常巡检" data-v2-inline-feedback>
     <header class="inspection-heading">
-      <NButton quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
-      <div><h1>日常巡检</h1><p>{{ duty ? dutyLabel(duty) : '设备参数与测点读数' }}</p></div>
-      <NButton v-if="state?.history_scopes?.length" size="small" :disabled="!!busy"
-        @click="historyOpen=!historyOpen">{{ historyOpen ? '返回本班' : '历史巡检' }}</NButton>
-      <NButton v-if="!historyOpen" size="small" :disabled="!!busy" :loading="busy==='load'" @click="load">刷新状态</NButton>
+      <NButton v-if="!embedded || historyOpen" quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
+      <div class="inspection-title"><h1>日常巡检</h1><p>{{ duty ? dutyLabel(duty) : '设备参数与测点读数' }}</p></div>
+      <div class="inspection-actions inspection-heading-tools">
+        <NButton v-if="state?.history_scopes?.length" size="small" :type="historyOpen ? 'primary' : 'default'"
+          :aria-pressed="historyOpen" :disabled="!!busy"
+          @click="toggleHistory">{{ historyOpen ? '返回本班' : '历史巡检' }}</NButton>
+        <NButton v-if="!historyOpen" size="small" :disabled="!!busy" :loading="busy==='load'" @click="load">刷新状态</NButton>
+      </div>
     </header>
     <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" role="status">{{ message }}</NAlert>
     <p v-if="storageError && active && !active.pending" class="warning" role="status">浏览器暂存不可用，离开前可保存本轮草稿。</p>
     <p v-if="!state && busy">正在读取巡检状态…</p>
     <DailyInspectionHistory v-show="historyOpen" v-if="historyVisited && state?.history_scopes?.length"
-      :scopes="state.history_scopes" :default-scope="duty?.scope" />
+      ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
     <template v-if="state && !historyOpen">
       <p v-if="!duty">{{ state.duty_warning || '当前排班没有可巡检的 D 楼或 E 楼。如排班有变更，请刷新状态。' }}</p>
       <section v-else-if="!active" class="inspection-summary">
@@ -30,8 +33,8 @@
             <strong>{{ active.duty.scope }}楼 · {{ active.duty.shift }}班第 {{ active.round }} / {{ state.round_limit }} 次</strong>
             <span v-if="active.pending" class="warning">待归档</span>
             <span v-else>已填齐 {{ completedDevices }} / {{ devices.length }} 台</span>
-            <span v-if="abnormalCount" class="warning">异常 {{ abnormalCount }} 台</span>
-            <button type="button" :disabled="!!busy || active.pending" @click="openOrder">批量排序</button>
+            <span v-if="abnormalCount" class="danger">异常 {{ abnormalCount }} 台</span>
+            <NButton size="small" :disabled="inputsLocked" @click="openOrder">批量排序</NButton>
           </div>
           <p>参考批次 {{ time(batch?.batch) }} · {{ batch?.count }} 条源数据</p>
           <p v-if="active.duty.date!==duty.date || active.duty.shift!==duty.shift" class="warning">
@@ -58,7 +61,7 @@
               <header class="inspection-device-heading">
                 <h2 tabindex="-1"><span class="sequence">{{ positions.get(item.id) }}</span>{{ item.name }}</h2>
                 <span v-if="conflicts.has(item.id)" class="warning">待核对共享修改</span>
-                <span v-else-if="!missingByDevice.get(item.id)" :class="reviewFor(item.id).result==='异常'?'warning':'done'">
+                <span v-else-if="!missingByDevice.get(item.id)" :class="reviewFor(item.id).result==='异常'?'danger':'done'">
                   {{ reviewFor(item.id).result==='异常' ? '异常' : '已填齐' }}
                 </span>
                 <span v-else class="warning">{{ missingByDevice.get(item.id) }}</span>
@@ -93,20 +96,23 @@
                 </p>
               </details>
               <div class="inspection-actions inspection-entry">
-                <select :value="reviewFor(item.id).result" :disabled="inputsLocked" aria-label="现场结论" data-native-select @change="setResult(item.id,$event)">
+                <select :value="reviewFor(item.id).result" :disabled="inputsLocked" aria-label="现场结论" data-native-select
+                  :class="reviewFor(item.id).result==='异常'?'danger':reviewFor(item.id).result==='正常'?'done':''"
+                  @change="setResult(item.id,$event)">
                   <option value="">选择结论</option><option value="正常">正常</option><option value="异常">异常</option>
                 </select>
-                <button type="button" :aria-expanded="showNote(item.id)" :aria-controls="deviceAnchor(item.id)+'-note'" @click="toggleNote(item.id)">备注</button>
+                <NButton size="small" :type="showNote(item.id) ? 'primary' : 'default'"
+                  :aria-expanded="showNote(item.id)" :aria-controls="deviceAnchor(item.id)+'-note'" @click="toggleNote(item.id)">备注</NButton>
                 <textarea v-show="showNote(item.id)" :id="deviceAnchor(item.id)+'-note'" :value="reviewFor(item.id).note"
                   :disabled="inputsLocked" rows="2" maxlength="1000" aria-label="现场备注" placeholder="异常时填写现场情况"
                   @input="setNote(item.id,$event)" />
               </div>
               <div v-if="!active.pending && conflicts.has(item.id)" class="inspection-actions warning">
                 <span>本台在其他页面有新填写，请选择要保留的版本。</span>
-                <button type="button" :disabled="inputsLocked" @click="resolveConflict(item.id,false)">使用共享填写</button>
-                <button type="button" :disabled="inputsLocked" @click="resolveConflict(item.id,true)">
+                <NButton size="small" :disabled="inputsLocked" @click="resolveConflict(item.id,false)">使用共享填写</NButton>
+                <NButton size="small" type="primary" secondary :disabled="inputsLocked" @click="resolveConflict(item.id,true)">
                   {{drafts[item.id]?.base ? '合并我的改动' : '用本机旧草稿覆盖本台'}}
-                </button>
+                </NButton>
               </div>
               <p v-else-if="blockedDevice===item.id && missingByDevice.get(item.id)" class="warning">
                 {{ missingByDevice.get(item.id) }}
@@ -117,9 +123,9 @@
         <p v-else>没有匹配的设备。</p>
         <footer class="inspection-actions inspection-footer">
           <p v-if="error" class="warning">{{ error }}</p>
-          <a :href="api+'/xlsx?id='+active.id" download>下载 DE 巡检表</a>
+          <NButton tag="a" size="small" :href="api+'/xlsx?id='+active.id" download>下载 DE 巡检表</NButton>
           <template v-if="!active.pending">
-            <NButton size="small" :disabled="!!busy" @click="promptConfirmation('cancel')">取消本轮</NButton>
+            <NButton size="small" type="error" secondary :disabled="!!busy" @click="promptConfirmation('cancel')">取消本轮</NButton>
             <NButton size="small" :disabled="!!busy || !hasDrafts" :loading="busy==='draft'" @click="saveDraft">保存本轮草稿</NButton>
           </template>
           <NButton type="primary" :loading="busy==='finish'" :disabled="!!busy" @click="confirmFinish">
@@ -138,13 +144,13 @@
       <p>顺序按账号和楼栋保存。可导入同楼人员分享的排序文件。</p>
       <div class="inspection-actions order-toolbar">
         <label>移动到第 <input v-model.number="position" type="number" inputmode="numeric" min="1" :max="lastPosition" :disabled="!!busy" aria-label="设备目标位置"> 位</label>
-        <button type="button" :disabled="!!busy || !selected.length || !validPosition" @click="moveOrder">移动</button>
+        <NButton size="small" :disabled="!!busy || !selected.length || !validPosition" @click="moveOrder">移动</NButton>
         <span>{{ selected.length }} 台已选</span>
       </div>
       <div class="inspection-actions order-toolbar">
         <input ref="orderFile" type="file" accept=".json,application/json" hidden @change="importOrder">
-        <button type="button" :disabled="!!busy" @click="orderFile?.click()">导入顺序</button>
-        <button type="button" :disabled="!order.length || !!busy" @click="exportOrder">导出顺序</button>
+        <NButton size="small" :disabled="!!busy" @click="orderFile?.click()">导入顺序</NButton>
+        <NButton size="small" :disabled="!order.length || !!busy" @click="exportOrder">导出顺序</NButton>
       </div>
       <p v-if="orderFeedback" :class="{warning:orderImportError}" role="status">{{ orderFeedback }}</p>
       <div class="order-list">
@@ -166,16 +172,23 @@
       :content="confirmation==='finish' ? '将把固定的参考数据、现场读数和核对结论归档到飞书「巡检记录」。' : '取消会清除本轮共享草稿与填写记录。'"
       :positive-text="confirmation==='finish' ? '确认并归档' : '取消本轮'" negative-text="返回填写"
       @positive-click="applyConfirmation" @update:show="show=>{if(!show)confirmation='';}" />
+    <NModal :show="!!leaveAction" preset="dialog" type="warning" title="本机填写尚未保存" aria-label="本机填写尚未保存"
+      content="浏览器暂存不可用，离开后本机尚未共享的填写会丢失。"
+      positive-text="仍要离开" negative-text="继续填写"
+      @positive-click="leaveWithoutDraft" @update:show="show=>{if(!show)leaveAction=undefined;}" />
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { NAlert, NButton, NModal } from 'naive-ui';
 import { ArrowLeft, ChevronRight } from 'lucide-vue-next';
 import { ApiError, requestJson } from '../api/client';
-import { navigateBack } from '../navigation';
+import { registerNavigationGuard } from '../navigation';
 import DailyInspectionHistory from './DailyInspectionHistory.vue';
+
+defineProps<{embedded?:boolean}>();
+const emit = defineEmits<{close:[]}>();
 
 type Value = string | number | boolean | null;
 type Reading = {location:string; form:string; integrity:string; missing:string; note:string};
@@ -202,6 +215,7 @@ const onlyMissing = ref(false);
 const focusedDevice = ref('');
 const historyOpen = ref(false);
 const historyVisited = ref(false);
+const historyPage = ref<InstanceType<typeof DailyInspectionHistory>>();
 const pollError = ref('');
 watch(historyOpen,open=>{if(open)historyVisited.value=true;});
 const orderOpen = ref(false);
@@ -217,6 +231,7 @@ const blockedDevice = ref('');
 const drafts = ref<Record<string,DraftReview>>({});
 const notes = ref<Record<string,boolean>>({});
 const storageError = ref(false);
+const leaveAction = shallowRef<() => void>();
 const emptyReview:Review = {values:{},result:'',note:'',revision:0};
 
 const active = computed(()=>state.value?.active);
@@ -562,73 +577,140 @@ async function importOrder(event:Event) {
 async function saveOrder() {
   if (active.value && await fetchState('order',{id:active.value.id,order:order.value})) orderOpen.value=false;
 }
-function back() {navigateBack(document.querySelector('.v2-shell') ? '/?view=functions' : '/?entry=tools');}
+function toggleHistory() {
+  if (historyOpen.value) {
+    if (historyPage.value) historyPage.value.requestClose();
+    else historyOpen.value=false;
+  }
+  else historyOpen.value=true;
+}
+function back() {
+  if (historyOpen.value) {
+    if (historyPage.value) historyPage.value.requestBack();
+    else historyOpen.value=false;
+  }
+  else emit('close');
+}
+function leaveWithoutDraft() {
+  const proceed=leaveAction.value;
+  leaveAction.value=undefined;
+  proceed?.();
+}
+const unregister=registerNavigationGuard((_target,proceed)=>{
+  if (busy.value && busy.value!=='load') {
+    error.value='巡检操作正在处理，请稍后再离开。';
+    return false;
+  }
+  if (historyOpen.value && historyPage.value && !historyPage.value.allowNavigation(proceed)) return false;
+  if (hasDrafts.value) {
+    persistDrafts();
+    if (storageError.value) {
+      leaveAction.value=proceed;
+      return false;
+    }
+  }
+  return true;
+});
+function beforeUnload(event:BeforeUnloadEvent) {
+  if (hasDrafts.value) persistDrafts();
+  if ((busy.value && busy.value!=='load') || (storageError.value && hasDrafts.value)
+      || historyPage.value?.hasUnsavedChanges()) event.preventDefault();
+}
 onMounted(()=>{
   window.addEventListener('pagehide',persistDrafts);
+  window.addEventListener('beforeunload',beforeUnload);
   document.addEventListener('visibilitychange',refreshSharedStatus);
   statusTimer=window.setInterval(refreshSharedStatus,8000);
   void load();
 });
 onBeforeUnmount(()=>{
   disposed=true;
+  unregister();
   controller?.abort();
   statusController?.abort();
   window.clearInterval(statusTimer);
   document.removeEventListener('visibilitychange',refreshSharedStatus);
   persistDrafts();
   window.removeEventListener('pagehide',persistDrafts);
+  window.removeEventListener('beforeunload',beforeUnload);
 });
 </script>
 
 <style scoped>
-.inspection-page{--line:hsl(211 36% 88%);--ink:hsl(215 56% 18%);--muted:hsl(215 22% 40%);display:grid;gap:8px;max-width:1500px;margin:auto;padding:10px 12px;min-width:0;background:hsl(0 0% 100%);color:var(--ink);color-scheme:light}
+.inspection-page,.inspection-order{
+  --inspection-ink:var(--cf-text);--inspection-muted:var(--cf-muted);--inspection-line:var(--cf-border);
+  --inspection-surface:var(--cf-surface);--inspection-accent:var(--cf-brand-blue);
+  --inspection-soft:color-mix(in srgb,var(--inspection-surface) 93%,var(--inspection-accent));
+}
+.inspection-page{display:grid;gap:10px;max-width:1500px;margin:auto;padding:10px 12px;min-width:0;background:var(--inspection-surface);color:var(--inspection-ink)}
 .inspection-heading,.inspection-actions{display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px}
-.inspection-heading{flex-wrap:nowrap;padding-bottom:6px;border-bottom:1px solid var(--line)}
-.inspection-heading>div{min-width:0;flex:1}
+.inspection-heading{padding-bottom:8px;border-bottom:1px solid var(--inspection-line)}
+.inspection-title{min-width:136px;flex:1}
+.inspection-heading-tools{margin-inline-start:auto}
 h1,h2,p{margin:0;overflow-wrap:anywhere}
-h1{font-size:20px}h2{font-size:16px}p,small{color:var(--muted);font-size:12px}
-.inspection-summary{display:grid;gap:4px}
-.inspection-page input,.inspection-page select,.inspection-page textarea,.inspection-page button:not(.n-button),.order-toolbar input,.order-toolbar button{min-width:0;min-height:36px;padding:3px 7px;border:1px solid hsl(213 29% 75%);border-radius:0;color:var(--ink,hsl(215 56% 18%));background:hsl(0 0% 100%);font:inherit}
-.inspection-page :is(input,select,textarea):disabled,.inspection-page button:not(.n-button):disabled,.order-toolbar button:disabled{opacity:.62}
-.inspection-page :deep(.n-button){border-radius:0}
-.inspection-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,140px);gap:6px}
-.inspection-filters label{display:flex;align-items:center;gap:5px;font-size:13px}
-.inspection-filters label input{min-height:0;margin:0}
+h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-size:12px}
+.inspection-summary{display:grid;gap:6px}
+.inspection-page :is(input:not([type=checkbox]),select,textarea),.order-toolbar input{
+  box-sizing:border-box;min-width:0;min-height:36px;padding:4px 8px;border:1px solid var(--inspection-line);
+  border-radius:4px;color:var(--inspection-ink);background:var(--inspection-surface);font:inherit
+}
+.inspection-page select{appearance:auto}
+.inspection-page :is(input,select,textarea):disabled,.order-toolbar input:disabled{opacity:.62}
+.inspection-page :is(input,select,textarea,a):focus-visible,.order-toolbar input:focus-visible,.order-list input:focus-visible{
+  outline:2px solid var(--inspection-accent);outline-offset:2px
+}
+.inspection-page input::placeholder,.inspection-page textarea::placeholder{color:var(--inspection-muted)}
+.inspection-page input[type=checkbox],.order-list input{width:17px;height:17px;margin:0;accent-color:var(--inspection-accent)}
+.inspection-page :deep(.n-button),.inspection-order :deep(.n-button){min-height:34px;max-width:100%;font-weight:500}
+.inspection-page :deep(.n-button__content){white-space:normal}
+.inspection-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,140px) auto;gap:6px;align-items:center}
+.inspection-filters label{display:flex;align-items:center;gap:6px;min-height:34px;font-size:13px;cursor:pointer}
 .inspection-devices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px 16px}
-.inspection-device{min-width:0;border-top:1px solid var(--line);padding:6px 0;scroll-margin-top:30px}
+.inspection-device{min-width:0;border-top:1px solid var(--inspection-line);padding:6px 0;scroll-margin-top:30px}
 .inspection-device-heading{display:flex;align-items:baseline;justify-content:space-between;gap:5px;font-size:12px}
-.sequence{margin-right:7px;color:var(--muted);font-size:12px}
+.inspection-device-heading>span{flex:none}
+.sequence{margin-right:7px;color:var(--inspection-muted);font-size:12px}
 .inspection-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,.76fr) minmax(0,1fr) minmax(0,.72fr);align-items:center;gap:5px;padding-inline:3px}
-.inspection-columns{font-size:12px;color:var(--muted);background:hsl(214 40% 97%);padding-block:3px}
+.inspection-columns{font-size:12px;color:var(--inspection-muted);background:var(--inspection-soft);padding-block:4px}
 .inspection-columns span:not(:first-child),.numeric{text-align:right;font-variant-numeric:tabular-nums}
 .inspection-shared-head{display:none}
-.inspection-reading{min-height:38px;border-bottom:1px solid var(--line);font-size:14px}
+.inspection-reading{min-height:40px;border-bottom:1px solid var(--inspection-line);font-size:14px}
 .inspection-reading>*{min-width:0;overflow-wrap:anywhere}
 .inspection-reading strong{font-size:13px}
 .inspection-reading small{display:block}
 .inspection-reading input{width:100%;min-height:32px}
-.inspection-reading input.missing-reading{border-color:hsl(35 66% 65%);background:hsl(40 90% 97%)}
-.inspection-source{padding-top:3px;color:var(--muted);font-size:12px}
+.inspection-page .inspection-reading input.missing-reading{
+  border-color:color-mix(in srgb,var(--cf-warning) 52%,var(--inspection-line));
+  background:color-mix(in srgb,var(--inspection-surface) 94%,var(--cf-warning))
+}
+.inspection-source{padding-top:4px;color:var(--inspection-muted);font-size:12px}
 .inspection-source summary{cursor:pointer}
 .inspection-entry{padding:4px 0}
 .inspection-entry textarea{width:100%;resize:vertical}
-.inspection-footer{padding:7px 0;border-top:1px solid var(--line)}
+.inspection-footer{padding:8px 0;border-top:1px solid var(--inspection-line);justify-content:flex-end}
 .inspection-footer p{flex-basis:100%}
-.inspection-history{display:flex;justify-content:space-between;align-items:center;gap:5px;padding:6px 0;border-bottom:1px solid var(--line)}
+.inspection-history{display:flex;justify-content:space-between;align-items:center;gap:5px;padding:6px 0;border-bottom:1px solid var(--inspection-line);color:var(--inspection-accent)}
 .inspection-order{width:min(510px,94vw)}
 .order-list{max-height:48dvh;overflow:auto}
-.order-list label{display:flex;align-items:center;gap:7px;min-height:36px;border-bottom:1px solid #d8e2ed;cursor:pointer}
-.order-list input{width:18px;height:18px;accent-color:#1356be}
+.order-list label{display:flex;align-items:center;gap:7px;min-height:38px;border-bottom:1px solid var(--inspection-line);cursor:pointer}
+.order-list input{flex:none}
 .order-toolbar{padding:5px 0}
 .order-toolbar input{width:58px}
-.muted{color:var(--muted)}.warning{color:#8d490b}.done{color:#087454}
+.muted{color:var(--inspection-muted)}.warning{color:var(--cf-warning)}.done,.inspection-entry select.done{color:var(--cf-success)}
+.danger,.inspection-entry select.danger{color:var(--cf-danger)}
 @media(min-width:1260px){.inspection-devices{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @media(max-width:760px){
   .inspection-page{padding:6px 8px;gap:6px}
   .inspection-devices{grid-template-columns:minmax(0,1fr);gap:0}
-  .inspection-shared-head{display:grid;position:sticky;top:0;z-index:1;border-bottom:1px solid var(--line)}
+  .inspection-shared-head{display:grid;position:sticky;top:0;z-index:1;border-bottom:1px solid var(--inspection-line)}
   .inspection-device-columns{display:none}
-  .inspection-page input,.inspection-page select,.inspection-page textarea{font-size:16px}
+  .inspection-page :is(input,select,textarea),.order-toolbar input{font-size:16px}
+  .inspection-page :deep(.n-button),.inspection-order :deep(.n-button){min-height:42px}
   .inspection-columns{font-size:11px}
+}
+@media(max-width:430px){
+  .inspection-filters{grid-template-columns:minmax(0,1fr) minmax(94px,auto)}
+  .inspection-heading-tools{gap:6px}
+  .inspection-footer>*:not(p){flex:1 1 auto}
 }
 </style>

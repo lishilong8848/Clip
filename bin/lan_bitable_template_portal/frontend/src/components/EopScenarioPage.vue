@@ -1,10 +1,11 @@
 <template>
   <section ref="root" class="eop-page" aria-label="EOP 场景维护" data-v2-inline-feedback>
     <header class="eop-header">
-      <NButton quaternary :aria-label="record ? '返回场景列表' : '返回'" :disabled="busy" @click="leave(record ? closeRecord : back)"><ArrowLeft :size="19" /></NButton>
+      <NButton v-if="!embedded || record || opening" quaternary :aria-label="record || opening ? '返回场景列表' : '返回'"
+        :disabled="saving || uploading" @click="headerBack"><ArrowLeft :size="19" /></NButton>
       <div class="eop-heading">
-        <small>{{ record ? editing ? 'EOP 场景 · 编辑中' : 'EOP 场景 · 查看' : '专项功能' }}</small>
-        <h1 ref="heading" tabindex="-1">{{ record?.fields['场景名称'] || 'EOP 场景维护' }}</h1>
+        <small>{{ opening ? 'EOP 场景 · 读取中' : record ? editing ? 'EOP 场景 · 编辑中' : 'EOP 场景 · 查看' : '专项功能' }}</small>
+        <h1 ref="heading" tabindex="-1">{{ (record || opening)?.fields['场景名称'] || 'EOP 场景维护' }}</h1>
         <div v-if="record && !editing" class="eop-summary" aria-label="场景信息">
           <span v-for="field in selectFields" :key="field" class="eop-tag">{{ field }} · {{ record.fields[field] || '未设置' }}</span>
         </div>
@@ -17,7 +18,8 @@
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" :bordered="false" role="status">{{ message }}</NAlert>
 
-    <section v-if="!record" class="eop-panel" aria-label="场景列表">
+    <section v-if="opening" class="eop-panel eop-opening" aria-busy="true" role="status">正在读取场景正文和步骤…</section>
+    <section v-else-if="!record" class="eop-panel" aria-label="场景列表">
       <div class="eop-toolbar">
         <NInput v-model:value="search" class="eop-search" clearable placeholder="搜索场景名称、专业或设备"
           :input-props="{ 'aria-label': '搜索场景' }"><template #prefix><Search :size="16" /></template></NInput>
@@ -51,6 +53,7 @@
         </label>
       </section>
 
+      <div class="eop-workspace" :class="{ 'with-pool': unassigned.length || editing }">
       <section class="eop-panel eop-work" aria-label="步骤与图片">
         <header class="eop-section-head">
           <div><h2>原通告重点项</h2><small>{{ record.steps.length }} 步 · {{ record.images.length - unassigned.length }} 张已关联</small></div>
@@ -64,7 +67,9 @@
           </div>
         </header>
         <NEmpty v-if="!record.steps.length" class="eop-empty" description="原记录暂无步骤" />
-        <article v-for="(step,index) in record.steps" :key="step.key" :id="'eop-step-'+step.key" class="eop-step" :class="{ 'has-images': step.images.length }">
+        <article v-for="(step,index) in record.steps" :key="step.key" :id="'eop-step-'+step.key" class="eop-step"
+          :class="{ 'has-images': step.images.length, 'eop-drop-ready': draggedPhoto, 'eop-drop-active': dropStep===step.key }"
+          @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop="dropPicture(step.key,$event)">
           <div class="eop-step-body">
             <div class="eop-step-title">
               <h3 tabindex="-1">第 {{ index + 1 }} 步</h3>
@@ -99,7 +104,7 @@
 
       <section v-if="unassigned.length || editing" class="eop-panel eop-pool" aria-label="待分配图片">
         <header class="eop-section-head">
-          <div><h2 ref="poolHeading" tabindex="-1">待分配图片</h2><small>{{ unassigned.length }} 张<span v-if="editing && unassigned.length"> · 选择步骤后关联</span></small></div>
+          <div><h2 ref="poolHeading" tabindex="-1">待分配图片</h2><small>{{ unassigned.length }} 张<span v-if="editing && unassigned.length && record.steps.length"> · 拖动图片到步骤，或选择步骤</span></small></div>
           <NButton v-if="editing" size="small" :disabled="busy || record.images.length >= 100" @click="choosePictures('')"><Upload :size="16" />上传到待分配</NButton>
         </header>
         <div v-if="editing && assignedPhoto" class="eop-assigned">
@@ -108,8 +113,11 @@
         </div>
         <div v-if="unassigned.length" class="eop-gallery eop-pool-grid">
           <figure v-for="photo in unassigned" :key="photo.token">
-            <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name" @click="openPreview(photo, unassigned, '待分配图片', $event)">
-              <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" @error="broken.add(photo.token)" />
+            <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name"
+              :draggable="editing && !busy && record.steps.length>0"
+              @dragstart="startPictureDrag(photo.token,$event)" @dragend="clearPictureDrag"
+              @click="openPreview(photo, unassigned, '待分配图片', $event)">
+              <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" decoding="async" draggable="false" @error="broken.add(photo.token)" />
               <span v-else>打开原图</span>
             </button>
             <figcaption><span :title="photo.name">{{ photo.name }}</span>
@@ -121,7 +129,9 @@
             </figcaption>
           </figure>
         </div>
+        <p v-else-if="editing" class="eop-pool-empty">当前没有待分配图片，可上传图片后关联到步骤。</p>
       </section>
+      </div>
 
       <section class="eop-panel eop-source" aria-label="原文资料">
         <header class="eop-section-head"><h2>原文资料</h2></header>
@@ -163,9 +173,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NSelect } from 'naive-ui';
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, ImagePlus, Pencil, Plus, RefreshCw, Search, Trash2, Upload } from 'lucide-vue-next';
 import { requestBinaryJson, requestJson } from '../api/client';
-import { navigateBack, registerNavigationGuard } from '../navigation';
+import { registerNavigationGuard } from '../navigation';
 
 defineOptions({ inheritAttrs: false });
+defineProps<{embedded?:boolean}>();
+const emit=defineEmits<{close:[]}>();
 
 interface Row { id: string; fields: Record<string,string> }
 interface Photo { token: string; name: string; url: string; ticket?: string }
@@ -176,6 +188,7 @@ const selectFields = ['专业', '系统/设备', '原优先级'];
 const longFields = ['处置正文（原文）', '原通告模板', '原演练场景', '原EOP精炼（参考）'];
 const rows = ref<Row[]>([]);
 const record = ref<Detail>();
+const opening = shallowRef<Row>();
 const editing = ref(false);
 const search = ref('');
 const specialty = ref('');
@@ -203,6 +216,8 @@ const poolHeading = ref<HTMLElement>();
 const fileInput = ref<HTMLInputElement>();
 const discardAction = shallowRef<() => void>();
 const lastAssignment = ref<{key: string; token: string}>();
+const draggedPhoto = ref('');
+const dropStep = ref('');
 let previewTrigger: HTMLElement | undefined;
 let listPosition: {scroller: Element; top: number; id: string} | undefined;
 let pictureTarget: {record: Detail; stepKey: string} | undefined;
@@ -276,11 +291,17 @@ async function read<T>(path: string, apply: (data:T) => void) {
     const data = await requestJson(path,{signal:request.signal,cache:'no-store'}) as T;
     if (!disposed && activeRead === request && !request.signal.aborted) apply(data);
   } catch (value) { if (!request.signal.aborted) fail(value); }
-  finally { if (activeRead === request) loading.value = false; }
+  finally {
+    if (activeRead === request) {
+      loading.value = false;
+      opening.value = undefined;
+    }
+  }
 }
 function loadList() { return read<{items:Row[]}>(api, data => { rows.value = data.items; }); }
 function applyRecord(data: Detail) {
   revokePictures();
+  clearPictureDrag();
   pictureTarget = undefined;
   record.value = { ...data, steps: data.steps.map(step => ({...step,key:String(++stepKey)})) };
   broken.value = new Set();
@@ -299,6 +320,10 @@ function openFromList(id: string, event: MouseEvent) {
 }
 function openRecord(id: string) {
   message.value = '';
+  if (!record.value) {
+    opening.value = rows.value.find(row => row.id === id);
+    void nextTick(focusRecordHeading);
+  }
   void read<Detail>(api+'/'+id, data => {
     applyRecord(data);
     void nextTick(focusRecordHeading);
@@ -306,6 +331,8 @@ function openRecord(id: string) {
 }
 function closeRecord() {
   activeRead?.abort();
+  opening.value = undefined;
+  clearPictureDrag();
   revokePictures();
   pictureTarget = undefined;
   record.value = undefined;
@@ -322,7 +349,16 @@ function closeRecord() {
     if (index >= 0) root.value?.querySelectorAll<HTMLElement>('.eop-list-row')[index]?.focus({preventScroll:true});
   });
 }
-function back() { navigateBack(document.querySelector('.v2-shell') ? '/?view=functions' : '/?entry=special'); }
+function back() { emit('close'); }
+function headerBack() {
+  if (saving.value || uploading.value) return;
+  if (opening.value) { closeRecord(); return; }
+  if (loading.value) {
+    activeRead?.abort();
+    loading.value = false;
+  }
+  leave(record.value ? closeRecord : back);
+}
 function refresh() { if (record.value) openRecord(record.value.id); else void loadList(); }
 function finishEditing() {
   const current = record.value;
@@ -385,13 +421,49 @@ async function uploadPictures(event: Event) {
 }
 function assign(token: string, event: Event) {
   const input = event.target as HTMLSelectElement;
-  const step = record.value?.steps.find(item => item.key === input.value);
-  if (step) {
-    step.images.push(token);
-    lastAssignment.value = {key:step.key, token};
+  if (assignPicture(token,input.value)) {
     void nextTick(() => root.value?.querySelector<HTMLElement>('.eop-assigned button')?.focus({preventScroll:true}));
   }
   input.value = '';
+}
+function assignPicture(token: string, stepKey: string) {
+  if (!record.value?.editable || !editing.value || busy.value || !unassigned.value.some(photo => photo.token===token)) return false;
+  const step = record.value.steps.find(item => item.key === stepKey);
+  if (!step) return false;
+  step.images.push(token);
+  lastAssignment.value = {key:step.key, token};
+  return true;
+}
+function clearPictureDrag() {
+  draggedPhoto.value = '';
+  dropStep.value = '';
+}
+function startPictureDrag(token: string, event: DragEvent) {
+  if (!event.dataTransfer || !record.value?.editable || !editing.value || busy.value || !record.value.steps.length) {
+    event.preventDefault();
+    return;
+  }
+  event.dataTransfer.setData('application/x-clipflow-eop-picture',token);
+  event.dataTransfer.effectAllowed = 'move';
+  draggedPhoto.value = token;
+}
+function overStep(key: string, event: DragEvent) {
+  if (!draggedPhoto.value || busy.value || !event.dataTransfer?.types.includes('application/x-clipflow-eop-picture')) return;
+  event.preventDefault();
+  event.dataTransfer.dropEffect = 'move';
+  dropStep.value = key;
+}
+function leaveStep(key: string, event: DragEvent) {
+  if (dropStep.value===key && !(event.relatedTarget instanceof Node && (event.currentTarget as HTMLElement).contains(event.relatedTarget))) {
+    dropStep.value = '';
+  }
+}
+function dropPicture(key: string, event: DragEvent) {
+  const token = event.dataTransfer?.getData('application/x-clipflow-eop-picture');
+  if (!token || token!==draggedPhoto.value) return;
+  event.preventDefault();
+  clearPictureDrag();
+  assignPicture(token,key);
 }
 function removePicture(photo: Photo) {
   if (!record.value) return;
@@ -444,6 +516,10 @@ onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revo
   display:grid; gap:12px; padding:12px 14px; margin:auto; color:var(--ep-ink); min-width:0; box-sizing:border-box; max-width:1500px;
 }
 .eop-header,.eop-panel,.eop-save { min-width:0; border:1px solid var(--ep-line); border-radius:10px; background:var(--ep-surface); }
+.eop-opening { min-height:96px; display:grid; place-items:center; color:var(--ep-muted); }
+.eop-pool .eop-thumb[draggable=true] { cursor:grab; }
+.eop-work .eop-step.eop-drop-ready { outline:1px dashed var(--ep-accent); outline-offset:-2px; }
+.eop-work .eop-step.eop-drop-active { outline:2px solid var(--ep-accent); background:var(--ep-soft); }
 .eop-header { display:flex; align-items:center; gap:10px; padding:10px; background:linear-gradient(110deg,var(--ep-soft),var(--ep-surface)); }
 .eop-heading { flex:1; min-width:0; }
 .eop-header h1 { margin:0; font-size:20px; overflow-wrap:anywhere; }
@@ -454,6 +530,12 @@ onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revo
 .eop-summary { margin-top:6px; }
 .eop-tag { display:inline-block; padding:2px 7px; border-radius:5px; background:var(--ep-soft); color:var(--ep-ink); font-size:12px; overflow-wrap:anywhere; }
 .eop-toolbar,.eop-meta,.eop-work,.eop-pool,.eop-source { padding:12px; }
+.eop-workspace { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:12px; min-width:0; }
+@media(min-width:1100px){
+  .eop-workspace.with-pool { grid-template-columns:minmax(0,1fr) minmax(245px,320px); }
+  .eop-workspace .eop-pool { position:sticky; top:12px; max-height:calc(100dvh - 32px); overflow:auto; overscroll-behavior:contain; }
+  .eop-workspace .eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,110px),1fr)); }
+}
 .eop-toolbar { justify-content:flex-start; }
 .eop-search { flex:1 1 210px; }
 .eop-filter { width:128px; }
@@ -491,6 +573,7 @@ onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revo
 .eop-gallery figcaption { display:grid; gap:4px; margin-top:4px; font-size:12px; }
 .eop-gallery figcaption>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .eop-gallery figcaption .n-button { justify-self:start; }
+.eop-pool-empty { margin:10px 0 0; color:var(--ep-muted); font-size:13px; line-height:1.6; }
 .eop-assigned { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; padding:7px 9px; margin-top:8px; background:var(--ep-soft); border-radius:6px; font-size:13px; overflow-wrap:anywhere; }
 .eop-source details { border-top:1px solid var(--ep-line); }
 .eop-source details:first-of-type { margin-top:8px; }
@@ -504,6 +587,7 @@ onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revo
 .eop-preview-actions>div { display:flex; gap:6px; margin-inline-start:auto; }
 @media(max-width:760px) {
   .eop-page { padding:6px 4px; gap:8px; }
+  .eop-workspace { gap:8px; }
   .eop-meta { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .eop-name { grid-column:1/-1; }
   .eop-header { gap:6px; }

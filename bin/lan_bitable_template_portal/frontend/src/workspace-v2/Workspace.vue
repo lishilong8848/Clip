@@ -68,7 +68,7 @@
             <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
             <template v-else-if="route.pathname === '/workbench-lite'" />
-            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="componentProps" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
+            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="componentProps" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):['daily_inspection','eop_scenarios'].includes(activeModule)?navigate('/?view=functions'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
             <NResult v-else status="404" title="没有找到此页面" description="请从功能导航选择要使用的模块。" />
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>

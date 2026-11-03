@@ -162,8 +162,8 @@
     <LifeGuidePage v-else-if="isLifeGuidePage" />
 
     <LinkDirectoryPage v-else-if="isLinkDirectoryPage" />
-    <EopScenarioPage v-else-if="isEopScenarioPage" />
-    <DailyInspectionPage v-else-if="routePath === '/daily-inspection'" :key="auth.user?.open_id" />
+    <EopScenarioPage v-else-if="isEopScenarioPage" @close="navigate('/?entry=special')" />
+    <DailyInspectionPage v-else-if="routePath === '/daily-inspection'" :key="auth.user?.open_id" @close="navigate('/?entry=tools')" />
     <KnowledgeBasePage v-else-if="isKnowledgeBasePage" />
     <DocumentLibraryPage v-else-if="isDocumentLibraryPage" />
 
