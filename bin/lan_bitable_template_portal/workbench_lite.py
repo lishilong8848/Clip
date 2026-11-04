@@ -7437,6 +7437,18 @@ def render_workbench_lite(
         const modal = document.getElementById('lite-target-candidates');
         if (modal) modal.hidden = false;
         setLiteStatus(`找到 ${{(result.candidates || []).length}} 条候选目标记录`);
+        const sourceId = previewValue(form, 'source_record_id');
+        if (sourceId && ['maintenance', 'change'].includes(payload.work_type)) {{
+          try {{
+            const params = new URLSearchParams({{scope: payload.scope || getCurrentScope(),
+              work_type: payload.work_type, source_record_id: sourceId}});
+            const pendingResponse = await fetch('/api/notice-identity/bind-wait?' + params, {{credentials:'same-origin'}});
+            const pendingData = await pendingResponse.json().catch(() => ({{}}));
+            const pending = pendingData.data || pendingData;
+            if (pendingResponse.ok && pending.state && document.getElementById('lite-notice-form') === form
+                && previewValue(form, 'source_record_id') === sourceId) setLiteStatus(pending.message || '');
+          }} catch (_) {{ /* Keep the candidate picker usable. */ }}
+        }}
       }} catch (error) {{
         showLiteError(error && error.message ? error.message : '查询目标记录失败');
         setLiteStatus(error && error.message ? error.message : '查询目标记录失败');
@@ -7504,6 +7516,12 @@ def render_workbench_lite(
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '绑定目标记录失败');
+        const bindingResult = data.data || data;
+        if (bindingResult.binding_pending) {{
+          closeTargetCandidates();
+          setLiteStatus(bindingResult.message || '关联请求已保存，等待飞书同步后自动核验绑定。');
+          return;
+        }}
         if (
           bindSequence !== liteTargetBindSequence
           || document.getElementById('lite-notice-form') !== form

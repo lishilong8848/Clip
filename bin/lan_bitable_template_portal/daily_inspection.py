@@ -432,6 +432,68 @@ def validate_round_locations(scope, profession, template, sheet_name, cells):
     return normalized
 
 
+def deferred_original_location(scope, sheet, cells):
+    """Temporarily omitted original-form positions, pending user point setup."""
+    sheet = str(sheet or '').strip()
+    address = str((cells or {}).get('白1') or '')
+    match = re.fullmatch(r'([A-Z]+)(\d+)', address)
+    if not match:
+        return False
+    col, row = column_index_from_string(match.group(1)), int(match.group(2))
+    if scope == 'D' and sheet == '辅助区空调巡检表 (2)':
+        return (row in (27, 33) and 3 <= col <= 12 or
+                row == 39 and 3 <= col <= 11 or row == 45 and 3 <= col <= 6)
+    if scope == 'E' and sheet == '辅助区空调巡检表 (3)':
+        return row == 26 and 3 <= col <= 16 or row == 32 and 3 <= col <= 13
+    if scope in ('D', 'E') and sheet == '辅助区空调巡检表':
+        return row in (15, 16, 25, 26) and 3 <= col <= 4
+    if scope in ('D', 'E') and sheet == 'SVG巡检表':
+        return (row == 7 and 8 <= col <= 10 or row == 7 and 17 <= col <= 19 or
+                row == 14 and 2 <= col <= 19 or
+                row == 21 and (2 <= col <= 7 or 11 <= col <= 16))
+    return False
+
+
+def deferred_catalog_section(device, section):
+    scope, name = device.get('scope'), str(device.get('name') or '').strip()
+    form = str(section.get('form') or '').strip()
+    location = str(section.get('location') or '').strip()
+    if scope not in ('D', 'E'):
+        return False
+    svg = re.fullmatch(r'(?:[DE]-)?(245|218|345|317|445|417)-SVG-(101|201)', name, re.I)
+    if form == 'SVG巡检表' and svg:
+        return True
+    if form == '辅助区空调巡检表' and re.fullmatch(r'(?:248|215)-CRAH-0[12]', name, re.I):
+        return True
+    vrv_locations = {
+        'D': {'生产线、VMI库房', '货运入口大厅', '电气值班室', 'VMI、运维库房',
+              '1F柴发并机控制室', '2F柴发测试控制室', '运维值班室', '1F运维库房',
+              '2F运维库房', '3F运维库房', '4F运维库房', '大堂', '运维库房'},
+        'E': {'E-178发电机并机室', 'E-142测试区', 'E-119备品备件库房', 'E楼大厅',
+              '货运入口大厅', 'E-111值班室', 'E-123', 'E-279并机室', 'E-278库房', 'E-347库房'},
+    }
+    return (form == ('辅助区空调巡检表 (2)' if scope == 'D' else '辅助区空调巡检表 (3)')
+            and bool(re.fullmatch(r'空调\d+号', name)) and location in vrv_locations[scope])
+
+
+def deferred_point(device, point):
+    # User-created non-baseline points are explicitly configured and may be
+    # used even where the template's original placeholder is deferred.
+    if point.get('enabled') is True and (point.get('baseline') is False or point.get('user_enabled') is True):
+        return False
+    if deferred_original_location(device.get('scope'), point.get('sheet'), point.get('round_cells')):
+        return True
+    sections = device.get('sections') or []
+    if not sections and device.get('scope') in ('D', 'E'):
+        name = str(device.get('name') or '').strip()
+        if (re.fullmatch(r'(?:248|215)-CRAH-0[12]', name, re.I)
+                or re.fullmatch(r'(?:[DE]-)?(?:245|218|345|317|445|417)-SVG-(?:101|201)', name, re.I)):
+            return True
+    if sections and all(deferred_catalog_section(device, section) for section in sections):
+        return True
+    return False
+
+
 def omit_occupied_form_cells(form_devices, devices):
     occupied = {(point['template'], point['sheet'].strip(), slot, address)
                 for device in devices for point in device['points']
@@ -440,6 +502,8 @@ def omit_occupied_form_cells(form_devices, devices):
     for device in form_devices:
         points = []
         for point in device['points']:
+            if deferred_original_location(device['scope'], point.get('sheet'), point.get('round_cells')):
+                continue
             remaining = {slot:address for slot,address in point['round_cells'].items()
                          if (point['template'], point['sheet'].strip(), slot, address) not in occupied}
             if remaining:
@@ -663,7 +727,11 @@ def devices_for(scope, rows, point_configs, templates):
             'value': reading if isinstance(reading, (int, float)) else plain(reading),
             'raw_value': raw_value,
             'sampled': fields.get('采样时间'), 'integrity': plain(fields.get('数据完整性')),
-            'enabled': config.get('启用'), 'baseline': config.get('基线测点'),
+            # Feishu omits unchecked checkboxes. For an identified config row,
+            # omission means False; absence of the whole row remains unknown.
+            'enabled': (config.get('启用') is True) if config else None,
+            'baseline': (config.get('基线测点') is True) if config else None,
+            'user_enabled': config.get('用户主动启用') is True,
             'note': plain(config.get('测点备注')) or plain(fields.get('测点备注')),
             'value_type': value_type,
             'status_normal': '' if ambiguous_config else plain(config.get('状态正常值') or fields.get('状态正常值')),
@@ -753,6 +821,8 @@ def state_reference(value, point=None):
 def parameters(device):
     rows = []
     for index, section in enumerate(device['sections']):
+        if deferred_catalog_section(device, section):
+            continue
         values = dict(section['values'])
         # An active round created before this fix may lack omitted fields in its
         # frozen snapshot; add only fields the source explicitly marked missing.
@@ -782,6 +852,8 @@ def parameters(device):
                          'reference': reference,
                          'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值', 'section': index})
     for point in device['points']:
+        if deferred_point(device, point):
+            continue
         is_state = state_parameter(point['name'], point.get('value_type', ''))
         rows.append({'id': 'p:' + point['id'], 'name': point['name'],
                      'reference': state_reference(point['value'], point) if is_state else point['value'],
@@ -789,6 +861,12 @@ def parameters(device):
                      'value_type': '状态' if is_state else '数值',
                      'point': point['id'], 'read_only': point.get('enabled') is False})
     return rows
+
+
+def display_device(device):
+    return {**device, 'parameters': parameters(device),
+            'deferred_sections': [index for index, section in enumerate(device['sections'])
+                                  if deferred_catalog_section(device, section)]}
 
 
 def device_profession(device):
@@ -802,7 +880,9 @@ def selected_devices(active, scope):
 
 
 def selected_form_devices(active, scope):
-    devices = active['batches'][scope].get('form_devices', [])
+    # Reapply the current omission to persisted snapshots without modifying
+    # their original data, including snapshots created before this change.
+    devices = omit_occupied_form_cells(active['batches'][scope].get('form_devices', []), [])
     selected = active.get('professions')
     return [device for device in devices if device_profession(device) in selected] if isinstance(selected, list) else devices
 
@@ -864,14 +944,21 @@ def merge_reviews(active, devices, submitted, actor):
             raise RiskError('设备清单或填写版本已变化，请刷新后重试。', 409)
         values, result, note = (review.get(key) for key in ('values', 'result', 'note'))
         fields = {item['id']: item for item in parameters(device) if not item.get('read_only')}
-        if (not isinstance(values, dict) or values.keys() - fields
+        previous = reviews.get(identity, {})
+        old_values = previous.get('values') if isinstance(previous.get('values'), dict) else {}
+        # Existing values for newly hidden fields are preserved, but clients
+        # cannot create or change those hidden fields through an old page.
+        hidden_changed = (isinstance(values, dict) and any(
+            key not in fields and (key not in old_values or value != old_values[key])
+            for key, value in values.items()))
+        if (not isinstance(values, dict) or hidden_changed
                 or any(not valid_cell_text(value, 160) for value in values.values())
                 or any(fields[key].get('value_type') == '状态' and value.strip() not in ('', '√', '×', '△') for key, value in values.items() if key in fields)
                 or result not in ('', '正常', '异常') or not valid_cell_text(note, 1000)):
             raise RiskError(f'「{device["name"]}」的现场填写无效，请核对后重试。', 400)
-        normalized = {'values': {key: value.strip() for key, value in values.items()},
+        preserved = {key: value for key, value in old_values.items() if key not in fields}
+        normalized = {'values': {**preserved, **{key: value.strip() for key, value in values.items()}},
                       'result': result, 'note': note.strip()}
-        previous = reviews.get(identity, {})
         if review_content(previous) == normalized:
             continue
         revision = previous.get('revision', 0)
@@ -1097,10 +1184,10 @@ class DailyInspection:
                                     for profession in active.get('professions', [])},
                                 'orders': {view: self.order(owner, scope, view) for view in ['ALL', *professions]},
                                 'batch': {'batch': batch['batch'], 'count': len(batch['rows']),
-                                          'devices': [{**device, 'parameters': parameters(device)}
+                                          'devices': [display_device(device)
                                                       for device in self.ordered(batch, self.order(owner, scope))
                                                       if device['id'] in selected],
-                                          'form_devices': [{**device, 'parameters': parameters(device)}
+                                          'form_devices': [display_device(device)
                                                            for device in selected_form_devices(active, scope)]}}
         return result
 
@@ -1917,7 +2004,7 @@ def install_daily_inspection(app, controller, runtime):
                     return JSONResponse({'ok': True, 'data': {'scope': scope, 'batch': batch['batch'],
                         'cache_refreshed_at': batch.get('cache_refreshed_at'), 'cache_stale': batch.get('cache_stale', False),
                         'count': len(batch['rows']), 'orders': {'ALL': order, **dict(zip(professions, profession_orders))},
-                        'devices': [{**device, 'parameters': parameters(device)}
+                        'devices': [display_device(device)
                             for device in svc.ordered(batch, order)]}}, headers={'Cache-Control': 'private, no-store'})
                 if action == 'xlsx':
                     active = svc.current(state, request.query_params.get('id'))

@@ -77,12 +77,13 @@
           <div v-if="previewDevices.length" class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
             <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
+            <button v-if="unsetCount" class="unplaced-button" type="button" @click="selectFloor('未设置')">未设置位置 {{ unsetCount }} 台</button>
             <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
           </div>
           <div class="inspection-devices">
-            <article v-for="item in visiblePreview" :key="item.id" class="inspection-device">
+            <article v-for="item in visiblePreview" :key="item.view_key || item.id" class="inspection-device">
               <h2>{{ item.name }}</h2>
-              <p>{{ [item.profession,devicePlace(item).unit,item.sections[0]?.location || item.points[0]?.location].filter(Boolean).join(' · ') }}</p>
+              <p>{{ [item.profession,devicePlace(item).unit,devicePlace(item).room].filter(Boolean).join(' · ') }}</p>
               <div class="inspection-readings">
                 <div v-for="row in item.parameters" :key="row.id" class="inspection-preview-row">
                   <span>{{ row.name }}</span><strong>{{ shownValue(row.reference) }}</strong>
@@ -125,6 +126,7 @@
           <div class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
             <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
+            <button v-if="unsetCount" class="unplaced-button" type="button" @click="selectFloor('未设置')">未设置位置 {{ unsetCount }} 台</button>
             <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
           </div>
           <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
@@ -132,14 +134,14 @@
         <p v-if="active.pending" class="warning" role="status">{{ readOnly ? '本轮已提交，正在等待归档确认。' : '本轮数据已锁定，可重试同一轮归档。' }}</p>
         <section v-if="filtered.length" class="inspection-sheet" aria-label="设备参数核对">
           <div class="inspection-devices">
-            <article v-for="item in filtered" :id="deviceAnchor(item.id)" :key="item.id" class="inspection-device"
+            <article v-for="item in filtered" :id="deviceAnchor(item.id)" :key="item.view_key || item.id" class="inspection-device"
               @focusin="focusedDevice=item.id" @focusout="leaveDevice(item.id,$event)">
               <header class="inspection-device-heading">
                 <h2 tabindex="-1"><span class="sequence">{{ positions.get(item.id) }}</span>{{ item.name }}</h2>
                 <span v-if="devicePlace(item).unit" class="device-profession">{{ devicePlace(item).unit }}</span>
                 <span class="device-profession">{{ item.profession }}</span>
                 <span v-if="conflicts.has(item.id)" class="warning">待核对共享修改</span>
-                <span v-else-if="missingByDevice.get(item.id)" class="warning">{{ missingByDevice.get(item.id) }}</span>
+                <span v-else-if="missingForView(item)" class="warning">{{ missingForView(item) }}</span>
                 <span v-else-if="deviceModified(item)" class="warning">已修改</span>
               </header>
               <p v-if="!item.parameters.length" class="muted">源表暂无参数。</p>
@@ -173,8 +175,8 @@
                   {{drafts[item.id]?.base ? '合并我的改动' : '用本机旧草稿覆盖本台'}}
                 </NButton>
               </div>
-              <p v-else-if="blockedDevice===item.id && missingByDevice.get(item.id)" class="warning">
-                {{ missingByDevice.get(item.id) }}
+              <p v-else-if="blockedDevice===item.id && missingForView(item)" class="warning">
+                {{ missingForView(item) }}
               </p>
             </article>
           </div>
@@ -261,7 +263,8 @@ type Value = string | number | boolean | null;
 type Reading = {location:string; form:string; integrity:string; missing:string; note:string};
 type Point = {id:string; point_id:string; name:string; sampled:number|null; integrity:string; location:string; path:string; note:string; template:string; sheet:string; cell:string; template_known:boolean;mapping_issue?:string};
 type Parameter = {id:string; name:string; reference:Value; source_reference?:Value; value_type?:string; section?:number; point?:string; read_only?:boolean};
-type Device = {id:string; name:string; scope?:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[]};
+type Place = {floor:string;room:string;unit:string};
+type Device = {id:string; name:string; scope?:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[];deferred_sections?:number[];view_key?:string;view_place?:Place};
 type Batch = {batch:number; count:number; devices:Device[];form_devices?:Device[];cache_stale?:boolean;cache_refreshed_at?:number};
 type Duty = {scope:string; date:string; shift:string};
 type Review = {values:Record<string,string>; result:''|'正常'|'异常'; note:string; revision:number};
@@ -339,12 +342,17 @@ const missingByDevice = computed(()=>new Map(devices.value.map(item=>{
   const issue=missing ? missing+' 项数据缺失' : !item.parameters.length ? '源表暂无参数' : '';
   return [item.id,issue] as const;
 })));
-const missingDevices = computed(()=>devices.value.filter(item=>!!missingByDevice.value.get(item.id)).length);
+const hasVisibleDevice=(device:Device)=>device.parameters.length>0 || device.sections.some((_,index)=>!device.deferred_sections?.includes(index)) || (!device.sections.length&&!device.points.length);
+const missingDevices = computed(()=>devices.value.filter(item=>hasVisibleDevice(item) && !!missingByDevice.value.get(item.id)).length);
+const missingForView=(device:Device)=>{
+  const count=device.parameters.filter(row=>!row.read_only&&!readingFor(device.id,row).trim()).length;
+  return count ? count+' 项数据缺失' : !device.parameters.length ? '源表暂无参数' : '';
+};
 const professionName = (device:Device)=>device.profession?.trim() || '未分类';
-const professions = computed(()=>[...new Set(devices.value.map(professionName))]);
+const professions = computed(()=>[...new Set(devices.value.filter(hasVisibleDevice).map(professionName))]);
 const availableProfessions = computed(()=>{
   const counts=new Map<string,number>();
-  for (const device of preview.value?.devices || []) {const name=professionName(device);counts.set(name,(counts.get(name) || 0)+1);}
+  for (const device of preview.value?.devices || []) {if(!hasVisibleDevice(device))continue;const name=professionName(device);counts.set(name,(counts.get(name) || 0)+1);}
   return [...counts].map(([name,count])=>({name,count}));
 });
 const previewDevices = computed(()=>{
@@ -369,39 +377,83 @@ const viewDevices = computed(()=>{
 });
 // Keep unrecognised locations visible for manual verification instead of guessing.
 function devicePlace(device:Device) {
+  if (device.view_place) return device.view_place;
   const location=device.sections.map(row=>row.location).find(Boolean) || device.points.map(row=>row.location).find(Boolean) || '';
   const path=device.points.map(row=>row.path).find(Boolean) || '';
   const parts=path.split('/').map(part=>part.trim()).filter(Boolean);
   const floorIndex=parts.findIndex(part=>/^[一二三四五六七八九\d]+层$/.test(part));
-  const code=(location+' '+device.name+' '+path).match(/(?:^|[^\d])(?:[DE][-\s]?)?([1-9]\d{2})(?=[-\s/]|$)/i)?.[1] || '';
+  const code=(location+' '+device.name+' '+path).match(/(?:^|[^\d])(?:[DE][-\s]?)?([1-4]\d{2})(?=[^\d]|$)/i)?.[1] || '';
   const explicit=(floorIndex>=0 ? parts[floorIndex] : location).match(/(?:^|[/\s])([一二三四五六七八九\d]+)层/);
+  const floorF=(location+' '+path).match(/(?:^|[/\s])([1-4])\s*F/i)?.[1] || '';
   const context=[location,path,device.name].join(' ');
   const isCold=/(?:冷冻站|冷站|冷机|冷冻泵|冷却泵|板换|冷塔)/.test(context);
   const isAuxPump=/辅助水泵/.test(context);
-  const diesel=String(device.scope || duty.value?.scope || preview.value?.scope || '')==='E' ? device.name.match(/(?:^|[^\d])(1[0-4]|[1-9])\s*(?:#|号)\s*(?:柴发|柴油发电)/) : null;
-  const dieselRoom=diesel ? (Number(diesel[1])<=7?'178':'279') : '';
-  const eScope=String(device.scope || duty.value?.scope || preview.value?.scope || '')==='E';
-  const substation=eScope ? (device.name+' '+path).match(/M([1-6])变电所环境/i)?.[1] : '';
+  const building=String(device.scope || duty.value?.scope || preview.value?.scope || '');
+  const diesel=['D','E'].includes(building) ? device.name.match(/(?:^|[^\d])(1[0-4]|[1-9])\s*(?:#|号)\s*(?:柴发|柴油发电)/) : null;
+  const dieselRoom=diesel ? building==='D' ? (Number(diesel[1])<=12?'178':'') : (Number(diesel[1])<=7?'178':'279') : '';
+  const eDieselRoom=building==='E' && ['柴发应急输出柜','供油管路','燃油自控柜','柴发并机控制柜'].includes(device.name.trim()) ? '178' : '';
+  const dDieselRoom=building==='D' && ['柴发输出柜','供油管路','柴发并机控制柜','燃油自控柜','溢油口油桶','室外油罐'].includes(device.name.trim()) ? '178' : '';
+  const intentionalUnset=building==='D' && location.trim()==='生产线、VMI库房' && /^空调\d+号$/.test(device.name.trim());
+  const substation=['D','E'].includes(building) ? (device.name+' '+path).match(/M([1-6])变电所环境/i)?.[1] : '';
   const substationRoom=substation ? ({'1':'245','2':'218','3':'345','4':'317','5':'445','6':'417'} as Record<string,string>)[substation] : '';
-  const number=explicit ? ({'一':'1','二':'2','三':'3','四':'4'} as Record<string,string>)[explicit[1]] || explicit[1] : dieselRoom?.[0] || substationRoom?.[0] || code?.[0] || '';
-  const floor=isCold || isAuxPump ? '1层' : ['1','2','3','4'].includes(number) ? number+'层' : '待核对';
-  const room=isCold ? '冷冻站' : isAuxPump ? '辅助水泵系统' : dieselRoom || substationRoom || (floorIndex>=0 ? parts[floorIndex+1] : '') || (code ? code : location.trim() || '未标注房间');
+  const battery=building==='D' && device.name.trim()==='电池室环境' ? location.match(/^M([1-6])HVDC巡检表\s*$/i)?.[1] : '';
+  const batteryRoom=battery ? ({'1':'246','2':'217','3':'346','4':'316','5':'446','6':'416'} as Record<string,string>)[battery] : '';
+  const area=/电气系统(东|西)区/.exec(location)?.[1];
+  const electricalRoom=['D','E'].includes(building) && /^(?:综保(?:指示灯)?|直流屏)$/.test(device.name.trim()) && area ? (area==='东'?'120':'144') : '';
+  const confirmedDieselRoom=dieselRoom || eDieselRoom || dDieselRoom;
+  const number=confirmedDieselRoom ? confirmedDieselRoom[0] : explicit ? ({'一':'1','二':'2','三':'3','四':'4'} as Record<string,string>)[explicit[1]] || explicit[1] : floorF || substationRoom?.[0] || batteryRoom?.[0] || electricalRoom?.[0] || code?.[0] || '';
+  const floor=intentionalUnset ? '未设置' : isCold || isAuxPump ? '1层' : ['1','2','3','4'].includes(number) ? number+'层' : '待核对';
+  const room=isCold ? '冷冻站' : isAuxPump ? '辅助水泵系统' : confirmedDieselRoom || substationRoom || batteryRoom || electricalRoom || (floorIndex>=0 ? parts[floorIndex+1] : '') || (code ? code : location.trim() || '未标注房间');
   const unitNumber=isCold ? context.match(/(?:^|[^\d])([1-9]\d*)\s*(?:#|号)\s*(?:冷机|冷冻泵|冷却泵|板换|冷塔)/)?.[1] || context.match(/(?:冷机|冷冻泵|冷却泵|板换|冷塔)[^\d]{0,3}([1-9]\d*)\s*(?:#|号)?/)?.[1] || device.name.match(/(?:^|[-_])CH([1-6])(?:$|[^\d])/i)?.[1] : '';
   return {floor,room,unit:unitNumber ? unitNumber+'号制冷单元' : ''};
 }
-const navigationDevices=computed(()=>active.value ? viewDevices.value : previewDevices.value);
+// Some source records group identically named devices from multiple rooms.
+// Split only their presentation; keep original IDs and parameter IDs for saves.
+function roomViews(device:Device):Device[] {
+  const groups=new Map<string,{place:Place;rows:Parameter[]}>();
+  const add=(place:Place,row?:Parameter)=>{
+    const key=place.floor+'\u0000'+place.room;
+    let group=groups.get(key);if(!group){group={place,rows:[]};groups.set(key,group);}
+    if(row)group.rows.push(row);
+  };
+  device.sections.forEach((section,index)=>{
+    if(device.deferred_sections?.includes(index))return;
+    const place=devicePlace({...device,sections:[section],points:[],view_place:undefined});
+    const rows=device.parameters.filter(row=>row.section===index);
+    if(!rows.length)add(place);else rows.forEach(row=>add(place,row));
+  });
+  const sectionPlaces=[...groups.values()].map(group=>group.place);
+  for(const row of device.parameters.filter(row=>row.section===undefined)){
+    const point=device.points.find(item=>item.id===row.point);
+    let place=devicePlace({...device,sections:[],points:point?[point]:[],view_place:undefined});
+    const building=String(device.scope || duty.value?.scope || preview.value?.scope || '');
+    const generator=/柴发并机系统/.test(device.name) ? point?.name.match(/^\s*(1[0-4]|[1-9])\s*(?:#|号)/)?.[1] : '';
+    if(generator && ((building==='D' && Number(generator)<=12) || building==='E')) {
+      const room=building==='D' || Number(generator)<=7 ? '178' : '279';
+      place={floor:room[0]+'层',room,unit:''};
+    }
+    if(place.floor==='待核对' && sectionPlaces.length===1 && sectionPlaces[0]!.floor!=='待核对')place=sectionPlaces[0]!;
+    add(place,row);
+  }
+  if(!groups.size)return device.sections.length||device.points.length ? [] : [device];
+  return [...groups.entries()].map(([key,group])=>({...device,parameters:group.rows,view_place:group.place,view_key:device.id+'\u0000'+key}));
+}
+const displayedDevices=computed(()=>viewDevices.value.flatMap(roomViews));
+const displayedPreview=computed(()=>previewDevices.value.flatMap(roomViews));
+const navigationDevices=computed(()=>active.value ? displayedDevices.value : displayedPreview.value);
 const floors=computed(()=>['1层','2层','3层','4层'].filter(floor=>navigationDevices.value.some(item=>devicePlace(item).floor===floor)));
 const unplacedCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor==='待核对').length);
+const unsetCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor==='未设置').length);
 const rooms=computed(()=>[...new Set(navigationDevices.value.filter(item=>devicePlace(item).floor===selectedFloor.value).map(item=>devicePlace(item).room))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
 function selectFloor(floor:string) {selectedFloor.value=floor;selectedRoom.value='';}
-const visiblePreview=computed(()=>previewDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value));
+const visiblePreview=computed(()=>displayedPreview.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value));
 watch([()=>state.value?.view_scope,()=>active.value?.id],()=>{selectedFloor.value='';selectedRoom.value='';});
-watch(floors,items=>{if (selectedFloor.value!=='待核对'&&!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
+watch(floors,items=>{if (!['待核对','未设置'].includes(selectedFloor.value)&&!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
 watch(rooms,items=>{if (!items.includes(selectedRoom.value)) selectedRoom.value='';});
 const positions = computed(()=>new Map(viewDevices.value.map((device,index)=>[device.id,index+1])));
 const filtered = computed(()=>{
   const q=search.value.trim().toLowerCase();
-  return viewDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value && (!onlyMissing.value || focusedDevice.value===item.id || !!missingByDevice.value.get(item.id) || conflicts.value.has(item.id)) &&
+  return displayedDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value && (!onlyMissing.value || focusedDevice.value===item.id || item.parameters.some(row=>!row.read_only&&!readingFor(item.id,row).trim()) || conflicts.value.has(item.id)) &&
     (!q || [item.name,item.profession,...item.sections.map(row=>row.location),...item.points.flatMap(row=>[row.name,row.path])]
       .some(value=>value.toLowerCase().includes(q))));
 });

@@ -9882,6 +9882,97 @@ class LanPortalStateStore:
                 conn.commit()
                 return identity
 
+    def queue_manual_notice_binding(self, key: str, document: dict[str, Any]) -> dict[str, Any]:
+        """Persist one pending binding per source; repeat clicks reuse it."""
+        namespace = "notice_manual_binding_wait"
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_legacy_json_document_locked(conn, namespace, key)
+            if current and current.get("state") in {"pending", "bound", "attention_required"}:
+                if current.get("fingerprint") != document.get("fingerprint"):
+                    raise ValueError("该计划已有其他目标通告等待核验，请先处理原关联。")
+                return current
+            conn.execute(
+                "INSERT OR REPLACE INTO json_documents(namespace,key,payload_json,updated_at) VALUES (?,?,?,?)",
+                (namespace, key, self._json(document), time.time()),
+            )
+            conn.commit()
+            return dict(document)
+
+    def list_due_manual_notice_bindings(self, now: float, limit: int = 3) -> list[dict[str, Any]]:
+        if not self.db_path.exists():
+            return []
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            rows = conn.execute(
+                "SELECT key,payload_json FROM json_documents WHERE namespace=? "
+                "AND json_extract(payload_json,'$.state') IN ('pending','bound','attention_required') "
+                "AND COALESCE(CAST(json_extract(payload_json,'$.next_check_at') AS REAL),0)<=? "
+                "ORDER BY COALESCE(CAST(json_extract(payload_json,'$.next_check_at') AS REAL),0),updated_at LIMIT ?",
+                ('notice_manual_binding_wait', now, max(1, min(int(limit), 20))),
+            ).fetchall()
+        return [{'key': row['key'], 'payload': self._loads(row['payload_json'], {})} for row in rows]
+
+    def update_manual_notice_binding(self, key: str, operation_id: str, changes: dict[str, Any]) -> bool:
+        namespace = "notice_manual_binding_wait"
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_legacy_json_document_locked(conn, namespace, key)
+            if (not current or current.get("operation_id") != operation_id
+                    or current.get("state") not in {"pending", "attention_required", "bound"}):
+                return False
+            current.update(changes, updated_at=time.time())
+            conn.execute("UPDATE json_documents SET payload_json=?,updated_at=? WHERE namespace=? AND key=?",
+                         (self._json(current), time.time(), namespace, key))
+            conn.commit()
+            return True
+
+    def cancel_pending_manual_notice_binding(self, key: str, operation_id: str, actor: str) -> bool:
+        namespace = "notice_manual_binding_wait"
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_legacy_json_document_locked(conn, namespace, key)
+            if (not current or current.get("operation_id") != operation_id or current.get("actor") != actor
+                    or current.get("state") not in {"pending", "attention_required"}):
+                return False
+            current.update(state="cancelled", reason="用户选择了新的关联。", updated_at=time.time())
+            conn.execute("UPDATE json_documents SET payload_json=?,updated_at=? WHERE namespace=? AND key=?",
+                         (self._json(current), time.time(), namespace, key))
+            conn.commit()
+            return True
+
+    def commit_manual_notice_binding(self, key: str, operation_id: str, payload: dict[str, Any]) -> bool:
+        """Commit the identity and durable completion marker together."""
+        namespace = "notice_manual_binding_wait"
+        with self._lock, closing(self._connect()) as conn:
+            self._ensure_schema_locked(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            current = self._get_legacy_json_document_locked(conn, namespace, key)
+            if not current or current.get("operation_id") != operation_id or current.get("state") not in {"pending", "attention_required"}:
+                return False
+            source = canonical_source_record_id(payload)
+            target = canonical_target_record_id(payload)
+            work_type = self._text(payload.get("work_type"))
+            for existing in (
+                self._notice_identity_lookup_locked(conn, work_type=work_type, source_record_id=source),
+                self._notice_identity_lookup_locked(conn, work_type=work_type, target_record_id=target),
+            ):
+                row = self._notice_identity_from_row(existing) if existing else {}
+                if (row.get("source_record_id") and row["source_record_id"] != source or
+                        row.get("target_record_id") and row["target_record_id"] != target):
+                    raise ValueError("计划或目标通告已关联其他记录，需重新核对。")
+            identity = self._upsert_notice_identity_locked(conn, payload, origin="manual_notice_binding")
+            if not identity:
+                raise ValueError("通告关联未保存。")
+            current.update(state="bound", reason="关联已核验，正在更新显示。", updated_at=time.time())
+            conn.execute("UPDATE json_documents SET payload_json=?,updated_at=? WHERE namespace=? AND key=?",
+                         (self._json(current), time.time(), namespace, key))
+            conn.commit()
+            return True
+
     def resolve_notice_identity(
         self,
         *,

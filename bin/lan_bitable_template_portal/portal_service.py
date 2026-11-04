@@ -6259,7 +6259,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                     days=numeric_value
                 )
                 try:
-                    return int(parsed_excel_date.timestamp() * 1000)
+                    # Lookup/formula dates can arrive as fractional Excel days.
+                    # Round the sub-millisecond representation error rather
+                    # than truncating an otherwise exact millisecond.
+                    return round(parsed_excel_date.timestamp() * 1000)
                 except (OSError, OverflowError, ValueError):
                     return None
             result = int(numeric_value if numeric_value > 10_000_000_000 else numeric_value * 1000)
@@ -22264,6 +22267,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def sync_notice_source_ended_fields(
         self, payload: dict[str, Any], *, before_write: Callable[[], None] | None = None,
+        read_only: bool = False,
     ) -> bool:
         """Write an ended notice back to its linked maintenance/change source row."""
         payload = normalize_notice_identity_payload(payload or {})
@@ -22432,6 +22436,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             remote_fields[status_field] = expected_status
         else:
             remote_fields.pop(status_field, None)
+        if read_only and remote_fields:
+            raise NoticeSourcePending("源表结束信息仍未同步，后台继续核验。")
         if before_write is not None:
             before_write()
         if not guard.get("mock_external") and remote_fields:
@@ -34188,6 +34194,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             "source_table_id": str(
                 (source_record or {}).get("source_table_id") or ""
             ).strip(),
+            "_source_period": self.notice_source_period_snapshot({
+                "source_record_id": source_record_id,
+                "source_work_type": (self._record_source_work_type(source_record) if source_record else work_type),
+                "plan_month": ((source_record or {}).get("display_fields") or {}).get("计划维护月份"),
+                "maintenance_cycle": ((source_record or {}).get("display_fields") or {}).get("维护周期"),
+            }) if source_record else {},
             "target_found": bool(target_record),
             "target_building_codes": target_building_codes,
             "target_active": bool(target_lifecycle.get("active")),

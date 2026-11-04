@@ -3326,7 +3326,121 @@ class PortalRuntime:
         ended_ms = cls.service._repair_management_datetime_ms(value)
         if not ended_ms:
             raise RuntimeError("目标记录缺少实际结束时间，未使用当前时间代替。")
-        return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")}
+        # Preserve the precise source timestamp: dropping milliseconds makes
+        # the later exact readback check reject an otherwise matching record.
+        return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).isoformat(sep=" ", timespec="milliseconds")}
+
+    @classmethod
+    def queue_manual_finished_binding(cls, payload, actor):
+        source = canonical_source_record_id(payload)
+        target = canonical_target_record_id(payload)
+        kind = str(payload.get('work_type') or '')
+        period = payload.get('_source_period')
+        if (not actor or not source or not target or kind not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}
+                or not isinstance(period, dict) or period.get('source_record_id') != source
+                or not cls.service._repair_management_datetime_ms(payload.get('ended_at'))):
+            raise PortalError('无法保存完整的关联核验信息，请重新选择通告。')
+        key = hashlib.sha256(json.dumps([kind, source], ensure_ascii=False).encode()).hexdigest()
+        fingerprint = hashlib.sha256(json.dumps([kind, source, target, period, actor, payload.get('ended_at')],
+            ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+        allowed = ('scope', 'work_type', 'notice_type', 'source_record_id', 'target_record_id',
+                   'record_id', 'active_item_id', 'source_work_type', 'source_app_token',
+                   'source_table_id', '_source_period', 'status', 'ended_at', 'title', 'start_time', 'end_time')
+        saved = {name: copy.deepcopy(payload[name]) for name in allowed if name in payload}
+        document = {'operation_id': uuid.uuid4().hex, 'fingerprint': fingerprint, 'actor': actor,
+                    'payload': saved, 'state': 'pending', 'reason': '等待飞书引用表同步。',
+                    'created_at': time.time(), 'next_check_at': 0}
+        try:
+            return cls.state_store.queue_manual_notice_binding(key, document)
+        except ValueError as exc:
+            raise PortalError(str(exc)) from exc
+
+    @classmethod
+    def process_manual_finished_bindings(cls):
+        """Resume explicit binding requests without writing to the source table."""
+        from .module_access import allowed_modules
+        from .portal_service import NoticeSourcePending, NoticeSourceSuperseded
+        due = cls.state_store.list_due_manual_notice_bindings(time.time(), limit=3)
+        for row in due:
+            key, document = row['key'], row['payload']
+            op = str(document.get('operation_id') or '')
+            payload = document.get('payload') or {}
+            actor = str(document.get('actor') or '')
+            session = {'user': {'open_id': actor}}
+            scope, kind = str(payload.get('scope') or ''), str(payload.get('work_type') or '')
+            try:
+                if (not actor or not cls.auth_manager.scope_allowed(session, scope)
+                        or kind not in allowed_modules(cls.auth_manager, session)):
+                    cls.state_store.update_manual_notice_binding(key, op, {
+                        'state': 'blocked', 'reason': '发起人的楼栋或通告权限已变化，请重新核对。'})
+                    continue
+                existing = cls.state_store.resolve_notice_identity(
+                    work_type=kind, source_record_id=canonical_source_record_id(payload)) or {}
+                existing_target = canonical_target_record_id(existing)
+                if existing_target and existing_target != canonical_target_record_id(payload):
+                    cls.state_store.update_manual_notice_binding(key, op, {
+                        'state': 'blocked', 'reason': '计划已关联其他目标通告，请重新核对。'})
+                    continue
+                validation = cls.service.validate_notice_identity_binding(
+                    scope=scope, work_type=kind, notice_type=str(payload.get('notice_type') or ''),
+                    source_record_id=canonical_source_record_id(payload),
+                    target_record_id=canonical_target_record_id(payload),
+                    active_item_id=str(payload.get('active_item_id') or ''), allow_finished=True,
+                    allow_unscoped_target=cls.auth_manager.is_admin(session), fresh_target=True)
+                expected = cls.service._repair_management_datetime_ms(payload.get('ended_at'))
+                actual = cls.service._repair_management_datetime_ms(validation.get('target_ended_at'))
+                if not validation.get('target_finished') or not expected or actual != expected:
+                    cls.state_store.update_manual_notice_binding(key, op, {
+                        'state': 'blocked', 'reason': '目标通告状态或结束时间已变化，请重新核对。'})
+                    continue
+                if validation.get('_source_period') != payload.get('_source_period'):
+                    cls.state_store.update_manual_notice_binding(key, op, {
+                        'state': 'blocked', 'reason': '计划周期已变化，请重新核对。'})
+                    continue
+                if document.get('state') in {'pending', 'attention_required'}:
+                    if not cls.service.sync_notice_source_ended_fields(payload, read_only=True):
+                        raise NoticeSourceSuperseded('计划周期或源记录已变化，不能继续绑定。')
+                    # Check authorization and the target again immediately before commit.
+                    if (not cls.auth_manager.scope_allowed(session, scope)
+                            or kind not in allowed_modules(cls.auth_manager, session)):
+                        raise NoticeSourceSuperseded('发起人的权限已变化。')
+                    fresh = cls.service.validate_notice_identity_binding(
+                        scope=scope, work_type=kind, notice_type=str(payload.get('notice_type') or ''),
+                        source_record_id=canonical_source_record_id(payload),
+                        target_record_id=canonical_target_record_id(payload),
+                        active_item_id=str(payload.get('active_item_id') or ''), allow_finished=True,
+                        allow_unscoped_target=cls.auth_manager.is_admin(session), fresh_target=True)
+                    if (not fresh.get('target_finished') or fresh.get('_source_period') != payload.get('_source_period')
+                            or cls.service._repair_management_datetime_ms(fresh.get('target_ended_at')) != expected):
+                        raise NoticeSourceSuperseded('目标通告或计划周期已变化。')
+                    if not cls.state_store.commit_manual_notice_binding(key, op, payload):
+                        continue
+                    document['state'] = 'bound'
+                # Bound marker and identity are committed together. Projection is
+                # idempotent and retried after a crash until it succeeds.
+                for item in cls.state_store.list_qt_active_items(include_deleted=False):
+                    item_payload = item.get('payload') if isinstance(item.get('payload'), dict) else {}
+                    if str(item_payload.get('work_type') or '') != kind:
+                        continue
+                    if (canonical_target_record_id(item_payload) == canonical_target_record_id(payload)
+                            or canonical_source_record_id(item_payload) == canonical_source_record_id(payload)):
+                        cls.service._enqueue_target_snapshot_active_delete(
+                            payload=item_payload, reason='manual_finished_target_binding')
+                cls.service._mark_local_notice_finished_from_target(payload, ended_at=str(payload.get('ended_at') or ''))
+                cls.clear_payload_cache()
+                cls.state_store.update_manual_notice_binding(key, op, {'state': 'done', 'reason': '', 'next_check_at': 0})
+            except (NoticeSourceSuperseded, ValueError) as exc:
+                cls.state_store.update_manual_notice_binding(key, op, {'state': 'blocked', 'reason': str(exc)})
+            except Exception as exc:
+                if isinstance(exc, PortalError) and any(text in str(exc) for text in (
+                        '目标多维记录不存在', '目标多维记录不属于当前楼栋', '源表事项不属于当前楼栋',
+                        '源记录关联的目标通告已变化')):
+                    cls.state_store.update_manual_notice_binding(key, op, {'state': 'blocked', 'reason': str(exc)})
+                    continue
+                age = time.time() - float(document.get('created_at') or time.time())
+                cls.state_store.update_manual_notice_binding(key, op, {
+                    'state': 'attention_required' if age >= 1800 and document.get('state') != 'bound' else document.get('state', 'pending'),
+                    'reason': str(exc) or '等待核验', 'next_check_at': time.time() + (300 if age >= 1800 else 60)})
 
     @classmethod
     def _sync_confirmed_source_end(cls, payload):

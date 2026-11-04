@@ -7750,6 +7750,47 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/notice-identity/bind-wait")
+        async def notice_identity_bind_wait(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                params = request.query_params
+                scope = self._authorized_scope_or_error(session, params.get('scope') or 'ALL')
+                kind = str(params.get('work_type') or '').strip()
+                source = str(params.get('source_record_id') or '').strip()
+                from lan_bitable_template_portal.module_access import allowed_modules
+                if kind not in {'maintenance', 'change'} or kind not in allowed_modules(PortalRuntime.auth_manager, session) or not source:
+                    raise PortalError('没有可查询的通告关联。')
+                key = hashlib.sha256(json.dumps([kind, source], ensure_ascii=False).encode()).hexdigest()
+                document = PortalRuntime.state_store.get_document('notice_manual_binding_wait', key) or {}
+                actor = str((session.get('user') or {}).get('open_id') or '')
+                stored = document.get('payload') or {}
+                if (not document or str(stored.get('scope') or '') != scope
+                        or document.get('actor') != actor and not PortalRuntime.auth_manager.is_admin(session)):
+                    return self._json_ok(request, session, {'state': ''})
+                source_row = await asyncio.to_thread(
+                    PortalRuntime.service._source_record_in_scope_snapshot,
+                    record_id=source, work_type=kind, scope=scope)
+                if source_row is None:
+                    return self._json_ok(request, session, {'state': ''})
+                fields = source_row.get('display_fields') or {}
+                period = PortalRuntime.service.notice_source_period_snapshot({
+                    'source_record_id': source, 'source_work_type': PortalRuntime.service._record_source_work_type(source_row),
+                    'plan_month': fields.get('计划维护月份'), 'maintenance_cycle': fields.get('维护周期')})
+                if period != stored.get('_source_period'):
+                    return self._json_ok(request, session, {'state': ''})
+                state = str(document.get('state') or '')
+                message = ('已保存关联请求，等待飞书同步；核验通过后自动绑定。' if state == 'pending' else
+                           '关联等待已超过30分钟，请核对飞书引用表；后台仍会继续核验。' if state == 'attention_required' else
+                           '关联已核验，正在更新显示。' if state == 'bound' else
+                           '关联已完成，请重新打开通告查看；当前填写不会自动重置。' if state == 'done' else
+                           '关联等待已暂停，请重新核对权限、周期和目标通告。' if state == 'blocked' else '')
+                return self._json_ok(request, session, {'state': state, 'message': message})
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.post("/api/notice-identity/bind")
         async def notice_identity_bind(request: Request):
             session = self._current_session(request)
@@ -7853,6 +7894,7 @@ class FastAPIPortalController:
                         "source_work_type": validation.get("source_work_type") or "",
                         "source_app_token": validation.get("source_app_token") or "",
                         "source_table_id": validation.get("source_table_id") or "",
+                        "_source_period": validation.get("_source_period") or {},
                     }
                 )
                 if target_finished:
@@ -7865,16 +7907,48 @@ class FastAPIPortalController:
 
                 source_ended_synced = False
                 if target_finished and work_type != WORK_TYPE_REPAIR:
+                    wait_key = hashlib.sha256(json.dumps([work_type, source_record_id], ensure_ascii=False).encode()).hexdigest()
+                    waiting = PortalRuntime.state_store.get_document('notice_manual_binding_wait', wait_key) or {}
+                    if waiting.get('state') in {'pending', 'bound', 'attention_required'}:
+                        waiting_payload = waiting.get('payload') or {}
+                        actor = str((session.get('user') or {}).get('open_id') or '').strip()
+                        same = (waiting.get('actor') == actor and canonical_target_record_id(waiting_payload) == target_record_id
+                                and waiting_payload.get('_source_period') == identity_payload.get('_source_period')
+                                and waiting_payload.get('ended_at') == identity_payload.get('ended_at'))
+                        if same:
+                            return self._json_ok(request, session, {
+                                'binding_pending': True, 'binding_id': waiting['operation_id'],
+                                'message': '关联请求已保存，正在等待飞书源表同步。',
+                            })
+                        from lan_bitable_template_portal.account_impersonation import COOKIE as impersonation_cookie
+                        from lan_bitable_template_portal.portal_auth import topic_execution
+                        if (hasattr(request.state, 'admin_impersonation_session') or request.cookies.get(impersonation_cookie)
+                                or topic_execution(PortalRuntime.auth_manager, session) is not None):
+                            raise PortalError('临时授权不能替换正在等待的关联，请使用原账号操作。')
+                        if not PortalRuntime.state_store.cancel_pending_manual_notice_binding(
+                                wait_key, str(waiting.get('operation_id') or ''), actor):
+                            raise PortalError('该计划已有其他关联正在核验或已由其他人员提交，请刷新后核对。')
                     try:
                         source_ended_synced = await asyncio.to_thread(
                             PortalRuntime.service.sync_notice_source_ended_fields,
                             identity_payload,
                         )
                     except NoticeSourcePending as exc:
-                        # Binding has not committed or queued a background sync yet.
-                        raise PortalError(
-                            "目标通告已结束，但源表完成信息尚未核实；本次绑定未完成，请稍后重试绑定。"
-                        ) from exc
+                        # Temporary impersonation/topic grants cannot be safely
+                        # carried into a task that can outlive the session.
+                        from lan_bitable_template_portal.portal_auth import topic_execution
+                        from lan_bitable_template_portal.account_impersonation import COOKIE as impersonation_cookie
+                        actor = str((session.get('user') or {}).get('open_id') or '').strip()
+                        if (not actor or hasattr(request.state, 'admin_impersonation_session')
+                                or request.cookies.get(impersonation_cookie)
+                                or topic_execution(PortalRuntime.auth_manager, session) is not None):
+                            raise PortalError('源表尚未同步；当前临时身份不能创建延迟绑定，请同步后重试。') from exc
+                        pending = await asyncio.to_thread(
+                            PortalRuntime.queue_manual_finished_binding, identity_payload, actor)
+                        return self._json_ok(request, session, {
+                            'binding_pending': True, 'binding_id': pending['operation_id'],
+                            'message': '已保存关联请求，等待飞书源表同步；核验通过后自动绑定。',
+                        })
                     if validation.get("source_found") and not source_ended_synced:
                         raise PortalError("目标记录已结束，但源表完成状态同步失败，请重试绑定。")
 
@@ -13474,6 +13548,8 @@ class FastAPIPortalController:
         )
         scheduler.add_job(PortalRuntime.process_source_end_sync, "interval", seconds=30,
                           id="notice_source_finalize", replace_existing=True, max_instances=1, coalesce=True)
+        scheduler.add_job(PortalRuntime.process_manual_finished_bindings, "interval", seconds=30,
+                          id="notice_manual_binding_wait", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(PortalRuntime.process_notice_robot_messages, "interval", seconds=5,
                           id="notice_robot", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(

@@ -8,6 +8,7 @@
       <NButton :disabled="locked||busy||!hasIdentity" :aria-expanded="mode==='event'" :aria-label="eventBound?'更换故障关联':'补充故障关联'" :title="!hasIdentity?'请先选择计划事项或已发通告':undefined" data-v2-navigation @click="toggle('event')">{{eventBound?'更换':'补充故障关联'}}</NButton>
     </div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
+    <NAlert v-if="pendingNotice" role="status" type="info" :bordered="false">{{ pendingNotice }}</NAlert>
     <div v-if="mode" class="v2-relation-picker">
       <label :for="'notice-relation-'+mode">{{ mode==='event'?'故障来源':'目标通告' }}</label>
       <NSelect v-model:value="selected" :options="candidateOptions" :disabled="locked||busy" :loading="loading" filterable clearable :remote="mode==='event'" :input-props="{id:'notice-relation-'+mode}" class="v2-notice-candidates" aria-label="关联候选" :placeholder="mode==='event'?'输入故障、设备或项目名称':'输入目标通告名称'" @search="searchCandidates"><template #empty>{{ loading?'正在查找…':'未找到符合条件的记录' }}</template></NSelect>
@@ -23,7 +24,7 @@ import {Search,X} from 'lucide-vue-next';
 import {requestJson,type Dict} from './client';
 import type {NoticeForm} from './noticeForm';
 const props=defineProps<{form:NoticeForm;locked:boolean}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
-const mode=ref(''),search=ref(''),selected=ref<string|null>(null),items=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref('');
+const mode=ref(''),search=ref(''),selected=ref<string|null>(null),items=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref(''),pendingNotice=ref('');
 const targetBound=computed(()=>!!props.form.values.target_record_id);
 const projectId=computed(()=>props.form.values.repair_management_record_id||props.form.repairRelation?.projectId||props.form.values.source_record_id||'');
 const eventId=computed(()=>props.form.repairRelation?.eventId||'');
@@ -40,7 +41,19 @@ const candidateId=(i:Dict)=>String(mode.value==='event'?i.repair_management_reco
 const candidateOptions=computed(()=>visible.value.map(item=>({value:candidateId(item),label:[item.title||item.project_title||item.event_title||'未命名记录',item.building,item.status||item.event_status,item.start_time||item.occurrence_time].filter(Boolean).join(' · ')})));
 watch(visible,()=>{if(selected.value&&!visible.value.some(item=>candidateId(item)===selected.value))selected.value=null;});
 let controller:AbortController|undefined;
+let waitController:AbortController|undefined;
 let searchTimer=0;
+let waitTimer=0;
+async function refreshWaiting(){
+  clearTimeout(waitTimer);waitController?.abort();
+  const {scope,work_type:kind,source_record_id:source}=props.form.values;
+  if(!source||!['maintenance','change'].includes(kind)){pendingNotice.value='';return;}
+  const c=new AbortController();waitController=c;
+  try{const result=await requestJson('/api/notice-identity/bind-wait?'+new URLSearchParams({scope:scope||'ALL',work_type:kind,source_record_id:source}),{signal:c.signal,cache:'no-store'});
+    if(!c.signal.aborted){pendingNotice.value=String(result.message||'');if(['pending','bound','attention_required'].includes(String(result.state)))waitTimer=window.setTimeout(refreshWaiting,30000);}
+  }catch{if(!c.signal.aborted&&pendingNotice.value)waitTimer=window.setTimeout(refreshWaiting,60000);}
+}
+watch(()=>[props.form.values.scope,props.form.values.work_type,props.form.values.source_record_id],()=>{pendingNotice.value='';void refreshWaiting();},{immediate:true});
 function toggle(next:string){if(busy.value||props.locked)return;clearTimeout(searchTimer);if(mode.value===next){controller?.abort();mode.value='';loading.value=false;error.value='';}else void lookup(next);}
 function searchCandidates(value:string){search.value=value;clearTimeout(searchTimer);if(mode.value==='event')searchTimer=window.setTimeout(()=>lookup('event'),300);}
 async function lookup(next:string){
@@ -60,8 +73,8 @@ async function lookup(next:string){
   }catch(e){if(!c.signal.aborted)error.value=(e as Error).message;}
   finally{if(controller===c)loading.value=false;}
 }
-function confirm(){const item=items.value.find(i=>candidateId(i)===selected.value);if(!item||busy.value||props.locked)return;dialog.warning({title:'确认保存关联',content:'将关联“'+(item.title||item.project_title||item.event_title)+'”，并重新读取通告。当前未保存的填写将重置，请先核对。',positiveText:'确认关联并重新读取',negativeText:'返回',onPositiveClick:async()=>{busy.value=true;emit('busy',true);error.value='';const v=props.form.values;try{const result=mode.value==='event'?await requestJson('/api/workbench/repair-event-bind',{method:'POST',body:JSON.stringify({scope:v.scope,source_record_id:v.repair_management_record_id||v.source_record_id||'',event_record_id:item.event_record_id,candidate_project_record_id:item.repair_management_record_id,active_item_id:v.active_item_id||'',target_record_id:v.target_record_id||''})}):await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:props.form.detailMode==='ongoing'?'ongoing':'planned',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id||item.active_item_id||'',source_record_id:v.source_record_id||'',target_record_id:candidateId(item),record_id:candidateId(item),title:v.title||item.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time,status:item.status||''})});emit('busy',false);emit('bound',result);}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;emit('busy',false);}}});}
-onBeforeUnmount(()=>{controller?.abort();clearTimeout(searchTimer);});
+function confirm(){const item=items.value.find(i=>candidateId(i)===selected.value);if(!item||busy.value||props.locked)return;dialog.warning({title:'确认保存关联',content:'将关联“'+(item.title||item.project_title||item.event_title)+'”，并重新读取通告。当前未保存的填写将重置，请先核对。',positiveText:'确认关联并重新读取',negativeText:'返回',onPositiveClick:async()=>{busy.value=true;emit('busy',true);error.value='';clearTimeout(waitTimer);waitController?.abort();pendingNotice.value='';const v=props.form.values;try{const result=mode.value==='event'?await requestJson('/api/workbench/repair-event-bind',{method:'POST',body:JSON.stringify({scope:v.scope,source_record_id:v.repair_management_record_id||v.source_record_id||'',event_record_id:item.event_record_id,candidate_project_record_id:item.repair_management_record_id,active_item_id:v.active_item_id||'',target_record_id:v.target_record_id||''})}):await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:props.form.detailMode==='ongoing'?'ongoing':'planned',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id||item.active_item_id||'',source_record_id:v.source_record_id||'',target_record_id:candidateId(item),record_id:candidateId(item),title:v.title||item.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time,status:item.status||''})});if(result.binding_pending){pendingNotice.value=String(result.message||'关联请求已保存，等待飞书同步后自动核验绑定。');waitTimer=window.setTimeout(refreshWaiting,30000);return;}emit('busy',false);emit('bound',result);}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;emit('busy',false);}}});}
+onBeforeUnmount(()=>{controller?.abort();waitController?.abort();clearTimeout(searchTimer);clearTimeout(waitTimer);});
 </script>
 <style>
 .v2-notice-relations{display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;min-width:0}
