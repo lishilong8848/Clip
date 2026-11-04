@@ -43,6 +43,7 @@ from clipflow_backend.runtime_helpers import (
     env_float as _env_float,
     external_guard_status as _external_guard_status,
     mock_external_enabled as _mock_external_enabled,
+    send_card_to_open_ids_guarded as _send_card_to_open_ids_guarded,
     send_text_to_open_ids_guarded as _send_text_to_open_ids_guarded,
     wait_until_listening as _wait_until_listening,
 )
@@ -13124,7 +13125,8 @@ class FastAPIPortalController:
     def _run_scheduled_daily_inspection_reminders(self) -> None:
         if _mock_external_enabled() or self._stopping_event.is_set():
             return
-        from lan_bitable_template_portal.daily_inspection_reminders import process_reminders
+        from lan_bitable_template_portal.daily_inspection_reminders import current_roster_recipient, process_reminders
+        from lan_bitable_template_portal.daily_inspection_reconcile import reconcile_inspection_delivery
         from lan_bitable_template_portal.personnel_source import daily_roster
         try:
             service = PortalRuntime.service
@@ -13133,7 +13135,12 @@ class FastAPIPortalController:
                 lambda day: daily_roster(service, day),
                 service._signature_public_base_url,
                 _send_text_to_open_ids_guarded,
+                send_card=_send_card_to_open_ids_guarded,
                 stopping=self._stopping_event.is_set,
+                resolve_recipient=lambda record_id, open_id, app_id, person: current_roster_recipient(
+                    PortalRuntime, lambda: self._account_directory().directory(), record_id, open_id, app_id, person),
+                reconcile_delivery=lambda open_id, message_uuid, target, route: reconcile_inspection_delivery(
+                    PortalRuntime.state_store, open_id, message_uuid, target, route),
             )
         except Exception:
             log_warning("日常巡检提醒暂未完成，将在重试时段内继续尝试。")

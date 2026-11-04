@@ -31,11 +31,12 @@ export const modules: ModuleEntry[] = [
   { id: 'accounts', label: '账号与权限', group: '账号与协作', path: '/admin/settings', icon: 'settings' },
 ];
 export function modulePermission(id: string): string { return modules.find(item => item.id === id)?.permission || id; }
-export function navigationModules(permitted: string[], toolManagement = false): ModuleEntry[] {
+export function navigationModules(permitted: string[], toolManagement = false, inspectionHistory = false): ModuleEntry[] {
   const notices=NOTICE_IDS.filter(id=>permitted.includes(id));
   return modules.flatMap(item=>{
     if(item.id==='tool_management'&&!toolManagement)return [];
-    if(item.id!=='signatures'&&!permitted.includes(item.permission||item.id)||item.id==='assistant')return [];
+    if(item.id!=='signatures'&&!permitted.includes(item.permission||item.id)
+        && !(item.id==='daily_inspection' && inspectionHistory) || item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];
     if(item.id!==notices[0])return [];
     return [{id:'notices',label:'通告办理',group:'运行管理',path:'/workbench-lite?work_type='+(notices.length===1?notices[0]:'all'),icon:'notice'},

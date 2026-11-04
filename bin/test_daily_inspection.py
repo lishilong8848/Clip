@@ -190,20 +190,45 @@ class DailyInspectionTests(unittest.TestCase):
         next_duty = {**DAY, 'group': 'B班、C班'}
         self.assertEqual(self.service.change('b', '乙', next_duty, 'start', {'duty': next_duty})['active']['round'], 2)
 
-    def test_whole_round_requires_readings_and_abnormal_note_before_archiving(self):
+    def test_whole_round_uses_source_values_without_requiring_a_note(self):
         active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
         submitted = self.submission(active)
         review = next(iter(submitted['reviews'].values()))
-        values = dict(review['values'])
         review['values'].clear()
-        with self.assertRaisesRegex(RiskError, '缺少.*现场读数'):
-            self.service.change('a', '甲', DAY, 'finish', submitted)
-        review['values'] = values
         review['result'] = '异常'
-        with self.assertRaisesRegex(RiskError, '异常备注'):
-            self.service.change('a', '甲', DAY, 'finish', submitted)
-        self.assertEqual((self.cloud.creates, self.cloud.uploads), (0, 0))
-        self.assertFalse(self.service.view(self.service.load('D'), 'a', DAY)['active']['pending'])
+        self.service.change('a', '甲', DAY, 'finish', submitted)
+        book = load_workbook(io.BytesIO(self.cloud.file), read_only=True)
+        try:
+            header, *rows = list(book['现场核对'].values)
+            self.assertEqual(rows[0][header.index('现场读数')], '0')
+            self.assertEqual(rows[0][header.index('核对结论')], '异常')
+            self.assertIsNone(rows[0][header.index('现场备注')])
+        finally:
+            book.close()
+
+    def test_unmodified_sources_need_no_manual_input_and_empty_is_not_fabricated(self):
+        self.cloud.tables[SOURCES['D'][0][0]][0]['fields']['湿度'] = ''
+        self.cloud.tables[SOURCES['D'][0][0]][0]['fields']['缺少源数据'] = '湿度'
+        active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        device = active['batch']['devices'][0]
+        value = next(item for item in device['parameters'] if item['name'] == '电流(A)')
+        draft = {device['id']: {'values': {value['id']: ''}, 'result': '', 'note': '', 'revision': 0}}
+        self.service.change('a', '甲', DAY, 'finish', {'id': active['id'], 'review_version': 0, 'reviews': draft})
+        book = load_workbook(io.BytesIO(self.cloud.file), read_only=True)
+        try:
+            columns, *rows = list(book['现场核对'].values)
+            by_name = {(row[columns.index('设备')], row[columns.index('参数')]): row for row in rows}
+            changed = by_name[(device['name'], '电流(A)')]
+            missing = by_name[(device['name'], '湿度')]
+            other = by_name[('144-AH-110', '电流(A)')]
+            self.assertIsNone(changed[columns.index('现场读数')])
+            self.assertIsNone(missing[columns.index('现场读数')])
+            self.assertIn('源数据不完整', missing[columns.index('参数状态')])
+            self.assertEqual(other[columns.index('现场读数')], '6')
+            self.assertEqual(other[columns.index('核对结论')], '正常')
+            self.assertEqual(self.cloud.tables[ARCHIVE][0]['fields']['现场已核对设备数'], 1)
+        finally:
+            book.close()
 
     def test_shared_drafts_survive_restart_and_prevent_stale_overwrite(self):
         active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
@@ -356,6 +381,12 @@ class DailyInspectionTests(unittest.TestCase):
         active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
         state = self.service.load('D')
         self.service.finish('building:D', state, state['active'], '甲', [])
+        book = load_workbook(io.BytesIO(self.cloud.file))
+        del book['现场核对']
+        legacy = io.BytesIO()
+        book.save(legacy)
+        book.close()
+        self.cloud.files['archive_file_1'] = legacy.getvalue()
         self.service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
         detail = self.service.archive_detail('D', self.cloud.tables[ARCHIVE][0]['record_id'])
         device = detail['devices_data'][0]
@@ -380,6 +411,54 @@ class DailyInspectionTests(unittest.TestCase):
 
 
 class DailyInspectionReminderTests(unittest.TestCase):
+    def test_changed_building_keeps_original_shift_and_retry_content(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store = LanPortalStateStore(folder / 'state.sqlite3')
+        person = {'record_id': 'recD', 'scope': 'D', 'shift': '白', 'open_id': 'ou_User'}
+        cards = []
+        def card_send(card, recipients, *, message_uuid):
+            cards.append((card, message_uuid))
+            if len(cards) == 1:
+                return False, '', [{'open_id': recipients[0], 'ok': False, 'failure_kind': 'not_sent'}]
+            raise TimeoutError('结果不确定')
+        def tick(minute):
+            now = dt.datetime(2026, 11, 3, 10, minute, tzinfo=CN)
+            process_reminders(store, lambda day: {'date': day, 'complete': True, 'people': [person],
+                                                  'observed_at': now.timestamp()},
+                lambda **_: 'https://inspection.example', card_send, send_card=card_send,
+                current=now)
+        tick(0)
+        person['scope'] = 'E'
+        tick(5)
+        self.assertEqual([item[0]['header']['title']['content'] for item in cards], ['D楼 · 日常巡检', 'D楼 · 日常巡检'])
+        self.assertEqual(cards[0][1], cards[1][1], '补发应保留原班次内容和消息编号')
+        person['scope'] = 'D'
+        tick(10)
+        self.assertEqual(len(cards), 3)
+        self.assertEqual(cards[1], cards[2], '结果不确定时只能使用原内容和消息编号重试')
+
+    def test_uncertain_legacy_text_retry_keeps_original_content_and_message_id(self):
+        folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        store = LanPortalStateStore(folder / 'state.sqlite3')
+        old = '【日常巡检提醒】D楼 2026-11-03 白班 · 第 1 次\n旧内容\nhttps://inspection.example/daily-inspection'
+        store.put_document('daily_inspection_reminders', '2026-11-03:白:1', {
+            'targets': {'ou_DayD': old}, 'inflight_records': {'recD': 'ou_DayD'},
+            'inflight_since': {'recD': dt.datetime(2026, 11, 3, 9, 59, tzinfo=CN).timestamp()}})
+        sent = []
+        def text_send(text, recipients, *, message_uuid):
+            sent.append((text, recipients, message_uuid))
+            return True, '', [{'open_id': recipients[0], 'ok': True}]
+        def card_send(*_args, **_kwargs):
+            self.fail('旧任务不能改变消息类型重发')
+        process_reminders(store, lambda day: {'date': day, 'complete': True,
+            'observed_at': dt.datetime(2026, 11, 3, 10, tzinfo=CN).timestamp(), 'people': [
+            {'record_id': 'recD', 'scope': 'D', 'shift': '白', 'open_id': 'ou_DayD'}]},
+            lambda **_: 'https://inspection.example', text_send, send_card=card_send,
+            current=dt.datetime(2026, 11, 3, 10, tzinfo=CN))
+        self.assertEqual(sent[0][0], old)
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(store.get_document('daily_inspection_reminders', '2026-11-03:白:1')['sent'], ['ou_DayD'])
+
     def test_retries_with_corrected_identity_and_ignores_ambiguous_assignments(self):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         rows = [
@@ -393,14 +472,21 @@ class DailyInspectionReminderTests(unittest.TestCase):
             recipient, = recipients
             attempts.append(recipient)
             ok = recipient != 'ou_OldD'
-            return ok, '', [{'open_id': recipient, 'ok': ok, 'failure_kind': '' if ok else 'not_sent'}]
+            return ok, '', [{'open_id': recipient, 'ok': ok, 'failure_kind': '' if ok else 'not_sent',
+                             'sender_app_id': 'cli_test', 'message_uuid': message_uuid,
+                             'message_id': 'om_fixture', 'chat_id': 'oc_fixture'}]
+
+        def resolve(record_id, _open_id, _app_id, _person):
+            return next(row['open_id'] for row in rows if row['record_id'] == record_id)
 
         def tick(minute):
+            now = dt.datetime(2026, 11, 3, 10, minute, tzinfo=CN)
             process_reminders(
                 LanPortalStateStore(folder / 'state.sqlite3'),
-                lambda day: {'date': day, 'complete': True, 'people': rows},
+                lambda day: {'date': day, 'app_id': 'cli_test', 'complete': True, 'people': rows,
+                             'observed_at': now.timestamp()},
                 lambda **_: 'https://inspection.example', send,
-                current=dt.datetime(2026, 11, 3, 10, minute, tzinfo=CN))
+                current=now, resolve_recipient=resolve)
 
         tick(0)
         self.assertEqual(attempts, ['ou_OldD'])
@@ -437,14 +523,18 @@ class DailyInspectionReminderTests(unittest.TestCase):
             attempts.append((recipient, message_uuid))
             if len(attempts) == 1:
                 raise TimeoutError
-            return True, '', [{'open_id': recipient, 'ok': True}]
+            return True, '', [{'open_id': recipient, 'ok': True, 'sender_app_id': 'cli_test',
+                               'message_uuid': message_uuid, 'message_id': 'om_fixture', 'chat_id': 'oc_fixture'}]
 
         def tick(minute):
+            now = dt.datetime(2026, 11, 3, 10, minute, tzinfo=CN)
             process_reminders(
                 LanPortalStateStore(folder / 'state.sqlite3'),
-                lambda day: {'date': day, 'complete': True, 'people': [person]},
+                lambda day: {'date': day, 'app_id': 'cli_test', 'complete': True, 'people': [person],
+                             'observed_at': now.timestamp()},
                 lambda **_: 'https://inspection.example', send,
-                current=dt.datetime(2026, 11, 3, 10, minute, tzinfo=CN))
+                current=now,
+                resolve_recipient=lambda _rid, _old, _app, _person: person['open_id'])
 
         tick(0)
         person['open_id'] = 'ou_ChangedD'
@@ -459,43 +549,47 @@ class DailyInspectionReminderTests(unittest.TestCase):
     def test_midnight_routes_to_previous_night_staff_and_retries_only_unconfirmed(self):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
         midnight = dt.datetime(2026, 11, 4, 0, tzinfo=CN)
-        roster_dates, sent, deliveries = [], [], set()
+        roster_dates, sent, deliveries, clock = [], [], set(), [midnight]
 
         def roster(day):
             roster_dates.append(day)
-            return {'date': day, 'complete': True, 'people': [
-                {'scope': 'D', 'shift': '夜', 'open_id': 'ou_NightD'},
-                {'scope': 'E', 'shift': '夜', 'open_id': 'ou_NightE'},
-                {'scope': 'D', 'shift': '白', 'open_id': 'ou_DayD'},
-                {'scope': 'C', 'shift': '夜', 'open_id': 'ou_NightC'},
+            return {'date': day, 'complete': True, 'observed_at': clock[0].timestamp(), 'people': [
+                {'record_id': 'recNightD', 'scope': 'D', 'shift': '夜', 'open_id': 'ou_NightD'},
+                {'record_id': 'recNightE', 'scope': 'E', 'shift': '夜', 'open_id': 'ou_NightE'},
+                {'record_id': 'recDayD', 'scope': 'D', 'shift': '白', 'open_id': 'ou_DayD'},
+                {'record_id': 'recNightC', 'scope': 'C', 'shift': '夜', 'open_id': 'ou_NightC'},
             ]}
 
         def send(message, recipients, *, message_uuid):
             recipient, = recipients
             key = (recipient, message_uuid)
-            ok = recipient != 'ou_NightE' or '第 1 次' in message or key in deliveries
+            content = message['elements'][0]['text']['content']
+            ok = recipient != 'ou_NightE' or '第 1 次' in content or key in deliveries
             deliveries.add(key)
             sent.append((recipient, message_uuid, message))
             return ok, '', [{'open_id': recipient, 'ok': ok}]
 
         def tick(minute):
             reopened = LanPortalStateStore(folder / 'state.sqlite3')
+            clock[0] = midnight + dt.timedelta(minutes=minute)
             process_reminders(reopened, roster, lambda **_: 'https://inspection.example', send,
-                              current=midnight + dt.timedelta(minutes=minute))
+                              current=clock[0])
 
         for minute in (-240, 0, 1, 5, 10):
             tick(minute)
-        self.assertEqual(roster_dates, ['2026-11-03'] * 3)
+        self.assertEqual(roster_dates, ['2026-11-03'] * 2)
         self.assertEqual([item[0] for item in sent], ['ou_NightD', 'ou_NightE', 'ou_NightD', 'ou_NightE', 'ou_NightE'])
         self.assertEqual(sent[3], sent[4])
         self.assertEqual(len(deliveries), 4)
-        self.assertIn('2026-11-03 夜班 · 第 1 次', sent[0][2])
-        self.assertIn('2026-11-03 夜班 · 第 2 次', sent[2][2])
-        self.assertIn('https://inspection.example/daily-inspection', sent[2][2])
+        self.assertIn('2026-11-03', sent[0][2]['elements'][0]['text']['content'])
+        self.assertIn('夜班', sent[0][2]['elements'][0]['text']['content'])
+        self.assertIn('第 1 次', sent[0][2]['elements'][0]['text']['content'])
+        self.assertIn('第 2 次', sent[2][2]['elements'][0]['text']['content'])
+        self.assertEqual(sent[2][2]['elements'][2]['actions'][0]['url'], 'https://inspection.example/daily-inspection')
 
     def test_restart_catches_up_both_day_slots_and_retries_late_identity(self):
         folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        sent, roster_dates = [], []
+        sent, roster_dates, clock = [], [], [dt.datetime(2026, 11, 3, 14, 10, tzinfo=CN)]
         rows = [
             {'record_id': 'recD', 'scope': 'D', 'shift': '白', 'open_id': 'ou_DayD'},
             {'record_id': 'recE', 'scope': 'E', 'shift': '白', 'open_id': ''},
@@ -505,25 +599,34 @@ class DailyInspectionReminderTests(unittest.TestCase):
 
         def roster(day):
             roster_dates.append(day)
-            return {'date': day, 'complete': True, 'people': rows}
+            return {'date': day, 'app_id': 'cli_test', 'complete': True, 'people': rows,
+                    'observed_at': clock[0].timestamp()}
 
         def send(message, recipients, *, message_uuid):
             recipient, = recipients
             sent.append((recipient, message_uuid, message))
-            return True, '', [{'open_id': recipient, 'ok': True}]
+            return True, '', [{'open_id': recipient, 'ok': True, 'sender_app_id': 'cli_test',
+                               'message_uuid': message_uuid, 'message_id': 'om_fixture', 'chat_id': 'oc_fixture'}]
 
         def tick(hour, minute):
+            clock[0] = dt.datetime(2026, 11, 3, hour, minute, tzinfo=CN)
             process_reminders(LanPortalStateStore(folder / 'state.sqlite3'), roster,
                               lambda **_: 'https://inspection.example', send,
-                              current=dt.datetime(2026, 11, 3, hour, minute, tzinfo=CN))
+                              current=clock[0],
+                              resolve_recipient=lambda record_id, _old, _app, _person:
+                                  next(row['open_id'] for row in rows if row.get('record_id') == record_id))
 
         tick(14, 10)
         rows[1]['open_id'] = 'ou_DayE'
         tick(14, 15)
         tick(15, 0)
-        self.assertEqual(roster_dates, ['2026-11-03', '2026-11-03'])
+        self.assertEqual(roster_dates, ['2026-11-03'])
         self.assertEqual([item[0] for item in sent], ['ou_DayD', 'ou_DayD', 'ou_DayE', 'ou_DayE'])
         self.assertEqual(len({item[1] for item in sent}), 4)
-        self.assertIn('D楼 2026-11-03 白班 · 第 1 次', sent[0][2])
-        self.assertIn('D楼 2026-11-03 白班 · 第 2 次', sent[1][2])
-        self.assertIn('E楼 2026-11-03 白班 · 第 2 次', sent[3][2])
+        self.assertEqual(sent[0][2]['header']['title']['content'], 'D楼 · 日常巡检')
+        self.assertEqual(sent[3][2]['header']['title']['content'], 'E楼 · 日常巡检')
+        self.assertIn('白班', sent[0][2]['elements'][0]['text']['content'])
+        self.assertIn('如发现不符可直接修改', sent[0][2]['elements'][1]['text']['content'])
+        self.assertEqual(sent[0][2]['elements'][2]['actions'][0]['text']['content'], '查看并核对巡检')
+        self.assertIn('第 1 次', sent[0][2]['elements'][0]['text']['content'])
+        self.assertIn('第 2 次', sent[1][2]['elements'][0]['text']['content'])

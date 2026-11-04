@@ -108,9 +108,8 @@ def edit_archived_devices(book, devices, changes, actor):
                 any(not valid_cell_text(value, 160) for value in values.values())):
             raise RiskError('历史设备读数格式无效。', 400)
         result, note = change.get('result'), change.get('note')
-        if (result not in ('', '正常', '异常') or not valid_cell_text(note, 1000)
-                or (result == '异常' and not note.strip())):
-            raise RiskError(f'请核对「{device["name"]}」的结论及异常备注。', 400)
+        if result not in ('', '正常', '异常') or not valid_cell_text(note, 1000):
+            raise RiskError(f'请核对「{device["name"]}」的历史记录。', 400)
         for row in device['rows']:
             number = int(row['id'])
             if row['id'] in values:
@@ -120,7 +119,7 @@ def edit_archived_devices(book, devices, changes, actor):
             write_cell(sheet, number, 13, note.strip() or None)
             write_cell(sheet, number, 14, actor)
         device.update(result=result, note=note.strip(), actor=actor)
-    completed = sum(device['result'] in ('正常', '异常') and (device['result'] != '异常' or bool(device['note'].strip()))
+    completed = sum(any(not row['read_only'] for row in device['rows'])
                     and all(row['read_only'] or row['value'].strip() for row in device['rows'])
                     for device in devices)
     return completed, sum(device['result'] == '异常' for device in devices)

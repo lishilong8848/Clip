@@ -22,6 +22,7 @@ import AsyncPageState from '../components/AsyncPageState.vue';
 import {requestJson,type Dict} from './client';
 import type { Widget } from './dashboard/layout';
 import { modules,navigationModules,NOTICE_IDS,SOP_IDS,moduleForRoute } from './modules';
+import { canViewInspectionHistory } from '../inspectionAccess';
 import { navigate,requestEmbeddedChange } from './navigation';
 import { embeddedContextKey } from './embeddedContext';
 import { pageContext } from './pageLayout';
@@ -38,10 +39,10 @@ pages.risk_inspection=lazy(()=>import('../components/InspectionWorkspace.vue'));
 pages.eop_scenarios=lazy(()=>import('../components/EopScenarioPage.vue'));
 pages.daily_inspection=lazy(()=>import('../components/DailyInspectionPage.vue'));
 pages.documents=lazy(()=>import('../components/DocumentLibraryPage.vue'));
-function initial(){const entry=navigationModules(props.user.modules||[]).find(module=>module.id===props.item.module);const url=new URL(entry?.path||'/',location.origin);url.searchParams.set('scope',props.scope);if(props.item.module==='water')url.searchParams.set('water_view','records');if(props.initialUrl){const target=new URL(props.initialUrl,location.origin);const kind=moduleForRoute(target);if(target.origin===location.origin&&(kind===props.item.module||props.item.module==='notices'&&(NOTICE_IDS.includes(kind)||kind==='all'))&&(!target.searchParams.get('scope')||props.scopes.some(s=>s.value===target.searchParams.get('scope'))))return target;}return url;}
+function initial(){const entry=navigationModules(props.user.modules||[],false,canViewInspectionHistory(props.user)).find(module=>module.id===props.item.module);const url=new URL(entry?.path||'/',location.origin);url.searchParams.set('scope',props.scope);if(props.item.module==='water')url.searchParams.set('water_view','records');if(props.initialUrl){const target=new URL(props.initialUrl,location.origin);const kind=moduleForRoute(target);if(target.origin===location.origin&&(kind===props.item.module||props.item.module==='notices'&&(NOTICE_IDS.includes(kind)||kind==='all'))&&(!target.searchParams.get('scope')||props.scopes.some(s=>s.value===target.searchParams.get('scope'))))return target;}return url;}
 const route=ref(initial()),history=ref<URL[]>([]),filterTarget=ref<HTMLElement|null>(null),error=ref('');
 const moduleId=computed(()=>{const id=moduleForRoute(route.value);return NOTICE_IDS.includes(id)||id==='all'?'notices':id;});
-const permitted=computed(()=>navigationModules(props.user.modules||[]).some(module=>module.id===props.item.module));
+const permitted=computed(()=>navigationModules(props.user.modules||[],false,canViewInspectionHistory(props.user)).some(module=>module.id===props.item.module));
 const localScope=computed(()=>{const scope=route.value.searchParams.get('scope')||props.scope;return props.scopes.some(item=>item.value===scope)?scope:props.scope;});
 const scopeLabel=computed(()=>props.scopes.find(scope=>scope.value===localScope.value)?.label||localScope.value);
 const viewScopeOptions=computed(()=>props.fixedScope?props.scopes.filter(option=>option.value===localScope.value):props.scopes);

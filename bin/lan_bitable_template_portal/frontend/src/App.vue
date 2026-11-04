@@ -294,6 +294,7 @@ import AsyncPageState from "./components/AsyncPageState.vue";
 import NoticeHistory from './components/NoticeHistory.vue';
 import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, setImpersonationContext, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
 import { setModulePermissions } from "./api/modulePermissions";
+import { canViewInspectionHistory } from "./inspectionAccess";
 import { navigate, navigateHard, registerNavigationGuard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
@@ -588,6 +589,7 @@ function moduleForCurrentRoute(): string {
 }
 const pageAccessDenied = computed(() => {
   if (!auth.loggedIn || authChecking.value) return "";
+  if (routePath.value === '/daily-inspection' && canViewInspectionHistory(auth.user)) return "";
   const required = moduleForCurrentRoute();
   if (!required) return "";
   return hasModule(required) ? "" : required;

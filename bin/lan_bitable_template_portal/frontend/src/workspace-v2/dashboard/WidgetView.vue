@@ -33,10 +33,11 @@ import OverviewPanel from '../OverviewPanel.vue';
 import MetricWidget from './MetricWidget.vue';
 import PreShiftCheck from './PreShiftCheck.vue';
 import type { Widget } from './layout';
+import { canViewInspectionHistory } from '../../inspectionAccess';
 const ModuleWidget=defineAsyncComponent(()=>import('../ModuleWidget.vue'));
 const props=defineProps<{item:Widget;user:Dict;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];headerToolsId?:string;brief?:boolean;preferencesBusy?:boolean;orderedTodos?:boolean}>();
 defineEmits<{open:[url:string];'task-kinds':[value:TodoKind[]]}>();
-const entries=computed(()=>props.item.links.flatMap(id=>navigationModules(props.user.modules||[]).filter(entry=>entry.id===id)));
+const entries=computed(()=>props.item.links.flatMap(id=>navigationModules(props.user.modules||[],false,canViewInspectionHistory(props.user)).filter(entry=>entry.id===id)));
 const moduleViews=computed(()=>props.selectedScopes&&props.selectedScopes.length>1&&props.item.module!=='notices'
   ?props.selectedScopes.map(scope=>({scope,label:props.scopes.find(option=>option.value===scope)?.label||scope}))
   :[{scope:props.scope,label:''}]);

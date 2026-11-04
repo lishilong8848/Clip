@@ -58,3 +58,17 @@ def send_text_to_open_ids_guarded(text: str, recipients: list[str], *, message_u
         send_text_to_open_ids(text, clean_recipients, message_uuid=message_uuid)
         if message_uuid else send_text_to_open_ids(text, clean_recipients)
     )
+
+
+def send_card_to_open_ids_guarded(card: dict, recipients: list[str], *, message_uuid: str = "") -> tuple[bool, str, list[dict]]:
+    clean_recipients = [str(open_id or "").strip() for open_id in recipients or [] if str(open_id or "").strip()]
+    guard = external_guard_status()
+    if guard.get("mock_external"):
+        return True, "mock external send skipped", [
+            {"open_id": open_id, "ok": True, "message": "mock external send skipped"}
+            for open_id in clean_recipients
+        ]
+    if not guard.get("real_write_allowed"):
+        return False, str(guard.get("reason") or "真实外部写入未确认。"), []
+    from upload_event_module.services.robot_webhook import send_interactive_to_open_ids
+    return send_interactive_to_open_ids(card, clean_recipients, message_uuid=message_uuid)

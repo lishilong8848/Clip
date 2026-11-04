@@ -5,6 +5,7 @@ import { randomHexId } from '../../browserStorage';
 import { chartViews,type ChartView } from '../vipboard';
 import {todoOptions,todoSelection,type TodoKind} from '../businessTodos';
 import {sanitizeWidgetScope} from './widgetScopes';
+import { canViewInspectionHistory } from '../../inspectionAccess';
 
 export type WidgetKind = 'tasks' | 'shortcuts' | 'notices' | 'events' | 'learning' | 'water' | 'pre_shift' | 'notice_actions' | 'repair_actions' | 'module';
 export type Widget = {
@@ -53,15 +54,15 @@ const taskIds=[...NOTICE_IDS,'event','repair_management','daily','plan_convergen
 export function taskOptions(user:Dict){return modules.filter(m=>taskIds.includes(m.id)&&(user.modules||[]).includes(m.id)).map(m=>({value:m.id,label:m.label}));}
 export function allowedKind(kind:WidgetKind,user:Dict){
   const granted:string[]=user.modules||[];
-  if(kind==='module')return user.role!=='guest'&&navigationModules(granted).length>0;
+  if(kind==='module')return user.role!=='guest'&&navigationModules(granted,false,canViewInspectionHistory(user)).length>0;
   if(kind==='pre_shift')return user.role!=='guest'&&granted.length>0&&(mandatoryCheck(user)||['L0','L1'].includes(user.level)||['supervisor','manager'].includes(user.category));
   if(kind==='notice_actions')return user.role!=='guest'&&NOTICE_IDS.some(id=>granted.includes(id));
   if(kind==='repair_actions')return user.role!=='guest'&&granted.includes('repair_management');
-  return kind==='shortcuts'?navigationModules(granted).length>0:kind==='tasks'?todoOptions(user).length>0||taskOptions(user).length>0:kind==='notices'?NOTICE_IDS.some(id=>granted.includes(id)):granted.includes(kind==='events'?'event':kind);
+  return kind==='shortcuts'?navigationModules(granted,false,canViewInspectionHistory(user)).length>0:kind==='tasks'?todoOptions(user).length>0||taskOptions(user).length>0:kind==='notices'?NOTICE_IDS.some(id=>granted.includes(id)):granted.includes(kind==='events'?'event':kind);
 }
 export function widget(kind:WidgetKind,user:Dict,overrides:Partial<Widget>={}):Widget{
-  const module=kind==='module'?navigationModules(user.modules||[])[0]?.id||'':kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
-  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:kind==='events'&&overrides.display==='calendar'?'year':'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[]).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...(kind==='tasks'?{taskKinds:todoSelection(undefined,user)}:{}),...overrides};
+  const module=kind==='module'?navigationModules(user.modules||[],false,canViewInspectionHistory(user))[0]?.id||'':kind==='repair_actions'?'repair_management':kind==='notice_actions'?NOTICE_IDS.find(id=>(user.modules||[]).includes(id))||'':taskOptions(user)[0]?.value||'';
+  return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:kind==='events'&&overrides.display==='calendar'?'year':'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[],false,canViewInspectionHistory(user)).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...(kind==='tasks'?{taskKinds:todoSelection(undefined,user)}:{}),...overrides};
 }
 export function mandatoryCheck(user:Dict){return user.role!=='guest'&&['operator','shift_leader','duty'].includes(user.category);}
 function withChecks(widgets:Widget[],user:Dict,initial=false){
@@ -75,7 +76,7 @@ export function defaults(user:Dict):Layout{
   const role=personaFor(user),granted:string[]=user.modules||[];
   const primary=role==='personal'?'learning':role==='engineer'||role==='supervisor'?'event':NOTICE_IDS.find(id=>granted.includes(id))||taskOptions(user)[0]?.value;
   const quick={global:['notices','event','repair_management','daily'],duty:['notices','water','drills','critical_guard'],engineer:['event','repair_management','plan_convergence'],supervisor:['event','notices','cabinet','plan_convergence'],personal:['learning','signatures','knowledge']}[role];
-  const available=navigationModules(granted).map(m=>m.id);
+  const available=navigationModules(granted,false,canViewInspectionHistory(user)).map(m=>m.id);
   const links=quick.filter(id=>available.includes(id));
   const widgets:Widget[]=[];
   if(allowedKind('shortcuts',user))widgets.push(widget('shortcuts',user,{x:8,w:4,h:3,title:'常用办理',links:links.length?links:available.slice(0,4)}));
@@ -85,7 +86,7 @@ export function defaults(user:Dict):Layout{
 const integer=(v:unknown,fallback:number,min:number,max:number)=>Number.isInteger(v)?Math.min(max,Math.max(min,Number(v))):fallback;
 export function sanitize(value:unknown,user:Dict,scopes:string[]):Layout{
   if(!value||typeof value!=='object'||(value as Dict).version!==1||!Array.isArray((value as Dict).widgets))return defaults(user);
-  const seen=new Set<string>(),granted=taskOptions(user).map(item=>item.value),links=navigationModules(user.modules||[]).map(m=>m.id);
+  const seen=new Set<string>(),granted=taskOptions(user).map(item=>item.value),links=navigationModules(user.modules||[],false,canViewInspectionHistory(user)).map(m=>m.id);
   const widgets:Widget[]=[];
   for(const item of (value as Layout).widgets.slice(0,16)){
     if(!item||!catalog.some(c=>c.kind===item.kind)||!allowedKind(item.kind,user)||typeof item.id!=='string'||!/^[a-zA-Z0-9_-]{1,80}$/.test(item.id)||seen.has(item.id))continue;

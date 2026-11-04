@@ -1,6 +1,7 @@
 """Frozen D/E inspection sheets and their Feishu archive."""
 
 import asyncio
+import copy
 import datetime as dt
 import hashlib
 import io
@@ -12,14 +13,14 @@ import time
 import unicodedata
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 from upload_event_module.services.http_client import FeishuHTTPError
-from .daily_inspection_history import (MAX_ARCHIVE, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
+from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
 from .eop_scenario_editor import plain
 from .module_access import allowed_modules
@@ -70,6 +71,21 @@ def duty_key(duty):
     return {key: duty[key] for key in ('scope', 'date', 'shift')}
 
 
+def inspection_history_scopes(auth, session):
+    from .cabinet_guest import is_cabinet_guest
+
+    if not isinstance(session, dict) or is_cabinet_guest(session):
+        return []
+    owner = (session.get('user') or {}).get('open_id')
+    if not owner:
+        return []
+    profile = auth.account_profile(owner)
+    home = profile.get('home_scope')
+    allowed = auth.session_scopes(session)
+    return [home] if (profile.get('enabled') and home in SOURCES and
+                      (home in allowed or 'ALL' in allowed)) else []
+
+
 def resolve_duty(roster, user, scopes, current=None):
     from .portal_service import BUILDING_OPEN_ID_MAP
 
@@ -102,6 +118,22 @@ def resolve_duty(roster, user, scopes, current=None):
                      and person.get('duty_kind') != '长白' and person.get('group')})
     if groups:
         duty['group'] = '、'.join(groups)
+    return duty
+
+
+def building_duty(roster, scope, current=None):
+    date, shift = duty_period(current or dt.datetime.now(CN))
+    duty = {'scope': scope, 'date': date, 'shift': shift}
+    try:
+        snapshot = roster(date)
+        if snapshot.get('date') == date and snapshot.get('complete') is True:
+            groups = sorted({person['group'] for person in snapshot.get('people', [])
+                             if person.get('scope') == scope and person.get('shift') == shift
+                             and person.get('duty_kind') != '长白' and person.get('group')})
+            if groups:
+                duty['group'] = '、'.join(groups)
+    except Exception:
+        pass  # The shift clock is authoritative; do not guess an unavailable roster group.
     return duty
 
 
@@ -138,7 +170,7 @@ def devices_for(scope, rows, point_configs, templates):
                 'missing': plain(fields.get('缺少源数据')),
                 'note': plain(fields.get('备注')),
                 'values': {name: value if isinstance(value, (int, float)) else plain(value)
-                           for name, value in fields.items() if name not in DEVICE_METADATA and value not in (None, '')},
+                           for name, value in fields.items() if name not in DEVICE_METADATA},
             })
         else:
             raise RiskError('源表出现无法识别的巡检记录类型，请核对后重试。', 503)
@@ -185,9 +217,39 @@ def parameters(device):
     return rows
 
 
+def device_profession(device):
+    return str(device.get('profession') or '').strip() or '未分类'
+
+
+def selected_devices(active, scope):
+    devices = active['batches'][scope]['devices']
+    selected = active.get('professions')
+    return [device for device in devices if device_profession(device) in selected] if isinstance(selected, list) else devices
+
+
+def profession_version(active, scope, profession):
+    reviews = active.get('reviews', {})
+    revisions = sorted((device['id'], reviews.get(device['id'], {}).get('revision', 0))
+                       for device in selected_devices(active, scope) if device_profession(device) == profession)
+    return hashlib.sha256(json.dumps(revisions, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
+def all_professions_confirmed(active, scope, confirmations):
+    return all(confirmations.get(item, {}).get('version') == profession_version(active, scope, item)
+               for item in active.get('professions', []))
+
+
 def review_content(review):
     return {key: review.get(key, default) for key, default in
             (('values', {}), ('result', ''), ('note', ''))}
+
+
+def source_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return '是' if value else '否'
+    return str(value)
 
 
 def merge_reviews(active, devices, submitted, actor):
@@ -206,7 +268,7 @@ def merge_reviews(active, devices, submitted, actor):
                 or any(not valid_cell_text(value, 160) for value in values.values())
                 or result not in ('', '正常', '异常') or not valid_cell_text(note, 1000)):
             raise RiskError(f'「{device["name"]}」的现场填写无效，请核对后重试。', 400)
-        normalized = {'values': {key: value.strip() for key, value in values.items() if value.strip()},
+        normalized = {'values': {key: value.strip() for key, value in values.items()},
                       'result': result, 'note': note.strip()}
         previous = reviews.get(identity, {})
         if review_content(previous) == normalized:
@@ -219,20 +281,31 @@ def merge_reviews(active, devices, submitted, actor):
     return reviews, active.get('review_version', 0) + int(changed)
 
 
-def require_complete(devices, reviews):
+def finalize_reviews(devices, reviews, actor, confirmations=None):
     if not devices:
         raise RiskError('没有可归档的巡检设备。', 409)
+    finalized = {}
     for device in devices:
-        review = review_content(reviews.get(device['id'], {}))
+        previous = reviews.get(device['id'], {})
+        review = review_content(previous)
         if (any(not valid_cell_text(value, 160) for value in review['values'].values())
                 or not valid_cell_text(review['note'], 1000)):
             raise RiskError(f'「{device["name"]}」的读数或备注含无效字符，请重新填写。', 400)
-        missing = next((item['name'] for item in parameters(device) if not item.get('read_only')
-                        and not review['values'].get(item['id'])), '')
-        if missing:
-            raise RiskError(f'「{device["name"]}」缺少「{missing}」现场读数。', 409)
-        if not review['result'] or (review['result'] == '异常' and not review['note']):
-            raise RiskError(f'请填写「{device["name"]}」的核对结论及异常备注。', 409)
+        rows = [item for item in parameters(device) if not item.get('read_only')]
+        values = dict(review['values'])
+        for item in rows:
+            if item['id'] not in values:
+                value = source_text(item['reference'])
+                if not valid_cell_text(value, 32767):
+                    raise RiskError(f'「{device["name"]}」的源数据含无效字符，请先核对。', 409)
+                values[item['id']] = value
+        complete = (bool(rows) and not any(section.get('missing') for section in device['sections'])
+                    and all(values.get(item['id'], '').strip() for item in rows))
+        confirmed_by = (confirmations or {}).get(device_profession(device), {}).get('actor') or actor
+        finalized[device['id']] = {**previous, 'values': values,
+            'result': review['result'] or ('正常' if complete else ''), 'note': review['note'],
+            'actor': previous.get('actor') or confirmed_by}
+    return finalized
 
 
 class DailyInspection:
@@ -303,7 +376,13 @@ class DailyInspection:
     def load(self, scope):
         return self.store.get_document(NS, 'building:' + scope) or {'active': None, 'history': []}
 
-    def order(self, owner, scope):
+    def order(self, owner, scope, view='ALL'):
+        if view != 'ALL':
+            key = hashlib.sha256(view.encode()).hexdigest()
+            order = self.store.get_document(NS, f'order-profession:{scope}:{owner}:{key}')
+            if order is not None:
+                return order['ids']
+            return self.order(owner, scope)
         order = self.store.get_document(NS, f'order:{scope}:{owner}')
         if order is not None:
             return order['ids']
@@ -326,20 +405,38 @@ class DailyInspection:
     def completed_rounds(state, duty):
         return sum(duty_key(row['duty']) == duty_key(duty) for row in state['history'])
 
+    @staticmethod
+    def history_with_keys(history, owner):
+        return [{**row, 'draft_key': hashlib.sha256(f'{owner}:{row["id"]}'.encode()).hexdigest()}
+                for row in history]
+
+    def recent_history(self, scopes, owner):
+        rows = [row for scope in scopes for row in self.load(scope)['history']]
+        return self.history_with_keys(sorted(rows, key=lambda row: row.get('completed') or 0, reverse=True)[:80], owner)
+
     def view(self, state, owner, duty):
         active = state.get('active')
         scope = duty['scope']
-        result = {'duty': duty, 'history': state['history'], 'completed_rounds': self.completed_rounds(state, duty),
+        history = self.history_with_keys(state['history'], owner)
+        result = {'duty': duty, 'history': history, 'completed_rounds': self.completed_rounds(state, duty),
                   'round_limit': ROUNDS_PER_SHIFT, 'active': None}
         if active:
             batch = active['batches'][scope]
+            selected = {device['id'] for device in selected_devices(active, scope)}
+            professions = list(dict.fromkeys(device_profession(device) for device in selected_devices(active, scope)))
             result['active'] = {'id': active['id'], 'duty': active['duty'], 'round': active['round'],
                                 'started': active['started'], 'pending': 'completed' in active,
                                 'draft_key': hashlib.sha256(f'{owner}:{active["id"]}'.encode()).hexdigest(),
                                 'reviews': active.get('reviews', {}), 'review_version': active.get('review_version', 0),
+                                'professions': active.get('professions'),
+                                'profession_confirmations': active.get('profession_confirmations', {}),
+                                'profession_versions': {profession: profession_version(active, scope, profession)
+                                    for profession in active.get('professions', [])},
+                                'orders': {view: self.order(owner, scope, view) for view in ['ALL', *professions]},
                                 'batch': {'batch': batch['batch'], 'count': len(batch['rows']),
                                           'devices': [{**device, 'parameters': parameters(device)}
-                                                      for device in self.ordered(batch, self.order(owner, scope))]}}
+                                                      for device in self.ordered(batch, self.order(owner, scope))
+                                                      if device['id'] in selected]}}
         return result
 
     def change(self, owner, actor, duty, action, data):
@@ -357,9 +454,19 @@ class DailyInspection:
                 completed = self.completed_rounds(state, duty)
                 if completed >= ROUNDS_PER_SHIFT:
                     raise RiskError('本楼本班两次巡检均已完成。', 409)
+                batches = self.capture([scope])
+                available = list(dict.fromkeys(device_profession(device) for device in batches[scope]['devices']))
+                requested = data.get('professions')
+                if requested is not None and (not isinstance(requested, list) or not requested
+                        or any(not isinstance(item, str) for item in requested)
+                        or len(requested) != len(set(requested)) or set(requested) - set(available)):
+                    raise RiskError('可巡检专业已变化，请刷新后重新选择。', 409)
                 state['active'] = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                                    'started': int(time.time() * 1000), 'duty': duty, 'round': completed + 1,
-                                   'batches': self.capture([scope])}
+                                   'batches': batches}
+                if requested is not None:
+                    state['active'].update(professions=[item for item in available if item in requested],
+                                           profession_confirmations={})
             elif action == 'cancel':
                 active = self.current(state, data.get('id'))
                 if ('completed' in active or type(data.get('review_version')) is not int
@@ -370,26 +477,69 @@ class DailyInspection:
                 if action == 'finish' and any(row['id'] == data.get('id') for row in state['history']):
                     return self.view(state, owner, duty)
                 active = self.current(state, data.get('id'))
-                devices = active['batches'][scope]['devices']
+                devices = selected_devices(active, scope)
                 if action == 'order':
                     ids = data.get('order')
+                    order_view = data.get('view', 'ALL')
                     if 'completed' in active:
                         raise RiskError('当前楼栋无法调整顺序。', 409)
-                    known = {row['id'] for row in devices}
+                    if not isinstance(order_view, str) or (order_view != 'ALL' and
+                            order_view not in {device_profession(row) for row in devices}):
+                        raise RiskError('排序专业已变化，请重新打开排序。', 409)
+                    known = {row['id'] for row in devices if order_view == 'ALL' or device_profession(row) == order_view}
                     if (not isinstance(ids, list) or any(not isinstance(value, str) for value in ids)
                             or len(ids) != len(known) or set(ids) != known):
                         raise RiskError('设备列表已变化，请重新打开再排序。', 409)
-                    self.store.put_document(NS, f'order:{scope}:{owner}', {'ids': ids})
+                    original = self.order(owner, scope, order_view)
+                    relevant = (device['id'] for device in active['batches'][scope]['devices']
+                                if order_view == 'ALL' or device_profession(device) == order_view)
+                    combined = list(dict.fromkeys([*original, *relevant]))
+                    selected_ids, reordered = set(ids), iter(ids)
+                    key = (f'order:{scope}:{owner}' if order_view == 'ALL' else
+                           f'order-profession:{scope}:{owner}:{hashlib.sha256(order_view.encode()).hexdigest()}')
+                    self.store.put_document(NS, key,
+                                            {'ids': [next(reordered) if item in selected_ids else item for item in combined]})
                     return self.view(state, owner, duty)
                 else:
                     if 'completed' not in active:
+                        profession = data.get('profession') if action == 'confirm-profession' else None
+                        chosen = active.get('professions')
+                        if action == 'confirm-profession':
+                            if (not isinstance(chosen, list) or profession not in chosen
+                                    or data.get('profession_version') != profession_version(active, scope, profession)):
+                                raise RiskError('该专业资料已变化，请刷新核对后再确认。', 409)
+                            allowed = {device['id'] for device in devices if device_profession(device) == profession}
+                            if not isinstance(data.get('reviews', {}), dict) or data.get('reviews', {}).keys() - allowed:
+                                raise RiskError('只能确认当前专业的设备。', 400)
+                        if action == 'finish' and isinstance(chosen, list) and not all_professions_confirmed(
+                                active, scope, active.get('profession_confirmations', {})):
+                            raise RiskError('还有已选专业尚未确认，请先逐个确认。', 409)
                         if action == 'finish' and (type(data.get('review_version')) is not int or
                                                    data['review_version'] != active.get('review_version', 0)):
                             raise RiskError('本轮核对资料已变化，请刷新并核对后再归档。', 409)
+                        before = active.get('reviews', {})
                         reviews, version = merge_reviews(active, devices, data.get('reviews', {}), actor)
-                        if action == 'finish':
-                            require_complete(devices, reviews)
+                        confirmations = dict(active.get('profession_confirmations', {}))
+                        for device in devices:
+                            if review_content(before.get(device['id'], {})) != review_content(reviews.get(device['id'], {})):
+                                confirmations.pop(device_profession(device), None)
+                        if action == 'finish' and isinstance(chosen, list) and not all(item in confirmations for item in chosen):
+                            raise RiskError('已确认的专业数据发生变化，请重新确认。', 409)
                         active.update(reviews=reviews, review_version=version)
+                        if action == 'confirm-profession':
+                            confirmed_version = profession_version(active, scope, profession)
+                            if confirmations.get(profession, {}).get('version') != confirmed_version:
+                                confirmations[profession] = {'actor': actor, 'confirmed': int(time.time() * 1000),
+                                    'version': confirmed_version}
+                                active['review_version'] += 1
+                            active['profession_confirmations'] = confirmations
+                            if all_professions_confirmed(active, scope, confirmations):
+                                active['reviews'] = finalize_reviews(devices, reviews, actor, confirmations)
+                                self.finish(state_key, state, active, actor, self.order(owner, scope))
+                        elif isinstance(chosen, list):
+                            active['profession_confirmations'] = confirmations
+                        if action == 'finish':
+                            active['reviews'] = finalize_reviews(devices, reviews, actor, confirmations)
                     elif action != 'finish':
                         raise RiskError('本轮已进入归档，现场数据已锁定。', 409)
                     if action == 'finish':
@@ -434,15 +584,17 @@ class DailyInspection:
                 'url': f'https://vnet.feishu.cn/base/{BASE}?table={ARCHIVE}&view={ARCHIVE_VIEW}&record={rid}'}
 
     def archive_history(self, scope, day):
-        try:
-            day = dt.date.fromisoformat(day).isoformat()
-        except (ValueError, TypeError):
-            raise RiskError('请选择有效巡检日期。', 400) from None
-        rows = self.records(ARCHIVE, {'filter': {'conjunction': 'and', 'conditions': [
-            {'field_name': '巡检范围', 'operator': 'is', 'value': [scope + '楼']},
-            {'field_name': '排班日期', 'operator': 'is', 'value': [day]}]}})
+        if day:
+            try:
+                day = dt.date.fromisoformat(day).isoformat()
+            except (ValueError, TypeError):
+                raise RiskError('请选择有效巡检日期。', 400) from None
+        conditions = [{'field_name': '巡检范围', 'operator': 'is', 'value': [scope + '楼']}]
+        if day:
+            conditions.append({'field_name': '排班日期', 'operator': 'is', 'value': [day]})
+        rows = self.records(ARCHIVE, {'filter': {'conjunction': 'and', 'conditions': conditions}})
         summaries = [self.archive_summary(row, scope) for row in rows]
-        return sorted((row for row in summaries if row and row['date'] == day),
+        return sorted((row for row in summaries if row and (not day or row['date'] == day)),
                       key=lambda row: row['completed'] or 0, reverse=True)
 
     def archive_record(self, scope, rid):
@@ -571,7 +723,13 @@ class DailyInspection:
         scopes = list(active['batches'])
         reviews = active.get('reviews')
         counts = {} if reviews is None else {
-            '现场已核对设备数': len(reviews),
+            '现场已核对设备数': sum(
+                bool(parameters(device)) and not any(section.get('missing') for section in device['sections'])
+                and review.get('result') in ('正常', '异常')
+                and all(item.get('read_only') or review.get('values', {}).get(item['id'], '').strip()
+                        for item in parameters(device))
+                for scope in active['batches'] for device in selected_devices(active, scope)
+                for review in [reviews.get(device['id'], {})]),
             '异常设备数': sum(review['result'] == '异常' for review in reviews.values()),
         }
         expected = {
@@ -601,7 +759,7 @@ class DailyInspection:
                 '完成时间': active['completed'],
                 '源数据批次': '；'.join(scope + '楼 ' + formatted_time(batch['batch'])
                                     for scope, batch in active['batches'].items()),
-                '设备数': sum(len(batch['devices']) for batch in active['batches'].values()),
+                '设备数': sum(len(selected_devices(active, scope)) for scope in active['batches']),
                 '源表记录数': sum(len(batch['rows']) for batch in active['batches'].values()),
                 '巡检快照': [{'file_token': active['file_token']}],
             }
@@ -649,7 +807,9 @@ def workbook(active, orders):
 
     summary, readings, reviews = [], [], []
     for scope, batch in active['batches'].items():
-        for order, device in enumerate(DailyInspection.ordered(batch, orders.get(scope, [])), 1):
+        selected = {device['id'] for device in selected_devices(active, scope)}
+        for order, device in enumerate((item for item in DailyInspection.ordered(batch, orders.get(scope, []))
+                                        if item['id'] in selected), 1):
             for section in device['sections']:
                 prefix = (scope + '楼', order, device['name'], device['profession'], section['location'], section['form'])
                 for label, value in section['values'].items():
@@ -658,39 +818,170 @@ def workbook(active, orders):
                 readings.append((scope + '楼', order, device['name'], device['profession'], point['point_id'],
                                  point['name'], point['value'], formatted_time(point['sampled']), point['path'],
                                  point['template'], point['sheet'], point['cell'], point['integrity'], point['note']))
-            review = active.get('reviews', {}).get(device['id'])
-            if review:
-                rows = parameters(device)
-                points = {point['id']: point for point in device['points']}
-                prefix = (scope + '楼', order, device['id'], device['name'], device['profession'])
-                outcome = (review['result'], review['note'], review.get('actor'))
-                for item in rows:
-                    section = device['sections'][item['section']] if 'section' in item else None
-                    point = points.get(item.get('point'), {})
-                    location = section['location'] if section is not None else point.get('location')
-                    source = section['form'] if section is not None else point.get('point_id')
-                    status = '配置停用' if item.get('read_only') else ''
-                    reviews.append((*prefix, location, source, item['name'], item['reference'],
-                                    review['values'].get(item['id']), status, *outcome))
-                if not rows:
-                    reviews.append((*prefix, '', '', '', '', '', '无可填参数', *outcome))
+            review = active.get('reviews', {}).get(device['id']) or {'values': {}, 'result': '', 'note': ''}
+            rows = parameters(device)
+            points = {point['id']: point for point in device['points']}
+            prefix = (scope + '楼', order, device['id'], device['name'], device['profession'])
+            outcome = (review['result'], review['note'], review.get('actor'))
+            for item in rows:
+                section = device['sections'][item['section']] if 'section' in item else None
+                point = points.get(item.get('point'), {})
+                location = section['location'] if section is not None else point.get('location')
+                source = section['form'] if section is not None else point.get('point_id')
+                status = ('配置停用' if item.get('read_only') else
+                          '源数据不完整：' + section['missing'] if section and section.get('missing') else '')
+                reviews.append((*prefix, location, source, item['name'], item['reference'],
+                                review['values'].get(item['id'], source_text(item['reference'])) or None, status, *outcome))
+            if not rows:
+                reviews.append((*prefix, '', '', '', '', '', '无可填参数', *outcome))
     duty = active.get('duty', {})
     sheet('巡检信息', ('巡检编号', '开始人员', '完成人员', '排班日期', '班次', '巡检轮次',
-                     '开始时间', '完成时间', '楼栋', '源表批次', '源表行数', '班组'),
+                     '开始时间', '完成时间', '楼栋', '源表批次', '源表行数', '班组', '巡检专业'),
           [(active['id'], active.get('started_by') or active['actor'], active['actor'] if active.get('completed') else '',
             duty.get('date'), duty.get('shift'), active.get('round'),
             formatted_time(active['started']), formatted_time(active.get('completed')),
-            scope + '楼', formatted_time(batch['batch']), len(batch['rows']), duty.get('group', ''))
+            scope + '楼', formatted_time(batch['batch']), len(batch['rows']), duty.get('group', ''),
+            '、'.join(active.get('professions') or sorted({device_profession(device) for device in batch['devices']})))
            for scope, batch in active['batches'].items()])
+    if isinstance(active.get('professions'), list):
+        confirmations = active.get('profession_confirmations', {})
+        sheet('专业确认', ('专业', '确认人员', '确认时间', '资料版本'),
+              [(profession, confirmations.get(profession, {}).get('actor', ''),
+                formatted_time(confirmations.get(profession, {}).get('confirmed')),
+                confirmations.get(profession, {}).get('version', '')) for profession in active['professions']])
     sheet('DE巡检表', ('楼栋','顺序','设备','专业','位置','巡检表单','参数','读数','数据完整性','缺少源数据','备注'), summary)
     sheet('测点读数', ('楼栋','顺序','设备','专业','测点ID','测点名称','读数','采样时间','测点路径','模板','页签','单元格','数据完整性','备注'), readings)
-    if 'reviews' in active:
-        sheet(REVIEW_SHEET, REVIEW_COLUMNS, reviews)
+    sheet(REVIEW_SHEET, REVIEW_COLUMNS, reviews)
     for scope, batch in active['batches'].items():
         rows = batch['rows']
         columns = list(dict.fromkeys(key for row in rows for key in row['fields']))
         sheet(scope + '楼源表快照', ['源记录ID', *columns],
               ([row['record_id'], *(row['fields'].get(key) for key in columns)] for row in rows))
+    stream = io.BytesIO()
+    book.save(stream)
+    return stream.getvalue()
+
+
+def inspection_report(service, scope, day, owner, actor, *, include_active=False, drafts=None, active_id=None):
+    """Read one duty date's archived sheets and, when authorized, the current snapshot."""
+    try:
+        day = dt.date.fromisoformat(day).isoformat()
+    except (ValueError, TypeError):
+        raise RiskError('请选择有效巡检日期。', 400) from None
+    if scope not in SOURCES:
+        raise RiskError('请选择有效的巡检楼栋。', 400)
+    if not isinstance(drafts, dict):
+        raise RiskError('本机填写资料格式无效。', 400)
+    with service.locks[scope]:
+        state = service.load(scope)
+        tracked_active = copy.deepcopy(state.get('active'))
+        active = tracked_active if include_active else None
+        order = service.order(owner, scope) if active else []
+    if drafts:
+        if (not active or active.get('id') != active_id or active.get('duty', {}).get('date') != day
+                or 'completed' in active):
+            raise RiskError('本机填写对应的巡检已变化，请刷新并核对后再查看或导出。', 409)
+        before = active.get('reviews', {})
+        reviews, version = merge_reviews(active, selected_devices(active, scope), drafts,
+                                         actor + '（本机未共享）')
+        if isinstance(active.get('professions'), list):
+            confirmations = dict(active.get('profession_confirmations', {}))
+            for device in selected_devices(active, scope):
+                if review_content(before.get(device['id'], {})) != review_content(reviews.get(device['id'], {})):
+                    confirmations.pop(device_profession(device), None)
+            active['profession_confirmations'] = confirmations
+        active.update(reviews=reviews, review_version=version)
+
+    archives = service.archive_history(scope, day)
+    result = {'scope': scope, 'date': day, 'captured': int(time.time() * 1000), 'rounds': []}
+    cells = 0
+
+    def collect(summary, content):
+        nonlocal cells
+        with archived_workbook(content, summary['round_id'], scope) as book:
+            sheets = []
+            for sheet in book.worksheets:
+                if sheet.max_row > MAX_ROWS or sheet.max_column > 200:
+                    raise RiskError('巡检附件数据过大，请核对原记录后重试。', 413)
+                cells += sheet.max_row * sheet.max_column
+                if cells > 1000000:
+                    raise RiskError('当日巡检数据过大，请分开查看原记录。', 413)
+                rows = []
+                for row in sheet.iter_rows(values_only=True):
+                    rows.append([value.isoformat(sep=' ') if isinstance(value, dt.datetime)
+                                 else value.isoformat() if isinstance(value, (dt.date, dt.time))
+                                 else value if isinstance(value, (str, int, float, bool)) or value is None
+                                 else str(value) for value in row])
+                sheets.append({'name': sheet.title, 'rows': rows})
+            result['rounds'].append({**summary, 'sheets': sheets})
+
+    archived_ids = set()
+    for summary in archives:
+        _, confirmed, attachment, _ = service.archive_record(scope, summary['id'])
+        if any(confirmed.get(key) != summary.get(key) for key in ('round_id', 'date', 'scope', 'shift', 'round')):
+            raise RiskError('巡检归档在读取时发生变化，请刷新后重试。', 409)
+        if confirmed['round_id'] in archived_ids:
+            raise RiskError('发现重复巡检归档，请先核对原记录。', 409)
+        archived_ids.add(confirmed['round_id'])
+        is_pending = bool(tracked_active and 'completed' in tracked_active and tracked_active['id'] == confirmed['round_id'])
+        if is_pending and tracked_active.get('file_token') != attachment.get('file_token'):
+            raise RiskError('本轮巡检归档附件尚未核验，请稍后重试。', 409)
+        collect({**confirmed, 'shift': (confirmed.get('shift') or '').removesuffix('班'),
+                 'status': '待归档核验' if is_pending else '已归档', 'local_draft': False},
+                service.download_archive(attachment))
+    if active and active.get('duty', {}).get('date') == day:
+        if active['id'] in archived_ids:
+            if drafts:
+                raise RiskError('本轮已归档，本机修改尚未保存，请刷新核对。', 409)
+        else:
+            summary = {'round_id': active['id'], 'scope': scope, 'date': day,
+                       'shift': active['duty']['shift'], 'round': active['round'],
+                       'actor': active.get('actor', ''), 'status': '待归档' if 'completed' in active else '进行中',
+                       'local_draft': bool(drafts)}
+            collect(summary, workbook(active, {scope: active.get('archive_order', order)}))
+    result['rounds'].sort(key=lambda item: (0 if item.get('shift') == '白' else 1,
+                                            item.get('round') or 0, item['round_id']))
+    return result
+
+
+def inspection_report_workbook(report):
+    from openpyxl import Workbook
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Font, PatternFill
+    book = Workbook(write_only=True)
+    titles = set()
+    overview = book.create_sheet('当日概览')
+    overview.append(['楼栋', '排班日期', '班次', '轮次', '状态', '人员', '包含本机未共享填写'])
+    for item in report['rounds']:
+        values = [report['scope'] + '楼', report['date'], item['shift'], item['round'],
+                  item['status'], item.get('actor', ''), '是' if item['local_draft'] else '否']
+        cells = [WriteOnlyCell(overview, value=value) for value in values]
+        for cell in cells:
+            if isinstance(cell.value, str):
+                cell.data_type = 's'
+        overview.append(cells)
+        for source in item['sheets']:
+            base = re.sub(r'[\\/*?:\[\]]', '_', f'{item["shift"]}{item["round"]}-{source["name"]}')[:27]
+            title, suffix = base, 1
+            while title in titles:
+                suffix += 1
+                title = base[:27] + f'-{suffix}'
+            titles.add(title)
+            target = book.create_sheet(title)
+            target.freeze_panes = 'A2'
+            for index, row in enumerate(source['rows']):
+                cells = []
+                for value in row:
+                    if index == 0 and source['name'] == REVIEW_SHEET and value == '现场读数':
+                        value = '巡检数据'
+                    cell = WriteOnlyCell(target, value=value)
+                    if isinstance(value, str):
+                        cell.data_type = 's'
+                    if index == 0:
+                        cell.fill = PatternFill('solid', fgColor='174785')
+                        cell.font = Font(color='FFFFFF', bold=True)
+                    cells.append(cell)
+                target.append(cells)
     stream = io.BytesIO()
     book.save(stream)
     return stream.getvalue()
@@ -719,57 +1010,150 @@ def install_daily_inspection(app, controller, runtime):
                                                     asyncio.to_thread(auth.session_scopes, session))
             owner = user.get('open_id')
             scopes = [scope for scope in SOURCES if scope in scopes or 'ALL' in scopes]
-            if not owner or 'daily' not in granted or not scopes:
+            if not owner or not scopes:
                 raise RiskError('需要每日任务权限及 D 楼或 E 楼范围。', 403)
+            can_manage = 'daily' in granted
+            home_scopes = await asyncio.to_thread(inspection_history_scopes, auth, session)
+            history_scopes = scopes if can_manage else home_scopes
+            if not can_manage and not history_scopes:
+                raise RiskError('没有可查看的巡检记录。', 403)
+            from .portal_service import LI_SHILONG_OPEN_ID
+            viewer = owner == LI_SHILONG_OPEN_ID and not session.get('impersonation') and session.get('source') != 'admin_impersonation'
+            local_write = bool(home_scopes and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
+            selected_scope = request.query_params.get('view_scope', '')
+            if selected_scope and not ((viewer and selected_scope in scopes) or selected_scope in home_scopes
+                                       or (can_manage and selected_scope in scopes)):
+                raise RiskError('没有该楼栋的当前巡检查看权限。', 403)
             svc = await asyncio.to_thread(manager)
             action = request.path_params.get('action', '')
+            report_action = action in {'day-sheet', 'day-export'}
             if request.method == 'POST':
+                local_actions = {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession', 'history-edit'}
+                if not can_manage and not report_action and not (local_write and action in local_actions):
+                    raise RiskError('当前账号仅可查看本楼历史巡检。', 403)
                 source = urlsplit(request.headers.get('origin') or request.headers.get('referer') or '')
                 expected = urlsplit(controller._request_base_url(request))
                 if (source.scheme, source.netloc) != (expected.scheme, expected.netloc) or request.headers.get('sec-fetch-site') == 'cross-site':
                     raise RiskError('请从当前站点办理巡检。', 403)
                 try:
                     payload = await controller._read_json_request(
-                        request, max_bytes=4 * 1024 * 1024 if action in {'draft', 'finish', 'history-edit'} else 128 * 1024)
+                        request, max_bytes=4 * 1024 * 1024 if action in {'draft', 'finish', 'history-edit', 'day-sheet', 'day-export'} else 128 * 1024)
                 except ValueError as error:
                     raise RiskError('巡检资料格式无效或超过提交大小限制。', 400) from error
-                if not isinstance(payload, dict) or (action != 'start' and not isinstance(payload.get('id'), str)):
+                if not isinstance(payload, dict) or (action != 'start' and not report_action and not isinstance(payload.get('id'), str)):
                     raise RiskError('巡检请求格式无效。', 400)
+            if report_action:
+                if request.method != 'POST':
+                    raise RiskError('巡检操作不存在。', 404)
+                scope = payload.get('scope')
+                if scope not in history_scopes:
+                    raise RiskError('没有该楼栋的巡检权限。', 403)
+                submitted = payload.get('drafts', {})
+                duty = None
+                if can_manage:
+                    from .personnel_source import daily_roster
+                    try:
+                        duty = await asyncio.to_thread(resolve_duty, lambda date: daily_roster(runtime.service, date), user, scopes)
+                    except RiskError:
+                        pass  # Archived records remain readable even when the roster is temporarily unavailable.
+                can_write_scope = bool(not session.get('impersonation') and session.get('source') != 'admin_impersonation'
+                    and ((duty and duty['scope'] == scope) or (local_write and scope in home_scopes)))
+                if submitted and not can_write_scope:
+                    raise RiskError('只有本楼有权限的人员可以带入本机填写。', 403)
+                report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
+                    user.get('name') or owner, include_active=viewer or can_write_scope or scope in home_scopes,
+                    drafts=submitted, active_id=payload.get('active_id'))
+                if action == 'day-export':
+                    if not report['rounds']:
+                        raise RiskError('该日期没有可导出的巡检记录。', 404)
+                    content = await asyncio.to_thread(inspection_report_workbook, report)
+                    filename = quote(f'{scope}楼-{report["date"]}-白夜班巡检.xlsx')
+                    return Response(content, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        headers={'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
+                                 'Cache-Control': 'private, no-store'})
+                return JSONResponse({'ok': True, 'data': report}, headers={'Cache-Control': 'private, no-store'})
             if action in {'history', 'history-record', 'history-edit'}:
                 scope = request.query_params.get('scope')
-                if scope not in scopes:
+                if scope not in history_scopes:
                     raise RiskError('没有该楼栋的巡检权限。', 403)
+                can_edit_history = bool((can_manage or (local_write and scope in home_scopes))
+                                        and not session.get('impersonation')
+                                        and session.get('source') != 'admin_impersonation')
                 if request.method == 'GET' and action == 'history':
                     data = await asyncio.to_thread(svc.archive_history, scope, request.query_params.get('date'))
                 elif request.method == 'GET' and action == 'history-record':
                     data = await asyncio.to_thread(svc.archive_detail, scope, request.query_params.get('id'))
-                    data['can_edit'] = not session.get('impersonation')
                 elif request.method == 'POST' and action == 'history-edit':
-                    if session.get('impersonation'):
-                        raise RiskError('临时代登录不能修改历史巡检。', 403)
+                    if not can_edit_history:
+                        raise RiskError('当前账号不能修改该楼栋的历史巡检。', 403)
                     data = await asyncio.to_thread(svc.edit_archive, scope, payload['id'], payload, user.get('name') or owner)
                 else:
                     raise RiskError('巡检操作不存在。', 404)
+                if action in {'history-record', 'history-edit'}:
+                    data['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{data["id"]}'.encode()).hexdigest()
+                    data['can_edit'] = can_edit_history
                 return JSONResponse({'ok': True, 'data': {'history': data} if action == 'history' else data},
                                     headers={'Cache-Control': 'private, no-store'})
+            if not can_manage and not local_write and (request.method != 'GET' or action not in ('', 'status', 'source', 'xlsx')):
+                raise RiskError('当前账号仅可查看本楼巡检。', 403)
             from .personnel_source import daily_roster
+            duty = None
             try:
-                duty = await asyncio.to_thread(resolve_duty, lambda date: daily_roster(runtime.service, date), user, scopes)
+                if can_manage:
+                    duty = await asyncio.to_thread(resolve_duty, lambda date: daily_roster(runtime.service, date), user, scopes)
             except RiskError as error:
-                if request.method != 'GET' or action or error.status != 503:
+                if (viewer or local_write) and (request.method == 'GET' or local_write):
+                    duty = None
+                elif request.method != 'GET' or action or error.status != 503:
                     raise
-                return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': [],
-                    'history_scopes': scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT,
-                    'duty_warning': str(error)}}, headers={'Cache-Control': 'private, no-store'})
+                else:
+                    recent = await asyncio.to_thread(svc.recent_history, history_scopes, owner)
+                    return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': recent,
+                        'history_scopes': history_scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT,
+                        'duty_warning': str(error)}}, headers={'Cache-Control': 'private, no-store'})
+            roster_scope = duty['scope'] if duty else ''
+            if selected_scope and not viewer and selected_scope not in home_scopes and selected_scope != roster_scope:
+                raise RiskError('没有该楼栋的当前巡检查看权限。', 403)
+            if local_write and selected_scope in home_scopes and selected_scope != roster_scope:
+                duty = await asyncio.to_thread(building_duty, lambda date: daily_roster(runtime.service, date), selected_scope)
+            elif not duty and local_write:
+                duty = await asyncio.to_thread(building_duty, lambda date: daily_roster(runtime.service, date), home_scopes[0])
+            can_edit = True
+            if viewer and request.method == 'POST' and action == 'order' and selected_scope:
+                can_edit = bool(roster_scope == selected_scope or (local_write and selected_scope in home_scopes))
+                if not can_edit:
+                    duty = await asyncio.to_thread(building_duty, lambda date: daily_roster(runtime.service, date), selected_scope)
+            if (viewer or home_scopes) and request.method == 'GET':
+                scope = selected_scope or (duty['scope'] if duty else (scopes[0] if viewer else home_scopes[0]))
+                can_edit = bool(duty and duty['scope'] == scope)
+                if not can_edit:
+                    date, shift = duty_period(dt.datetime.now(CN))
+                    duty = {'scope': scope, 'date': date, 'shift': shift}
             if not duty:
                 if request.method == 'GET' and action in ('', 'status'):
-                    return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': [],
-                        'history_scopes': scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT}},
+                    recent = await asyncio.to_thread(svc.recent_history, history_scopes, owner)
+                    return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': recent,
+                        'history_scopes': history_scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT}},
                         headers={'Cache-Control': 'private, no-store'})
                 raise RiskError('没有可办理的 D 楼或 E 楼当班排班。', 403)
             scope = duty['scope']
+            if request.method == 'POST' and selected_scope and selected_scope != scope:
+                raise RiskError('只能办理本人当班楼栋的巡检。', 403)
             if request.method == 'GET':
                 state = await asyncio.to_thread(svc.load, scope)
+                if action == 'source':
+                    if not viewer and scope not in home_scopes and not can_manage:
+                        raise RiskError('没有当前参考数据的查看权限。', 403)
+                    batches = await asyncio.to_thread(svc.capture, [scope])
+                    batch = batches[scope]
+                    order = await asyncio.to_thread(svc.order, owner, scope)
+                    professions = list(dict.fromkeys(device_profession(device) for device in batch['devices']))
+                    profession_orders = await asyncio.gather(*(asyncio.to_thread(svc.order, owner, scope, name)
+                                                               for name in professions))
+                    return JSONResponse({'ok': True, 'data': {'scope': scope, 'batch': batch['batch'],
+                        'count': len(batch['rows']), 'orders': {'ALL': order, **dict(zip(professions, profession_orders))},
+                        'devices': [{**device, 'parameters': parameters(device)}
+                            for device in svc.ordered(batch, order)]}}, headers={'Cache-Control': 'private, no-store'})
                 if action == 'xlsx':
                     active = svc.current(state, request.query_params.get('id'))
                     order = active.get('archive_order')
@@ -781,7 +1165,7 @@ def install_daily_inspection(app, controller, runtime):
                                  'Cache-Control': 'private, no-store'})
                 if action == 'status':
                     active = state.get('active')
-                    if (active and request.query_params.get('id') == active['id']
+                    if (not viewer and active and request.query_params.get('id') == active['id']
                             and request.query_params.get('version') == str(active.get('review_version', 0))
                             and request.query_params.get('pending') == str(int('completed' in active))
                             and request.query_params.get('date') == duty['date']
@@ -792,10 +1176,13 @@ def install_daily_inspection(app, controller, runtime):
                     raise RiskError('巡检操作不存在。', 404)
                 data = await asyncio.to_thread(svc.view, state, owner, duty)
             else:
-                if action not in {'start', 'order', 'draft', 'cancel', 'finish'}:
+                if action not in {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession'}:
                     raise RiskError('巡检操作不存在。', 404)
                 data = await asyncio.to_thread(svc.change, owner, user.get('name') or owner, duty, action, payload)
-            data['history_scopes'] = scopes
+            data['history_scopes'] = history_scopes
+            if viewer or home_scopes:
+                local_views = list(dict.fromkeys(value for value in (roster_scope, *home_scopes) if value))
+                data.update(view_scopes=scopes if viewer else local_views if len(local_views)>1 else [], view_scope=scope, can_edit=can_edit)
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
         except RiskError as error:
             return JSONResponse({'ok': False, 'error': str(error)}, status_code=error.status)

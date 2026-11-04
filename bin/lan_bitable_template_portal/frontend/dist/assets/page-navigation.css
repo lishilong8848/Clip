@@ -30,6 +30,7 @@
   width: 76px;
   height: 40px;
 }
+#page-back-slot:empty { pointer-events: none; }
 #page-navigation .vnet-back-button {
   box-sizing: border-box;
   display: inline-flex;

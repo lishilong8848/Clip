@@ -176,6 +176,18 @@ async def module_denial(request, controller, runtime):
     request.state.allowed_modules = allowed
     if needed & allowed:
         return None
+    if ((request.method == 'GET' and path in {
+            '/daily-inspection', '/api/daily-inspection', '/api/daily-inspection/status',
+            '/api/daily-inspection/history', '/api/daily-inspection/history-record',
+            '/api/daily-inspection/source', '/api/daily-inspection/xlsx'})
+            or (request.method == 'POST' and path in {
+                '/api/daily-inspection/day-sheet', '/api/daily-inspection/day-export',
+                '/api/daily-inspection/start', '/api/daily-inspection/order', '/api/daily-inspection/draft',
+                '/api/daily-inspection/cancel', '/api/daily-inspection/finish', '/api/daily-inspection/confirm-profession',
+                '/api/daily-inspection/history-edit'})):
+        from .daily_inspection import inspection_history_scopes
+        if await asyncio.to_thread(inspection_history_scopes, runtime.auth_manager, session):
+            return None
     if needed == frozenset({'risk_inspection'}):
         from .risk_inspection_routes import risk_task_access
         rid = request.query_params.get('id', '') if path.startswith('/risk-inspections') else ''

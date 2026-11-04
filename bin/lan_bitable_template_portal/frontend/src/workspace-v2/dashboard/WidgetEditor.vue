@@ -6,14 +6,14 @@
         <NFormItem v-if="presentationOptions(draft.kind).length>1" label="组件样式"><NSelect v-model:value="draft.presentation" :options="presentationOptions(draft.kind)" /></NFormItem>
         <NFormItem v-if="draft.kind==='tasks'" label="待办业务及排列顺序"><TodoKindPicker :value="draft.taskKinds||[]" :user="user" @update:value="draft.taskKinds=$event" /></NFormItem>
         <NFormItem v-if="draft.kind==='notice_actions'" label="默认通告分类"><NSelect v-model:value="draft.module" :options="taskOptions(user).filter(item=>NOTICE_IDS.includes(item.value))" /></NFormItem>
-        <NFormItem v-if="draft.kind==='module'" label="完整业务模块"><NSelect v-model:value="draft.module" :options="navigationModules(user.modules||[]).map(item=>({value:item.id,label:item.label}))" filterable /></NFormItem>
+        <NFormItem v-if="draft.kind==='module'" label="完整业务模块"><NSelect v-model:value="draft.module" :options="navigationModules(user.modules||[],false,canViewInspectionHistory(user)).map(item=>({value:item.id,label:item.label}))" filterable /></NFormItem>
         <NFormItem label="组件宽度"><NSelect v-model:value="draft.w" :options="[{label:'紧凑 · 1/3',value:4},{label:'标准 · 1/2',value:6},{label:'宽幅 · 2/3',value:8},{label:'整行',value:12}]" /></NFormItem>
         <NFormItem label="组件高度"><NSelect v-model:value="draft.h" :options="draft.kind==='module'?[{label:'紧凑',value:6},{label:'常规',value:10},{label:'标准',value:12},{label:'完整工作区',value:14},{label:'加高工作区',value:18},{label:'超高工作区',value:24},{label:'最大工作区',value:30}]:[{label:'紧凑',value:3},{label:'标准',value:5},{label:'加高',value:7},{label:'超高',value:9}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='notices'" label="统计口径"><NSelect v-model:value="draft.metric" :options="[{label:'当前进行中',value:'ongoing'},{label:'本月待发计划',value:'pending'}]" /></NFormItem>
         <NFormItem v-if="draft.kind==='events'" label="时间范围"><NSelect v-model:value="draft.period" :options="[{label:'本周',value:'week'},{label:'本月',value:'month'},...(draft.display==='calendar'?[{label:'本年',value:'year'}]:[])]" /></NFormItem>
         <NFormItem v-if="['events','notices'].includes(draft.kind)" label="展示方式"><NSelect v-model:value="draft.display" :options="displayOptions(draft.kind)" /></NFormItem>
       </div>
-      <NFormItem v-if="draft.kind==='shortcuts'" label="常用功能"><NSelect v-model:value="draft.links" multiple :options="navigationModules(user.modules||[]).map(m=>({label:m.label,value:m.id}))" filterable /></NFormItem>
+      <NFormItem v-if="draft.kind==='shortcuts'" label="常用功能"><NSelect v-model:value="draft.links" multiple :options="navigationModules(user.modules||[],false,canViewInspectionHistory(user)).map(m=>({label:m.label,value:m.id}))" filterable /></NFormItem>
       <NAlert v-if="error" type="error" :bordered="false">{{ error }}</NAlert>
       <div class="v2-editor-footer"><NButton @click="$emit('close')">取消</NButton><NButton type="primary" attr-type="submit">应用设置</NButton></div>
     </NForm>
@@ -24,6 +24,7 @@ import { ref,watch } from 'vue';
 import { NAlert,NButton,NForm,NFormItem,NInput,NModal,NSelect } from 'naive-ui';
 import type { Dict } from '../client';
 import { navigationModules,NOTICE_IDS } from '../modules';
+import { canViewInspectionHistory } from '../../inspectionAccess';
 import { displayOptions,presentationOptions,taskOptions,type Widget } from './layout';
 import TodoKindPicker from '../TodoKindPicker.vue';
 const props=defineProps<{value:Widget|null;user:Dict;scopes:{value:string;label:string}[]}>();

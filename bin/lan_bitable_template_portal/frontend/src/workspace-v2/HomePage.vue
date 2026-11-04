@@ -46,6 +46,7 @@ import {widgetScopeOptions,selectedWidgetScopes} from './dashboard/widgetScopes'
 import MobileBrief from './dashboard/MobileBrief.vue';
 import TemplatePreview from './dashboard/TemplatePreview.vue';
 import { allowedKind,catalog,chartTemplates,motionTemplates,defaults,sanitize,layoutKey,widget,mandatoryCheck,reorderWidgets,type Layout,type Widget,type WidgetKind } from './dashboard/layout';
+import { canViewInspectionHistory } from '../inspectionAccess';
 import { useLayoutSync } from './useLayoutSync';
 const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;initialKind?:string}>();
 const emit=defineEmits<{open:[url:string]}>();
@@ -79,7 +80,7 @@ function chooseBuildings(item:Widget,values:string[]){
 const librarySearch=ref('');
 const matches=(entry:{title:string;description:string})=>(entry.title+entry.description).toLowerCase().includes(librarySearch.value.trim().toLowerCase());
 const available=computed(()=>catalog.filter(c=>c.kind!=='module'&&allowedKind(c.kind,props.user)&&matches(c)&&(c.kind!=='pre_shift'||!layout.value.widgets.some(w=>w.kind==='pre_shift'))));
-const fullModules=computed(()=>allowedKind('module',props.user)?navigationModules(props.user.modules||[]).filter(entry=>!layout.value.widgets.some(item=>item.kind==='module'&&item.module===entry.id)&&(entry.label+'完整业务模块').includes(librarySearch.value.trim())):[]);
+const fullModules=computed(()=>allowedKind('module',props.user)?navigationModules(props.user.modules||[],false,canViewInspectionHistory(props.user)).filter(entry=>!layout.value.widgets.some(item=>item.kind==='module'&&item.module===entry.id)&&(entry.label+'完整业务模块').includes(librarySearch.value.trim())):[]);
 const availableTemplates=computed(()=>motionTemplates.filter(c=>allowedKind(c.kind,props.user)&&matches(c)));
 const availableCharts=computed(()=>chartTemplates.filter(c=>allowedKind(c.kind,props.user)&&matches(c)));
 const ordered=()=>[...layout.value.widgets].sort((a,b)=>a.y-b.y||a.x-b.x);

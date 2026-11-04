@@ -88,6 +88,7 @@ import { Activity, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate } from './modules';
+import { canViewInspectionHistory } from '../inspectionAccess';
 import { personaFor } from './persona';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack, runNavigationAction } from './navigation';
@@ -171,6 +172,7 @@ const identityKey = computed(() => JSON.stringify([user.value.open_id, user.valu
 const toolManagementAvailable = computed(() => user.value.tool_management_enabled === true);
 const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&granted.value.includes(item.permission||item.id)&&(item.id!=='tool_management'||toolManagementAvailable.value))})).filter(group=>group.items.length));
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
+const inspectionHistory = computed(()=>canViewInspectionHistory(user.value));
 const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
 const homeViews = ['home', 'tasks', 'functions'];
@@ -178,7 +180,7 @@ const mobileActive = computed(() => route.value.pathname === '/' && (route.value
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
-const denied = computed(() => loggedIn.value && !publicLink.value && (activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const denied = computed(() => loggedIn.value && !publicLink.value && (activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');
@@ -204,7 +206,7 @@ const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',eng
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
 const selectedMenu = computed(() => activeModule.value==='accounts'?'settings:'+(route.value.searchParams.get('tab')||'permissions'):NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
-const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value).filter(m=>
+const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(m=>
   m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest') &&
   (m.id!=='daily_inspection'||scopes.value.some(scope=>['ALL','D','E'].includes(scope.value)))));
 const menuOptions = computed(() => [
