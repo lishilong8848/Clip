@@ -12,7 +12,11 @@
         <tr v-for="(row,ri) in grid" :key="ri">
           <template v-for="cell in row" :key="cell.address">
             <td v-if="!cell.hidden" :rowspan="cell.rowspan" :colspan="cell.colspan" :class="{reading:!!cell.value,missing:!!cell.value && !display(cell.value.value)}">
-              <input v-if="cell.value && editTargets(cell.value).length" :value="currentValue(cell.value)" :placeholder="cell.value.conflict ? '读数不一致，请核对' : '待填'" :aria-label="cell.value.parameter+' '+cell.address"
+              <select v-if="cell.value && editTargets(cell.value).length && statusTarget(cell.value)" :value="currentValue(cell.value)" :aria-label="cell.value.parameter+' '+cell.address" data-native-select @change="update(cell.value,$event)">
+                <option v-if="currentValue(cell.value) && !['√','×','△'].includes(currentValue(cell.value))" :value="currentValue(cell.value)">原值 {{ currentValue(cell.value) }}（待核对）</option>
+                <option value="">待核对</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option>
+              </select>
+              <input v-else-if="cell.value && editTargets(cell.value).length" :value="currentValue(cell.value)" :placeholder="cell.value.conflict ? '读数不一致，请核对' : '待填'" :aria-label="cell.value.parameter+' '+cell.address"
                 @input="update(cell.value,$event)">
               <span v-else-if="cell.value">{{ cell.value.conflict ? '读数不一致' : display(cell.value.value) || '待填' }}</span><span v-else>{{ display(cell.text) }}</span>
             </td>
@@ -31,7 +35,7 @@ type FormSheet={name:string;rows:Value[][];merges:string[]};
 type Template={scope:string;profession:string;name:string;sheets:FormSheet[]};
 type Reading={template:string;sheet:string;cell:string;value:Value;device:string;point_id:string;parameter:string;read_only:boolean;kind:'point'|'section'|'paired';location?:string;form?:string;members?:Reading[];conflict?:boolean};
 type Round={round_id:string;shift:string;round:number;original_cells:Reading[]};
-type Device={id:string;sections:{location:string;form:string}[];points:{id:string;point_id:string}[];parameters:{id:string;reference:Value;read_only?:boolean}[]};
+type Device={id:string;sections:{location:string;form:string}[];points:{id:string;point_id:string}[];parameters:{id:string;reference:Value;read_only?:boolean;value_type?:string}[]};
 type Active={id:string;pending:boolean;batch:{devices:Device[];form_devices?:Device[]};reviews:Record<string,{values:Record<string,string>}>};
 type Draft={values:Record<string,string>};
 const props=defineProps<{templates:Template[];rounds:Round[];active?:Active;drafts:Record<string,Draft>;readOnly:boolean;zoom:number}>();
@@ -78,7 +82,7 @@ function editTargets(reading:Reading){
   const round=props.rounds.find(item=>item.round_id===active.id && item.original_cells?.includes(reading));
   if(!round)return [];
   const members=reading.kind==='paired' ? reading.members || [] : [reading];
-  const result:{device:string;parameter:string;reference:Value}[]=[];
+  const result:{device:string;parameter:string;reference:Value;value_type?:string}[]=[];
   for(const member of members){
     const device=[...active.batch.devices,...(active.batch.form_devices || [])].find(item=>item.id===member.device);
     if(member.kind==='section'){
@@ -86,17 +90,19 @@ function editTargets(reading:Reading){
       if(sections.length!==1)return [];
       const parameter=device?.parameters.find(item=>item.id===`s:${sections[0].index}:${member.parameter}` && !item.read_only);
       if(!parameter)return [];
-      result.push({device:device!.id,parameter:parameter.id,reference:parameter.reference});
+      result.push({device:device!.id,parameter:parameter.id,reference:parameter.reference,value_type:parameter.value_type});
     }else{
       const points=device?.points.filter(point=>point.point_id===member.point_id) || [];
       if(points.length!==1)return [];
       const parameter=device?.parameters.find(item=>item.id==='p:'+points[0].id && !item.read_only);
       if(!parameter)return [];
-      result.push({device:device!.id,parameter:parameter.id,reference:parameter.reference});
+      result.push({device:device!.id,parameter:parameter.id,reference:parameter.reference,value_type:parameter.value_type});
     }
   }
+  if (new Set(result.map(item=>item.value_type==='状态'?'状态':'数值')).size>1) return [];
   return result;
 }
+function statusTarget(reading:Reading){const targets=editTargets(reading);return targets.length>0 && targets.every(target=>target.value_type==='状态');}
 function currentValue(reading:Reading){const targets=editTargets(reading);if(!targets.length)return display(reading.value);
   const values=targets.map(target=>props.drafts[target.device]?.values[target.parameter] ?? props.active?.reviews[target.device]?.values[target.parameter] ?? display(target.reference));
   const first=values[0].trim();
@@ -106,5 +112,5 @@ function update(reading:Reading,event:Event){for(const target of editTargets(rea
 
 <style scoped>
 .original-sheet{display:grid;gap:7px;min-width:0}.toolbar{display:flex;flex-wrap:wrap;gap:6px 10px}.toolbar label{display:flex;align-items:center;gap:4px}.toolbar select{min-height:34px;max-width:100%;color:inherit;background:var(--inspection-surface);border:1px solid var(--inspection-line);font:inherit}
-p{margin:0}.scroll{max-width:100%;max-height:65vh;overflow:auto;border:1px solid var(--inspection-line)}table{border-collapse:collapse;width:max-content;min-width:100%;table-layout:fixed}td{border:1px solid var(--inspection-line);min-width:74px;max-width:260px;height:30px;padding:3px 5px;text-align:center;white-space:pre-wrap;overflow-wrap:anywhere}.reading{background:var(--inspection-surface);color:var(--inspection-text)}.missing{color:var(--cf-warning)}td input{width:100%;min-width:65px;padding:3px;color:inherit;background:transparent;border:1px solid var(--inspection-line);font:inherit}@media(max-width:700px){td input{font-size:16px}}
+p{margin:0}.scroll{max-width:100%;max-height:65vh;overflow:auto;border:1px solid var(--inspection-line)}table{border-collapse:collapse;width:max-content;min-width:100%;table-layout:fixed}td{border:1px solid var(--inspection-line);min-width:74px;max-width:260px;height:30px;padding:3px 5px;text-align:center;white-space:pre-wrap;overflow-wrap:anywhere}.reading{background:var(--inspection-surface);color:var(--inspection-text)}.missing{color:var(--cf-warning)}td input,td select{width:100%;min-width:65px;padding:3px;color:inherit;background:var(--inspection-surface);border:1px solid var(--inspection-line);font:inherit}@media(max-width:700px){td input,td select{font-size:16px}}
 </style>

@@ -10,7 +10,7 @@
     <NoticeSopManager v-else-if="moduleId==='sops'" :initial-scope="localScope" :initial-type="''" :scopes="viewScopeOptions.filter(scope=>['110',...'ABCDEH'].includes(scope.value))" :types="modules.filter(module=>SOP_IDS.includes(module.id)&&(user.modules||[]).includes(module.id)).map(module=>({value:module.id,label:module.label}))" :can-delete="user.can_delete_business===true" />
     <NSpin v-else-if="moduleId==='handover'" :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url,building) in handovers" :key="building" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{building}}楼审核</NButton></div><NEmpty v-if="!handoverLoading&&!Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin>
     <AccountSignature v-else-if="pageName==='signatures'&&route.searchParams.get('self')==='1'" />
-    <component v-else-if="currentPage" :is="currentPage" :key="pageKey" v-bind="pageProps" :embedded="['daily_inspection','eop_scenarios'].includes(pageName) || undefined" @switch-scope="switchScope" @status="status" @close="back" @select-tab="changeTab" @changed="changed" />
+    <component v-else-if="currentPage" :is="currentPage" :key="pageKey" v-bind="pageProps" :embedded="['tool_management','daily_inspection','eop_scenarios'].includes(pageName) || undefined" @switch-scope="switchScope" @status="status" @close="back" @select-tab="changeTab" @changed="changed" />
     <NEmpty v-else description="当前页面不可用，可使用独立页面查看" />
   </section>
 </template>

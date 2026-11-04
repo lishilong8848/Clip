@@ -58,9 +58,11 @@
           <p v-if="state.completed_rounds>=state.round_limit">本楼本班巡检已全部完成。</p>
           <p v-else>选择本轮专业；全部确认后统一提交归档。</p>
         </template>
-        <p v-if="previewBusy" role="status">正在读取最新设备数据…</p>
-        <p v-else-if="previewError" class="warning" role="alert">{{ previewError }}</p>
+        <p v-if="previewBusy && !preview" role="status">正在读取最新设备数据…</p>
+        <p v-else-if="previewError && !preview" class="warning" role="alert">{{ previewError }}</p>
         <template v-else-if="preview">
+          <p v-if="previewError" class="warning" role="alert">{{ previewError }}</p>
+          <p v-if="preview.cache_stale" class="warning" role="status">当前显示上次核验的数据（{{ time((preview.cache_refreshed_at || 0)*1000) }}），后台会重试更新；开始巡检前会再次核验。</p>
           <template v-if="!readOnly && state.completed_rounds<state.round_limit">
             <div class="inspection-actions profession-choices" aria-label="本轮巡检专业">
               <label v-for="item in availableProfessions" :key="item.name">
@@ -74,12 +76,13 @@
           <p v-if="!previewDevices.length">请选择专业查看设备。</p>
           <div v-if="previewDevices.length" class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
+            <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
             <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
           </div>
           <div class="inspection-devices">
             <article v-for="item in visiblePreview" :key="item.id" class="inspection-device">
               <h2>{{ item.name }}</h2>
-              <p>{{ [item.profession,item.sections[0]?.location || item.points[0]?.location].filter(Boolean).join(' · ') }}</p>
+              <p>{{ [item.profession,devicePlace(item).unit,item.sections[0]?.location || item.points[0]?.location].filter(Boolean).join(' · ') }}</p>
               <div class="inspection-readings">
                 <div v-for="row in item.parameters" :key="row.id" class="inspection-preview-row">
                   <span>{{ row.name }}</span><strong>{{ shownValue(row.reference) }}</strong>
@@ -121,6 +124,7 @@
           </div>
           <div class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
+            <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
             <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
           </div>
           <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
@@ -132,6 +136,7 @@
               @focusin="focusedDevice=item.id" @focusout="leaveDevice(item.id,$event)">
               <header class="inspection-device-heading">
                 <h2 tabindex="-1"><span class="sequence">{{ positions.get(item.id) }}</span>{{ item.name }}</h2>
+                <span v-if="devicePlace(item).unit" class="device-profession">{{ devicePlace(item).unit }}</span>
                 <span class="device-profession">{{ item.profession }}</span>
                 <span v-if="conflicts.has(item.id)" class="warning">待核对共享修改</span>
                 <span v-else-if="missingByDevice.get(item.id)" class="warning">{{ missingByDevice.get(item.id) }}</span>
@@ -143,6 +148,11 @@
                 <div><strong>{{ row.name }}</strong><small v-if="item.parameters.filter(value=>value.name===row.name).length>1">{{ parameterLocation(item,row) }}</small><small v-if="mappingIssue(item,row)" class="warning" :title="mappingIssue(item,row)">原表位置待核对</small></div>
                 <div class="inspection-value">
                   <span v-if="row.read_only" class="muted">{{ shownValue(row.reference) }} · 已停用</span>
+                  <select v-else-if="row.value_type==='状态'" :value="readingFor(item.id,row)" :disabled="inputsLocked" data-native-select
+                    :class="{'missing-reading':!readingFor(item.id,row).trim()}" :aria-label="item.name+' '+row.name+'巡检状态'" @change="setReading(item.id,row.id,$event)">
+                    <option v-if="readingFor(item.id,row) && !['√','×','△'].includes(readingFor(item.id,row))" :value="readingFor(item.id,row)">原值 {{ readingFor(item.id,row) }}（待核对）</option>
+                    <option value="">待核对</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option>
+                  </select>
                   <input v-else :value="readingFor(item.id,row)" :disabled="inputsLocked"
                     :inputmode="numericValue(row.reference)===null ? 'text' : 'decimal'" maxlength="160"
                     class="numeric" :class="{'missing-reading':!readingFor(item.id,row).trim()}"
@@ -150,8 +160,12 @@
                     :title="readingFor(item.id,row)!==referenceText(row.reference) ? '原值：'+shownValue(row.reference) : ''"
                     @input="setReading(item.id,row.id,$event)">
                 </div>
+                <small v-if="row.value_type==='状态' && !row.reference && row.source_reference!==null && row.source_reference!==undefined && String(row.source_reference).trim()" class="warning">原始值 {{ row.source_reference }} 待核对</small>
               </div>
               </div>
+              <label v-if="item.parameters.some(row=>row.value_type==='状态' && readingFor(item.id,row)==='×')" class="inspection-note">异常备注
+                <textarea :value="drafts[item.id]?.note ?? savedReview(item.id).note" :disabled="inputsLocked" maxlength="1000" rows="2" placeholder="请说明异常情况" @input="setNote(item.id,$event)" />
+              </label>
               <div v-if="!readOnly && !active.pending && conflicts.has(item.id)" class="inspection-actions warning">
                 <span>本台在其他页面有新填写，请选择要保留的版本。</span>
                 <NButton size="small" :disabled="inputsLocked" @click="resolveConflict(item.id,false)">使用共享填写</NButton>
@@ -168,10 +182,6 @@
         <p v-else>{{ selectedRoom ? '没有匹配的设备。' : '请选择楼层和房间查看设备。' }}</p>
         <footer class="inspection-actions inspection-footer">
           <p v-if="error" class="warning">{{ error }}</p>
-          <details v-if="!readOnly && !active.pending" class="inspection-more">
-            <summary>更多操作</summary>
-            <NButton size="small" type="error" secondary :disabled="!!busy || autoSaving" @click="promptConfirmation('cancel')">取消本轮</NButton>
-          </details>
           <template v-if="!readOnly">
             <NButton v-if="active.pending" type="primary" :loading="busy==='finish'" :disabled="!!busy || autoSaving" @click="confirmFinish">重试归档</NButton>
             <template v-else-if="active.professions?.length">
@@ -221,8 +231,8 @@
     </NModal>
     <NModal :show="!!confirmation" preset="dialog" type="warning"
       :title="confirmationTitle" :aria-label="confirmationTitle"
-      :content="confirmation==='profession' ? '确认该专业的设备数据已核对；全部专业确认后还需统一提交归档。' : confirmation==='finish' ? '将把多维表原值及本轮修改归档到飞书「巡检记录」；源数据缺失项保留为空。' : '取消会清除本轮共享草稿与填写记录。'"
-      :positive-text="confirmation==='profession' ? '确认该专业' : confirmation==='finish' ? '确认并归档' : '取消本轮'" negative-text="返回查看"
+      :content="confirmation==='profession' ? '确认该专业的设备数据已核对；全部专业确认后还需统一提交归档。' : '将把多维表原值及本轮修改归档到飞书「巡检记录」；源数据缺失项保留为空。'"
+      :positive-text="confirmation==='profession' ? '确认该专业' : '确认并归档'" negative-text="返回查看"
       @positive-click="applyConfirmation" @update:show="show=>{if(!show)confirmation='';}" />
     <NModal :show="!!leaveAction" preset="dialog" type="warning" title="本机填写尚未保存" aria-label="本机填写尚未保存"
       content="浏览器暂存不可用，离开后本机尚未共享的填写会丢失。"
@@ -250,9 +260,9 @@ const emit = defineEmits<{close:[]}>();
 type Value = string | number | boolean | null;
 type Reading = {location:string; form:string; integrity:string; missing:string; note:string};
 type Point = {id:string; point_id:string; name:string; sampled:number|null; integrity:string; location:string; path:string; note:string; template:string; sheet:string; cell:string; template_known:boolean;mapping_issue?:string};
-type Parameter = {id:string; name:string; reference:Value; section?:number; point?:string; read_only?:boolean};
-type Device = {id:string; name:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[]};
-type Batch = {batch:number; count:number; devices:Device[];form_devices?:Device[]};
+type Parameter = {id:string; name:string; reference:Value; source_reference?:Value; value_type?:string; section?:number; point?:string; read_only?:boolean};
+type Device = {id:string; name:string; scope?:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[]};
+type Batch = {batch:number; count:number; devices:Device[];form_devices?:Device[];cache_stale?:boolean;cache_refreshed_at?:number};
 type Duty = {scope:string; date:string; shift:string};
 type Review = {values:Record<string,string>; result:''|'正常'|'异常'; note:string; revision:number};
 type Reviews = Record<string,Review>;
@@ -293,7 +303,7 @@ const orderImportError = ref(false);
 const orderFormat = 'clipflow-daily-inspection-order-v2';
 const selected = ref<string[]>([]);
 const position = ref<number|string>(1);
-const confirmation = ref<''|'finish'|'cancel'|'profession'>('');
+const confirmation = ref<''|'finish'|'profession'>('');
 const blockedDevice = ref('');
 const drafts = ref<Record<string,DraftReview>>({});
 const recoveries = ref<Recovery[]>([]);
@@ -365,17 +375,28 @@ function devicePlace(device:Device) {
   const floorIndex=parts.findIndex(part=>/^[一二三四五六七八九\d]+层$/.test(part));
   const code=(location+' '+device.name+' '+path).match(/(?:^|[^\d])(?:[DE][-\s]?)?([1-9]\d{2})(?=[-\s/]|$)/i)?.[1] || '';
   const explicit=(floorIndex>=0 ? parts[floorIndex] : location).match(/(?:^|[/\s])([一二三四五六七八九\d]+)层/);
-  const floor=explicit ? explicit[1]+'层' : code ? code[0]+'层（按编号）' : '未标注楼层';
-  const room=(floorIndex>=0 ? parts[floorIndex+1] : '') || (code ? code+'（按编号，待核对）' : location.trim() || '未标注房间');
-  return {floor,room};
+  const context=[location,path,device.name].join(' ');
+  const isCold=/(?:冷冻站|冷站|冷机|冷冻泵|冷却泵|板换|冷塔)/.test(context);
+  const isAuxPump=/辅助水泵/.test(context);
+  const diesel=String(device.scope || duty.value?.scope || preview.value?.scope || '')==='E' ? device.name.match(/(?:^|[^\d])(1[0-4]|[1-9])\s*(?:#|号)\s*(?:柴发|柴油发电)/) : null;
+  const dieselRoom=diesel ? (Number(diesel[1])<=7?'178':'279') : '';
+  const eScope=String(device.scope || duty.value?.scope || preview.value?.scope || '')==='E';
+  const substation=eScope ? (device.name+' '+path).match(/M([1-6])变电所环境/i)?.[1] : '';
+  const substationRoom=substation ? ({'1':'245','2':'218','3':'345','4':'317','5':'445','6':'417'} as Record<string,string>)[substation] : '';
+  const number=explicit ? ({'一':'1','二':'2','三':'3','四':'4'} as Record<string,string>)[explicit[1]] || explicit[1] : dieselRoom?.[0] || substationRoom?.[0] || code?.[0] || '';
+  const floor=isCold || isAuxPump ? '1层' : ['1','2','3','4'].includes(number) ? number+'层' : '待核对';
+  const room=isCold ? '冷冻站' : isAuxPump ? '辅助水泵系统' : dieselRoom || substationRoom || (floorIndex>=0 ? parts[floorIndex+1] : '') || (code ? code : location.trim() || '未标注房间');
+  const unitNumber=isCold ? context.match(/(?:^|[^\d])([1-9]\d*)\s*(?:#|号)\s*(?:冷机|冷冻泵|冷却泵|板换|冷塔)/)?.[1] || context.match(/(?:冷机|冷冻泵|冷却泵|板换|冷塔)[^\d]{0,3}([1-9]\d*)\s*(?:#|号)?/)?.[1] || device.name.match(/(?:^|[-_])CH([1-6])(?:$|[^\d])/i)?.[1] : '';
+  return {floor,room,unit:unitNumber ? unitNumber+'号制冷单元' : ''};
 }
 const navigationDevices=computed(()=>active.value ? viewDevices.value : previewDevices.value);
-const floors=computed(()=>[...new Set(navigationDevices.value.map(item=>devicePlace(item).floor))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
+const floors=computed(()=>['1层','2层','3层','4层'].filter(floor=>navigationDevices.value.some(item=>devicePlace(item).floor===floor)));
+const unplacedCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor==='待核对').length);
 const rooms=computed(()=>[...new Set(navigationDevices.value.filter(item=>devicePlace(item).floor===selectedFloor.value).map(item=>devicePlace(item).room))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
 function selectFloor(floor:string) {selectedFloor.value=floor;selectedRoom.value='';}
 const visiblePreview=computed(()=>previewDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value));
 watch([()=>state.value?.view_scope,()=>active.value?.id],()=>{selectedFloor.value='';selectedRoom.value='';});
-watch(floors,items=>{if (!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
+watch(floors,items=>{if (selectedFloor.value!=='待核对'&&!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
 watch(rooms,items=>{if (!items.includes(selectedRoom.value)) selectedRoom.value='';});
 const positions = computed(()=>new Map(viewDevices.value.map((device,index)=>[device.id,index+1])));
 const filtered = computed(()=>{
@@ -403,13 +424,14 @@ const deviceModified = (device:Device)=>device.parameters.some(row=>readingFor(d
 let controller:AbortController|undefined;
 let statusController:AbortController|undefined;
 let previewController:AbortController|undefined;
+let previewTimer:number|undefined;
 let previewScope='';
 let previewChoiceScope='';
 let autoController:AbortController|undefined;
 let statusTimer:number|undefined;
 let confirmationTarget:{id:string;version:number;profession?:string;professionVersion?:string}|undefined;
 const confirmationTitle=computed(()=>confirmation.value==='profession' ? '确认'+(confirmationTarget?.profession || '')+'专业？'
-  : confirmation.value==='finish' ? '确认整轮巡检？' : '取消本轮巡检？');
+  : '确认整轮巡检？');
 let disposed=false;
 let saveTimer:number|undefined;
 let autoTimer:number|undefined;
@@ -477,6 +499,10 @@ function setReading(id:string,parameter:string,event:Event) {
 }
 function setReadingValue(id:string,parameter:string,value:string) {
   edit(id).values[parameter]=value;
+  queueAutoSave();
+}
+function setNote(id:string,event:Event) {
+  edit(id).note=(event.target as HTMLTextAreaElement).value;
   queueAutoSave();
 }
 function resolveConflict(id:string,keep:boolean) {
@@ -654,7 +680,7 @@ async function fetchState(action:string, body?:object, selectedScope?:string) {
       signal:request.signal,timeoutMs:120000,
     }) as State;
     if (disposed || request.signal.aborted) return false;
-    useState(next,action==='finish' || action==='cancel' || action==='confirm-profession' && !next.active);
+    useState(next,action==='finish' || action==='confirm-profession' && !next.active);
     if (action==='finish') message.value='本轮巡检已归档。';
     if (action==='confirm-profession') message.value=next.active?.professions?.every(name=>next.active?.profession_confirmations?.[name]?.version===next.active?.profession_versions?.[name]) ? '所有专业已确认，可统一提交归档。' : '该专业已确认，等待其他已选专业。';
     if (action==='order') message.value='设备顺序已保存。';
@@ -730,7 +756,7 @@ async function refreshPreview() {
   }
   const request=previewController=new AbortController();
   previewScope=scope;
-  preview.value=undefined;
+  if (preview.value?.scope!==scope) preview.value=undefined;
   previewBusy.value=true;
   previewError.value='';
   try {
@@ -741,6 +767,8 @@ async function refreshPreview() {
       const available=[...new Set(data.devices.map(professionName))];
       selectedProfessions.value=previewChoiceScope===scope ? selectedProfessions.value.filter(item=>available.includes(item)) : available;
       previewChoiceScope=scope;
+      window.clearTimeout(previewTimer);
+      if (data.cache_stale) previewTimer=window.setTimeout(()=>void refreshPreview(),30000);
     }
   } catch (value) {
     if (!disposed && !request.signal.aborted) previewError.value=value instanceof Error ? value.message : '最新设备数据暂时无法读取。';
@@ -796,7 +824,7 @@ function confirmFinish() {
   blockedDevice.value='';
   promptConfirmation('finish');
 }
-function promptConfirmation(action:'finish'|'cancel') {
+function promptConfirmation(action:'finish') {
   const current=active.value;
   if (!current || autoController) return;
   window.clearTimeout(autoTimer);
@@ -944,6 +972,7 @@ onBeforeUnmount(()=>{
   controller?.abort();
   statusController?.abort();
   previewController?.abort();
+  window.clearTimeout(previewTimer);
   autoController?.abort();
   window.clearTimeout(autoTimer);
   window.clearInterval(statusTimer);
@@ -988,6 +1017,8 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
 .inspection-page :deep(.n-button__content){white-space:normal}
 .inspection-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,140px) auto;gap:6px;align-items:center}
 .room-navigation{display:grid;gap:6px;margin:8px 0}.room-navigation button{border:1px solid var(--border-color,#ccd5df);background:transparent;color:inherit;padding:5px 10px;cursor:pointer}.room-navigation button[aria-pressed=true]{background:var(--primary-color,#1764c0);color:#fff;border-color:transparent}
+.room-navigation .unplaced-button{justify-self:start;color:var(--cf-warning,#a65b00)}
+.inspection-note{display:grid;gap:4px;margin-top:8px}.inspection-note textarea{width:100%;box-sizing:border-box;color:inherit;background:transparent;border:1px solid var(--border-color,#ccd5df);font:inherit;padding:6px}
 .inspection-filters label{display:flex;align-items:center;gap:6px;min-height:34px;font-size:13px;cursor:pointer}
 .inspection-devices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px 16px}
 .inspection-device{min-width:0;border-top:1px solid var(--inspection-line);padding:3px 0;scroll-margin-top:30px}

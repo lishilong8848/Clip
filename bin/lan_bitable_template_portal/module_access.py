@@ -42,6 +42,7 @@ PREFIXES = (
     ("/api/eop-scenarios", "drills"), ("/eop-scenarios", "drills"),
     ("/api/daily-tasks", "daily"), ("/daily-tasks", "daily"),
     ("/api/daily-inspection", "daily"), ("/daily-inspection", "daily"),
+    ("/api/cold-source-monitor", "daily"), ("/cold-source-monitor", "daily"),
     ("/api/learning", "learning"), ("/learning", "learning"),
     ("/api/plan-convergence", "plan_convergence"), ("/plan-convergence", "plan_convergence"),
     ("/api/link-directory", "links"), ("/link-directory", "links"), ("/life-guide", "life_guide"),

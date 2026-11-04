@@ -43,6 +43,10 @@
             <strong>{{ row.name }}</strong>
             <div class="history-value">
               <span v-if="row.read_only">{{ reading(device,row) || valueLabel(row.reference) }} · 已停用</span>
+              <select v-else-if="editing && row.value_type==='状态'" :value="reading(device,row)" :aria-label="device.name+' '+row.name+'巡检状态'" :disabled="!!busy" data-native-select @change="setValue(device,row.id,$event)">
+                <option v-if="reading(device,row) && !['√','×','△'].includes(reading(device,row))" :value="reading(device,row)">原值 {{ reading(device,row) }}（待核对）</option>
+                <option value="">待核对</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option>
+              </select>
               <input v-else-if="editing" :value="reading(device,row)" :aria-label="device.name+' '+row.name+'巡检数据'"
                 :disabled="!!busy" placeholder="未填" maxlength="160" @input="setValue(device,row.id,$event)">
               <span v-else :class="{'warning':!reading(device,row).trim()}">{{ reading(device,row) || '未填' }}</span>
@@ -50,6 +54,9 @@
             </div>
           </div>
         </div>
+        <label v-if="editing && device.rows.some(row=>row.value_type==='状态' && reading(device,row)==='×')">异常备注
+          <textarea :value="changes[device.id]?.note ?? device.note" :disabled="!!busy" maxlength="1000" rows="2" placeholder="请说明异常情况" @input="setNote(device,$event)" />
+        </label>
       </div>
       <div v-if="editing" class="history-tools">
         <NButton size="small" :disabled="!!busy" @click="cancelEdit">结束编辑</NButton>
@@ -72,7 +79,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, watch } from 'vue';
 import { NButton, NModal } from 'naive-ui';
 import { ApiError, requestJson } from '../api/client';
 
-type Row = {id:string;name:string;location:string;source:string;reference:string|number|boolean|null;value:string;read_only:boolean};
+type Row = {id:string;name:string;location:string;source:string;reference:string|number|boolean|null;value:string;read_only:boolean;value_type?:string};
 type Device = {id:string;order:number;name:string;profession:string;rows:Row[];result:string;note:string};
 type Summary = {id:string;scope:string;date:string;shift:string;group:string;round:number;completed:number;actor:string;
   confirmed:number|null;devices:number|null;url:string;modified:number|null;editor:string};
@@ -288,6 +295,7 @@ const changed=()=>{
   queueAutoSave();
 };
 const setValue=(device:Device,id:string,event:Event)=>{edit(device).values[id]=(event.target as HTMLInputElement).value;changed();};
+const setNote=(device:Device,event:Event)=>{edit(device).note=(event.target as HTMLTextAreaElement).value;changed();};
 function resetEdit(keep=false) {
   window.clearTimeout(autoTimer);
   if (keep) persistDraft();

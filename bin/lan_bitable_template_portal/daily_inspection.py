@@ -490,14 +490,36 @@ def supplemental_form_devices(scope):
                 (item['template']+'|'+item['sheet']).encode()).hexdigest()[:16],
                 'name':'原表补填 · '+item['sheet'].strip(), 'scope':scope,'profession':item['profession'],
                 'form_only':True,'sections':[],'points':[]})
+            header_is_state = original_cell_is_status(layout, cells['白1'])
             device['points'].append({'id':identity,'point_id':identity,'name':item['name'],'location':'',
                 'path':'','value':'','sampled':None,'integrity':'','enabled':True,'baseline':False,'note':'',
                 'template':item['template'],'sheet':item['sheet'],'cell':cells['白1'],'round_cells':dict(cells),
-                'template_known':True})
+                'template_known':True,'value_type':'状态' if header_is_state else ''})
         return list(groups.values())
     except (OSError, TypeError, KeyError, ValueError, AttributeError):
         logging.exception('原表补填目录未就绪')
         return []
+
+
+def original_cell_is_status(layout, address):
+    """Recognize a status header only when it explicitly covers this column."""
+    column, row = coordinate_from_string(address)
+    column = column_index_from_string(column)
+    headers = []
+    for previous in range(max(1, row - 5), row):
+        cells = layout['rows'][previous - 1]
+        if column <= len(cells) and cells[column - 1] not in ('', None):
+            headers.append((previous, str(cells[column - 1])))
+    for merged in layout.get('merges', []):
+        left, top, right, bottom = range_boundaries(merged)
+        if left <= column <= right and max(1, row - 5) <= top < row and bottom < row:
+            cells = layout['rows'][top - 1]
+            if left <= len(cells) and cells[left - 1] not in ('', None):
+                headers.append((top, str(cells[left - 1])))
+    if not headers:
+        return False
+    nearest = max(position for position, _ in headers)
+    return any(state_parameter(label) for position, label in headers if position == nearest)
 
 
 def load_climate_cells(filename, kind):
@@ -594,7 +616,9 @@ def devices_for(scope, rows, point_configs, templates):
             key = target
         device = devices.setdefault(key, {'id': f'{scope}:{key[0]}:{key[1]}', 'name': name, 'scope': scope,
                                            'profession': profession, 'sections': [], 'points': []})
-        config = configurations.get((profession, point_id), {})
+        config_key = (profession, point_id)
+        config = configurations.get(config_key, {})
+        ambiguous_config = config_key in configurations and not config
         target_source = config if config else fields
         template, sheet, cell = [plain(target_source.get(k)).strip() for k in LOCATION_FIELDS]
         explicit_cells = {slot:plain(target_source.get(field)).strip() for slot,field in ROUND_LOCATION_FIELDS.items()}
@@ -623,15 +647,28 @@ def devices_for(scope, rows, point_configs, templates):
             template, sheet = mapped['template'], mapped['sheet']
             round_cells = dict(mapped['cells'])
             cell = round_cells['白1']
+        if ambiguous_config:
+            mapping_issue = '测点配置重复，请核对配置后再使用自动值'
         reading = fields.get('测点值')
+        raw_value = plain(fields.get('测点原始值')) if '测点原始值' in fields else None
+        value_type = plain(config.get('测点类型') or fields.get('测点类型'))
+        if value_type == '直接填充':
+            reading = raw_value if raw_value is not None else ''
+        if ambiguous_config:
+            reading = ''
         device['points'].append({
             'id': row['record_id'], 'point_id': point_id,
             'name': point_name,
             'location': location, 'path': plain(config.get('测点路径')) or plain(fields.get('测点路径')),
             'value': reading if isinstance(reading, (int, float)) else plain(reading),
+            'raw_value': raw_value,
             'sampled': fields.get('采样时间'), 'integrity': plain(fields.get('数据完整性')),
             'enabled': config.get('启用'), 'baseline': config.get('基线测点'),
             'note': plain(config.get('测点备注')) or plain(fields.get('测点备注')),
+            'value_type': value_type,
+            'status_normal': '' if ambiguous_config else plain(config.get('状态正常值') or fields.get('状态正常值')),
+            'status_abnormal': '' if ambiguous_config else plain(config.get('状态异常值') or fields.get('状态异常值')),
+            'status_stopped': '' if ambiguous_config else plain(config.get('状态未运行值') or fields.get('状态未运行值')),
             'template': template, 'sheet': sheet, 'cell': cell,
             'round_cells': round_cells, 'mapping_issue': mapping_issue,
             'template_known': template in templates.get((scope, profession), []),
@@ -684,6 +721,35 @@ def devices_for(scope, rows, point_configs, templates):
     return list(devices.values())
 
 
+def state_parameter(name, value_type=''):
+    return value_type == '状态' or bool(re.search(r'运行状态|启停状态|开关状态|设备状态|工作状态|报警状态|告警状态|有无滴漏', name))
+
+
+def state_reference(value, point=None):
+    raw = source_text(value).strip()
+    if point is None:
+        if raw in ('√', '×', '△'):
+            return raw
+        if raw == 'Δ':
+            return '△'
+    if point is not None:
+        # Formatted measurements are not a reliable substitute for the exact
+        # raw value used by a configured state rule.
+        original = point.get('raw_value')
+        if original is None:
+            return ''
+        raw = original
+    matches = []
+    for key, symbol in (('status_normal', '√'), ('status_abnormal', '×'), ('status_stopped', '△')):
+        try:
+            values = json.loads((point or {}).get(key) or '[]')
+            if isinstance(values, list) and all(isinstance(item, str) for item in values) and raw and raw in values:
+                matches.append(symbol)
+        except (TypeError, ValueError):
+            pass
+    return matches[0] if len(matches) == 1 else ''
+
+
 def parameters(device):
     rows = []
     for index, section in enumerate(device['sections']):
@@ -694,11 +760,34 @@ def parameters(device):
             name = name.strip()
             if name and name not in DEVICE_METADATA:
                 values.setdefault(name, '')
-        rows.extend({'id': f's:{index}:{name}', 'name': name, 'reference': value, 'section': index}
-                    for name, value in values.items())
-    rows.extend({'id': 'p:' + point['id'], 'name': point['name'], 'reference': point['value'],
-                 'point': point['id'], 'read_only': point.get('enabled') is False}
-                for point in device['points'])
+        for name, value in values.items():
+            is_state = state_parameter(name)
+            reference = state_reference(value) if is_state else value
+            if is_state and not reference:
+                # A device field and a configured point may refer to the same
+                # original cells. Only reuse a uniquely verified state mapping.
+                try:
+                    key = (device['scope'] + '楼', device['name'], device['profession'], section['location'],
+                           section['form'].strip(), name)
+                    target = catalog_locations().get(key)
+                    matches = [point for point in device['points'] if target and point.get('enabled') is not False
+                               and point.get('template') == target['template']
+                               and str(point.get('sheet') or '').strip() == target['sheet'].strip()
+                               and point.get('round_cells') == target['cells']]
+                    if len(matches) == 1:
+                        reference = state_reference(matches[0]['value'], matches[0])
+                except (OSError, TypeError, KeyError, ValueError, AttributeError):
+                    pass
+            rows.append({'id': f's:{index}:{name}', 'name': name,
+                         'reference': reference,
+                         'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值', 'section': index})
+    for point in device['points']:
+        is_state = state_parameter(point['name'], point.get('value_type', ''))
+        rows.append({'id': 'p:' + point['id'], 'name': point['name'],
+                     'reference': state_reference(point['value'], point) if is_state else point['value'],
+                     'source_reference': (point.get('raw_value') if point.get('raw_value') is not None else point['value']) if is_state else None,
+                     'value_type': '状态' if is_state else '数值',
+                     'point': point['id'], 'read_only': point.get('enabled') is False})
     return rows
 
 
@@ -774,9 +863,10 @@ def merge_reviews(active, devices, submitted, actor):
         if not device or not isinstance(review, dict) or type(review.get('revision')) is not int:
             raise RiskError('设备清单或填写版本已变化，请刷新后重试。', 409)
         values, result, note = (review.get(key) for key in ('values', 'result', 'note'))
-        fields = {item['id'] for item in parameters(device) if not item.get('read_only')}
+        fields = {item['id']: item for item in parameters(device) if not item.get('read_only')}
         if (not isinstance(values, dict) or values.keys() - fields
                 or any(not valid_cell_text(value, 160) for value in values.values())
+                or any(fields[key].get('value_type') == '状态' and value.strip() not in ('', '√', '×', '△') for key, value in values.items() if key in fields)
                 or result not in ('', '正常', '异常') or not valid_cell_text(note, 1000)):
             raise RiskError(f'「{device["name"]}」的现场填写无效，请核对后重试。', 400)
         normalized = {'values': {key: value.strip() for key, value in values.items()},
@@ -811,30 +901,40 @@ def finalize_reviews(devices, reviews, actor, confirmations=None):
                     raise RiskError(f'「{device["name"]}」的源数据含无效字符，请先核对。', 409)
                 values[item['id']] = value
         complete = bool(rows) and all(values.get(item['id'], '').strip() for item in rows)
+        states = [values.get(item['id'], '').strip() for item in rows if item.get('value_type') == '状态']
+        if any(value not in ('', '√', '×', '△') for value in states):
+            raise RiskError(f'「{device["name"]}」的运行状态需选择 √、× 或 △。', 400)
+        if '×' in states and not review['note'].strip():
+            raise RiskError(f'「{device["name"]}」有异常状态，请填写备注。', 400)
         confirmed_by = (confirmations or {}).get(device_profession(device), {}).get('actor') or actor
         finalized[device['id']] = {**previous, 'values': values,
-            'result': review['result'] or ('正常' if complete else ''), 'note': review['note'],
+            'result': '异常' if '×' in states else review['result'] or ('正常' if complete else ''), 'note': review['note'],
             'actor': previous.get('actor') or confirmed_by}
     return finalized
 
 
 class DailyInspection:
-    def __init__(self, store, cloud):
+    def __init__(self, store, cloud, source_clouds=None):
         self.store, self.cloud = store, cloud
+        self.source_clouds = source_clouds or {}
         self.locks = {scope: threading.RLock() for scope in SOURCES}
+        self.source_locks = {scope: threading.Lock() for scope in SOURCES}
+        self.source_cache_lock = threading.RLock()
+        self.source_cache = {}
         self.schema_lock = threading.Lock()
 
     def path(self, table):
         return self.cloud.table_path(BASE, table)
 
-    def records(self, table, query, page_size=500):
+    def records(self, table, query, page_size=500, cloud=None):
+        cloud = cloud or self.cloud
         rows, ids, cursors = [], set(), set()
         cursor, total = None, None
         for _ in range(50):
             params = {'page_size': page_size}
             if cursor:
                 params['page_token'] = cursor
-            result = self.cloud.request('POST', self.path(table) + '/records/search', params=params, json=query)
+            result = cloud.request('POST', self.path(table) + '/records/search', params=params, json=query)
             items, count = result.get('items'), result.get('total')
             if (not isinstance(items, list) or type(count) is not int or type(result.get('has_more')) is not bool
                     or (total is not None and total != count)):
@@ -856,30 +956,30 @@ class DailyInspection:
             cursors.add(cursor)
         raise RiskError('巡检表正在更新或分页未读完，请稍后重试。', 503)
 
-    def capture(self, scopes):
-        template_rows = self.records(TEMPLATES[0], {'view_id': TEMPLATES[1]})
-        templates = {}
-        for row in template_rows:
-            fields = row['fields']
-            scope = plain(fields.get('楼栋')).removesuffix('楼')
-            if scope in scopes:
-                names = [item['name'] for item in (fields.get('附件') or []) if isinstance(item, dict) and item.get('name')]
-                templates.setdefault((scope, plain(fields.get('专业'))), []).extend(names)
+    def capture_fresh(self, scopes):
         batches = {}
         for scope in scopes:
+            cloud = self.source_clouds.get(scope, self.cloud)
+            template_rows = self.records(TEMPLATES[0], {'view_id': TEMPLATES[1]}, cloud=cloud)
+            templates = {}
+            for row in template_rows:
+                fields = row['fields']
+                if plain(fields.get('楼栋')).removesuffix('楼') == scope:
+                    names = [item['name'] for item in (fields.get('附件') or []) if isinstance(item, dict) and item.get('name')]
+                    templates.setdefault((scope, plain(fields.get('专业'))), []).extend(names)
             (table, _view), (point_table, point_view) = SOURCES[scope]
-            points = self.records(point_table, {'view_id': point_view})
+            points = self.records(point_table, {'view_id': point_view}, cloud=cloud)
             # The producer seals the *whole table*, not a potentially filtered view.
-            rows = self.records(table, {})
+            rows = self.records(table, {}, cloud=cloud)
             marker = validate_source_batch(scope, rows)
             if marker is None:
                 raise RiskError(f'{scope}楼源表尚无可核验的完整批次，请等待上传完成后重试。', 409)
-            check = self.records(table, {})
+            check = self.records(table, {}, cloud=cloud)
             if (validate_source_batch(scope, check) != marker
                     or json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
                     != json.dumps(sorted(check, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)):
                 raise RiskError(f'{scope}楼读取期间数据发生变化，请稍后重试。', 409)
-            point_check = self.records(point_table, {'view_id': point_view})
+            point_check = self.records(point_table, {'view_id': point_view}, cloud=cloud)
             if (json.dumps(sorted(points, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
                     != json.dumps(sorted(point_check, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)):
                 raise RiskError(f'{scope}楼测点配置在读取期间发生变化，请稍后重试。', 409)
@@ -888,6 +988,53 @@ class DailyInspection:
             batches[scope] = {'batch': batch, 'rows': rows, 'devices': devices,
                               'form_devices': omit_occupied_form_cells(copy.deepcopy(supplemental_form_devices(scope)), devices)}
         return batches
+
+    def cached_source(self, scope):
+        with self.source_cache_lock:
+            value = self.source_cache.get(scope)
+            if value is None and self.store:
+                value = self.store.get_document(NS, 'source-cache:' + scope)
+                if isinstance(value, dict) and value.get('version') == 2:
+                    batch = value.get('batch') or {}
+                    marker = validate_source_batch(scope, batch.get('rows'))
+                    if marker and marker.get('upload_time') == batch.get('batch') and isinstance(batch.get('devices'), list):
+                        self.source_cache[scope] = value
+                    else:
+                        value = None
+                else:
+                    value = None
+            return value
+
+    def refresh_source(self, scope):
+        with self.source_locks[scope]:
+            cached = self.cached_source(scope)
+            if cached and time.time() - cached.get('refreshed_at', 0) < 300:
+                return cached
+            batch = self.capture_fresh([scope])[scope]
+            value = {'version': 2, 'refreshed_at': time.time(), 'batch': batch}
+            with self.source_cache_lock:
+                self.source_cache[scope] = value
+            if self.store:
+                try:
+                    self.store.put_document(NS, 'source-cache:' + scope, value)
+                except Exception:
+                    logging.exception('%s楼巡检数据本地缓存未持久化', scope)
+            return value
+
+    def capture(self, scopes, allow_stale=False):
+        result = {}
+        for scope in scopes:
+            if scope not in SOURCES:
+                raise RiskError('巡检楼栋无效。', 400)
+            value = self.cached_source(scope)
+            stale = not value or time.time() - value.get('refreshed_at', 0) >= 300
+            if stale and not (allow_stale and value):
+                value = self.refresh_source(scope)
+                stale = False
+            result[scope] = copy.deepcopy(value['batch'])
+            result[scope]['cache_refreshed_at'] = value['refreshed_at']
+            result[scope]['cache_stale'] = stale and bool(allow_stale)
+        return result
 
     def load(self, scope):
         return self.store.get_document(NS, 'building:' + scope) or {'active': None, 'history': []}
@@ -986,11 +1133,7 @@ class DailyInspection:
                     state['active'].update(professions=[item for item in available if item in requested],
                                            profession_confirmations={})
             elif action == 'cancel':
-                active = self.current(state, data.get('id'))
-                if ('completed' in active or type(data.get('review_version')) is not int
-                        or data['review_version'] != active.get('review_version', 0)):
-                    raise RiskError('当前巡检资料已变化或正在归档，请重新核对。', 409)
-                state['active'] = None
+                raise RiskError('取消本轮功能已移除，请继续完成并归档当前巡检。', 409)
             else:
                 if action == 'finish' and any(row['id'] == data.get('id') for row in state['history']):
                     return self.view(state, owner, duty)
@@ -1365,6 +1508,8 @@ def workbook(active, orders, *, strict_original=True):
                 status = ('配置停用' if item.get('read_only') else
                           '源数据不完整：' + section['missing'] if section and section.get('missing')
                           and not str(current_value or '').strip() else '')
+                if item.get('value_type') == '状态' and not item.get('read_only'):
+                    status = '状态测点' + ('；' + status if status else '')
                 reviews.append((*prefix, location, source, item['name'], item['reference'],
                                 review['values'].get(item['id'], source_text(item['reference'])) or None, status, *outcome))
             if not rows:
@@ -1591,14 +1736,32 @@ def inspection_report_workbook(report):
 def install_daily_inspection(app, controller, runtime):
     service = None
     lock = threading.Lock()
+    stopped = threading.Event()
 
     def manager():
         nonlocal service
         with lock:
             if service is None:
                 store = runtime.state_store
-                service = DailyInspection(store, RiskCloud(None, Path(store.db_path).parent / 'feishu_assistant.json', None, None))
+                config = Path(store.db_path).parent / 'feishu_assistant.json'
+                service = DailyInspection(store, RiskCloud(None, config, None, None),
+                                          {scope: RiskCloud(None, config, None, None) for scope in SOURCES})
             return service
+
+    def prefetch(scope):
+        while not stopped.is_set():
+            try:
+                manager().refresh_source(scope)
+            except Exception:
+                logging.exception('%s楼巡检参考数据预取失败，保留上次完整批次', scope)
+            stopped.wait(300)
+
+    def startup():
+        for scope in SOURCES:
+            threading.Thread(target=prefetch, args=(scope,), name='daily-inspection-prefetch-' + scope, daemon=True).start()
+
+    app.add_event_handler('startup', startup)
+    app.add_event_handler('shutdown', stopped.set)
 
     async def endpoint(request: Request):
         try:
@@ -1745,13 +1908,14 @@ def install_daily_inspection(app, controller, runtime):
                 if action == 'source':
                     if not viewer and scope not in home_scopes and not can_manage:
                         raise RiskError('没有当前参考数据的查看权限。', 403)
-                    batches = await asyncio.to_thread(svc.capture, [scope])
+                    batches = await asyncio.to_thread(svc.capture, [scope], True)
                     batch = batches[scope]
                     order = await asyncio.to_thread(svc.order, owner, scope)
                     professions = list(dict.fromkeys(device_profession(device) for device in batch['devices']))
                     profession_orders = await asyncio.gather(*(asyncio.to_thread(svc.order, owner, scope, name)
                                                                for name in professions))
                     return JSONResponse({'ok': True, 'data': {'scope': scope, 'batch': batch['batch'],
+                        'cache_refreshed_at': batch.get('cache_refreshed_at'), 'cache_stale': batch.get('cache_stale', False),
                         'count': len(batch['rows']), 'orders': {'ALL': order, **dict(zip(professions, profession_orders))},
                         'devices': [{**device, 'parameters': parameters(device)}
                             for device in svc.ordered(batch, order)]}}, headers={'Cache-Control': 'private, no-store'})

@@ -2,7 +2,7 @@
   <section ref="root" class="tool-check" aria-label="工具管理" data-v2-inline-feedback>
     <header class="tool-header">
       <div class="tool-title">
-        <NButton quaternary :aria-label="order ? '返回工单列表' : '返回专项功能'" :disabled="busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
+        <NButton v-if="!embedded || order" quaternary :aria-label="order ? '返回工单列表' : '返回专项功能'" :disabled="busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
         <div>
           <p>{{ order ? `${order.scope}楼 · ${kindLabel(order)}工单` : '专项功能' }}</p>
           <h2>{{ order ? order.tool_name : '工具管理' }}</h2>
@@ -229,7 +229,7 @@ import { downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
-defineProps<{ scope?: string }>();
+defineProps<{ scope?: string; embedded?: boolean }>();
 const api = '/api/tool-self-check';
 interface Template {
   id: string; version: number; name: string; active: boolean;

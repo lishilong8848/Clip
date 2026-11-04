@@ -20,18 +20,26 @@
 
     <section v-if="opening" class="eop-panel eop-opening" aria-busy="true" role="status">正在读取场景正文和步骤…</section>
     <section v-else-if="!record" class="eop-panel" aria-label="场景列表">
+      <div class="eop-stats" aria-label="P0 场景统计">
+        <button type="button" :class="{selected:!specialty&&!missing}" @click="specialty='';missing=''">全部 P0 <strong>{{ rows.length }}</strong></button>
+        <button v-for="item in specialtyCounts" :key="item.name" type="button" :class="{selected:specialty===item.name}" @click="specialty=specialty===item.name?'':item.name;missing=''">{{ item.name }} <strong>{{ item.count }}</strong></button>
+        <button v-for="item in missingCounts" :key="item.key" type="button" :class="{selected:missing===item.key}" @click="missing=missing===item.key?'':item.key;specialty=''">{{ item.label }}未填写 <strong>{{ item.count }}</strong></button>
+      </div>
+      <p v-if="updatedAt" class="eop-cache-note">仅显示 P0-高 · 每 5 分钟同步多维表 · 最近同步 {{ new Date(updatedAt*1000).toLocaleString('zh-CN') }}<strong v-if="Date.now()/1000-updatedAt>360"> · 同步可能延迟，请刷新核对</strong></p>
       <div class="eop-toolbar">
         <NInput v-model:value="search" class="eop-search" clearable placeholder="搜索场景名称、专业或设备"
           :input-props="{ 'aria-label': '搜索场景' }"><template #prefix><Search :size="16" /></template></NInput>
         <NSelect v-model:value="specialty" class="eop-filter" :options="specialties" aria-label="筛选专业" />
+        <NSelect v-model:value="missing" class="eop-filter" :options="missingOptions" aria-label="筛选缺失内容" />
         <span class="eop-muted">共 {{ filtered.length }} 条</span>
       </div>
       <div v-if="filtered.length" class="eop-list">
-        <div class="eop-list-head" aria-hidden="true"><span>场景名称</span><span>专业</span><span>系统／设备</span><span>原优先级</span></div>
+        <div class="eop-list-head" aria-hidden="true"><span>场景名称</span><span>专业</span><span>系统／设备</span><span>资料完整情况</span></div>
         <button v-for="item in shown" :key="item.id" type="button" class="eop-list-row" :disabled="busy" @click="openFromList(item.id, $event)">
           <strong>{{ item.fields['场景名称'] || '未命名场景' }}</strong>
           <span class="eop-row-tags">
-            <span v-for="field in selectFields" :key="field"><span class="eop-tag">{{ item.fields[field] || '未设置' }}</span></span>
+            <span v-for="field in selectFields.slice(0,2)" :key="field"><span class="eop-tag">{{ item.fields[field] || '未设置' }}</span></span>
+            <span class="eop-presence"><span :class="{missing:!item.has_steps}">步骤{{ item.has_steps?'✓':'缺' }}</span><span :class="{missing:!item.has_template}">模板{{ item.has_template?'✓':'缺' }}</span><span :class="{missing:!item.has_images}">图片{{ item.has_images?'✓':'缺' }}</span></span>
           </span>
           <ChevronRight :size="16" />
         </button>
@@ -54,7 +62,7 @@
       </section>
 
       <div class="eop-workspace" :class="{ 'with-pool': unassigned.length || editing }">
-      <section class="eop-panel eop-work" aria-label="步骤与图片">
+      <section class="eop-panel eop-work" aria-label="步骤与图片" @paste="pastePictures($event,'')">
         <header class="eop-section-head">
           <div><h2>原通告重点项</h2><small>{{ record.steps.length }} 步 · {{ record.images.length - unassigned.length }} 张已关联</small></div>
           <div class="eop-step-tools">
@@ -69,7 +77,7 @@
         <NEmpty v-if="!record.steps.length" class="eop-empty" description="原记录暂无步骤" />
         <article v-for="(step,index) in record.steps" :key="step.key" :id="'eop-step-'+step.key" class="eop-step"
           :class="{ 'has-images': step.images.length, 'eop-drop-ready': draggedPhoto, 'eop-drop-active': dropStep===step.key }"
-          @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop="dropPicture(step.key,$event)">
+          @paste.stop="pastePictures($event,step.key)" @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop.stop="dropPicture(step.key,$event)">
           <div class="eop-step-body">
             <div class="eop-step-title">
               <h3 tabindex="-1">第 {{ index + 1 }} 步</h3>
@@ -93,7 +101,7 @@
                   <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" @error="broken.add(photo.token)" />
                   <span v-else>打开原图</span>
                 </button>
-                <figcaption><span :title="photo.name">{{ photo.name }}</span>
+                <figcaption><input v-if="editing" v-model="photo.name" maxlength="180" aria-label="图片名称" :disabled="busy" /><span v-else :title="photo.name">{{ photo.name }}</span>
                   <NButton v-if="editing" text size="tiny" :disabled="busy" @click="step.images = step.images.filter(token => token !== photo.token)">移回待分配</NButton>
                 </figcaption>
               </figure>
@@ -102,11 +110,12 @@
         </article>
       </section>
 
-      <section v-if="unassigned.length || editing" class="eop-panel eop-pool" aria-label="待分配图片">
+      <section v-if="unassigned.length || editing" class="eop-panel eop-pool" aria-label="待分配图片" @paste="pastePictures($event,'')" @dragover="overFiles" @drop="dropFiles($event,'')">
         <header class="eop-section-head">
           <div><h2 ref="poolHeading" tabindex="-1">待分配图片</h2><small>{{ unassigned.length }} 张<span v-if="editing && unassigned.length && record.steps.length"> · 拖动图片到步骤，或选择步骤</span></small></div>
           <NButton v-if="editing" size="small" :disabled="busy || record.images.length >= 100" @click="choosePictures('')"><Upload :size="16" />上传到待分配</NButton>
         </header>
+        <p v-if="editing" class="eop-muted">可点击上传、粘贴图片或拖入此区域。</p>
         <div v-if="editing && assignedPhoto" class="eop-assigned">
           <span role="status">已关联「{{ assignedPhoto.name }}」到第 {{ assignedPhoto.index }} 步</span>
           <NButton text type="primary" @click="focusStep(assignedPhoto.key)">查看步骤</NButton>
@@ -120,7 +129,7 @@
               <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" decoding="async" draggable="false" @error="broken.add(photo.token)" />
               <span v-else>打开原图</span>
             </button>
-            <figcaption><span :title="photo.name">{{ photo.name }}</span>
+            <figcaption><input v-if="editing" v-model="photo.name" maxlength="180" aria-label="图片名称" :disabled="busy" /><span v-else :title="photo.name">{{ photo.name }}</span>
               <select v-if="editing && record.steps.length" aria-label="分配到步骤" :disabled="busy" @change="assign(photo.token, $event)">
                 <option value="">分配到步骤</option>
                 <option v-for="(step,index) in record.steps" :key="step.key" :value="step.key">第 {{ index + 1 }} 步 · {{ step.text.slice(0,28) || '待填写' }}</option>
@@ -179,7 +188,7 @@ defineOptions({ inheritAttrs: false });
 defineProps<{embedded?:boolean}>();
 const emit=defineEmits<{close:[]}>();
 
-interface Row { id: string; fields: Record<string,string> }
+interface Row { id: string; fields: Record<string,string>; has_steps?:boolean; has_template?:boolean; has_images?:boolean }
 interface Photo { token: string; name: string; url: string; ticket?: string }
 interface Step { key: string; text: string; images: string[] }
 interface Detail extends Row { revision: string; editable: boolean; options: Record<string,string[]>; steps: Step[]; images: Photo[] }
@@ -192,6 +201,8 @@ const opening = shallowRef<Row>();
 const editing = ref(false);
 const search = ref('');
 const specialty = ref('');
+const missing = ref('');
+const updatedAt = ref(0);
 const page = ref(1);
 const pageSize = 20;
 const loading = ref(false);
@@ -225,15 +236,19 @@ let stepKey = 0;
 let activeRead: AbortController | undefined;
 let disposed = false;
 const specialties = computed(() => [{ label: '全部专业', value: '' }, ...Array.from(new Set(rows.value.map(row => row.fields['专业']).filter(Boolean))).sort().map(value => ({ label: value, value }))]);
+const specialtyCounts = computed(() => specialties.value.slice(1).map(item=>({name:item.value,count:rows.value.filter(row=>row.fields['专业']===item.value).length})));
+const missingOptions = [{label:'全部资料',value:''},{label:'缺少步骤',value:'has_steps'},{label:'缺少模板',value:'has_template'},{label:'缺少图片',value:'has_images'}];
+const missingCounts = computed(() => [{key:'has_steps',label:'步骤',count:rows.value.filter(row=>!row.has_steps).length},{key:'has_template',label:'模板',count:rows.value.filter(row=>!row.has_template).length},{key:'has_images',label:'图片',count:rows.value.filter(row=>!row.has_images).length}]);
 const filtered = computed(() => {
   const query = search.value.trim().toLowerCase();
   return rows.value.filter(row => (!specialty.value || row.fields['专业'] === specialty.value)
+    && (!missing.value || !row[missing.value as 'has_steps'|'has_template'|'has_images'])
     && Object.values(row.fields).some(value => value.toLowerCase().includes(query)));
 });
 const shown = computed(() => filtered.value.slice((page.value-1)*pageSize,page.value*pageSize));
 const payload = computed(() => record.value && ({
   fields: record.value.fields, steps: record.value.steps.map(({text,images}) => ({text,images})),
-  images: record.value.images.map(({token,ticket}) => ({token,ticket})),
+  images: record.value.images.map(({token,ticket,name}) => ({token,ticket,name})),
 }));
 const dirty = computed(() => !!record.value?.editable && JSON.stringify(payload.value) !== saved.value);
 const photos = computed(() => new Map(record.value?.images.map(photo => [photo.token,photo])));
@@ -248,7 +263,7 @@ const assignedPhoto = computed(() => {
   const photo = photos.value.get(assignment.token);
   return index >= 0 && photo ? {key: assignment.key, name: photo.name, index: index+1} : undefined;
 });
-watch([search,specialty], () => { page.value = 1; });
+watch([search,specialty,missing], () => { page.value = 1; });
 watch(() => filtered.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length/pageSize))); });
 watch(preview, () => { previewError.value = false; });
 const choices = (field: string) => [...new Set([...(record.value?.options[field] || []),record.value?.fields[field] || ''])].filter(Boolean);
@@ -298,7 +313,7 @@ async function read<T>(path: string, apply: (data:T) => void) {
     }
   }
 }
-function loadList() { return read<{items:Row[]}>(api, data => { rows.value = data.items; }); }
+function loadList(refresh=false) { return read<{items:Row[];updated_at?:number}>(api+(refresh?'?refresh=1':''), data => { rows.value = data.items; updatedAt.value=data.updated_at || 0; }); }
 function applyRecord(data: Detail) {
   revokePictures();
   clearPictureDrag();
@@ -359,7 +374,11 @@ function headerBack() {
   }
   leave(record.value ? closeRecord : back);
 }
-function refresh() { if (record.value) openRecord(record.value.id); else void loadList(); }
+function refresh() {
+  if (!record.value) { void loadList(true); return; }
+  const id=record.value.id;
+  void read<{items:Row[];updated_at?:number}>(api+'?refresh=1', data=>{rows.value=data.items;updatedAt.value=data.updated_at || 0;openRecord(id);});
+}
 function finishEditing() {
   const current = record.value;
   if (current && dirty.value) {
@@ -396,7 +415,11 @@ async function uploadPictures(event: Event) {
   input.value = '';
   const target = pictureTarget;
   pictureTarget = undefined;
-  if (!target || target.record !== record.value || !editing.value || busy.value || !files.length) return;
+  if (!target) return;
+  await uploadFiles(files,target);
+}
+async function uploadFiles(files:File[],target:{record:Detail;stepKey:string}) {
+  if (target.record !== record.value || !editing.value || busy.value || !files.length) return;
   const current = target.record;
   const step = current.steps.find(item => item.key === target.stepKey);
   if (target.stepKey && !step) return;
@@ -418,6 +441,23 @@ async function uploadPictures(event: Event) {
     }
   } catch (value) { fail(value); }
   finally { uploading.value = false; }
+}
+function pastePictures(event:ClipboardEvent,stepKey:string) {
+  if (!record.value?.editable || !editing.value || busy.value) return;
+  const files=Array.from(event.clipboardData?.files || []).filter(file=>file.type.startsWith('image/'));
+  if (!files.length) return;
+  event.preventDefault();
+  void uploadFiles(files,{record:record.value,stepKey});
+}
+function overFiles(event:DragEvent) {
+  if (editing.value && !busy.value && event.dataTransfer?.types.includes('Files')) event.preventDefault();
+}
+function dropFiles(event:DragEvent,stepKey:string) {
+  if (!record.value?.editable || !editing.value || busy.value) return;
+  const files=Array.from(event.dataTransfer?.files || []).filter(file=>file.type.startsWith('image/'));
+  if (!files.length) return;
+  event.preventDefault();
+  void uploadFiles(files,{record:record.value,stepKey});
 }
 function assign(token: string, event: Event) {
   const input = event.target as HTMLSelectElement;
@@ -448,6 +488,7 @@ function startPictureDrag(token: string, event: DragEvent) {
   draggedPhoto.value = token;
 }
 function overStep(key: string, event: DragEvent) {
+  if (event.dataTransfer?.types.includes('Files')) { overFiles(event); return; }
   if (!draggedPhoto.value || busy.value || !event.dataTransfer?.types.includes('application/x-clipflow-eop-picture')) return;
   event.preventDefault();
   event.dataTransfer.dropEffect = 'move';
@@ -459,6 +500,7 @@ function leaveStep(key: string, event: DragEvent) {
   }
 }
 function dropPicture(key: string, event: DragEvent) {
+  if (event.dataTransfer?.files.length) { dropFiles(event,key); return; }
   const token = event.dataTransfer?.getData('application/x-clipflow-eop-picture');
   if (!token || token!==draggedPhoto.value) return;
   event.preventDefault();
@@ -491,7 +533,10 @@ async function save() {
     applyRecord(result.record);
     message.value = '记录已保存到飞书。';
     const row = rows.value.find(item => item.id === current.id);
-    if (row) row.fields = {...result.record.fields};
+    if (row) {
+      if (result.record.fields['原优先级']!=='P0-高') rows.value=rows.value.filter(item=>item.id!==row.id);
+      else { row.fields = {...result.record.fields}; row.has_steps=!!result.record.steps.length; row.has_template=!!result.record.fields['原通告模板'].trim(); row.has_images=!!result.record.images.length; }
+    }
   } catch (value) { if (!disposed && record.value === current) fail(value); }
   finally { saving.value = false; }
 }
@@ -504,8 +549,9 @@ const unregister = registerNavigationGuard((_target,proceed) => {
   return false;
 });
 function beforeUnload(event: BeforeUnloadEvent) { if (busy.value || dirty.value) event.preventDefault(); }
-onMounted(() => { void loadList(); window.addEventListener('beforeunload',beforeUnload); });
-onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revokePictures(); window.removeEventListener('beforeunload',beforeUnload); });
+let refreshTimer:ReturnType<typeof setInterval> | undefined;
+onMounted(() => { void loadList(); refreshTimer=setInterval(()=>{if (!record.value && !opening.value && !loading.value) void loadList();},300000); window.addEventListener('beforeunload',beforeUnload); });
+onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refreshTimer); activeRead?.abort(); unregister(); revokePictures(); window.removeEventListener('beforeunload',beforeUnload); });
 </script>
 
 <style scoped>
@@ -537,9 +583,16 @@ onBeforeUnmount(() => { disposed = true; activeRead?.abort(); unregister(); revo
   .eop-workspace .eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,110px),1fr)); }
 }
 .eop-toolbar { justify-content:flex-start; }
+.eop-stats { display:flex; flex-wrap:wrap; gap:6px; padding:12px 12px 0; }
+.eop-stats button { display:flex; align-items:center; gap:6px; padding:6px 9px; border:1px solid var(--ep-line); border-radius:6px; background:var(--ep-surface); color:var(--ep-ink); cursor:pointer; font:inherit; font-size:13px; }
+.eop-stats button.selected { border-color:var(--ep-accent); background:var(--ep-soft); }
+.eop-cache-note { margin:8px 12px 0; color:var(--ep-muted); font-size:12px; }
+.eop-presence { display:flex; flex-wrap:wrap; gap:4px; font-size:12px; }
+.eop-presence span { color:#18805e; white-space:nowrap; }
+.eop-presence .missing { color:#c3413b; font-weight:600; }
 .eop-search { flex:1 1 210px; }
 .eop-filter { width:128px; }
-.eop-list-head,.eop-list-row { display:grid; grid-template-columns:minmax(180px,2.5fr) minmax(0,1fr) minmax(0,1.5fr) minmax(80px,1fr) 16px; gap:8px; align-items:center; padding:10px 12px; }
+.eop-list-head,.eop-list-row { display:grid; grid-template-columns:minmax(180px,2.5fr) minmax(0,1fr) minmax(0,1.5fr) minmax(170px,1.4fr) 16px; gap:8px; align-items:center; padding:10px 12px; }
 .eop-list-head { background:var(--ep-soft); color:var(--ep-muted); font-size:12px; font-weight:700; }
 .eop-list-row { width:100%; border:0; border-top:1px solid var(--ep-line); background:transparent; text-align:left; cursor:pointer; font:inherit; color:inherit; }
 .eop-list-row:hover { background:var(--ep-soft); }
