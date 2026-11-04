@@ -1,7 +1,7 @@
 <template>
   <NConfigProvider :theme="nightMode && !printMode && !printing ? darkTheme : null" :theme-overrides="nightMode && !printMode && !printing ? nightTheme : theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
-      <div :key="impersonationSession" class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'has-rail':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'has-impersonation':!!user.impersonation, 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
+      <div :key="impersonationSession" class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'has-rail':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink || user.role==='guest')" class="v2-header">
           <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
@@ -68,12 +68,12 @@
             <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
             <template v-else-if="route.pathname === '/workbench-lite'" />
-            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="componentProps" :embedded="['tool_management','daily_inspection','eop_scenarios'].includes(componentName) || undefined" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):['daily_inspection','eop_scenarios'].includes(activeModule)?navigate('/?view=functions'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
+            <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="{...componentProps,...(componentName==='daily_inspection'?{immersive:immersiveInspection}:{})}" :embedded="['tool_management','daily_inspection','eop_scenarios'].includes(componentName) || undefined" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):['daily_inspection','eop_scenarios'].includes(activeModule)?navigate('/?view=functions'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
             <NResult v-else status="404" title="没有找到此页面" description="请从功能导航选择要使用的模块。" />
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>
         </main>
-        <MobileNavigation v-if="!impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
+        <MobileNavigation v-if="!immersiveInspection && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
         <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
         <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
         <NModal v-model:show="accountConfirm" preset="dialog" :title="accountAction==='switch'?'切换账号':'退出登录'" :content="accountAction==='switch'?'将退出当前账号并返回登录页，已保存的资料会保留。':'确定退出当前账号？已保存的资料会保留。'" positive-text="继续" negative-text="取消" @positive-click="confirmAccountAction" />
@@ -146,10 +146,14 @@ const pages: Record<string, any> = {
   history: lazy(() => import('../components/HistoryMemoryPage.vue')),
 };
 const navigationQuery=window.matchMedia('(min-width:761px) and (hover:hover), (min-width:1025px)'),desktopNavigation=ref(navigationQuery.matches);
+const phoneQuery=window.matchMedia('(max-width:760px), (hover:none) and (max-width:1024px) and (max-height:500px)'),phoneViewport=ref(phoneQuery.matches);
+const phoneViewportChanged=()=>{phoneViewport.value=phoneQuery.matches;};
 provide('workspace-mobile-navigation',computed(()=>!desktopNavigation.value));
 function navigationViewportChanged(){desktopNavigation.value=navigationQuery.matches;collapsed.value=true;dismissAccountPopovers();}
 onMounted(()=>navigationQuery.addEventListener('change',navigationViewportChanged));
 onBeforeUnmount(()=>navigationQuery.removeEventListener('change',navigationViewportChanged));
+onMounted(()=>phoneQuery.addEventListener('change',phoneViewportChanged));
+onBeforeUnmount(()=>phoneQuery.removeEventListener('change',phoneViewportChanged));
 const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login'), collapsed = ref(true);
 const operationError=ref(''),logoutBusy=ref(false);
 const impersonationExpired=ref(false),impersonationLeaving=ref(false);
@@ -182,6 +186,9 @@ const publicLink = computed(() => route.value.pathname.startsWith('/polling-work
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
 const denied = computed(() => loggedIn.value && !publicLink.value && (activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const immersiveInspection=computed(()=>phoneViewport.value && !desktopNavigation.value && loggedIn.value && !checking.value && !denied.value && !publicLink.value && !printMode.value && !impersonationBlocked.value && user.value.role!=='guest' && activeModule.value==='daily_inspection');
+watch(immersiveInspection,value=>document.documentElement.classList.toggle('inspection-mobile-active',value),{immediate:true});
+onBeforeUnmount(()=>document.documentElement.classList.remove('inspection-mobile-active'));
 const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');

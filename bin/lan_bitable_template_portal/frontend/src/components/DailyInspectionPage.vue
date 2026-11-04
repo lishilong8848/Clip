@@ -1,13 +1,14 @@
 <template>
-  <section class="inspection-page" aria-label="日常巡检" data-v2-inline-feedback>
+  <section class="inspection-page" :class="{'is-inspection-immersive':immersive}" aria-label="日常巡检" data-v2-inline-feedback>
     <header class="inspection-heading">
-      <NButton v-if="!embedded || historyOpen || sheetOpen" quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
+      <NButton v-if="!embedded || immersive || historyOpen || sheetOpen" quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
       <div class="inspection-title"><h1>日常巡检</h1><p>{{ duty ? dutyLabel(duty) : '设备参数与测点读数' }}</p></div>
       <div class="inspection-actions inspection-heading-tools">
         <NButton v-if="state?.history_scopes?.length && !sheetOpen" size="small" :type="historyOpen ? 'primary' : 'default'"
           :aria-pressed="historyOpen" :aria-label="historyOpen ? '返回本班' : '历史巡检'" :disabled="!!busy"
           @click="toggleHistory">{{ historyOpen ? '返回' : '历史' }}</NButton>
         <NButton v-if="state?.history_scopes?.length && !historyOpen && !sheetOpen" size="small" aria-label="巡检表与导出" :disabled="!!busy" @click="sheetOpen=true">巡检表</NButton>
+        <NButton v-if="immersive && active && !historyOpen && !sheetOpen" size="small" :disabled="!!busy || !!active.pending || autoSaving" @click="openOrder">排序</NButton>
         <NButton v-if="!historyOpen && !sheetOpen && (!active || pollError)" size="small" :disabled="!!busy || autoSaving" :loading="busy==='load'" @click="load">刷新</NButton>
       </div>
     </header>
@@ -37,7 +38,7 @@
       :conflict-devices="[...conflicts].map(id=>({id,name:byId.get(id)?.name || '原表补填'}))"
       @resolve-conflict="resolveConflict" @retry-save="retryAutoSave" @update-reading="setReadingValue" @close="sheetOpen=false" />
     <template v-if="state && !historyOpen && !sheetOpen">
-      <div v-if="state.view_scopes?.length" class="inspection-actions inspection-view-scopes" aria-label="查看楼栋">
+      <div v-if="state.view_scopes?.length && (!immersive || state.view_scopes.length>1)" class="inspection-actions inspection-view-scopes" aria-label="查看楼栋">
         <span>查看楼栋</span>
         <NButton v-for="scope in state.view_scopes" :key="scope" size="small"
           :type="state.view_scope===scope?'primary':'default'" :aria-pressed="state.view_scope===scope"
@@ -74,12 +75,14 @@
           </template>
           <p>最新参考数据 · {{ time(preview.batch) }}<span v-if="!readOnly && state.completed_rounds<state.round_limit"> · 开始巡检后可修改</span></p>
           <p v-if="!previewDevices.length">请选择专业查看设备。</p>
-          <div v-if="previewDevices.length" class="room-navigation" aria-label="按楼层和房间查看">
+          <div v-if="previewDevices.length" id="inspection-room-navigation" class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
             <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
             <button v-if="unsetCount" class="unplaced-button" type="button" @click="selectFloor('未设置')">未设置位置 {{ unsetCount }} 台</button>
-            <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
+            <div v-if="selectedFloor" class="inspection-room-summary" :class="{'has-current':selectedRoom && !roomPickerOpen}"><span>{{ selectedFloor }} · {{ selectedRoom || '选择房间' }}</span><button v-if="selectedRoom" type="button" :aria-expanded="roomPickerOpen" @click="roomPickerOpen=!roomPickerOpen">{{ roomPickerOpen?'收起房间':'切换房间' }}</button></div>
+            <div v-if="selectedFloor" class="inspection-actions room-choice-list" :class="{'is-collapsed':selectedRoom && !roomPickerOpen}"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectRoom(room)">{{ room }}</button></div>
           </div>
+          <div v-if="immersive && selectedRoom" class="inspection-current-room"><span>{{ selectedFloor }} · {{ selectedRoom }} <small>{{ currentRoomCount }} 台</small></span><button type="button" @click="openRoomPicker">切换房间</button></div>
           <div class="inspection-devices">
             <article v-for="item in visiblePreview" :key="item.view_key || item.id" class="inspection-device">
               <h2>{{ item.name }}</h2>
@@ -105,7 +108,7 @@
               <span :class="autoStatus==='error'?'warning':'muted'">{{ autoLabel }}</span>
               <NButton v-if="autoStatus==='error' && !conflicts.size && !orphanedDrafts.length" size="small" :disabled="autoSaving || !!busy" @click="retryAutoSave">重试保存</NButton>
             </div>
-            <NButton size="small" :disabled="!!busy || !!active.pending || autoSaving" @click="openOrder">排序</NButton>
+            <NButton v-if="!immersive" size="small" :disabled="!!busy || !!active.pending || autoSaving" @click="openOrder">排序</NButton>
           </div>
           <div v-if="active.professions?.length" class="inspection-actions profession-progress">
             <span v-for="item in active.professions" :key="item" :class="professionConfirmed(item)?'done':'muted'">
@@ -123,14 +126,16 @@
             </select>
             <label title="只看数据缺失"><input v-model="onlyMissing" type="checkbox" aria-label="只看数据缺失"> 缺失</label>
           </div>
-          <div class="room-navigation" aria-label="按楼层和房间查看">
+          <div id="inspection-room-navigation" class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
             <button v-if="unplacedCount" class="unplaced-button" type="button" @click="selectFloor('待核对')">位置待核对 {{ unplacedCount }} 台</button>
             <button v-if="unsetCount" class="unplaced-button" type="button" @click="selectFloor('未设置')">未设置位置 {{ unsetCount }} 台</button>
-            <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
+            <div v-if="selectedFloor" class="inspection-room-summary" :class="{'has-current':selectedRoom && !roomPickerOpen}"><span>{{ selectedFloor }} · {{ selectedRoom || '选择房间' }}</span><button v-if="selectedRoom" type="button" :aria-expanded="roomPickerOpen" @click="roomPickerOpen=!roomPickerOpen">{{ roomPickerOpen?'收起房间':'切换房间' }}</button></div>
+            <div v-if="selectedFloor" class="inspection-actions room-choice-list" :class="{'is-collapsed':selectedRoom && !roomPickerOpen}"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectRoom(room)">{{ room }}</button></div>
           </div>
           <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
         </section>
+        <div v-if="immersive && selectedRoom" class="inspection-current-room"><span>{{ selectedFloor }} · {{ selectedRoom }} <small>{{ currentRoomCount }} 台</small></span><button type="button" @click="openRoomPicker">切换房间</button></div>
         <p v-if="active.pending" class="warning" role="status">{{ readOnly ? '本轮已提交，正在等待归档确认。' : '本轮数据已锁定，可重试同一轮归档。' }}</p>
         <section v-if="filtered.length" class="inspection-sheet" aria-label="设备参数核对">
           <div class="inspection-devices">
@@ -256,7 +261,7 @@ import { registerNavigationGuard } from '../navigation';
 import DailyInspectionHistory from './DailyInspectionHistory.vue';
 import DailyInspectionSheet from './DailyInspectionSheet.vue';
 
-defineProps<{embedded?:boolean}>();
+defineProps<{embedded?:boolean;immersive?:boolean}>();
 const emit = defineEmits<{close:[]}>();
 
 type Value = string | number | boolean | null;
@@ -288,6 +293,7 @@ const search = ref('');
 const profession = ref('');
 const selectedFloor = ref('');
 const selectedRoom = ref('');
+const roomPickerOpen = ref(true);
 const selectedProfessions = ref<string[]>([]);
 const onlyMissing = ref(false);
 const focusedDevice = ref('');
@@ -445,9 +451,12 @@ const floors=computed(()=>['1层','2层','3层','4层'].filter(floor=>navigation
 const unplacedCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor==='待核对').length);
 const unsetCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor==='未设置').length);
 const rooms=computed(()=>[...new Set(navigationDevices.value.filter(item=>devicePlace(item).floor===selectedFloor.value).map(item=>devicePlace(item).room))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
-function selectFloor(floor:string) {selectedFloor.value=floor;selectedRoom.value='';}
+function selectFloor(floor:string) {selectedFloor.value=floor;selectedRoom.value='';roomPickerOpen.value=true;}
+function selectRoom(room:string) {selectedRoom.value=room;roomPickerOpen.value=false;}
+async function openRoomPicker(){roomPickerOpen.value=true;await nextTick();document.getElementById('inspection-room-navigation')?.scrollIntoView({block:'start',behavior:'auto'});}
+const currentRoomCount=computed(()=>navigationDevices.value.filter(item=>devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value).length);
 const visiblePreview=computed(()=>displayedPreview.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value));
-watch([()=>state.value?.view_scope,()=>active.value?.id],()=>{selectedFloor.value='';selectedRoom.value='';});
+watch([()=>state.value?.view_scope,()=>active.value?.id],()=>{selectedFloor.value='';selectedRoom.value='';roomPickerOpen.value=true;});
 watch(floors,items=>{if (!['待核对','未设置'].includes(selectedFloor.value)&&!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
 watch(rooms,items=>{if (!items.includes(selectedRoom.value)) selectedRoom.value='';});
 const positions = computed(()=>new Map(viewDevices.value.map((device,index)=>[device.id,index+1])));
@@ -1070,6 +1079,7 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
 .inspection-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,140px) auto;gap:6px;align-items:center}
 .room-navigation{display:grid;gap:6px;margin:8px 0}.room-navigation button{border:1px solid var(--border-color,#ccd5df);background:transparent;color:inherit;padding:5px 10px;cursor:pointer}.room-navigation button[aria-pressed=true]{background:var(--primary-color,#1764c0);color:#fff;border-color:transparent}
 .room-navigation .unplaced-button{justify-self:start;color:var(--cf-warning,#a65b00)}
+.inspection-room-summary{display:none}
 .inspection-note{display:grid;gap:4px;margin-top:8px}.inspection-note textarea{width:100%;box-sizing:border-box;color:inherit;background:transparent;border:1px solid var(--border-color,#ccd5df);font:inherit;padding:6px}
 .inspection-filters label{display:flex;align-items:center;gap:6px;min-height:34px;font-size:13px;cursor:pointer}
 .inspection-devices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px 16px}
@@ -1105,7 +1115,7 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
 .order-toolbar input{width:58px}
 .muted{color:var(--inspection-muted)}.warning{color:var(--cf-warning)}.done{color:var(--cf-success)}
 @media(min-width:1260px){.inspection-devices{grid-template-columns:repeat(3,minmax(0,1fr))}}
-@media(max-width:760px){
+@media(max-width:760px),(hover:none) and (max-width:1024px) and (max-height:500px){
   .inspection-page{padding:6px 8px;gap:6px}
   .inspection-heading{flex-wrap:nowrap;gap:4px;padding-bottom:5px}
   .inspection-title{min-width:0;flex:1}.inspection-title h1{font-size:16px}
@@ -1116,6 +1126,42 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
   .inspection-devices{grid-template-columns:minmax(0,1fr);gap:0}
   .inspection-page :is(input,select,textarea),.order-toolbar input{font-size:16px}
   .inspection-page :deep(.n-button),.inspection-order :deep(.n-button){min-height:42px}
+  .inspection-page.is-inspection-immersive{padding:0 10px max(12px,env(safe-area-inset-bottom));gap:8px;max-width:none}
+  .is-inspection-immersive .inspection-heading{min-height:50px;padding:4px 0;border-bottom:1px solid var(--inspection-line)}
+  .is-inspection-immersive .inspection-heading> :deep(.n-button:first-child){width:38px;min-width:38px;padding:0}
+  .is-inspection-immersive .inspection-title h1{font-size:17px;line-height:1.25}
+  .is-inspection-immersive .inspection-title p{font-size:11px;margin-top:2px}
+  .is-inspection-immersive .inspection-heading-tools{gap:2px}
+  .is-inspection-immersive .inspection-heading-tools :deep(.n-button){min-height:40px;padding-inline:7px}
+  .is-inspection-immersive .inspection-summary{gap:7px}
+  .is-inspection-immersive .inspection-view-scopes{padding:0 0 3px}
+  .is-inspection-immersive .inspection-filters{grid-template-columns:minmax(0,1fr) 92px auto;gap:5px}
+  .is-inspection-immersive .inspection-filters :is(input,select){height:40px;border-radius:0}
+  .is-inspection-immersive .room-navigation{gap:5px;margin:2px 0;scroll-margin-top:8px}
+  .is-inspection-immersive .room-navigation>.inspection-actions:first-child{display:grid;grid-template-columns:38px repeat(4,minmax(0,1fr));gap:4px}
+  .is-inspection-immersive .room-navigation button{min-height:38px;padding:4px 6px;border-radius:0;line-height:1.2}
+  .is-inspection-immersive .room-navigation button[aria-pressed=true]{background:var(--v2-palette-accent-text,var(--inspection-accent));color:var(--v2-palette-on-accent-text,#fff);border-color:transparent}
+  .is-inspection-immersive .room-navigation .unplaced-button{min-height:34px;font-size:12px}
+  .is-inspection-immersive .inspection-room-summary{display:flex;align-items:center;justify-content:space-between;gap:8px;padding-top:2px;font-size:13px;font-weight:600}
+  .is-inspection-immersive .inspection-room-summary.has-current{display:none}
+  .is-inspection-immersive .inspection-room-summary button{border:0;color:var(--inspection-accent);font-size:13px}
+  .is-inspection-immersive .room-choice-list{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px}
+  .is-inspection-immersive .room-choice-list>strong{grid-column:1/-1;font-size:12px;color:var(--inspection-muted)}
+  .is-inspection-immersive .room-choice-list button{overflow-wrap:anywhere}
+  .is-inspection-immersive .room-choice-list.is-collapsed{display:none}
+  .inspection-current-room{position:sticky;top:0;z-index:8;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;min-height:40px;padding:3px 0;background:var(--inspection-surface);border-bottom:1px solid var(--inspection-line);font-size:14px;font-weight:600}
+  .inspection-current-room span{min-width:0;overflow-wrap:anywhere}.inspection-current-room small{font-weight:400;margin-left:4px}
+  .inspection-current-room button{min-height:38px;flex:none;border:0;background:transparent;color:var(--inspection-accent);font:inherit;font-size:13px;cursor:pointer}
+  .is-inspection-immersive .inspection-devices{gap:0}
+  .is-inspection-immersive .inspection-device{padding:6px 0 8px;border-top:1px solid var(--inspection-line);scroll-margin-top:46px}
+  .is-inspection-immersive .inspection-device-heading{align-items:center;flex-wrap:wrap;gap:3px 7px}
+  .is-inspection-immersive .inspection-device-heading h2{font-size:14px;line-height:1.3;overflow-wrap:anywhere}
+  .is-inspection-immersive .inspection-readings{grid-template-columns:repeat(2,minmax(0,1fr));gap:0 10px}
+  .is-inspection-immersive .inspection-reading{grid-template-columns:minmax(0,1fr) minmax(54px,44%);min-height:40px;gap:3px}
+  .is-inspection-immersive .inspection-reading strong{font-size:12px;font-weight:500;line-height:1.3}
+  .is-inspection-immersive .inspection-reading :is(input,select){width:100%;min-height:36px;padding:3px 4px;border-radius:0;font-size:16px}
+  .is-inspection-immersive .inspection-preview-row{min-height:34px;align-items:center;padding:4px 0;font-size:12px}
+  .is-inspection-immersive .inspection-footer{gap:6px;padding:10px 0 4px}
 }
 @media(max-width:430px){
   .inspection-filters{grid-template-columns:minmax(0,1fr) 82px auto}
