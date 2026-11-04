@@ -774,6 +774,8 @@ class FastAPIPortalController:
         install_eop_scenario_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.daily_inspection import install_daily_inspection
         install_daily_inspection(app, self, PortalRuntime)
+        from lan_bitable_template_portal.cold_source_monitor import install_cold_source_monitor
+        install_cold_source_monitor(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
         install_plan_convergence_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
@@ -13145,6 +13147,20 @@ class FastAPIPortalController:
         except Exception:
             log_warning("日常巡检提醒暂未完成，将在重试时段内继续尝试。")
 
+    def _run_scheduled_cold_source_monitor(self) -> None:
+        if _mock_external_enabled() or self._stopping_event.is_set():
+            return
+        from lan_bitable_template_portal.cold_source_monitor import process
+        from lan_bitable_template_portal.risk_inspection_cloud import RiskCloud
+        cloud = getattr(self, '_cold_source_cloud', None)
+        if cloud is None:
+            cloud = self._cold_source_cloud = RiskCloud(None, PortalRuntime.state_store.db_path.parent / 'feishu_assistant.json', None, None)
+        try:
+            process(PortalRuntime.state_store, cloud, PortalRuntime.auth_manager,
+                    _send_card_to_open_ids_guarded, stopping=self._stopping_event.is_set)
+        except Exception:
+            log_warning('冷源运行提醒暂未完成，将在下次检查时重试。')
+
     def _run_scheduled_plan_deadlines(self) -> None:
         if _mock_external_enabled() or self._stopping_event.is_set():
             return
@@ -13593,6 +13609,11 @@ class FastAPIPortalController:
             coalesce=True,
             misfire_grace_time=60,
             next_run_time=dt.datetime.now(dt.timezone.utc),
+        )
+        scheduler.add_job(
+            self._run_scheduled_cold_source_monitor,
+            'interval', minutes=1, id='cold_source_monitor', replace_existing=True,
+            max_instances=1, coalesce=True, next_run_time=dt.datetime.now(dt.timezone.utc),
         )
         scheduler.add_job(
             self._run_scheduled_daily_report_recipient_refresh,
@@ -14167,6 +14188,10 @@ class FastAPIPortalController:
             PortalRuntime.auth_manager.shutdown()
         with suppress(Exception):
             PortalRuntime._polling_sop_cloud.close()
+        with suppress(Exception):
+            if getattr(self, '_cold_source_cloud', None):
+                self._cold_source_cloud.close()
+                self._cold_source_cloud = None
         PortalRuntime.notice_callback = None
         PortalRuntime.ongoing_callback = None
         PortalRuntime.ongoing_delete_callback = None

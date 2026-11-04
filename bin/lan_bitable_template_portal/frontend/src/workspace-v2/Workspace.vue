@@ -131,6 +131,7 @@ const pages: Record<string, any> = {
   documents: lazy(() => import('../components/DocumentLibraryPage.vue')),
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
   daily_inspection: lazy(() => import('../components/DailyInspectionPage.vue')),
+  cold_source: lazy(() => import('../components/ColdSourceMonitorPage.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
   risk_inspection: lazy(() => import('../components/InspectionWorkspace.vue')),
