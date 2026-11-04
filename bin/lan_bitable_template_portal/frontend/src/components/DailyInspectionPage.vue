@@ -32,7 +32,10 @@
       ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
     <DailyInspectionSheet v-if="sheetOpen && state?.history_scopes?.length" :scopes="state.history_scopes"
       :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
-      :drafts="submissionReviews()" :read-only="readOnly" @close="sheetOpen=false" />
+      :drafts="submissionReviews()" :read-only="readOnly || inputsLocked" :save-label="autoLabel"
+      :save-error="autoStatus==='error'" :can-retry="!conflicts.size && !orphanedDrafts.length && !autoSaving"
+      :conflict-devices="[...conflicts].map(id=>({id,name:byId.get(id)?.name || '原表补填'}))"
+      @resolve-conflict="resolveConflict" @retry-save="retryAutoSave" @update-reading="setReadingValue" @close="sheetOpen=false" />
     <template v-if="state && !historyOpen && !sheetOpen">
       <div v-if="state.view_scopes?.length" class="inspection-actions inspection-view-scopes" aria-label="查看楼栋">
         <span>查看楼栋</span>
@@ -53,7 +56,7 @@
             <span>已完成 {{ state.completed_rounds }} / {{ state.round_limit }} 次</span>
           </div>
           <p v-if="state.completed_rounds>=state.round_limit">本楼本班巡检已全部完成。</p>
-          <p v-else>选择本轮专业；已选专业全部确认后归档。</p>
+          <p v-else>选择本轮专业；全部确认后统一提交归档。</p>
         </template>
         <p v-if="previewBusy" role="status">正在读取最新设备数据…</p>
         <p v-else-if="previewError" class="warning" role="alert">{{ previewError }}</p>
@@ -69,8 +72,12 @@
           </template>
           <p>最新参考数据 · {{ time(preview.batch) }}<span v-if="!readOnly && state.completed_rounds<state.round_limit"> · 开始巡检后可修改</span></p>
           <p v-if="!previewDevices.length">请选择专业查看设备。</p>
+          <div v-if="previewDevices.length" class="room-navigation" aria-label="按楼层和房间查看">
+            <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
+            <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
+          </div>
           <div class="inspection-devices">
-            <article v-for="item in previewDevices" :key="item.id" class="inspection-device">
+            <article v-for="item in visiblePreview" :key="item.id" class="inspection-device">
               <h2>{{ item.name }}</h2>
               <p>{{ [item.profession,item.sections[0]?.location || item.points[0]?.location].filter(Boolean).join(' · ') }}</p>
               <div class="inspection-readings">
@@ -112,6 +119,10 @@
             </select>
             <label title="只看数据缺失"><input v-model="onlyMissing" type="checkbox" aria-label="只看数据缺失"> 缺失</label>
           </div>
+          <div class="room-navigation" aria-label="按楼层和房间查看">
+            <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
+            <div v-if="selectedFloor" class="inspection-actions"><strong>房间</strong><button v-for="room in rooms" :key="room" type="button" :aria-pressed="selectedRoom===room" @click="selectedRoom=room">{{ room }}</button></div>
+          </div>
           <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
         </section>
         <p v-if="active.pending" class="warning" role="status">{{ readOnly ? '本轮已提交，正在等待归档确认。' : '本轮数据已锁定，可重试同一轮归档。' }}</p>
@@ -121,26 +132,23 @@
               @focusin="focusedDevice=item.id" @focusout="leaveDevice(item.id,$event)">
               <header class="inspection-device-heading">
                 <h2 tabindex="-1"><span class="sequence">{{ positions.get(item.id) }}</span>{{ item.name }}</h2>
+                <span class="device-profession">{{ item.profession }}</span>
                 <span v-if="conflicts.has(item.id)" class="warning">待核对共享修改</span>
                 <span v-else-if="missingByDevice.get(item.id)" class="warning">{{ missingByDevice.get(item.id) }}</span>
                 <span v-else-if="deviceModified(item)" class="warning">已修改</span>
               </header>
-              <p>{{ [item.profession,item.sections[0]?.location || item.points[0]?.location].filter(Boolean).join(' · ') }}</p>
               <p v-if="!item.parameters.length" class="muted">源表暂无参数。</p>
               <div class="inspection-readings">
               <div v-for="row in item.parameters" :key="row.id" class="inspection-reading">
-                <div>
-                  <strong>{{ row.name }}</strong>
-                  <small v-if="parameterLocation(item,row)">{{ parameterLocation(item,row) }}</small>
-                </div>
+                <div><strong>{{ row.name }}</strong><small v-if="item.parameters.filter(value=>value.name===row.name).length>1">{{ parameterLocation(item,row) }}</small><small v-if="mappingIssue(item,row)" class="warning" :title="mappingIssue(item,row)">原表位置待核对</small></div>
                 <div class="inspection-value">
                   <span v-if="row.read_only" class="muted">{{ shownValue(row.reference) }} · 已停用</span>
                   <input v-else :value="readingFor(item.id,row)" :disabled="inputsLocked"
                     :inputmode="numericValue(row.reference)===null ? 'text' : 'decimal'" maxlength="160"
                     class="numeric" :class="{'missing-reading':!readingFor(item.id,row).trim()}"
-                    placeholder="源数据缺失" :aria-label="row.name+'巡检数据'"
+                    placeholder="待填" :aria-label="item.name+' '+row.name+'巡检数据'"
+                    :title="readingFor(item.id,row)!==referenceText(row.reference) ? '原值：'+shownValue(row.reference) : ''"
                     @input="setReading(item.id,row.id,$event)">
-                  <small v-if="!row.read_only && readingFor(item.id,row)!==referenceText(row.reference)" class="muted">原值 {{ shownValue(row.reference) }}</small>
                 </div>
               </div>
               </div>
@@ -157,7 +165,7 @@
             </article>
           </div>
         </section>
-        <p v-else>没有匹配的设备。</p>
+        <p v-else>{{ selectedRoom ? '没有匹配的设备。' : '请选择楼层和房间查看设备。' }}</p>
         <footer class="inspection-actions inspection-footer">
           <p v-if="error" class="warning">{{ error }}</p>
           <details v-if="!readOnly && !active.pending" class="inspection-more">
@@ -213,7 +221,7 @@
     </NModal>
     <NModal :show="!!confirmation" preset="dialog" type="warning"
       :title="confirmationTitle" :aria-label="confirmationTitle"
-      :content="confirmation==='profession' ? '确认该专业的设备数据已核对；所有已选专业确认后开始归档。' : confirmation==='finish' ? '将把多维表原值及本轮修改归档到飞书「巡检记录」；源数据缺失项保留为空。' : '取消会清除本轮共享草稿与填写记录。'"
+      :content="confirmation==='profession' ? '确认该专业的设备数据已核对；全部专业确认后还需统一提交归档。' : confirmation==='finish' ? '将把多维表原值及本轮修改归档到飞书「巡检记录」；源数据缺失项保留为空。' : '取消会清除本轮共享草稿与填写记录。'"
       :positive-text="confirmation==='profession' ? '确认该专业' : confirmation==='finish' ? '确认并归档' : '取消本轮'" negative-text="返回查看"
       @positive-click="applyConfirmation" @update:show="show=>{if(!show)confirmation='';}" />
     <NModal :show="!!leaveAction" preset="dialog" type="warning" title="本机填写尚未保存" aria-label="本机填写尚未保存"
@@ -241,10 +249,10 @@ const emit = defineEmits<{close:[]}>();
 
 type Value = string | number | boolean | null;
 type Reading = {location:string; form:string; integrity:string; missing:string; note:string};
-type Point = {id:string; name:string; sampled:number|null; integrity:string; location:string; path:string; note:string; template:string; sheet:string; cell:string; template_known:boolean};
+type Point = {id:string; point_id:string; name:string; sampled:number|null; integrity:string; location:string; path:string; note:string; template:string; sheet:string; cell:string; template_known:boolean;mapping_issue?:string};
 type Parameter = {id:string; name:string; reference:Value; section?:number; point?:string; read_only?:boolean};
 type Device = {id:string; name:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[]};
-type Batch = {batch:number; count:number; devices:Device[]};
+type Batch = {batch:number; count:number; devices:Device[];form_devices?:Device[]};
 type Duty = {scope:string; date:string; shift:string};
 type Review = {values:Record<string,string>; result:''|'正常'|'异常'; note:string; revision:number};
 type Reviews = Record<string,Review>;
@@ -265,6 +273,8 @@ const error = ref('');
 const message = ref('');
 const search = ref('');
 const profession = ref('');
+const selectedFloor = ref('');
+const selectedRoom = ref('');
 const selectedProfessions = ref<string[]>([]);
 const onlyMissing = ref(false);
 const focusedDevice = ref('');
@@ -302,7 +312,7 @@ const readOnly = computed(()=>state.value?.can_edit===false);
 const duty = computed(()=>state.value?.duty);
 const batch = computed(()=>active.value?.batch);
 const devices = computed(()=>batch.value?.devices || []);
-const byId = computed(()=>new Map(devices.value.map(device=>[device.id,device])));
+const byId = computed(()=>new Map([...devices.value,...(batch.value?.form_devices || [])].map(device=>[device.id,device])));
 const inputsLocked = computed(()=>!!busy.value || !!active.value?.pending || readOnly.value);
 const hasDrafts = computed(()=>Object.keys(drafts.value).length>0);
 const orphanedDrafts = computed(()=>Object.keys(drafts.value).filter(id=>!byId.value.has(id)));
@@ -316,7 +326,7 @@ const conflicts = computed(()=>new Set(active.value?.pending || readOnly.value ?
   .filter(([id,review])=>review.revision!==savedReview(id).revision).map(([id])=>id)));
 const missingByDevice = computed(()=>new Map(devices.value.map(item=>{
   const missing=item.parameters.filter(row=>!row.read_only && !readingFor(item.id,row).trim()).length;
-  const issue=missing ? missing+' 项数据缺失' : item.sections.some(section=>section.missing) ? '源数据不完整' : !item.parameters.length ? '源表暂无参数' : '';
+  const issue=missing ? missing+' 项数据缺失' : !item.parameters.length ? '源表暂无参数' : '';
   return [item.id,issue] as const;
 })));
 const missingDevices = computed(()=>devices.value.filter(item=>!!missingByDevice.value.get(item.id)).length);
@@ -347,10 +357,30 @@ const viewDevices = computed(()=>{
     .sort((a,b)=>(ranks.get(a.device.id) ?? Number.MAX_SAFE_INTEGER)-(ranks.get(b.device.id) ?? Number.MAX_SAFE_INTEGER) || a.index-b.index)
     .map(item=>item.device);
 });
+// Keep unrecognised locations visible for manual verification instead of guessing.
+function devicePlace(device:Device) {
+  const location=device.sections.map(row=>row.location).find(Boolean) || device.points.map(row=>row.location).find(Boolean) || '';
+  const path=device.points.map(row=>row.path).find(Boolean) || '';
+  const parts=path.split('/').map(part=>part.trim()).filter(Boolean);
+  const floorIndex=parts.findIndex(part=>/^[一二三四五六七八九\d]+层$/.test(part));
+  const code=(location+' '+device.name+' '+path).match(/(?:^|[^\d])(?:[DE][-\s]?)?([1-9]\d{2})(?=[-\s/]|$)/i)?.[1] || '';
+  const explicit=(floorIndex>=0 ? parts[floorIndex] : location).match(/(?:^|[/\s])([一二三四五六七八九\d]+)层/);
+  const floor=explicit ? explicit[1]+'层' : code ? code[0]+'层（按编号）' : '未标注楼层';
+  const room=(floorIndex>=0 ? parts[floorIndex+1] : '') || (code ? code+'（按编号，待核对）' : location.trim() || '未标注房间');
+  return {floor,room};
+}
+const navigationDevices=computed(()=>active.value ? viewDevices.value : previewDevices.value);
+const floors=computed(()=>[...new Set(navigationDevices.value.map(item=>devicePlace(item).floor))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
+const rooms=computed(()=>[...new Set(navigationDevices.value.filter(item=>devicePlace(item).floor===selectedFloor.value).map(item=>devicePlace(item).room))].sort((a,b)=>a.localeCompare(b,'zh-CN',{numeric:true})));
+function selectFloor(floor:string) {selectedFloor.value=floor;selectedRoom.value='';}
+const visiblePreview=computed(()=>previewDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value));
+watch([()=>state.value?.view_scope,()=>active.value?.id],()=>{selectedFloor.value='';selectedRoom.value='';});
+watch(floors,items=>{if (!items.includes(selectedFloor.value)) {selectedFloor.value='';selectedRoom.value='';}});
+watch(rooms,items=>{if (!items.includes(selectedRoom.value)) selectedRoom.value='';});
 const positions = computed(()=>new Map(viewDevices.value.map((device,index)=>[device.id,index+1])));
 const filtered = computed(()=>{
   const q=search.value.trim().toLowerCase();
-  return viewDevices.value.filter(item=>(!onlyMissing.value || focusedDevice.value===item.id || !!missingByDevice.value.get(item.id) || conflicts.value.has(item.id)) &&
+  return viewDevices.value.filter(item=>!!selectedRoom.value && devicePlace(item).floor===selectedFloor.value && devicePlace(item).room===selectedRoom.value && (!onlyMissing.value || focusedDevice.value===item.id || !!missingByDevice.value.get(item.id) || conflicts.value.has(item.id)) &&
     (!q || [item.name,item.profession,...item.sections.map(row=>row.location),...item.points.flatMap(row=>[row.name,row.path])]
       .some(value=>value.toLowerCase().includes(q))));
 });
@@ -400,6 +430,9 @@ function parameterLocation(device:Device,row:Parameter) {
   if (row.section!==undefined) return device.sections.length>1 ? device.sections[row.section]?.form || device.sections[row.section]?.location : '';
   return '测点';
 }
+function mappingIssue(device:Device,row:Parameter) {
+  return row.point ? device.points.find(point=>point.id===row.point)?.mapping_issue || '' : '';
+}
 function persistDrafts() {
   window.clearTimeout(saveTimer);
   if (!draftKey) return;
@@ -440,7 +473,10 @@ function edit(id:string) {
   return drafts.value[id];
 }
 function setReading(id:string,parameter:string,event:Event) {
-  edit(id).values[parameter]=(event.target as HTMLInputElement).value;
+  setReadingValue(id,parameter,(event.target as HTMLInputElement).value);
+}
+function setReadingValue(id:string,parameter:string,value:string) {
+  edit(id).values[parameter]=value;
   queueAutoSave();
 }
 function resolveConflict(id:string,keep:boolean) {
@@ -620,7 +656,7 @@ async function fetchState(action:string, body?:object, selectedScope?:string) {
     if (disposed || request.signal.aborted) return false;
     useState(next,action==='finish' || action==='cancel' || action==='confirm-profession' && !next.active);
     if (action==='finish') message.value='本轮巡检已归档。';
-    if (action==='confirm-profession') message.value=next.active ? '该专业已确认，等待其他已选专业。' : '所有专业已确认，本轮巡检已归档。';
+    if (action==='confirm-profession') message.value=next.active?.professions?.every(name=>next.active?.profession_confirmations?.[name]?.version===next.active?.profession_versions?.[name]) ? '所有专业已确认，可统一提交归档。' : '该专业已确认，等待其他已选专业。';
     if (action==='order') message.value='设备顺序已保存。';
     if (action==='draft') message.value='本轮草稿已共享给本楼当班人员。';
     return true;
@@ -747,6 +783,9 @@ function confirmFinish() {
     search.value='';
     profession.value='';
     onlyMissing.value=false;
+    const place=devicePlace(missing);
+    selectedFloor.value=place.floor;
+    selectedRoom.value=place.room;
     void nextTick(()=>{
       const element=document.getElementById(deviceAnchor(missing.id));
       element?.scrollIntoView({block:'start'});
@@ -948,17 +987,19 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
 .inspection-page :deep(.n-button),.inspection-order :deep(.n-button){min-height:34px;max-width:100%;font-weight:500}
 .inspection-page :deep(.n-button__content){white-space:normal}
 .inspection-filters{display:grid;grid-template-columns:minmax(0,1fr) minmax(90px,140px) auto;gap:6px;align-items:center}
+.room-navigation{display:grid;gap:6px;margin:8px 0}.room-navigation button{border:1px solid var(--border-color,#ccd5df);background:transparent;color:inherit;padding:5px 10px;cursor:pointer}.room-navigation button[aria-pressed=true]{background:var(--primary-color,#1764c0);color:#fff;border-color:transparent}
 .inspection-filters label{display:flex;align-items:center;gap:6px;min-height:34px;font-size:13px;cursor:pointer}
 .inspection-devices{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start;gap:10px 16px}
-.inspection-device{min-width:0;border-top:1px solid var(--inspection-line);padding:5px 0;scroll-margin-top:30px}
-.inspection-readings{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,155px),1fr));gap:0 8px;align-items:start}
+.inspection-device{min-width:0;border-top:1px solid var(--inspection-line);padding:3px 0;scroll-margin-top:30px}
+.inspection-readings{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,150px),1fr));gap:0 8px;align-items:start}
 .inspection-preview-row{display:flex;justify-content:space-between;gap:8px;padding:5px 3px;border-bottom:1px solid var(--inspection-line);font-size:13px;min-width:0;overflow-wrap:anywhere}
 .inspection-preview-row strong{text-align:right;font-variant-numeric:tabular-nums}
-.inspection-device-heading{display:flex;align-items:baseline;justify-content:space-between;gap:5px;font-size:12px}
+.inspection-device-heading{display:flex;align-items:baseline;gap:5px;font-size:12px}
+.inspection-device-heading h2{min-width:0;flex:1}.device-profession{color:var(--inspection-muted);font-size:11px}
 .inspection-device-heading>span{flex:none}
 .sequence{margin-right:7px;color:var(--inspection-muted);font-size:12px}
 .numeric{text-align:right;font-variant-numeric:tabular-nums}
-.inspection-reading{display:grid;grid-template-columns:minmax(0,1fr) minmax(60px,42%);align-items:center;gap:4px;min-width:0;min-height:40px;padding:2px 0;border-bottom:1px solid var(--inspection-line);font-size:14px}
+.inspection-reading{display:grid;grid-template-columns:minmax(0,1fr) minmax(58px,42%);align-items:center;gap:4px;min-width:0;min-height:36px;padding:1px 0;border-bottom:1px solid var(--inspection-line);font-size:14px}
 .inspection-reading>*{min-width:0;overflow-wrap:anywhere}
 .inspection-reading strong{font-size:13px}
 .inspection-reading small{display:block}

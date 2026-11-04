@@ -20,7 +20,7 @@ EXTENSIONS = {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.xlsm', '.md', '.txt', 
 
 
 def tool_management_enabled():
-    return os.environ.get('CLIPFLOW_TOOL_SELF_CHECK_ENABLED') == '1'
+    return os.environ.get('CLIPFLOW_TOOL_SELF_CHECK_ENABLED', '1') == '1'
 
 
 def tool_management_access(runtime, session, user):

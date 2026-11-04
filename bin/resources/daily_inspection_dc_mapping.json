@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "11_0_443_1_600_0",
+      "source_device": "178-AD001",
+      "source_device_full": "178-AD001_直流屏",
+      "source_name": "主路输入 UV 线电压",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "柴发巡检表",
+      "cells": {
+        "白1": "B23",
+        "白2": "B24",
+        "夜1": "B25",
+        "夜2": "B26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "11_0_443_1_609_0",
+      "source_device": "178-AD001",
+      "source_device_full": "178-AD001_直流屏",
+      "source_name": "合母电压",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "柴发巡检表",
+      "cells": {
+        "白1": "C23",
+        "白2": "C24",
+        "夜1": "C25",
+        "夜2": "C26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "11_0_443_1_610_0",
+      "source_device": "178-AD001",
+      "source_device_full": "178-AD001_直流屏",
+      "source_name": "控母电压",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "柴发巡检表",
+      "cells": {
+        "白1": "D23",
+        "白2": "D24",
+        "夜1": "D25",
+        "夜2": "D26"
+      }
+    }
+  ]
+}

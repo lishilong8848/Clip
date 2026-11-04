@@ -17,7 +17,7 @@ from openpyxl import load_workbook
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bin.lan_bitable_template_portal.risk_inspection import MODULE, RiskError, RiskInspections
-from bin.lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes
+from bin.lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes, tool_management_enabled
 from bin.lan_bitable_template_portal.tool_self_check import BUILDINGS, ToolSelfChecks
 
 
@@ -36,7 +36,14 @@ class ToolSelfCheckTest(TestCase):
         self.month = self.service.issue()
         self.templates = self.service.list(self.admin)['templates']
 
-    def test_disabled_by_default(self):
+    def test_enabled_by_default_and_explicit_disable_still_works(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertTrue(tool_management_enabled())
+            app = FastAPI()
+            runtime = SimpleNamespace()
+            install_risk_inspection_routes(app, SimpleNamespace(), runtime)
+            self.assertTrue(any(route.path.startswith('/api/tool-self-check') for route in app.routes))
+            self.assertTrue(callable(runtime.tool_management))
         with patch.dict(os.environ, {'CLIPFLOW_TOOL_SELF_CHECK_ENABLED': ''}):
             app = FastAPI()
             install_risk_inspection_routes(app, SimpleNamespace(), SimpleNamespace())

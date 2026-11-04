@@ -1,0 +1,133 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "10_0_344_1_603_0",
+      "source_device": "144-SVG-201",
+      "source_device_full": "144-SVG-201_SVG动态补偿装置_动态补偿装置",
+      "source_name": "装置温度",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "F7",
+        "白2": "F8",
+        "夜1": "F9",
+        "夜2": "F10"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "2_0_355_1_603_0",
+      "source_device": "120-SVG-201",
+      "source_device_full": "120-SVG-201_SVG动态补偿装置_动态补偿装置",
+      "source_name": "装置温度",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "O7",
+        "白2": "O8",
+        "夜1": "O9",
+        "夜2": "O10"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "3_0_383_1_603_0",
+      "source_device": "120-SVG-101",
+      "source_device_full": "120-SVG-101_SVG动态补偿装置_动态补偿装置",
+      "source_name": "装置温度",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "L7",
+        "白2": "L8",
+        "夜1": "L9",
+        "夜2": "L10"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "8_0_366_1_603_0",
+      "source_device": "144-SVG-101",
+      "source_device_full": "144-SVG-101_SVG动态补偿装置_动态补偿装置",
+      "source_name": "装置温度_℃",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "C7",
+        "白2": "C8",
+        "夜1": "C9",
+        "夜2": "C10"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "电气",
+      "point_id": "2_0_362_1_682_0",
+      "source_device": "144-SVG-101",
+      "source_device_full": "144-SVG-101_动态补偿装置",
+      "source_name": "A_功率因数(R)",
+      "template": "21V-JSNTFOC-RM-428 南通数据中心E栋电气巡检表单.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "D7",
+        "白2": "D8",
+        "夜1": "D9",
+        "夜2": "D10"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "电气",
+      "point_id": "4_0_388_1_682_0",
+      "source_device": "120-SVG-101",
+      "source_device_full": "120-SVG-101_动态补偿装置",
+      "source_name": "A_功率因数(R)",
+      "template": "21V-JSNTFOC-RM-428 南通数据中心E栋电气巡检表单.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "M7",
+        "白2": "M8",
+        "夜1": "M9",
+        "夜2": "M10"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "电气",
+      "point_id": "53_0_349_1_682_0",
+      "source_device": "144-SVG-201",
+      "source_device_full": "144-SVG-201_动态补偿装置",
+      "source_name": "A_功率因数(R)",
+      "template": "21V-JSNTFOC-RM-428 南通数据中心E栋电气巡检表单.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "G7",
+        "白2": "G8",
+        "夜1": "G9",
+        "夜2": "G10"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "电气",
+      "point_id": "6_0_370_1_682_0",
+      "source_device": "120-SVG-201",
+      "source_device_full": "120-SVG-201_动态补偿装置",
+      "source_name": "A_功率因数(R)",
+      "template": "21V-JSNTFOC-RM-428 南通数据中心E栋电气巡检表单.xlsx",
+      "sheet": "SVG巡检表",
+      "cells": {
+        "白1": "P7",
+        "白2": "P8",
+        "夜1": "P9",
+        "夜2": "P10"
+      }
+    }
+  ]
+}

@@ -16,6 +16,9 @@ from lan_bitable_template_portal.daily_inspection import (
     DailyInspection, RiskError, inspection_report, inspection_report_workbook, install_daily_inspection,
 )
 from lan_bitable_template_portal.module_access import module_denial
+from lan_bitable_template_portal.daily_inspection_original import (catalog_locations, original_cells,
+                                                                    original_templates, original_views)
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from lan_bitable_template_portal.portal_service import LI_SHILONG_OPEN_ID
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import test_daily_inspection as fixtures
@@ -31,6 +34,258 @@ class InspectionReportTests(unittest.TestCase):
         self.service = DailyInspection(self.store, self.cloud)
         self.service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
 
+    def test_original_form_uses_exact_identity_and_four_distinct_rounds(self):
+        templates = [{'name':'原表.xlsx','scope':'D','profession':'电气','sheets':[
+            {'name':'原表','rows':[['设备',None],['时间',None],['时间',None],['时间',None],['时间',None]],'merges':[]}]}]
+        points = [['楼栋','设备','专业','测点ID','测点名称','模板','页签','白班1单元格','白班2单元格','夜班1单元格','夜班2单元格'],
+                  ['D楼','设备甲','电气','p1','电压','原表.xlsx','原表','B2','B3','B4','B5']]
+        reviews = [['楼栋','设备','专业','来源','参数','设备标识','现场读数','参数状态'],
+                   ['D楼','设备甲','电气','p1','电压','D:电气:甲','235','']]
+        sheets = [{'name':'测点读数','rows':points},{'name':'现场核对','rows':reviews}]
+        entries = original_cells(sheets, templates, '白', 1)
+        self.assertEqual((entries[0]['cell'], entries[0]['value'], entries[0]['device']), ('B2','235','D:电气:甲'))
+        second = original_cells(sheets, templates, '夜', 2)
+        self.assertEqual(second[0]['cell'],'B5')
+        points[1][7]=''
+        self.assertEqual(original_cells(sheets, templates, '白', 1), [])
+        points[1][7]='B2'
+        views = original_views(templates, [{'shift':'白','round':1,'original_cells':entries},
+                                           {'shift':'夜','round':2,'original_cells':second}])
+        self.assertEqual((views[0]['rows'][1][1], views[0]['rows'][4][1]),('235','235'))
+        reviews.append(reviews[1][:])
+        self.assertEqual(original_cells(sheets, templates, '白', 1), [])
+        reviews.pop()
+        points.append(points[1][:])
+        self.assertEqual(original_cells(sheets, templates, '白', 1), [])
+
+    def test_original_catalog_cells_require_exact_location_and_use_saved_reading(self):
+        templates=[{'name':'原表.xlsx','scope':'D','profession':'电气','sheets':[
+            {'name':'M1','rows':[['设备',None],['时间',None]],'merges':[]}]}]
+        mapping={'scope':'D','profession':'电气','device':'设备甲','location':'M1房间','field':'电压',
+                 'template':'原表.xlsx','sheet':'M1','cells':{'白1':'B2'}}
+        key=('D楼','设备甲','电气','M1房间','M1','电压')
+        reviews=[['楼栋','设备','专业','位置','来源','参数','设备标识','现场读数','参数状态'],
+                 ['D楼','设备甲','电气','M1房间','M1','电压','D:甲','236','']]
+        with patch('lan_bitable_template_portal.daily_inspection_original.catalog_locations',return_value={key:mapping}):
+            cells=original_cells([{'name':'现场核对','rows':reviews}],templates,'白',1)
+            self.assertEqual((cells[0]['cell'],cells[0]['value'],cells[0]['kind']),('B2','236','section'))
+            reviews[1][3]='其他房间'
+            self.assertEqual(original_cells([{'name':'现场核对','rows':reviews}],templates,'白',1),[])
+
+    def test_original_cell_with_point_and_device_source_is_linked_and_flags_conflicts(self):
+        templates=[{'name':'原表.xlsx','scope':'D','profession':'电气','sheets':[
+            {'name':'M1','rows':[['设备',None],['时间',None]],'merges':[]}]}]
+        mapping={'scope':'D','profession':'电气','device':'设备甲','location':'M1','field':'输出电压',
+                 'template':'原表.xlsx','sheet':'M1','cells':{'白1':'B2'}}
+        key=('D楼','设备甲','电气','M1','M1','输出电压')
+        points=[['楼栋','设备','专业','测点ID','测点名称','模板','页签','白班1单元格'],
+                ['D楼','设备甲','电气','p1','直流电压','原表.xlsx','M1','B2']]
+        reviews=[['楼栋','设备','专业','位置','来源','参数','设备标识','现场读数','参数状态'],
+                 ['D楼','设备甲','电气','M1','M1','输出电压','D:甲','235',''],
+                 ['D楼','设备甲','电气','M1','p1','直流电压','D:甲','235.0','']]
+        sheets=[{'name':'测点读数','rows':points},{'name':'现场核对','rows':reviews}]
+        with patch('lan_bitable_template_portal.daily_inspection_original.catalog_locations',return_value={key:mapping}):
+            cell=original_cells(sheets,templates,'白',1)[0]
+            self.assertEqual((cell['kind'],cell['conflict'],len(cell['members'])),('paired',False,2))
+            reviews[2][7]='240'
+            cell=original_cells(sheets,templates,'白',1)[0]
+            self.assertTrue(cell['conflict'])
+            with self.assertRaises(ValueError):
+                original_views(templates,[{'shift':'白','round':1,'original_cells':[cell]}])
+
+    def test_diesel_level_uses_converted_device_field_without_overwriting_raw_volume(self):
+        templates=[{'name':'原表.xlsx','scope':'D','profession':'电气','sheets':[
+            {'name':'柴发巡检表','rows':[['设备',None],['时间',None]],'merges':[]}]}]
+        mapping={'scope':'D','profession':'电气','device':'1#柴发','location':'柴发巡检表',
+                 'field':'柴油液位(cm)','template':'原表.xlsx','sheet':'柴发巡检表','cells':{'白1':'B2'}}
+        key=('D楼','1#柴发','电气','柴发巡检表','柴发巡检表','柴油液位(cm)')
+        points=[['楼栋','设备','专业','测点ID','测点名称','模板','页签','白班1单元格'],
+                ['D楼','燃油自控系统','电气','oil1','1#油箱体积','原表.xlsx','柴发巡检表','B2']]
+        reviews=[['楼栋','设备','专业','位置','来源','参数','设备标识','现场读数','参数状态'],
+                 ['D楼','1#柴发','电气','柴发巡检表','柴发巡检表','柴油液位(cm)','D:电气:1#柴发','55.43',''],
+                 ['D楼','燃油自控系统','电气','', 'oil1','1#油箱体积','D:电气:178-燃油自控系统','554.29','']]
+        with patch('lan_bitable_template_portal.daily_inspection_original.catalog_locations',return_value={key:mapping}):
+            cells=original_cells([{'name':'测点读数','rows':points},{'name':'现场核对','rows':reviews}],templates,'白',1)
+            self.assertEqual((len(cells),cells[0]['kind'],cells[0]['value']),(1,'section','55.43'))
+            self.assertNotIn('members',cells[0])
+
+    def test_catalog_mapping_points_only_to_empty_unique_original_cells(self):
+        templates = {(item['scope'],item['profession'],item['name'],sheet['name']):sheet
+                     for item in original_templates() for sheet in item['sheets']}
+        locations = catalog_locations()
+        self.assertGreater(len(locations),1900)
+        occupied = set()
+        for mapping in locations.values():
+            self.assertIsNotNone(mapping)
+            key=(mapping['scope'],mapping['profession'],mapping['template'],mapping['sheet'])
+            sheet=templates[key]
+            per_round = sheet['name'].strip()=='暖通冷机系统巡检表'
+            for slot,address in mapping['cells'].items():
+                col,row=coordinate_from_string(address)
+                self.assertIn(sheet['rows'][row-1][column_index_from_string(col)-1],(None,''))
+                destination=(key,address,slot if per_round else '')
+                self.assertNotIn(destination,occupied)
+                occupied.add(destination)
+
+    def test_manual_form_cells_do_not_overlap_automatic_catalog_coordinates(self):
+        from lan_bitable_template_portal.daily_inspection import (supplemental_form_devices, confirmed_chiller_cells,
+            confirmed_svg_cells, confirmed_hvdc_cells, confirmed_humidity_cells, confirmed_return_air_cells,
+            confirmed_electrical_environment_cells, confirmed_dc_screen_cells)
+        locations=catalog_locations()
+        occupied={(item['scope'],item['template'],item['sheet'].strip(),slot,address)
+                  for item in locations.values() if item for slot,address in item['cells'].items()}
+        for loader in (confirmed_chiller_cells,confirmed_svg_cells,confirmed_hvdc_cells,
+                       confirmed_humidity_cells,confirmed_return_air_cells,confirmed_electrical_environment_cells,
+                       confirmed_dc_screen_cells):
+            occupied.update((item['scope'],item['template'],item['sheet'].strip(),slot,address)
+                            for item in loader().values() for slot,address in item['cells'].items())
+        count=0
+        for scope in ('D','E'):
+            for device in supplemental_form_devices(scope):
+                self.assertTrue(device['form_only'])
+                for point in device['points']:
+                    count+=1
+                    for slot,address in point['round_cells'].items():
+                        self.assertNotIn((scope,point['template'],point['sheet'].strip(),slot,address),occupied)
+        self.assertGreater(count,300)
+
+    def test_chiller_form_stays_separate_for_each_round_and_exports_merges(self):
+        template = {'name':'暖通.xlsx','scope':'E','profession':'暖通','sheets':[
+            {'name':'暖通冷机系统巡检表 ', 'rows':[['冷机',None],[None,None]],'merges':['A1:B1']},
+            {'name':'恒湿机巡检表', 'rows':[['恒湿机',None],[None,None]],'merges':['A1:B1']}]}
+        rounds = [{'round_id':str(i),'shift':shift,'round':number,'status':'已归档','sheets':[],'local_draft':False,
+                   'original_cells':[]} for i,(shift,number) in enumerate((('白',1),('白',2),('夜',1),('夜',2)))]
+        views = original_views([template], rounds)
+        self.assertEqual(len(views),5)
+        self.assertEqual(sum('冷机系统' in item['name'] for item in views),4)
+        book = load_workbook(io.BytesIO(inspection_report_workbook({'scope':'E','date':'2026-11-04',
+                         'rounds':rounds,'original_templates':[template]})))
+        try:
+            names=[name for name in book.sheetnames if '冷机系统' in name]
+            self.assertEqual(len(names),4)
+            self.assertIn('A1:B1',str(book[names[0]].merged_cells))
+        finally:
+            book.close()
+
+    def test_daily_export_has_four_chiller_sheets_even_when_rounds_missing(self):
+        template = {'name':'暖通.xlsx','scope':'E','profession':'暖通','sheets':[
+            {'name':'暖通冷机系统巡检表', 'rows':[['冷机',None],[None,None]], 'merges':[]},
+            {'name':'恒湿机巡检表', 'rows':[['恒湿机',None],[None,None]], 'merges':[]}]}
+        rounds=[{'shift':'白','round':1,'original_cells':[
+            {'template':'暖通.xlsx','sheet':'暖通冷机系统巡检表','cell':'B2','value':'12'}]}]
+        self.assertEqual(len(original_views([template],rounds)),2)
+        book=load_workbook(io.BytesIO(inspection_report_workbook({'scope':'E','date':'2026-11-04',
+                            'rounds':rounds,'original_templates':[template]})))
+        try:
+            self.assertEqual(len(book.sheetnames),5)
+            for slot in ('白1','白2','夜1','夜2'):
+                self.assertEqual(book[f'原-暖-{slot}-暖通冷机系统巡检表']['B2'].value,
+                                 '12' if slot=='白1' else None)
+            self.assertIn('原-暖-恒湿机巡检表',book.sheetnames)
+        finally:
+            book.close()
+
+    def test_daily_export_keeps_four_round_values_in_separate_chiller_sheets(self):
+        template={'name':'暖通.xlsx','scope':'E','profession':'暖通','sheets':[
+            {'name':'暖通冷机系统巡检表','rows':[['冷机',None],[None,None]],'merges':[]},
+            {'name':'恒湿机巡检表','rows':[['设备',None],[None,None],[None,None],[None,None],[None,None]],'merges':[]}]}
+        rounds=[]
+        for index,(shift,number) in enumerate((('白',1),('白',2),('夜',1),('夜',2))):
+            value=str(index+1)
+            rounds.append({'shift':shift,'round':number,'original_cells':[
+                {'template':'暖通.xlsx','sheet':'暖通冷机系统巡检表','cell':'B2','value':value},
+                {'template':'暖通.xlsx','sheet':'恒湿机巡检表','cell':f'B{index+2}','value':value}]})
+        book=load_workbook(io.BytesIO(inspection_report_workbook({'scope':'E','date':'2026-11-04',
+                            'rounds':rounds,'original_templates':[template]})))
+        try:
+            self.assertEqual(len(book.sheetnames),5)
+            for index,slot in enumerate(('白1','白2','夜1','夜2')):
+                self.assertEqual(book[f'原-暖-{slot}-暖通冷机系统巡检表']['B2'].value,str(index+1))
+                self.assertEqual(book['原-暖-恒湿机巡检表'][f'B{index+2}'].value,str(index+1))
+        finally:
+            book.close()
+
+    def test_history_edit_updates_frozen_original_cell_with_review(self):
+        source = self.cloud.tables[fixtures.SOURCES['D'][0][0]][0]['fields']
+        source.update(位置='电气系统西区', 巡检表单='电气系统西区')
+        active = self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        self.service.change('a','甲',DAY,'finish',fixtures.DailyInspectionTests.submission(active))
+        detail = self.service.archive_detail('D','recArchive1')
+        device = next(item for item in detail['devices_data'] if item['name']=='144-AH-109')
+        row = next(item for item in device['rows'] if item['name']=='电流(A)')
+        self.service.edit_archive('D','recArchive1',{'version':detail['version'],
+            'changes':{device['id']:{'values':{row['id']:'123'},'result':'正常','note':''}}},'乙')
+        book=load_workbook(io.BytesIO(self.cloud.file))
+        try:
+            self.assertEqual(book['原-电-电气系统西区']['C5'].value,'123')
+            self.assertEqual(book['原-电-电气系统西区']['C6'].value,None)
+        finally:
+            book.close()
+
+    def test_history_edit_keeps_shared_point_and_device_value_in_sync(self):
+        rows=self.cloud.tables[fixtures.SOURCES['D'][0][0]]
+        fields=rows[0]['fields']
+        fields.update(设备编号='245-HVDC-111',位置='M1HVDC巡检表',巡检表单='M1HVDC巡检表',**{'输出电压(V)':234})
+        rows[2]['fields'].update(设备编号='D-245-HVDC-112',测点ID='13_0_133_1_653_0',测点名称='直流电压_V',测点值=234)
+        active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        self.service.change('a','甲',DAY,'finish',fixtures.DailyInspectionTests.submission(active))
+        detail=self.service.archive_detail('D','recArchive1')
+        device=next(item for item in detail['devices_data'] if item['name']=='245-HVDC-111')
+        section=next(item for item in device['rows'] if item['name']=='输出电压(V)')
+        self.service.edit_archive('D','recArchive1',{'version':detail['version'],
+            'changes':{device['id']:{'values':{section['id']:'256'},'result':'正常','note':''}}},'乙')
+        book=load_workbook(io.BytesIO(self.cloud.file))
+        try:
+            self.assertEqual(book['原-电-M1HVDC巡检表']['B6'].value,'256')
+            values=list(book['现场核对'].values)
+            self.assertEqual({r[7]:r[9] for r in values[1:] if r[7] in ('输出电压(V)','直流电压_V')},
+                             {'输出电压(V)':'256','直流电压_V':'256'})
+        finally:
+            book.close()
+
+    def test_inconsistent_device_and_point_are_visible_but_cannot_be_archived_as_one_value(self):
+        rows=self.cloud.tables[fixtures.SOURCES['D'][0][0]]
+        rows[0]['fields'].update(设备编号='245-HVDC-111',位置='M1HVDC巡检表',巡检表单='M1HVDC巡检表',**{'输出电压(V)':234})
+        rows[2]['fields'].update(设备编号='D-245-HVDC-112',测点ID='13_0_133_1_653_0',测点名称='直流电压_V',测点值=235)
+        active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        report=inspection_report(self.service,'D',DAY['date'],'a','甲',include_active=True,drafts={})
+        cell=next(item for item in report['rounds'][0]['original_cells'] if item['cell']=='B6')
+        self.assertTrue(cell['conflict'])
+        with self.assertRaisesRegex(RiskError,'读数不一致'):
+            self.service.change('a','甲',DAY,'finish',{'id':active['id'],'review_version':0,'reviews':{}})
+        self.assertEqual(self.cloud.creates,0)
+
+    def test_unmapped_original_cell_autosaves_and_archives_without_extra_device_count(self):
+        active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        form=next(item for item in active['batch']['form_devices'] if item['profession']=='电气' and item['points'])
+        point=form['points'][0]; parameter='p:'+point['id']
+        saved=self.service.change('a','甲',DAY,'draft',{'id':active['id'],'reviews':{
+            form['id']:{'values':{parameter:'手填值'},'result':'','note':'','revision':0}}})['active']
+        self.assertEqual(saved['reviews'][form['id']]['values'][parameter],'手填值')
+        restarted=DailyInspection(self.store,self.cloud)
+        restarted.change('a','甲',DAY,'finish',{'id':saved['id'],'review_version':saved['review_version'],'reviews':{}})
+        self.assertEqual(self.cloud.tables[fixtures.ARCHIVE][0]['fields']['设备数'],2)
+        book=load_workbook(io.BytesIO(self.cloud.file))
+        try:
+            header,*rows=list(book['原表映射'].values)
+            item=next(dict(zip(header,row)) for row in rows if row[2]==form['id'] and row[4]==point['point_id'])
+            self.assertEqual(book[item['工作表']][item['单元格']].value,'手填值')
+        finally:
+            book.close()
+
+    def test_concurrent_original_form_edits_do_not_silently_overwrite_each_other(self):
+        active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        form=next(item for item in active['batch']['form_devices'] if len(item['points'])>=2)
+        first,second=('p:'+item['id'] for item in form['points'][:2])
+        a={'values':{first:'甲'},'result':'','note':'','revision':0}
+        b={'values':{second:'乙'},'result':'','note':'','revision':0}
+        latest=self.service.change('a','甲',DAY,'draft',{'id':active['id'],'reviews':{form['id']:a}})['active']
+        with self.assertRaisesRegex(RiskError,'已被其他页面更新'):
+            self.service.change('b','乙',DAY,'draft',{'id':active['id'],'reviews':{form['id']:b}})
+        merged={'values':{first:'甲',second:'乙'},'result':'','note':'','revision':latest['reviews'][form['id']]['revision']}
+        result=self.service.change('b','乙',DAY,'draft',{'id':active['id'],'reviews':{form['id']:merged}})['active']
+        self.assertEqual(result['reviews'][form['id']]['values'],{first:'甲',second:'乙'})
+
     def test_day_and_overnight_rounds_export_same_cells_and_keep_local_drafts_local(self):
         active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
         self.service.change('a', '甲', DAY, 'finish', fixtures.DailyInspectionTests.submission(active))
@@ -44,6 +299,8 @@ class InspectionReportTests(unittest.TestCase):
                                    drafts=drafts, active_id=night['id'])
         self.assertEqual([(item['shift'], item['status']) for item in report['rounds']], [('白', '已归档'), ('夜', '进行中')])
         self.assertTrue(report['rounds'][1]['local_draft'])
+        self.assertFalse(any(sheet['name'].startswith('原-') or sheet['name'] in ('原表映射','原表目录')
+                             for item in report['rounds'] for sheet in item['sheets']))
         self.assertEqual(self.service.load('D'), before)
         sheet = next(sheet for sheet in report['rounds'][1]['sheets'] if sheet['name'] == '现场核对')
         header, *rows = sheet['rows']
@@ -52,10 +309,9 @@ class InspectionReportTests(unittest.TestCase):
         self.assertTrue(any(row[value_column] is None for row in rows[1:]))
         book = load_workbook(io.BytesIO(inspection_report_workbook(report)), read_only=True)
         try:
-            self.assertIn('白1-现场核对', book.sheetnames)
-            self.assertIn('夜1-现场核对', book.sheetnames)
-            self.assertIn('夜1-D楼源表快照', book.sheetnames)
-            self.assertEqual(list(book['夜1-现场核对'].values)[1][value_column], '0')
+            self.assertEqual(sum(name=='原-电-电气系统西区' for name in book.sheetnames),1)
+            self.assertEqual(sum('冷机系统巡检表' in name and name.startswith('原-暖-') for name in book.sheetnames),4)
+            self.assertFalse(any('现场核对' in name or '源表快照' in name for name in book.sheetnames))
         finally:
             book.close()
         only_history = inspection_report(self.service, 'D', DAY['date'], 'c', '丙', drafts={})
@@ -112,6 +368,9 @@ class InspectionProfessionTests(unittest.TestCase):
                        for profession, actor in [('电气', '甲'), ('暖通', '乙')]]
             for future in futures:
                 future.result()
+        ready = self.service.view(self.service.load('D'), 'a', DAY)['active']
+        self.assertEqual((self.cloud.creates, self.cloud.uploads), (0, 0))
+        self.service.change('a', '甲', DAY, 'finish', {'id': active['id'], 'review_version': ready['review_version'], 'reviews': {}})
         self.assertIsNone(self.service.load('D')['active'])
         self.assertEqual((self.cloud.creates, self.cloud.uploads), (1, 1))
         self.assertEqual(self.cloud.tables[fixtures.ARCHIVE][0]['fields']['设备数'], 2)
@@ -136,7 +395,9 @@ class InspectionProfessionTests(unittest.TestCase):
         self.assertEqual(self.cloud.creates, 0)
         with self.assertRaisesRegex(RiskError, '尚未确认'):
             self.service.change('a', '甲', DAY, 'finish', {'id': active['id'], 'review_version': after_other['review_version'], 'reviews': {}})
-        self.confirm(after_other, '电气', '甲')
+        ready = self.confirm(after_other, '电气', '甲')['active']
+        self.assertEqual(self.cloud.creates, 0)
+        self.service.change('a', '甲', DAY, 'finish', {'id': active['id'], 'review_version': ready['review_version'], 'reviews': {}})
         self.assertEqual(self.cloud.creates, 1)
 
     def test_two_people_can_edit_and_confirm_different_professions_concurrently(self):
@@ -149,6 +410,8 @@ class InspectionProfessionTests(unittest.TestCase):
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             for future in [pool.submit(inspect, '电气', '甲', '11'), pool.submit(inspect, '暖通', '乙', '22')]:
                 future.result()
+        ready = self.service.view(self.service.load('D'), 'a', DAY)['active']
+        self.service.change('a', '甲', DAY, 'finish', {'id': active['id'], 'review_version': ready['review_version'], 'reviews': {}})
         self.assertEqual((self.cloud.creates, self.cloud.uploads), (1, 1))
         book = load_workbook(io.BytesIO(self.cloud.file), read_only=True)
         try:
@@ -167,11 +430,14 @@ class InspectionProfessionTests(unittest.TestCase):
         self.assertEqual({item['profession'] for item in single['batch']['devices']}, {'电气'})
         self.service.change('a', '甲', DAY, 'order', {'id': single['id'], 'order': [single['batch']['devices'][0]['id']]})
         self.assertEqual(set(self.service.order('a', 'D')), set(identities))
-        self.confirm(single, '电气', '甲')
+        ready = self.confirm(single, '电气', '甲')['active']
+        self.service.change('a', '甲', DAY, 'finish', {'id': single['id'], 'review_version': ready['review_version'], 'reviews': {}})
         self.assertEqual(self.cloud.tables[fixtures.ARCHIVE][0]['fields']['设备数'], 1)
         book = load_workbook(io.BytesIO(self.cloud.file), read_only=True)
         try:
-            self.assertEqual({row[3] for row in list(book['现场核对'].values)[1:]}, {'144-AH-109'})
+            rows = list(book['现场核对'].values)[1:]
+            self.assertEqual({row[3] for row in rows if not str(row[3]).startswith('原表补填 · ')}, {'144-AH-109'})
+            self.assertEqual({row[4] for row in rows}, {'电气'})
             self.assertEqual(len(list(book['D楼源表快照'].values)), 4)
         finally:
             book.close()
@@ -204,9 +470,10 @@ class InspectionProfessionTests(unittest.TestCase):
     def test_last_confirmation_recovers_lost_archive_receipt_without_duplicate(self):
         active = self.start(['电气', '暖通'])
         after_first = self.confirm(active, '电气', '甲')['active']
+        ready = self.confirm(after_first, '暖通', '乙')['active']
         self.cloud.lose_receipt = True
         with self.assertRaisesRegex(RiskError, '模拟响应丢失'):
-            self.confirm(after_first, '暖通', '乙')
+            self.service.change('b', '乙', DAY, 'finish', {'id': active['id'], 'review_version': ready['review_version'], 'reviews': {}})
         self.cloud.lose_receipt = False
         result = DailyInspection(self.store, self.cloud).change('b', '乙', DAY, 'finish', {'id': active['id']})
         self.assertIsNone(result['active'])
@@ -346,7 +613,12 @@ class InspectionAccessTests(unittest.TestCase):
         result = self.post('confirm-profession', {'id': active['id'], 'profession': '电气',
             'profession_version': active['profession_versions']['电气'], 'reviews': {}})
         self.assertEqual(result.status_code, 200)
-        self.assertIsNone(result.json()['data']['active'])
+        ready = result.json()['data']['active']
+        self.assertIsNotNone(ready)
+        self.assertEqual(self.cloud.creates, 0)
+        finished = self.post('finish', {'id': ready['id'], 'review_version': ready['review_version'], 'reviews': {}})
+        self.assertEqual(finished.status_code, 200)
+        self.assertIsNone(finished.json()['data']['active'])
         self.assertEqual(self.cloud.creates, 1)
 
     def test_reference_preview_returns_the_current_users_independent_orders(self):
@@ -362,22 +634,33 @@ class InspectionAccessTests(unittest.TestCase):
         other = self.client.get('/api/daily-inspection/source', params={'view_scope': 'D'}).json()['data']
         self.assertEqual(other['orders']['电气'], [])
 
-    def test_li_shilong_view_and_other_people_on_duty_without_write_expansion(self):
+    def test_li_shilong_can_edit_de_without_expanding_other_users(self):
         self.modules, self.scopes = {'daily'}, ['D', 'E']
         self.home = 'H'
         self.session['user']['open_id'] = LI_SHILONG_OPEN_ID
         data = self.client.get('/api/daily-inspection?view_scope=D').json()['data']
-        self.assertFalse(data['can_edit'])
+        self.assertTrue(data['can_edit'])
         self.assertEqual(data['active']['duty']['scope'], 'D')
         identities = [item['id'] for item in data['active']['batch']['devices']]
         sorted_view = self.client.post('/api/daily-inspection/order?view_scope=D',
             json={'id': data['active']['id'], 'view': 'ALL', 'order': list(reversed(identities))},
             headers={'origin': 'http://testserver'})
         self.assertEqual(sorted_view.status_code, 200)
-        self.assertFalse(sorted_view.json()['data']['can_edit'])
+        self.assertTrue(sorted_view.json()['data']['can_edit'])
         report = self.post('day-sheet', {'scope': 'D', 'date': DAY['date'], 'drafts': {}}).json()['data']
         self.assertEqual(len(report['rounds']), 1)
-        self.assertEqual(self.post('draft', {'id': data['active']['id'], 'reviews': {}}).status_code, 403)
+        device = data['active']['batch']['devices'][0]
+        parameter = device['parameters'][0]
+        updated = self.client.post('/api/daily-inspection/draft?view_scope=D',
+            json={'id': data['active']['id'], 'reviews': {device['id']: {'revision': 0,
+                  'values': {parameter['id']: '29'}, 'result': '', 'note': ''}}},
+            headers={'origin': 'http://testserver'})
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.json()['data']['active']['reviews'][device['id']]['values'][parameter['id']], '29')
+        other_building = self.client.get('/api/daily-inspection?view_scope=E')
+        self.assertEqual(other_building.status_code, 200)
+        self.assertEqual(other_building.json()['data']['duty']['scope'], 'E')
+        self.assertTrue(other_building.json()['data']['can_edit'])
         self.session['user']['open_id'] = 'ou_person'
         self.home = 'D'
         self.duty = DAY

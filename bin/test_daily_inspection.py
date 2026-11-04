@@ -1,6 +1,8 @@
 import copy
 import datetime as dt
 import io
+import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -41,6 +43,7 @@ class InspectionCloud:
         self.uploads = self.creates = self.updates = 0
         self.lose_receipt = False
         self.fail_before_update = False
+        self.auto_marker = True
 
     @staticmethod
     def row(rid, **fields):
@@ -67,6 +70,18 @@ class InspectionCloud:
             return {}
         if extra == ['search']:
             rows = self.tables[table]
+            if self.auto_marker and table in {source[0][0] for source in SOURCES.values()}:
+                for row in rows:
+                    if str(row['fields'].get('备注', '')).startswith('INSPECTION_BATCH_V1:'):
+                        row['fields'].pop('备注')
+                devices = [row for row in rows if row['fields'].get('记录类型') == '设备巡检']
+                if devices:
+                    fields = devices[0]['fields']
+                    marker = {'status':'completed', 'building':fields['楼栋'], 'upload_time':fields['上传日期'],
+                              'device_count':len(devices), 'point_count':sum(row['fields'].get('记录类型')=='测点明细' for row in rows),
+                              'record_ids_sha256':hashlib.sha256(json.dumps(sorted(row['record_id'] for row in rows),
+                                  ensure_ascii=False,separators=(',',':')).encode()).hexdigest()}
+                    fields['备注'] = 'INSPECTION_BATCH_V1:' + json.dumps(marker,ensure_ascii=False,separators=(',',':'))
             if data.get('filter'):
                 rows = [row for row in rows if all(row['fields'].get(condition['field_name']) == condition['value'][0]
                                                    for condition in data['filter']['conditions'])]
@@ -103,6 +118,344 @@ class DailyInspectionTests(unittest.TestCase):
             device['id']: {'values': {item['id']: '0' for item in device['parameters'] if not item.get('read_only')},
                            'result': '正常', 'note': '', 'revision': 0}
             for device in active['batch']['devices']}}
+
+    def test_incomplete_missing_or_tampered_source_batch_is_not_captured(self):
+        from lan_bitable_template_portal.daily_inspection import validate_source_batch
+        rows = self.cloud.tables[SOURCES['D'][0][0]]
+        self.cloud.request('POST', SOURCES['D'][0][0] + '/records/search', params={'page_size':500}, json={})
+        self.cloud.auto_marker = False
+        self.assertIsNotNone(validate_source_batch('D',rows))
+        self.assertIsNone(validate_source_batch('D',rows[:-1]))
+        duplicate = copy.deepcopy(rows)
+        duplicate[-1]['record_id'] = duplicate[0]['record_id']
+        self.assertIsNone(validate_source_batch('D',duplicate))
+        rows[0]['fields'].pop('备注')
+        with self.assertRaisesRegex(RiskError, '完整批次'):
+            self.service.capture(['D'])
+
+    def test_source_changing_after_first_complete_read_is_rejected(self):
+        table = SOURCES['D'][0][0]
+        original = self.cloud.request
+        reads = 0
+        def request(method,path,**kwargs):
+            nonlocal reads
+            if path == table + '/records/search':
+                reads += 1
+                if reads == 2:
+                    self.cloud.tables[table][0]['fields']['电流(A)'] = 99
+            return original(method,path,**kwargs)
+        self.cloud.request = request
+        with self.assertRaisesRegex(RiskError, '数据发生变化'):
+            self.service.capture(['D'])
+
+    def test_archive_numeric_string_roundtrip_is_verified_without_relaxing_text_or_numbers(self):
+        from lan_bitable_template_portal.daily_inspection import archive_integer
+        DailyInspection.verify_archive_fields({'巡检轮次':'1','现场已核对设备数':'149.0','异常设备数':'0'},
+            {'巡检轮次':1,'现场已核对设备数':149,'异常设备数':0})
+        self.assertEqual(archive_integer('2.0'),2)
+        for value in ('nan','1.5',True,'错误'):
+            with self.assertRaises(RiskError):
+                archive_integer(value)
+        with self.assertRaises(RiskError):
+            DailyInspection.verify_archive_fields({'巡检轮次':'2'},{'巡检轮次':1})
+        with self.assertRaises(RiskError):
+            DailyInspection.verify_archive_fields({'文本':'01'},{'文本':'1'})
+
+    def test_point_configuration_changing_during_source_capture_is_rejected(self):
+        table = SOURCES['D'][1][0]
+        original = self.cloud.request
+        reads = 0
+        def request(method,path,**kwargs):
+            nonlocal reads
+            if path == table + '/records/search':
+                reads += 1
+                if reads == 2:
+                    self.cloud.tables[table][0]['fields']['测点名称'] = '已改变'
+            return original(method,path,**kwargs)
+        self.cloud.request = request
+        with self.assertRaisesRegex(RiskError, '测点配置.*变化'):
+            self.service.capture(['D'])
+
+    def test_explicit_round_targets_are_independent_and_do_not_hide_other_blank_rounds(self):
+        from lan_bitable_template_portal.daily_inspection import (devices_for, supplemental_form_devices,
+                                                                  omit_occupied_form_cells)
+        forms=supplemental_form_devices('D')
+        form=next(device for device in forms if device['profession']=='电气' and device['points'])
+        blank=form['points'][0]
+        def row(identity, **fields):return {'record_id':identity,'fields':fields}
+        source=[row('point',记录类型='测点明细',设备编号='新增设备',专业='电气',测点ID='new-point',测点名称='新增读数',测点值='8')]
+        config=[row('config',专业='电气',测点ID='new-point',测点名称='新增读数',
+                    目标巡检表=blank['template'],目标工作表=blank['sheet'].strip(),
+                    **{slot+'目标单元格':address for slot,address in blank['round_cells'].items()})]
+        devices=devices_for('D',source,config,{})
+        self.assertEqual(devices[0]['points'][0]['round_cells'],blank['round_cells'])
+        filtered=omit_occupied_form_cells(copy.deepcopy(forms),devices)
+        self.assertFalse(any(point['id']==blank['id'] for device in filtered for point in device['points']))
+        for slot in ('白1','夜1','夜2'):config[0]['fields'].pop(slot+'目标单元格')
+        devices=devices_for('D',source,config,{})
+        self.assertEqual(devices[0]['points'][0]['round_cells'],{'白2':blank['round_cells']['白2']})
+        filtered=omit_occupied_form_cells(copy.deepcopy(forms),devices)
+        remaining=next(point for device in filtered for point in device['points'] if point['id']==blank['id'])
+        self.assertEqual(set(remaining['round_cells']),{'白1','夜1','夜2'})
+        config[0]['fields']['白2目标单元格']='XFD1000'
+        self.assertEqual(devices_for('D',source,config,{})[0]['points'][0]['round_cells'],{})
+
+    def test_round_targets_reject_duplicate_normal_and_allow_fixed_chiller(self):
+        from lan_bitable_template_portal.daily_inspection import validate_round_locations
+        electric='21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx'
+        with self.assertRaisesRegex(ValueError,'不同位置'):
+            validate_round_locations('D','电气',electric,'柴发巡检表',{'白1':'B23','白2':'B23'})
+        with self.assertRaisesRegex(ValueError,'空白'):
+            validate_round_locations('D','电气',electric,'柴发巡检表',{'白1':'B21'})
+        cold='21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx'
+        self.assertEqual(validate_round_locations('D','暖通',cold,'暖通冷机系统巡检表',
+            {'白1':'C8','白2':'C8','夜1':'C8','夜2':'C8'}),{'白1':'C8','白2':'C8','夜1':'C8','夜2':'C8'})
+        with self.assertRaisesRegex(ValueError,'同一固定位置'):
+            validate_round_locations('D','暖通',cold,'暖通冷机系统巡检表',{'白1':'C8','白2':'D8'})
+
+    def test_explicitly_missing_source_fields_are_editable_without_hiding_values(self):
+        first = self.cloud.tables[SOURCES['D'][0][0]][0]['fields']
+        first['缺少源数据'] = '运行状态、启停状态、电流(A)'
+        active = self.service.change('owner', '甲', DAY, 'start', {'duty': DAY})['active']
+        device = active['batch']['devices'][0]
+        fields = {row['name']: row for row in device['parameters']}
+        self.assertEqual(fields['电流(A)']['reference'], 0)
+        self.assertEqual(fields['运行状态']['reference'], '')
+        self.assertEqual(fields['启停状态']['reference'], '')
+        saved = self.service.change('owner', '甲', DAY, 'draft', {
+            'id': active['id'], 'reviews': {device['id']: {'revision': 0, 'result': '', 'note': '',
+                'values': {fields['运行状态']['id']: '正常', fields['启停状态']['id']: '运行'}}}})['active']
+        self.assertEqual(saved['reviews'][device['id']]['values'][fields['运行状态']['id']], '正常')
+        from lan_bitable_template_portal.daily_inspection import finalize_reviews
+        completed = finalize_reviews([device], saved['reviews'], '甲')[device['id']]
+        self.assertEqual(completed['result'], '正常')
+
+    def test_old_active_snapshot_exposes_omitted_fields(self):
+        from lan_bitable_template_portal.daily_inspection import finalize_reviews, parameters
+        active = self.service.change('owner', '甲', DAY, 'start', {'duty': DAY})['active']
+        device = active['batch']['devices'][0]
+        device['sections'][0]['missing'] = '运行状态'
+        rows = parameters(device)
+        field = next(item for item in rows if item['name'] == '运行状态')
+        self.assertEqual(field['reference'], '')
+        self.assertEqual(finalize_reviews([device], {}, '甲')[device['id']]['result'], '')
+
+    def test_confirmed_hvdc_alias_is_scoped_and_does_not_override_exact_device(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for
+        def row(identity, **fields):
+            return {'record_id': identity, 'fields': fields}
+        rows = [row('recMain', 记录类型='设备巡检', 设备编号='245-HVDC-111', 专业='电气'),
+                row('recPoint', 记录类型='测点明细', 设备编号='D-245-HVDC-112', 专业='电气', 测点ID='p1', 测点值=234)]
+        devices = devices_for('D', rows, [], {})
+        self.assertEqual(len(devices), 1)
+        self.assertEqual(devices[0]['name'], '245-HVDC-111')
+        self.assertEqual(devices[0]['points'][0]['value'], 234)
+        e_rows = [row('recMainE', 记录类型='设备巡检', 设备编号='245-HVDC-111', 专业='电气'),
+                  row('recPointE', 记录类型='测点明细', 设备编号='E-245-HVDC-112', 专业='电气', 测点ID='p1', 测点值=235)]
+        self.assertEqual(len(devices_for('E', e_rows, [], {})), 1)
+        rows[1]['fields']['专业'] = '暖通'
+        self.assertEqual(len(devices_for('D', rows, [], {})), 2)
+        rows[1]['fields']['专业'] = '电气'
+        rows[1]['fields']['设备编号'] = 'D-245-HVDC-122'
+        rows[0]['fields']['设备编号'] = '245-HVDC-121'
+        self.assertEqual(len(devices_for('D', rows, [], {})), 1)
+        rows[1]['fields']['设备编号'] = 'D-245-HVDC-112'
+        rows[0]['fields']['设备编号'] = '245-HVDC-111'
+        rows.append(row('recExact', 记录类型='设备巡检', 设备编号='D-245-HVDC-112', 专业='电气'))
+        exact = devices_for('D', rows, [], {})
+        self.assertEqual(len(exact), 2)
+        self.assertEqual(next(item for item in exact if item['name']=='D-245-HVDC-112')['points'][0]['value'], 234)
+        rows[1]['fields']['设备编号'] = 'D-245-HVDC-112_电量仪'
+        exact = devices_for('D', rows, [], {})
+        self.assertEqual(next(item for item in exact if item['name']=='D-245-HVDC-112')['points'][0]['value'], 234)
+
+    def test_confirmed_hvdc_four_round_cells_use_exact_point_and_preserve_explicit_config(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_hvdc_cells
+        confirmed = confirmed_hvdc_cells()
+        self.assertEqual(len(confirmed), 136)
+        def row(identity, **fields):
+            return {'record_id': identity, 'fields': fields}
+        source = [row('recMain', 记录类型='设备巡检', 设备编号='245-HVDC-111', 专业='电气'),
+                  row('recPoint', 记录类型='测点明细', 设备编号='D-245-HVDC-112', 专业='电气',
+                      测点ID='13_0_133_1_653_0', 测点名称='直流电压_V', 测点值=234)]
+        point = devices_for('D', source, [], {})[0]['points'][0]
+        self.assertEqual(point['round_cells'], {'白1': 'B6', '白2': 'B7', '夜1': 'B8', '夜2': 'B9'})
+        self.assertEqual((point['sheet'], point['cell']), ('M1HVDC巡检表', 'B6'))
+        config = [row('recConfig', 专业='电气', 测点ID='13_0_133_1_653_0', 测点名称='直流电压_V',
+                      目标巡检表='已有.xlsx', 目标工作表='旧表', 目标单元格='Z2')]
+        point = devices_for('D', source, config, {})[0]['points'][0]
+        self.assertEqual((point['template'], point['sheet'], point['cell']), ('已有.xlsx', '旧表', 'Z2'))
+        self.assertEqual(point['round_cells'], {})
+
+    def test_confirmed_hvdc_cells_are_preserved_in_archive(self):
+        source = self.cloud.tables[SOURCES['D'][0][0]]
+        source[0]['fields']['设备编号'] = '245-HVDC-111'
+        source[2]['fields'].update(设备编号='D-245-HVDC-112', 测点ID='13_0_133_1_653_0', 测点名称='直流电压_V')
+        active = self.service.change('owner', '甲', DAY, 'start', {'duty': DAY})['active']
+        self.service.change('owner', '甲', DAY, 'finish', self.submission(active))
+        book = load_workbook(io.BytesIO(self.cloud.file), read_only=True)
+        try:
+            columns, *rows = list(book['测点读数'].values)
+            row = next(item for item in rows if item[columns.index('测点ID')]=='13_0_133_1_653_0')
+            self.assertEqual([row[columns.index(label)] for label in ('白班1单元格','白班2单元格','夜班1单元格','夜班2单元格')],
+                             ['B6', 'B7', 'B8', 'B9'])
+        finally:
+            book.close()
+
+    def test_humidity_mapping_requires_exact_scope_device_and_parameter(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_humidity_cells
+        self.assertEqual(len(confirmed_humidity_cells()), 92)
+        def row(identity, **fields):
+            return {'record_id': identity, 'fields': fields}
+        rows = [row('recHum', 记录类型='设备巡检', 设备编号='121-HUM-01', 专业='暖通'),
+                row('recPoint', 记录类型='测点明细', 设备编号='D-121-HUM-01', 专业='暖通',
+                    测点ID='70_0_1166_1_601_0', 测点名称='湿度显示', 测点值=60)]
+        point = devices_for('D', rows, [], {})[0]['points'][0]
+        self.assertEqual(point['round_cells'], {'白1':'D23','白2':'D24','夜1':'D25','夜2':'D26'})
+        rows[1]['fields']['测点名称'] = '其他读数'
+        self.assertEqual(devices_for('D', rows, [], {})[0]['points'][0]['round_cells'], {})
+
+    def test_electrical_room_climate_maps_only_exact_point_and_keeps_explicit_mapping(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_electrical_environment_cells
+        self.assertEqual(len(confirmed_electrical_environment_cells()), 60)
+        def row(identity, **fields):
+            return {'record_id': identity, 'fields': fields}
+        source = [row('recPoint', 记录类型='测点明细', 设备编号='E-245-TH_01', 专业='电气',
+                      测点ID='55_0_249_1_1_0', 测点名称='温度', 测点值=24)]
+        point = devices_for('E', source, [], {})[0]['points'][0]
+        self.assertEqual(point['round_cells'], {'白1':'J20','白2':'J21','夜1':'J22','夜2':'J23'})
+        source[0]['fields']['设备编号'] = 'E-246-TH_01'
+        self.assertEqual(devices_for('E', source, [], {})[0]['points'][0]['round_cells'], {})
+        source[0]['fields']['设备编号'] = 'E-245-TH_01'
+        source[0]['fields']['测点名称'] = '湿度'
+        self.assertEqual(devices_for('E', source, [], {})[0]['points'][0]['round_cells'], {})
+        source[0]['fields']['测点名称'] = '温度'
+        config = [row('recConfig', 专业='电气', 测点ID='55_0_249_1_1_0', 测点名称='温度',
+                      目标巡检表='已有.xlsx', 目标工作表='旧表', 目标单元格='Z2')]
+        point = devices_for('E', source, config, {})[0]['points'][0]
+        self.assertEqual((point['template'], point['sheet'], point['cell']), ('已有.xlsx', '旧表', 'Z2'))
+        self.assertEqual(point['round_cells'], {})
+        verified=confirmed_electrical_environment_cells()[('E','电气','55_0_249_1_1_0')]
+        config[0]['fields'].update({'目标巡检表':verified['template'], '目标工作表':verified['sheet'],
+                                    '目标单元格':verified['cells']['白1']})
+        self.assertEqual(devices_for('E',source,config,{})[0]['points'][0]['round_cells'],verified['cells'])
+        config[0]['fields']['目标单元格']='Z2'
+        self.assertEqual(devices_for('E',source,config,{})[0]['points'][0]['round_cells'],{})
+
+    def test_confirmed_chiller_fills_missing_reference_without_overwriting_real_values(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_chiller_cells
+        self.assertEqual(len(confirmed_chiller_cells()),174)
+        def row(identity, **fields):
+            return {'record_id':identity,'fields':fields}
+        rows=[row('device',记录类型='设备巡检',设备编号='1号冷机',专业='暖通',位置='冷冻站',
+                  巡检表单='暖通冷机系统巡检表',缺少源数据='冷凝饱和温度(℃)'),
+              row('point',记录类型='测点明细',设备编号='E-150-101-MOXA_150-CH1',专业='暖通',
+                  测点ID='55_40_0_228_1_12_0',测点名称='M4031冷凝器饱和温度',测点值='25.00')]
+        devices=devices_for('E',rows,[],{})
+        section=next(item for item in devices if item['name']=='1号冷机')['sections'][0]
+        self.assertEqual(section['values']['冷凝饱和温度(℃)'],'25.00')
+        point=next(item for item in devices if item['points'])['points'][0]
+        self.assertEqual(set(point['round_cells'].values()),{'B12'})
+        rows[0]['fields']['冷凝饱和温度(℃)']=27
+        devices=devices_for('E',rows,[],{})
+        self.assertEqual(next(item for item in devices if item['name']=='1号冷机')['sections'][0]['values']['冷凝饱和温度(℃)'],27)
+        rows[0]['fields'].pop('冷凝饱和温度(℃)')
+        rows[1]['fields']['设备编号']='E-150-102-MOXA_150-CH2'
+        devices=devices_for('E',rows,[],{})
+        self.assertEqual(next(item for item in devices if item['name']=='1号冷机')['sections'][0]['values']['冷凝饱和温度(℃)'],'')
+
+    def test_d_chiller_and_plate_pressure_each_keep_their_per_round_form_cell(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for
+        rows=[{'record_id':'p1','fields':{'记录类型':'测点明细','设备编号':'一层D-150-GW-102网络控制器',
+            '专业':'暖通','测点ID':'70_27_0_31_1_17_0','测点名称':'2#冷机压缩机供油温度','测点值':'49'}},
+            {'record_id':'p2','fields':{'记录类型':'测点明细','设备编号':'一层D-150-BAS-102网络控制器',
+            '专业':'暖通','测点ID':'70_3_0_14_1_11_0','测点名称':'2#冷机冷却水进口压力','测点值':'0.4'}}]
+        points={point['point_id']:point for device in devices_for('D',rows,[],{}) for point in device['points']}
+        self.assertEqual(set(points['70_27_0_31_1_17_0']['round_cells'].values()),{'C5'})
+        self.assertEqual(set(points['70_3_0_14_1_11_0']['round_cells'].values()),{'L10'})
+
+    def test_e_plate_and_svg_mapping_require_exact_source_and_scope(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_svg_cells
+        self.assertEqual(len(confirmed_svg_cells()),8)
+        rows=[{'record_id':'p1','fields':{'记录类型':'测点明细','设备编号':'E-150-DDC-101','专业':'暖通',
+            '测点ID':'55_16_0_48_1_2_0','测点名称':'E-150-DDC-101_冷冻水侧板换出口压力','测点值':'0.4'}},
+              {'record_id':'p2','fields':{'记录类型':'测点明细','设备编号':'D-144-SVG-101_SVG动态补偿装置_动态补偿装置',
+            '专业':'电气','测点ID':'8_0_366_1_603_0','测点名称':'装置温度_℃','测点值':'30'}}]
+        epoint=devices_for('E',rows[:1],[],{})[0]['points'][0]
+        self.assertEqual(set(epoint['round_cells'].values()),{'K13'})
+        dpoint=devices_for('D',rows[1:],[],{})[0]['points'][0]
+        self.assertEqual(dpoint['round_cells']['白1'],'C7')
+        rows[0]['fields']['设备编号']='E-124-DDC-101'
+        self.assertEqual(devices_for('E',rows[:1],[],{})[0]['points'][0]['round_cells'],{})
+
+    def test_confirmed_d_dc_screen_uses_four_distinct_form_cells(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_dc_screen_cells
+        self.assertEqual(len(confirmed_dc_screen_cells()),3)
+        rows=[{'record_id':'p1','fields':{'记录类型':'测点明细','设备编号':'D-178-AD001_直流屏','专业':'电气',
+            '测点ID':'11_0_443_1_600_0','测点名称':'主路输入 UV 线电压','测点值':'380'}}]
+        point=devices_for('D',rows,[],{})[0]['points'][0]
+        self.assertEqual(point['round_cells'],{'白1':'B23','白2':'B24','夜1':'B25','夜2':'B26'})
+        rows[0]['fields']['设备编号']='D-179-AD001_直流屏'
+        self.assertEqual(devices_for('D',rows,[],{})[0]['points'][0]['round_cells'],{})
+
+    def test_e_dc_screen_six_points_map_to_distinct_columns_and_replace_manual_cells(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, supplemental_form_devices, omit_occupied_form_cells
+        template='21V-JSNTFOC-RM-428 南通数据中心E栋电气巡检表单.xlsx'
+        points=[('E-178-AD-001_直流屏','45_0_197_1_600_0','主路输入 UV 线电压','H'),
+                ('E-178-AD-001_直流屏','45_0_197_1_609_0','合母电压','I'),
+                ('E-178-AD-001_直流屏','45_0_197_1_610_0','控母电压','J'),
+                ('E-279-AD-001_直流屏','34_0_157_1_600_0','主路输入 UV 线电压','K'),
+                ('E-279-AD-001_直流屏','34_0_157_1_609_0','合母电压','L'),
+                ('E-279-AD-001_直流屏','34_0_157_1_610_0','控母电压','M')]
+        slots=('白1','白2','夜1','夜2')
+        rows=[{'record_id':f'p{i}','fields':{'记录类型':'测点明细','设备编号':device,'专业':'电气',
+            '测点ID':identity,'测点名称':name,'测点值':123}} for i,(device,identity,name,col) in enumerate(points)]
+        configs=[{'record_id':f'c{i}','fields':{'专业':'电气','测点ID':identity,'测点名称':name,
+            '目标巡检表':template,'目标工作表':'柴发巡检表',
+            **{slot+'目标单元格':f'{col}{number}' for slot,number in zip(slots,range(23,27))}}}
+            for i,(device,identity,name,col) in enumerate(points)]
+        devices=devices_for('E',rows,configs,{})
+        actual={point['point_id']:point['round_cells'] for device in devices for point in device['points']}
+        for device,identity,name,col in points:
+            self.assertEqual(actual[identity],{slot:f'{col}{number}' for slot,number in zip(slots,range(23,27))})
+        forms=omit_occupied_form_cells(copy.deepcopy(supplemental_form_devices('E')),devices)
+        for device in forms:
+            for point in device['points']:
+                if point['template']==template and point['sheet'].strip()=='柴发巡检表':
+                    self.assertFalse(any(cell in {f'{col}{number}' for _,_,_,col in points for number in range(23,27)}
+                                         for cell in point['round_cells'].values()))
+
+    def test_diesel_volume_only_converts_to_missing_level_for_exact_source(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for
+        def row(identity, **fields):return {'record_id':identity,'fields':fields}
+        template='21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx'
+        rows=[row('device',记录类型='设备巡检',设备编号='1#柴发',专业='电气',位置='柴发巡检表',
+                  巡检表单='柴发巡检表',缺少源数据='柴油液位(cm)'),
+              row('point',记录类型='测点明细',设备编号='D-178-燃油自控系统',专业='电气',
+                  测点ID='oil-1',测点名称='1#油箱体积',测点值='554.29')]
+        config=[row('config',专业='电气',测点ID='oil-1',测点名称='1#油箱体积',
+                    目标巡检表=template,目标工作表='柴发巡检表',
+                    白1目标单元格='D5',白2目标单元格='D6',夜1目标单元格='D7',夜2目标单元格='D8')]
+        devices=devices_for('D',rows,config,{})
+        section=next(item for item in devices if item['name']=='1#柴发')['sections'][0]
+        self.assertEqual(section['values']['柴油液位(cm)'],'55.43')
+        self.assertEqual(next(item for item in devices if item['points'])['points'][0]['value'],'554.29')
+        rows[1]['fields']['设备编号']='其他来源'
+        devices=devices_for('D',rows,config,{})
+        self.assertEqual(next(item for item in devices if item['name']=='1#柴发')['sections'][0]['values']['柴油液位(cm)'],'')
+
+    def test_return_air_mapping_uses_correct_temperature_rows(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_return_air_cells
+        self.assertEqual(len(confirmed_return_air_cells()), 30)
+        rows = [
+            {'record_id': 'recDevice', 'fields': {'记录类型':'设备巡检','设备编号':'246-CRAC-01','专业':'暖通'}},
+            {'record_id': 'recPoint', 'fields': {'记录类型':'测点明细','设备编号':'D-246-CRAC-01','专业':'暖通',
+                '测点ID':'70_0_1220_1_600_0','测点名称':'1#回风温度','测点值':26}},
+        ]
+        point = devices_for('D', rows, [], {})[0]['points'][0]
+        self.assertEqual(point['round_cells'], {'白1':'G6','白2':'G8','夜1':'G10','夜2':'G12'})
+        rows[1]['fields']['测点名称'] = '1#回风湿度'
+        self.assertEqual(devices_for('D', rows, [], {})[0]['points'][0]['round_cells'], {})
 
     def test_freezes_duty_building_and_recovers_same_archive_after_restart(self):
         active = self.service.change('owner', '值班员', DAY, 'start', {'duty': DAY})['active']
@@ -160,7 +513,7 @@ class DailyInspectionTests(unittest.TestCase):
         with self.assertRaisesRegex(RiskError, '安排已变化'):
             self.service.change('owner', '', DAY, 'start', {'duty': {**DAY, 'scope': 'E'}})
         self.cloud.tables[SOURCES['D'][0][0]][1]['fields']['上传日期'] += 3600000
-        with self.assertRaisesRegex(RiskError, '单一批次'):
+        with self.assertRaisesRegex(RiskError, '完整批次'):
             self.service.change('owner', '', DAY, 'start', {'duty': DAY})
         self.assertIsNone(self.service.load('D')['active'])
 

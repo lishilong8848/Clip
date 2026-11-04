@@ -8,20 +8,36 @@
       <NButton size="small" type="primary" :disabled="!!busy || !report?.rounds.length" :loading="busy==='export'" @click="download">导出白夜班表格</NButton>
       <NButton size="small" :disabled="!!busy" @click="$emit('close')">返回巡检</NButton>
     </div>
-    <p>按排班日期汇总白班和夜班；凌晨巡检归前一天夜班。导出包含该日已有的全部轮次和源数据。</p>
+    <div v-if="active && !active.pending && !readOnly" class="sheet-tools" role="status">
+      <span :class="{warning:saveError}">{{ saveLabel }}</span>
+      <NButton v-if="saveError && canRetry" size="small" @click="$emit('retrySave')">重试保存</NButton>
+      <NButton v-else-if="saveError" size="small" @click="$emit('close')">返回核对</NButton>
+    </div>
+    <div v-for="item in conflictDevices" :key="item.id" class="sheet-tools warning" role="alert">
+      <span>{{ item.name }}：共享数据已有其他修改</span>
+      <NButton size="small" @click="$emit('resolveConflict',item.id,true)">合并我的修改</NButton>
+      <NButton size="small" @click="$emit('resolveConflict',item.id,false)">使用共享数据</NButton>
+    </div>
+    <p>按排班日期汇总白班和夜班；凌晨巡检归前一天夜班。冷机表按四轮分别导出，其余原表每天一份；未填写的位置留空。</p>
     <p v-if="busy" role="status">{{ busy==='export' ? '正在生成表格…' : '正在读取白夜班巡检表…' }}</p>
     <p v-if="error" class="warning" role="alert">{{ error }}</p>
-    <p v-if="report && !report.rounds.length && !busy && !error">该日期尚无可查看的巡检记录。</p>
-    <template v-if="report?.rounds.length">
+    <div v-if="report" class="sheet-tools">
+      <NButton size="small" :type="view==='original'?'primary':'default'" @click="view='original'">原巡检表</NButton>
+      <NButton size="small" :type="view==='summary'?'primary':'default'" @click="view='summary'">数据明细</NButton>
+      <label>文字大小 <select v-model.number="zoom" data-native-select aria-label="表格文字大小"><option :value="12">小</option><option :value="14">标准</option><option :value="18">放大</option><option :value="22">更大</option></select></label>
+    </div>
+    <DailyInspectionOriginalSheet v-if="report && view==='original' && report.original_templates?.length" :key="scope"
+      :templates="report.original_templates" :rounds="report.rounds" :active="active" :drafts="drafts" :read-only="readOnly" :zoom="zoom"
+      @update-reading="(device,parameter,value)=>$emit('updateReading',device,parameter,value)" />
+    <p v-else-if="report && view==='original'">原表布局暂不可用，请稍后重试。</p>
+    <p v-if="report && view==='summary' && !report.rounds.length && !busy && !error">该日期尚无可查看的巡检记录。</p>
+    <template v-if="report?.rounds.length && view==='summary'">
       <div class="sheet-tools">
         <label>轮次 <select v-model="roundIndex" data-native-select>
           <option v-for="(item,index) in report.rounds" :key="item.round_id" :value="index">{{ item.shift }}班第{{ item.round }}次 · {{ item.status }}</option>
         </select></label>
         <label>工作表 <select v-model="sheetIndex" data-native-select>
           <option v-for="(item,index) in round?.sheets || []" :key="item.name" :value="index">{{ item.name }}</option>
-        </select></label>
-        <label>文字大小 <select v-model.number="zoom" data-native-select aria-label="表格文字大小">
-          <option :value="12">小</option><option :value="14">标准</option><option :value="18">放大</option><option :value="22">更大</option>
         </select></label>
         <label v-if="isReview"><input v-model="onlyMissing" type="checkbox"> 只看数据缺失</label>
       </div>
@@ -52,20 +68,24 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { NButton } from 'naive-ui';
 import { downloadFile, requestJson } from '../api/client';
+import DailyInspectionOriginalSheet from './DailyInspectionOriginalSheet.vue';
 
 type Value=string|number|boolean|null;
 type Sheet={name:string;rows:Value[][]};
-type Round={round_id:string;shift:string;round:number;status:string;local_draft:boolean;sheets:Sheet[]};
-type Report={scope:string;date:string;rounds:Round[]};
+type OriginalCell={template:string;sheet:string;cell:string;value:Value;device:string;point_id:string;parameter:string;read_only:boolean;kind:'point'|'section'|'paired';location?:string;form?:string;members?:OriginalCell[];conflict?:boolean};
+type Round={round_id:string;shift:string;round:number;status:string;local_draft:boolean;sheets:Sheet[];original_cells:OriginalCell[]};
+type OriginalTemplate={scope:string;profession:string;name:string;sheets:{name:string;rows:Value[][];merges:string[]}[]};
+type Report={scope:string;date:string;rounds:Round[];original_templates:OriginalTemplate[]};
 type Draft={values:Record<string,string>;result:string;note:string;revision:number};
 const props=defineProps<{scopes:string[];defaultScope?:string;defaultDate?:string;
-  active?:{id:string;duty:{scope:string;date:string};review_version:number;pending:boolean};drafts:Record<string,Draft>;readOnly:boolean}>();
-defineEmits<{close:[]}>();
+  active?:{id:string;duty:{scope:string;date:string};review_version:number;pending:boolean;batch:{devices:{id:string;sections:{location:string;form:string}[];points:{id:string;point_id:string}[];parameters:{id:string;reference:Value;read_only?:boolean}[]}[];form_devices?:{id:string;sections:{location:string;form:string}[];points:{id:string;point_id:string}[];parameters:{id:string;reference:Value;read_only?:boolean}[]}[]};reviews:Record<string,Draft>};drafts:Record<string,Draft>;readOnly:boolean;saveLabel:string;saveError:boolean;canRetry:boolean;conflictDevices:{id:string;name:string}[]}>();
+defineEmits<{close:[];retrySave:[];resolveConflict:[device:string,keep:boolean];updateReading:[device:string,parameter:string,value:string]}>();
 const today=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',dateStyle:'short'}).format(new Date());
 const scope=ref(props.defaultScope || props.scopes[0] || '');
 const day=ref(props.defaultDate || today());
 const report=ref<Report>();
 const busy=ref('');
+const view=ref<'original'|'summary'>('original');
 const error=ref('');
 const roundIndex=ref(0),sheetIndex=ref(0),page=ref(1),zoom=ref(14),onlyMissing=ref(false);
 const round=computed(()=>report.value?.rounds[roundIndex.value]);
@@ -110,14 +130,19 @@ async function load() {
   controller?.abort();
   const current=controller=new AbortController();
   const requestedScope=scope.value, requestedDay=day.value;
-  report.value=undefined; error.value='';
+  if (report.value && (report.value.scope!==requestedScope || report.value.date!==requestedDay)) report.value=undefined;
+  error.value='';
   if (!requestedScope || !requestedDay) {busy.value='';return;}
   busy.value='load';
   try {
     const value=await requestJson('/api/daily-inspection/day-sheet',{method:'POST',body:JSON.stringify(payload()),signal:current.signal,timeoutMs:180000}) as Report;
     if (!disposed && !current.signal.aborted && requestedScope===scope.value && requestedDay===day.value) {
-      report.value=value; roundIndex.value=0;
-      sheetIndex.value=Math.max(0,value.rounds[0]?.sheets.findIndex(item=>item.name==='现场核对') ?? 0);
+      const previous=report.value;
+      report.value=value;
+      if (!previous || previous.scope!==value.scope || previous.date!==value.date) {
+        roundIndex.value=0;
+        sheetIndex.value=Math.max(0,value.rounds[0]?.sheets.findIndex(item=>item.name==='现场核对') ?? 0);
+      }
     }
   } catch (value) {
     if (!disposed && !current.signal.aborted) error.value=value instanceof Error ? value.message : '巡检表读取失败，请重试。';

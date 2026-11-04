@@ -1,0 +1,2181 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_133_1_653_0",
+      "source_device": "245-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_133_1_654_0",
+      "source_device": "245-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_134_1_653_0",
+      "source_device": "245-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_134_1_654_0",
+      "source_device": "245-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_135_1_653_0",
+      "source_device": "245-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_135_1_654_0",
+      "source_device": "245-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_136_1_653_0",
+      "source_device": "245-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_136_1_654_0",
+      "source_device": "245-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_137_1_653_0",
+      "source_device": "245-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_137_1_654_0",
+      "source_device": "245-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_138_1_653_0",
+      "source_device": "245-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-211",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_138_1_654_0",
+      "source_device": "245-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-211",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_139_1_653_0",
+      "source_device": "245-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-221",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_139_1_654_0",
+      "source_device": "245-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-221",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_140_1_653_0",
+      "source_device": "245-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-231",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_140_1_654_0",
+      "source_device": "245-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-231",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_141_1_653_0",
+      "source_device": "245-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-241",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_141_1_654_0",
+      "source_device": "245-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-241",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_142_1_653_0",
+      "source_device": "245-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-251",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "13_0_142_1_654_0",
+      "source_device": "245-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M1HVDC巡检表",
+      "target_device": "245-HVDC-251",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_127_1_653_0",
+      "source_device": "218-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_127_1_654_0",
+      "source_device": "218-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_128_1_653_0",
+      "source_device": "218-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_128_1_654_0",
+      "source_device": "218-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_129_1_653_0",
+      "source_device": "218-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_129_1_654_0",
+      "source_device": "218-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_130_1_653_0",
+      "source_device": "218-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_130_1_654_0",
+      "source_device": "218-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_131_1_653_0",
+      "source_device": "218-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_131_1_654_0",
+      "source_device": "218-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_132_1_653_0",
+      "source_device": "218-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-211",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_132_1_654_0",
+      "source_device": "218-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-211",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_133_1_653_0",
+      "source_device": "218-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-221",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_133_1_654_0",
+      "source_device": "218-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-221",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_134_1_653_0",
+      "source_device": "218-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-231",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_134_1_654_0",
+      "source_device": "218-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-231",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_135_1_653_0",
+      "source_device": "218-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-241",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_135_1_654_0",
+      "source_device": "218-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-241",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_136_1_653_0",
+      "source_device": "218-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-251",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "22_0_136_1_654_0",
+      "source_device": "218-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M2HVDC巡检表",
+      "target_device": "218-HVDC-251",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_169_1_653_0",
+      "source_device": "345-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_169_1_654_0",
+      "source_device": "345-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_170_1_653_0",
+      "source_device": "345-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_170_1_654_0",
+      "source_device": "345-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_171_1_653_0",
+      "source_device": "345-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_171_1_654_0",
+      "source_device": "345-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_172_1_653_0",
+      "source_device": "345-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_172_1_654_0",
+      "source_device": "345-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_173_1_653_0",
+      "source_device": "345-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_173_1_654_0",
+      "source_device": "345-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_174_1_653_0",
+      "source_device": "345-HVDC-162",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-161",
+      "cells": {
+        "白1": "L6",
+        "白2": "L7",
+        "夜1": "L8",
+        "夜2": "L9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "30_0_174_1_654_0",
+      "source_device": "345-HVDC-162",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-161",
+      "cells": {
+        "白1": "M6",
+        "白2": "M7",
+        "夜1": "M8",
+        "夜2": "M9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_101_1_653_0",
+      "source_device": "345-HVDC-172",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-171",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_101_1_654_0",
+      "source_device": "345-HVDC-172",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-171",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_102_1_653_0",
+      "source_device": "345-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-211",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_102_1_654_0",
+      "source_device": "345-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-211",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_103_1_653_0",
+      "source_device": "345-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-221",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_103_1_654_0",
+      "source_device": "345-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-221",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_104_1_653_0",
+      "source_device": "345-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-231",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_104_1_654_0",
+      "source_device": "345-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-231",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_105_1_653_0",
+      "source_device": "345-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-241",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_105_1_654_0",
+      "source_device": "345-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-241",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_106_1_653_0",
+      "source_device": "345-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-251",
+      "cells": {
+        "白1": "L13",
+        "白2": "L14",
+        "夜1": "L15",
+        "夜2": "L16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_106_1_654_0",
+      "source_device": "345-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-251",
+      "cells": {
+        "白1": "M13",
+        "白2": "M14",
+        "夜1": "M15",
+        "夜2": "M16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_107_1_653_0",
+      "source_device": "345-HVDC-262",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-261",
+      "cells": {
+        "白1": "B20",
+        "白2": "B21",
+        "夜1": "B22",
+        "夜2": "B23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_107_1_654_0",
+      "source_device": "345-HVDC-262",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-261",
+      "cells": {
+        "白1": "C20",
+        "白2": "C21",
+        "夜1": "C22",
+        "夜2": "C23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_108_1_653_0",
+      "source_device": "345-HVDC-272",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-271",
+      "cells": {
+        "白1": "D20",
+        "白2": "D21",
+        "夜1": "D22",
+        "夜2": "D23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "33_0_108_1_654_0",
+      "source_device": "345-HVDC-272",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M3HVDC巡检表",
+      "target_device": "345-HVDC-271",
+      "cells": {
+        "白1": "E20",
+        "白2": "E21",
+        "夜1": "E22",
+        "夜2": "E23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_304_1_653_0",
+      "source_device": "317-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-211",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_304_1_654_0",
+      "source_device": "317-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-211",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_306_1_653_0",
+      "source_device": "317-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-221",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_306_1_654_0",
+      "source_device": "317-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-221",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_307_1_653_0",
+      "source_device": "317-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-231",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_307_1_654_0",
+      "source_device": "317-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-231",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_308_1_653_0",
+      "source_device": "317-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-241",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_308_1_654_0",
+      "source_device": "317-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-241",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_309_1_653_0",
+      "source_device": "317-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-251",
+      "cells": {
+        "白1": "L13",
+        "白2": "L14",
+        "夜1": "L15",
+        "夜2": "L16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_309_1_654_0",
+      "source_device": "317-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-251",
+      "cells": {
+        "白1": "M13",
+        "白2": "M14",
+        "夜1": "M15",
+        "夜2": "M16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_310_1_653_0",
+      "source_device": "317-HVDC-262",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-261",
+      "cells": {
+        "白1": "B20",
+        "白2": "B21",
+        "夜1": "B22",
+        "夜2": "B23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_310_1_654_0",
+      "source_device": "317-HVDC-262",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-261",
+      "cells": {
+        "白1": "C20",
+        "白2": "C21",
+        "夜1": "C22",
+        "夜2": "C23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_311_1_653_0",
+      "source_device": "317-HVDC-272",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-271",
+      "cells": {
+        "白1": "D20",
+        "白2": "D21",
+        "夜1": "D22",
+        "夜2": "D23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "39_0_311_1_654_0",
+      "source_device": "317-HVDC-272",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-271",
+      "cells": {
+        "白1": "E20",
+        "白2": "E21",
+        "夜1": "E22",
+        "夜2": "E23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_106_1_653_0",
+      "source_device": "317-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_106_1_654_0",
+      "source_device": "317-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_108_1_653_0",
+      "source_device": "317-HVDC-172",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-171",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_108_1_654_0",
+      "source_device": "317-HVDC-172",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-171",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_184_1_653_0",
+      "source_device": "317-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_184_1_654_0",
+      "source_device": "317-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_185_1_653_0",
+      "source_device": "317-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_185_1_654_0",
+      "source_device": "317-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_186_1_653_0",
+      "source_device": "317-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_186_1_654_0",
+      "source_device": "317-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_187_1_653_0",
+      "source_device": "317-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_187_1_654_0",
+      "source_device": "317-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_188_1_653_0",
+      "source_device": "317-HVDC-162",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-161",
+      "cells": {
+        "白1": "L6",
+        "白2": "L7",
+        "夜1": "L8",
+        "夜2": "L9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "40_0_188_1_654_0",
+      "source_device": "317-HVDC-162",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M4HVDC巡检表",
+      "target_device": "317-HVDC-161",
+      "cells": {
+        "白1": "M6",
+        "白2": "M7",
+        "夜1": "M8",
+        "夜2": "M9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_167_1_653_0",
+      "source_device": "417-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_167_1_654_0",
+      "source_device": "417-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_168_1_653_0",
+      "source_device": "417-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_168_1_654_0",
+      "source_device": "417-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_169_1_653_0",
+      "source_device": "417-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_169_1_654_0",
+      "source_device": "417-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_170_1_653_0",
+      "source_device": "417-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_170_1_654_0",
+      "source_device": "417-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_171_1_653_0",
+      "source_device": "417-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_171_1_654_0",
+      "source_device": "417-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_172_1_653_0",
+      "source_device": "417-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-211",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_172_1_654_0",
+      "source_device": "417-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-211",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_173_1_653_0",
+      "source_device": "417-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-221",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_173_1_654_0",
+      "source_device": "417-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-221",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_174_1_653_0",
+      "source_device": "417-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-231",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_174_1_654_0",
+      "source_device": "417-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-231",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_230_1_653_0",
+      "source_device": "417-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-241",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "49_0_230_1_654_0",
+      "source_device": "417-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-241",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "52_0_102_1_653_0",
+      "source_device": "417-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-251",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "52_0_102_1_654_0",
+      "source_device": "417-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M6HVDC巡检表",
+      "target_device": "417-HVDC-251",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_132_1_653_0",
+      "source_device": "445-HVDC-112",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-111",
+      "cells": {
+        "白1": "B6",
+        "白2": "B7",
+        "夜1": "B8",
+        "夜2": "B9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_132_1_654_0",
+      "source_device": "445-HVDC-112",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-111",
+      "cells": {
+        "白1": "C6",
+        "白2": "C7",
+        "夜1": "C8",
+        "夜2": "C9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_133_1_653_0",
+      "source_device": "445-HVDC-122",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-121",
+      "cells": {
+        "白1": "D6",
+        "白2": "D7",
+        "夜1": "D8",
+        "夜2": "D9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_133_1_654_0",
+      "source_device": "445-HVDC-122",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-121",
+      "cells": {
+        "白1": "E6",
+        "白2": "E7",
+        "夜1": "E8",
+        "夜2": "E9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_134_1_653_0",
+      "source_device": "445-HVDC-132",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-131",
+      "cells": {
+        "白1": "F6",
+        "白2": "F7",
+        "夜1": "F8",
+        "夜2": "F9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_134_1_654_0",
+      "source_device": "445-HVDC-132",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-131",
+      "cells": {
+        "白1": "G6",
+        "白2": "G7",
+        "夜1": "G8",
+        "夜2": "G9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_135_1_653_0",
+      "source_device": "445-HVDC-142",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-141",
+      "cells": {
+        "白1": "H6",
+        "白2": "H7",
+        "夜1": "H8",
+        "夜2": "H9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_135_1_654_0",
+      "source_device": "445-HVDC-142",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-141",
+      "cells": {
+        "白1": "I6",
+        "白2": "I7",
+        "夜1": "I8",
+        "夜2": "I9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_136_1_653_0",
+      "source_device": "445-HVDC-152",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-151",
+      "cells": {
+        "白1": "J6",
+        "白2": "J7",
+        "夜1": "J8",
+        "夜2": "J9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_136_1_654_0",
+      "source_device": "445-HVDC-152",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-151",
+      "cells": {
+        "白1": "K6",
+        "白2": "K7",
+        "夜1": "K8",
+        "夜2": "K9"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_137_1_653_0",
+      "source_device": "445-HVDC-212",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-211",
+      "cells": {
+        "白1": "B13",
+        "白2": "B14",
+        "夜1": "B15",
+        "夜2": "B16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_137_1_654_0",
+      "source_device": "445-HVDC-212",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-211",
+      "cells": {
+        "白1": "C13",
+        "白2": "C14",
+        "夜1": "C15",
+        "夜2": "C16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_138_1_653_0",
+      "source_device": "445-HVDC-222",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-221",
+      "cells": {
+        "白1": "D13",
+        "白2": "D14",
+        "夜1": "D15",
+        "夜2": "D16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_138_1_654_0",
+      "source_device": "445-HVDC-222",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-221",
+      "cells": {
+        "白1": "E13",
+        "白2": "E14",
+        "夜1": "E15",
+        "夜2": "E16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_139_1_653_0",
+      "source_device": "445-HVDC-232",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-231",
+      "cells": {
+        "白1": "F13",
+        "白2": "F14",
+        "夜1": "F15",
+        "夜2": "F16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_139_1_654_0",
+      "source_device": "445-HVDC-232",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-231",
+      "cells": {
+        "白1": "G13",
+        "白2": "G14",
+        "夜1": "G15",
+        "夜2": "G16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_140_1_653_0",
+      "source_device": "445-HVDC-242",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-241",
+      "cells": {
+        "白1": "H13",
+        "白2": "H14",
+        "夜1": "H15",
+        "夜2": "H16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "54_0_140_1_654_0",
+      "source_device": "445-HVDC-242",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-241",
+      "cells": {
+        "白1": "I13",
+        "白2": "I14",
+        "夜1": "I15",
+        "夜2": "I16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "55_0_101_1_653_0",
+      "source_device": "445-HVDC-252",
+      "source_name": "直流电压_V",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-251",
+      "cells": {
+        "白1": "J13",
+        "白2": "J14",
+        "夜1": "J15",
+        "夜2": "J16"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "电气",
+      "point_id": "55_0_101_1_654_0",
+      "source_device": "445-HVDC-252",
+      "source_name": "负载总电流_A",
+      "template": "21V-JSNTFOC-RM-422 南通数据中心D栋电气巡检表单(2024.11.30）.xlsx",
+      "sheet": "M5HVDC巡检表",
+      "target_device": "445-HVDC-251",
+      "cells": {
+        "白1": "K13",
+        "白2": "K14",
+        "夜1": "K15",
+        "夜2": "K16"
+      }
+    }
+  ]
+}

@@ -1,0 +1,1477 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1166_1_601_0",
+      "source_device": "121-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "121-HUM-01",
+      "cells": {
+        "白1": "D23",
+        "白2": "D24",
+        "夜1": "D25",
+        "夜2": "D26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1167_1_601_0",
+      "source_device": "124-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "124-HUM-01",
+      "cells": {
+        "白1": "E23",
+        "白2": "E24",
+        "夜1": "E25",
+        "夜2": "E26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1168_1_601_0",
+      "source_device": "143-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "143-HUM-01",
+      "cells": {
+        "白1": "C23",
+        "白2": "C24",
+        "夜1": "C25",
+        "夜2": "C26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1169_1_601_0",
+      "source_device": "150-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "150-HUM-01",
+      "cells": {
+        "白1": "F23",
+        "白2": "F24",
+        "夜1": "F25",
+        "夜2": "F26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1170_1_601_0",
+      "source_device": "212-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-01",
+      "cells": {
+        "白1": "L5",
+        "白2": "L6",
+        "夜1": "L7",
+        "夜2": "L8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1171_1_601_0",
+      "source_device": "212-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-02",
+      "cells": {
+        "白1": "M5",
+        "白2": "M6",
+        "夜1": "M7",
+        "夜2": "M8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1172_1_601_0",
+      "source_device": "212-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-03",
+      "cells": {
+        "白1": "N5",
+        "白2": "N6",
+        "夜1": "N7",
+        "夜2": "N8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1175_1_601_0",
+      "source_device": "211-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-01",
+      "cells": {
+        "白1": "I5",
+        "白2": "I6",
+        "夜1": "I7",
+        "夜2": "I8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1176_1_601_0",
+      "source_device": "211-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-02",
+      "cells": {
+        "白1": "J5",
+        "白2": "J6",
+        "夜1": "J7",
+        "夜2": "J8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1177_1_601_0",
+      "source_device": "211-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-03",
+      "cells": {
+        "白1": "K5",
+        "白2": "K6",
+        "夜1": "K7",
+        "夜2": "K8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1178_1_601_0",
+      "source_device": "241-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-01",
+      "cells": {
+        "白1": "F5",
+        "白2": "F6",
+        "夜1": "F7",
+        "夜2": "F8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1179_1_601_0",
+      "source_device": "241-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-02",
+      "cells": {
+        "白1": "G5",
+        "白2": "G6",
+        "夜1": "G7",
+        "夜2": "G8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1180_1_601_0",
+      "source_device": "241-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-03",
+      "cells": {
+        "白1": "H5",
+        "白2": "H6",
+        "夜1": "H7",
+        "夜2": "H8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1181_1_601_0",
+      "source_device": "240-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-01",
+      "cells": {
+        "白1": "C5",
+        "白2": "C6",
+        "夜1": "C7",
+        "夜2": "C8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1182_1_601_0",
+      "source_device": "240-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-02",
+      "cells": {
+        "白1": "D5",
+        "白2": "D6",
+        "夜1": "D7",
+        "夜2": "D8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1183_1_601_0",
+      "source_device": "240-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-03",
+      "cells": {
+        "白1": "E5",
+        "白2": "E6",
+        "夜1": "E7",
+        "夜2": "E8"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1184_1_601_0",
+      "source_device": "244-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "244-HUM-01",
+      "cells": {
+        "白1": "G23",
+        "白2": "G24",
+        "夜1": "G25",
+        "夜2": "G26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1187_1_601_0",
+      "source_device": "219-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "219-HUM-01",
+      "cells": {
+        "白1": "H23",
+        "白2": "H24",
+        "夜1": "H25",
+        "夜2": "H26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1190_1_601_0",
+      "source_device": "312-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-01",
+      "cells": {
+        "白1": "L11",
+        "白2": "L12",
+        "夜1": "L13",
+        "夜2": "L14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1191_1_601_0",
+      "source_device": "312-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-02",
+      "cells": {
+        "白1": "M11",
+        "白2": "M12",
+        "夜1": "M13",
+        "夜2": "M14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1192_1_601_0",
+      "source_device": "312-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-03",
+      "cells": {
+        "白1": "N11",
+        "白2": "N12",
+        "夜1": "N13",
+        "夜2": "N14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1193_1_601_0",
+      "source_device": "311-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-01",
+      "cells": {
+        "白1": "I11",
+        "白2": "I12",
+        "夜1": "I13",
+        "夜2": "I14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1194_1_601_0",
+      "source_device": "311-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-02",
+      "cells": {
+        "白1": "J11",
+        "白2": "J12",
+        "夜1": "J13",
+        "夜2": "J14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1195_1_601_0",
+      "source_device": "311-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-03",
+      "cells": {
+        "白1": "K11",
+        "白2": "K12",
+        "夜1": "K13",
+        "夜2": "K14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1196_1_601_0",
+      "source_device": "341-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-01",
+      "cells": {
+        "白1": "F11",
+        "白2": "F12",
+        "夜1": "F13",
+        "夜2": "F14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1197_1_601_0",
+      "source_device": "341-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-02",
+      "cells": {
+        "白1": "G11",
+        "白2": "G12",
+        "夜1": "G13",
+        "夜2": "G14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1198_1_601_0",
+      "source_device": "341-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-03",
+      "cells": {
+        "白1": "H11",
+        "白2": "H12",
+        "夜1": "H13",
+        "夜2": "H14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1199_1_601_0",
+      "source_device": "340-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-01",
+      "cells": {
+        "白1": "C11",
+        "白2": "C12",
+        "夜1": "C13",
+        "夜2": "C14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1200_1_601_0",
+      "source_device": "340-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-02",
+      "cells": {
+        "白1": "D11",
+        "白2": "D12",
+        "夜1": "D13",
+        "夜2": "D14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1201_1_601_0",
+      "source_device": "340-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-03",
+      "cells": {
+        "白1": "E11",
+        "白2": "E12",
+        "夜1": "E13",
+        "夜2": "E14"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1202_1_601_0",
+      "source_device": "318-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "318-HUM-01",
+      "cells": {
+        "白1": "J23",
+        "白2": "J24",
+        "夜1": "J25",
+        "夜2": "J26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1205_1_601_0",
+      "source_device": "344-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "344-HUM-01",
+      "cells": {
+        "白1": "I23",
+        "白2": "I24",
+        "夜1": "I25",
+        "夜2": "I26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1206_1_601_0",
+      "source_device": "418-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "418-HUM-01",
+      "cells": {
+        "白1": "L23",
+        "白2": "L24",
+        "夜1": "L25",
+        "夜2": "L26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1207_1_601_0",
+      "source_device": "444-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "444-HUM-01",
+      "cells": {
+        "白1": "K23",
+        "白2": "K24",
+        "夜1": "K25",
+        "夜2": "K26"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1208_1_601_0",
+      "source_device": "412-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-01",
+      "cells": {
+        "白1": "L17",
+        "白2": "L18",
+        "夜1": "L19",
+        "夜2": "L20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1209_1_601_0",
+      "source_device": "412-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-02",
+      "cells": {
+        "白1": "M17",
+        "白2": "M18",
+        "夜1": "M19",
+        "夜2": "M20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1210_1_601_0",
+      "source_device": "412-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-03",
+      "cells": {
+        "白1": "N17",
+        "白2": "N18",
+        "夜1": "N19",
+        "夜2": "N20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1211_1_601_0",
+      "source_device": "411-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-01",
+      "cells": {
+        "白1": "I17",
+        "白2": "I18",
+        "夜1": "I19",
+        "夜2": "I20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1212_1_601_0",
+      "source_device": "411-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-02",
+      "cells": {
+        "白1": "J17",
+        "白2": "J18",
+        "夜1": "J19",
+        "夜2": "J20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1213_1_601_0",
+      "source_device": "411-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-03",
+      "cells": {
+        "白1": "K17",
+        "白2": "K18",
+        "夜1": "K19",
+        "夜2": "K20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1214_1_601_0",
+      "source_device": "441-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-01",
+      "cells": {
+        "白1": "F17",
+        "白2": "F18",
+        "夜1": "F19",
+        "夜2": "F20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1215_1_601_0",
+      "source_device": "441-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-02",
+      "cells": {
+        "白1": "G17",
+        "白2": "G18",
+        "夜1": "G19",
+        "夜2": "G20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1216_1_601_0",
+      "source_device": "441-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-03",
+      "cells": {
+        "白1": "H17",
+        "白2": "H18",
+        "夜1": "H19",
+        "夜2": "H20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1217_1_601_0",
+      "source_device": "440-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-01",
+      "cells": {
+        "白1": "C17",
+        "白2": "C18",
+        "夜1": "C19",
+        "夜2": "C20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1218_1_601_0",
+      "source_device": "440-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-02",
+      "cells": {
+        "白1": "D17",
+        "白2": "D18",
+        "夜1": "D19",
+        "夜2": "D20"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1219_1_601_0",
+      "source_device": "440-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-03",
+      "cells": {
+        "白1": "E17",
+        "白2": "E18",
+        "夜1": "E19",
+        "夜2": "E20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_569_1_600_0",
+      "source_device": "412-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-01",
+      "cells": {
+        "白1": "L17",
+        "白2": "L18",
+        "夜1": "L19",
+        "夜2": "L20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_570_1_600_0",
+      "source_device": "412-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-02",
+      "cells": {
+        "白1": "M17",
+        "白2": "M18",
+        "夜1": "M19",
+        "夜2": "M20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_571_1_600_0",
+      "source_device": "412-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "412-HUM-03",
+      "cells": {
+        "白1": "N17",
+        "白2": "N18",
+        "夜1": "N19",
+        "夜2": "N20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_572_1_600_0",
+      "source_device": "411-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-01",
+      "cells": {
+        "白1": "I17",
+        "白2": "I18",
+        "夜1": "I19",
+        "夜2": "I20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_573_1_600_0",
+      "source_device": "411-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-02",
+      "cells": {
+        "白1": "J17",
+        "白2": "J18",
+        "夜1": "J19",
+        "夜2": "J20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_574_1_600_0",
+      "source_device": "411-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "411-HUM-03",
+      "cells": {
+        "白1": "K17",
+        "白2": "K18",
+        "夜1": "K19",
+        "夜2": "K20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_575_1_600_0",
+      "source_device": "441-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-01",
+      "cells": {
+        "白1": "F17",
+        "白2": "F18",
+        "夜1": "F19",
+        "夜2": "F20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_576_1_600_0",
+      "source_device": "441-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-02",
+      "cells": {
+        "白1": "G17",
+        "白2": "G18",
+        "夜1": "G19",
+        "夜2": "G20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_577_1_600_0",
+      "source_device": "441-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "441-HUM-03",
+      "cells": {
+        "白1": "H17",
+        "白2": "H18",
+        "夜1": "H19",
+        "夜2": "H20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_578_1_600_0",
+      "source_device": "440-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-01",
+      "cells": {
+        "白1": "C17",
+        "白2": "C18",
+        "夜1": "C19",
+        "夜2": "C20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_579_1_600_0",
+      "source_device": "440-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-02",
+      "cells": {
+        "白1": "D17",
+        "白2": "D18",
+        "夜1": "D19",
+        "夜2": "D20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_580_1_600_0",
+      "source_device": "440-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "440-HUM-03",
+      "cells": {
+        "白1": "E17",
+        "白2": "E18",
+        "夜1": "E19",
+        "夜2": "E20"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_583_1_600_0",
+      "source_device": "444-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "444-HUM-01",
+      "cells": {
+        "白1": "K23",
+        "白2": "K24",
+        "夜1": "K25",
+        "夜2": "K26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_584_1_600_0",
+      "source_device": "418-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "418-HUM-01",
+      "cells": {
+        "白1": "L23",
+        "白2": "L24",
+        "夜1": "L25",
+        "夜2": "L26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_585_1_600_0",
+      "source_device": "312-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-01",
+      "cells": {
+        "白1": "L11",
+        "白2": "L12",
+        "夜1": "L13",
+        "夜2": "L14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_586_1_600_0",
+      "source_device": "312-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-02",
+      "cells": {
+        "白1": "M11",
+        "白2": "M12",
+        "夜1": "M13",
+        "夜2": "M14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_587_1_600_0",
+      "source_device": "312-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "312-HUM-03",
+      "cells": {
+        "白1": "N11",
+        "白2": "N12",
+        "夜1": "N13",
+        "夜2": "N14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_588_1_600_0",
+      "source_device": "311-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-01",
+      "cells": {
+        "白1": "I11",
+        "白2": "I12",
+        "夜1": "I13",
+        "夜2": "I14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_589_1_600_0",
+      "source_device": "311-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-02",
+      "cells": {
+        "白1": "J11",
+        "白2": "J12",
+        "夜1": "J13",
+        "夜2": "J14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_590_1_600_0",
+      "source_device": "311-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "311-HUM-03",
+      "cells": {
+        "白1": "K11",
+        "白2": "K12",
+        "夜1": "K13",
+        "夜2": "K14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_591_1_600_0",
+      "source_device": "341-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-01",
+      "cells": {
+        "白1": "F11",
+        "白2": "F12",
+        "夜1": "F13",
+        "夜2": "F14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_592_1_600_0",
+      "source_device": "341-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-02",
+      "cells": {
+        "白1": "G11",
+        "白2": "G12",
+        "夜1": "G13",
+        "夜2": "G14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_593_1_600_0",
+      "source_device": "341-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "341-HUM-03",
+      "cells": {
+        "白1": "H11",
+        "白2": "H12",
+        "夜1": "H13",
+        "夜2": "H14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_594_1_600_0",
+      "source_device": "340-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-01",
+      "cells": {
+        "白1": "C11",
+        "白2": "C12",
+        "夜1": "C13",
+        "夜2": "C14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_595_1_600_0",
+      "source_device": "340-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-02",
+      "cells": {
+        "白1": "D11",
+        "白2": "D12",
+        "夜1": "D13",
+        "夜2": "D14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_596_1_600_0",
+      "source_device": "340-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "340-HUM-03",
+      "cells": {
+        "白1": "E11",
+        "白2": "E12",
+        "夜1": "E13",
+        "夜2": "E14"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_597_1_600_0",
+      "source_device": "318-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "318-HUM-01",
+      "cells": {
+        "白1": "J23",
+        "白2": "J24",
+        "夜1": "J25",
+        "夜2": "J26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_598_1_600_0",
+      "source_device": "344-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "344-HUM-01",
+      "cells": {
+        "白1": "I23",
+        "白2": "I24",
+        "夜1": "I25",
+        "夜2": "I26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_599_1_600_0",
+      "source_device": "212-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-01",
+      "cells": {
+        "白1": "L5",
+        "白2": "L6",
+        "夜1": "L7",
+        "夜2": "L8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_600_1_600_0",
+      "source_device": "212-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-02",
+      "cells": {
+        "白1": "M5",
+        "白2": "M6",
+        "夜1": "M7",
+        "夜2": "M8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_601_1_600_0",
+      "source_device": "212-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "212-HUM-03",
+      "cells": {
+        "白1": "N5",
+        "白2": "N6",
+        "夜1": "N7",
+        "夜2": "N8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_602_1_600_0",
+      "source_device": "211-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-01",
+      "cells": {
+        "白1": "I5",
+        "白2": "I6",
+        "夜1": "I7",
+        "夜2": "I8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_603_1_600_0",
+      "source_device": "211-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-02",
+      "cells": {
+        "白1": "J5",
+        "白2": "J6",
+        "夜1": "J7",
+        "夜2": "J8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_604_1_600_0",
+      "source_device": "211-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "211-HUM-03",
+      "cells": {
+        "白1": "K5",
+        "白2": "K6",
+        "夜1": "K7",
+        "夜2": "K8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_605_1_600_0",
+      "source_device": "241-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-01",
+      "cells": {
+        "白1": "F5",
+        "白2": "F6",
+        "夜1": "F7",
+        "夜2": "F8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_606_1_600_0",
+      "source_device": "241-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-02",
+      "cells": {
+        "白1": "G5",
+        "白2": "G6",
+        "夜1": "G7",
+        "夜2": "G8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_607_1_600_0",
+      "source_device": "241-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "241-HUM-03",
+      "cells": {
+        "白1": "H5",
+        "白2": "H6",
+        "夜1": "H7",
+        "夜2": "H8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_608_1_600_0",
+      "source_device": "240-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-01",
+      "cells": {
+        "白1": "C5",
+        "白2": "C6",
+        "夜1": "C7",
+        "夜2": "C8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_609_1_600_0",
+      "source_device": "240-HUM-02",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-02",
+      "cells": {
+        "白1": "D5",
+        "白2": "D6",
+        "夜1": "D7",
+        "夜2": "D8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_610_1_600_0",
+      "source_device": "240-HUM-03",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "240-HUM-03",
+      "cells": {
+        "白1": "E5",
+        "白2": "E6",
+        "夜1": "E7",
+        "夜2": "E8"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_611_1_600_0",
+      "source_device": "219-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "219-HUM-01",
+      "cells": {
+        "白1": "H23",
+        "白2": "H24",
+        "夜1": "H25",
+        "夜2": "H26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_612_1_600_0",
+      "source_device": "244-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "244-HUM-01",
+      "cells": {
+        "白1": "G23",
+        "白2": "G24",
+        "夜1": "G25",
+        "夜2": "G26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_613_1_600_0",
+      "source_device": "121-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "121-HUM-01",
+      "cells": {
+        "白1": "D23",
+        "白2": "D24",
+        "夜1": "D25",
+        "夜2": "D26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_614_1_600_0",
+      "source_device": "124-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "124-HUM-01",
+      "cells": {
+        "白1": "E23",
+        "白2": "E24",
+        "夜1": "E25",
+        "夜2": "E26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_615_1_600_0",
+      "source_device": "143-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "143-HUM-01",
+      "cells": {
+        "白1": "C23",
+        "白2": "C24",
+        "夜1": "C25",
+        "夜2": "C26"
+      }
+    },
+    {
+      "scope": "E",
+      "profession": "暖通",
+      "point_id": "55_0_616_1_600_0",
+      "source_device": "150-HUM-01",
+      "source_name": "湿度显示",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心E栋暖通巡检表单(2024年最新版) (2).xlsx",
+      "sheet": "恒湿机巡检表",
+      "target_device": "150-HUM-01",
+      "cells": {
+        "白1": "F23",
+        "白2": "F24",
+        "夜1": "F25",
+        "夜2": "F26"
+      }
+    }
+  ]
+}

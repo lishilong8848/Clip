@@ -1,0 +1,485 @@
+{
+  "version": 1,
+  "items": [
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1220_1_600_0",
+      "source_device": "246-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "246-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "G6",
+        "白2": "G8",
+        "夜1": "G10",
+        "夜2": "G12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1220_1_602_0",
+      "source_device": "246-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "246-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "G7",
+        "白2": "G9",
+        "夜1": "G11",
+        "夜2": "G13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1221_1_600_0",
+      "source_device": "246-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "246-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "H6",
+        "白2": "H8",
+        "夜1": "H10",
+        "夜2": "H12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1221_1_602_0",
+      "source_device": "246-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "246-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "H7",
+        "白2": "H9",
+        "夜1": "H11",
+        "夜2": "H13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1222_1_600_0",
+      "source_device": "217-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "217-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "I6",
+        "白2": "I8",
+        "夜1": "I10",
+        "夜2": "I12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1222_1_602_0",
+      "source_device": "217-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "217-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "I7",
+        "白2": "I9",
+        "夜1": "I11",
+        "夜2": "I13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1223_1_600_0",
+      "source_device": "217-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "217-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "J6",
+        "白2": "J8",
+        "夜1": "J10",
+        "夜2": "J12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1223_1_602_0",
+      "source_device": "217-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "217-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "J7",
+        "白2": "J9",
+        "夜1": "J11",
+        "夜2": "J13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1224_1_600_0",
+      "source_device": "346-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "346-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "K6",
+        "白2": "K8",
+        "夜1": "K10",
+        "夜2": "K12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1224_1_602_0",
+      "source_device": "346-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "346-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "K7",
+        "白2": "K9",
+        "夜1": "K11",
+        "夜2": "K13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1225_1_600_0",
+      "source_device": "346-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "346-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "L6",
+        "白2": "L8",
+        "夜1": "L10",
+        "夜2": "L12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1225_1_602_0",
+      "source_device": "346-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "346-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "L7",
+        "白2": "L9",
+        "夜1": "L11",
+        "夜2": "L13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1226_1_600_0",
+      "source_device": "316-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "316-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "C16",
+        "白2": "C18",
+        "夜1": "C20",
+        "夜2": "C22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1226_1_602_0",
+      "source_device": "316-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "316-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "C17",
+        "白2": "C19",
+        "夜1": "C21",
+        "夜2": "C23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1227_1_600_0",
+      "source_device": "316-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "316-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "D16",
+        "白2": "D18",
+        "夜1": "D20",
+        "夜2": "D22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1227_1_602_0",
+      "source_device": "316-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "316-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "D17",
+        "白2": "D19",
+        "夜1": "D21",
+        "夜2": "D23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1228_1_600_0",
+      "source_device": "446-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "446-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "E16",
+        "白2": "E18",
+        "夜1": "E20",
+        "夜2": "E22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1228_1_602_0",
+      "source_device": "446-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "446-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "E17",
+        "白2": "E19",
+        "夜1": "E21",
+        "夜2": "E23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1229_1_600_0",
+      "source_device": "446-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "446-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "F16",
+        "白2": "F18",
+        "夜1": "F20",
+        "夜2": "F22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1229_1_602_0",
+      "source_device": "446-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "446-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "F17",
+        "白2": "F19",
+        "夜1": "F21",
+        "夜2": "F23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1230_1_600_0",
+      "source_device": "416-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "416-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "G16",
+        "白2": "G18",
+        "夜1": "G20",
+        "夜2": "G22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1230_1_602_0",
+      "source_device": "416-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "416-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "G17",
+        "白2": "G19",
+        "夜1": "G21",
+        "夜2": "G23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1231_1_600_0",
+      "source_device": "416-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "416-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "H16",
+        "白2": "H18",
+        "夜1": "H20",
+        "夜2": "H22"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_1231_1_602_0",
+      "source_device": "416-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "416-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "H17",
+        "白2": "H19",
+        "夜1": "H21",
+        "夜2": "H23"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_772_1_600_0",
+      "source_device": "141-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "141-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "C6",
+        "白2": "C8",
+        "夜1": "C10",
+        "夜2": "C12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_772_1_602_0",
+      "source_device": "141-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "141-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "C7",
+        "白2": "C9",
+        "夜1": "C11",
+        "夜2": "C13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_773_1_600_0",
+      "source_device": "141-CRAC-02",
+      "source_name": "1#回风温度",
+      "target_device": "141-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "D6",
+        "白2": "D8",
+        "夜1": "D10",
+        "夜2": "D12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_773_1_602_0",
+      "source_device": "141-CRAC-02",
+      "source_name": "1#回风湿度",
+      "target_device": "141-CRAC-02",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "D7",
+        "白2": "D9",
+        "夜1": "D11",
+        "夜2": "D13"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_774_1_600_0",
+      "source_device": "118-CRAC-01",
+      "source_name": "1#回风温度",
+      "target_device": "118-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "E6",
+        "白2": "E8",
+        "夜1": "E10",
+        "夜2": "E12"
+      }
+    },
+    {
+      "scope": "D",
+      "profession": "暖通",
+      "point_id": "70_0_774_1_602_0",
+      "source_device": "118-CRAC-01",
+      "source_name": "1#回风湿度",
+      "target_device": "118-CRAC-01",
+      "template": "21V-JSNTFOC-RM-423 南通数据中心D栋暖通巡检表单(2024.11.30）.xlsx",
+      "sheet": "辅助区空调巡检表 (2)",
+      "cells": {
+        "白1": "E7",
+        "白2": "E9",
+        "夜1": "E11",
+        "夜2": "E13"
+      }
+    }
+  ]
+}
