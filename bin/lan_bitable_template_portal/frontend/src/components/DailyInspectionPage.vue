@@ -1,16 +1,8 @@
 <template>
   <section class="inspection-page" :class="{'is-inspection-immersive':immersive}" aria-label="日常巡检" data-v2-inline-feedback>
     <header class="inspection-heading">
-      <NButton v-if="!embedded || immersive || historyOpen || sheetOpen" quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
+      <NButton v-if="!embedded || immersive" quaternary aria-label="返回" @click="back"><ArrowLeft :size="18" /></NButton>
       <div class="inspection-title"><h1>日常巡检</h1><p>{{ duty ? dutyLabel(duty) : '设备参数与测点读数' }}</p></div>
-      <div class="inspection-actions inspection-heading-tools">
-        <NButton v-if="state?.history_scopes?.length && !sheetOpen" size="small" :type="historyOpen ? 'primary' : 'default'"
-          :aria-pressed="historyOpen" :aria-label="historyOpen ? '返回本班' : '历史巡检'" :disabled="!!busy"
-          @click="toggleHistory">{{ historyOpen ? '返回' : '历史' }}</NButton>
-        <NButton v-if="state?.history_scopes?.length && !historyOpen && !sheetOpen" size="small" aria-label="巡检表与导出" :disabled="!!busy" @click="sheetOpen=true">巡检表</NButton>
-        <NButton v-if="immersive && active && !historyOpen && !sheetOpen" size="small" :disabled="!!busy || !!active.pending || autoSaving" @click="openOrder">排序</NButton>
-        <NButton v-if="!historyOpen && !sheetOpen && (!active || pollError)" size="small" :disabled="!!busy || autoSaving" :loading="busy==='load'" @click="load">刷新</NButton>
-      </div>
     </header>
     <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" role="status">{{ message }}</NAlert>
@@ -31,12 +23,18 @@
     <p v-if="!state && busy">正在读取巡检状态…</p>
     <DailyInspectionHistory v-show="historyOpen" v-if="historyVisited && state?.history_scopes?.length"
       ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
-    <DailyInspectionSheet v-if="sheetOpen && state?.history_scopes?.length" :scopes="state.history_scopes"
+    <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
       :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
-      :drafts="submissionReviews()" :read-only="readOnly || inputsLocked" :save-label="autoLabel"
-      :save-error="autoStatus==='error'" :can-retry="!conflicts.size && !orphanedDrafts.length && !autoSaving"
-      :conflict-devices="[...conflicts].map(id=>({id,name:byId.get(id)?.name || '原表补填'}))"
-      @resolve-conflict="resolveConflict" @retry-save="retryAutoSave" @update-reading="setReadingValue" @close="sheetOpen=false" />
+      :read-only="readOnly || inputsLocked" :parent-busy="!!busy || autoSaving || hasDrafts"
+      @changed="load" @scope="switchView">
+      <template #start>
+        <div v-if="duty && !readOnly && !active && state.completed_rounds<state.round_limit" class="inspection-actions">
+          <label v-for="item in availableProfessions" :key="item.name"><input v-model="selectedProfessions" type="checkbox" :value="item.name"> {{ item.name }}</label>
+          <NButton type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length" @click="start">开始第 {{ state.completed_rounds+1 }} 次巡检</NButton>
+          <span v-if="previewBusy">正在读取本次数据…</span><span v-if="previewError" class="warning">{{ previewError }}</span>
+        </div>
+      </template>
+    </DailyInspectionWorkbook>
     <template v-if="state && !historyOpen && !sheetOpen">
       <div v-if="state.view_scopes?.length && (!immersive || state.view_scopes.length>1)" class="inspection-actions inspection-view-scopes" aria-label="查看楼栋">
         <span>查看楼栋</span>
@@ -259,7 +257,7 @@ import { ArrowLeft, ChevronRight } from 'lucide-vue-next';
 import { ApiError, requestJson } from '../api/client';
 import { registerNavigationGuard } from '../navigation';
 import DailyInspectionHistory from './DailyInspectionHistory.vue';
-import DailyInspectionSheet from './DailyInspectionSheet.vue';
+import DailyInspectionWorkbook from './DailyInspectionWorkbook.vue';
 
 defineProps<{embedded?:boolean;immersive?:boolean}>();
 const emit = defineEmits<{close:[]}>();
@@ -298,7 +296,8 @@ const selectedProfessions = ref<string[]>([]);
 const onlyMissing = ref(false);
 const focusedDevice = ref('');
 const historyOpen = ref(false);
-const sheetOpen = ref(false);
+const sheetOpen = ref(true);
+const workbookPage=ref<InstanceType<typeof DailyInspectionWorkbook>>();
 const historyVisited = ref(false);
 const historyPage = ref<InstanceType<typeof DailyInspectionHistory>>();
 const pollError = ref('');
@@ -710,7 +709,7 @@ function useState(next:State,discardPrevious=false) {
     blockedDevice.value='';
   }
   state.value=next;
-  if (!next.history_scopes?.length) { historyOpen.value=false; sheetOpen.value=false; }
+  if (!next.history_scopes?.length) { historyOpen.value=false; }
   for (const [id,review] of Object.entries(drafts.value)) {
     const saved=savedReview(id);
     if (review.pending && saved.revision>=review.pending.revision && sameReview(review.pending,saved)) {
@@ -845,6 +844,12 @@ function switchView(scope:string) {
   if (scope!==state.value?.view_scope) void fetchState('load',undefined,scope);
 }
 const start = ()=>fetchState('start',{duty:duty.value,professions:selectedProfessions.value});
+let entryStarted=false;
+watch([()=>preview.value,()=>active.value?.id,()=>busy.value],()=>{
+  if(entryStarted || !state.value || busy.value || readOnly.value)return;
+  if(active.value || state.value.completed_rounds>=state.value.round_limit){entryStarted=true;return;}
+  if(preview.value && selectedProfessions.value.length && duty.value){entryStarted=true;void start();}
+});
 async function confirmProfession(name:string) {
   if (!active.value || autoController || busy.value || professionConfirmed(name)) return;
   window.clearTimeout(autoTimer);
@@ -988,7 +993,7 @@ function toggleHistory() {
   else historyOpen.value=true;
 }
 function back() {
-  if (sheetOpen.value) sheetOpen.value=false;
+  if (sheetOpen.value) {if(workbookPage.value?.allowNavigation()!==false) emit('close');}
   else if (historyOpen.value) {
     if (historyPage.value) historyPage.value.requestBack();
     else historyOpen.value=false;

@@ -523,6 +523,16 @@ class InspectionAccessTests(unittest.TestCase):
     def post(self, action, data):
         return self.client.post('/api/daily-inspection/' + action, json=data, headers={'origin': 'http://testserver'})
 
+    def test_form_only_read_omits_raw_sheets_and_keeps_building_permissions(self):
+        body={'scope':'D','date':DAY['date'],'drafts':{},'form_only':True}
+        result=self.post('day-sheet',body)
+        self.assertEqual(result.status_code,200)
+        data=result.json()['data']
+        self.assertTrue(data['original_templates'])
+        self.assertTrue(data['rounds'][0]['original_cells'])
+        self.assertNotIn('sheets',data['rounds'][0])
+        self.assertEqual(self.post('day-sheet',{**body,'scope':'E'}).status_code,403)
+
     def test_home_building_can_inspect_without_daily_module_or_roster(self):
         page = self.client.get('/api/daily-inspection').json()['data']
         self.assertEqual(page['history_scopes'], ['D'])

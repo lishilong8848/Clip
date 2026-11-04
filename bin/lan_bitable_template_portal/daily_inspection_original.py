@@ -181,6 +181,11 @@ def original_views(templates, rounds, *, include_empty_rounds=False):
                         occupied.add(address)
                         col, row = coordinate_from_string(address)
                         rows[row - 1][column_index_from_string(col) - 1] = cell.get('value')
+                # Preserve free cell corrections without replacing other rounds' mapped readings.
+                from .daily_inspection_sheet_edit import overlay_views
+                current = {'template': template['name'], 'sheet': sheet['name'], 'rows': rows}
+                for item in group:
+                    overlay_views([current], [edit for edit in item.get('extra_cells', []) if edit['cell'] not in occupied])
                 round_label = f'{slot[0]}{slot[1]}-' if slot else ''
                 output.append({'name': f"原-{template['profession'][0]}-{round_label}{sheet['name'].strip()}",
                                'template': template['name'], 'sheet': sheet['name'],

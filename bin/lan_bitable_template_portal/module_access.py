@@ -185,7 +185,7 @@ async def module_denial(request, controller, runtime):
                 '/api/daily-inspection/day-sheet', '/api/daily-inspection/day-export',
                 '/api/daily-inspection/start', '/api/daily-inspection/order', '/api/daily-inspection/draft',
                 '/api/daily-inspection/cancel', '/api/daily-inspection/finish', '/api/daily-inspection/confirm-profession',
-                '/api/daily-inspection/history-edit'})):
+                '/api/daily-inspection/history-edit', '/api/daily-inspection/sheet-group'})):
         from .daily_inspection import inspection_history_scopes
         if await asyncio.to_thread(inspection_history_scopes, runtime.auth_manager, session):
             return None

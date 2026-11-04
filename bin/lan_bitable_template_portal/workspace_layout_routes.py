@@ -12,13 +12,22 @@ from .portal_service import PortalError
 
 
 PAGES = frozenset("workspace notices sops mop repair cabinet events daily links signatures accounts handover "
-                  "plan-review plan-audit plan-rules guard-building guard-admin learning-practice learning-profile".split())
+                  "plan-review plan-audit plan-rules guard-building guard-admin learning-practice learning-profile inspection-sheets-D inspection-sheets-E".split())
 WIDGET_FIELDS = frozenset("id kind title module scope display period metric presentation links taskKinds x y w h builtin minW minH".split())
 
 
 def validate_layout(page, value):
     if not isinstance(value, dict):
         raise ValueError("布局格式无效。")
+    if page in {"inspection-sheets-D", "inspection-sheets-E"}:
+        orders = value.get('orders')
+        if set(value) != {'version', 'orders'} or value.get('version') != 1 or not isinstance(orders, dict) or set(orders) != {'ALL', '电气', '暖通'}:
+            raise ValueError('巡检工作表排序格式无效。')
+        for items in orders.values():
+            if (not isinstance(items, list) or len(items) > 128 or any(not isinstance(key, str) or len(key) > 1024 for key in items)
+                    or len(set(items)) != len(items)):
+                raise ValueError('巡检工作表顺序无效。')
+        return value
     if page == "workspace":
         layout, field = value, "widgets"
         if set(value) != {"version", "widgets"}:
