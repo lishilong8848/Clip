@@ -1033,7 +1033,7 @@ class PortalRuntime:
                 existing.get("active_item_id")
                 or cls._change_confirmation_active_item_id(target_record_id)
             ).strip(),
-            "title": str(
+            "title": cls.service._clean_source_text(
                 fields.get("名称")
                 or record.get("title")
                 or existing.get("title")
@@ -1521,19 +1521,8 @@ class PortalRuntime:
                     task["last_error"] = "未配置可供H楼访问的门户地址。"
                     task["h_notification_next_at"] = now + CHANGE_CONFIRMATION_REMINDER_SECONDS
                     return cls._put_change_confirmation_task(task)
-                text = "\n".join(
-                    (
-                        "【变更阿里确认截图待确认】",
-                        f"名称：{task.get('title') or target_record_id}",
-                        f"楼栋：{task.get('building') or '未识别'}",
-                        "截图已上传，无需重复上传。请H楼在变更确认面板点击确认。",
-                        link,
-                    )
-                ).strip()
-                ok_send, message, _results = _send_text_to_open_ids_guarded(
-                    text,
-                    [h_open_id] if h_open_id else [],
-                )
+                from .change_screenshot_cards import send as send_confirmation_card
+                ok_send, message, _results = send_confirmation_card(cls,task,h_open_id,link)
                 if ok_send:
                     task["h_notification_fingerprint"] = fingerprint
                     task["h_notification_sent_at"] = now
@@ -1960,6 +1949,7 @@ class PortalRuntime:
     def _query_active_change_confirmation_record(
         cls,
         target_record_id: str,
+        *, allow_recently_ended: bool = False,
     ) -> tuple[dict, dict]:
         ok, result = query_record_by_id(target_record_id, NOTICE_TYPE_CHANGE)
         if not ok:
@@ -1974,6 +1964,11 @@ class PortalRuntime:
             notice_type=NOTICE_TYPE_CHANGE,
             target_record={"record_id": target_record_id, "display_fields": fields},
         )
+        if allow_recently_ended:
+            from .change_screenshot_cards import check_lifetime
+            try:check_lifetime(lifecycle)
+            except ValueError as exc:raise PortalConflictError(str(exc)) from None
+            return record, fields
         if lifecycle.get("finished") or not lifecycle.get("active"):
             cls.stop_change_confirmation(target_record_id, reason="target_terminal")
             raise PortalConflictError("该变更已经结束，确认流程已停止。")
@@ -2458,6 +2453,8 @@ class PortalRuntime:
         *,
         actor_open_id: str,
         actor_name: str,
+        expected_fingerprint: str | None = None,
+        allow_recently_ended: bool = False,
     ) -> dict:
         target_record_id = str(target_record_id or "").strip()
         if not target_record_id or is_local_record_id(target_record_id):
@@ -2470,7 +2467,10 @@ class PortalRuntime:
         if lock_error:
             raise PortalConflictError(lock_error)
         try:
-            record, fields = cls._query_active_change_confirmation_record(target_record_id)
+            record, fields = (cls._query_active_change_confirmation_record(target_record_id,allow_recently_ended=True)
+                              if allow_recently_ended else cls._query_active_change_confirmation_record(target_record_id))
+            if expected_fingerprint is not None and expected_fingerprint != cls._change_confirmation_fingerprint(fields.get(CHANGE_NOTICE_FIELDS['ali_confirmation_snapshot'])):
+                raise PortalConflictError('截图已变更，请查看最新卡片或打开灯塔重新核对。')
             screenshot_count = cls._change_confirmation_attachment_count(fields.get(CHANGE_NOTICE_FIELDS["ali_confirmation_snapshot"]))
             if not screenshot_count:
                 raise PortalConflictError("尚未上传阿里确认截图，不能确认。")
