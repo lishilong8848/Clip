@@ -890,6 +890,80 @@ def display_device(device):
                                   if deferred_catalog_section(device, section)]}
 
 
+def manual_state_key(device, parameter):
+    """A manual state belongs to one device/parameter and its complete four-round mapping."""
+    if parameter.get('value_type')!='状态' or parameter.get('read_only'):
+        return None
+    if parameter.get('reference') not in ('',None):
+        return None
+    if 'point' in parameter:
+        point=next((p for p in device['points'] if p['id']==parameter['point']),None)
+        if not point or point.get('enabled') is False:return None
+        for field in ('status_normal','status_abnormal','status_stopped'):
+            try:
+                rule=json.loads(point.get(field) or '[]')
+                if not isinstance(rule,list) or rule:return None
+            except (ValueError,TypeError):return None
+        identity=['point',point.get('point_id'),point.get('name')]
+        target=[point.get('template'),str(point.get('sheet') or '').strip(),point.get('round_cells')]
+    else:
+        section=device['sections'][parameter['section']]
+        item=catalog_locations().get((device['scope']+'楼',device['name'],device['profession'],section['location'],section['form'].strip(),parameter['name']))
+        if not item:return None
+        # A catalogue field backed by a real state rule keeps its live source.
+        for point in device['points']:
+            if point.get('template')==item['template'] and str(point.get('sheet') or '').strip()==item['sheet'].strip() and point.get('round_cells')==item['cells']:
+                for field in ('status_normal','status_abnormal','status_stopped'):
+                    try:
+                        rule=json.loads(point.get(field) or '[]')
+                        if not isinstance(rule,list) or rule:return None
+                    except (ValueError,TypeError):return None
+        identity=['section',section['location'],section['form'],parameter['name']]
+        target=[item['template'],item['sheet'].strip(),item['cells']]
+    if not all(target):return None
+    return hashlib.sha256(json.dumps([device['scope'],device['id'],identity,target],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+
+
+def inherit_manual_states(state, active, scope):
+    saved=state.get('manual_states',{})
+    if not saved:return
+    reviews={}
+    for device in review_devices(active,scope):
+        values={};inherited={}
+        for param in parameters(device):
+            key=manual_state_key(device,param)
+            remembered=saved.get(key,{}) if key else {}
+            if param.get('reference') not in ('',None) or remembered.get('value') not in ('√','×','△'):continue
+            values[param['id']]=remembered['value'];inherited[param['id']]=remembered
+        if values:
+            latest_note=max((item for item in inherited.values() if item['value']=='×' and item.get('note')),
+                            key=lambda item:item.get('at',0),default={}).get('note','')
+            reviews[device['id']]={'values':values,'result':'异常' if '×' in values.values() else '',
+                                    'note':latest_note,'revision':0,'actor':'','inherited_states':inherited}
+    if reviews:active['reviews']=reviews
+
+
+def remember_manual_states(state, active, devices, before, reviews, submitted, actor):
+    saved=dict(state.get('manual_states',{}))
+    for device in devices:
+        update=submitted.get(device['id'])
+        if not isinstance(update,dict):continue
+        previous=before.get(device['id'],{}).get('values',{})
+        current=reviews.get(device['id'],{})
+        for param in parameters(device):
+            pid=param['id']
+            if pid not in update.get('values',{}):continue
+            value=current.get('values',{}).get(pid)
+            if value==previous.get(pid) and (value!='×' or current.get('note','')==before.get(device['id'],{}).get('note','')):continue
+            key=manual_state_key(device,param)
+            if not key:continue
+            if value in ('√','×','△'):
+                saved[key]={'value':value,'actor':actor,'at':int(time.time()*1000),'round_id':active['id'],
+                            'note':current.get('note','') if value=='×' else ''}
+            elif value=='':saved.pop(key,None)
+    state['manual_states']=saved
+
+
 def device_profession(device):
     return str(device.get('profession') or '').strip() or '未分类'
 
@@ -1304,6 +1378,7 @@ class DailyInspection:
                 if requested is not None:
                     state['active'].update(professions=[item for item in available if item in requested],
                                            profession_confirmations={})
+                inherit_manual_states(state,state['active'],scope)
             elif action == 'cancel':
                 raise RiskError('取消本轮功能已移除，请继续完成并归档当前巡检。', 409)
             else:
@@ -1430,6 +1505,7 @@ class DailyInspection:
                         if action == 'finish' and isinstance(chosen, list) and not all(item in confirmations for item in chosen):
                             raise RiskError('已确认的专业数据发生变化，请重新确认。', 409)
                         active.update(reviews=reviews, review_version=version)
+                        remember_manual_states(state,active,devices,before,reviews,data.get('reviews',{}),actor)
                         if action == 'confirm-profession':
                             confirmed_version = profession_version(active, scope, profession)
                             if confirmations.get(profession, {}).get('version') != confirmed_version:

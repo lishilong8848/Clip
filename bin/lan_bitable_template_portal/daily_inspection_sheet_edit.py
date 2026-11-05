@@ -119,7 +119,8 @@ def frozen_readings(book, scope):
             raise RiskError('历史巡检测点关联不唯一，请核对原附件。', 409)
         template, sheet = index[name]
         grouped.setdefault((name,address), []).append({'template':template,'sheet':sheet,'cell':address,
-            'value':json_cell_value(book[name][address].value),'device':identity,'kind':kind,'point_id':point or '',
+            'value':json_cell_value(book[name][address].value),'value_type':matched[0].get('value_type','数值'),'device':identity,'kind':kind,'point_id':point or '',
             'parameter':parameter,'location':location or '', 'form':form or '', 'read_only':matched[0]['read_only']})
     return [items[0] if len(items)==1 else {**items[0],'kind':'paired','members':items,
+        'value_type':'状态' if any(item.get('value_type')=='状态' for item in items) else '数值',
         'read_only':any(item['read_only'] for item in items)} for items in grouped.values()]

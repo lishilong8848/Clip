@@ -98,7 +98,7 @@ import {requestJson,downloadFile} from '../api/client';
 import {registerNavigationGuard} from '../navigation';
 import {inspectionCellText} from './inspectionCellFormat';
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
-type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string};
+type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_type?:string};
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;original_cells:Reading[];extra_cells?:Reading[]};
 type Page={key:string;baseKey:string;slot?:string;saved?:boolean;template:string;profession:string;name:string;rows:any[][];merges:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];sheet_groups?:Record<string,string>;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
@@ -182,15 +182,15 @@ const sheetReadings=computed(()=>{
 });
 const grid=computed(()=>{
  const p=currentPage.value;if(!p)return [];
- const values=new Map<string,{value:any;round:RoundMeta;readonly?:boolean;mapped:boolean;parameter?:string}>();const occupied=new Set<string>(),collisions=new Set<string>();
- for(const {reading:c,round:r} of sheetReadings.value.get(p.baseKey)||[])if(!isChiller.value||r.shift+r.round===chillerSlot.value){if(occupied.has(c.cell)){collisions.add(c.cell);continue;}occupied.add(c.cell);values.set(c.cell,{value:c.value,round:r,readonly:c.read_only,mapped:true,parameter:c.parameter});}
+ const values=new Map<string,{value:any;round:RoundMeta;readonly?:boolean;mapped:boolean;parameter?:string;value_type?:string}>();const occupied=new Set<string>(),collisions=new Set<string>();
+ for(const {reading:c,round:r} of sheetReadings.value.get(p.baseKey)||[])if(!isChiller.value||r.shift+r.round===chillerSlot.value){if(occupied.has(c.cell)){collisions.add(c.cell);continue;}occupied.add(c.cell);values.set(c.cell,{value:c.value,round:r,readonly:c.read_only,mapped:true,parameter:c.parameter,value_type:c.value_type});}
  for(const r of visibleRounds.value)for(const c of r.extra_cells||[])if(c.template===p.template&&c.sheet===p.name&&!occupied.has(c.cell))values.set(c.cell,{value:c.value,round:r,mapped:false});
  for(const job of jobs.value)for(const c of job.cells)if(c.template===p.template&&c.sheet===p.name&&(!isChiller.value||job.round.shift+job.round.round===chillerSlot.value))values.set(c.cell,{...values.get(c.cell),value:c.value,round:job.round,mapped:occupied.has(c.cell)});
  const fallback=visibleRounds.value.find(r=>r.round_id===currentActive.value?.id)||visibleRounds.value[visibleRounds.value.length-1];
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{const a=cell.address,raw=cell.raw,v=values.get(a),round=v?.round||fallback;
  const current=round?.round_id===currentActive.value?.id;const excluded=(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});const editable=!(current&&excluded)&&!!round && !collisions.has(a) && !v?.readonly && (current?!props.readOnly&&!currentActive.value?.pending:report.value?.can_edit_history&&round.status==='已归档');
  const value=collisions.has(a)?'位置冲突，请核对映射':(v?v.value:raw),style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
- return {...cell,value,diagonal:style?.diagonal,text:text(value),displayText:inspectionCellText(value,format),round,current:!!v&&current,historical:!!v&&!current,mapped:!!v?.mapped,stateCell:/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(v?.value)),editable:!!editable};}));
+ return {...cell,value,diagonal:style?.diagonal,text:text(value),displayText:inspectionCellText(value,format),round,current:!!v&&current,historical:!!v&&!current,mapped:!!v?.mapped,stateCell:v?.value_type==='状态'||/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(v?.value)),editable:!!editable};}));
 });
 type GridCell=(typeof grid.value)[number][number];
 let timer:number|undefined,controller:AbortController|undefined,disposed=false,storageKey='',storageUnverified=false;

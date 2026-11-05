@@ -150,7 +150,7 @@ def original_cells(sheets, templates, shift, round_number):
         if review.get('参数状态') == '配置停用':
             continue
         add_target(row.get('模板'), sheet, address,
-                   {'value': review.get('现场读数'), 'device': review.get('设备标识'),
+                   {'value': review.get('现场读数'), 'value_type':'状态' if '状态测点' in str(review.get('参数状态') or '') else '数值', 'device': review.get('设备标识'),
                     'point_id': row.get('测点ID'), 'parameter': row.get('测点名称'),
                     'kind': 'point', 'read_only': review.get('参数状态') == '配置停用'})
     locations = catalog_locations()
@@ -163,7 +163,7 @@ def original_cells(sheets, templates, shift, round_number):
         sheet = valid_sheets.get((mapping['template'], mapping['sheet'].strip()))
         address = mapping.get('cells', {}).get(shift + str(round_number))
         add_target(mapping['template'], sheet, address,
-                   {'value': review.get('现场读数'), 'device': review.get('设备标识'),
+                   {'value': review.get('现场读数'), 'value_type':'状态' if '状态测点' in str(review.get('参数状态') or '') else '数值', 'device': review.get('设备标识'),
                     'point_id': '', 'parameter': review.get('参数'), 'kind': 'section',
                     'location': review.get('位置'), 'form': review.get('来源'),
                     'read_only': review.get('参数状态') in ('配置停用', '无可填参数')})
@@ -186,6 +186,7 @@ def original_cells(sheets, templates, shift, round_number):
             # Keep both identities so one correction updates both stored values.
             same = same_reading(entries[0]['value'], entries[1]['value'])
             result.append({**entries[0], 'kind': 'paired', 'members': entries,
+                           'value_type':'状态' if any(e.get('value_type')=='状态' for e in entries) else '数值',
                            'value': entries[0]['value'] if same else None, 'conflict': not same,
                            'read_only': any(entry['read_only'] for entry in entries)})
     return result

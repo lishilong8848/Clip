@@ -114,4 +114,13 @@ try{
  assert.equal(await book.getByRole('textbox',{name:'编辑 B3'}).getAttribute('inputmode'),'decimal');await book.getByRole('button',{name:'下一格',exact:true}).click();await book.getByRole('textbox',{name:'编辑 C3'}).fill('33');await book.locator('.cell-editor-tools').getByRole('button',{name:'完成',exact:true}).click();await editorPage.waitForTimeout(1200);
  editFixture.delayD();await editorPage.reload();await editorPage.getByText('模板已就绪，正在读取本轮及历史数据…',{exact:true}).waitFor();assert.ok(await editorPage.locator('.book-scroll td').count()>0);assert.equal(await editorPage.getByRole('button',{name:'确认提交',exact:true}).count(),0);editFixture.releaseOld();await editorPage.getByText('228',{exact:true}).waitFor();console.log('cached template visible before live data: OK');
  assert.equal(editFixture.reports.D.rounds[1].original_cells[0].value,'228');assert.equal(editFixture.reports.D.rounds[1].original_cells[1].value,'33');assert.deepEqual(editFixture.errors,[]);console.log('mobile next-cell and done: OK');
+ for(const legacy of [false,true]){
+  const statePage=await browser.newPage({viewport:{width:402,height:874},isMobile:true,hasTouch:true});const stateFixture=await setup(statePage);
+  stateFixture.reports.D.rounds[1].original_cells.push({template:'D.xlsx',sheet:'配电间巡检表',cell:'D3',parameter:'自定义检查项目',value_type:'状态',value:''});
+  await statePage.goto(legacy?origin+'/daily-inspection?frontend=legacy':origin+'/assets/workspace-v2/index.html?__page=%2Fdaily-inspection&scope=D');
+  await statePage.locator('td[data-address="D3"]').click();const select=statePage.getByRole('combobox',{name:'编辑 D3',exact:true});await select.waitFor();await select.selectOption('√');
+  await statePage.waitForResponse(r=>r.url().includes('/api/daily-inspection/draft')&&r.status()===200);
+  assert.equal(stateFixture.reports.D.rounds[1].original_cells.find(c=>c.cell==='D3').value,'√');assert.deepEqual(stateFixture.errors,[]);
+  console.log((legacy?'legacy':'v2')+' empty custom state cell saves selection: OK');await statePage.close();
+ }
 }finally{await browser.close();await new Promise(r=>server.close(r));}
