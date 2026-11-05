@@ -21,6 +21,7 @@ for option in MODULE_OPTIONS:
 MODULE_IDS = frozenset(item["value"] for item in MODULE_OPTIONS)
 NOTICE_MODULES = frozenset({"maintenance", "change", "repair", "polling", "adjust", "power"})
 PREFIXES = (
+    ("/api/dingtalk-notices", "accounts"),
     ("/api/risk-inspections", "risk_inspection"), ("/risk-inspections", "risk_inspection"),
     ("/api/tool-self-check", "risk_inspection"),
     ("/api/work-handovers", "work_handover"), ("/work-handover", "work_handover"),

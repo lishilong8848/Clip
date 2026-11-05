@@ -187,6 +187,11 @@ class SettingsDialog(QDialog):
 
         form_layout.addWidget(self.app_secret_input)
 
+        ding_button=QPushButton("钉钉通告机器人设置（支持多个及备注）")
+        ding_button.setToolTip("在灯塔系统设置中配置，由管理员登录后管理；Qt与网页通告共用。")
+        ding_button.clicked.connect(self._open_dingtalk_settings)
+        form_layout.addWidget(ding_button)
+
 
 
         # 应用 Token
@@ -497,6 +502,17 @@ class SettingsDialog(QDialog):
 
 
         self.drag_position = None
+    def _open_dingtalk_settings(self):
+        from PyQt6.QtCore import QUrl
+        from PyQt6.QtGui import QDesktopServices
+        parent=self.parent()
+        builder=getattr(parent,'_build_lan_template_portal_url',None)
+        base=builder() if callable(builder) else f"http://127.0.0.1:{int(config.lan_template_portal_port or 18766)}"
+        url=QUrl(base)
+        url.setPath('/admin/settings')
+        url.setQuery('tab=dingtalk')
+        QDesktopServices.openUrl(url)
+
     def load_current_settings(self):
         """加载当前配置到输入框"""
         self.app_id_input.setText(config.app_id)

@@ -793,6 +793,9 @@ class LanPortalStateStore:
                                  "idempotency_key": f"notice_robot:{normalized_operation_id}"},
                         now=now,
                     )
+                if status=='completed' and result_payload.get('dingtalk_targets') and result_payload.get('robot_payload'):
+                    self._enqueue_outbox_event_locked(conn,channel='notice_dingtalk',
+                        payload={'operation_id':normalized_operation_id,'idempotency_key':'notice_dingtalk:'+normalized_operation_id},now=now)
                 conn.commit()
         return self._notice_remote_operation_payload(row) or {}
 
@@ -8479,6 +8482,21 @@ class LanPortalStateStore:
                                 "INSERT OR REPLACE INTO json_documents(namespace, key, payload_json, updated_at) VALUES (?, ?, ?, ?)",
                                 (namespace, key, self._json(dict(payload)), time.time()),
                             )
+
+    def put_documents_atomic(self, documents: dict[tuple[str, str], dict[str, Any]]) -> None:
+        """Persist related business state and its receipt in one transaction."""
+        if any(not self._text(ns) or not self._text(key) or not isinstance(value,dict)
+               for (ns,key),value in documents.items()):
+            raise ValueError('Document namespaces, keys and dictionary values are required')
+        with self._lock:
+            with closing(self._connect()) as conn:
+                self._ensure_schema_locked(conn)
+                with conn:
+                    for (namespace,key),document in documents.items():
+                        table=self._document_table_for_namespace(namespace)
+                        if table:self._put_table_document_locked(conn,table,key,dict(document))
+                        else:conn.execute('INSERT OR REPLACE INTO json_documents(namespace,key,payload_json,updated_at) VALUES (?,?,?,?)',
+                            (namespace,key,self._json(document),time.time()))
 
     def put_action_job_with_queue(self, job: dict[str, Any]) -> None:
         """Save the job and its matching queue state in the same transaction."""

@@ -858,6 +858,7 @@ def create_bitable_record_fields(
     fields: dict,
     *,
     client_token: str = "",
+    audit_action: str = "回退恢复",
 ):
     """
     Directly create a bitable record from already-captured target-table fields.
@@ -900,7 +901,7 @@ def create_bitable_record_fields(
 
     record_id = response.data.record.record_id
     log_info(f"飞书创建记录字段: 成功, record_id={record_id}")
-    _log_record_action("回退恢复", notice_type, record_id, fields, "")
+    _log_record_action(audit_action, notice_type, record_id, fields, "")
     return True, record_id
 
 

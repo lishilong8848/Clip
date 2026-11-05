@@ -3236,6 +3236,10 @@ class ScreenshotConfirmDialog(QDialog):
 
         inner_layout.addWidget(self.specialty_container)
 
+        self.dingtalk_button = QPushButton("钉钉推送：未选择机器人")
+        self.dingtalk_button.clicked.connect(self._choose_dingtalk_robots)
+        inner_layout.addWidget(self.dingtalk_button)
+
         inner_layout.addLayout(btn_layout)
 
         layout.addWidget(self.container)
@@ -3358,6 +3362,38 @@ class ScreenshotConfirmDialog(QDialog):
         self._patch_cache_fields({"level_locked": True})
 
 
+    def _choose_dingtalk_robots(self):
+        from PyQt6.QtWidgets import QScrollArea
+        from lan_bitable_template_portal.dingtalk_notices import DingTalkNotices
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+        try:
+            service = DingTalkNotices(LanPortalStateStore())
+            robots = service.public()['robots']
+        except Exception:
+            show_simple_message(self, '钉钉机器人配置暂时无法读取，请稍后重试。', self.theme)
+            return
+        dialog = QDialog(self); dialog.setWindowTitle('选择钉钉机器人（并行发送）')
+        dialog.resize(400, 380)
+        layout = QVBoxLayout(dialog); scroll = QScrollArea(); scroll.setWidgetResizable(True)
+        body = QWidget(); choices = QVBoxLayout(body); boxes = []
+        selected = set((self.data_dict or {}).get('dingtalk_robot_ids') or [])
+        for robot in robots:
+            if not robot['enabled']: continue
+            try:
+                service.snapshot(self.notice_type, {'buildings':list(self.selected_buildings or []), 'dingtalk_robot_ids':[robot['id']]})
+            except Exception: continue
+            check = QCheckBox(robot['name'] + (' · ' + robot['remark'] if robot['remark'] else ''))
+            check.setChecked(robot['id'] in selected); choices.addWidget(check); boxes.append((robot['id'],check))
+        if not boxes: choices.addWidget(QLabel('当前没有适用的已启用机器人。不选则不推送钉钉。'))
+        choices.addStretch(); scroll.setWidget(body); layout.addWidget(scroll)
+        buttons = QHBoxLayout(); cancel = QPushButton('取消'); save = QPushButton('确认选择')
+        cancel.clicked.connect(dialog.reject); save.clicked.connect(dialog.accept)
+        buttons.addWidget(cancel); buttons.addWidget(save); layout.addLayout(buttons)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.data_dict['dingtalk_robot_ids'] = [identity for identity,check in boxes if check.isChecked()]
+            self.dingtalk_button.setText(f"钉钉推送：已选 {len(self.data_dict['dingtalk_robot_ids'])} 个机器人")
+            self.state_changed.emit()
+
     def set_data(self, data_dict, action_type="upload", is_mandatory=False):
 
         self._session_generation += 1
@@ -3371,6 +3407,7 @@ class ScreenshotConfirmDialog(QDialog):
         # The dialog may prefill and normalize several selections.  Work on a
         # copy so opening the dialog and closing it with X is a neutral action.
         self.data_dict = copy.deepcopy(data_dict or {})
+        self.dingtalk_button.setText(f"钉钉推送：已选 {len(self.data_dict.get('dingtalk_robot_ids') or [])} 个机器人")
 
         self.action_type = action_type
 

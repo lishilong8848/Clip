@@ -14,7 +14,7 @@ HOP = {b'connection', b'keep-alive', b'proxy-authenticate', b'proxy-authorizatio
 DENIED = ('/api/qt/', '/api/backend/', '/api/assistant/feishu-event',
           '/api/notice-cards/', '/docs', '/redoc', '/openapi.json')
 API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records workbench '
-    'workbench-actions maintenance-actions maintenance-refresh change-refresh repair-refresh '
+    'workbench-actions workbench-events maintenance-actions maintenance-refresh change-refresh repair-refresh '
     'refresh source-refresh-status history-summary engineer signatures events repair-management '
     'capacity cabinet-power critical-guard drills daily-tasks daily-inspection learning plan-convergence '
     'link-directory pre-shift-checks pre-shift notice-panel notice-alert-tags notice-memory '

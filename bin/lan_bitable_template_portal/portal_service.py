@@ -42769,6 +42769,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         payload = request_payload if isinstance(request_payload, dict) else {}
         work_type = str(payload.get("work_type") or payload.get("lan_work_type") or "").strip()
         valid_types = {
+            WORK_TYPE_EVENT,
             WORK_TYPE_MAINTENANCE,
             WORK_TYPE_CHANGE,
             WORK_TYPE_REPAIR,
@@ -42974,6 +42975,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 cls._request_work_type_fallback(payload),
             )
         )
+        if expected_type == WORK_TYPE_EVENT:
+            return None
         title = re.sub(r"\s+", "", cls._manual_payload_title_text(payload))
         if not title:
             return None
@@ -43737,6 +43740,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "source_month",
             "_auth_open_id",
             "_auth_user_name",
+            "dingtalk_robot_ids",
         ):
             value = payload.get(key)
             if manual and not manual_source_binding and key == "source_record_id":
@@ -43818,6 +43822,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         if action not in {"start", "update", "end"}:
             raise PortalError("动作必须是 start/update/end。")
         request_work_type = str(request_payload.get("work_type") or "").strip()
+        if request_work_type == WORK_TYPE_EVENT and not request_payload.get('start_time'):
+            request_payload['start_time'] = request_payload.get('time_str') or request_payload.get('occurrence_date') or ''
         if (
             is_workbench_command
             and request_work_type == WORK_TYPE_REPAIR
@@ -44702,7 +44708,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         if work_type != str(request_payload.get("work_type") or "").strip():
             request_payload = {**request_payload, "work_type": work_type}
-        if work_type == WORK_TYPE_CHANGE:
+        if work_type == WORK_TYPE_EVENT:
+            from .event_notice_web import prepare_event
+            prepared = prepare_event(self,request_payload,job_id)
+        elif work_type == WORK_TYPE_CHANGE:
             prepared = self.prepare_change_action(request_payload, job_id=job_id)
         elif work_type == WORK_TYPE_REPAIR:
             prepared = self.prepare_repair_action(request_payload, job_id=job_id)
@@ -44729,6 +44738,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                     people=([] if self._truthy_flag(request_payload.get("polling_work_order_exempt")) else self._load_signature_people()),
                 )
             )
+        prepared['dingtalk_robot_ids'] = list(request_payload.get('dingtalk_robot_ids') or [])
+        from .dingtalk_notices import DingTalkNotices, DingTalkError
+        try:
+            DingTalkNotices(self._state_store).snapshot(prepared.get('notice_type',''),
+                {**prepared,'buildings':prepared.get('building_codes') or [prepared.get('building','')]})
+        except DingTalkError as exc:
+            raise PortalError(str(exc)) from None
         return self._synchronize_prepared_notice_text(prepared)
 
     @classmethod

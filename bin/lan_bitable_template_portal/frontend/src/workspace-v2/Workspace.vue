@@ -211,7 +211,7 @@ const passwordPage = computed(() => loggedIn.value && route.value.searchParams.g
 const permissionPage = computed(() => view.value === 'permission');
 const levelLabel = computed(() => ({ L0:'超级管理员',L1:'全楼管理员',L2:'工程师',L3:'楼栋主管',L4:'成员' }[String(user.value.level)] || '成员'));
 const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',engineer:'工程师',duty:'值班账号',operator:'值班员',shift_leader:'值班长' }[String(user.value.category)] || '工作空间'));
-const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
+const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'dingtalk',label:'钉钉推送'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
 const selectedMenu = computed(() => activeModule.value==='accounts'?'settings:'+(route.value.searchParams.get('tab')||'permissions'):NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
 const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(m=>

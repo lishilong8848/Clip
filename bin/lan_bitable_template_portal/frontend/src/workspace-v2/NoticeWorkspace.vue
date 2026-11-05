@@ -1,12 +1,13 @@
 <template>
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
-    <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ applied.month }}计划与当前进行中通告</p></div><div class="v2-notice-tools"><NButton class="v2-notice-history-action" data-v2-navigation secondary aria-label="查看历史通告" @click="historyOpen=true"><History :size="16" /><span>历史通告</span></NButton><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton class="v2-notice-more-action" data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" /><span>更多办理</span></NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton class="v2-notice-refresh-action" :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" /><span>刷新</span></NButton></NDropdown><NDropdown :options="newOptions" trigger="click" @select="newNotice"><NButton class="v2-notice-create-action" data-v2-navigation type="primary" aria-label="新建通告"><Plus :size="17" /><span>新建通告</span></NButton></NDropdown></div></header>
+    <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ kind==='event'?'进行中事件与历史事件':applied.month+'计划与当前进行中通告' }}</p></div><div v-if="kind!=='event'" class="v2-notice-tools"><NButton class="v2-notice-history-action" data-v2-navigation secondary aria-label="查看历史通告" @click="historyOpen=true"><History :size="16" /><span>历史通告</span></NButton><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton class="v2-notice-more-action" data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" /><span>更多办理</span></NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton class="v2-notice-refresh-action" :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" /><span>刷新</span></NButton></NDropdown><NDropdown :options="newOptions" trigger="click" @select="newNotice"><NButton class="v2-notice-create-action" data-v2-navigation type="primary" aria-label="新建通告"><Plus :size="17" /><span>新建通告</span></NButton></NDropdown></div></header>
     <div class="v2-notice-type-filters"><nav ref="typeNavigation" class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
-    <div v-if="!selectedScopes&&buildingOptions.length>1" class="v2-notice-global-scope"><WidgetScopePicker :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><small>适用于计划与进行中通告</small></div>
+    <div v-if="kind!=='event'&&!selectedScopes&&buildingOptions.length>1" class="v2-notice-global-scope"><WidgetScopePicker :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><small>适用于计划与进行中通告</small></div>
     <NAlert v-if="error" role="alert" type="error" :bordered="false" class="v2-notice-feedback">{{ error }}<NButton text @click="load(true)">重新读取</NButton></NAlert>
     <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" />正在同步源表，当前仍可查看已加载的通告。</NAlert>
-    <NTabs v-model:value="list" class="v2-notice-mobile-tabs" type="line" animated><NTab name="planned" role="tab" :aria-selected="list==='planned'">计划通告<span class="v2-notice-count">{{ total('planned') }}</span></NTab><NTab name="ongoing" role="tab" :aria-selected="list==='ongoing'">进行中<span class="v2-notice-count">{{ total('ongoing') }}</span></NTab></NTabs>
-    <PageCanvas page="notices" label="通告办理" :active="active" :blocks="lanes.map(lane=>({id:lane.id,title:lane.label,w:6,h:11,minW:4,minH:5}))">
+    <EventNoticeBoard v-if="kind==='event'" :scope="scope" :active="active" />
+    <NTabs v-if="kind!=='event'" v-model:value="list" class="v2-notice-mobile-tabs" type="line" animated><NTab name="planned" role="tab" :aria-selected="list==='planned'">计划通告<span class="v2-notice-count">{{ total('planned') }}</span></NTab><NTab name="ongoing" role="tab" :aria-selected="list==='ongoing'">进行中<span class="v2-notice-count">{{ total('ongoing') }}</span></NTab></NTabs>
+    <PageCanvas v-if="kind!=='event'" page="notices" label="通告办理" :active="active" :blocks="lanes.map(lane=>({id:lane.id,title:lane.label,w:6,h:11,minW:4,minH:5}))">
       <template v-for="lane in lanes" :key="lane.id" #[lane.id]>
       <section class="v2-notice-section" :class="{'is-mobile-hidden':list!==lane.id}" :data-list="lane.id" :aria-label="lane.label">
         <header><h2>{{ lane.label }}<span class="v2-notice-count">{{ total(lane.id) }}</span><NSpin v-if="loading" size="small" /></h2></header>
@@ -65,6 +66,7 @@
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
         </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
+          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :buildings="form.values.building_codes" :disabled="locked" />
           <section class="v2-notice-page-fields">
             <header><span>{{ cycleWarnings.length?'维保周期不一致，请修改标红内容后再发送':missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
 
@@ -126,6 +128,8 @@ import NoticeRelations from './NoticeRelations.vue';
 import NoticeChangeConfirmations from './NoticeChangeConfirmations.vue';
 import NoticeTaskRecords from './NoticeTaskRecords.vue';
 import NoticeHistory from '../components/NoticeHistory.vue';
+import EventNoticeBoard from '../components/EventNoticeBoard.vue';
+import NoticeDingTalkPicker from '../components/NoticeDingTalkPicker.vue';
 import {rememberNoticeTask} from './noticeTasks';
 import LighthouseNoticeSop from '../components/LighthouseNoticeSop.vue';
 import NoticeAlertTags from '../components/NoticeAlertTags.vue';
@@ -136,7 +140,7 @@ import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
 const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean}>();
 const dialog=useDialog(),message=useMessage();
 const params=computed(()=>new URL(props.url,location.origin).searchParams);
-const types=computed(()=>[{id:'all',label:'全部'},...modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))]);
+const types=computed(()=>[...((props.user.modules||[]).includes('event')?[{id:'event',label:'事件通告'}]:[]),{id:'all',label:'全部'},...modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))]);
 const kind=ref(params.value.get('work_type')||'all'),list=ref('planned'),month=ref(params.value.get('month')||Number(beijingDate().slice(5,7))+'月'),search=ref(params.value.get('search')||''),specialty=ref(params.value.get('specialty')||null);
 const typeNavigation=ref<HTMLElement|null>(null);
 function revealActiveType(){
@@ -164,7 +168,7 @@ const historyDialog=ref<InstanceType<typeof NoticeHistory>|null>(null);
 function openRecords(){recordsOpen.value=true;}
 let syncAbort:AbortController|undefined;
 function more(key:string){if(key==='paste')newNotice('paste');else if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(props.scope));}
-function newNotice(key:string){if(key==='paste'){pasteError.value='';pasteOpen.value=true;}else void openRecord(null,false,'start','',key);}
+function newNotice(key:string){if(key==='event'){setKind('event');return;}if(key==='paste'){pasteError.value='';pasteOpen.value=true;}else void openRecord(null,false,'start','',key);}
 async function refreshSource(key:string){if(key==='page'){void load(true);return;}if(syncing.value||!refreshOptions.value.some(t=>t.key===key))return;syncing.value=true;error.value='';syncAbort=new AbortController();try{await refreshRemoteSourceAndWait(key as 'maintenance'|'change'|'repair','/api/'+key+'-refresh?scope='+encodeURIComponent(props.scope),{scope:props.scope,signal:syncAbort.signal});await load(true);}catch(e){if(!syncAbort.signal.aborted)error.value=(e as Error).message;}finally{syncing.value=false;}}
 function pasteNoticeText(event:ClipboardEvent){
   const text=event.clipboardData?.getData('text/plain'),input=event.target;
@@ -175,7 +179,7 @@ function pasteNoticeText(event:ClipboardEvent){
   const cursor=Math.min(normalizePastedNotice(before+text).length,pasteText.value.length);
   void nextTick(()=>{if(document.activeElement===input)input.setSelectionRange(cursor,cursor);});
 }
-async function parsePasted(){if(parsing.value)return;pasteText.value=normalizePastedNotice(pasteText.value);if(!pasteText.value.trim())return;parsing.value=true;pasteError.value='';try{const body=new FormData();body.append('scope',props.scope);body.append('month',applied.value.month);body.append('work_type',kind.value==='all'?types.value[1]?.id||'maintenance':kind.value);body.append('paste_text',pasteText.value);const result=await requestJson('/workbench-lite/parse',{method:'POST',body});parseNoticeForm(result.fragments?.detail||'');pasteOpen.value=false;await openRecord(null,false,'',result.fragments.detail);}catch(e){pasteError.value=(e as Error).message;}finally{parsing.value=false;}}
+async function parsePasted(){if(parsing.value)return;pasteText.value=normalizePastedNotice(pasteText.value);if(!pasteText.value.trim())return;parsing.value=true;pasteError.value='';try{const body=new FormData();body.append('scope',props.scope);body.append('month',applied.value.month);body.append('work_type',kind.value==='all'?types.value.find(t=>NOTICE_IDS.includes(t.id))?.id||'maintenance':kind.value);body.append('paste_text',pasteText.value);const result=await requestJson('/workbench-lite/parse',{method:'POST',body});parseNoticeForm(result.fragments?.detail||'');pasteOpen.value=false;await openRecord(null,false,'',result.fragments.detail);}catch(e){pasteError.value=(e as Error).message;}finally{parsing.value=false;}}
 const pageNumber=(value:string|null)=>Math.max(1,Math.trunc(Number(value)||1));
 const pages=ref<Record<string,number>>({planned:pageNumber(params.value.get('records_page')||params.value.get('pending_page')),ongoing:pageNumber(params.value.get('ongoing_page'))}),data=ref<Dict>({}),loading=ref(false),error=ref('');
 const lanes=computed(()=>[{id:'planned',label:'计划通告',rows:(data.value.records||[]) as Dict[],total:Number(data.value.records_pagination?.total??data.value.records?.length??0)}, {id:'ongoing',label:'进行中',rows:(data.value.ongoing||[]) as Dict[],total:Number(data.value.ongoing_pagination?.total??data.value.ongoing?.length??0)}]);
@@ -238,6 +242,7 @@ const snapshot=()=>JSON.stringify({values:form.value?.values,sop:sop.value,photo
 const dirty=computed(()=>!!form.value&&(snapshot()!==saved.value||pendingPhotos.value>0));
 function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,specialty:applied.value.specialty||'',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20',...(selectedBuildings.value?{buildings:selectedBuildings.value.join(',')}:{})});}
 async function load(fresh=false){
+  if(kind.value==='event'){listAbort?.abort();loading.value=false;return;}
   if(!props.active||disposed||document.hidden)return;
   listAbort?.abort();const c=new AbortController();listAbort=c;loading.value=true;error.value='';
   try{

@@ -122,6 +122,8 @@ WORKBENCH_NOTICE_DRAFT_TTL_SECONDS = 30 * 24 * 60 * 60
 WORKBENCH_NOTICE_DRAFT_MAX_PER_USER = 100
 WORKBENCH_NOTICE_DRAFT_FIELDS = frozenset(
     {
+        "dingtalk_robot_ids_json",
+        "dingtalk_robot_ids",
         "notice_type",
         "title",
         "building",
@@ -500,7 +502,9 @@ class PortalRuntime:
         for name, value in dict(fields or {}).items():
             if name not in WORKBENCH_NOTICE_DRAFT_FIELDS:
                 continue
-            if name == "building_codes":
+            if name == 'dingtalk_robot_ids':
+                clean_fields[name] = list(dict.fromkeys(item for item in value if isinstance(item,str) and re.fullmatch(r'[a-f0-9]{32}',item)))[:20] if isinstance(value,list) else []
+            elif name == "building_codes":
                 raw_codes = value if isinstance(value, list) else str(value or "").split(",")
                 clean_fields[name] = list(
                     dict.fromkeys(
@@ -7923,6 +7927,7 @@ class PortalRuntime:
                 str(prepared.get("polling_reviewer_name") or "").strip() or None
             ),
             operation_id=str(prepared.get("operation_id") or prepared.get("job_id") or "").strip() or None,
+            dingtalk_robot_ids=list(prepared.get("dingtalk_robot_ids") or []),
         )
 
     @staticmethod
@@ -9037,6 +9042,10 @@ class PortalRuntime:
         payload.operation_id = operation_id
         payload._clipflow_defer_robot_message = True
         payload._clipflow_robot_background = True
+        if 'dingtalk_targets' not in (operation.get('result') or {}):
+            from .dingtalk_notices import DingTalkNotices
+            cls._mark_notice_remote_operation(operation_id,status=operation['status'],
+                result={'dingtalk_targets':DingTalkNotices(cls.state_store).snapshot(notice_type,asdict(payload))})
         if not (operation.get("result") or {}).get("robot_delivery_state"):
             cls._mark_notice_remote_operation(
                 operation_id, status=operation["status"],
@@ -9058,6 +9067,16 @@ class PortalRuntime:
 
     @classmethod
     def process_notice_robot_messages(cls) -> None:
+        try:
+            from .event_notice_delivery import dispatch as dispatch_event_messages
+            dispatch_event_messages(cls)
+        except Exception:
+            log_warning('网页事件投递任务暂未完成，原消息和资料保留。')
+        try:
+            from .dingtalk_notices import dispatch
+            dispatch(cls)
+        except Exception:
+            log_warning('钉钉通告队列暂未完成处理，原任务保留。')
         cls.dispatch_notice_personal_messages()
         # Completion queues these atomically; messaging never re-enters upload.
         for task in cls.state_store.lease_outbox_events("notice_robot", limit=3, lease_seconds=900):
@@ -11354,6 +11373,7 @@ class PortalRuntime:
                 ).strip()
             ),
             "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            **({'dingtalk_robot_ids':sorted(payload_value('dingtalk_robot_ids',default=[]) or [])} if payload_value('dingtalk_robot_ids',default=[]) else {}),
             "title": str(prepared.get("title") or "").strip(),
             "start_time": str(prepared.get("start_time") or "").strip(),
             "end_time": str(prepared.get("end_time") or "").strip(),
@@ -16891,6 +16911,8 @@ class PortalRuntime:
                     "record_id": resolved_remote_record_id,
                     "message": str(result_message or ""),
                     "action": str(prepared.get("action") or ""),
+                    "dingtalk_paired_target": str(prepared.get('paired_maintenance_target_record_id') or ''),
+                    "dingtalk_paired_start": str(prepared.get('paired_maintenance_actual_start_time') or prepared.get('response_time') or ''),
                 },
             )
             if (

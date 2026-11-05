@@ -5,7 +5,7 @@ export type NoticeField = { key:string; label:string; group:string; type:string;
 export type NoticeForm = { values:Dict; cycleRules?:MaintenanceCycleRule[]; contextVersion?:string; fields:NoticeField[]; actions:string[]; initialAction:string; detailMode:string; canDelete:boolean; photoRequired:boolean; photos:Dict[]; aliPhotos:Dict[]; sop:boolean; groupId:string; sopLinks:{label:string;url:string}[]; sourceOptions:{label:string;value:string}[]; repairRelation?:{eventId:string;eventTitle:string;projectId:string;projectTitle:string} };
 export const endProgress = '工作已完成，设备运行正常，请知晓！';
 export function normalizePastedNotice(value:string):string {return value.replace(/\r\n?/g,'\n').split('\n').filter(line=>line.trim()).join('\n');}
-const patchKeys = new Set(`manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_operator_record_ids polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
+const patchKeys = new Set(`dingtalk_robot_ids manual manual_id scope source_month action work_type notice_type operation_id manual_binding_choice manual_binding_required active_item_id source_record_id target_record_id record_id repair_management_record_id source_work_type converted_from_work_type converted_to_work_type sync_maintenance_target paired_maintenance_target_record_id paired_maintenance_original_title paired_maintenance_actual_start_time building buildings building_code building_codes title name specialty maintenance_cycle execution_party level start_time end_time actual_action_time response_time location content reason impact progress repair_device repair_fault fault_type repair_mode discovery symptom solution spare_parts fault_time expected_time cabinet quantity device status site_photo_count site_photos extra_images ali_confirmation_images polling_work_order_exempt polling_sop_id polling_sop_version polling_run_count polling_runs polling_operator_record_id polling_operator_record_ids polling_reviewer_record_id mop_status zhihang_record_id lan_zhihang_record_id zhihang_involved`.split(' '));
 
 // The existing read-only detail endpoint remains the source of field metadata.
 // Parse inertly: no returned HTML, styles or scripts are mounted into the new page.
@@ -23,7 +23,7 @@ export function parseNoticeForm(html:string):NoticeForm {
       continue;
     }
     values[key]=control.value;
-    if(control.type==='hidden'||seen.has(key)||['source_record_id','polling_work_order_exempt'].includes(key))continue;
+    if(control.type==='hidden'||key==='actual_action_time'||seen.has(key)||['source_record_id','polling_work_order_exempt'].includes(key))continue;
     seen.add(key);
     const label=control.closest('label');
     const caption=label?.querySelector('.field-label') || label?.querySelector('span');
@@ -63,6 +63,7 @@ export function restoreNoticeEdits(form:NoticeForm,cached:Dict,version:number):b
     if(field.readonly||!Object.prototype.hasOwnProperty.call(cached.snapshot.values,field.key))continue;
     if(JSON.stringify(cached.snapshot.values[field.key])!==JSON.stringify(cached.baseValues[field.key]))form.values[field.key]=cached.snapshot.values[field.key];
   }
+  if(Array.isArray(cached.snapshot.values.dingtalk_robot_ids))form.values.dingtalk_robot_ids=[...cached.snapshot.values.dingtalk_robot_ids];
   return true;
 }
 // Display-only formats mirror the existing web preview; submission remains noticeCommand.
@@ -98,7 +99,7 @@ export function noticeCommand(form:NoticeForm,action:string,operationId:string,d
   if(aliPhotos.length&&raw.work_type==='change')values.ali_confirmation_images=aliPhotos;
   return {command_format:'notice_command',action,scope:raw.scope,work_type:raw.work_type,notice_type:raw.notice_type,
     active_item_id:raw.active_item_id||'',source_record_id:raw.source_record_id||'',target_record_id:raw.target_record_id||'',repair_management_record_id:values.repair_management_record_id||'',
-    record_id:values.record_id,actual_action_time:values.actual_action_time,operation_id:operationId,draft_version:draftVersion,patch:values};
+    dingtalk_robot_ids:values.dingtalk_robot_ids||[],record_id:values.record_id,actual_action_time:values.actual_action_time,operation_id:operationId,draft_version:draftVersion,patch:values};
 }
 export function validateNotice(form:NoticeForm,action:string,sop:Dict,photos:Dict[]):string {
   if(!form.actions.includes(action))return '该通告当前不支持此操作，请刷新后核对。';

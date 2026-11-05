@@ -58,9 +58,10 @@ try {
     if (url.pathname === '/workbench-lite') { oldPages.push(req.url()); return route.fulfill({ contentType: 'text/html', body: data.html }); }
     if (!url.pathname.startsWith('/api/')) return route.continue();
     const ok = data => route.fulfill({ json: { ok: true, data } });
-    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_notice_fixture', name: '测试值班员', role: 'building', level: 'L4', category: 'operator', can_delete_business: false, modules: Object.keys(fixtures) }, scope_options: [{ value: 'A', label: 'A楼' }] });
+    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_notice_fixture', name: '测试值班员', role: 'building', level: 'L4', category: 'operator', can_delete_business: false, modules: [...Object.keys(fixtures),'event'] }, scope_options: [{ value: 'A', label: 'A楼' }] });
     if (url.pathname === '/api/auth/logout') return failLogout ? route.fulfill({ status: 503, json: { ok: false, error: '退出暂时失败，请重试' } }) : ok({});
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-notice-ui' } });
+    if (url.pathname === '/api/workbench-events'||url.pathname === '/api/workbench-events/options') return ok({user_id:'ou_notice_fixture',scopes:['A'],levels:['I3'],sources:['巡检发现'],specialties:['电气'],can_delete:false,defaults:{robot_ids:[],revision:0},robots:[],items:[]});
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
     if (url.pathname === '/api/workbench/lite-detail') {detailReads++;return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });}
@@ -110,8 +111,8 @@ try {
     await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=' + kind);
     await page.locator('.v2-notice-entry').first().waitFor();
     assert.equal(await page.locator('.v2-notice-command .v2-notice-filters').count(),0,'the primary command row is not crowded by filters');
-    assert.equal(await page.locator('.v2-notices>.v2-notice-filters').count(),1,'shared notice filters stay directly below the primary controls');
-    assert.equal(await page.locator('[data-list="planned"]>header .v2-notice-plan-search').count(),1,'name search stays beside the plan title');
+    assert.equal(await page.locator('.v2-notice-command .v2-notice-types').count(),1,'notice categories remain above the business lists');
+    assert.equal(await page.locator('[data-list="planned"] .v2-notice-plan-filters input[placeholder="搜索计划名称"]').count(),1,'plan-only search remains inside the planned list');
     assert.equal(await page.locator('[data-list="ongoing"] .v2-notice-filters').count(),0);
     assert.equal(await page.locator('iframe').count(), 0, 'new notice page must not embed legacy HTML');
     for (const width of index === 0 ? [1440,1920,360,390,430] : [1366]) {
@@ -268,6 +269,21 @@ try {
     await page.screenshot({ path: path.join(output, `source-status-unknown-${width}.png`), fullPage: true });
     if (width <= 760) await page.getByRole('tab', { name: /进行中/ }).click();
     assert(await page.locator('[data-list="ongoing"]').getByRole('button', { name: '更新', exact: true }).first().isEnabled(), 'source read failure does not disable existing notice operations');
+  }
+  for (const width of [402,440,1440]) {
+    await page.setViewportSize({width,height:900});
+    await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=event');
+    await page.locator('.raw-event-card').first().waitFor();
+    assert.equal(await page.locator('.v2-notice-command .v2-notice-types button').first().innerText(),'事件通告');
+    assert.equal(await page.locator('[data-list="planned"]').count(),0,'events have no planned list');
+    const card=page.locator('.raw-event-card').first();
+    await card.getByLabel('本次通告原文',{exact:true}).fill('【事件通告】状态：新增\n【标题】A楼I3隔离草稿');
+    await card.getByRole('button',{name:'发送新增',exact:true}).scrollIntoViewIfNeeded();
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+    await card.getByRole('button',{name:'发送新增',exact:true}).click({trial:true});
+    assert(await card.getByRole('button',{name:'发送新增',exact:true}).isVisible());
+    await page.screenshot({path:path.join(output,'event-viewport-'+width+'.png')});
+    await page.screenshot({path:path.join(output,'event-production-'+width+'.png'),fullPage:true});
   }
   if (!process.argv.includes('--baseline')) {
     await selectWorkspaceAccount(page,'个人信息');

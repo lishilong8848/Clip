@@ -114,6 +114,7 @@
       />
 
       <FeishuAssistantSettings v-else-if="tab === 'feishu'" />
+      <DingTalkNoticeSettings v-else-if="tab === 'dingtalk'" />
       <ReleaseJournalPage v-else-if="tab === 'development'" />
 
       <AdminPressurePane
@@ -153,6 +154,7 @@ import AdminStatusPane from "./AdminStatusPane.vue";
 import AdminWorkspaceChrome from "./AdminWorkspaceChrome.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
+const DingTalkNoticeSettings=defineAsyncComponent(()=>import('./DingTalkNoticeSettings.vue'));
 const ReleaseJournalPage = defineAsyncComponent(() => import('./ReleaseJournalPage.vue'));
 
 type Dict = Record<string, any>;
@@ -293,6 +295,7 @@ const adminTabs = computed(() => {
       badge: mopSettingsLoaded.value && !mopConfigured.value ? "待配置" : "",
     },
     { key: "feishu" as AdminTabKey, label: "飞书智能体", description: "", badge: "" },
+    { key: "dingtalk" as AdminTabKey, label: "钉钉推送", description: "", badge: "" },
     { key: "development" as AdminTabKey, label: "开发问题与更新记录", description: "", badge: "" },
   ];
   if (advancedDiagnosticsVisible.value) {

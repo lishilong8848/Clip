@@ -56,6 +56,7 @@ class NoticePayload:
     polling_operator_name: Optional[str] = None
     polling_reviewer_name: Optional[str] = None
     operation_id: Optional[str] = None
+    dingtalk_robot_ids: Optional[List[str]] = None
 
 
 class BaseNoticeHandler:

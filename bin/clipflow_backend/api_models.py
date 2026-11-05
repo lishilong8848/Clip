@@ -24,6 +24,7 @@ class APIModel(BaseModel):
 
 
 class WorkbenchActionRequest(APIModel):
+    dingtalk_robot_ids: list[str] = Field(default_factory=list, max_length=20)
     plan_convergence_confirmation: str = Field(default="", max_length=48)
     planned_notice_version: str = Field(default="", max_length=64)
     source_month: str = Field(default="", max_length=20)

@@ -379,8 +379,8 @@ const impersonationBlocked=computed(()=>impersonationExpired.value||impersonatio
 const loading = ref(false);
 const adminInitialTab = computed(() => {
   const value = routeParams.value.get('tab');
-  return ['status', 'permissions', 'handover', 'mop', 'feishu', 'pressure', 'development'].includes(value || '')
-    ? value as 'status' | 'permissions' | 'handover' | 'mop' | 'feishu' | 'pressure' | 'development' : 'permissions';
+  return ['status', 'permissions', 'handover', 'mop', 'feishu', 'dingtalk', 'pressure', 'development'].includes(value || '')
+    ? value as 'status' | 'permissions' | 'handover' | 'mop' | 'feishu' | 'dingtalk' | 'pressure' | 'development' : 'permissions';
 });
 const showPermissionRequestPanel = ref(false);
 const refreshMenuOpen = ref(false);

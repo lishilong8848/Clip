@@ -794,6 +794,10 @@ class FastAPIPortalController:
         install_notice_alert_tag_routes(app, self, PortalRuntime, recommend_notice_tags)
         from lan_bitable_template_portal.message_delivery_routes import install_message_delivery_routes
         install_message_delivery_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.dingtalk_notice_routes import install_dingtalk_notice_routes
+        install_dingtalk_notice_routes(app,self,PortalRuntime)
+        from lan_bitable_template_portal.event_notice_web import install_event_notice_web
+        install_event_notice_web(app,self,PortalRuntime)
         from lan_bitable_template_portal.notice_panel_routes import install_notice_panel_routes
         install_notice_panel_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.notice_history_routes import install_notice_history_routes

@@ -27,7 +27,7 @@ WORK_TYPE_LABELS: dict[str, str] = {
 }
 
 ALL_WORK_TYPE = "all"
-WORK_TYPE_FILTER_LABELS: dict[str, str] = {ALL_WORK_TYPE: "全部", **WORK_TYPE_LABELS}
+WORK_TYPE_FILTER_LABELS: dict[str, str] = {"event": "事件通告", ALL_WORK_TYPE: "全部", **WORK_TYPE_LABELS}
 
 NOTICE_TYPE_BY_WORK_TYPE: dict[str, str] = {
     "maintenance": "维保通告",
@@ -2603,6 +2603,7 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
+        <fieldset data-dingtalk-picker><legend>钉钉群推送（可多选，不选则不推送钉钉）</legend><input type="hidden" name="dingtalk_robot_ids_json" value="[]"><div data-dingtalk-options style="display:flex;flex-wrap:wrap;gap:8px 18px"></div></fieldset>
         {cycle_warning_html}
         {_polling_work_order_selector(work)}
         {_polling_work_order_status(source, work)}
@@ -2618,7 +2619,7 @@ def _detail_form(
         </section>
         <div class="form-actions notice-submit-bar">
           <div class="notice-submit-context">
-            <label class="actual-action-time"><span>实际发送时间</span><input type="datetime-local" name="actual_action_time" data-auto-actual-time="1"></label>
+            <input type="hidden" name="actual_action_time" data-auto-actual-time="1">
             <span id="lite-action-reason" class="action-reason" aria-live="polite">请先确认标题和进度。</span>
           </div>
           <div class="notice-submit-toolbar">
@@ -5079,6 +5080,7 @@ def render_workbench_lite(
       return compact;
     }}
     const commandPatchKeys = new Set([
+      'dingtalk_robot_ids',
       'manual', 'manual_id', 'scope', 'source_month', 'action', 'work_type', 'notice_type', 'operation_id',
       'manual_binding_choice', 'manual_binding_required',
       'active_item_id', 'source_record_id', 'target_record_id', 'record_id',
@@ -5101,6 +5103,7 @@ def render_workbench_lite(
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
+      'dingtalk_robot_ids_json',
       'notice_type', 'title', 'building', 'specialty', 'maintenance_cycle', 'execution_party', 'level',
       'start_time', 'end_time', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',
@@ -7621,8 +7624,38 @@ def render_workbench_lite(
       syncNoticeDrawerState();
       syncManualSourceBindingControls(form);
       resetLiteDraftTracking(form);
-      restoreLiteDraft(form).catch(() => null);
+      restoreLiteDraft(form).catch(() => null).finally(()=>hydrateDingTalkPicker(form));
       refreshNoticeTags();
+    }}
+    async function hydrateDingTalkPicker(form) {{
+      const panel=form?.querySelector('[data-dingtalk-options]');
+      if(!panel)return;
+      const work=form.elements.namedItem('work_type')?.value||'maintenance';
+      panel.textContent='正在读取机器人…';
+      try {{
+        const response=await fetch('/api/workbench/dingtalk-options?work_type='+encodeURIComponent(work),{{credentials:'same-origin'}});
+        const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'机器人读取失败');
+        if(!form.isConnected)return;
+        const render=()=>{{
+          if(!form.isConnected)return;
+          const field=form.elements.namedItem('dingtalk_robot_ids_json');
+          let selected=[];try{{selected=JSON.parse(field.value||'[]');}}catch{{}}
+          if(!Array.isArray(selected))selected=[];
+          const buildings=syncBuildingSelection(form),rawType=form.elements.namedItem('notice_type')?.value||'';
+          const type=['上电通告','下电通告'].includes(rawType)?'上下电通告':rawType;
+          const robots=(result.data?.robots||[]).filter(r=>(!r.types.length||r.types.includes(type))&&(!r.scopes.length||buildings.some(s=>r.scopes.includes(s))));
+          form.querySelector('[data-dingtalk-picker]').hidden=!robots.length&&!selected.length;
+          panel.replaceChildren();
+          for(const robot of robots){{
+            const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.checked=selected.includes(robot.id);input.style.width='18px';input.style.minHeight='18px';label.style.cssText='display:flex;align-items:center;gap:6px;min-height:36px';label.title=robot.remark||'';
+            input.addEventListener('change',()=>{{let ids=[];try{{ids=JSON.parse(field.value||'[]');}}catch{{}}field.value=JSON.stringify(input.checked?[...new Set([...ids,robot.id])]:ids.filter(id=>id!==robot.id));field.dispatchEvent(new Event('input',{{bubbles:true}}));}});
+            label.append(input,document.createTextNode(robot.name+(robot.remark?' · '+robot.remark:'')));panel.append(label);
+          }}
+          if(!robots.length)panel.textContent='当前没有适用的已启用机器人';
+          if(selected.some(id=>!robots.some(r=>r.id===id))){{const clear=document.createElement('button');clear.type='button';clear.textContent='移除已失效的机器人选择';clear.onclick=()=>{{field.value=JSON.stringify(selected.filter(id=>robots.some(r=>r.id===id)));field.dispatchEvent(new Event('input',{{bubbles:true}}));render();}};panel.append(clear);}}
+        }};
+        render();form.addEventListener('change',event=>{{if(['building_codes','notice_type'].includes(event.target.name))render();}});
+      }}catch(error){{if(form.isConnected){{panel.textContent='机器人读取失败，可重试；原通告内容保留。';const retry=document.createElement('button');retry.type='button';retry.textContent='重新读取';retry.onclick=()=>hydrateDingTalkPicker(form);panel.append(retry);}}}}
     }}
     let noticeTagsTimer = 0, noticeTagsRequest = null, noticeTagsSequence = 0;
     function stopNoticeTags() {{
@@ -8341,6 +8374,16 @@ def render_workbench_lite(
     document.addEventListener('click', async (event) => {{
       const target = event.target instanceof Element ? event.target : null;
       if (!target) return;
+      const eventLink=target.closest('a[href]');
+      if(eventLink){{
+        const url=new URL(eventLink.href,location.origin);
+        if(url.origin===location.origin&&url.pathname==='/workbench-lite'&&url.searchParams.get('work_type')==='event'){{
+          event.preventDefault();
+          if(window.parent!==window)window.parent.postMessage({{type:'clipflow:workbench-navigate',url:url.pathname+url.search}},location.origin);
+          else location.href=url.pathname+url.search;
+          return;
+        }}
+      }}
       const dialogDismiss = target.closest('[data-dialog-dismiss]');
       if (dialogDismiss) {{
         event.preventDefault();
@@ -8993,6 +9036,7 @@ def render_workbench_lite(
       const fd = new FormData(form);
       const action = actionOverride || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       const patch = Object.assign(Object.fromEntries(fd.entries()), formValues);
+      patch.dingtalk_robot_ids=JSON.parse(String(fd.get('dingtalk_robot_ids_json')||'[]'));
       patch.building_codes = buildingCodes;
       patch.building = buildingCodes.map(buildingLabelFromCode).join('、');
       const photos = sitePhotoPayload(form);
@@ -9064,6 +9108,7 @@ def render_workbench_lite(
       const draftContext = liteDraftContext(form);
       return {{
         command_format: 'notice_command',
+        dingtalk_robot_ids: patch.dingtalk_robot_ids,
         action,
         scope: patch.scope,
         work_type: patch.work_type,

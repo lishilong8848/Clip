@@ -30,7 +30,7 @@ const emit = defineEmits<{ 'select-tab': [tab: AdminTabKey]; 'toggle-advanced': 
 const otherOpen = ref(props.activeTab !== 'permissions');
 const accountBadge = computed(() => props.tabs.find(item => item.key === 'permissions')?.badge);
 const otherTabs = computed(() => props.tabs.filter(item => item.key !== 'permissions'));
-const icons = { status: Activity, permissions: UsersRound, handover: ClipboardList, mop: FileCog, feishu: MessageSquare, pressure: Wrench, development: NotebookPen };
+const icons = { status: Activity, permissions: UsersRound, handover: ClipboardList, mop: FileCog, feishu: MessageSquare, dingtalk: MessageSquare, pressure: Wrench, development: NotebookPen };
 watch(() => props.activeTab, tab => { if (tab !== 'permissions') otherOpen.value = true; });
 </script>
 

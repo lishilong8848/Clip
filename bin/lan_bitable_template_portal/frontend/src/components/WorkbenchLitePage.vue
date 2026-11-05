@@ -1,7 +1,8 @@
 <template>
-  <section class="workbench-frame-page" :aria-busy="loading">
-    <iframe ref="frame" :src="frameUrl" title="通告管理" @load="onLoaded" />
-    <div v-if="loading || error" class="frame-state" role="status">
+  <section class="workbench-frame-page" :class="{'event-mode':eventMode}" :aria-busy="!eventMode&&loading">
+    <template v-if="eventMode"><nav class="event-nav"><strong>事件通告</strong><button type="button" @click="navigate('/workbench-lite?scope='+encodeURIComponent(eventScope)+'&work_type=all')">其他通告</button></nav><EventNoticeBoard :scope="eventScope" :active="active" /></template>
+    <iframe v-else ref="frame" :src="frameUrl" title="通告管理" @load="onLoaded" />
+    <div v-if="!eventMode&&(loading || error)" class="frame-state" role="status">
       <AsyncPageState :error="error ? new Error(error) : undefined" :retry="reload" />
     </div>
     <p v-if="navigationError" class="navigation-error" role="alert">{{ navigationError }}</p>
@@ -13,9 +14,12 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AsyncPageState from './AsyncPageState.vue';
 import NoticeHistory from './NoticeHistory.vue';
+import EventNoticeBoard from './EventNoticeBoard.vue';
 import { navigate, registerNavigationGuard } from '../navigation';
 
 const props = withDefaults(defineProps<{ search: string; active?: boolean }>(), { active: true });
+const eventMode=computed(()=>new URLSearchParams(props.search).get('work_type')==='event');
+const eventScope=computed(()=>new URLSearchParams(props.search).get('scope')||'ALL');
 const frame = ref<HTMLIFrameElement | null>(null), loading = ref(true), error = ref('');
 const navigationError = ref('');
 const nativeSearch = ref(props.search), retry = ref(0);
@@ -39,6 +43,7 @@ function clean(url: string): URL {
   return result;
 }
 async function syncSearch(search: string): Promise<void> {
+  if(eventMode.value){loading.value=false;return;}
   if (!props.active) return;
   try {
     if (frame.value?.contentWindow && clean(frame.value.contentWindow.location.href).searchParams.toString() === clean('/workbench-lite?' + search).searchParams.toString()) return;
@@ -140,6 +145,7 @@ onBeforeUnmount(() => { window.clearTimeout(loadTimer); unregister?.(); window.r
 
 <style scoped>
 .workbench-frame-page { position: fixed; inset: 0; background: #eef3f8; }
+.workbench-frame-page.event-mode{overflow:auto;padding:16px;box-sizing:border-box;background:var(--cf-surface,#eef3f8);color:var(--cf-text,#173450)}.event-nav{display:flex;align-items:center;gap:16px;margin-bottom:16px}.event-nav button{min-height:40px;padding:6px 14px;border:1px solid var(--cf-border,#cbd5e1);border-radius:8px;background:var(--cf-surface,#fff);color:inherit;cursor:pointer}
 iframe { display: block; width: 100%; height: 100%; border: 0; }
 .frame-state { position: absolute; inset: 0; padding-top: 112px; background: #eef3f8; }
 .navigation-error { position: absolute; bottom: 16px; left: 20px; max-width: 460px; background: #fff4e8; border: 1px solid #ebc99c; color: #805218; padding: 10px 14px; font-size: 13px; pointer-events: none; }
