@@ -24,9 +24,9 @@
     <DailyInspectionHistory v-show="historyOpen" v-if="historyVisited && state?.history_scopes?.length"
       ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
     <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
-      :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
+      :template-version="state.template_version" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
       :read-only="readOnly || inputsLocked" :parent-busy="!!busy || autoSaving || hasDrafts"
-      @changed="load" @scope="switchView">
+      @changed="load" @scope="switchView" @exit="back">
       <template #start>
         <div v-if="duty && !readOnly && !active && state.completed_rounds<state.round_limit" class="inspection-actions">
           <label v-for="item in availableProfessions" :key="item.name"><input v-model="selectedProfessions" type="checkbox" :value="item.name"> {{ item.name }}</label>
@@ -275,7 +275,7 @@ type Reviews = Record<string,Review>;
 type DraftReview = Review & {base?:Review;pending?:Review;label?:string;parameterLabels?:Record<string,string>};
 type Recovery = {key:string;duty:Duty;round:number;drafts:Record<string,DraftReview>};
 type ProfessionConfirmation = {actor:string;confirmed:number;version:string};
-type State = {duty:Duty|null; completed_rounds:number; round_limit:number; history_scopes?:string[]; duty_warning?:string;
+type State = {template_version?:string;duty:Duty|null; completed_rounds:number; round_limit:number; history_scopes?:string[]; duty_warning?:string;
   view_scopes?:string[]; view_scope?:string; can_edit?:boolean;
   active:null|{id:string; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
     professions?:string[]|null;profession_confirmations?:Record<string,ProfessionConfirmation>;profession_versions?:Record<string,string>;
@@ -1131,7 +1131,7 @@ h1{font-size:20px}h2{font-size:16px}p,small{color:var(--inspection-muted);font-s
   .inspection-devices{grid-template-columns:minmax(0,1fr);gap:0}
   .inspection-page :is(input,select,textarea),.order-toolbar input{font-size:16px}
   .inspection-page :deep(.n-button),.inspection-order :deep(.n-button){min-height:42px}
-  .inspection-page.is-inspection-immersive{padding:0 10px max(12px,env(safe-area-inset-bottom));gap:8px;max-width:none}
+  .inspection-page.is-inspection-immersive{padding:0 10px max(12px,env(safe-area-inset-bottom));gap:8px;max-width:none;animation:none!important;transform:none!important}
   .is-inspection-immersive .inspection-heading{min-height:50px;padding:4px 0;border-bottom:1px solid var(--inspection-line)}
   .is-inspection-immersive .inspection-heading> :deep(.n-button:first-child){width:38px;min-width:38px;padding:0}
   .is-inspection-immersive .inspection-title h1{font-size:17px;line-height:1.25}

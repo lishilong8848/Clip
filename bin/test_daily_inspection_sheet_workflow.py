@@ -230,6 +230,22 @@ class SheetWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.svc.load('D')['history']),1)
         self.assertEqual(self.svc.load('D')['rollovers'],{})
 
+    def test_excluded_auxiliary_ranges_keep_history_but_reject_current_edits(self):
+        from lan_bitable_template_portal.daily_inspection_original import cell_excluded
+        t=next(t for t in original_templates() if t['scope']=='D' and t['profession']=='暖通')
+        aux=next(s for s in t['sheets'] if s['name']=='辅助区空调巡检表 (2)')
+        self.assertTrue(cell_excluded(aux,'I14'))
+        self.assertTrue(cell_excluded(aux,'L23'))
+        self.assertTrue(cell_excluded(aux,'A24'))
+        self.assertFalse(cell_excluded(aux,'H16'))
+        e=next(t for t in original_templates() if t['scope']=='E' and t['profession']=='暖通')
+        aux3=next(s for s in e['sheets'] if s['name']=='辅助区空调巡检表 (3)')
+        self.assertFalse(cell_excluded(aux3,'I16'))
+        self.assertTrue(cell_excluded(aux3,'A24'))
+        with self.assertRaises(RiskError):
+            self.svc.change('a','甲',DAY,'draft',{'id':self.active['id'],'review_version':0,'sheet_cells':[{'template':t['name'],'sheet':aux['name'],'cell':'I16','value':'20'}]})
+        self.assertEqual(self.svc.load('D')['active'].get('review_version',0),0)
+
     def test_three_personal_orders_are_account_isolated_and_conflict_checked(self):
         from lan_bitable_template_portal.workspace_layout_routes import validate_layout
         from lan_bitable_template_portal.portal_service import PortalConflictError

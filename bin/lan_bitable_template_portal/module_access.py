@@ -180,7 +180,7 @@ async def module_denial(request, controller, runtime):
     if ((request.method == 'GET' and path in {
             '/daily-inspection', '/api/daily-inspection', '/api/daily-inspection/status',
             '/api/daily-inspection/history', '/api/daily-inspection/history-record',
-            '/api/daily-inspection/source', '/api/daily-inspection/xlsx'})
+            '/api/daily-inspection/source', '/api/daily-inspection/xlsx', '/api/daily-inspection/templates'})
             or (request.method == 'POST' and path in {
                 '/api/daily-inspection/day-sheet', '/api/daily-inspection/day-export',
                 '/api/daily-inspection/start', '/api/daily-inspection/order', '/api/daily-inspection/draft',

@@ -12,10 +12,12 @@ def form_index(book):
     return {(row[1], row[2]): row[0] for row in book[ORIGINAL_INDEX_SHEET].iter_rows(min_row=2, values_only=True) if row[0]}
 
 
-def apply_cells(book, scope, edits, actor):
+def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False):
     if not isinstance(edits, list) or not edits or len(edits) > 2000:
         raise RiskError('请提交有效的单元格修改。', 400)
     index = form_index(book)
+    from .daily_inspection_original import original_templates,cell_excluded
+    layouts={(t['name'],s['name']):s for t in original_templates() if t['scope']==scope for s in t['sheets']} if enforce_exclusions else {}
     mappings = {}
     for row in book[ORIGINAL_MAPPING_SHEET].iter_rows(min_row=2, values_only=True):
         mappings.setdefault((row[0], row[1]), []).append(row)
@@ -40,6 +42,9 @@ def apply_cells(book, scope, edits, actor):
                 raise ValueError()
         except (ValueError, TypeError, KeyError):
             raise RiskError('单元格坐标无效或重复。', 400) from None
+        layout=layouts.get((edit.get('template'),edit.get('sheet')))
+        if layout and cell_excluded(layout,address):
+            raise RiskError('该区域已设为本次无需填写，原有历史记录保留。',409)
         seen.add((name, address))
         for _, _, identity, kind, point, parameter, location, form in mappings.get((name, address), []):
             device = rows.get(identity)

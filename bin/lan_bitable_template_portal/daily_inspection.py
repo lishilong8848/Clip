@@ -28,7 +28,7 @@ from upload_event_module.services.http_client import FeishuHTTPError
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
-                                        original_cells, original_templates, original_views, same_reading,
+                                        original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
                                         refresh_archived_original)
 from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views, frozen_readings
 from .eop_scenario_editor import plain
@@ -479,6 +479,8 @@ def deferred_catalog_section(device, section):
 
 
 def deferred_point(device, point):
+    if all_cells_excluded(point.get('template'),point.get('sheet'),point.get('round_cells')):
+        return True
     # User-created non-baseline points are explicitly configured and may be
     # used even where the template's original placeholder is deferred.
     if point.get('enabled') is True and (point.get('baseline') is False or point.get('user_enabled') is True):
@@ -548,7 +550,7 @@ def supplemental_form_devices(scope):
                     outside = outside or row > len(layout['rows']) or col > len(layout['rows'][row-1])
                 except (ValueError,TypeError,IndexError):
                     raise ValueError('原表补填坐标无效') from None
-            if outside:
+            if outside or all(cell_excluded(layout,address) for address in cells.values()):
                 continue
             for slot,address in cells.items():
                 match = re.fullmatch(r'([A-Z]{1,3})([1-9]\d{0,5})', address or '')
@@ -846,6 +848,9 @@ def parameters(device):
             if name and name not in DEVICE_METADATA:
                 values.setdefault(name, '')
         for name, value in values.items():
+            mapping=catalog_locations().get((device.get('scope','')+'楼',device['name'],device['profession'],section['location'],section['form'].strip(),name))
+            if mapping and all_cells_excluded(mapping['template'],mapping['sheet'],mapping['cells']):
+                continue
             is_state = state_parameter(name)
             reference = state_reference(value) if is_state else value
             if is_state and not reference:
@@ -1184,7 +1189,7 @@ class DailyInspection:
         active = state.get('active')
         scope = duty['scope']
         history = self.history_with_keys(state['history'], owner)
-        result = {'duty': duty, 'history': history, 'completed_rounds': self.completed_rounds(state, duty),
+        result = {'template_version':template_version(), 'duty': duty, 'history': history, 'completed_rounds': self.completed_rounds(state, duty),
                   'round_limit': ROUNDS_PER_SHIFT, 'active': None}
         if active:
             batch = active['batches'][scope]
@@ -1352,7 +1357,7 @@ class DailyInspection:
                             if data.get('review_version') != active.get('review_version', 0):
                                 raise RiskError('巡检表已有其他修改，请刷新核对后重试，您的填写仍保留。', 409)
                             with archived_workbook(workbook(active, {scope: []}, strict_original=False), active['id'], scope) as book:
-                                edits = apply_cells(book, scope, data['sheet_cells'], actor)
+                                edits = apply_cells(book, scope, data['sheet_cells'], actor, enforce_exclusions=True)
                                 submitted = {}
                                 for device in devices:
                                     change = edits.get(device['id'])
@@ -2070,6 +2075,29 @@ def install_daily_inspection(app, controller, runtime):
                 raise RiskError('没有该楼栋的当前巡检查看权限。', 403)
             svc = await asyncio.to_thread(manager)
             action = request.path_params.get('action', '')
+            if request.method == 'GET' and action == 'templates':
+                template_scope = request.query_params.get('scope')
+                if template_scope not in history_scopes:
+                    raise RiskError('没有该楼栋的巡检权限。',403)
+                data = {'version':template_version(),'scope':template_scope,
+                        'templates':[item for item in original_templates() if item['scope']==template_scope]}
+                return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, max-age=3600'})
+            if request.method == 'GET' and action in ('','status') and (viewer or home_scopes and (not selected_scope or selected_scope in home_scopes)):
+                scope = selected_scope or (scopes[0] if viewer else home_scopes[0])
+                if not viewer and scope not in home_scopes:
+                    raise RiskError('没有该楼栋的巡检权限。',403)
+                await asyncio.to_thread(svc.rollover_due,scope)
+                state = await asyncio.to_thread(svc.load,scope)
+                date,shift = duty_period(dt.datetime.now(CN))
+                duty = {'scope':scope,'date':date,'shift':shift}
+                if state.get('active') and duty_key(state['active']['duty'])==duty_key(duty):
+                    duty=state['active']['duty']
+                if action=='status' and state.get('active') and request.query_params.get('id')==state['active']['id'] and request.query_params.get('version')==str(state['active'].get('review_version',0)) and request.query_params.get('pending')==str(int('completed' in state['active'])) and request.query_params.get('date')==date and request.query_params.get('shift')==shift:
+                    data={'unchanged':True,'history_scopes':history_scopes}
+                else:
+                    data=await asyncio.to_thread(svc.view,state,owner,duty)
+                    data.update(history_scopes=history_scopes,view_scope=scope,view_scopes=scopes if viewer else home_scopes,can_edit=not session.get('impersonation') and session.get('source')!='admin_impersonation')
+                return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, no-store'})
             report_action = action in {'day-sheet', 'day-export'}
             if request.method == 'POST':
                 local_actions = {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession', 'history-edit', 'sheet-group'}
@@ -2094,7 +2122,7 @@ def install_daily_inspection(app, controller, runtime):
                     raise RiskError('没有该楼栋的巡检权限。', 403)
                 submitted = payload.get('drafts', {})
                 duty = None
-                if can_manage:
+                if can_manage and not (viewer or local_write and scope in home_scopes):
                     from .personnel_source import daily_roster
                     try:
                         duty = await asyncio.to_thread(resolve_duty, lambda date: daily_roster(runtime.service, date), user, scopes)
@@ -2110,6 +2138,9 @@ def install_daily_inspection(app, controller, runtime):
                 if action == 'day-sheet' and payload.get('form_only') is True:
                     for item in report['rounds']:
                         item.pop('sheets', None)
+                if action=='day-sheet' and payload.get('template_version')==template_version():
+                    report.pop('original_templates',None)
+                report['template_version']=template_version()
                 report['can_edit_history'] = bool((viewer or can_manage or (local_write and scope in home_scopes)) and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
                 report['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{report["date"]}'.encode()).hexdigest()
                 if action == 'day-export':

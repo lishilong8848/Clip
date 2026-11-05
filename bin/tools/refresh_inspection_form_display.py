@@ -70,7 +70,7 @@ def main():
                     ids.append(seen[key])
                 rows.append(row);style_ids.append(ids)
             name=next((name for name in old if name.strip()==ws.title.strip()),ws.title)
-            sheets.append({'name':name,'rows':rows,'merges':merges,'column_widths':widths,'row_heights':heights,'styles':styles,'style_ids':style_ids,'source_range':f'A1:{ws.cell(maxrow,maxcol).coordinate}'})
+            sheets.append({'excluded_ranges':old.get(name,{}).get('excluded_ranges',[]),'name':name,'rows':rows,'merges':merges,'column_widths':widths,'row_heights':heights,'styles':styles,'style_ids':style_ids,'source_range':f'A1:{ws.cell(maxrow,maxcol).coordinate}'})
             print(template['scope'],name,maxcol,maxrow,flush=True)
         template.update(sheets=sheets,source_name=source.name,source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         book.close()

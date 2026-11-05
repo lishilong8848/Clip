@@ -539,6 +539,22 @@ class InspectionAccessTests(unittest.TestCase):
         self.assertNotIn('sheets',data['rounds'][0])
         self.assertEqual(self.post('day-sheet',{**body,'scope':'E'}).status_code,403)
 
+    def test_template_and_status_reads_do_not_wait_for_live_roster(self):
+        with patch('lan_bitable_template_portal.personnel_source.daily_roster',side_effect=AssertionError('no roster network on read')) as roster:
+            status=self.client.get('/api/daily-inspection?view_scope=D')
+            self.assertEqual(status.status_code,200)
+            layout=self.client.get('/api/daily-inspection/templates?scope=D')
+            self.assertEqual(layout.status_code,200)
+            data=layout.json()['data']
+            self.assertEqual(data['scope'],'D')
+            self.assertTrue(data['templates'])
+            self.assertEqual(data['version'],status.json()['data']['template_version'])
+            self.assertEqual(self.client.get('/api/daily-inspection/templates?scope=E').status_code,403)
+            report=self.post('day-sheet',{'scope':'D','date':DAY['date'],'drafts':{},'form_only':True,'template_version':data['version']})
+            self.assertEqual(report.status_code,200)
+            self.assertNotIn('original_templates',report.json()['data'])
+            roster.assert_not_called()
+
     def test_home_building_can_inspect_without_daily_module_or_roster(self):
         page = self.client.get('/api/daily-inspection').json()['data']
         self.assertEqual(page['history_scopes'], ['D'])
@@ -621,8 +637,12 @@ class InspectionAccessTests(unittest.TestCase):
     def test_non_roster_building_member_can_start_and_confirm_a_profession(self):
         current = self.client.get('/api/daily-inspection').json()['data']
         cancel = self.post('cancel', {'id': current['active']['id'], 'review_version': current['active']['review_version']})
-        self.assertEqual(cancel.status_code, 200)
-        duty = cancel.json()['data']['duty']
+        self.assertEqual(cancel.status_code, 409)
+        self.assertEqual(self.service.load('D')['active']['id'], current['active']['id'])
+        # Start-path fixture: a fresh building, without using the removed cancel operation.
+        from lan_bitable_template_portal.daily_inspection import NS
+        self.store.put_document(NS, 'building:D', {'active': None, 'history': []})
+        duty = current['duty']
         started = self.post('start', {'duty': duty, 'professions': ['电气']})
         self.assertEqual(started.status_code, 200)
         active = started.json()['data']['active']

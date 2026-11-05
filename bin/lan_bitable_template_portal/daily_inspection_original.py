@@ -1,5 +1,6 @@
 """Read-only original form layout and strictly identified per-round readings."""
 
+import hashlib
 import json
 import copy
 import re
@@ -8,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, range_boundaries
 from openpyxl.cell.cell import MergedCell
 
 ORIGINAL_MAPPING_SHEET = '原表映射'
@@ -29,6 +30,12 @@ def same_reading(left, right):
         return a.is_finite() and b.is_finite() and a == b
     except InvalidOperation:
         return False
+
+
+@lru_cache(maxsize=1)
+def template_version():
+    path = Path(__file__).resolve().parents[1] / 'resources' / 'daily_inspection_templates.json'
+    return hashlib.sha256(path.read_bytes()).hexdigest()[:20]
 
 
 @lru_cache(maxsize=1)
@@ -53,6 +60,28 @@ def catalog_locations():
         # Ambiguous directory entries must never be resolved by order.
         result[key] = item if key not in result else None
     return result
+
+
+def cell_excluded(sheet, address):
+    col, row = coordinate_from_string(address)
+    col = column_index_from_string(col)
+    return any(a<=col<=c and b<=row<=d for a,b,c,d in
+               (range_boundaries(value) for value in sheet.get('excluded_ranges', [])))
+
+
+@lru_cache(maxsize=1)
+def excluded_layouts():
+    return {(t['name'],s['name'].strip()):s for t in original_templates() for s in t['sheets'] if s.get('excluded_ranges')}
+
+
+def all_cells_excluded(template, sheet, cells):
+    layout=excluded_layouts().get((template,str(sheet or '').strip()))
+    if not layout or not isinstance(cells,dict) or not cells:
+        return False
+    try:
+        return all(cell_excluded(layout,address) for address in cells.values())
+    except (ValueError,TypeError):
+        return False
 
 
 def original_cells(sheets, templates, shift, round_number):
@@ -88,6 +117,8 @@ def original_cells(sheets, templates, shift, round_number):
         if not sheet or not isinstance(address, str) or not re.fullmatch(r'[A-Z]{1,3}[1-9]\d{0,5}', address):
             return
         try:
+            if cell_excluded(sheet,address):
+                return
             column, index = coordinate_from_string(address)
             column = column_index_from_string(column)
             if index > len(sheet['rows']) or column > len(sheet['rows'][index - 1]):
