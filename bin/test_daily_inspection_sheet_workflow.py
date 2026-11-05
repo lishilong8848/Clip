@@ -36,6 +36,10 @@ class SheetWorkflowTests(unittest.TestCase):
         self.assertEqual(next(x['value'] for x in archived['original_cells'] if all(x[k]==edit[k] for k in ('template','sheet','cell'))),'123')
     def test_history_cells_retry_loss_and_free_cell_preserved(self):
         c=self.target();self.finish(0);r=self.report()['rounds'][0]
+        import io
+        from lan_bitable_template_portal.daily_inspection_template_art import read_artwork
+        before_attachment=self.svc.archive_record('D',r['id'])[2]
+        before_art=read_artwork(io.BytesIO(self.svc.download_archive(before_attachment)))
         edits=[{k:c[k] for k in ('template','sheet','cell')},{'template':c['template'],'sheet':c['sheet'],'cell':'A1','value':'现场更正'}]
         edits[0]['value']='234'
         body={'version':r['version'],'cells':edits}
@@ -48,6 +52,10 @@ class SheetWorkflowTests(unittest.TestCase):
         revised=self.report()['rounds'][0]
         self.assertEqual(next(x['value'] for x in revised['original_cells'] if all(x[k]==c[k] for k in ('template','sheet','cell'))),'234')
         self.assertTrue(any(x['cell']=='A1' and x['value']=='现场更正' for x in revised['extra_cells']))
+        after_attachment=self.svc.archive_record('D',r['id'])[2]
+        after_art=read_artwork(io.BytesIO(self.svc.download_archive(after_attachment)))
+        self.assertEqual({k:(v['xml'],v['assets']) for k,v in after_art.items()},
+                         {k:(v['xml'],v['assets']) for k,v in before_art.items()})
         with self.assertRaisesRegex(RiskError,'已被修改'):
             self.svc.edit_archive('D',r['id'],{**body,'cells':[{**edits[0],'value':'999'}]},'丙')
     def test_foreign_building_and_stale_version_rejected(self):

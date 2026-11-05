@@ -36,6 +36,7 @@ export function navigationModules(permitted: string[], toolManagement = false, i
   const notices=NOTICE_IDS.filter(id=>permitted.includes(id));
   return modules.flatMap(item=>{
     if(item.id==='tool_management'&&!toolManagement)return [];
+    if(item.id==='tool_management'&&toolManagement)return [item];
     if(item.id!=='signatures'&&!permitted.includes(item.permission||item.id)
         && !(item.id==='daily_inspection' && inspectionHistory) || item.id==='assistant')return [];
     if(!NOTICE_IDS.includes(item.id))return [item];

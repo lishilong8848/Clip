@@ -443,7 +443,7 @@ const filteredModuleCards = computed(() =>
           tags: [checkError.value || (checkSummary.value ? checkSummary.value.pending ? '本班待检查' : checkSummary.value.completed ? '本班已完成' : '暂无待检查清单' : '正在读取检查状态')] };
       }
       const allowedModules = cardModules[card.key] || [];
-      if (!allowedModules.some(hasModule)) return null;
+      if (!allowedModules.some(hasModule) && !(card.key==='special' && props.currentUser?.tool_management_enabled===true)) return null;
       const secondary = (card.secondaryActions || []).filter((action) => hasModule(entryModule(action.key)));
       const primaryAction = hasModule(entryModule(card.primaryAction.key)) ? card.primaryAction : secondary.shift();
       if (!primaryAction) return null;
@@ -759,7 +759,7 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 }
 
 function selectEntry(key: EntryKey): void {
-  if (key === 'risk' || key === 'special' ? !cardModules[key].some(hasModule) : !isEntryAllowed(key)) return;
+  if (!(key==='special' && props.currentUser?.tool_management_enabled===true) && (key === 'risk' || key === 'special' ? !cardModules[key].some(hasModule) : !isEntryAllowed(key))) return;
   if (key === 'work_handover') { emit('work-handover'); return; }
   if (key === 'pre_shift') { emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }

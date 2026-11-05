@@ -4,6 +4,11 @@ import {createServer} from 'node:http';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {chromium} from 'playwright';
+import {inspectionCellText} from '../src/components/inspectionCellFormat.ts';
+assert.equal(inspectionCellText('09:30:00','h:mm'),'9:30');
+assert.equal(inspectionCellText(0.5,'h:mm'),'12:00');
+assert.equal(inspectionCellText(0.1234,'0.0%'),'12.3%');
+assert.equal(inspectionCellText('0012','@'),'0012');
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../build_output/inspection-mobile-review');await mkdir(output,{recursive:true});
 const server=createServer(async(req,res)=>{try{let name=new URL(req.url,'http://localhost').pathname;name=name.startsWith('/assets/')?name.slice(1):'index.html';const file=path.resolve(root,'dist',name);if(!file.startsWith(path.join(root,'dist')+path.sep))throw Error();res.setHeader('content-type',({'.html':'text/html','.js':'text/javascript','.css':'text/css','.svg':'image/svg+xml'})[path.extname(file)]||'application/octet-stream');res.end(await readFile(file));}catch{res.writeHead(404);res.end();}});
@@ -20,6 +25,7 @@ async function setup(page,{slow=false,lose=false,actual=false}={}){
   states[s]={template_version:'fixture-layout-v1',duty,view_scope:s,view_scopes:['D','E'],can_edit:true,history_scopes:['D','E'],history:[],completed_rounds:0,round_limit:2,active:{id:s+'round',duty,round:2,pending:false,draft_key:s+'draft',reviews:{},review_version:1,batch:{batch:1,count:1,devices:[device]},professions:['电气']}};
   const name=s+'.xlsx';
   reports[s]={template_version:'fixture-layout-v1',scope:s,date:duty.date,draft_key:s+'-owner-date',sheet_groups:{},can_edit_history:true,original_templates:templates?templates.filter(t=>t.scope===s):[{scope:s,name,profession:'电气',sheets:[{name:'配电间巡检表',rows:[['时间','电压','电流','状态','备用1','备用2'],['9:30',null,null,null,null,null],['16:00',null,null,null,null,null],...Array.from({length:25},()=>[null,null,null,null,null,null])],merges:[]},{name:'机房巡检表',rows:[['设备','读数'],['配电柜',null]],merges:[]}]}],rounds:[{id:'rec'+s,round_id:s+'old',shift:'白',round:1,version:'old1',status:'已归档',original_cells:[{template:name,sheet:'配电间巡检表',cell:'B2',value:'210'}]},{round_id:s+'round',shift:'白',round:2,version:1,status:'进行中',original_cells:[{template:name,sheet:'配电间巡检表',cell:'B3',parameter:'电压',value:s==='D'?'220':'380'},{template:name,sheet:'配电间巡检表',cell:'C3',parameter:'电流',value:'30'}]}]};
+  if(actual)for(const t of reports[s].original_templates)for(const sheet of t.sheets){const merged=new Set();for(const range of sheet.merges){const [a,b=a]=range.split(':');const xy=x=>{const m=/^([A-Z]+)(\d+)$/.exec(x);let c=0;for(const letter of m[1])c=c*26+letter.charCodeAt(0)-64;return [+m[2]-1,c-1];};const [r,c]=xy(a),[rr,cc]=xy(b);for(let y=r;y<=rr;y++)for(let x=c;x<=cc;x++)merged.add(y+':'+x);}let index=0;for(let r=5;r<sheet.rows.length&&index<2;r++)for(let c=1;c<sheet.rows[r].length&&index<2;c++){if(sheet.rows[r][c]!=null||merged.has(r+':'+c))continue;let letters='',col=c+1;for(;col;col=Math.floor((col-1)/26))letters=String.fromCharCode(65+(col-1)%26)+letters;reports[s].rounds[index].original_cells.push({template:t.name,sheet:sheet.name,cell:letters+(r+1),value:index?'123.456789':'√'});index++;}}
  }
  const seen=new Map();page.on('pageerror',e=>errors.push(e.message));
  await page.route('**/api/**',async route=>{
@@ -57,16 +63,21 @@ async function openMenu(page,expanded=true){const button=page.getByRole('button'
 async function chooseSheet(page,pattern){const picker=page.getByLabel('切换巡检工作表',{exact:true});if(await picker.isVisible()){const options=await picker.locator('option').evaluateAll(items=>items.map(o=>({value:o.value,text:o.textContent})));const option=options.find(o=>pattern.test(o.text));assert.ok(option);await picker.selectOption(option.value);}else await page.getByRole('button',{name:pattern}).click();}
 async function chooseSheetIndex(page,index){const picker=page.getByLabel('切换巡检工作表',{exact:true});if(await picker.isVisible())await picker.selectOption({index});else await page.locator('.sheet-tabs button').nth(index).click();}
 async function pinchSheet(page,start,end){const cdp=await page.context().newCDPSession(page);try{await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:180-start/2,y:180,id:1},{x:180+start/2,y:180,id:2}]});for(let i=1;i<=5;i++){const width=start+(end-start)*i/5;await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:180-width/2,y:180,id:1},{x:180+width/2,y:180,id:2}]});await delay(30);}await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await delay(80);}finally{await cdp.detach();}}
-function validateGrid(page,templates){return (async()=>{
+function validateGrid(page,templates,rounds){return (async()=>{
  const text=await page.locator('.sheet-tabs button[aria-pressed=true]').innerText();
- const candidates=templates.flatMap(t=>t.sheets).filter(s=>text.includes(s.name.trim())).sort((a,b)=>b.name.trim().length-a.name.trim().length);
+ const candidates=templates.flatMap(t=>t.sheets.map(s=>({...s,template:t.name}))).filter(s=>text.includes(s.name.trim())).sort((a,b)=>b.name.trim().length-a.name.trim().length);
  const sheet=candidates[0];assert.ok(sheet,text);
  const coord=a=>{const m=/^([A-Z]+)(\d+)$/.exec(a);let col=0;for(const c of m[1])col=col*26+c.charCodeAt(0)-64;return [Number(m[2])-1,col-1];};
  const address=(r,c)=>{let s='';for(c++;c;c=Math.floor((c-1)/26))s=String.fromCharCode(65+(c-1)%26)+s;return s+(r+1);};
  const hidden=new Set(),spans=new Map();for(const range of sheet.merges){const [a,b=a]=range.split(':');const [r,c]=coord(a),[rr,cc]=coord(b);spans.set(a,[rr-r+1,cc-c+1]);for(let y=r;y<=rr;y++)for(let x=c;x<=cc;x++)if(y!==r||x!==c)hidden.add(address(y,x));}
- const expected=[];sheet.rows.forEach((row,r)=>row.forEach((v,c)=>{const a=address(r,c);if(!hidden.has(a))expected.push({address:a,rowspan:spans.get(a)?.[0]||1,colspan:spans.get(a)?.[1]||1,text:String(v??'').trim()});}));
+ const selected=await page.getByLabel('切换巡检工作表',{exact:true}).inputValue();const slot=selected.match(/:(白[12]|夜[12])$/)?.[1];const filled=new Map();for(const round of rounds||[])if(!slot||round.shift+round.round===slot)for(const c of round.original_cells)if(c.template===sheet.template&&c.sheet===sheet.name)filled.set(c.cell,c.value);
+ const expected=[];sheet.rows.forEach((row,r)=>row.forEach((v,c)=>{const a=address(r,c);if(!hidden.has(a))expected.push({address:a,rowspan:spans.get(a)?.[0]||1,colspan:spans.get(a)?.[1]||1,text:inspectionCellText(filled.has(a)?filled.get(a):v,sheet.excel_styles?.[sheet.style_ids?.[r]?.[c]??0]?.number_format).trim()});}));
  const actual=await page.locator('.book-scroll td').evaluateAll(cells=>cells.map(c=>({address:c.dataset.address,rowspan:c.rowSpan,colspan:c.colSpan,text:c.textContent.trim()})));
  assert.deepEqual(actual,expected,'原表坐标/合并/文字必须一致: '+sheet.name);
+ const heights=await page.locator('.book-scroll tbody tr').evaluateAll(rows=>rows.map(r=>r.getBoundingClientRect().height));
+ heights.forEach((h,i)=>assert.ok(Math.abs(h-sheet.row_heights[i])<1.1,`${sheet.name} 第${i+1}行实际${h}，模板${sheet.row_heights[i]}`));
+ const widths=await page.locator('.book-scroll colgroup col').evaluateAll(cols=>cols.slice(1).map(c=>c.getBoundingClientRect().width));
+ widths.forEach((w,i)=>assert.ok(Math.abs(w-sheet.column_widths[i])<1.1,`${sheet.name} 第${i+1}列实际${w}，模板${sheet.column_widths[i]}`));
 })();}
 try{
  for(const [name,width,height,mobile] of [['phone',402,874,true],['small',360,640,true],['landscape',874,402,true],['desktop',1440,900,false],['legacy',402,874,true]]){
@@ -92,10 +103,10 @@ try{
   console.log(JSON.stringify({name,...metrics,saves:f.writes.length,reads:f.reads,storedBytes:stored.length,errors:f.errors}));await context.close();
  }
  const page=await browser.newPage({viewport:{width:402,height:874}});const f=await setup(page,{actual:true});await page.goto(origin+'/assets/workspace-v2/index.html?__page=%2Fdaily-inspection&scope=D');await page.locator('.book-scroll td').first().waitFor();
- const measurements=[];for(let i=0;i<await page.locator('.sheet-tabs button').count();i++){const start=Date.now();await chooseSheetIndex(page,i);await page.locator('.book-scroll td').first().waitFor();measurements.push(Date.now()-start);await validateGrid(page,f.reports.D.original_templates);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth),0);}
+ const measurements=[];for(let i=0;i<await page.locator('.sheet-tabs button').count();i++){const start=Date.now();await chooseSheetIndex(page,i);await page.locator('.book-scroll td').first().waitFor();measurements.push(Date.now()-start);await validateGrid(page,f.reports.D.original_templates,f.reports.D.rounds);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth),0);}
  await chooseSheet(page,/M2HVDC/);assert.equal(await page.locator('.column-number').last().innerText(),'K');await page.screenshot({path:path.join(output,'audit-D-M2.png')});
  await openMenu(page);await page.getByRole('button',{name:'表格设置',exact:true}).click();await page.waitForTimeout(600);await page.screenshot({path:path.join(output,'audit-settings.png')});await page.getByRole('dialog').getByRole('button',{name:'完成',exact:true}).click();
- await page.getByLabel('楼栋',{exact:true}).selectOption('E');await page.waitForTimeout(400);await openMenu(page,false);for(let i=0;i<await page.locator('.sheet-tabs button').count();i++){await chooseSheetIndex(page,i);await validateGrid(page,f.reports.E.original_templates);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth),0);}
+ await page.getByLabel('楼栋',{exact:true}).selectOption('E');await page.waitForTimeout(400);await openMenu(page,false);for(let i=0;i<await page.locator('.sheet-tabs button').count();i++){await chooseSheetIndex(page,i);await validateGrid(page,f.reports.E.original_templates,f.reports.E.rounds);assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth-innerWidth),0);}
  await page.screenshot({path:path.join(output,'audit-real-template.png')});console.log(JSON.stringify({name:'real-template',switchMs:measurements,errors:f.errors}));assert.deepEqual(f.errors,[]);
  await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:fixture-person','dark'));await page.reload();await page.locator('.book-scroll td').first().waitFor();await page.screenshot({path:path.join(output,'audit-dark.png')});
  const editorPage=await browser.newPage({viewport:{width:402,height:874},isMobile:true,hasTouch:true});const editFixture=await setup(editorPage);await editorPage.goto(origin+'/assets/workspace-v2/index.html?__page=%2Fdaily-inspection&scope=D');

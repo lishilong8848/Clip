@@ -2,12 +2,26 @@
 import datetime as dt
 import hashlib
 import json
+import sys
 from pathlib import Path
 from openpyxl import load_workbook
 from openpyxl.styles.colors import COLOR_INDEX
+from openpyxl.xml.functions import tostring
 ROOT=Path(__file__).resolve().parents[2]
+sys.path.insert(0,str(ROOT/'bin'))
+from lan_bitable_template_portal.daily_inspection_template_art import read_artwork, display_artwork
 TARGET=ROOT/'bin/resources/daily_inspection_templates.json'
 SOURCE=Path(r'D:\下载\E楼巡检表')
+
+def xml(value):
+    return tostring(value.to_tree()).decode('utf8')
+
+def excel_style(cell):
+    return {'font':xml(cell.font),'fill':xml(cell.fill),'border':xml(cell.border),
+            'alignment':xml(cell.alignment),'protection':xml(cell.protection),
+            'number_format':cell.number_format,
+            'diagonal':{'up':bool(cell.border.diagonalUp),'down':bool(cell.border.diagonalDown),
+                        'color':color(cell.border.diagonal.color,'#000000') if cell.border.diagonal else '#000000'}}
 
 def color(c,default):
     if c is None:return default
@@ -15,7 +29,7 @@ def color(c,default):
     if c.type=='indexed' and 0<=c.indexed<len(COLOR_INDEX):return '#'+COLOR_INDEX[c.indexed][-6:]
     return default
 
-def css(cell):
+def css(cell,show_grid=True):
     f,a,b,fill=cell.font,cell.alignment,cell.border,cell.fill
     out={'fontFamily':f.name or 'Calibri','fontSize':round((f.sz or 11)*4/3,2),'fontWeight':'700' if f.bold else '400',
          'fontStyle':'italic' if f.italic else 'normal','color':color(f.color,'#000000'),
@@ -29,7 +43,7 @@ def css(cell):
             weight=2 if edge.style in ('medium','thick','mediumDashDot','mediumDashed') else 1
             style='double' if edge.style=='double' else 'dotted' if edge.style in ('dotted','hair') else 'dashed' if 'dash' in edge.style.lower() else 'solid'
             out['border'+side.title()]=f'{weight}px {style} {color(edge.color,"#000000")}'
-        else:out['border'+side.title()]='1px solid #e1e4e8'
+        else:out['border'+side.title()]='1px solid '+('#e1e4e8' if show_grid else 'transparent')
     return out
 
 def main():
@@ -37,7 +51,7 @@ def main():
     for template in data['templates']:
         matches=[p for p in SOURCE.glob('*.xlsx') if template['scope']+'栋'+template['profession'] in p.name]
         if len(matches)!=1:raise ValueError('来源不唯一 '+str(matches))
-        source=matches[0];book=load_workbook(source,data_only=False)
+        source=matches[0];artwork=read_artwork(source);book=load_workbook(source,data_only=False)
         old={s['name']:s for s in template['sheets']};sheets=[]
         base_font=book._fonts[0]
         digit_width=round((base_font.sz or 11)*2/3) if base_font.name in ('宋体','新宋体','SimSun') else 7
@@ -57,7 +71,7 @@ def main():
                 width=dim.width if dim and dim.width is not None else ws.sheet_format.defaultColWidth or 8.43
                 widths.append(0 if dim and dim.hidden else round(width*digit_width+5,2))
             heights=[0 if ws.row_dimensions[i].hidden else round((ws.row_dimensions[i].height or ws.sheet_format.defaultRowHeight or 15)*4/3,2) for i in range(1,maxrow+1)]
-            rows=[];style_ids=[];styles=[];seen={}
+            rows=[];style_ids=[];styles=[];native_styles=[];seen={}
             for ri in range(1,maxrow+1):
                 row=[];ids=[]
                 for ci in range(1,maxcol+1):
@@ -65,12 +79,21 @@ def main():
                     if isinstance(value,(dt.datetime,dt.date,dt.time)):value=value.isoformat()
                     if template['scope']=='D' and ws.title.strip()=='暖通冷机系统巡检表' and value=='`':value=None
                     row.append(value)
-                    style=css(cell);key=json.dumps(style,sort_keys=True)
-                    if key not in seen:seen[key]=len(styles);styles.append(style)
+                    style=css(cell,ws.sheet_view.showGridLines is not False);native=excel_style(cell);key=json.dumps(native,sort_keys=True)
+                    if key not in seen:seen[key]=len(styles);styles.append(style);native_styles.append(native)
                     ids.append(seen[key])
                 rows.append(row);style_ids.append(ids)
             name=next((name for name in old if name.strip()==ws.title.strip()),ws.title)
-            sheets.append({'excluded_ranges':old.get(name,{}).get('excluded_ranges',[]),'name':name,'rows':rows,'merges':merges,'column_widths':widths,'row_heights':heights,'styles':styles,'style_ids':style_ids,'source_range':f'A1:{ws.cell(maxrow,maxcol).coordinate}'})
+            settings={'sheet_format':xml(ws.sheet_format),'sheet_properties':xml(ws.sheet_properties),
+                      'show_grid_lines':ws.sheet_view.showGridLines,'header_footer':xml(ws.HeaderFooter),
+                      'page_setup':xml(ws.page_setup),'page_margins':xml(ws.page_margins),'print_options':xml(ws.print_options),
+                      'print_area':str(ws.print_area) if ws.print_area else '',
+                      'print_title_rows':ws.print_title_rows,'print_title_cols':ws.print_title_cols,
+                      'row_dimensions':{str(i):{k:getattr(d,k) for k in ('height','hidden','outlineLevel','collapsed','thickTop','thickBot')} for i,d in ws.row_dimensions.items() if i<=maxrow},
+                      'column_dimensions':{key:{k:getattr(d,k) for k in ('width','hidden','outlineLevel','collapsed','min','max','bestFit')} for key,d in ws.column_dimensions.items() if (d.min or 0)<=maxcol}}
+            art=artwork.get(ws.title)
+            sheets.append({'excluded_ranges':old.get(name,{}).get('excluded_ranges',[]),'name':name,'rows':rows,'merges':merges,'column_widths':widths,'row_heights':heights,'styles':styles,'excel_styles':native_styles,'excel_settings':settings,'style_ids':style_ids,'source_range':f'A1:{ws.cell(maxrow,maxcol).coordinate}',
+                           'artwork':art,'display_artwork':display_artwork(art,widths,heights) if art else []})
             print(template['scope'],name,maxcol,maxrow,flush=True)
         template.update(sheets=sheets,source_name=source.name,source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
         book.close()

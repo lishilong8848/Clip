@@ -1,9 +1,14 @@
 """Validated edits of frozen inspection form cells; never changes the base template."""
+import datetime as dt
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from .daily_inspection_history import (REVIEW_SHEET, archived_devices, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_SHEET, refresh_archived_original)
 from .risk_inspection import RiskError
+
+
+def json_cell_value(value):
+    return value.isoformat() if isinstance(value,(dt.datetime,dt.date,dt.time)) else value
 
 
 def form_index(book):
@@ -83,9 +88,9 @@ def form_extras(book, templates, entries):
                         continue
                     key = (template['name'], sheet['name'], cell.coordinate)
                     if key in mapped:
-                        mapped[key]['value'] = cell.value
+                        mapped[key]['value'] = json_cell_value(cell.value)
                     elif ('' if cell.value is None else str(cell.value)) != ('' if original is None else str(original)):
-                        extras.append({'template':key[0], 'sheet':key[1], 'cell':key[2], 'value':cell.value})
+                        extras.append({'template':key[0], 'sheet':key[1], 'cell':key[2], 'value':json_cell_value(cell.value)})
     return extras
 
 
@@ -114,7 +119,7 @@ def frozen_readings(book, scope):
             raise RiskError('历史巡检测点关联不唯一，请核对原附件。', 409)
         template, sheet = index[name]
         grouped.setdefault((name,address), []).append({'template':template,'sheet':sheet,'cell':address,
-            'value':book[name][address].value,'device':identity,'kind':kind,'point_id':point or '',
+            'value':json_cell_value(book[name][address].value),'device':identity,'kind':kind,'point_id':point or '',
             'parameter':parameter,'location':location or '', 'form':form or '', 'read_only':matched[0]['read_only']})
     return [items[0] if len(items)==1 else {**items[0],'kind':'paired','members':items,
         'read_only':any(item['read_only'] for item in items)} for items in grouped.values()]

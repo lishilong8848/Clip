@@ -2012,7 +2012,9 @@ class FastAPIPortalController:
                 if await asyncio.to_thread(risk_task_access, PortalRuntime, session):
                     status_user['modules'] = list(dict.fromkeys([*status_user.get('modules', []), 'risk_inspection']))
                     status_user['risk_inspection_assigned'] = True
-                if tool_management_enabled() and 'risk_inspection' in status_user.get('modules', ()):
+                status_user['tool_management_enabled']=False
+                status_user['tool_management_full_access']=False
+                if tool_management_enabled():
                     if await asyncio.to_thread(tool_management_access, PortalRuntime, session, status_user):
                         status_user['tool_management_enabled'] = True
             response = self._json_response(request, session, payload)

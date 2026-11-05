@@ -25,12 +25,16 @@ def tool_management_enabled():
 
 def tool_management_access(runtime, session, user):
     from .cabinet_guest import is_cabinet_guest
+    user['tool_management_full_access']=False
     service = getattr(runtime, 'tool_management', None)
     if is_cabinet_guest(session) or not callable(service):
         return False
     try:
         actor = runtime.risk_inspection_actor(user.get('open_id'), user.get('name'))
-        return service().available_to(actor)
+        allowed=service().available_to(actor)
+        from .tool_management import full_access
+        user['tool_management_full_access']=bool(allowed and full_access(actor))
+        return allowed
     except RiskError:
         return False
     except Exception:
@@ -78,6 +82,8 @@ def install_risk_inspection_routes(app, controller, runtime):
                  'open_id': open_id, 'name': person.get('name') or name or '当前人员',
                  'position': person.get('position') or ''}
         RiskInspections.check(actor)
+        from .tool_management import trusted_full_access
+        actor['_tool_management_full_access']=trusted_full_access(auth,open_id,person)
         return actor
 
     def directory():
@@ -211,8 +217,11 @@ def install_risk_inspection_routes(app, controller, runtime):
                 else:
                     data = await asyncio.to_thread(svc.history.get, actor, tid, kind='history')
             elif path == 'people':
-                if not manager(actor):
+                from .tool_management import full_access
+                if not manager(actor) and not full_access(actor):
                     raise RiskError('仅发布人可查看可分配人员。', 403)
+                from .tool_self_check import BUILDINGS
+                actor_scopes=[s for s in SCOPES if can_scope(actor,s) or full_access(actor) and s in BUILDINGS]
                 def people():
                     result = []
                     for row in directory():
@@ -222,7 +231,7 @@ def install_risk_inspection_routes(app, controller, runtime):
                             person = person_for(row['record_id'])
                         except RiskError:
                             continue
-                        scopes = [s for s in SCOPES if can_scope(actor, s)]
+                        scopes = actor_scopes
                         result.append({'id': person['id'], 'name': person['name'], 'employee_no': row.get('employee_no', ''),
                                        'scopes': scopes, 'home_scope': person.get('home_scope', ''), 'can_review': True,
                                        'final_scopes': [s for s in scopes if can_scope(person, s)],
@@ -230,11 +239,11 @@ def install_risk_inspection_routes(app, controller, runtime):
                                        'can_receive_final': final_manager(person)})
                     if not any(p['id'] == actor['id'] for p in result):
                         result.insert(0, {'id': actor['id'], 'name': actor['name'], 'employee_no': '',
-                                         'scopes': [s for s in SCOPES if can_scope(actor, s)],
+                                         'scopes': actor_scopes,
                                          'home_scope': actor.get('home_scope', ''), 'can_review': True,
-                                         'final_scopes': [s for s in SCOPES if can_scope(actor, s)],
+                                         'final_scopes': actor_scopes,
                                          'category': actor.get('category', ''), 'can_receive_final': final_manager(actor)})
-                    return {'items': result, 'self_id': actor['id'], 'scopes': [s for s in SCOPES if can_scope(actor, s)]}
+                    return {'items': result, 'self_id': actor['id'], 'scopes': actor_scopes}
                 data = await asyncio.to_thread(people)
             elif path == 'template':
                 if not manager(actor):

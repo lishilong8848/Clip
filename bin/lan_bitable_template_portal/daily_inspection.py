@@ -29,8 +29,9 @@ from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, RE
                                        archived_workbook, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
                                         original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
-                                        refresh_archived_original)
+                                        refresh_archived_original, write_original_sheet, display_templates)
 from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views, frozen_readings
+from .daily_inspection_template_art import preserve_artwork, read_artwork
 from .eop_scenario_editor import plain
 from .module_access import allowed_modules
 from .risk_inspection import RiskError
@@ -1356,7 +1357,7 @@ class DailyInspection:
                                 return self.view(state, owner, duty)
                             if data.get('review_version') != active.get('review_version', 0):
                                 raise RiskError('巡检表已有其他修改，请刷新核对后重试，您的填写仍保留。', 409)
-                            with archived_workbook(workbook(active, {scope: []}, strict_original=False), active['id'], scope) as book:
+                            with archived_workbook(workbook(active, {scope: []}, strict_original=False, presentation=False), active['id'], scope) as book:
                                 edits = apply_cells(book, scope, data['sheet_cells'], actor, enforce_exclusions=True)
                                 submitted = {}
                                 for device in devices:
@@ -1602,7 +1603,8 @@ class DailyInspection:
                     self.apply_archive_edit(scope, rid, path, current_version, pending['fields'])
                     self.store.put_document(NS, key, {**pending, 'confirmed': True})
                     raise RiskError('上一份修改已确认，请重新打开记录后再修改。', 409)
-                with archived_workbook(self.download_archive(attachment), summary['round_id'], scope) as book:
+                previous_content=self.download_archive(attachment)
+                with archived_workbook(previous_content, summary['round_id'], scope) as book:
                     devices = archived_devices(book, scope)
                     if payload.get('cells'):
                         changes = apply_cells(book, scope, payload['cells'], actor)
@@ -1620,7 +1622,8 @@ class DailyInspection:
                     output = io.BytesIO()
                     book.save(output)
                 self.ensure_archive_fields({**ARCHIVE_FIELDS, **EDIT_FIELDS})
-                token = self.upload_archive(output.getvalue(), 'DE巡检修订-' + summary['round_id'][:10] + '.xlsx')
+                updated_content=preserve_artwork(output.getvalue(),read_artwork(io.BytesIO(previous_content)))
+                token = self.upload_archive(updated_content, 'DE巡检修订-' + summary['round_id'][:10] + '.xlsx')
                 pending = {'fingerprint': fingerprint, 'token': token, 'fields': {
                     '巡检快照': [{'file_token': token}],
                     '上版巡检快照': [{'file_token': attachment['file_token']}],
@@ -1707,7 +1710,7 @@ class DailyInspection:
         state['active'] = None
 
 
-def workbook(active, orders, *, strict_original=True):
+def workbook(active, orders, *, strict_original=True, presentation=True):
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
     from openpyxl.styles import Font, PatternFill
@@ -1813,6 +1816,7 @@ def workbook(active, orders, *, strict_original=True):
     # Freeze the rendered form and its mapping together with the review data.
     # History edits update only these exact saved coordinates, not today's catalogue.
     mappings, form_index, titles = [], [], set(book.sheetnames)
+    artworks={}
     try:
         catalogue = original_templates()
         for scope in active['batches']:
@@ -1838,14 +1842,8 @@ def workbook(active, orders, *, strict_original=True):
                 names[(source['template'], source['sheet'])] = title
                 form_index.append((title, source['template'], source['sheet']))
                 target = book.create_sheet(title)
-                for merge in source['merges']:
-                    target.merged_cells.add(merge)
-                for row in source['rows']:
-                    cells = [WriteOnlyCell(target, value=value) for value in row]
-                    for cell in cells:
-                        if isinstance(cell.value, str):
-                            cell.data_type = 's'
-                    target.append(cells)
+                write_original_sheet(target, source if presentation else {**source,'excel_styles':[],'excel_settings':{}})
+                if presentation and source.get('artwork'):artworks[title]=source['artwork']
             for entry in entries:
                 name = names.get((entry['template'], entry['sheet']))
                 if not name:
@@ -1861,7 +1859,7 @@ def workbook(active, orders, *, strict_original=True):
     book[ORIGINAL_INDEX_SHEET].sheet_state = 'hidden'
     stream = io.BytesIO()
     book.save(stream)
-    return stream.getvalue()
+    return preserve_artwork(stream.getvalue(),artworks)
 
 
 def inspection_report(service, scope, day, owner, actor, *, include_active=False, drafts=None, active_id=None):
@@ -1963,7 +1961,7 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             collect({'round_id':saved['id'],'scope':scope,'date':day,'shift':saved['duty']['shift'],
                      'round':saved['round'],'version':saved.get('review_version',0),'status':'自动确认·待上传',
                      'auto_closed':bool(saved.get('auto_closed')),'local_draft':False},
-                    workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False))
+                    workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False,presentation=False))
     if active and active.get('duty', {}).get('date') == day:
         if active['id'] in archived_ids:
             if drafts:
@@ -1973,7 +1971,7 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                        'shift': active['duty']['shift'], 'round': active['round'],
                        'actor': active.get('actor', ''), 'version': active.get('review_version', 0), 'status': '待归档' if 'completed' in active else '进行中',
                        'local_draft': bool(drafts)}
-            collect(summary, workbook(active, {scope: active.get('archive_order', order)}, strict_original=False))
+            collect(summary, workbook(active, {scope: active.get('archive_order', order)}, strict_original=False, presentation=False))
     result['rounds'].sort(key=lambda item: (0 if item.get('shift') == '白' else 1,
                                             item.get('round') or 0, item['round_id']))
     group_shift = active['duty']['shift'] if active and active['duty']['date'] == day else (result['rounds'][-1]['shift'] if result['rounds'] else duty_period(dt.datetime.now(CN))[1])
@@ -1986,6 +1984,7 @@ def inspection_report_workbook(report):
     from openpyxl.cell import WriteOnlyCell
     book = Workbook(write_only=True)
     titles = set()
+    artworks={}
     try:
         original = original_views(report.get('original_templates', []), report['rounds'], include_empty_rounds=True)
     except (ValueError, IndexError, TypeError, KeyError) as error:
@@ -2000,17 +1999,11 @@ def inspection_report_workbook(report):
             title = base[:27] + f'-{suffix}'
         titles.add(title)
         target = book.create_sheet(title)
-        for merge in source['merges']:
-            target.merged_cells.add(merge)
-        for row in source['rows']:
-            cells = [WriteOnlyCell(target, value=value) for value in row]
-            for cell in cells:
-                if isinstance(cell.value, str):
-                    cell.data_type = 's'
-            target.append(cells)
+        write_original_sheet(target, source)
+        if source.get('artwork'):artworks[title]=source['artwork']
     stream = io.BytesIO()
     book.save(stream)
-    return stream.getvalue()
+    return preserve_artwork(stream.getvalue(),artworks)
 
 
 def install_daily_inspection(app, controller, runtime):
@@ -2080,7 +2073,7 @@ def install_daily_inspection(app, controller, runtime):
                 if template_scope not in history_scopes:
                     raise RiskError('没有该楼栋的巡检权限。',403)
                 data = {'version':template_version(),'scope':template_scope,
-                        'templates':[item for item in original_templates() if item['scope']==template_scope]}
+                        'templates':display_templates(template_scope)}
                 return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, max-age=3600'})
             if request.method == 'GET' and action in ('','status') and (viewer or home_scopes and (not selected_scope or selected_scope in home_scopes)):
                 scope = selected_scope or (scopes[0] if viewer else home_scopes[0])
@@ -2140,6 +2133,8 @@ def install_daily_inspection(app, controller, runtime):
                         item.pop('sheets', None)
                 if action=='day-sheet' and payload.get('template_version')==template_version():
                     report.pop('original_templates',None)
+                elif action=='day-sheet':
+                    report['original_templates']=display_templates(scope)
                 report['template_version']=template_version()
                 report['can_edit_history'] = bool((viewer or can_manage or (local_write and scope in home_scopes)) and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
                 report['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{report["date"]}'.encode()).hexdigest()

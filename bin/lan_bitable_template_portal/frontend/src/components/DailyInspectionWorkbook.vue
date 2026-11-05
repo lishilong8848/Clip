@@ -45,16 +45,25 @@
         <button v-for="item in pages" :key="item.key" :class="{selected:pageKey===item.key,seen:visited.has(item.baseKey)}" :aria-pressed="pageKey===item.key" @click="selectPage(item.key)">{{ item.profession }} · {{ item.name.trim() }}<small>{{ item.slot ? item.slot[0]+'班第'+item.slot[1]+'次 · '+(item.saved?savedDayLabel+'已保存'+(report?.rounds.find(r=>r.shift+r.round===item.slot)?.auto_closed?' · 自动收尾':''):item.slot===activeSlot?'本次待填写':'未开始') : visited.has(item.baseKey)?'已查看':'未查看' }}</small></button>
       </nav>
       <div v-if="currentPage" ref="scrollElement" class="book-scroll" tabindex="0" aria-label="可编辑巡检表格" :key="pageKey+chillerSlot" @touchstart="startPinch" @touchmove="movePinch" @touchend="endPinch" @touchcancel="endPinch">
+        <div class="book-canvas" :style="{width:(columnWidths.reduce((a,b)=>a+b,0)+42)+'px'}">
         <table :style="{fontSize:zoom+'px',width:(columnWidths.reduce((a,b)=>a+b,0)+42)+'px'}"><colgroup><col style="width:42px"><col v-for="i in columnCount" :key="i" :style="{width:columnWidths[i-1]+'px'}"></colgroup><thead><tr><th class="grid-corner" aria-label="行列编号"></th><th v-for="i in columnCount" :key="i" class="column-number" scope="col">{{ address(0,i-1).replace(/\d+$/,'') }}</th></tr></thead><tbody>
-          <tr v-for="(row,i) in grid" :key="i" :style="{height:rowHeight(i)+'px',display:rowHeight(i)===0?'none':undefined}"><th class="row-number" scope="row">{{ i+1 }}</th><template v-for="cell in row" :key="cell.address">
+          <tr v-for="(row,i) in grid" :key="i" :style="{height:rowHeight(i)+'px',display:rowHeight(i)===0?'none':undefined}"><th class="row-number" scope="row"><span>{{ i+1 }}</span></th><template v-for="cell in row" :key="cell.address">
             <td v-if="!cell.hidden" :data-address="cell.address" :style="originalCellStyle(cell)" :rowspan="cell.rowspan" :colspan="cell.colspan" :class="{'current-cell':cell.current,'history-cell':cell.historical,'empty-cell':cell.mapped && !cell.text}"
               :tabindex="cell.editable?0:undefined" :aria-label="cell.address+' '+cell.text" @click="beginEdit(cell)" @keydown.enter.prevent="beginEdit(cell)">
               <select v-if="editing===cell.address && cell.stateCell" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="commit(cell)"><option value="">待填写</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option></select>
               <input v-else-if="editing===cell.address" v-model="editValue" v-focus :inputmode="cell.mapped && !cell.stateCell ? 'decimal' : 'text'" enterkeyhint="done" @click.stop :aria-label="'编辑 '+cell.address" @blur="commit(cell)" @keydown.enter.stop.prevent="commit(cell)" @keydown.esc.stop="cancelEdit">
-              <span v-else :style="{maxHeight:mergedHeight(cell)+'px'}">{{ cell.text || (cell.mapped?'待填':'\u00a0') }}</span>
+              <span v-else class="cell-content" :style="cellContentStyle(cell)"><span>{{ cell.displayText || '\u00a0' }}</span></span>
+              <svg v-if="cell.diagonal?.up || cell.diagonal?.down" class="cell-diagonal" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line v-if="cell.diagonal.up" x1="0" y1="100" x2="100" y2="0" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/><line v-if="cell.diagonal.down" x1="0" y1="0" x2="100" y2="100" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/></svg>
             </td>
           </template></tr>
         </tbody></table>
+        <svg v-if="currentPage.display_artwork?.length" class="template-art" aria-hidden="true" :width="columnWidths.reduce((a,b)=>a+b,0)" :height="(currentPage.row_heights||[]).reduce((a,b)=>a+b,0)*scale" :viewBox="'0 0 '+(currentPage.column_widths||[]).reduce((a,b)=>a+b,0)+' '+(currentPage.row_heights||[]).reduce((a,b)=>a+b,0)">
+          <g v-for="(art,index) in currentPage.display_artwork" :key="index">
+            <image v-if="art.image" :href="art.image" :x="art.x" :y="art.y" :width="art.width" :height="art.height" preserveAspectRatio="none" />
+            <text v-else :x="art.x+(art.left||0)" :y="art.y+(art.top||0)" :font-family="art.font" :font-size="art.size" fill="#000" dominant-baseline="text-before-edge"><tspan v-for="(line,li) in art.lines" :key="li" :x="art.x+(art.left||0)" :dy="li?(art.size||14)*1.2:0">{{ line }}</tspan></text>
+          </g>
+        </svg>
+        </div>
       </div>
       <p v-if="loading && !report.draft_key" role="status">模板已就绪，正在读取本轮及历史数据…</p>
       <p v-else-if="!report.rounds.length">尚无巡检记录；开始本轮后即可填写。原表已显示。</p>
@@ -87,10 +96,11 @@ import {computed,nextTick,onBeforeUnmount,onMounted,ref,shallowRef,watch} from '
 import {NModal,NButton} from 'naive-ui';
 import {requestJson,downloadFile} from '../api/client';
 import {registerNavigationGuard} from '../navigation';
+import {inspectionCellText} from './inspectionCellFormat';
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
 type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string};
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;original_cells:Reading[];extra_cells?:Reading[]};
-type Page={key:string;baseKey:string;slot?:string;saved?:boolean;template:string;profession:string;name:string;rows:any[][];merges:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[]};
+type Page={key:string;baseKey:string;slot?:string;saved?:boolean;template:string;profession:string;name:string;rows:any[][];merges:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];sheet_groups?:Record<string,string>;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
 type Job={scope:string;date:string;round:RoundMeta;cells:CellEdit[];attempted?:boolean};
@@ -151,10 +161,13 @@ const scale=computed(()=>zoom.value/14);
 const columnWidths=computed(()=>Array.from({length:columnCount.value},(_,i)=>currentPage.value?.column_widths ? currentPage.value.column_widths[i]*scale.value : columnWidth.value));
 function rowHeight(index:number){return (currentPage.value?.row_heights?.[index]??32)*scale.value;}
 function mergedHeight(cell:LayoutCell){let height=0;for(let i=cell.rowIndex;i<cell.rowIndex+cell.rowspan;i++)height+=rowHeight(i);return Math.max(0,height-2);}
-function originalCellStyle(cell:GridCell){const p=currentPage.value;const source=p?.styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0];if(!source)return {};
- return {...source,fontSize:typeof source.fontSize==='number'?source.fontSize*scale.value+'px':undefined,
+function originalCellStyle(cell:GridCell):Record<string,any>{const p=currentPage.value;const source=p?.styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0];if(!source)return {};
+ const alignment=p?.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0]?.alignment||'';
+ const horizontal=alignment.match(/horizontal="([^"]*)"/)?.[1];
+ return {...source,...(!horizontal||horizontal==='general'?{textAlign:typeof cell.value==='number'?'right':'left'}:{}),fontSize:typeof source.fontSize==='number'?source.fontSize*scale.value+'px':undefined,
  ...(cell.current?{backgroundColor:'#fff0b8',color:'#111827'}:{}),height:mergedHeight(cell)+'px',padding:'0 2px'};
 }
+function cellContentStyle(cell:GridCell){const style=originalCellStyle(cell);return {justifyContent:style.verticalAlign==='middle'?'center':style.verticalAlign==='top'?'flex-start':'flex-end'};}
 const cellLayout=computed(()=>{
  const p=currentPage.value;if(!p)return [];
  const cached=layoutCache.get(p.rows);if(cached)return cached;
@@ -176,7 +189,8 @@ const grid=computed(()=>{
  const fallback=visibleRounds.value.find(r=>r.round_id===currentActive.value?.id)||visibleRounds.value[visibleRounds.value.length-1];
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{const a=cell.address,raw=cell.raw,v=values.get(a),round=v?.round||fallback;
  const current=round?.round_id===currentActive.value?.id;const excluded=(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});const editable=!(current&&excluded)&&!!round && !collisions.has(a) && !v?.readonly && (current?!props.readOnly&&!currentActive.value?.pending:report.value?.can_edit_history&&round.status==='已归档');
- return {...cell,text:collisions.has(a)?'位置冲突，请核对映射':text(v?v.value:raw),round,current:!!v&&current,historical:!!v&&!current,mapped:!!v?.mapped,stateCell:/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(v?.value)),editable:!!editable};}));
+ const value=collisions.has(a)?'位置冲突，请核对映射':(v?v.value:raw),style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
+ return {...cell,value,diagonal:style?.diagonal,text:text(value),displayText:inspectionCellText(value,format),round,current:!!v&&current,historical:!!v&&!current,mapped:!!v?.mapped,stateCell:/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(v?.value)),editable:!!editable};}));
 });
 type GridCell=(typeof grid.value)[number][number];
 let timer:number|undefined,controller:AbortController|undefined,disposed=false,storageKey='',storageUnverified=false;
@@ -374,4 +388,14 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .mobile-save-recovery,.mobile-start{display:flex;align-items:center;gap:4px;flex-shrink:0;font-size:12px;padding:2px 5px}
 .full-height>.cell-editor-tools{padding:2px 6px}
 @media(max-height:500px) and (pointer:coarse){.mobile-sheet-bar{padding:0 2px}.mobile-sheet-bar>button{min-height:34px}.mobile-sheet-picker{flex-direction:row;align-items:center;gap:4px}.mobile-sheet-picker>span{flex:0 0 auto}.mobile-sheet-picker>select{flex:1;min-height:34px}.full-height>.book-submit{min-height:22px;padding:0 6px}.full-height>.book-submit .primary{min-height:34px}}
+/* Cell contents must not enlarge Excel's saved row heights, including merged cells. */
+.book-scroll td{position:relative;line-height:normal}
+.book-scroll td>.cell-content{position:absolute;inset:0 2px;display:flex;flex-direction:column;overflow:hidden;line-height:normal}
+.cell-content>span{flex:0 0 auto;max-height:100%;overflow:hidden}
+.book-scroll tbody .row-number{height:auto;padding:0;line-height:1}
+.row-number>span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.book-scroll td>input,.book-scroll td>select{position:absolute;inset:0;width:100%;height:100%;min-height:0;z-index:1}
+.book-canvas{position:relative;min-width:0}
+.template-art{position:absolute;left:42px;top:29px;pointer-events:none;overflow:hidden;z-index:1}
+.cell-diagonal{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 </style>

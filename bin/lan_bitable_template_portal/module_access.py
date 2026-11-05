@@ -177,6 +177,15 @@ async def module_denial(request, controller, runtime):
     request.state.allowed_modules = allowed
     if needed & allowed:
         return None
+    tool_path=(path=='/api/tool-self-check' or path.startswith('/api/tool-self-check/') or
+               path=='/risk-inspections' and request.query_params.get('view')=='tool-self-check')
+    tool_people=path=='/api/risk-inspections/people' and request.method=='GET'
+    if tool_path or tool_people:
+        from .risk_inspection_routes import tool_management_access
+        user=await asyncio.to_thread(runtime.auth_manager.public_user,session)
+        if await asyncio.to_thread(tool_management_access,runtime,session,user):
+            if tool_path or user.get('tool_management_full_access'):
+                return None
     if ((request.method == 'GET' and path in {
             '/daily-inspection', '/api/daily-inspection', '/api/daily-inspection/status',
             '/api/daily-inspection/history', '/api/daily-inspection/history-record',

@@ -27,6 +27,78 @@ class LedgerFixture:
 
 
 class ToolManagementTest(TestCase):
+    def full_actor(self,name):
+        return actor(scope='H',identity=name) | {'name':name,'level':'L4','category':'engineer',
+             'modules':[],'scope_rules':['H'],'_tool_management_full_access':True}
+
+    def test_designated_people_can_manage_all_buildings_without_expanding_risk_permissions(self):
+        from bin.lan_bitable_template_portal.risk_inspection import can_scope
+        for name in ('李世龙','刘小杏'):
+            who=self.full_actor(name)
+            self.assertTrue(self.svc.available_to(who))
+            board=self.svc.list(who)
+            self.assertEqual(len(board['orders']),4)
+            self.assertTrue(board['can_manage_templates'])
+            self.assertTrue(board['can_download_month'])
+            self.assertEqual(len(self.svc.inventory(who)['items']),3)
+            self.assertTrue(all(row['can_claim'] for row in board['orders']))
+            self.assertFalse(can_scope(who,'A'),'工具专用授权不能改变专项排查权限')
+        ordinary=self.full_actor('李世龙') | {'_tool_management_full_access':False}
+        with self.assertRaises(RiskError):self.svc.list(ordinary)
+
+    def test_designated_people_can_handle_claimed_report_and_approve_scrap(self):
+        li=self.full_actor('李世龙');liu=self.full_actor('刘小杏')
+        external=next(row for row in self.orders if row['kind']=='external')
+        claimed=self.svc.action(self.leader,external['id'],'claim',{'revision':external['revision']})
+        self.assertTrue(self.svc.detail(liu,external['id'])['can_edit'])
+        attached=self.svc.attach(li,external['id'],claimed['revision'],'报告.pdf',b'%PDF-1.7\nfixture')
+        body={'revision':attached['revision'],'actual':self.date}
+        submitted=self.svc.action(liu,external['id'],'submit',body)
+        self.assertEqual(submitted['owner_name'],'刘小杏')
+        self.assertEqual(self.svc.action(liu,external['id'],'submit',body),submitted)
+        self.assertEqual(self.svc.detail(li,external['id'])['history'][-1]['name'],'刘小杏')
+        scrap=self.submit_self(next(row for row in self.orders if row['kind']=='self'),'scrap')
+        self.assertTrue(self.svc.detail(li,scrap['id'])['can_approve'])
+        self.assertTrue(self.svc.detail(liu,scrap['id'])['can_approve'])
+        self.assertFalse(self.svc.detail(self.admin,scrap['id'])['can_approve'])
+        approved=self.svc.action(liu,scrap['id'],'approve',{'revision':scrap['revision'],'reason':'核对报废'})
+        self.assertEqual(approved['outcome'],'scrapped')
+
+    def test_full_access_requires_current_unique_directory_identity(self):
+        from types import SimpleNamespace
+        from bin.lan_bitable_template_portal.tool_management import trusted_full_access
+        person={'id':'recLiu','name':'刘小杏','selectable':True,'login_ids':['ou_new']}
+        snapshot={'schema':4,'app_id':'current','people':{'recLiu':person}}
+        auth=SimpleNamespace(_account_read_state=lambda:None,_account_directory_provider=lambda:snapshot,current_feishu_app_id=lambda:'current')
+        self.assertTrue(trusted_full_access(auth,'ou_new',person))
+        self.assertFalse(trusted_full_access(auth,'ou_someone_else',person))
+        self.assertFalse(trusted_full_access(auth,'ou_new',{}))
+        self.assertFalse(trusted_full_access(auth,'ou_new',person|{'inactive':True}))
+        snapshot['people']['duplicate']={**person,'id':'duplicate'}
+        self.assertFalse(trusted_full_access(auth,'ou_new',person))
+        del snapshot['people']['duplicate'];snapshot['app_id']='outdated'
+        self.assertFalse(trusted_full_access(auth,'ou_new',person))
+
+    def test_module_gate_opens_tools_without_granting_risk_writes(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from starlette.requests import Request
+        from bin.lan_bitable_template_portal.module_access import module_denial
+        who=self.full_actor('刘小杏')
+        session={'user':{'open_id':who['open_id'],'name':who['name']},'role':'user'}
+        runtime=SimpleNamespace(tool_management=lambda:self.svc,risk_inspection_actor=lambda *_:who,
+                                auth_manager=SimpleNamespace(public_user=lambda s:dict(s['user'])))
+        controller=SimpleNamespace(_current_session=lambda _:session)
+        def check(path,method='GET'):
+            return asyncio.run(module_denial(Request({'type':'http','path':path,'query_string':b'','headers':[],
+                        'method':method,'scheme':'http','server':('testserver',80)}),controller,runtime))
+        with patch('bin.lan_bitable_template_portal.module_access.allowed_modules',return_value=set()):
+            self.assertIsNone(check('/api/tool-self-check'))
+            self.assertIsNone(check('/api/tool-self-check/orders/fixture/submit','POST'))
+            self.assertIsNone(check('/api/risk-inspections/people'))
+            self.assertEqual(check('/api/risk-inspections/template','POST').status_code,403)
+
     def setUp(self):
         temp = TemporaryDirectory()
         self.addCleanup(temp.cleanup)

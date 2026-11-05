@@ -589,6 +589,7 @@ function moduleForCurrentRoute(): string {
 }
 const pageAccessDenied = computed(() => {
   if (!auth.loggedIn || authChecking.value) return "";
+  if (routePath.value==='/risk-inspections' && routeParams.value.get('view')==='tool-self-check' && auth.user?.tool_management_enabled===true) return '';
   if (routePath.value === '/daily-inspection' && canViewInspectionHistory(auth.user)) return "";
   const required = moduleForCurrentRoute();
   if (!required) return "";

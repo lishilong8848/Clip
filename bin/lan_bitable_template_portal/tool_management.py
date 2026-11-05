@@ -12,7 +12,7 @@ import time
 import uuid
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
-from .risk_inspection import RiskError, can_scope, digest, text
+from .risk_inspection import RiskError, RiskInspections, can_scope as risk_can_scope, digest, text
 from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
 
 
@@ -23,6 +23,33 @@ OUTCOMES = {'normal': '正常', 'repair': '检修中', 'repaired': '检修完成
 DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档表', 'repair': '检修跟踪表',
                 'scrap': '工具报废表', 'change': '异动台账'}
 MAX_REPORT = 12 * 1024 * 1024
+
+
+def full_access(actor):
+    return actor.get('_tool_management_full_access') is True and not (
+        actor.get('inactive') or actor.get('explicit_disabled') or actor.get('role') in {'guest','temporary'})
+
+
+def trusted_full_access(auth, open_id, person):
+    """Resolve the two designated people from the authenticated employee directory only."""
+    from .portal_service import LI_SHILONG_OPEN_ID
+    if person.get('inactive') or person and not person.get('selectable'):return False
+    if open_id==LI_SHILONG_OPEN_ID:return True
+    if not person.get('id') or person.get('name') not in {'李世龙','刘小杏'} or not person.get('selectable') or person.get('inactive'):
+        return False
+    if open_id not in person.get('login_ids',[]) and open_id!='person:'+person['id']:
+        return False
+    read=auth._account_read_state()
+    provider=getattr(auth,'_account_directory_provider',None)
+    snapshot=read['snapshot'] if read is not None else provider() if provider else {}
+    app_id=read['app_id'] if read is not None else auth.current_feishu_app_id()
+    if snapshot.get('schema')!=4 or snapshot.get('app_id')!=app_id:return False
+    matching=[p for p in snapshot.get('people',{}).values() if p.get('name')==person['name'] and not p.get('inactive')]
+    return len(matching)==1 and matching[0].get('id')==person['id']
+
+
+def can_scope(actor, scope):
+    return scope in BUILDINGS and full_access(actor) or risk_can_scope(actor,scope)
 
 
 def clock():
@@ -69,6 +96,15 @@ def report_file(name, data):
 
 
 class ToolManagement(ToolSelfChecks):
+    @staticmethod
+    def access(actor):
+        RiskInspections.check(actor)
+        if not full_access(actor):ToolSelfChecks.access(actor)
+
+    @staticmethod
+    def administrator(actor):
+        return full_access(actor) or ToolSelfChecks.administrator(actor)
+
     def __init__(self, inspection, cloud):
         super().__init__(inspection)
         self.cloud = cloud
@@ -246,7 +282,7 @@ class ToolManagement(ToolSelfChecks):
         return can_scope(actor, scope) and actor['open_id'] in leaders.get(scope, ())
 
     def eligible(self, db, actor, row):
-        return self.is_building_leader(db, actor, row['scope']) or (
+        return full_access(actor) or self.is_building_leader(db, actor, row['scope']) or (
             row['kind'] == 'external' and actor['id'] == row['supervisor'] and self.supervisor(actor, row['scope']))
 
     def visible(self, db, actor, row):
@@ -263,7 +299,7 @@ class ToolManagement(ToolSelfChecks):
     def work_info(self, db, actor, row):
         eligible = self.eligible(db, actor, row)
         open_order = not row['submitted_at'] and row['outcome'] != 'cancelled'
-        mine = row['owner'] == actor['id'] and eligible
+        mine = eligible and (row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
         result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
                                             'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty')}
         sync = [{'label': DESTINATIONS[job['dest']], 'state': 'done' if job['synced'] == job['revision'] else 'pending',
@@ -278,8 +314,8 @@ class ToolManagement(ToolSelfChecks):
                          'can_edit': open_order and mine,
                          'can_release': open_order and bool(row['owner']) and self.administrator(actor),
                          'can_repair': row['outcome'] == 'repair' and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
-                         'can_approve': row['outcome'] == 'scrap' and row['manager'] == actor['id']
-                             and actor.get('category') == 'manager', 'sync': sync}
+                         'can_approve': row['outcome'] == 'scrap' and (full_access(actor) or row['manager'] == actor['id']
+                             and actor.get('category') == 'manager'), 'sync': sync}
 
     def list(self, actor, month=''):
         self.access(actor)
@@ -375,6 +411,7 @@ class ToolManagement(ToolSelfChecks):
                         'reason': text(body.get('reason', ''), 1000)})
                 elif action == 'submit':
                     updates.update(submitted_at=now, submit_key=submit_key, draft='{}')
+                    if full_access(actor):updates.update(owner=actor['id'],owner_name=actor['name'])
                     label = '提交工单'
                     if row['kind'] == 'external':
                         if not row['report']:

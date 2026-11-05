@@ -47,6 +47,15 @@ def original_templates():
     return data['templates']
 
 
+@lru_cache(maxsize=2)
+def display_templates(scope):
+    # Export-only XML stays on the server; do not exhaust the browser's layout cache.
+    return [{**template,'sheets':[
+        {**{key:value for key,value in sheet.items() if key not in ('excel_settings','artwork','excel_styles')},
+         'excel_styles':[{key:style[key] for key in ('number_format','alignment','diagonal') if key in style} for style in sheet.get('excel_styles',[])]}
+        for sheet in template['sheets']]} for template in original_templates() if template['scope']==scope]
+
+
 @lru_cache(maxsize=1)
 def catalog_locations():
     path = Path(__file__).resolve().parents[1] / 'resources' / 'daily_inspection_catalog_mapping.json'
@@ -220,8 +229,71 @@ def original_views(templates, rounds, *, include_empty_rounds=False):
                 round_label = f'{slot[0]}{slot[1]}-' if slot else ''
                 output.append({'name': f"原-{template['profession'][0]}-{round_label}{sheet['name'].strip()}",
                                'template': template['name'], 'sheet': sheet['name'],
-                               'rows': rows, 'merges': sheet['merges']})
+                               'rows': rows, 'merges': sheet['merges'], 'template_rows':sheet['rows'],
+                               **{key:sheet[key] for key in ('excel_styles','excel_settings','style_ids','artwork') if key in sheet}})
     return output
+
+
+@lru_cache(maxsize=4096)
+def native_style(serialized):
+    from openpyxl.styles import Font, Border, Alignment, Protection
+    from openpyxl.xml.functions import fromstring
+    data=json.loads(serialized)
+    fill_node=fromstring(data['fill'])
+    from openpyxl.styles.fills import Fill
+    return {'font':Font.from_tree(fromstring(data['font'])), 'fill':Fill.from_tree(fill_node),
+            'border':Border.from_tree(fromstring(data['border'])),
+            'alignment':Alignment.from_tree(fromstring(data['alignment'])),
+            'protection':Protection.from_tree(fromstring(data['protection'])),
+            'number_format':data['number_format']}
+
+
+def write_original_sheet(target, source):
+    """Render the same template and value matrix used by the inspection page."""
+    import datetime as dt
+    from openpyxl.cell import WriteOnlyCell
+    from openpyxl.xml.functions import fromstring
+    from openpyxl.worksheet.dimensions import SheetFormatProperties
+    from openpyxl.worksheet.properties import WorksheetProperties
+    from openpyxl.worksheet.page import PrintPageSetup, PageMargins, PrintOptions
+    from openpyxl.worksheet.header_footer import HeaderFooter
+    settings=source.get('excel_settings',{})
+    for key,kind in [('sheet_format',SheetFormatProperties),('sheet_properties',WorksheetProperties),
+                     ('page_setup',PrintPageSetup),('page_margins',PageMargins),('print_options',PrintOptions)]:
+        if settings.get(key):setattr(target,key,kind.from_tree(fromstring(settings[key])))
+    target.page_setup.id=None  # Printer driver references belong to the original workbook.
+    target.sheet_view.showGridLines=settings.get('show_grid_lines')
+    if settings.get('header_footer'):target.HeaderFooter=HeaderFooter.from_tree(fromstring(settings['header_footer']))
+    for key in ('print_area','print_title_rows','print_title_cols'):
+        if settings.get(key):setattr(target,key,settings[key])
+    for key,values in settings.get('row_dimensions',{}).items():
+        for attr,value in values.items():setattr(target.row_dimensions[int(key)],attr,value)
+    for key,values in settings.get('column_dimensions',{}).items():
+        for attr,value in values.items():setattr(target.column_dimensions[key],attr,value)
+    styles=[native_style(json.dumps(item,sort_keys=True)) for item in source.get('excel_styles',[])]
+    bound_styles=[]
+    for style in styles:
+        prototype=WriteOnlyCell(target)
+        for key,item in style.items():setattr(prototype,key,copy.copy(item))
+        bound_styles.append(prototype._style)
+    for merge in source['merges']:target.merged_cells.add(merge)
+    for ri,row in enumerate(source['rows']):
+        cells=[]
+        for ci,value in enumerate(row):
+            cell=WriteOnlyCell(target,value=value)
+            if styles:
+                index=source['style_ids'][ri][ci]
+                style=styles[index]
+                cell._style=bound_styles[index]
+                if style['number_format'].lower() in ('h:mm','hh:mm','h:mm:ss','hh:mm:ss') and isinstance(value,str):
+                    try:cell.value=dt.time.fromisoformat(value)
+                    except ValueError:pass
+            if isinstance(cell.value,str):
+                baseline=source.get('template_rows',[])
+                formula=bool(cell.value.startswith('=') and ri<len(baseline) and ci<len(baseline[ri]) and baseline[ri][ci]==cell.value)
+                if not formula:cell.data_type='s'
+            cells.append(cell)
+        target.append(cells)
 
 
 def refresh_archived_original(book, changes=None, actor=''):
