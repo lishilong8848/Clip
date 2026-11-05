@@ -20,15 +20,17 @@
 
     <section v-if="opening" class="eop-panel eop-opening" aria-busy="true" role="status">正在读取场景正文和步骤…</section>
     <section v-else-if="!record" class="eop-panel" aria-label="场景列表">
-      <div class="eop-stats" aria-label="P0 场景统计">
-        <button type="button" :class="{selected:!specialty&&!missing}" @click="specialty='';missing=''">全部 P0 <strong>{{ rows.length }}</strong></button>
+      <div class="eop-toolbar" aria-label="场景范围"><NButton :type="listMode==='p0'?'primary':'default'" :disabled="busy" @click="changeListMode('p0')">首页 · P0 高优先级</NButton><NButton :type="listMode==='other'?'primary':'default'" :disabled="busy" @click="changeListMode('other')">其他等级场景</NButton></div>
+      <div class="eop-stats" aria-label="场景统计">
+        <button type="button" :class="{selected:!specialty&&!missing}" @click="specialty='';missing=''">{{ listMode==='p0'?'全部 P0':'全部其他等级' }} <strong>{{ rows.length }}</strong></button>
         <button v-for="item in specialtyCounts" :key="item.name" type="button" :class="{selected:specialty===item.name}" @click="specialty=specialty===item.name?'':item.name;missing=''">{{ item.name }} <strong>{{ item.count }}</strong></button>
         <button v-for="item in missingCounts" :key="item.key" type="button" :class="{selected:missing===item.key}" @click="missing=missing===item.key?'':item.key;specialty=''">{{ item.label }}未填写 <strong>{{ item.count }}</strong></button>
       </div>
-      <p v-if="updatedAt" class="eop-cache-note">仅显示 P0-高 · 每 5 分钟同步多维表 · 最近同步 {{ new Date(updatedAt*1000).toLocaleString('zh-CN') }}<strong v-if="Date.now()/1000-updatedAt>360"> · 同步可能延迟，请刷新核对</strong></p>
+      <p v-if="updatedAt" class="eop-cache-note">{{ listMode==='p0'?'仅显示 P0-高':'显示非 P0 及未设置等级的场景' }} · 每 5 分钟同步多维表 · 最近同步 {{ new Date(updatedAt*1000).toLocaleString('zh-CN') }}<strong v-if="Date.now()/1000-updatedAt>360"> · 同步可能延迟，请刷新核对</strong></p>
       <div class="eop-toolbar">
         <NInput v-model:value="search" class="eop-search" clearable placeholder="搜索场景名称、专业或设备"
           :input-props="{ 'aria-label': '搜索场景' }"><template #prefix><Search :size="16" /></template></NInput>
+        <NSelect v-if="listMode==='other'" v-model:value="priority" class="eop-filter" :options="priorities" aria-label="筛选等级" />
         <NSelect v-model:value="specialty" class="eop-filter" :options="specialties" aria-label="筛选专业" />
         <NSelect v-model:value="missing" class="eop-filter" :options="missingOptions" aria-label="筛选缺失内容" />
         <span class="eop-muted">共 {{ filtered.length }} 条</span>
@@ -36,7 +38,7 @@
       <div v-if="filtered.length" class="eop-list">
         <div class="eop-list-head" aria-hidden="true"><span>场景名称</span><span>专业</span><span>系统／设备</span><span>资料完整情况</span></div>
         <button v-for="item in shown" :key="item.id" type="button" class="eop-list-row" :disabled="busy" @click="openFromList(item.id, $event)">
-          <strong>{{ item.fields['场景名称'] || '未命名场景' }}</strong>
+          <strong>{{ item.fields['场景名称'] || '未命名场景' }}<small v-if="listMode==='other'" class="eop-priority">{{ item.fields['原优先级'] || '等级未设置' }}</small></strong>
           <span class="eop-row-tags">
             <span v-for="field in selectFields.slice(0,2)" :key="field"><span class="eop-tag">{{ item.fields[field] || '未设置' }}</span></span>
             <span class="eop-presence"><span :class="{missing:!item.has_steps}">步骤{{ item.has_steps?'✓':'缺' }}</span><span :class="{missing:!item.has_template}">模板{{ item.has_template?'✓':'缺' }}</span><span :class="{missing:!item.has_images}">图片{{ item.has_images?'✓':'缺' }}</span></span>
@@ -196,6 +198,8 @@ const api = '/api/eop-scenarios';
 const selectFields = ['专业', '系统/设备', '原优先级'];
 const longFields = ['处置正文（原文）', '原通告模板', '原演练场景', '原EOP精炼（参考）'];
 const rows = ref<Row[]>([]);
+const listMode=ref<'p0'|'other'>('p0'),priority=ref('');
+const priorities=computed(()=>[{label:'全部等级',value:''},...Array.from(new Set(rows.value.map(r=>r.fields['原优先级']||'等级未设置'))).sort().map(value=>({label:value,value}))]);
 const record = ref<Detail>();
 const opening = shallowRef<Row>();
 const editing = ref(false);
@@ -241,7 +245,7 @@ const missingOptions = [{label:'全部资料',value:''},{label:'缺少步骤',va
 const missingCounts = computed(() => [{key:'has_steps',label:'步骤',count:rows.value.filter(row=>!row.has_steps).length},{key:'has_template',label:'模板',count:rows.value.filter(row=>!row.has_template).length},{key:'has_images',label:'图片',count:rows.value.filter(row=>!row.has_images).length}]);
 const filtered = computed(() => {
   const query = search.value.trim().toLowerCase();
-  return rows.value.filter(row => (!specialty.value || row.fields['专业'] === specialty.value)
+  return rows.value.filter(row => (!specialty.value || row.fields['专业'] === specialty.value) && (!priority.value || (row.fields['原优先级']||'等级未设置')===priority.value)
     && (!missing.value || !row[missing.value as 'has_steps'|'has_template'|'has_images'])
     && Object.values(row.fields).some(value => value.toLowerCase().includes(query)));
 });
@@ -263,7 +267,7 @@ const assignedPhoto = computed(() => {
   const photo = photos.value.get(assignment.token);
   return index >= 0 && photo ? {key: assignment.key, name: photo.name, index: index+1} : undefined;
 });
-watch([search,specialty,missing], () => { page.value = 1; });
+watch([search,specialty,missing,priority], () => { page.value = 1; });
 watch(() => filtered.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length/pageSize))); });
 watch(preview, () => { previewError.value = false; });
 const choices = (field: string) => [...new Set([...(record.value?.options[field] || []),record.value?.fields[field] || ''])].filter(Boolean);
@@ -313,7 +317,8 @@ async function read<T>(path: string, apply: (data:T) => void) {
     }
   }
 }
-function loadList(refresh=false) { return read<{items:Row[];updated_at?:number}>(api+(refresh?'?refresh=1':''), data => { rows.value = data.items; updatedAt.value=data.updated_at || 0; }); }
+function loadList(refresh=false) { return read<{items:Row[];updated_at?:number}>(api+'?priority_scope='+listMode.value+(refresh?'&refresh=1':''), data => { rows.value = data.items; updatedAt.value=data.updated_at || 0; }); }
+function changeListMode(mode:'p0'|'other'){if(busy.value||mode===listMode.value)return;listMode.value=mode;priority.value='';specialty.value='';missing.value='';search.value='';rows.value=[];page.value=1;void loadList();}
 function applyRecord(data: Detail) {
   revokePictures();
   clearPictureDrag();
@@ -534,7 +539,7 @@ async function save() {
     message.value = '记录已保存到飞书。';
     const row = rows.value.find(item => item.id === current.id);
     if (row) {
-      if (result.record.fields['原优先级']!=='P0-高') rows.value=rows.value.filter(item=>item.id!==row.id);
+      if ((result.record.fields['原优先级']==='P0-高')!==(listMode.value==='p0')) rows.value=rows.value.filter(item=>item.id!==row.id);
       else { row.fields = {...result.record.fields}; row.has_steps=!!result.record.steps.length; row.has_template=!!result.record.fields['原通告模板'].trim(); row.has_images=!!result.record.images.length; }
     }
   } catch (value) { if (!disposed && record.value === current) fail(value); }
@@ -656,4 +661,5 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
   .eop-media-head .n-button,.eop-add-image,.eop-save .n-button,.eop-preview-actions .n-button { min-height:40px; }
   :global(.v2-shell.is-mobile-workspace .eop-page .eop-save) { bottom:calc(62px + env(safe-area-inset-bottom,0px)); }
 }
+.eop-priority{display:block;font-size:12px;font-weight:400;margin-top:4px;color:var(--text-color-3,#64748b)}
 </style>

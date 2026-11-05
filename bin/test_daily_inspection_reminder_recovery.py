@@ -48,6 +48,34 @@ class ReminderRecoveryTests(unittest.TestCase):
                         '2026-11-04': snapshot('2026-11-04', [self.tomorrow])}
         self.calls = []
 
+    def test_future_copy_per_building_retries_without_repeating_staff(self):
+        self.white_e=person('recWhiteE','乙','ou_WhiteE','E','白')
+        copied=person('recCopy','李世龙','ou_Copy','H','白')
+        failed=[False]
+        def send(card,recipients,*,message_uuid):
+            who=recipients[0]
+            title=card['header']['title']['content']
+            self.calls.append((who,message_uuid,title))
+            if who=='ou_Copy' and title.startswith('E') and not failed[0]:
+                failed[0]=True
+                return False,'未发送',[{'open_id':who,'ok':False,'failure_kind':'not_sent'}]
+            return True,'',[receipt(who,message_uuid)]
+        def tick(when):
+            roster=lambda day:{**snapshot(day,[self.white,self.white_e]),'observed_at':when.timestamp()}
+            reminders.process_reminders(LanPortalStateStore(self.path),roster,lambda **_:'https://inspection.example',send,
+                send_card=send,current=when,copy_recipient=lambda app:copied)
+        self.seed(moment(3,9))
+        tick(moment(3,9))
+        tick(moment(3,9,30))
+        tick(moment(3,9,36))
+        tick(moment(3,9,42))
+        self.assertEqual(sum(c[0]=='ou_White' for c in self.calls),1)
+        self.assertEqual(sum(c[0]=='ou_WhiteE' for c in self.calls),1)
+        copies=[c for c in self.calls if c[0]=='ou_Copy']
+        self.assertEqual(len(copies),3)
+        self.assertEqual(len({c[1] for c in copies}),2)
+        self.assertTrue(self.store.get_document(reminders.NAMESPACE,'2026-11-03:白:1')['complete'])
+
     def seed(self, when):
         self.store.put_document(reminders.NAMESPACE, reminders.SCHEDULE_KEY,
                                 {'version': 2, 'cursor': when.timestamp()})

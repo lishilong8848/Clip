@@ -115,9 +115,7 @@ class EopEditor:
                 rid, fields = row.get('record_id'), row.get('fields')
                 if not isinstance(rid, str) or not isinstance(fields, dict):
                     raise RiskError('场景列表存在不完整记录。', 503)
-                if plain(fields.get('原优先级')).strip() == 'P0-高':
-                    attachment_rows(fields)
-                    rows.append({'id': rid, 'fields': fields})
+                rows.append({'id': rid, 'fields': fields})
             if not data['has_more']:
                 return rows
             cursor = data.get('page_token')
@@ -133,7 +131,7 @@ class EopEditor:
         with self.cache_lock:
             if generation != self.cache_generation:
                 return self.cache()
-            value = {'updated_at': time.time(), 'records': {row['id']: row['fields'] for row in rows},
+            value = {'version':2, 'updated_at': time.time(), 'records': {row['id']: row['fields'] for row in rows},
                      'schema': self.detail_schema[2] if self.detail_schema else {}}
             if len(value['records']) != len(rows):
                 raise RiskError('场景列表存在重复记录。', 503)
@@ -147,25 +145,28 @@ class EopEditor:
         with self.cache_lock:
             if self.cached is None and self.store:
                 saved = self.store.get_document('eop_scenario_cache', 'snapshot')
-                if isinstance(saved, dict) and isinstance(saved.get('records'), dict):
+                if isinstance(saved, dict) and saved.get('version') == 2 and isinstance(saved.get('records'), dict):
                     self.cached = saved
             value = self.cached
         return value or self.refresh_cache()
 
-    def cached_list(self):
+    def cached_list(self, priority_scope='p0'):
+        if priority_scope not in ('p0','other'):
+            raise RiskError('场景范围无效。',400)
         value = self.cache()
         return {'items': [{'id': rid, 'fields': {name: plain(fields.get(name)) for name in MAIN},
                            'has_steps': bool(split_steps(plain(fields.get(STEPS)))),
                            'has_template': bool(plain(fields.get('原通告模板')).strip()),
                            'has_images': bool(attachment_rows(fields))}
-                          for rid, fields in value['records'].items()], 'updated_at': value.get('updated_at')}
+                          for rid, fields in value['records'].items()
+                          if (plain(fields.get('原优先级')).strip() == 'P0-高') == (priority_scope == 'p0')], 'updated_at': value.get('updated_at')}
 
     def cached_detail(self, rid, user, editable):
         with self.cache_lock:
             snapshot = self.cache()
             fields = snapshot['records'].get(rid)
             if not fields:
-                raise RiskError('该场景不在当前 P0-高 列表，请刷新后查看。', 404)
+                raise RiskError('该场景不在当前缓存中，请刷新后查看。', 404)
             with self.schema_lock:
                 identity = getattr(self.cloud, 'config_hash', None)
                 cached = self.detail_schema
@@ -184,11 +185,8 @@ class EopEditor:
             return
         value = self.cache()
         records = dict(value['records'])
-        if plain(fields.get('原优先级')).strip() == 'P0-高':
-            records[rid] = fields
-        else:
-            records.pop(rid, None)
-        value = {'updated_at': value.get('updated_at'), 'records': records, 'schema': value.get('schema', {})}
+        records[rid] = fields
+        value = {'version':2, 'updated_at': value.get('updated_at'), 'records': records, 'schema': value.get('schema', {})}
         try:
             self.store.put_document('eop_scenario_cache', 'snapshot', value)
         except Exception:
@@ -283,8 +281,6 @@ class EopEditor:
     def save(self, rid, user, body):
         with self.cache_lock, self.lock:
             current = self.read(rid)
-            if plain(current.get('原优先级')).strip() != 'P0-高':
-                raise RiskError('该场景已不是 P0-高，请刷新列表。', 409)
             if body.get('revision') != self.revision(current):
                 raise RiskError('该记录已变化。请保留当前草稿，重新打开并核对飞书记录。', 409)
             schema = self.schema()
@@ -488,7 +484,7 @@ def install_eop_scenario_routes(app, controller, runtime):
             if request.method == 'GET':
                 if not rid and request.query_params.get('refresh') == '1':
                     await asyncio.to_thread(svc.refresh_cache)
-                data = await asyncio.to_thread(svc.cached_detail, rid, user, editor) if rid else await asyncio.to_thread(svc.cached_list)
+                data = await asyncio.to_thread(svc.cached_detail, rid, user, editor) if rid else await asyncio.to_thread(svc.cached_list, request.query_params.get('priority_scope','p0'))
             else:
                 source = urlsplit(request.headers.get('origin') or request.headers.get('referer') or '')
                 expected = urlsplit(controller._request_base_url(request))

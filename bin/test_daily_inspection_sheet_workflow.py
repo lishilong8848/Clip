@@ -110,6 +110,126 @@ class SheetWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(self.svc.load('E')['active'])
         self.assertIsNone(self.svc.load('D')['active'])
 
+    def test_unconfirmed_round_is_frozen_at_next_slot_and_retried_once(self):
+        import datetime as dt
+        from lan_bitable_template_portal.daily_inspection import CN
+        self.svc.rollover_due('D',dt.datetime(2026,11,3,11,59,tzinfo=CN))
+        self.assertIsNotNone(self.svc.load('D')['active'])
+        self.svc.rollover_due('D',dt.datetime(2026,11,3,12,0,tzinfo=CN))
+        state=self.svc.load('D')
+        self.assertIsNone(state['active'])
+        self.assertEqual(self.svc.completed_rounds(state,DAY),1)
+        report=self.report()
+        self.assertEqual(report['rounds'][0]['status'],'自动确认·待上传')
+        self.assertTrue(report['rounds'][0]['auto_closed'])
+        self.assertTrue(report['rounds'][0]['original_cells'])
+        next_round=self.svc.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        self.assertEqual(next_round['round'],2)
+        self.cloud.lose_receipt=True
+        with self.assertLogs(level='ERROR'):self.svc.retry_rollovers('D')
+        self.cloud.lose_receipt=False
+        self.svc=DailyInspection(self.store,self.cloud)
+        self.svc.download_archive=lambda a:self.cloud.files[a['file_token']]
+        self.svc.retry_rollovers('D')
+        self.svc.retry_rollovers('D')
+        self.assertEqual(self.cloud.creates,1)
+        self.assertEqual(self.svc.load('D')['active']['id'],next_round['id'])
+        self.assertEqual(len(self.svc.load('D')['history']),1)
+        self.assertEqual(self.svc.load('D')['rollovers'],{})
+        self.assertTrue(self.report()['rounds'][0]['auto_closed'])
+
+    def test_unconfirmed_cloud_rollover_is_not_editable(self):
+        import datetime as dt
+        from lan_bitable_template_portal.daily_inspection import CN
+        self.svc.rollover_due('D',dt.datetime(2026,11,3,12,tzinfo=CN))
+        self.cloud.lose_receipt=True
+        with self.assertLogs(level='ERROR'):self.svc.retry_rollovers('D')
+        self.cloud.lose_receipt=False
+        row=self.report()['rounds'][0]
+        self.assertEqual(row['status'],'待归档核验')
+        with self.assertRaisesRegex(RiskError,'归档尚未确认'):
+            self.svc.edit_archive('D','recArchive1',{'version':row['version'],'cells':[]},'甲')
+        self.svc.retry_rollovers('D')
+        self.assertEqual(self.report()['rounds'][0]['status'],'已归档')
+
+    def test_rollover_upload_does_not_lock_or_overwrite_current_round(self):
+        import datetime as dt
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+        from unittest.mock import patch
+        from lan_bitable_template_portal.daily_inspection import CN, NS
+        self.svc.rollover_due('D',dt.datetime(2026,11,3,12,tzinfo=CN))
+        next_round=self.svc.change('a','甲',DAY,'start',{'duty':DAY})['active']
+        entered,release=threading.Event(),threading.Event()
+        original=self.svc.finish
+        def delayed(*args):
+            entered.set()
+            if not release.wait(5):raise RuntimeError('test gate timed out')
+            return original(*args)
+        with patch.object(self.svc,'finish',side_effect=delayed),ThreadPoolExecutor(max_workers=1) as pool:
+            task=pool.submit(self.svc.retry_rollovers,'D')
+            try:
+                self.assertTrue(entered.wait(2))
+                acquired=self.svc.locks['D'].acquire(timeout=.5)
+                self.assertTrue(acquired,'remote upload must not block editing')
+                if acquired:
+                    try:
+                        state=self.svc.load('D');state['active']['concurrent_marker']='kept'
+                        self.store.put_document(NS,'building:D',state)
+                    finally:self.svc.locks['D'].release()
+            finally:release.set()
+            task.result(timeout=5)
+        self.assertEqual(self.svc.load('D')['active']['id'],next_round['id'])
+        self.assertEqual(self.svc.load('D')['active']['concurrent_marker'],'kept')
+
+    def test_rollover_history_keeps_newest_forty(self):
+        from lan_bitable_template_portal.daily_inspection import NS
+        state=self.svc.load('D')
+        state['history']=[{'id':str(i),'duty':DAY,'round':1,'completed':i} for i in range(240,200,-1)]
+        state['rollovers']={'old':{'id':'old','duty':DAY,'round':1}}
+        self.store.put_documents(NS,{'building:D':state,'rollover:old':{'active':None,'history':[{'id':'old','duty':DAY,'round':1,'completed':100}]}})
+        self.svc.retry_rollovers('D')
+        self.assertEqual([r['completed'] for r in self.svc.load('D')['history']],list(range(240,200,-1)))
+
+    def test_night_rollover_preserves_previous_duty_date_across_restart(self):
+        import datetime as dt
+        from lan_bitable_template_portal.daily_inspection import CN, NS
+        state=self.svc.load('D')
+        state['active']['duty']={**DAY,'shift':'夜'}
+        state['active']['round']=2
+        self.store.put_document(NS,'building:D',state)
+        self.svc.rollover_due('D',dt.datetime(2026,11,4,9,29,tzinfo=CN))
+        self.assertIsNotNone(self.svc.load('D')['active'])
+        self.svc=DailyInspection(self.store,self.cloud)
+        self.svc.download_archive=lambda a:self.cloud.files[a['file_token']]
+        self.svc.rollover_due('D',dt.datetime(2026,11,4,9,30,tzinfo=CN))
+        self.svc.retry_rollovers('D')
+        history=self.svc.load('D')['history'][0]
+        self.assertEqual(history['duty'],{**DAY,'shift':'夜'})
+        self.assertEqual(history['round'],2)
+        self.assertEqual(self.report()['rounds'][0]['date'],DAY['date'])
+        self.assertEqual(self.cloud.creates,1)
+
+    def test_restart_between_cloud_confirmation_and_history_merge(self):
+        import datetime as dt
+        from unittest.mock import patch
+        from lan_bitable_template_portal.daily_inspection import CN, NS
+        self.svc.rollover_due('D',dt.datetime(2026,11,3,12,tzinfo=CN))
+        original=self.store.put_document
+        def crash(namespace,key,value):
+            if namespace==NS and key=='building:D':raise RuntimeError('模拟历史合并前停机')
+            return original(namespace,key,value)
+        with patch.object(self.store,'put_document',side_effect=crash),self.assertLogs(level='ERROR'):
+            self.svc.retry_rollovers('D')
+        pending=self.store.get_document(NS,'rollover:'+self.active['id'])
+        self.assertIsNone(pending['active'])
+        self.assertEqual(len(self.report()['rounds']),1)
+        self.svc=DailyInspection(self.store,self.cloud)
+        self.svc.retry_rollovers('D')
+        self.assertEqual(self.cloud.creates,1)
+        self.assertEqual(len(self.svc.load('D')['history']),1)
+        self.assertEqual(self.svc.load('D')['rollovers'],{})
+
     def test_three_personal_orders_are_account_isolated_and_conflict_checked(self):
         from lan_bitable_template_portal.workspace_layout_routes import validate_layout
         from lan_bitable_template_portal.portal_service import PortalConflictError

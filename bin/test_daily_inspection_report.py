@@ -518,6 +518,12 @@ class InspectionAccessTests(unittest.TestCase):
         self.enterContext(patch('lan_bitable_template_portal.daily_inspection.allowed_modules', side_effect=lambda *_: self.modules))
         self.enterContext(patch('lan_bitable_template_portal.module_access.allowed_modules', side_effect=lambda *_: self.modules))
         self.enterContext(patch('lan_bitable_template_portal.daily_inspection.resolve_duty', side_effect=lambda *_: self.duty))
+        # Access tests use a fixed in-shift clock; rollover boundaries have dedicated tests.
+        import datetime as dt
+        from lan_bitable_template_portal.daily_inspection import CN
+        rollover = DailyInspection.rollover_due
+        self.enterContext(patch.object(DailyInspection, 'rollover_due',
+            lambda service, scope: rollover(service, scope, dt.datetime(2026,11,3,10,tzinfo=CN))))
         self.client = self.enterContext(TestClient(app))
 
     def post(self, action, data):

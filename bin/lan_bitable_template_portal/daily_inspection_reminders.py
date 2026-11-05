@@ -129,7 +129,7 @@ def pending_slots(store, current):
     with store._lock, closing(store._connect()) as conn:
         store._ensure_schema_locked(conn)
         rows = conn.execute(f'''SELECT key FROM json_documents
-            WHERE namespace=? AND key<>? AND json_valid(payload_json)
+            WHERE namespace=? AND key<>? AND length(key)=14 AND substr(key,11,1)=':' AND substr(key,13,1)=':' AND json_valid(payload_json)
               AND COALESCE(json_extract(payload_json,'$.complete'),0)<>1
               AND COALESCE(json_extract(payload_json,'$.retry_at'),0)<=?
               AND COALESCE(json_extract(payload_json,'$._lease.until'),0)<=?
@@ -338,10 +338,12 @@ def reminder_card(scope, day, shift, number, url):
 
 
 def process_reminders(store, roster, public_base, send, *, send_card=None, current=None,
-                      stopping=lambda: False, resolve_recipient=None, reconcile_delivery=None):
+                      stopping=lambda: False, resolve_recipient=None, reconcile_delivery=None, copy_recipient=None):
     current = current or dt.datetime.now(CN)
     current = current.replace(tzinfo=CN) if current.tzinfo is None else current.astimezone(CN)
     snapshots = {}
+    if copy_recipient and not store.get_document(NAMESPACE,'__copy_enabled_at__'):
+        store.put_document(NAMESPACE,'__copy_enabled_at__',{'timestamp':current.timestamp()})
 
     def snapshot(day):
         if day not in snapshots:
@@ -360,7 +362,7 @@ def process_reminders(store, roster, public_base, send, *, send_card=None, curre
             return
         try:
             process_slot(store, snapshot, public_base, send, send_card or send, current, day, shift, number,
-                         stopping, resolve_recipient=resolve_recipient, reconcile_delivery=reconcile_delivery)
+                         stopping, resolve_recipient=resolve_recipient, reconcile_delivery=reconcile_delivery, copy_recipient=copy_recipient)
         except Exception as error:
             LOGGER.warning('日常巡检提醒 %s %s班第%d次暂未完成（%s）', day, shift, number, type(error).__name__)
 
@@ -394,8 +396,8 @@ def saved_receipt(store, open_id, message_uuid, target):
 
 
 def process_slot(store, roster, public_base, send, send_card, current, day, shift, number, stopping,
-                 *, resolve_recipient=None, reconcile_delivery=None):
-    key = f'{day}:{shift}:{number}'
+                 *, resolve_recipient=None, reconcile_delivery=None, copy_recipient=None, job_key=None):
+    key = job_key or f'{day}:{shift}:{number}'
     claimed = claim_slot(store, key, current)
     if not claimed:
         return
@@ -571,6 +573,30 @@ def process_slot(store, roster, public_base, send, send_card, current, day, shif
                     state['retargetable'] = sorted(retargetable)
                     save()
                 failed += 1
+        enabled_at = (store.get_document(NAMESPACE,'__copy_enabled_at__') or {}).get('timestamp',current.timestamp())
+        if copy_recipient and not job_key and slot_time(day,shift,number).timestamp() >= enabled_at:
+            for building in sorted({scope for scope,_,_ in recipients.values()}):
+                child_key = 'copy:'+key+':'+building
+                child = store.get_document(NAMESPACE,child_key)
+                try:
+                    if child is None:
+                        person = dict(copy_recipient(snapshot.get('app_id','')))
+                        # If already an original recipient for this building, use that receipt.
+                        original = recipients.get(person.get('open_id'))
+                        if original and original[0] == building and person.get('open_id') in sent:
+                            continue
+                        person.update(scope=building,shift=shift,duty_kind=shift)
+                        copied = {**snapshot,'people':[person],'issues':[]}
+                        with _transaction(store) as conn:
+                            if _document(conn,child_key) is None:
+                                _put(conn,child_key,{'roster_snapshot':copied,'complete':False})
+                    process_slot(store,roster,public_base,send,send_card,current,day,shift,number,stopping,
+                        resolve_recipient=resolve_recipient,reconcile_delivery=reconcile_delivery,job_key=child_key)
+                    if not (store.get_document(NAMESPACE,child_key) or {}).get('complete'):
+                        failed += 1
+                except Exception:
+                    failed += 1
+                    LOGGER.warning('日常巡检 %s %s楼抄送待重试',key,building)
         state.update(missing=missing, failed=failed, complete=not missing and not failed,
                      last_error='' if not missing and not failed else '原班次人员或飞书投递尚未全部确认')
         save()
@@ -587,3 +613,19 @@ def process_slot(store, roster, public_base, send, send_card, current, day, shif
             save_claimed_slot(store, key, state, token, release=True)
         except LeaseLost:
             pass
+
+
+def inspection_copy_person(directory, app_id):
+    snapshot = directory()
+    if snapshot.get('schema') != 4 or snapshot.get('app_id') != app_id:
+        raise ValueError('抄送人员目录的应用身份未核验')
+    matches = [(rid,p) for rid,p in (snapshot.get('people') or {}).items()
+               if str(p.get('employee_no') or '').strip()=='92998' and p.get('name')=='李世龙']
+    if len(matches)!=1:
+        raise ValueError('李世龙的人员记录无法唯一核验')
+    rid,person=matches[0]
+    mapped=(person.get('feishu_open_ids') or {}).get(app_id)
+    ids=[mapped] if mapped else person.get('login_ids') or []
+    if len(set(ids))!=1 or not re.fullmatch(r'ou_[A-Za-z0-9]+',str(ids[0])):
+        raise ValueError('抄送人员的当前飞书账号无法核验')
+    return {'name':person['name'],'employee_no':person['employee_no'],'record_id':rid,'open_id':ids[0]}
