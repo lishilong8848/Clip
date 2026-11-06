@@ -17,7 +17,18 @@ def install_dingtalk_notice_routes(app,controller,runtime):
             return JSONResponse({'ok':False,'error':'通告类型无效。'},status_code=400)
         require_module(runtime.auth_manager,session,work)
         robots=(await asyncio.to_thread(DingTalkNotices(runtime.state_store).config))['robots']
-        return JSONResponse({'ok':True,'data':{'robots':[{key:r[key] for key in ('id','name','remark','scopes','types')} for r in robots if r['enabled']]}},headers={'Cache-Control':'no-store'})
+        selected=[]
+        target=request.query_params.get('target_record_id','')
+        if re.fullmatch(r'rec[A-Za-z0-9_-]+',target):
+            operations=await asyncio.to_thread(runtime.state_store.list_notice_remote_operations_for_target,target)
+            for op in reversed(operations):
+                result=op.get('result') or {}; payload=result.get('robot_payload') or {}; request_data=op.get('request') or {}
+                if op.get('status')!='completed' or request_data.get('work_type')!=work:continue
+                scopes=runtime.service._building_codes_from_value(payload.get('buildings') or request_data.get('building_codes') or request_data.get('building'))
+                if not scopes or not all(runtime.auth_manager.scope_allowed(session,c) for c in scopes):continue
+                ids=request_data.get('dingtalk_robot_ids')
+                if isinstance(ids,list):selected=[value for value in ids if isinstance(value,str)];break
+        return JSONResponse({'ok':True,'data':{'selected_robot_ids':selected,'robots':[{key:r[key] for key in ('id','name','remark','scopes','types')} for r in robots if r['enabled']]}},headers={'Cache-Control':'no-store'})
     app.add_api_route('/api/workbench/dingtalk-options',options,methods=['GET'])
     async def job_delivery(request:Request):
         session=await asyncio.to_thread(controller._current_session,request)

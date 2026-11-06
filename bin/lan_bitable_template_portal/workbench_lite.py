@@ -2603,7 +2603,7 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
-        <fieldset data-dingtalk-picker><legend>钉钉群推送（可多选，不选则不推送钉钉）</legend><input type="hidden" name="dingtalk_robot_ids_json" value="[]"><div data-dingtalk-options style="display:flex;flex-wrap:wrap;gap:8px 18px"></div></fieldset>
+        <fieldset data-dingtalk-picker><legend>钉钉群推送（至少选择一个，后续更新/结束沿用）</legend><input type="hidden" name="dingtalk_robot_ids_json" value="[]"><div data-dingtalk-options style="display:flex;flex-wrap:wrap;gap:8px 18px"></div></fieldset>
         {cycle_warning_html}
         {_polling_work_order_selector(work)}
         {_polling_work_order_status(source, work)}
@@ -7632,9 +7632,11 @@ def render_workbench_lite(
       const work=form.elements.namedItem('work_type')?.value||'maintenance';
       panel.textContent='正在读取机器人…';
       try {{
-        const response=await fetch('/api/workbench/dingtalk-options?work_type='+encodeURIComponent(work),{{credentials:'same-origin'}});
+        const response=await fetch('/api/workbench/dingtalk-options?work_type='+encodeURIComponent(work)+'&target_record_id='+encodeURIComponent(form.elements.namedItem('target_record_id')?.value||''),{{credentials:'same-origin'}});
         const result=await response.json();if(!response.ok||!result.ok)throw new Error(result.error||'机器人读取失败');
         if(!form.isConnected)return;
+        const restored=form.elements.namedItem('dingtalk_robot_ids_json');
+        if(restored&&(!restored.value||restored.value==='[]')&&result.data?.selected_robot_ids?.length)restored.value=JSON.stringify(result.data.selected_robot_ids);
         const render=()=>{{
           if(!form.isConnected)return;
           const field=form.elements.namedItem('dingtalk_robot_ids_json');

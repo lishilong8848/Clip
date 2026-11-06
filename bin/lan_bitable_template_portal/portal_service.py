@@ -44739,6 +44739,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 )
             )
         prepared['dingtalk_robot_ids'] = list(request_payload.get('dingtalk_robot_ids') or [])
+        if prepared.get('work_type') != 'event' and not prepared['dingtalk_robot_ids']:
+            raise PortalError('请至少选择一个钉钉机器人后发送。')
         from .dingtalk_notices import DingTalkNotices, DingTalkError
         try:
             DingTalkNotices(self._state_store).snapshot(prepared.get('notice_type',''),

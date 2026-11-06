@@ -11,7 +11,7 @@
       <div class="table-scroll"><table><thead><tr><th>触发时间</th><th>涉及楼栋</th><th>推送对象</th><th>消息内容</th><th>状态</th></tr></thead>
         <tbody><tr v-for="job in history" :key="job.id"><td data-label="触发时间">{{formatTime(job.created_at)}}</td><td data-label="涉及楼栋">{{label(job.row.scope)}}</td><td data-label="推送对象" class="full"><span v-for="target in Object.values(job.targets || {})" :key="target.id" class="recipient">{{target.name}}（{{status(target.status)}}）</span><span v-if="!Object.keys(job.targets || {}).length">待确定</span></td><td data-label="消息内容" class="full"><b>{{job.row.temperature}} ℃ · {{job.row.mode}}</b><br>{{job.row.hint}}</td><td data-label="状态" class="full">{{status(job.status)}}<span v-if="job.error" class="detail">{{job.error}}</span></td></tr></tbody></table></div>
       <p v-if="!loading && !history.length" class="empty">暂无自动推送记录。</p>
-      <div v-if="total>50" class="paging"><NButton size="small" :disabled="loading||page<=1" @click="load(page-1)">上一页</NButton><span>第 {{page}} / {{Math.ceil(total/50)}} 页 · {{total}} 条</span><NButton size="small" :disabled="loading||page*50>=total" @click="load(page+1)">下一页</NButton></div>
+      <div v-if="total>10" class="paging"><NButton size="small" :disabled="loading||page<=1" @click="load(page-1)">上一页</NButton><span>第 {{page}} / {{Math.ceil(total/10)}} 页 · {{total}} 条</span><NButton size="small" :disabled="loading||page*10>=total" @click="load(page+1)">下一页</NButton></div>
     </section>
   </section>
 </template>

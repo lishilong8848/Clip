@@ -66,7 +66,7 @@
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
         </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
-          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
+          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
           <section class="v2-notice-page-fields">
             <header><span>{{ cycleWarnings.length?'维保周期不一致，请修改标红内容后再发送':missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
 
@@ -85,7 +85,7 @@
       </template>
       <template #footer>
         <div class="v2-notice-editor-footer">
-          <NButton v-if="form?.canDelete&&!confirming" type="error" text :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton>
+          <NButton v-if="form?.canDelete&&!confirming" type="error" text :loading="busy" :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton>
           <span></span>
           <NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton>
           <NButton v-else class="v2-notice-close" type="warning" secondary data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor"><X :size="18" />{{ job&&!terminal?'后台处理，返回列表':job||ambiguous?'返回列表':'关闭' }}</NButton>
@@ -491,7 +491,9 @@ async function retrySopUpload(){if(!form.value?.groupId||busy.value)return;busy.
 function deleteNotice(){
   if(!form.value?.canDelete||locked.value)return;
   const v={...form.value.values},operation=createRepairOperationId('v2-delete');
-  dialog.error({title:'删除整条通告',content:'将删除当前通告及对应目标记录：'+v.title,positiveText:'确认删除',negativeText:'取消',onPositiveClick:async()=>{
+  const deletingDialog=dialog.error({title:'删除整条通告',content:'将删除当前通告及对应目标记录：'+v.title,positiveText:'确认删除',negativeText:'取消',onPositiveClick:async()=>{
+    if(busy.value)return false;
+    deletingDialog.loading=true;deletingDialog.closable=false;deletingDialog.maskClosable=false;
     busy.value=true;
     try{
       await requestJson('/api/ongoing-items/delete',{method:'POST',body:JSON.stringify({scope:v.scope,work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id,source_record_id:v.source_record_id,target_record_id:v.target_record_id,record_id:v.target_record_id||v.record_id,title:v.title,operation_id:operation})});
@@ -499,7 +501,7 @@ function deleteNotice(){
       saved.value=snapshot();editing.value=false;form.value=null;
       window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);
     }catch(e){message.error((e as Error).message);return false;}
-    finally{busy.value=false;}
+    finally{busy.value=false;deletingDialog.loading=false;deletingDialog.closable=true;deletingDialog.maskClosable=true;}
   }});
 }
 const undoOpen=ref(false),undos=ref<Dict[]>([]),undoLoading=ref(false),undoError=ref(''),undoJob=ref<Dict|null>(null);

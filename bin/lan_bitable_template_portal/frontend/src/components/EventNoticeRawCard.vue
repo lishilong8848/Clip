@@ -1,7 +1,7 @@
 <template>
-  <article class="raw-event-card">
-    <header><div><h3>{{ creation?'新建事件通告':title }}</h3><small>{{ stateLabel }}<span v-if="!creation&&unfilled.length"> · 待补充 {{ unfilled.length }} 项资料</span></small></div><button v-if="!creation&&options.can_delete" class="danger" :disabled="busy" @click="deleteOpen=true">删除</button></header>
-    <div v-if="deleteOpen" role="alertdialog" class="feedback"><p>确认删除这条事件？已发群消息不会撤回，后台确认删除成功后才移除卡片。</p><button :disabled="busy" @click="deleteOpen=false">保留</button><button class="danger" :disabled="busy" @click="remove">确认删除</button></div>
+  <article class="raw-event-card" :style="{height:cardHeight+'px'}">
+    <header><button type="button" aria-label="缩小事件卡片" :disabled="cardHeight<=360" @click="cardHeight=Math.max(360,cardHeight-120)">−</button><button type="button" aria-label="放大事件卡片" :disabled="cardHeight>=960" @click="cardHeight=Math.min(960,cardHeight+120)">＋</button><div><h3>{{ creation?'新建事件通告':title }}</h3><small>{{ stateLabel }}<span v-if="!creation&&unfilled.length"> · 待补充 {{ unfilled.length }} 项资料</span></small></div><button v-if="!creation&&options.can_delete" class="danger" :disabled="busy" @click="deleteOpen=true">删除</button></header>
+    <div v-if="deleteOpen" role="alertdialog" class="feedback"><p>确认删除这条事件？已发群消息不会撤回，后台确认删除成功后才移除卡片。</p><button :disabled="busy" @click="deleteOpen=false">保留</button><button class="danger" :disabled="busy" @click="remove"><span v-if="busy" class="delete-spinner" aria-hidden="true"></span>{{busy?'正在删除…':'确认删除'}}</button></div>
     <div class="raw-event-layout">
       <section class="message-side" aria-label="事件通告原文">
         <template v-if="creation||editingAction">
@@ -9,7 +9,7 @@
           <p class="muted">I3 自动发飞书 I3 群；非 I3 不发飞书。钉钉使用右上角的默认机器人。</p>
           <footer><button v-if="!creation&&!frozen" :disabled="busy" @click="editingAction=''">收起，保留填写</button><button v-if="!frozen" class="primary" :disabled="busy||!text.trim()" @click="send">{{ busy?'正在受理…':creation?'发送新增':'发送'+(editingAction==='end'?'结束':'更新') }}</button><button v-else class="primary" :disabled="busy" @click="send">核验并重试原发送</button></footer>
         </template>
-        <template v-else><pre>{{ current.text }}</pre><footer v-if="current.state!=='ended'"><button :disabled="busy" @click="edit('update')">更新</button><button class="primary" :disabled="busy" @click="edit('end')">结束</button></footer></template>
+        <template v-else><pre>{{ current.text }}</pre><footer v-if="current.state==='active'"><button :disabled="busy" @click="edit('update')">更新</button><button class="primary" :disabled="busy" @click="edit('end')">结束</button></footer></template>
         <p v-if="error" class="feedback danger" role="alert">{{ error }}</p>
         <section v-if="current.delivery" class="delivery-status" aria-label="群消息发送结果">
           <strong>群消息：{{ deliveryLabels[current.delivery.state]||'处理中' }}</strong>
@@ -41,13 +41,14 @@
 <script setup lang="ts">
 import {computed,nextTick,onBeforeUnmount,ref,watch} from 'vue';
 import {ApiError,requestJson,type Dict} from '../workspace-v2/client';
-const props=defineProps<{row?:Dict;creation?:boolean;scope:string;options:Dict}>();
+const props=defineProps<{row?:Dict;creation?:boolean;initialText?:string;scope:string;options:Dict}>();
 const emit=defineEmits<{changed:[];accepted:[]}>();
 const uuid=()=>crypto.randomUUID().replace(/-/g,'');
 const pointer='event-compose:'+props.options.user_id+':'+props.scope;
 let initial=props.row?.event_id||'';
 try{if(props.creation)initial=sessionStorage.getItem(pointer)||'';}catch{}
-const eventId=ref(initial||'web_'+uuid()),current=ref<Dict>(props.row||{}),text=ref(''),editingAction=ref(''),busy=ref(false),saving=ref(false),error=ref(''),saveError=ref(''),frozen=ref<Dict|null>(null),deleteOpen=ref(false),retryOpen=ref(false),metadataOpen=ref(innerWidth>=850),textBox=ref<HTMLTextAreaElement|null>(null);
+const cardHeight=ref(600);
+const eventId=ref(initial||'web_'+uuid()),current=ref<Dict>(props.row||{}),text=ref(props.initialText||''),editingAction=ref(''),busy=ref(false),saving=ref(false),error=ref(''),saveError=ref(''),frozen=ref<Dict|null>(null),deleteOpen=ref(false),retryOpen=ref(false),metadataOpen=ref(innerWidth>=850),textBox=ref<HTMLTextAreaElement|null>(null);
 const fields:Record<string,string>={summary:'告警描述',building:'楼栋',specialty:'专业',level:'事件等级',event_source:'来源',occurrence_time:'发生时间'};
 const empty=()=>({summary:'',building:'',specialty:'',level:'',event_source:'',occurrence_time:'',recover_time:'',transfer_to_overhaul:false});
 const base=ref<Dict>({...empty(),...(props.row?.metadata||{})}),metadata=ref<Dict>({...base.value});
@@ -61,7 +62,7 @@ let saveTimer=0,parseTimer=0,parseVersion=0,disposed=false;
 const manualFields=ref<string[]>([]),autoFields=ref<Dict>({});
 const cacheKey=()=> 'event-draft:'+props.options.user_id+':'+eventId.value;
 function persist(){try{sessionStorage.setItem(cacheKey(),JSON.stringify({metadata:metadata.value,base:base.value,text:text.value,editingAction:editingAction.value,frozen:frozen.value,manualFields:manualFields.value,autoFields:autoFields.value}));if(props.creation)sessionStorage.setItem(pointer,eventId.value);}catch{saveError.value='浏览器无法保存草稿，请保持本页打开。';}}
-try{const saved=JSON.parse(sessionStorage.getItem(cacheKey())||'null');if(saved){metadata.value={...empty(),...saved.metadata};base.value={...empty(),...saved.base};text.value=saved.text||'';editingAction.value=saved.editingAction||'';frozen.value=saved.frozen||null;manualFields.value=Array.isArray(saved.manualFields)?saved.manualFields:[];autoFields.value=saved.autoFields||{};}}catch{}
+try{const saved=JSON.parse(sessionStorage.getItem(cacheKey())||'null');if(saved){metadata.value={...empty(),...saved.metadata};base.value={...empty(),...saved.base};text.value=props.initialText||saved.text||'';editingAction.value=saved.editingAction||'';frozen.value=saved.frozen||null;manualFields.value=Array.isArray(saved.manualFields)?saved.manualFields:[];autoFields.value=saved.autoFields||{};}}catch{}
 function merge(value:Dict){const previous=base.value,next={...empty(),...(value.metadata||{})};for(const key of Object.keys(next))if(metadata.value[key]===previous[key])metadata.value[key]=next[key];base.value=next;const issues=Object.fromEntries(Object.entries(value.metadata_issues||{}).filter(([key])=>metadata.value[key]!==next[key]));current.value={...value,metadata_issues:issues};if(!Object.keys(patch()).length&&!Object.keys(issues).length)saveError.value='';persist();}
 watch(()=>props.row,value=>{if(value&&!props.creation)merge(value);},{deep:true});
 function patch(){return Object.fromEntries(Object.keys(empty()).filter(key=>metadata.value[key]!==base.value[key]).map(key=>[key,metadata.value[key]]));}
@@ -78,5 +79,7 @@ async function remove(){if(busy.value)return;busy.value=true;try{await requestJs
 onBeforeUnmount(()=>{clearTimeout(saveTimer);clearTimeout(parseTimer);parseVersion++;persist();void saveMetadata();disposed=true;});
 </script>
 <style scoped>
+.raw-event-card{box-sizing:border-box;overflow:auto;resize:vertical;min-height:360px;max-height:960px}.raw-event-card>header{position:sticky;top:0;background:var(--cf-surface,#fff);z-index:1;padding-bottom:8px}.delete-spinner{display:inline-block;width:13px;height:13px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:delete-spin .8s linear infinite;margin-right:6px}@keyframes delete-spin{to{transform:rotate(360deg)}}
+
 .raw-event-card{border:1px solid var(--cf-border,#d8e0eb);border-radius:10px;padding:14px;background:var(--cf-surface,#fff);color:var(--cf-text,#243447);min-width:0}.raw-event-card header,.raw-event-card footer{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:space-between}.raw-event-card h3{font-size:16px;margin:0;overflow-wrap:anywhere}.raw-event-card header>div{flex:1;min-width:0}.raw-event-card header small,.muted{font-size:12px;opacity:.75}.raw-event-layout{display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,320px);gap:16px;margin-top:12px}.message-side,.metadata-side{min-width:0}.message-side>label,.metadata-fields label{display:grid;gap:5px;font-size:13px}.message-side textarea{min-height:220px}.raw-event-card textarea,.raw-event-card select,.raw-event-card input:not([type=checkbox]){width:100%;min-width:0;box-sizing:border-box;border:1px solid var(--cf-border,#cbd5e1);border-radius:5px;background:var(--cf-surface,#fff);color:inherit;padding:8px;font:inherit;min-height:38px}.raw-event-card textarea{resize:vertical;line-height:1.6}.raw-event-card button{min-height:38px;padding:7px 12px;border:1px solid var(--cf-border,#cbd5e1);border-radius:6px;background:var(--cf-surface,#fff);color:inherit;font:inherit;cursor:pointer}.raw-event-card button:disabled{opacity:.55;cursor:wait}.raw-event-card .primary{background:var(--cf-primary,#1762cf);color:white;border-color:transparent}.raw-event-card .danger{color:#c22b38}.raw-event-card footer{justify-content:flex-end;margin-top:12px}.raw-event-card pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;line-height:1.7;margin:0}.metadata-side{border-left:1px solid var(--cf-border,#d8e0eb);padding-left:14px}.metadata-side summary{font-weight:600;cursor:pointer;min-height:38px;padding:6px 0;box-sizing:border-box}.metadata-side summary span{font-size:12px;margin-left:8px}.metadata-fields{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}.metadata-fields .wide{grid-column:1/-1}.metadata-fields .inline{display:flex;align-items:center;gap:7px}.metadata-status,.delivery-status,.feedback{font-size:13px;overflow-wrap:anywhere}.feedback{padding:9px;background:color-mix(in srgb,var(--cf-primary,#1762cf) 7%,transparent);border-radius:6px}.delivery-status{margin-top:14px}.delivery-status p{display:flex;gap:7px;flex-wrap:wrap;margin:5px 0}.delivery-status small{width:100%;opacity:.8}.delivery-status b{font-weight:500}@media(max-width:850px){.raw-event-layout{grid-template-columns:minmax(0,1fr)}.metadata-side{border-left:0;border-top:1px solid var(--cf-border,#d8e0eb);padding:12px 0 0}.raw-event-card input:not([type=checkbox]),.raw-event-card textarea,.raw-event-card select{font-size:16px}.raw-event-card{padding:12px}}
 </style>

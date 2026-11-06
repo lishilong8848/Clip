@@ -244,9 +244,9 @@ def install_cold_source_monitor(app, controller, runtime):
                 page=max(1,int(request.query_params.get('page','1')))
             except ValueError:
                 raise RiskError('记录页码无效。',400) from None
-            page=min(page,max(1,(len(jobs)+49)//50))
+            page=min(page,max(1,(len(jobs)+9)//10))
             return JSONResponse({'ok':True,'data':{'items':[r for r in rows if allowed(r['scope'])],
-                                                  'history':jobs[(page-1)*50:page*50],
+                                                  'history':jobs[(page-1)*10:page*10],
                                                   'history_total':len(jobs),'history_page':page}},headers={'Cache-Control':'private, no-store'})
         except RiskError as error:
             return JSONResponse({'ok':False,'error':str(error)},status_code=error.status)

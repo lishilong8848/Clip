@@ -130,6 +130,7 @@ class EventNoticeDelivery:
             if action!='start' and not (row['operations'] or row.get('target_record_id')):raise PortalError('请先发送本事件的新增通告。')
             targets=[]
             selected=self.preference(actor)['robot_ids']
+            if not selected:raise PortalError('请至少选择一个默认钉钉机器人后发送。')
             robots={r['id']:r for r in self.ding.config()['robots']}
             for identity in selected:
                 try:target=self.ding.snapshot('事件通告',{'buildings':list(scopes),'mention_buildings':mention_buildings or [],'dingtalk_robot_ids':[identity]})[0]
