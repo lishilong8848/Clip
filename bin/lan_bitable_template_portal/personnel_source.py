@@ -126,7 +126,8 @@ def daily_roster(service, day, *, force=False):
     with _lock:
         cached = service._state_store.get_document(ROSTER_NAMESPACE, day) or {}
         today = dt.datetime.now(TZ).date().isoformat()
-        valid = cached.get('source') == TABLE_ID and cached.get('app_id') == config.app_id and cached.get('complete') is True
+        valid = (cached.get('date') == day and cached.get('source') == TABLE_ID and cached.get('app_id') == config.app_id
+                 and cached.get('complete') is True and observed_on_day(cached.get('observed_at'), day))
         if day != today:
             if valid:
                 return copy.deepcopy(cached)
@@ -167,3 +168,10 @@ def daily_roster(service, day, *, force=False):
                   'observed_at': time.time(), 'people': people, 'issues': issues}
         service._state_store.put_document(ROSTER_NAMESPACE, day, result)
         return copy.deepcopy(result)
+
+
+def observed_on_day(observed_at, day):
+    try:
+        return dt.datetime.fromtimestamp(float(observed_at), TZ).date().isoformat() == day
+    except (TypeError, ValueError, OverflowError, OSError):
+        return False

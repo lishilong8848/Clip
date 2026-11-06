@@ -49,7 +49,7 @@ def install_dingtalk_notice_routes(app,controller,runtime):
             for target in result.get('dingtalk_targets') or []:
                 key=hashlib.sha256((operation_id+':'+target['id']).encode()).hexdigest()
                 row=await asyncio.to_thread(runtime.state_store.get_document,'dingtalk_notices','delivery:'+key) or {'state':'pending'}
-                rows.append({'name':target['name'],'state':row.get('state'),'reason':row.get('reason','')})
+                rows.append({'name':target['name'],'state':row.get('state'),'reason':row.get('reason','') or result.get('dingtalk_selection_error','') or target.get('mention_warning','')})
             state=('skipped' if result.get('dingtalk_delivery_state')=='superseded' else 'sent' if result.get('dingtalk_delivery_state')=='done' else 'failed' if result.get('dingtalk_delivery_state')=='failed' else 'pending') if rows else ('sent' if operation.get('status')=='completed' else 'pending')
             if request.method=='POST':state='pending'
             return JSONResponse({'ok':True,'data':{'state':state,'robots':rows,'time_warning':'实际开始时间已被其他操作修改，未覆盖，请核对记录。' if result.get('dingtalk_start_time_state')=='conflict' else ''}},headers={'Cache-Control':'no-store'})

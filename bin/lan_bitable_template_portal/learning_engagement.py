@@ -107,7 +107,7 @@ def repeated_reminders(service, current):
             period = int((current - start).total_seconds() // 7200)
             if period < 1 or current >= end:
                 continue
-            learners = shift_learners(service, day, shift)
+            learners = shift_learners(service, day, shift, current=current)
             if learners is None:
                 unavailable.add(day)
                 continue

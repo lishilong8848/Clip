@@ -134,13 +134,14 @@ def collect(service, date, current, conn, directory, app_id):
     from .learning_shift_storage import person_open_id
     from .learning_schedule import windows
     from .learning_reminders import excluded_long_day
+    from .personnel_source import observed_on_day
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
               'completed': [], 'unfinished': [], 'failed': [], 'unverified': [], **_question_summary(service, conn)}
     view = SimpleNamespace(_get=lambda kind, key: service._get(kind, key, conn), settings=service.settings)
     roster = completion._snapshot(view, date)
-    if roster is None:
-        result['unverified'].append({'reason': '昨日排班快照缺失或版本待核对，名单不全，不能判定为零人未完成。'})
+    if roster is None or not observed_on_day(roster.get('observed_at'),date):
+        result['unverified'].append({'reason': '昨日排班快照缺失或采集日期待核对，不能用今天的排班判断昨日未完成。'})
         return result
     for issue in roster.get('issues', []):
         if not excluded_long_day(issue):
@@ -239,6 +240,13 @@ def collect(service, date, current, conn, directory, app_id):
         notices = [n for n in data['notification'] if n.get('kind') == 'shift'
                    and n.get('shift') == shift and n.get('open_id') == duty['open_id']]
         status, reason = _delivery(notices, duty['open_id'], app_id)
+        if status == 'sent':
+            try:
+                sent=dt.datetime.fromisoformat(notices[0].get('sent_at',''))
+                sent=sent.astimezone(core.TZ) if sent.tzinfo else sent.replace(tzinfo=core.TZ)
+                if not windows(date,shift)[0] <= sent < end:raise ValueError()
+            except (ValueError,TypeError):
+                status,reason='unverified','题单发送时间不在该班时段或缺失，不能判定昨日未完成。'
         if status != 'sent':
             result['failed' if status in {'failed', 'pending'} else 'unverified'].append({**row, 'reason': reason})
         else:

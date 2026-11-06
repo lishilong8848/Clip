@@ -56,8 +56,10 @@ def request_recompute(service, dates):
 
 def _snapshot(service, date):
     from .learning_reminders import ROSTER_VERSION
+    from .personnel_source import observed_on_day
     value = service._get('local', 'shift_roster:' + date) or service._get('local', 'shift_roster') or {}
-    return value if value.get('date') == date and value.get('version') == ROSTER_VERSION and isinstance(value.get('people'), list) else None
+    return value if (value.get('date') == date and value.get('version') == ROSTER_VERSION
+        and isinstance(value.get('people'), list) and (not value.get('observed_at') or observed_on_day(value['observed_at'],date))) else None
 
 
 def _status(task, current):
@@ -437,7 +439,7 @@ def refresh(service, current=None):
         from .learning_reminders import roster_snapshot
         for date in sorted(dates):
             if date >= (current.date() - dt.timedelta(days=1)).isoformat():
-                roster_snapshot(service, date)
+                roster_snapshot(service, date, current=current)
     data = _data(service)
     for date in sorted(dates):
         if date > current.date().isoformat():

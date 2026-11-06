@@ -13127,6 +13127,12 @@ class PortalRuntime:
         from .event_priority import blockers, is_event
         from .notice_actions import (trusted_notice_request, check_notice_job_owner,
                                      bind_notice_job, notice_job_impersonation)
+        # This endpoint and its deferred queue are exclusively for Qt. Ignore
+        # robot choices left by older Qt drafts; web submissions use a separate path.
+        request_payload = copy.deepcopy(request_payload or {})
+        request_payload.pop('dingtalk_robot_ids', None)
+        if isinstance(request_payload.get('data_dict'), dict):
+            request_payload['data_dict'].pop('dingtalk_robot_ids', None)
         if not _queued_job_id:
             request_payload = trusted_notice_request(request_payload)
             request_payload['data_dict'] = trusted_notice_request(request_payload.get('data_dict') or {})

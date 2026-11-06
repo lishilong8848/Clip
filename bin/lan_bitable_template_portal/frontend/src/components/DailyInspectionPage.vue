@@ -33,6 +33,8 @@
           <NButton type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length" @click="start">开始第 {{ state.completed_rounds+1 }} 次巡检</NButton>
           <span v-if="previewBusy">正在读取本次数据…</span><span v-if="previewError" class="warning">{{ previewError }}</span>
         </div>
+        <span v-else-if="duty && !active && state.completed_rounds>=state.round_limit">{{ duty.scope }}楼本班 {{ state.round_limit }} 次巡检已完成</span>
+        <span v-else-if="duty && !active && readOnly">{{ duty.scope }}楼当前为查看模式</span>
       </template>
     </DailyInspectionWorkbook>
     <template v-if="state && !historyOpen && !sheetOpen">
@@ -844,11 +846,15 @@ function switchView(scope:string) {
   if (scope!==state.value?.view_scope) void fetchState('load',undefined,scope);
 }
 const start = ()=>fetchState('start',{duty:duty.value,professions:selectedProfessions.value});
-let entryStarted=false;
-watch([()=>preview.value,()=>active.value?.id,()=>busy.value],()=>{
-  if(entryStarted || !state.value || busy.value || readOnly.value)return;
-  if(active.value || state.value.completed_rounds>=state.value.round_limit){entryStarted=true;return;}
-  if(preview.value && selectedProfessions.value.length && duty.value){entryStarted=true;void start();}
+const entryStarted=new Set<string>();
+watch([()=>preview.value,()=>active.value?.id,()=>busy.value,()=>state.value?.view_scope],()=>{
+  const current=state.value,shift=duty.value;
+  if(!current || !shift || busy.value || readOnly.value)return;
+  const scope=current.view_scope || shift.scope;
+  const key=JSON.stringify([scope,shift.date,shift.shift]);
+  if(entryStarted.has(key))return;
+  if(active.value || current.completed_rounds>=current.round_limit){entryStarted.add(key);return;}
+  if(preview.value?.scope===scope && selectedProfessions.value.length){entryStarted.add(key);void start();}
 });
 async function confirmProfession(name:string) {
   if (!active.value || autoController || busy.value || professionConfirmed(name)) return;

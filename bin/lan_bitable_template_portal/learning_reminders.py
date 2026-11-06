@@ -59,7 +59,8 @@ def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False,
               and (include_long_day or not excluded_long_day(person))]
     issues = [dict(issue) for issue in snapshot.get('issues', []) if (not issue.get('scope') or issue['scope'] in scopes)
               and (include_long_day or not excluded_long_day(issue))]
-    return {'people': people, 'issues': issues} if with_status else people
+    return {'people': people, 'issues': issues, 'source_date':snapshot['date'],
+            'source_observed_at':snapshot['observed_at']} if with_status else people
 
 
 def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
@@ -107,16 +108,22 @@ def resolve_roster(people, directory, *, allowed_scopes=tuple('ABCDEH')):
     return list(resolved.values()), warnings
 
 
-def roster_snapshot(service, day):
+def roster_snapshot(service, day, *, current=None):
+    from .personnel_source import observed_on_day
+    from . import learning as core
+    current = current or core.now()
+    current = current.astimezone(TZ) if current.tzinfo else current.replace(tzinfo=TZ)
+    today = current.date().isoformat()
     snapshot = service._get('local', 'shift_roster') or {}
     if snapshot.get('date') != day:
         snapshot = service._get('local', 'shift_roster:' + day) or {}
-    if (snapshot.get('date') == day and day < dt.datetime.now(TZ).date().isoformat()
-            and snapshot.get('version') in {3, 4, 5, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)):
+    if (snapshot.get('date') == day and day < today
+            and snapshot.get('version') in {3, 4, 5, ROSTER_VERSION} and isinstance(snapshot.get('people'), list)
+            and observed_on_day(snapshot.get('observed_at'),day)):
         return snapshot
-    if (snapshot.get('date') != day or snapshot.get('version') != ROSTER_VERSION
+    if (snapshot.get('date') != day or not observed_on_day(snapshot.get('observed_at'),day) or snapshot.get('version') != ROSTER_VERSION
             or snapshot.get('policy_version') != ROSTER_POLICY_VERSION
-            or time.time() - float(snapshot.get('observed_at') or 0) >= 300):
+            or time.time() - float(snapshot.get('cached_at') or snapshot.get('observed_at') or 0) >= 300):
         retry = service._get('local', 'shift_roster_retry:' + day) or service._get('local', 'shift_roster_retry') or {}
         if (snapshot.get('version') in (None, ROSTER_VERSION)
                 and retry.get('policy_version') == ROSTER_POLICY_VERSION
@@ -128,6 +135,14 @@ def roster_snapshot(service, day):
             issues = value.get('issues', []) if isinstance(value, dict) else []
             if not isinstance(people, list) or not isinstance(issues, list):
                 raise ValueError('invalid roster snapshot')
+            observed = value.get('source_observed_at') if isinstance(value,dict) else None
+            if day < today and (not isinstance(value,dict)
+                    or value.get('source_date') != day or not observed_on_day(observed,day)):
+                raise ValueError('历史排班采集日期无法核验。')
+            if not observed:
+                observed=current.timestamp()
+            if not observed_on_day(observed,day):
+                raise ValueError('排班采集日期不匹配。')
         except Exception:
             with service.transaction() as conn:
                 retry = {'date': day, 'retry_at': time.time() + 300, 'policy_version': ROSTER_POLICY_VERSION}
@@ -136,14 +151,14 @@ def roster_snapshot(service, day):
             service._last_error = '学练排班名单读取失败，5分钟后重试；原楼栋提醒不受影响。'
             return
         snapshot = {'date': day, 'people': people, 'issues': issues, 'version': ROSTER_VERSION,
-                    'policy_version': ROSTER_POLICY_VERSION, 'observed_at': time.time()}
+                    'policy_version': ROSTER_POLICY_VERSION, 'observed_at': observed, 'cached_at': time.time()}
         with service.transaction() as conn:
             service._put('local', 'shift_roster', snapshot, conn, False)
             service._put('local', 'shift_roster:' + day, snapshot, conn, False)
     return snapshot
 
 
-def shift_learners(service, day, shift):
+def shift_learners(service, day, shift, *, current=None):
     from .learning_personal import _login_directory, _hr_learning_scopes, resolve_self
 
     if not service._shift_roster_reader:
@@ -154,7 +169,7 @@ def shift_learners(service, day, shift):
         return None
     if not valid:
         return None
-    snapshot = roster_snapshot(service, day)
+    snapshot = roster_snapshot(service, day, current=current)
     if snapshot is None:
         return None
     roster, warnings = resolve_roster(snapshot['people'], directory)
@@ -188,7 +203,7 @@ def enqueue_shift_reminders(service, current):
         service._last_error = '本地人员目录暂未就绪，个人学练提醒等待核对后发送。'
         return
     day = current.date().isoformat()
-    snapshot = roster_snapshot(service, day)
+    snapshot = roster_snapshot(service, day, current=current)
     if snapshot is None:
         return
     people, warnings = resolve_roster(snapshot['people'], directory)

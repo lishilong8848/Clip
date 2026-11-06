@@ -112,7 +112,7 @@ class EventNoticeDelivery:
             self.store.put_document(NS,event_id,row)
             return self.public(row)
 
-    def accept(self,event_id,operation_id,actor,scopes,action,text):
+    def accept(self,event_id,operation_id,actor,scopes,action,text,*,mention_buildings=None):
         if action not in ('start','update','end'):raise PortalError('请选择新增、更新或结束。')
         if not isinstance(text,str) or not text.strip() or len(text.encode('utf-8'))>15000:raise PortalError('请粘贴事件通告原文，单条不超过15000字节。')
         if not re.fullmatch(r'[a-f0-9]{32}',operation_id):raise PortalError('发送操作标识无效。')
@@ -132,7 +132,7 @@ class EventNoticeDelivery:
             selected=self.preference(actor)['robot_ids']
             robots={r['id']:r for r in self.ding.config()['robots']}
             for identity in selected:
-                try:target=self.ding.snapshot('事件通告',{'buildings':list(scopes),'dingtalk_robot_ids':[identity]})[0]
+                try:target=self.ding.snapshot('事件通告',{'buildings':list(scopes),'mention_buildings':mention_buildings or [],'dingtalk_robot_ids':[identity]})[0]
                 except DingTalkError as exc:
                     target={'id':identity,'name':robots.get(identity,{}).get('name','已失效机器人'),'invalid':str(exc)}
                 targets.append({'channel':'dingtalk',**target})
@@ -140,7 +140,7 @@ class EventNoticeDelivery:
             if feishu is not None:targets.append({'channel':'feishu',**feishu})
             if not targets:raise PortalError('非I3事件不发飞书群，请先在右上角设置默认钉钉机器人。')
             row['sequence']+=1
-            op={'operation_id':operation_id,'intent':intent,'access_scopes':list(scopes),'sequence':row['sequence'],'targets':targets,'receipts':{},'state':'pending','created_at':time.time()}
+            op={'operation_id':operation_id,'intent':intent,'access_scopes':list(scopes),'sequence':row['sequence'],'targets':targets,'dingtalk_selection':list(selected),'receipts':{},'state':'pending','created_at':time.time()}
             row['operations'].append(operation_id);row.update(text=text,updated_at=time.time(),sync_next_at=0)
             if action=='start':row['start_requested_at']=op['created_at']
             self.store.enqueue_outbox_event(CHANNEL,{'operation_id':operation_id,'event_id':event_id,'idempotency_key':operation_id},
@@ -260,8 +260,16 @@ class EventNoticeDelivery:
                     self.store.mark_outbox_event(task['id'],'done',count_attempt=False);return
                 if not external_real_write_guard().get('real_write_allowed'):
                     self.store.mark_outbox_event(task['id'],'deferred',error='当前运行环境禁止真实消息发送',count_attempt=False);return
+                actual=[target for target in op['targets'] if target['channel']=='dingtalk']
+                selected=op.get('dingtalk_selection')
+                if selected is not None and not self.ding.selection_matches({'request':{'dingtalk_robot_ids':selected},'result':{'dingtalk_targets':actual}}):
+                    for target in actual:
+                        self._receipt(op,target,{'state':'failed','reason':'钉钉目标与本次默认选择不一致，已停止发送，请核对设置。'})
+                    targets=[target for target in op['targets'] if target['channel']!='dingtalk']
+                else:
+                    targets=op['targets']
                 with ThreadPoolExecutor(max_workers=max(1,min(21,len(op['targets']))),thread_name_prefix='event-groups') as pool:
-                    futures=[pool.submit(self._send_target,op,target) for target in op['targets']]
+                    futures=[pool.submit(self._send_target,op,target) for target in targets]
                     for future in futures:
                         try:future.result()
                         except Exception:pass
@@ -279,6 +287,9 @@ class EventNoticeDelivery:
             if not row or not op or op['intent']['event_id']!=event_id:raise PortalError('原发送任务不存在。')
             if row['state']=='deleted':raise PortalError('事件已删除，未重发。')
             if op['sequence']<row.get('sequence',0):raise PortalError('已有后续事件消息，不重发旧通告。')
+            actual=[target for target in op['targets'] if target['channel']=='dingtalk']
+            if op.get('dingtalk_selection') is not None and not self.ding.selection_matches({'request':{'dingtalk_robot_ids':op['dingtalk_selection']},'result':{'dingtalk_targets':actual}}):
+                raise PortalError('原任务的钉钉目标与默认选择不一致，请核对设置。')
             if op['state']=='pending':return self.public(row)
             uncertain=any(r.get('state') in ('posting','uncertain') for r in op['receipts'].values())
             if uncertain and not confirm_uncertain:raise PortalError('部分群消息结果未确认，请先核对群中是否已收到，再确认重发。')
@@ -289,6 +300,9 @@ class EventNoticeDelivery:
                 if target['channel']=='dingtalk':
                     try:current=self.ding.snapshot('事件通告',{'buildings':op.get('access_scopes') or row['access_scopes'],'dingtalk_robot_ids':[target['id']]})[0]
                     except DingTalkError as exc:target['invalid']=str(exc);continue
+                    # Keep the mention audience accepted with the original task.
+                    current['mention_cipher']=target.get('mention_cipher','')
+                    current['mention_warning']=target.get('mention_warning','')
                     target.update(current);target.pop('invalid',None)
                     delivery_id=receipt.get('delivery_id') or hashlib.sha256(('web-event:'+operation_id+':'+target['id']).encode()).hexdigest()
                     delivery=self.store.get_document('dingtalk_notices','delivery:'+delivery_id)

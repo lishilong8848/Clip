@@ -22,6 +22,7 @@ for(const legacy of [false,true])for(const [width,height] of [[402,874],[440,956
  await page.route(url=>url.pathname.startsWith('/api/'),async route=>{const req=route.request(),pathname=new URL(req.url()).pathname;let data={},status=200;
   if(pathname==='/api/workbench-events/options')data=options;
   else if(pathname==='/api/workbench-events')data={...options,items:rows};
+  else if(pathname==='/api/workbench-events/parse'){if(req.postDataJSON().text.includes('自动识别测试')){await new Promise(resolve=>setTimeout(resolve,350));data={summary:'自动概述',building:'D',level:'I3',specialty:'电气'};}else if(req.postDataJSON().text.includes('无等级识别测试'))data={building:'D'};}
   else if(pathname==='/api/workbench-events/defaults'){options.defaults={robot_ids:req.postDataJSON().robot_ids,revision:options.defaults.revision+1};data=options.defaults;}
   else if(pathname==='/api/workbench-events/send'){
    const body=req.postDataJSON();posts.push(body);if(failStart){failStart=false;status=503;}
@@ -44,6 +45,18 @@ for(const legacy of [false,true])for(const [width,height] of [[402,874],[440,956
  await ended.getByLabel('告警描述',{exact:true}).fill('结束后补充的资料');await ended.getByRole('status').filter({hasText:'多维资料已同步'}).waitFor();assert.equal(posts.length,3);assert(metadataWrites>0);
  const existing=page.locator('.event-grid .raw-event-card').filter({has:page.getByRole('heading',{name:'隔离事件卡片',exact:true})});
  await existing.getByRole('button',{name:'删除',exact:true}).click();await existing.getByRole('button',{name:'确认删除',exact:true}).click();await existing.getByText('模拟故障，原任务保留',{exact:true}).waitFor();assert.equal(await existing.count(),1);await existing.getByRole('button',{name:'确认删除',exact:true}).click();await existing.waitFor({state:'detached'});
+ if(width<850)await card.locator('.metadata-side > summary').click();
+ await card.getByLabel('本次通告原文').fill('自动识别测试');
+ await card.getByLabel('告警描述',{exact:true}).fill('用户手填优先');
+ await card.getByLabel('事件资料楼栋').waitFor();
+ await page.waitForFunction(()=>document.querySelector('select[aria-label="事件资料楼栋"]')?.value==='D');
+ assert.equal(await card.getByLabel('告警描述',{exact:true}).inputValue(),'用户手填优先');
+ assert.equal(await card.getByLabel('事件资料等级').inputValue(),'I3');
+ assert.equal(await card.getByLabel('事件资料专业').inputValue(),'电气');
+ await card.getByLabel('本次通告原文').fill('无等级识别测试');
+ await page.waitForFunction(()=>document.querySelector('select[aria-label="事件资料等级"]')?.value==='');
+ assert.equal(await card.getByLabel('告警描述',{exact:true}).inputValue(),'用户手填优先');
+ assert.equal(await card.getByLabel('事件资料专业').inputValue(),'');
  assert.deepEqual(errors,[]);await context.close();console.log(`raw event ${legacy?'legacy':'new'} ${width}x${height}: PASS`);
 }
 }finally{await browser.close();await server.close();}

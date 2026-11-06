@@ -19,6 +19,64 @@ class WebEventTests(unittest.TestCase):
             'title':'D楼隔离验证事件','content':'隔离测试概述','impact':'隔离测试影响','progress':'隔离测试进展',
             'time_str':'2026-11-05 09:00','event_source':'巡检发现','level':'I3','specialty':'电气','building_codes':['D']}
 
+    def test_pasted_event_autofill_uses_explicit_fields_without_guessing(self):
+        from lan_bitable_template_portal.event_notice_web import parse_event_metadata
+        text=('【事件通告】状态：新增\n【标题】D楼I3隔离事件\n【概述】设备告警\n'
+              '【事件发生时间】2026-11-05 09:30\n【来源】BMS\n【专业】电气')
+        self.assertEqual(parse_event_metadata(self.service,text,['D']),{
+            'summary':'设备告警','building':'D','level':'I3','event_source':'BMS动环系统告警',
+            'specialty':'电气','occurrence_time':'2026-11-05 09:30'})
+        result=parse_event_metadata(self.service,'【标题】D楼和E楼事件\n【发生时间】9:30',['D','E'])
+        self.assertNotIn('building',result);self.assertNotIn('occurrence_time',result)
+        self.assertNotIn('building',parse_event_metadata(self.service,text,['E']))
+
+    def test_mention_uses_actual_event_buildings_not_actor_scope(self):
+        from lan_bitable_template_portal.event_notice_web import event_mention_buildings
+        scopes=['D','E']
+        self.assertEqual(event_mention_buildings(self.service,'【标题】D楼事件',scopes,{}, {}, []),['D'])
+        self.assertEqual(event_mention_buildings(self.service,'【标题】D楼和E楼事件',scopes,{}, {}, []),['D','E'])
+        self.assertEqual(event_mention_buildings(self.service,'【位置】发电机房\n【标题】E楼事件',scopes,{}, {}, []),['E'])
+        self.assertEqual(event_mention_buildings(self.service,'【位置】D楼\n【标题】E楼事件',scopes,{}, {}, []),[])
+        self.assertEqual(event_mention_buildings(self.service,'【标题】事件',scopes,{}, {}, []),[])
+        self.assertEqual(event_mention_buildings(self.service,'【标题】D楼事件',scopes,{}, {'building':'E'}, ['building']),['E'])
+        self.assertEqual(event_mention_buildings(self.service,'【标题】D楼事件',['E'],{}, {}, []),[])
+
+    def test_api_immediate_send_fills_missing_data_and_preserves_manual_values(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from lan_bitable_template_portal.event_notice_web import install_event_notice_web
+        from lan_bitable_template_portal.event_notice_delivery import EventNoticeDelivery
+        store=self.service._state_store
+        auth=SimpleNamespace(scope_allowed=lambda session,scope:scope=='D',account_profile=lambda _: {'can_delete_business':False})
+        async def read_json(request,max_bytes):return await request.json()
+        controller=SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'fixture-user'}},
+            _authorized_scope_or_error=lambda session,scope:scope,_request_base_url=lambda _: 'http://testserver',
+            _read_json_request=read_json)
+        runtime=SimpleNamespace(service=self.service,state_store=store,auth_manager=auth)
+        manager=EventNoticeDelivery(runtime)
+        robot=manager.ding.save({'revision':0,'robots':[{'name':'隔离群','enabled':True,'scopes':[],'types':[],
+            'webhook':'https://oapi.dingtalk.com/robot/send?access_token='+'a'*64,'secret':'SEC'+'s'*64}]})['robots'][0]
+        manager.save_preference('fixture-user',[robot['id']],0)
+        app=FastAPI()
+        with patch('lan_bitable_template_portal.event_notice_delivery.dispatch'):
+            install_event_notice_web(app,controller,runtime)
+        raw='【事件通告】状态：新增\n【标题】D楼I3事件\n【概述】原文概述\n【发生时间】2026-11-05 09:30\n【来源】BMS\n【专业】电气'
+        body={'scope':'D','event_id':'web_'+'a'*32,'operation_id':'1'*32,'action':'start','text':raw,
+            'metadata_patch':{'summary':'人工概述'},'metadata_base':{},'manual_fields':['summary']}
+        with TestClient(app) as client,patch('lan_bitable_template_portal.module_access.allowed_modules',return_value=['event']),patch('lan_bitable_template_portal.event_notice_delivery.dispatch'):
+            response=client.post('/api/workbench-events/send',json=body,headers={'origin':'http://testserver'})
+        self.assertEqual(response.status_code,200,response.text)
+        data=response.json()['data'];self.assertEqual(data['text'],raw)
+        self.assertEqual(data['metadata']['summary'],'人工概述');self.assertEqual(data['metadata']['building'],'D')
+        self.assertEqual(data['metadata']['occurrence_time'],'2026-11-05 09:30')
+        second='web_'+'b'*32
+        manager.save_metadata(second,'fixture-user',['D'],{'summary':'上一段自动概述'},{})
+        body.update(event_id=second,operation_id='2'*32,metadata_patch={},manual_fields=[],auto_fields={'summary':'上一段自动概述'})
+        with TestClient(app) as client,patch('lan_bitable_template_portal.module_access.allowed_modules',return_value=['event']),patch('lan_bitable_template_portal.event_notice_delivery.dispatch'):
+            response=client.post('/api/workbench-events/send',json=body,headers={'origin':'http://testserver'})
+        self.assertEqual(response.status_code,200,response.text)
+        self.assertEqual(response.json()['data']['metadata']['summary'],'原文概述')
+
     def test_event_start_update_end_use_existing_text_and_upload_without_screenshot(self):
         from lan_bitable_template_portal.server import PortalRuntime
         for action,label in [('start','新增'),('update','更新'),('end','结束')]:

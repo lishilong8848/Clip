@@ -26,8 +26,11 @@ class SheetWorkflowTests(unittest.TestCase):
         c=self.target();edit={k:c[k] for k in ('template','sheet','cell')};edit['value']='123'
         body={'id':self.active['id'],'review_version':0,'sheet_cells':[edit]}
         saved=self.svc.change('a','甲',DAY,'draft',body)['active']
+        self.assertEqual(saved['manual_sheet_cells'],[{k:edit[k] for k in ('template','sheet','cell')}])
         restored=DailyInspection(self.store,self.cloud)
-        self.assertEqual(restored.change('a','甲',DAY,'draft',body)['active']['review_version'],saved['review_version'])
+        replay=restored.change('a','甲',DAY,'draft',body)['active']
+        self.assertEqual(replay['review_version'],saved['review_version'])
+        self.assertEqual(replay['manual_sheet_cells'],saved['manual_sheet_cells'])
         with self.assertRaisesRegex(RiskError,'逐页'):
             self.svc.change('a','甲',DAY,'finish',{'id':self.active['id'],'review_version':saved['review_version'],'sheet_workflow':True,'visited_sheets':[]})
         self.assertEqual(self.cloud.creates,0)
@@ -100,6 +103,18 @@ class SheetWorkflowTests(unittest.TestCase):
         self.assertEqual(next(c['value'] for c in latest_e['rounds'][0]['original_cells'] if all(c[k]==e_edit[k] for k in ('template','sheet','cell'))),'235')
         self.assertIsNotNone(self.store.get_document(NS,'submitted:'+self.active['id']))
         self.assertIsNone(self.store.get_document(NS,'submitted:'+e['id']))
+
+    def test_e_cover_is_not_required_and_d_stays_independent(self):
+        duty={**DAY,'scope':'E'}
+        active=self.svc.change('b','乙',duty,'start',{'duty':duty})['active']
+        visited=[json.dumps([template['name'],sheet['name']],ensure_ascii=False,separators=(',',':'))
+                 for template in original_templates() if template['scope']=='E'
+                 for sheet in template['sheets'] if sheet['name'].strip()!='封面']
+        self.assertTrue(any(sheet['name'].strip()=='封面' for t in original_templates() if t['scope']=='E' for sheet in t['sheets']))
+        with self.assertRaisesRegex(RiskError,'逐页'):
+            self.svc.change('b','乙',duty,'finish',{'id':active['id'],'review_version':0,'sheet_workflow':True,'visited_sheets':visited[:-1]})
+        self.svc.change('b','乙',duty,'finish',{'id':active['id'],'review_version':0,'sheet_workflow':True,'visited_sheets':visited})
+        self.assertEqual(self.svc.load('D')['active']['id'],self.active['id'])
 
     def test_d_archive_receipt_failure_does_not_block_e_draft(self):
         e_duty={**DAY,'scope':'E'}

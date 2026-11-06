@@ -652,6 +652,8 @@ class MainWindowWorkflowMixin:
             dict(data_snapshot or {})
         )
         command_data.pop("_upload_operation_id", None)
+        # A saved Qt draft may predate the separation from web DingTalk sends.
+        command_data.pop("dingtalk_robot_ids", None)
         request_payload = {
             "action_type": str(action_type or "").strip(),
             "operation_id": operation_id,

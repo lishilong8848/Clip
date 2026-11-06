@@ -63,7 +63,8 @@ export function restoreNoticeEdits(form:NoticeForm,cached:Dict,version:number):b
     if(field.readonly||!Object.prototype.hasOwnProperty.call(cached.snapshot.values,field.key))continue;
     if(JSON.stringify(cached.snapshot.values[field.key])!==JSON.stringify(cached.baseValues[field.key]))form.values[field.key]=cached.snapshot.values[field.key];
   }
-  if(Array.isArray(cached.snapshot.values.dingtalk_robot_ids))form.values.dingtalk_robot_ids=[...cached.snapshot.values.dingtalk_robot_ids];
+  // Destinations are a per-send decision, not part of a reusable notice draft.
+  form.values.dingtalk_robot_ids=[];
   return true;
 }
 // Display-only formats mirror the existing web preview; submission remains noticeCommand.

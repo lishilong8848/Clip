@@ -323,7 +323,7 @@ class EnqueueShiftRemindersTests(TestCase):
         today = dt.datetime.now(reminders.TZ).date()
         day, yesterday = today.isoformat(), (today-dt.timedelta(days=1)).isoformat()
         old = {'date':day, 'version':reminders.ROSTER_VERSION, 'people':[], 'observed_at':999}
-        previous = {**old, 'date':yesterday}
+        previous = {**old, 'date':yesterday, 'observed_at':dt.datetime.combine(today-dt.timedelta(days=1), dt.time(15), tzinfo=reminders.TZ).timestamp()}
         reader = Mock(side_effect=ValueError('offline'))
         service = self.FakeService(reader, local={'shift_roster':old, 'shift_roster:'+yesterday:previous})
         with patch.object(reminders.time,'time',return_value=1000):

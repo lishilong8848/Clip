@@ -4359,7 +4359,7 @@ def render_workbench_lite(
         liteDraftRestoring = true;
         try {{
           for (const [name, value] of Object.entries(fields)) {{
-            if (name === 'building_codes') continue;
+            if (name === 'building_codes' || name === 'dingtalk_robot_ids_json') continue;
             setFormValue(form, name, value == null ? '' : String(value));
           }}
           if (Array.isArray(fields.building_codes)) {{
@@ -5103,7 +5103,6 @@ def render_workbench_lite(
       'mop_status', 'zhihang_record_id', 'lan_zhihang_record_id', 'zhihang_involved'
     ]);
     const noticeFormValueKeys = [
-      'dingtalk_robot_ids_json',
       'notice_type', 'title', 'building', 'specialty', 'maintenance_cycle', 'execution_party', 'level',
       'start_time', 'end_time', 'location', 'content', 'reason', 'impact', 'progress',
       'repair_device', 'repair_fault', 'fault_type', 'repair_mode', 'discovery',

@@ -1274,6 +1274,8 @@ class DailyInspection:
                                 'started': active['started'], 'pending': 'completed' in active,
                                 'draft_key': hashlib.sha256(f'{owner}:{active["id"]}'.encode()).hexdigest(),
                                 'reviews': active.get('reviews', {}), 'review_version': active.get('review_version', 0),
+                                'manual_sheet_cells': active.get('manual_sheet_cells'),
+                                'manual_sheet_cells_legacy': bool(active.get('manual_sheet_cells_legacy')),
                                 'professions': active.get('professions'),
                                 'profession_confirmations': active.get('profession_confirmations', {}),
                                 'profession_versions': {profession: profession_version(active, scope, profession)
@@ -1373,7 +1375,7 @@ class DailyInspection:
                     raise RiskError('可巡检专业已变化，请刷新后重新选择。', 409)
                 state['active'] = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                                    'started': int(time.time() * 1000), 'duty': duty, 'round': completed + 1,
-                                   'batches': batches}
+                                   'batches': batches, 'manual_sheet_cells': []}
                 state['active']['sheet_groups'] = (self.store.get_document(NS, 'sheet-groups:' + scope + ':' + duty['date'] + ':' + duty['shift']) or {}).get('groups', {})
                 if requested is not None:
                     state['active'].update(professions=[item for item in available if item in requested],
@@ -1467,13 +1469,23 @@ class DailyInspection:
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells})
                             active['sheet_overrides'] = [item for item in overrides.values()
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells]
+                            # Track explicit sheet edits separately from source values that
+                            # finalize_reviews may populate when the round is submitted.
+                            if 'manual_sheet_cells' not in active:
+                                active['manual_sheet_cells_legacy'] = True
+                            manual = {(item['template'], item['sheet'], item['cell']): item
+                                      for item in active.get('manual_sheet_cells', [])}
+                            for item in data['sheet_cells']:
+                                key = (item['template'], item['sheet'], item['cell'])
+                                manual[key] = {'template': key[0], 'sheet': key[1], 'cell': key[2]}
+                            active['manual_sheet_cells'] = list(manual.values())
                             active['last_sheet_edit'] = fingerprint
                             active['review_version'] = active.get('review_version', 0) + 1
                             active['profession_confirmations'] = {}
                         if action == 'finish' and data.get('sheet_workflow'):
                             required = {json.dumps([item['name'], sh['name']], ensure_ascii=False, separators=(',', ':'))
                                 for item in original_templates() if item['scope'] == scope
-                                for sh in item['sheets']}
+                                for sh in item['sheets'] if sh['name'].strip() != '封面'}
                             visited = data.get('visited_sheets')
                             if not isinstance(visited, list) or any(not isinstance(item, str) for item in visited) or not required.issubset(visited):
                                 raise RiskError('请先逐页查看本次所有工作表后再确认提交。', 409)

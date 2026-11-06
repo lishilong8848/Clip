@@ -52,7 +52,7 @@ def credentials(webhook,secret):
 
 
 class DingTalkTransport:
-    def send(self,token,secret,text):
+    def send(self,token,secret,text,mention=None):
         from .portal_service import external_real_write_guard
         if not external_real_write_guard()['real_write_allowed']:
             return {'state':'failed','reason':'当前运行环境禁止真实外部发送。'}
@@ -61,9 +61,17 @@ class DingTalkTransport:
         # Do not log HTTP exceptions: their URL contains the webhook credential.
         import httpx
         try:
+            body={'msgtype':'text','text':{'content':text}}
+            if mention and mention.get('mode')=='all':
+                body['text']['content']+='\n@所有人'
+                body['at']={'isAtAll':True}
+            elif mention and mention.get('mode')=='people':
+                users=mention.get('user_ids') or [];mobiles=mention.get('mobiles') or []
+                body['text']['content']+='\n'+' '.join('@'+item for item in [*users,*mobiles])
+                body['at']={'atUserIds':users,'atMobiles':mobiles,'isAtAll':False}
             response=_http().request('POST','https://oapi.dingtalk.com/robot/send',
                 params={'access_token':token,'timestamp':timestamp,'sign':signature},
-                json={'msgtype':'text','text':{'content':text}},timeout=httpx.Timeout(15,connect=5),follow_redirects=False)
+                json=body,timeout=httpx.Timeout(15,connect=5),follow_redirects=False)
             if response.status_code==429:
                 return {'state':'pending','reason':'钉钉限制发送频率，稍后自动重试。','next_at':time.time()+600}
             data=response.json()
@@ -101,11 +109,11 @@ def _http():
     return _client
 
 
-def message_parts(text):
+def message_parts(text,limit=15000):
     parts=[];part='';size=0
     for char in text:
         width=len(char.encode('utf8'))
-        if size+width>15000:parts.append(part);part='';size=0
+        if size+width>limit:parts.append(part);part='';size=0
         part+=char;size+=width
     if part:parts.append(part)
     return [f'【通告 {i+1}/{len(parts)}】\n'+part for i,part in enumerate(parts)] if len(parts)>1 else parts
@@ -124,9 +132,47 @@ class DingTalkNotices:
 
     def config(self):return self.store.get_document(NS,'config') or {'revision':0,'robots':[]}
 
+    @staticmethod
+    def _mention(cipher):
+        if not cipher:return {'mode':'none','user_ids':[],'mobiles':[]}
+        from openclaw_service.assistant.lighthouse_ai import unprotect_key
+        try:
+            value=json.loads(unprotect_key(cipher))
+            if not isinstance(value,dict) or value.get('mode') not in ('none','people','all'):raise ValueError()
+            return value
+        except Exception:raise DingTalkError('本机无法读取机器人艾特设置，请重新保存配置。',409) from None
+
+    @staticmethod
+    def _validate_mention(value):
+        mode=value.get('mention_mode','none')
+        users=value.get('mention_user_ids',[]);mobiles=value.get('mention_mobiles',[])
+        buildings=value.get('mention_building_mobiles',{})
+        if mode not in ('none','people','all') or not isinstance(users,list) or not isinstance(mobiles,list) or not isinstance(buildings,dict):
+            raise DingTalkError('艾特设置格式无效。')
+        if any(scope not in SCOPES or not isinstance(numbers,list) for scope,numbers in buildings.items()):
+            raise DingTalkError('楼栋艾特设置格式无效。')
+        building_numbers=[number for numbers in buildings.values() for number in numbers]
+        if len(users)+len(mobiles)+len(building_numbers)>50:raise DingTalkError('每个机器人最多设置50个艾特对象。')
+        if any(not isinstance(x,str) or not x.isprintable() or not re.fullmatch(r'[^\s,，;；@]{1,96}',x) for x in users):
+            raise DingTalkError('钉钉用户ID格式无效，请使用实际用户ID并以逗号或换行分隔。')
+        if any(not isinstance(x,str) or not re.fullmatch(r'\+?[0-9]{6,20}',x) for x in [*mobiles,*building_numbers]):
+            raise DingTalkError('手机号格式无效，请以逗号或换行分隔。')
+        users=list(dict.fromkeys(users));mobiles=list(dict.fromkeys(mobiles))
+        buildings={scope:list(dict.fromkeys(numbers)) for scope,numbers in buildings.items() if numbers}
+        if sum(len(x.encode('utf-8'))+2 for x in [*users,*mobiles,*building_numbers])>4000:raise DingTalkError('艾特对象信息过长，请减少成员数量。')
+        if mode=='people' and not users and not mobiles and not buildings:raise DingTalkError('请选择指定成员的用户ID或手机号。')
+        result={'mode':mode,'user_ids':users,'mobiles':mobiles}
+        if buildings:result['building_mobiles']=buildings
+        return result
+
     def public(self):
         data=self.config()
-        return {'revision':data['revision'],'robots':[{k:v for k,v in r.items() if k not in ('token_cipher','secret_cipher','token_hash')}|{'configured':True} for r in data['robots']],
+        robots=[]
+        for r in data['robots']:
+            mention=self._mention(r.get('mention_cipher'))
+            robots.append({k:v for k,v in r.items() if k not in ('token_cipher','secret_cipher','token_hash','mention_cipher')}|
+                {'configured':True,'mention_mode':mention['mode'],'mention_user_ids':mention.get('user_ids',[]),'mention_mobiles':mention.get('mobiles',[]),'mention_building_mobiles':mention.get('building_mobiles',{})})
+        return {'revision':data['revision'],'robots':robots,
                 'types':TYPES,'scopes':SCOPES}
 
     def save(self,payload):
@@ -158,6 +204,15 @@ class DingTalkNotices:
                 if robot['token_hash'] in tokens:raise DingTalkError('同一机器人不能重复添加。')
                 tokens.add(robot['token_hash'])
                 robot.update(id=identity,name=name,remark=remark,enabled=value['enabled'],scopes=list(dict.fromkeys(scopes)),types=list(dict.fromkeys(types)))
+                previous_mention=self._mention(previous.get('mention_cipher'))
+                if not any(key in value for key in ('mention_mode','mention_user_ids','mention_mobiles','mention_building_mobiles')):
+                    mention=previous_mention
+                else:mention=self._validate_mention({'mention_mode':previous_mention.get('mode','none'),
+                    'mention_user_ids':previous_mention.get('user_ids',[]),'mention_mobiles':previous_mention.get('mobiles',[]),
+                    'mention_building_mobiles':previous_mention.get('building_mobiles',{}),**value})
+                if mention==previous_mention and previous.get('mention_cipher'):robot['mention_cipher']=previous['mention_cipher']
+                elif mention['mode']!='none' or mention['user_ids'] or mention['mobiles'] or mention.get('building_mobiles'):
+                    robot['mention_cipher']=protect_key(json.dumps(mention,ensure_ascii=False,separators=(',',':')))
                 # Remarks/names do not invalidate pending deliveries; credential or route changes do.
                 routing=('token_cipher','secret_cipher','enabled','scopes','types')
                 changed=any(robot.get(k)!=previous.get(k) for k in routing)
@@ -169,12 +224,29 @@ class DingTalkNotices:
     def snapshot(self,notice_type,payload):
         if notice_type in ('上电通告','下电通告'):notice_type='上下电通告'
         selected=payload.get('dingtalk_robot_ids') or []
-        if not isinstance(selected,list) or len(selected)>20 or any(not isinstance(x,str) for x in selected):
+        if not isinstance(selected,list) or len(selected)>20 or any(not isinstance(x,str) or not x for x in selected) or len(selected)!=len(set(selected)):
             raise DingTalkError('钉钉机器人选择无效。')
         if not selected:return []
         buildings={code for item in payload.get('buildings') or [] for code in re.findall(r'110|[ABCDEH]',str(item).upper())}
-        targets=[{'id':r['id'],'revision':r['revision'],'name':r['name']} for r in self.config()['robots'] if r['enabled'] and r['id'] in selected
-                and (not r['types'] or notice_type in r['types']) and (not r['scopes'] or buildings.intersection(r['scopes']))]
+        mention_input=payload.get('mention_buildings',payload.get('buildings') or [])
+        if not isinstance(mention_input,list):raise DingTalkError('通告楼栋格式无效。')
+        from .portal_service import MaintenancePortalService
+        mention_buildings=set(MaintenancePortalService._building_codes_from_value(mention_input))
+        targets=[]
+        for robot in self.config()['robots']:
+            if not robot['enabled'] or robot['id'] not in selected or (robot['types'] and notice_type not in robot['types']) or (robot['scopes'] and not buildings.intersection(robot['scopes'])):continue
+            cipher=robot.get('mention_cipher','');warning=''
+            mention=self._mention(cipher)
+            mapping=mention.get('building_mobiles') or {}
+            if mention['mode']=='people' and mapping:
+                phones=list(dict.fromkeys([*(mention.get('mobiles') or []),*(number for scope in SCOPES if scope in mention_buildings for number in mapping.get(scope,[]))]))
+                resolved={'mode':'people' if phones or mention.get('user_ids') else 'none','user_ids':mention.get('user_ids') or [],'mobiles':phones}
+                from openclaw_service.assistant.lighthouse_ai import protect_key
+                cipher=protect_key(json.dumps(resolved,ensure_ascii=False,separators=(',',':')))
+                missing=[scope for scope in SCOPES if scope in mention_buildings and scope not in mapping]
+                if not mention_buildings:warning='未识别通告楼栋，未附加楼栋专属艾特。'
+                elif missing:warning='部分楼栋未配置专属艾特手机号：'+'、'.join(missing)+'。'
+            targets.append({'id':robot['id'],'revision':robot['revision'],'name':robot['name'],'mention_cipher':cipher,'mention_warning':warning})
         if set(selected)!={r['id'] for r in targets}:raise DingTalkError('所选钉钉机器人已停用、删除或不适用于当前楼栋和通告类型，请重新选择。')
         return targets
 
@@ -187,11 +259,32 @@ class DingTalkNotices:
     def _save_delivery(self,key,data):
         data['updated_at']=time.time();self.store.put_document(NS,'delivery:'+key,data)
 
+    @staticmethod
+    def selection_matches(operation):
+        """The durable sending targets must equal the original explicit selection."""
+        requested=(operation.get('request') or {}).get('dingtalk_robot_ids')
+        targets=(operation.get('result') or {}).get('dingtalk_targets')
+        if not isinstance(requested,list) or not isinstance(targets,list):return False
+        if any(not isinstance(value,str) or not value for value in requested):return False
+        if any(not isinstance(value,dict) or not isinstance(value.get('id'),str) or not value['id'] for value in targets):return False
+        actual=[value['id'] for value in targets]
+        return len(requested)==len(set(requested)) and len(actual)==len(set(actual)) and set(actual)==set(requested)
+
     def deliver(self,key,target,text,*,retry=False,operation_id=''):
         from openclaw_service.assistant.lighthouse_ai import unprotect_key
         with self.lock('delivery:'+key):
-            data=self.store.get_document(NS,'delivery:'+key) or {'id':key,'robot_id':target['id'],'robot_name':target['name'],
-                 'target':target,'text':text,'parts':message_parts(text),'sent_parts':0,'state':'pending','created_at':time.time(),'operation_id':operation_id}
+            data=self.store.get_document(NS,'delivery:'+key)
+            if not data:
+                try:mention=self._mention(target.get('mention_cipher'))
+                except DingTalkError as error:
+                    data={'id':key,'robot_id':target['id'],'robot_name':target['name'],'target':target,'mention_cipher':target.get('mention_cipher',''),
+                        'text':text,'parts':message_parts(text),'sent_parts':0,'state':'failed','reason':str(error),'created_at':time.time(),'operation_id':operation_id}
+                    self._save_delivery(key,data);return data
+                suffix='@所有人' if mention['mode']=='all' else ' '.join('@'+item for item in [*mention.get('user_ids',[]),*mention.get('mobiles',[])]) if mention['mode']=='people' else ''
+                limit=15000-len(suffix.encode('utf-8'))-64 if suffix else 15000
+                data={'id':key,'robot_id':target['id'],'robot_name':target['name'],'target':target,
+                    'mention_cipher':target.get('mention_cipher',''),'text':text,'parts':message_parts(text,limit),
+                    'sent_parts':0,'state':'pending','created_at':time.time(),'operation_id':operation_id}
             if data['text']!=text:raise DingTalkError('原任务正文发生变化，已停止发送。',409)
             if data['state']=='sent':return data
             if data['state']=='posting':
@@ -210,13 +303,20 @@ class DingTalkNotices:
                 try:token=unprotect_key(robot['token_cipher']);secret=unprotect_key(robot['secret_cipher'])
                 except Exception:
                     data.update(state='failed',reason='本机无法读取机器人密钥，请重新保存配置。');self._save_delivery(key,data);return data
+                try:mention=self._mention(data.get('mention_cipher'))
+                except DingTalkError as error:
+                    data.update(state='failed',reason=str(error));self._save_delivery(key,data);return data
                 data.update(state='posting',target=target,next_at=0,updated_at=time.time())
                 self.store.put_documents(NS,{'delivery:'+key:data,'rate:'+target['id']:{'next_at':time.time()+4}})
-                result=self.transport.send(token,secret,data['parts'][data['sent_parts']])
+                part=data['parts'][data['sent_parts']]
+                if mention['mode']!='none' and data['sent_parts']==len(data['parts'])-1:
+                    result=self.transport.send(token,secret,part,mention=mention)
+                else:result=self.transport.send(token,secret,part)
                 if result['state']=='sent':
                     data.setdefault('first_sent_at',time.time())
                     data['sent_parts']+=1
-                    data.update(state='sent' if data['sent_parts']==len(data['parts']) else 'pending',reason='',next_at=time.time()+4)
+                    complete=data['sent_parts']==len(data['parts'])
+                    data.update(state='sent' if complete else 'pending',reason=target.get('mention_warning','') if complete else '',next_at=time.time()+4)
                 else:
                     data.update(result)
                     if data['state']=='pending' and data.get('operation_id','').startswith('test:'):data['state']='failed'
@@ -230,8 +330,16 @@ class DingTalkNotices:
             operation_id=task['payload'].get('operation_id','')
             try:
                 with self.lock('operation:'+operation_id,ttl_seconds=900):
+                    if operation_id.startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:')):
+                        self.store.mark_outbox_event(task['id'],'done',error='Qt通告不发送钉钉',count_attempt=False);continue
                     operation=self.store.get_notice_remote_operation(operation_id) or {};result=operation.get('result') or {}
                     if operation.get('status')!='completed':raise DingTalkError('通告尚未完成，钉钉推送等待确认。',409)
+                    if not self.selection_matches(operation):
+                        reason='实际钉钉目标与本次勾选不一致，已停止发送，请核对原任务。'
+                        self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':'failed','dingtalk_selection_error':reason})
+                        if operation_id.startswith('notice_action:') and hasattr(runtime.service,'set_notice_followup'):
+                            runtime.service.set_notice_followup(operation_id.removeprefix('notice_action:'),'dingtalk','failed',reason)
+                        self.store.mark_outbox_event(task['id'],'failed',error=reason,count_attempt=False);continue
                     kind=result.get('robot_notice_type','');payload=result.get('robot_payload') or {}
                     if kind!='事件通告':
                         if operation_id.startswith('notice_action:'):
@@ -305,6 +413,8 @@ class DingTalkNotices:
     def retry(self,key,confirm_uncertain=False):
         data=self.store.get_document(NS,'delivery:'+key)
         if not data:raise DingTalkError('投递任务不存在。',404)
+        if data.get('operation_id','').startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:')):
+            raise DingTalkError('Qt通告不发送钉钉，请在网页办理事件通告。',409)
         if data.get('operation_id','').startswith('web-event:'):
             raise DingTalkError('请返回事件通告卡片核对并重试原消息；不会重发已经送达的群。',409)
         if data['state'] in ('posting','uncertain') and not confirm_uncertain:raise DingTalkError('发送结果未确认，请先核对钉钉群，再确认是否重发。',409)
@@ -314,12 +424,17 @@ class DingTalkNotices:
             return self.deliver(key,{k:robot[k] for k in ('id','revision','name')},data['text'],retry=True)
         if not data.get('operation_id'):raise DingTalkError('原通告操作编号缺失，未重新发送。',409)
         operation=self.store.get_notice_remote_operation(data['operation_id']) or {}
+        if not self.selection_matches(operation):raise DingTalkError('原任务的钉钉目标与本次勾选不一致，请核对原任务。',409)
         result=operation.get('result') or {}
         self.snapshot(result.get('robot_notice_type',''),{**(result.get('robot_payload') or {}),'dingtalk_robot_ids':[data['robot_id']]})
         with self.lock('delivery:'+key):
             current=self.store.get_document(NS,'delivery:'+key)
             if current['state']=='sent':return current
-            current.update(state='pending',reason='等待按当前配置重试',target={k:robot[k] for k in ('id','revision','name')})
+            target={k:robot[k] for k in ('id','revision','name')}
+            # Keep the original audience and any scope warning across a manual retry.
+            target['mention_cipher']=current.get('mention_cipher','')
+            target['mention_warning']=(current.get('target') or {}).get('mention_warning','')
+            current.update(state='pending',reason='等待按当前配置重试',target=target)
             event_id=self.store.enqueue_outbox_event(CHANNEL,{'operation_id':data['operation_id'],'idempotency_key':'notice_dingtalk:'+data['operation_id']},documents={(NS,'delivery:'+key):current})
             self.store.mark_outbox_event(event_id,'pending',count_attempt=False)
         return current

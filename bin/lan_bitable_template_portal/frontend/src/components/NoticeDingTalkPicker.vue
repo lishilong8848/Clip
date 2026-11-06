@@ -13,13 +13,14 @@
 import {computed,ref,watch,onBeforeUnmount} from 'vue';
 import {requestJson,type Dict} from '../workspace-v2/client';
 const props=defineProps<{modelValue?:string[];workType:string;noticeType:string;buildings?:string[];disabled?:boolean}>();
-const emit=defineEmits<{ 'update:modelValue':[value:string[]] }>();
+const emit=defineEmits<{ 'update:modelValue':[value:string[]]; 'selected-names':[value:string[]] }>();
 const robots=ref<Dict[]>([]),error=ref(''),loading=ref(false),selected=computed(()=>props.modelValue||[]);
 let generation=0;
 const available=computed(()=>robots.value.filter(r=>(!r.types.length||r.types.includes(['上电通告','下电通告'].includes(props.noticeType)?'上下电通告':props.noticeType))&&(!r.scopes.length||(props.buildings||[]).some(s=>r.scopes.includes(s)))));
 async function load(){const seq=++generation;loading.value=true;error.value='';try{const data=await requestJson('/api/workbench/dingtalk-options?work_type='+encodeURIComponent(props.workType));if(seq===generation)robots.value=data.robots||[];}catch(e){if(seq===generation)error.value=e instanceof Error?e.message:'机器人读取失败';}finally{if(seq===generation)loading.value=false;}}
 function toggle(id:string,checked:boolean){emit('update:modelValue',checked?[...new Set([...selected.value,id])]:selected.value.filter(value=>value!==id));}
 watch(()=>props.workType,()=>{robots.value=[];void load();},{immediate:true});
+watch([selected,available],()=>emit('selected-names',selected.value.map(id=>available.value.find(robot=>robot.id===id)?.name||'待核验的机器人')),{immediate:true});
 onBeforeUnmount(()=>generation++);
 </script>
 <style scoped>

@@ -16,8 +16,8 @@ from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 class FakeTransport:
     def __init__(self):self.calls=[];self.results=[]
-    def send(self,token,secret,text):
-        self.calls.append((token,secret,text))
+    def send(self,token,secret,text,mention=None):
+        self.calls.append((token,secret,text,mention))
         result=self.results.pop(0) if self.results else {'state':'sent','reason':''}
         if isinstance(result,Exception):raise result
         return result
@@ -34,8 +34,8 @@ class DingTalkTests(unittest.TestCase):
                 'webhook':'https://oapi.dingtalk.com/robot/send?access_token='+char*64,'secret':'SEC'+'s'*64}
 
     def complete(self):
-        self.store.begin_notice_remote_operation(operation_id='op',operation_type='start',request={'text':'测试通告'})
         targets=self.service.snapshot('维保通告',{'buildings':['南通D楼'],'dingtalk_robot_ids':[r['id'] for r in self.service.config()['robots']]})
+        self.store.begin_notice_remote_operation(operation_id='op',operation_type='start',request={'text':'测试通告','dingtalk_robot_ids':[t['id'] for t in targets]})
         self.store.mark_notice_remote_operation('op',status='completed',result={'robot_notice_type':'维保通告',
             'robot_payload':{'text':'【维保通告】状态：开始\n隔离测试正文'},'dingtalk_targets':targets})
         return self.store.list_outbox_events(CHANNEL)[0]['id']
@@ -54,6 +54,108 @@ class DingTalkTests(unittest.TestCase):
         with self.assertRaises(DingTalkError):self.service.save({'revision':2,'robots':[self.robot(),self.robot()]})
         bad=self.robot();bad['webhook']='http://127.0.0.1/robot/send?access_token='+'a'*64
         with self.assertRaises(DingTalkError):self.service.save({'revision':2,'robots':[bad]})
+
+    def test_qt_operations_cannot_enqueue_or_resume_dingtalk_delivery(self):
+        self.service.save({'revision':0,'robots':[self.robot()]})
+        operation='qt_notice:isolated'
+        self.store.begin_notice_remote_operation(operation_id=operation,operation_type='start',request={})
+        targets=self.service.snapshot('维保通告',{'dingtalk_robot_ids':[self.service.config()['robots'][0]['id']]})
+        self.store.mark_notice_remote_operation(operation,status='completed',result={'robot_notice_type':'维保通告',
+            'robot_payload':{'text':'隔离文本'},'dingtalk_targets':targets})
+        self.assertEqual(self.store.list_outbox_events(CHANNEL),[])
+        # A queued item from an older installation is discarded without sending.
+        event=self.store.enqueue_outbox_event(CHANNEL,{'operation_id':operation,'idempotency_key':'qt-old'})
+        self.service.process(self.runtime)
+        self.assertEqual(self.transport.calls,[])
+        self.assertTrue(any(item['id']==event for item in self.store.list_outbox_events(CHANNEL,status='done')))
+
+    def test_mismatched_selected_robots_never_send_to_any_group(self):
+        saved=self.service.save({'revision':0,'robots':[self.robot(),self.robot('b'),self.robot('c')]})
+        ids=[r['id'] for r in saved['robots']]
+        targets=self.service.snapshot('变更通告',{'dingtalk_robot_ids':ids})
+        self.store.begin_notice_remote_operation(operation_id='notice_action:fixture',operation_type='start',
+            request={'dingtalk_robot_ids':ids[:2]})
+        self.store.mark_notice_remote_operation('notice_action:fixture',status='completed',result={
+            'robot_notice_type':'变更通告','robot_payload':{'text':'隔离通告'},'dingtalk_targets':targets})
+        self.service.process(self.runtime)
+        self.assertFalse(self.transport.calls)
+        result=self.store.get_notice_remote_operation('notice_action:fixture')['result']
+        self.assertEqual(result['dingtalk_delivery_state'],'failed')
+        self.assertIn('本次勾选不一致',result['dingtalk_selection_error'])
+
+    def test_mentions_are_private_frozen_per_robot_and_only_on_final_segment(self):
+        robot=self.robot();robot.update(mention_mode='people',mention_user_ids=['employee_1'],mention_mobiles=['13800138000'])
+        saved=self.service.save({'revision':0,'robots':[robot]})
+        identity=saved['robots'][0]['id'];target=self.service.snapshot('变更通告',{'dingtalk_robot_ids':[identity]})[0]
+        self.assertNotIn('13800138000',json.dumps(self.service.config(),ensure_ascii=False))
+        text='巡检'*3000
+        first=self.service.deliver('mention-fixture',target,text,operation_id='test:fixture')
+        self.assertEqual(first['state'],'pending');self.assertIsNone(self.transport.calls[0][3])
+        saved['robots'][0]['mention_mode']='all';self.service.save(saved)
+        self.store.put_document(NS,'rate:'+identity,{'next_at':0})
+        first['next_at']=0;self.store.put_document(NS,'delivery:mention-fixture',first)
+        last=self.service.deliver('mention-fixture',target,text,operation_id='test:fixture')
+        self.assertEqual(last['state'],'sent');self.assertEqual(len(self.transport.calls),2)
+        self.assertEqual(self.transport.calls[-1][3],{'mode':'people','user_ids':['employee_1'],'mobiles':['13800138000']})
+        self.assertNotIn('13800138000',json.dumps(self.store.get_document(NS,'delivery:mention-fixture'),ensure_ascii=False))
+
+    def test_transport_renders_at_fields_and_keeps_original_body(self):
+        captured=[]
+        def send(*args,**kwargs):captured.append(kwargs['json']);return SimpleNamespace(status_code=200,json=lambda:{'errcode':0})
+        with patch('lan_bitable_template_portal.dingtalk_notices._http',return_value=SimpleNamespace(request=send)),patch('lan_bitable_template_portal.portal_service.external_real_write_guard',return_value={'real_write_allowed':True}):
+            transport=DingTalkTransport()
+            transport.send('token','secret','原始通告',mention={'mode':'people','user_ids':['u01'],'mobiles':['13800138000']})
+            transport.send('token','secret','原始通告',mention={'mode':'all'})
+            transport.send('token','secret','原始通告')
+        self.assertEqual(captured[0]['at'],{'atUserIds':['u01'],'atMobiles':['13800138000'],'isAtAll':False})
+        self.assertEqual(captured[0]['text']['content'],'原始通告\n@u01 @13800138000')
+        self.assertEqual(captured[1]['at'],{'isAtAll':True});self.assertEqual(captured[1]['text']['content'],'原始通告\n@所有人')
+        self.assertNotIn('at',captured[2]);self.assertEqual(captured[2]['text']['content'],'原始通告')
+
+    def test_building_mentions_are_frozen_deduplicated_and_do_not_guess(self):
+        robot=self.robot();robot.update(mention_mode='people',mention_user_ids=['fixture'],
+            mention_mobiles=['13800138000'],mention_building_mobiles={
+                'D':['13800138001','13800138000'],'E':['13800138002','13800138001']})
+        saved=self.service.save({'revision':0,'robots':[robot]});identity=saved['robots'][0]['id']
+        def snapshot(buildings):
+            target=self.service.snapshot('维保通告',{'dingtalk_robot_ids':[identity],
+                'buildings':['D','E'],'mention_buildings':buildings})[0]
+            return target,self.service._mention(target['mention_cipher'])
+        d_target,d=snapshot(['D楼']);_,e=snapshot(['E']);_,both=snapshot(['D','E'])
+        self.assertEqual(d['mobiles'],['13800138000','13800138001'])
+        self.assertEqual(e['mobiles'],['13800138000','13800138002','13800138001'])
+        self.assertEqual(both['mobiles'],['13800138000','13800138001','13800138002'])
+        unknown,u=snapshot(['ALL']);self.assertEqual(u['mobiles'],['13800138000'])
+        self.assertIn('未识别通告楼栋',unknown['mention_warning'])
+        self.assertNotIn('13800138001',json.dumps(self.service.config(),ensure_ascii=False))
+        saved['robots'][0]['mention_building_mobiles']={'D':['13800138003']}
+        self.service.save(saved)
+        self.service.deliver('building-fixture',d_target,'隔离正文',operation_id='test:fixture')
+        self.assertEqual(self.transport.calls[-1][3],d)
+
+    def test_disabling_mentions_preserves_building_configuration(self):
+        robot=self.robot();robot.update(mention_mode='people',mention_building_mobiles={'D':['13800138001']})
+        saved=self.service.save({'revision':0,'robots':[robot]})
+        saved['robots'][0]['mention_mode']='none';saved=self.service.save(saved)
+        self.assertEqual(saved['robots'][0]['mention_building_mobiles'],{'D':['13800138001']})
+        saved['robots'][0]['mention_mode']='people';saved=self.service.save(saved)
+        self.assertEqual(saved['robots'][0]['mention_building_mobiles'],{'D':['13800138001']})
+
+    def test_manual_retry_keeps_original_building_audience(self):
+        robot=self.robot();robot.update(mention_mode='people',mention_building_mobiles={'D':['13800138001']})
+        saved=self.service.save({'revision':0,'robots':[robot]})
+        self.complete()
+        self.transport.results=[{'state':'failed','reason':'隔离测试失败'},{'state':'sent','reason':''}]
+        self.service.process(self.runtime)
+        delivery=self.service.recent()[0]
+        self.assertEqual(delivery['state'],'failed')
+        saved['robots'][0]['mention_building_mobiles']={'D':['13800138002']}
+        self.service.save(saved)
+        self.service.retry(delivery['id'])
+        self.store.put_document(NS,'rate:'+saved['robots'][0]['id'],{'next_at':0})
+        self.service.process(self.runtime)
+        self.assertEqual(self.transport.calls[-1][3]['mobiles'],['13800138001'])
+        self.assertEqual(self.service.recent()[0]['state'],'sent')
 
     def test_atomic_enqueue_independent_robots_and_no_repeat_or_remark(self):
         self.service.save({'revision':0,'robots':[self.robot(),self.robot('b')]});event_id=self.complete()

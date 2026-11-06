@@ -9,6 +9,57 @@ from .module_access import require_module
 from upload_event_module.config import EVENT_LEVEL_OPTIONS, EVENT_SOURCE_OPTIONS, SPECIALTY_OPTIONS
 
 
+def parse_event_metadata(service, text, scopes):
+    """Extract only identifiable event details; never invent missing values."""
+    from upload_event_module.core.parser import extract_event_info
+    from upload_event_module.services.handlers.event_notice import EventNoticeHandler
+    from upload_event_module.time_parser import parse_single_datetime
+    if not isinstance(text, str) or len(text.encode('utf-8')) > 15000:
+        raise PortalError('事件原文过长或格式无效。')
+    handler=EventNoticeHandler(); info=extract_event_info(text) or {}
+    section=lambda *labels: next((value for label in labels if (value:=handler._extract_section(text,label))), '')
+    result={}
+    summary=section('概述','告警描述','标题','名称')
+    if summary:result['summary']=summary[:5000]
+    location=section('楼栋','机楼','位置','地点') or section('标题','名称')
+    codes=service._building_codes_from_value(location)
+    if len(codes)==1 and codes[0] in scopes:result['building']=codes[0]
+    level=handler._normalize_event_level(section('事件等级','等级') or info.get('level') or '',section('标题','名称'))
+    if level in EVENT_LEVEL_OPTIONS:result['level']=level
+    source=handler._detect_event_source(text)
+    if source in EVENT_SOURCE_OPTIONS:result['event_source']=source
+    specialty=section('专业','专业类别','所属专业')
+    choices=[value for value in SPECIALTY_OPTIONS if value!='/' and value in specialty]
+    if len(choices)==1:result['specialty']=choices[0]
+    # A year and time are required; an incomplete date must not be guessed.
+    for key,labels in (('occurrence_time',('事件发生时间','发生时间','时间')),('recover_time',('事件恢复时间','恢复时间'))):
+        value=section(*labels)
+        if re.search(r'\b\d{4}[-/.年]',value) and re.search(r'\d{1,2}[:：时点]\d{1,2}',value):
+            parsed=parse_single_datetime(value)
+            if parsed:result[key]=parsed.strftime('%Y-%m-%d %H:%M')
+    return result
+
+
+def event_mention_buildings(service, text, scopes, row, patch, manual_fields):
+    """Find event buildings without turning missing metadata into a send requirement."""
+    from upload_event_module.services.handlers.event_notice import EventNoticeHandler
+    metadata=(row or {}).get('metadata') or {}
+    patch=patch if isinstance(patch,dict) else {}
+    manual_fields=manual_fields if isinstance(manual_fields,list) else []
+    if 'building' in manual_fields:
+        codes=service._building_codes_from_value(patch.get('building',metadata.get('building','')))
+    else:
+        handler=EventNoticeHandler()
+        found=[set(service._building_codes_from_value(handler._extract_section(text,label)))
+               for label in ('楼栋','机楼','位置','地点','标题','名称')]
+        found=[item for item in found if item]
+        # Conflicting explicit text is ambiguous; never guess who should be mentioned.
+        if found and any(item!=found[0] for item in found[1:]):return []
+        codes=list(found[0]) if found else service._building_codes_from_value(metadata.get('building',''))
+    codes=[code for code in ('110','A','B','C','D','E','H') if code in codes]
+    return list(dict.fromkeys(codes)) if codes and set(codes).issubset(scopes) else []
+
+
 def prepare_event(service,payload,job_id):
     action=str(payload.get('action') or '')
     status={'start':'新增','update':'更新','end':'结束'}.get(action)
@@ -170,7 +221,9 @@ def install_event_notice_web(app,controller,runtime):
             if not actor:raise PortalError('登录身份无效。')
             context=await asyncio.to_thread(options,session,body.get('scope') or 'ALL')
             action=request.path_params['action']
-            if action=='defaults':
+            if action=='parse':
+                data=await asyncio.to_thread(parse_event_metadata,runtime.service,body.get('text'),context['scopes'])
+            elif action=='defaults':
                 ids=body.get('robot_ids',[])
                 if not isinstance(ids,list) or not set(ids)<={r['id'] for r in context['robots']}:raise PortalError('默认机器人不在当前可选范围内。')
                 data=await asyncio.to_thread(manager.save_preference,actor,ids,body.get('revision'))
@@ -181,10 +234,28 @@ def install_event_notice_web(app,controller,runtime):
                 if row and not authorized(session,row,write=True):raise PortalError('无权处理该事件。')
                 if not row and not identity.startswith('web_'):raise PortalError('请刷新事件后再操作。')
                 if action=='send':
-                    data=await asyncio.to_thread(manager.accept,identity,str(body.get('operation_id') or ''),actor,context['scopes'],body.get('action'),body.get('text'))
+                    try:
+                        mention_buildings=await asyncio.to_thread(event_mention_buildings,runtime.service,body.get('text') or '',context['scopes'],row,body.get('metadata_patch'),body.get('manual_fields'))
+                    except Exception:
+                        mention_buildings=[]
+                    data=await asyncio.to_thread(manager.accept,identity,str(body.get('operation_id') or ''),actor,context['scopes'],body.get('action'),body.get('text'),mention_buildings=mention_buildings)
                     if body.get('metadata_patch'):
                         try:data=await asyncio.to_thread(manager.save_metadata,identity,actor,context['scopes'],body['metadata_patch'],body.get('metadata_base') or {})
                         except PortalError as exc:data['metadata_save_warning']=str(exc)
+                    try:
+                        parsed=await asyncio.to_thread(parse_event_metadata,runtime.service,body.get('text'),context['scopes'])
+                        current=(await asyncio.to_thread(manager.get,identity)).get('metadata') or {}
+                        manual=body.get('manual_fields') if isinstance(body.get('manual_fields'),list) else []
+                        protected={key for key in manual if isinstance(key,str)}
+                        auto=body.get('auto_fields') if isinstance(body.get('auto_fields'),dict) else {}
+                        keys=set(parsed) | (set(auto) if body.get('action')=='start' else set())
+                        fill={key:parsed.get(key,'') for key in keys if key not in protected and
+                              (key not in current or key in auto and current.get(key)==auto[key]) and
+                              (key in parsed or key in auto and body.get('action')=='start')}
+                        if fill:data=await asyncio.to_thread(manager.save_metadata,identity,actor,context['scopes'],fill,current)
+                    except Exception:
+                        # Acceptance already succeeded; parsing never blocks sending.
+                        data['metadata_parse_warning']='自动识别暂未完成，可继续手动补充资料。'
                 elif action=='metadata':
                     data=await asyncio.to_thread(manager.save_metadata,identity,actor,context['scopes'],body.get('patch') or {},body.get('base') or {})
                 elif action=='retry':

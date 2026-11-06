@@ -64,7 +64,7 @@ class DailyReportTests(unittest.TestCase):
 
     def save_roster(self):
         self.put('local', {'id': 'shift_roster:' + DATE, 'date': DATE, 'version': ROSTER_VERSION,
-                           'people': self.roster, 'issues': []})
+                           'people': self.roster, 'issues': [], 'observed_at': dt.datetime.fromisoformat(DATE + 'T15:00:00+08:00').timestamp()})
 
     def member(self, pid='p1', shift='白', *, scope='A', paper=True):
         person = self.put('person', {'id': pid, 'name': '示例' + pid, 'active': True,
@@ -85,6 +85,7 @@ class DailyReportTests(unittest.TestCase):
     def notice(self, pid='p1', shift='白', status='sent', **changes):
         return self.put('notification', {'id': f'shift:{DATE}:{shift}:ou_{pid}', 'kind': 'shift',
             'date': DATE, 'shift': shift, 'open_id': 'ou_' + pid, 'status': status,
+            'sent_at': DATE + ('T20:00:00+08:00' if shift == '夜' else 'T13:00:00+08:00'),
             'delivery': [{'open_id': 'ou_' + pid, 'ok': True, 'message_id': 'om_notice',
                           'sender_app_id': 'cli_current'}], **changes})
 
@@ -240,6 +241,25 @@ class DailyReportTests(unittest.TestCase):
         self.assertTrue(report['unverified']); self.assertFalse(report['unfinished'])
         self.service._shift_roster_reader.assert_not_called()
 
+    def test_today_capture_must_not_be_reported_as_yesterdays_roster(self):
+        self.save_roster()
+        roster=self.service._get('local','shift_roster:'+DATE)
+        roster['observed_at']=NOW.timestamp()
+        self.put('local',roster)
+        report=self.report()
+        self.assertFalse(report['unfinished'])
+        self.assertIn('采集日期待核对',report['unverified'][0]['reason'])
+
+    def test_todays_receipt_does_not_turn_yesterdays_roster_into_unfinished(self):
+        notice=self.service._get('notification','shift:'+DATE+':白:ou_p1')
+        if notice is None:
+            notice=next(n for n in self.service._all('notification') if n.get('shift')=='白')
+        notice['sent_at']=NOW.isoformat()
+        self.put('notification',notice)
+        report=self.report()
+        self.assertFalse(report['unfinished'])
+        self.assertTrue(any('发送时间' in row['reason'] for row in report['unverified']))
+
     def test_working_long_day_operations_intern_in_daily_report_but_other_jobs_excluded(self):
         self.roster[0].update(group='长白', duty_kind='长白', position='运维实习生')
         self.directory['p1']['position']='实习生'
@@ -302,7 +322,7 @@ class DailyReportTests(unittest.TestCase):
     def test_shift_end_exactly_09_due_later_end_not_accused(self):
         self.member('night', '夜')
         for minutes, expected in ((0, True), (1, False)):
-            with self.subTest(minutes=minutes), patch('lan_bitable_template_portal.pre_shift_checks.windows',
+            with self.subTest(minutes=minutes), patch('lan_bitable_template_portal.learning_schedule.duty_windows',
                     side_effect=lambda date, shift: (windows(date, shift)[0],
                         NOW + dt.timedelta(minutes=minutes) if shift == '夜' else windows(date, shift)[1])):
                 report = self.report()

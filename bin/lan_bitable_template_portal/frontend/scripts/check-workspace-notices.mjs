@@ -61,6 +61,7 @@ try {
     if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'ou_notice_fixture', name: '测试值班员', role: 'building', level: 'L4', category: 'operator', can_delete_business: false, modules: [...Object.keys(fixtures),'event'] }, scope_options: [{ value: 'A', label: 'A楼' }] });
     if (url.pathname === '/api/auth/logout') return failLogout ? route.fulfill({ status: 503, json: { ok: false, error: '退出暂时失败，请重试' } }) : ok({});
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-notice-ui' } });
+    if (url.pathname === '/api/workbench-events/parse') return ok({}); // Read-only parsing, not a business write.
     if (url.pathname === '/api/workbench-events'||url.pathname === '/api/workbench-events/options') return ok({user_id:'ou_notice_fixture',scopes:['A'],levels:['I3'],sources:['巡检发现'],specialties:['电气'],can_delete:false,defaults:{robot_ids:[],revision:0},robots:[],items:[]});
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });

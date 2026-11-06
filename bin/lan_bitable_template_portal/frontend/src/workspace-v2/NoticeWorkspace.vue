@@ -58,7 +58,7 @@
         <div v-if="confirming" class="v2-notice-review" aria-label="发送前确认">
           <header><h2>发送前确认</h2><NTag :bordered="false" type="info">{{ actionLabel(action) }} · {{ form.values.building_codes?.join('、') }}</NTag></header>
           <NAlert v-if="form.values.sync_maintenance_target==='1'||form.values.sync_maintenance_target===true" type="warning" :bordered="false">本次变更同时写入关联的维保目标记录。</NAlert>
-          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ (sop.operator_record_ids??[sop.operator_record_id]).map(sopPersonName).join('、') }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
+          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ (sop.operator_record_ids??[sop.operator_record_id]).map(sopPersonName).join('、') }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>钉钉群：{{ selectedDingNames.length ? selectedDingNames.join('、') : '本次不发送' }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
         <div class="v2-notice-context-row" :class="{'has-tags':form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired}"><div class="v2-notice-context-controls">
@@ -66,7 +66,7 @@
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
         </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
-          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :buildings="form.values.building_codes" :disabled="locked" />
+          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
           <section class="v2-notice-page-fields">
             <header><span>{{ cycleWarnings.length?'维保周期不一致，请修改标红内容后再发送':missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
 
@@ -194,6 +194,7 @@ function rowAttention(row:Dict,lane:string){if(lane==='planned'&&rowUnknown(row)
 const actionLabel=(value:string)=>({start:'开始',update:'更新',end:'结束'}[value]||'');
 let listAbort:AbortController|undefined,detailAbort:AbortController|undefined,disposed=false,timer=0;
 const editing=ref(false),detailLoading=ref(false),form=ref<NoticeForm|null>(null),detailError=ref(''),busy=ref(false),saving=ref(false),uploading=ref(false),confirming=ref(false),ambiguous=ref(false);
+const selectedDingNames=ref<string[]>([]);
 const viewport=ref({width:innerWidth,height:innerHeight});
 function measureViewport(){viewport.value={width:innerWidth,height:innerHeight};void nextTick(revealActiveType);}
 const attempted=ref(false),issueTarget=ref<Omit<NoticeIssue,'message'>|null>(null);
@@ -282,6 +283,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   try{
     const result=parsedHtml?{fragments:{detail:parsedHtml}}:await requestJson('/api/workbench/lite-detail?'+q,{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;
     const next=parseNoticeForm(result.fragments?.detail||'');
+    next.values.dingtalk_robot_ids=[];
     if(!NOTICE_IDS.includes(next.values.work_type)||!(props.user.modules||[]).includes(next.values.work_type))throw new Error('无权办理此类通告。');
     form.value=next;action.value=next.actions.includes(next.initialAction)?next.initialAction:next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;sourceExpanded.value=focusBinding||!!(next.values.manual_binding_required&&!next.values.source_record_id&&!next.values.target_record_id);
     if(sourceChoice.value&&!sourceOptions.value.some(o=>o.value===sourceChoice.value))sourceOptions.value.unshift({label:'已绑定源表事项',value:sourceChoice.value});
@@ -329,6 +331,7 @@ function askLeave(proceed:()=>void){dialog.warning({title:'当前填写尚未保
 function closeEditor(){if(busy.value||uploading.value||saving.value)return;const close=()=>{editing.value=false;detailAbort?.abort();window.clearTimeout(timer);};if(dirty.value&&!job.value){askLeave(close);return;}if(persist()||!dirty.value&&!job.value&&!ambiguous.value)close();}
 function changeAction(){
   const values=form.value?.values;
+  if(values)values.dingtalk_robot_ids=[];
   if(values&&values.work_type!=='adjust'){
     if(action.value==='end'&&(!String(values.progress||'').trim()||values.progress===originalProgress)){progressBeforeEnd=String(values.progress||'');values.progress=endProgress;}
     else if(action.value!=='end'&&values.progress===endProgress)values.progress=progressBeforeEnd;

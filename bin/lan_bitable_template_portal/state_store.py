@@ -793,7 +793,8 @@ class LanPortalStateStore:
                                  "idempotency_key": f"notice_robot:{normalized_operation_id}"},
                         now=now,
                     )
-                if status=='completed' and result_payload.get('dingtalk_targets') and result_payload.get('robot_payload'):
+                if (status=='completed' and not normalized_operation_id.startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:'))
+                        and result_payload.get('dingtalk_targets') and result_payload.get('robot_payload')):
                     self._enqueue_outbox_event_locked(conn,channel='notice_dingtalk',
                         payload={'operation_id':normalized_operation_id,'idempotency_key':'notice_dingtalk:'+normalized_operation_id},now=now)
                 conn.commit()

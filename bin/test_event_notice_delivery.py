@@ -51,6 +51,18 @@ class EventDeliveryTests(unittest.TestCase):
         self.accept('update');self.process();self.assertEqual(len(self.calls),3)
         self.assertTrue(self.calls[-1][0].startswith('b'))
 
+    def test_inconsistent_event_targets_are_blocked_without_sending(self):
+        self.accept()
+        op=self.store.get_document(OPS,'1'*32)
+        op['dingtalk_selection']=op['dingtalk_selection'][:1]
+        self.store.put_document(OPS,'1'*32,op)
+        self.process()
+        self.assertEqual(self.calls,[])
+        delivery=self.manager.public(self.manager.get(self.event))['delivery']
+        self.assertEqual(delivery['state'],'failed')
+        self.assertTrue(all('不一致' in target.get('reason','') for target in delivery['targets']))
+        with self.assertRaises(PortalError):self.manager.retry(self.event,'1'*32)
+
     def test_partial_failure_does_not_prevent_first_success_priority_or_repeat_success(self):
         self.manager.ding.transport.send=lambda token,secret,text:{'state':'failed','reason':'模拟拒绝'} if token.startswith('a') else self.send(token,text)
         self.accept();self.process();self.assertEqual(len(blockers(self.store)),1)

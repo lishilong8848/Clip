@@ -141,7 +141,13 @@ class ShiftReminderTests(TestCase):
         self.reader.assert_called_once_with('2026-10-10')
         self.assertEqual([c.args[0] for c in self.sender.call_args_list], ['ou_external', 'ou_night'])
         for call in self.sender.call_args_list:
-            self.assertEqual(call.args[1]['elements'][-1]['actions'][0]['url'], 'http://portal.test:18766/learning?view=practice')
+            from urllib.parse import urlsplit, parse_qs
+            target=urlsplit(call.args[1]['elements'][-1]['actions'][0]['url'])
+            query=parse_qs(target.query)
+            self.assertEqual((target.scheme,target.netloc,target.path),('http','portal.test:18766','/learning'))
+            self.assertEqual(query['view'],['practice'])
+            self.assertEqual(query['date'],['2026-10-10'])
+            self.assertEqual(query['shift'],['白' if call.args[0]=='ou_external' else '夜'])
         self.run_at(13, 11)
         self.assertEqual(self.reader.call_count, 2)
 
@@ -218,7 +224,7 @@ class ShiftReminderTests(TestCase):
         with patch.object(learning.time, 'time', return_value=1301):
             self.run_at(20)
         self.assertEqual(self.sender.call_args_list[0].args[2], self.sender.call_args_list[2].args[2])
-        self.reader.assert_called_once()
+        self.assertEqual(self.reader.call_count, 2)  # after five minutes refresh the same day's roster
 
     def test_long_day_intern_does_not_receive_late_initial_or_failed_retry_after_work(self):
         self.reader.return_value=[{'name':'外部人员','scope':'A','shift':'白','open_id':'ou_external',
