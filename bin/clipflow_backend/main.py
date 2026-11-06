@@ -747,6 +747,8 @@ class FastAPIPortalController:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="ClipFlow LAN Backend")
+        from alarm_scan.routes import install_alarm_scan_routes
+        install_alarm_scan_routes(app)
 
         @app.middleware('http')
         async def permission_write_origin(request: Request, call_next):

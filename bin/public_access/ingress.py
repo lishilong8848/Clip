@@ -25,6 +25,9 @@ API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records wo
 # Business modules share LAN authorization; internal and anonymous guards stay separate.
 API_ROOTS |= frozenset(prefix.split('/')[2] for prefix, _ in PREFIXES
                        if prefix.startswith('/api/') and not prefix.endswith('-'))
+API_ROOTS |= {'alarm-scan'}
+# Only these two endpoints bypass portal login. Event submission validates the QR signature.
+ALARM_SCAN_PUBLIC = {('GET', '/api/alarm-scan/health'), ('POST', '/api/alarm-scan/events')}
 ANONYMOUS = {
     ('GET', '/api/auth/status'), ('GET', '/api/auth/login'), ('GET', '/api/auth/feishu/callback'),
     ('GET', '/api/auth/password/people'), ('POST', '/api/auth/password/login'),
@@ -108,15 +111,15 @@ class PublicGuard:
         scope = {**scope, 'client': ('192.0.2.1', 0), 'scheme': 'https',
                  'state': {**scope.get('state', {}), 'clipflow_public_ingress': True},
                  'headers': clean_headers(scope['headers']) + [(b'x-forwarded-proto', b'https')]}
-        needs_session = path.startswith('/api/') and (method, path) not in ANONYMOUS
+        needs_session = path.startswith('/api/') and (method, path) not in ANONYMOUS | ALARM_SCAN_PUBLIC
         session = await asyncio.to_thread(self.session_reader, Request(scope)) if needs_session else None
         if isinstance(session, dict) and session.get('role') == 'guest' and path.startswith('/api/') \
-                and (method, path) not in ANONYMOUS:
+                and (method, path) not in ANONYMOUS | ALARM_SCAN_PUBLIC:
             from lan_bitable_template_portal.cabinet_guest import cabinet_guest_api_allowed
             if not cabinet_guest_api_allowed(method, path):
                 return await reject(scope, receive, send, 403, '访客仅可查看机柜数据和导出单楼文件。')
         signed_photo = method == 'GET' and path.startswith('/api/polling-work-orders/photos/')
-        if path.startswith('/api/') and (method, path) not in ANONYMOUS | SIGNED and not signed_photo and not session:
+        if path.startswith('/api/') and (method, path) not in ANONYMOUS | SIGNED | ALARM_SCAN_PUBLIC and not signed_photo and not session:
             return await reject(scope, receive, send, 401, '请先登录灯塔。')
 
         async def secure_send(message):
