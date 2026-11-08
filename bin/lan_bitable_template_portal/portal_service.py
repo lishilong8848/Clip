@@ -216,32 +216,7 @@ WATER_CONSUMPTION_SUPERVISOR_POSITIONS = {
     "E": "设施运维主管",
     "H": "H楼值班主管",
 }
-WATER_CONSUMPTION_SUPERVISOR_FALLBACKS = {
-    "A": {
-        "name": "施小东",
-        "open_id": "ou_32ff59c86bbadabb6c22c21f0ad249ec",
-    },
-    "B": {
-        "name": "陈继猛",
-        "open_id": "ou_0c3cee3752565ff30bc38a1ddb20a1aa",
-    },
-    "C": {
-        "name": "孙婷婷",
-        "open_id": "ou_1b45c51fec99162ce1e78bd2f06aeedf",
-    },
-    "D": {
-        "name": "陶必亮",
-        "open_id": "ou_6e9ab06be2174a56908c289a4c4926fa",
-    },
-    "E": {
-        "name": "陈凯",
-        "open_id": "ou_ed5a06724bca67ebe08aa94e5505c882",
-    },
-    "H": {
-        "name": "周庆庆",
-        "open_id": "ou_31b9b88b491da8ef0cfa18ee4599288c",
-    },
-}
+H_WATER_SUPERVISOR_EMPLOYEE_NO = "14549"
 CRITICAL_GUARD_WEATHER_URL = "https://www.sm.sjhl.online:3001/api/weather/warning"
 CRITICAL_GUARD_WEATHER_SCOPES = ("A", "B", "C", "D", "E")
 CRITICAL_GUARD_WEATHER_OBSERVER_SCOPE = "H"
@@ -263,7 +238,6 @@ DRILL_ARCHIVE_FIELD_TYPES = {
     "本地演练ID": 1,
     "生成版本": 2,
 }
-MEI_BINGBING_OPEN_ID = "ou_6e607320c167d816366acba893b339b1"
 CRITICAL_GUARD_COLOR_LABELS = {
     "red": "红色",
     "orange": "橙色",
@@ -1232,7 +1206,8 @@ def external_real_write_guard() -> dict[str, Any]:
         "reason": reason,
     }
 LI_SHILONG_OPEN_ID = "ou_083f6c32c2cd3da8ccfd62d800e742fd"
-MA_JINYU_OPEN_ID = "ou_cee45ea48df99def799710e782f5434c"
+MA_JINYU_EMPLOYEE_NO = "18871"
+LI_SHILONG_EMPLOYEE_NO = "92998"
 HANDOVER_PASSWORD_RESET_TTL_SECONDS = 10 * 60
 HANDOVER_PASSWORD_RESET_MAX_ATTEMPTS = 5
 BUILDING_OPEN_ID_MAP = {
@@ -5361,6 +5336,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         unavailable_reason = ""
         if departed:
             unavailable_reason = "已离职或异动"
+        elif len(user_items) != 1:
+            unavailable_reason = "人员记录关联多个飞书账号"
         elif not open_id:
             unavailable_reason = "缺少飞书人员"
         return {
@@ -5397,16 +5374,19 @@ class MaintenancePortalService(RepairOperationsMixin):
         unified = getattr(self, "_unified_account_directory", None)
         if unified:
             return unified(force_refresh=force_refresh, query=query)
+        app_id, _ = config.refresh_credentials()
         now = time.time()
         with self._permission_directory_cache_lock:
             cached = self._permission_directory_cache
             if (
                 not force_refresh
                 and isinstance(cached, dict)
+                and bool(app_id)
+                and cached.get("app_id") == app_id
                 and now - float(cached.get("loaded_ts") or 0)
                 < PERMISSION_DIRECTORY_CACHE_TTL_SECONDS
             ):
-                payload = copy.deepcopy(cached)
+                payload = {key: copy.deepcopy(value) for key, value in cached.items() if key != "app_id"}
             else:
                 _metas, meta_by_name = self._load_table_fields(
                     app_token=PERMISSION_DIRECTORY_APP_TOKEN,
@@ -5426,6 +5406,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     work_type="",
                     notice_type="",
                 )
+                if str(config.app_id or "") != app_id:
+                    raise PortalError("飞书应用已切换，请重新读取人员目录。")
                 items = [self._permission_directory_person(item) for item in records]
                 items = [
                     item
@@ -5451,7 +5433,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "loaded_at": dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                     "loaded_ts": now,
                 }
-                self._permission_directory_cache = copy.deepcopy(payload)
+                self._permission_directory_cache = {**copy.deepcopy(payload), "app_id": app_id}
 
         normalized_query = str(query or "").strip().casefold()
         if normalized_query:
@@ -19139,44 +19121,52 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
         return note
 
-    def _water_supervisor_recipient(self, scope: str) -> dict[str, str]:
-        scope_code = self._water_scope_code(scope)
-        expected_position = WATER_CONSUMPTION_SUPERVISOR_POSITIONS.get(
-            scope_code,
-            "",
-        )
+    def _business_notification_people(self) -> list[dict[str, Any]]:
         try:
-            directory = self.get_permission_directory_people()
-            candidates = [
-                item
-                for item in directory.get("items") or []
-                if item.get("selectable")
-                and str(item.get("open_id") or "").strip()
-                and scope_code in (item.get("scopes") or [])
-                and str(item.get("position") or "").strip() == expected_position
-            ]
-            if len(candidates) == 1:
-                candidate = candidates[0]
-                return {
-                    "name": str(candidate.get("name") or "").strip(),
-                    "open_id": str(candidate.get("open_id") or "").strip(),
-                }
-            if len(candidates) > 1:
-                logging.getLogger(__name__).warning(
-                    "水耗提醒匹配到多个楼栋主管: scope=%s position=%s names=%s",
-                    scope_code,
-                    expected_position,
-                    [str(item.get("name") or "") for item in candidates],
-                )
+            return list(self.get_permission_directory_people().get("items") or [])
         except Exception as exc:
-            logging.getLogger(__name__).warning(
-                "水耗提醒读取楼栋主管失败，使用已核验兜底映射: scope=%s error=%s",
-                scope_code,
-                exc,
-            )
-        return dict(
-            WATER_CONSUMPTION_SUPERVISOR_FALLBACKS.get(scope_code) or {}
-        )
+            logging.getLogger(__name__).warning("读取飞书通知人员目录失败：%s", type(exc).__name__)
+            return []
+
+    @staticmethod
+    def _unique_business_recipient(candidates: list[dict], people: list[dict]) -> dict[str, str]:
+        if len(candidates) != 1 or not candidates[0].get("selectable"):
+            return {}
+        candidate = candidates[0]
+        open_id = str(candidate.get("open_id") or "").strip()
+        if not re.fullmatch(r"ou_[A-Za-z0-9]+", open_id):
+            return {}
+        if sum(item.get("open_id") == open_id for item in people) != 1:
+            return {}
+        return {"name": str(candidate.get("name") or ""), "open_id": open_id}
+
+    def _employee_business_recipient(
+        self, employee_no: str, *, people: list[dict] | None = None
+    ) -> dict[str, str]:
+        if people is None:
+            people = self._business_notification_people()
+        candidates = [item for item in people if str(item.get("employee_no") or "") == employee_no]
+        return self._unique_business_recipient(candidates, people)
+
+    def _water_supervisor_recipient(
+        self, scope: str, *, people: list[dict] | None = None
+    ) -> dict[str, str]:
+        scope_code = self._water_scope_code(scope)
+        position = WATER_CONSUMPTION_SUPERVISOR_POSITIONS.get(scope_code)
+        if not position:
+            return {}
+        if people is None:
+            people = self._business_notification_people()
+        scoped = [item for item in people if scope_code in (item.get("scopes") or [])]
+        positions = {position, "运维主管"} if scope_code != "H" else {position}
+        candidates = [item for item in scoped if item.get("position") in positions]
+        if not candidates and scope_code == "H":
+            candidates = [
+                item for item in scoped
+                if item.get("employee_no") == H_WATER_SUPERVISOR_EMPLOYEE_NO
+                and item.get("position") == "值班长"
+            ]
+        return self._unique_business_recipient(candidates, people)
 
     def _notify_water_large_change(
         self,
@@ -19190,14 +19180,16 @@ class MaintenancePortalService(RepairOperationsMixin):
         operator_name: str,
         abnormal_note: str = "",
     ) -> dict[str, Any]:
-        supervisor = self._water_supervisor_recipient(scope)
+        people = self._business_notification_people()
+        supervisor = self._water_supervisor_recipient(scope, people=people)
+        manager = self._employee_business_recipient(MA_JINYU_EMPLOYEE_NO, people=people)
         recipients = [
             item
             for item in dict.fromkeys(
                 [
                     str(operator_open_id or "").strip(),
                     str(supervisor.get("open_id") or "").strip(),
-                    MA_JINYU_OPEN_ID,
+                    manager.get("open_id", ""),
                 ]
             )
             if item
@@ -21850,19 +21842,17 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _building_label_from_codes(cls, codes: list[str]) -> str:
         return "、".join(cls._building_label_from_code(code) for code in codes if code)
 
-    @classmethod
-    def _recipients_for_building(cls, building: str) -> tuple[str, list[str], str]:
-        code = cls._building_code_from_value(building)
+    def _recipients_for_building(self, building: str) -> tuple[str, list[str], str]:
+        code = self._building_code_from_value(building)
         if not code:
             return "", [], f"无法从楼栋字段识别 110/A-E/H: {building or '-'}"
         building_open_id = BUILDING_OPEN_ID_MAP.get(code, "")
         if not building_open_id:
-            return code, [], f"未配置 {cls._scope_label(code)} openid"
-        return code, list(dict.fromkeys([building_open_id, LI_SHILONG_OPEN_ID])), ""
+            return code, [], f"未配置 {self._scope_label(code)} openid"
+        return self._recipients_for_building_codes([code])
 
-    @classmethod
     def _recipients_for_building_codes(
-        cls, building_codes: list[str], *, fallback_building: str = ""
+        self, building_codes: list[str], *, fallback_building: str = ""
     ) -> tuple[str, list[str], str]:
         codes = [
             str(code or "").strip().upper()
@@ -21871,7 +21861,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         ]
         codes = [code for code in BUILDING_SCOPE_CODES if code in dict.fromkeys(codes)]
         if not codes and fallback_building:
-            codes = cls._building_codes_from_value(fallback_building)
+            codes = self._building_codes_from_value(fallback_building)
         if not codes:
             return "", [], f"无法从楼栋字段识别 110/A-E/H: {fallback_building or '-'}"
         recipients: list[str] = []
@@ -21881,8 +21871,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             if open_id:
                 recipients.append(open_id)
             else:
-                missing.append(cls._scope_label(code))
-        recipients.append(LI_SHILONG_OPEN_ID)
+                missing.append(self._scope_label(code))
+        copy_recipient = self._employee_business_recipient(LI_SHILONG_EMPLOYEE_NO)
+        if copy_recipient:
+            recipients.append(copy_recipient["open_id"])
         recipients = [item for item in dict.fromkeys(str(open_id or "").strip() for open_id in recipients) if item]
         if missing:
             return codes[0] if len(codes) == 1 else "CAMPUS", recipients, f"未配置 {','.join(missing)} openid"
@@ -27404,27 +27396,6 @@ class MaintenancePortalService(RepairOperationsMixin):
             "elements": elements,
         }
 
-    def _daily_report_supervisor_recipient(self, scope: str) -> dict[str, str]:
-        scope_code = self._water_scope_code(scope)
-        expected_position = WATER_CONSUMPTION_SUPERVISOR_POSITIONS.get(scope_code, "")
-        cached = getattr(self, "_permission_directory_cache", None)
-        if isinstance(cached, dict):
-            candidates = [
-                item
-                for item in cached.get("items") or []
-                if isinstance(item, dict)
-                and item.get("selectable")
-                and str(item.get("open_id") or "").strip()
-                and scope_code in (item.get("scopes") or [])
-                and str(item.get("position") or "").strip() == expected_position
-            ]
-            if len(candidates) == 1:
-                return {
-                    "name": str(candidates[0].get("name") or "").strip(),
-                    "open_id": str(candidates[0].get("open_id") or "").strip(),
-                }
-        return dict(WATER_CONSUMPTION_SUPERVISOR_FALLBACKS.get(scope_code) or {})
-
     def _new_daily_work_report_document(
         self,
         *,
@@ -27456,11 +27427,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         deliveries: dict[str, dict[str, Any]] = {}
         for scope in DAILY_WORK_REPORT_SCOPES:
-            recipient = self._daily_report_supervisor_recipient(scope)
             deliveries[scope] = {
                 "scope": scope,
-                "recipient_name": str(recipient.get("name") or ""),
-                "open_id": str(recipient.get("open_id") or ""),
+                "recipient_name": "",
+                "open_id": "",
                 "card_key": scope,
                 "status": "pending",
                 "attempts": 0,
@@ -27478,7 +27448,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         deliveries["LI_SHILONG"] = {
             "scope": "ALL_AE",
             "recipient_name": "李世龙",
-            "open_id": LI_SHILONG_OPEN_ID,
+            "open_id": "",
             "card_key": "ALL_AE",
             "status": "pending",
             "attempts": 0,
@@ -27665,6 +27635,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             cards = cards if isinstance(cards, dict) else {}
             sent = 0
             failed = 0
+            people = None
             for delivery_key, raw_delivery in deliveries.items():
                 if not isinstance(raw_delivery, dict):
                     continue
@@ -27673,6 +27644,28 @@ class MaintenancePortalService(RepairOperationsMixin):
                     continue
                 open_id = str(delivery.get("open_id") or "").strip()
                 card = cards.get(str(delivery.get("card_key") or ""))
+                scope = str(delivery.get("scope") or "")
+                identity_warning = ""
+                if scope in DAILY_WORK_REPORT_SCOPES or delivery_key == "LI_SHILONG":
+                    if people is None:
+                        people = self._business_notification_people()
+                    recipient = (
+                        self._employee_business_recipient(LI_SHILONG_EMPLOYEE_NO, people=people)
+                        if delivery_key == "LI_SHILONG"
+                        else self._water_supervisor_recipient(scope, people=people)
+                    )
+                    current_id = recipient.get("open_id", "")
+                    if not current_id:
+                        identity_warning = "日报接收人当前身份无法唯一核验，等待重新匹配。"
+                    elif open_id and open_id != current_id and delivery.get("attempts"):
+                        identity_warning = "日报接收人已变更，原投递曾尝试，请先核对原回执。"
+                    else:
+                        delivery["recipient_name"] = recipient["name"]
+                        delivery["open_id"] = open_id = current_id
+                if identity_warning:
+                    delivery["last_error"] = identity_warning
+                    failed += 1
+                    continue
                 delivery["attempts"] = int(delivery.get("attempts") or 0) + 1
                 delivery["last_attempt_at"] = dt.datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S"
@@ -28114,11 +28107,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         elif isinstance(configured, (list, tuple, set)):
             recipients = [str(item or "") for item in configured]
         else:
-            recipients = [LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID]
+            people = self._business_notification_people()
+            recipients = [
+                self._employee_business_recipient(number, people=people).get("open_id", "")
+                for number in (LI_SHILONG_EMPLOYEE_NO, MA_JINYU_EMPLOYEE_NO)
+            ]
         recipients = list(dict.fromkeys([str(item or "").strip() for item in recipients]))
         recipients = [item for item in recipients if item]
         if len(recipients) < 2:
-            raise PortalError("未配置李世龙和马进宇两个 openid，无法发送改密验证码。")
+            raise PortalError("改密验证码需要两位已核验的接收人，请检查配置或员工信息池中的李世龙、马进宇。")
         return recipients
 
     def _clear_expired_handover_reset_locked(self) -> None:
@@ -48336,7 +48333,7 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _critical_guard_archive_managers(self) -> list[dict[str, str]]:
         rows = personnel_source.read_records(self, fields=["姓名", "员工工号", "员工姓名", "离职/异动情况"])
         result = []
-        for number, name in (("18871", "马进宇"), ("14258", "梅冰冰")):
+        for number, name in ((MA_JINYU_EMPLOYEE_NO, "马进宇"), ("14258", "梅冰冰")):
             matches = [item.get("fields") or {} for item in rows
                        if personnel_source.text((item.get("fields") or {}).get("员工工号")) == number]
             if len(matches) != 1 or self._signature_person_inactive(matches[0].get("离职/异动情况")):
@@ -48344,8 +48341,10 @@ class MaintenancePortalService(RepairOperationsMixin):
             employee = matches[0].get("员工姓名")
             user = self._signature_user_info(employee) if not isinstance(employee, list) or len(employee) == 1 else {}
             identity = str(user.get("open_id") or "").strip()
-            if not identity.startswith("ou_"):
+            if not re.fullmatch(r"ou_[A-Za-z0-9]+", identity):
                 raise PortalError(f"重保归档机房经理 {name} 的员工姓名字段未绑定有效飞书账号。")
+            if {"id": identity} in result:
+                raise PortalError("重保归档的两位机房经理关联了同一飞书账号，请核对员工信息池。")
             result.append({"id": identity})
         return result
 

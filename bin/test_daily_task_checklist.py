@@ -526,6 +526,40 @@ class DailyTaskChecklistTests(unittest.TestCase):
         sender.assert_called_once()
         self.assertEqual(sender.call_args.kwargs["message_uuid"], "stable-uuid")
 
+    def test_daily_report_resolves_current_supervisor_without_redirecting_unverified_send(self) -> None:
+        service = self._service()
+        service._business_notification_people = lambda: [
+            {"name": "C楼现任主管", "position": "运维主管", "scopes": ["C"],
+             "open_id": "ou_CurrentSupervisor", "selectable": True},
+        ]
+        now = dt.datetime(2026, 7, 28, 17, 50)
+        attempts = 1
+
+        def new_document(**_kwargs):
+            return {
+                "cards": {"C": {"header": {}, "elements": []}},
+                "deliveries": {"C": {
+                    "scope": "C", "card_key": "C", "open_id": "ou_FormerSupervisor",
+                    "status": "pending", "attempts": attempts, "message_uuid": "stable-uuid",
+                }},
+            }
+
+        service._new_daily_work_report_document = new_document
+        with patch(
+            "lan_bitable_template_portal.portal_service.send_interactive_to_open_ids",
+            return_value=(True, "ok", []),
+        ) as sender:
+            held = service.process_daily_work_reports(now=now, force=True)
+            self.assertEqual(held["pending"], 1)
+            sender.assert_not_called()
+
+            tomorrow = now + dt.timedelta(days=1)
+            attempts = 0
+            sent = service.process_daily_work_reports(now=tomorrow, force=True)
+            self.assertEqual(sent["sent"], 1)
+            self.assertEqual(sender.call_args.args[1], ["ou_CurrentSupervisor"])
+            self.assertEqual(sender.call_args.kwargs["message_uuid"], "stable-uuid")
+
     def test_interactive_sender_forwards_stable_uuid(self) -> None:
         from bin.test_feishu_single_app_delivery import standalone_delivery_fixture
         with standalone_delivery_fixture('ou_test'), patch.object(

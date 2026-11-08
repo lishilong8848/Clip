@@ -20,7 +20,7 @@ from lan_bitable_template_portal.lighthouse_ai import (
 )
 from lan_bitable_template_portal.lighthouse_sources import LocalAssistantSources, codes
 from tools.lighthouse_test_backend import install_test_backend as install_lighthouse_routes
-from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID
+from lan_bitable_template_portal.portal_service import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
 from upload_event_module.services.http_client import FeishuHttpClient
 
 ACTOR = {"id": "ou_user_a", "scopes": ["A"], "is_admin": False}
@@ -401,7 +401,7 @@ class SourcesAndRoutesTests(unittest.TestCase):
             session["role"] = "admin"
             self.assertEqual(client.get("/api/assistant/settings").status_code, 200)
             self.assertTrue(client.get("/api/assistant/conversation").json()["data"]["can_manage_settings"])
-            for open_id in (LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, BUILDING_OPEN_ID_MAP["H"]):
+            for open_id in (LI_SHILONG_OPEN_ID, "ou_CurrentManager", BUILDING_OPEN_ID_MAP["H"]):
                 session["user"] = {"open_id": open_id}
                 session["role"] = "building" if open_id == BUILDING_OPEN_ID_MAP["H"] else "admin"
                 self.assertEqual(client.get("/api/assistant/settings").status_code, 200)

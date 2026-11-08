@@ -18,13 +18,11 @@ if str(BIN_DIR) not in sys.path:
 from lan_bitable_template_portal import portal_service as portal_service_module
 from lan_bitable_template_portal.portal_service import (
     FieldMeta,
-    MA_JINYU_OPEN_ID,
     MaintenancePortalService,
     PortalConfirmationRequiredError,
     PortalError,
     WATER_CONSUMPTION_ABNORMAL_NOTE_FIELD,
     WATER_CONSUMPTION_ALERT_CHAT_ID,
-    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
@@ -349,6 +347,11 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             )
         )
         self.service.start_water_consumption_refresh_async = Mock()
+        self.service.get_permission_directory_people = Mock(return_value={
+            "items": [
+                {"name": "马进宇", "employee_no": "18871", "open_id": "ou_CurrentManager", "selectable": True},
+            ],
+        })
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -686,8 +689,8 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 "message": "发送成功",
                 "recipients": [
                     "ou_operator",
-                    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
-                    MA_JINYU_OPEN_ID,
+                    "ou_CurrentSupervisor",
+                    "ou_CurrentManager",
                 ],
                 "results": [],
             }
@@ -753,9 +756,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
         self.service._water_supervisor_recipient = Mock(
             return_value={
                 "name": "施小东",
-                "open_id": WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"][
-                    "open_id"
-                ],
+                "open_id": "ou_CurrentSupervisor",
             }
         )
         with (
@@ -797,8 +798,8 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
             recipients,
             [
                 "ou_operator",
-                WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
-                MA_JINYU_OPEN_ID,
+                "ou_CurrentSupervisor",
+                "ou_CurrentManager",
             ],
         )
         sent_text = sender.call_args.args[0]
@@ -877,7 +878,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                     {
                         "name": "A楼主管",
                         "position": "设施运维主管",
-                        "open_id": "ou_a_supervisor",
+                        "open_id": "ou_AcurrentSupervisor",
                         "scopes": ["A"],
                         "selectable": True,
                     },
@@ -889,7 +890,7 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
 
         self.assertEqual(
             recipient,
-            {"name": "A楼主管", "open_id": "ou_a_supervisor"},
+            {"name": "A楼主管", "open_id": "ou_AcurrentSupervisor"},
         )
 
     def test_missing_abnormal_note_field_stops_before_upload_and_remote_write(
@@ -1015,8 +1016,8 @@ class WaterConsumptionWriteFlowTests(unittest.TestCase):
                 "message": "模拟消息发送失败",
                 "recipients": [
                     "ou_operator",
-                    WATER_CONSUMPTION_SUPERVISOR_FALLBACKS["A"]["open_id"],
-                    MA_JINYU_OPEN_ID,
+                    "ou_CurrentSupervisor",
+                    "ou_CurrentManager",
                 ],
                 "results": [],
             }

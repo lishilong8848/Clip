@@ -26,7 +26,6 @@ from .portal_service import (
     BUILDING_OPEN_ID_MAP,
     BUILDING_SCOPE_CODES,
     LI_SHILONG_OPEN_ID,
-    MA_JINYU_OPEN_ID,
     SCOPE_OPTIONS,
     MaintenancePortalService,
     PortalError,
@@ -741,7 +740,7 @@ class PortalAuthManager:
         """Read verified current-app recipients without fetching another HR snapshot."""
         if not re.fullmatch(r"ou_[A-Za-z0-9]+", identity) or app_id != self.current_feishu_app_id():
             return None
-        if app_id == TARGET_APP_ID and identity in {LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, *BUILDING_OPEN_ID_MAP.values()}:
+        if app_id == TARGET_APP_ID and identity in {LI_SHILONG_OPEN_ID, *BUILDING_OPEN_ID_MAP.values()}:
             return identity if self._permission_user(identity) and not self._open_id_explicitly_disabled(identity) else None
         provider = getattr(self, "_account_directory_provider", None)
         snapshot = provider() if provider else {}

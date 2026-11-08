@@ -1476,8 +1476,8 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
     def test_archive_sets_both_managers_without_confirmation(self) -> None:
         from unittest.mock import patch
         reader = patch("lan_bitable_template_portal.personnel_source.read_records", return_value=[
-            {"fields": {"员工工号": "18871", "姓名": "马进宇", "员工姓名": [{"id": "ou_current_ma", "name": "马进宇"}]}},
-            {"fields": {"员工工号": "14258", "姓名": "梅冰冰", "员工姓名": [{"id": "ou_current_mei", "name": "梅冰冰"}]}},
+            {"fields": {"员工工号": "18871", "姓名": "马进宇", "员工姓名": [{"id": "ou_CurrentMa", "name": "马进宇"}]}},
+            {"fields": {"员工工号": "14258", "姓名": "梅冰冰", "员工姓名": [{"id": "ou_CurrentMei", "name": "梅冰冰"}]}},
         ])
         reader.start()
         self.addCleanup(reader.stop)
@@ -1528,8 +1528,8 @@ class CriticalGuardWeatherStateTests(unittest.TestCase):
         self.assertEqual(
             fields["机房经理"],
             [
-                {"id": "ou_current_ma"},
-                {"id": "ou_current_mei"},
+                {"id": "ou_CurrentMa"},
+                {"id": "ou_CurrentMei"},
             ],
         )
         self.assertEqual(fields["重保标签"], "暴雨蓝色")

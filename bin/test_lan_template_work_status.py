@@ -21521,16 +21521,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(
                     open_ids,
                     [
-                        "ou_902e364a6c2c6c20893c02abe505a7b2",
-                        "ou_ma_jinyu",
+                        "ou_CurrentLi",
+                        "ou_CurrentManager",
                     ],
                 )
                 return True, "ok", [{"open_id": item, "ok": True} for item in open_ids]
 
-            with patch(
-                "lan_bitable_template_portal.portal_service.MA_JINYU_OPEN_ID",
-                "ou_ma_jinyu",
-            ), patch(
+            with patch.object(service, "_business_notification_people", return_value=[
+                {"employee_no": "92998", "open_id": "ou_CurrentLi", "selectable": True},
+                {"employee_no": "18871", "open_id": "ou_CurrentManager", "selectable": True},
+            ]), patch(
                 "lan_bitable_template_portal.portal_service.send_text_to_open_ids",
                 side_effect=fake_send,
             ), patch.dict(

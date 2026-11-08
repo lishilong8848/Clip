@@ -18,7 +18,7 @@ from lan_bitable_template_portal.feishu_identity import (
     TARGET_APP_ID, TARGET_DUTY_OPEN_IDS, canonical_duty_identity, duty_recipient_open_id,
 )
 from lan_bitable_template_portal.portal_service import (
-    BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID, MA_JINYU_OPEN_ID, PortalError,
+    BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID, MA_JINYU_EMPLOYEE_NO, PortalError,
 )
 from lan_bitable_template_portal.personnel_password_login import PersonnelPasswordLogin
 
@@ -91,7 +91,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
     def test_current_constants_and_duty_helpers_never_translate(self):
         self.assertEqual(BUILDING_OPEN_ID_MAP, TARGET_DUTY_OPEN_IDS)
         self.assertEqual(LI_SHILONG_OPEN_ID, "ou_083f6c32c2cd3da8ccfd62d800e742fd")
-        self.assertEqual(MA_JINYU_OPEN_ID, "ou_cee45ea48df99def799710e782f5434c")
+        self.assertEqual(MA_JINYU_EMPLOYEE_NO, "18871")
         for oid in TARGET_DUTY_OPEN_IDS.values():
             self.assertEqual(canonical_duty_identity(oid, TARGET_APP_ID), oid)
             self.assertEqual(duty_recipient_open_id(oid, TARGET_APP_ID), oid)
@@ -266,7 +266,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
 
     def test_ma_and_regular_employees_still_reject_duplicate_and_inactive_hr(self):
         from openclaw_service.assistant.lighthouse_ai import AssistantError
-        for oid in (MA_JINYU_OPEN_ID, "ou_SyntheticEmployee"):
+        for oid in ("ou_CurrentManager", "ou_SyntheticEmployee"):
             for reason in ("duplicate", "inactive"):
                 with self.subTest(identity=oid, reason=reason):
                     rows = ([self.row("recShared" + str(i), oid) for i in range(9)] if reason == "duplicate"
@@ -313,7 +313,7 @@ class FeishuDirectoryIdentityTests(_TempDirTestCase):
     def test_loading_does_not_add_reenable_or_promote_administrators(self):
         self.load([])
         self.assertEqual(self.auth.get_permissions_payload()["users"], [])
-        for oid in (MA_JINYU_OPEN_ID, TARGET_DUTY_OPEN_IDS["H"]):
+        for oid in ("ou_CurrentManager", TARGET_DUTY_OPEN_IDS["H"]):
             self.grant(oid, enabled=False, modules=[], scopes=[])
             self.auth._permissions_cache = None
             self.assertFalse(self.auth._permission_user(oid)["enabled"])

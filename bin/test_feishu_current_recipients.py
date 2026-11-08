@@ -239,10 +239,9 @@ class CurrentRecipientTests(unittest.TestCase):
 
     def test_ordinary_people_and_ma_still_require_unique_active_matching_hr_record(self):
         from lan_bitable_template_portal.portal_auth import REQUIRED_ADMIN_USERS
-        from lan_bitable_template_portal.portal_service import MA_JINYU_OPEN_ID
-        self.assertNotIn(MA_JINYU_OPEN_ID, REQUIRED_ADMIN_USERS)
+        self.assertNotIn("ou_CurrentManager", REQUIRED_ADMIN_USERS)
         with patch('lan_bitable_template_portal.feishu_identity.TARGET_APP_ID', TARGET_APP_ID):
-            for open_id in ('ou_current', MA_JINYU_OPEN_ID):
+            for open_id in ('ou_current', "ou_CurrentManager"):
                 with self.subTest(open_id=open_id):
                     self.directory({'recPerson': self.person(open_id)})
                     self.assertEqual(current_recipient_open_id(self.runtime, open_id, TARGET_APP_ID,

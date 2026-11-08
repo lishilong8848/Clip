@@ -35,8 +35,12 @@ def send_alert(message, recipient, message_uuid):
 
 
 def alert_recipients():
-    from lan_bitable_template_portal.portal_service import LI_SHILONG_OPEN_ID, BUILDING_OPEN_ID_MAP
-    return list(dict.fromkeys([LI_SHILONG_OPEN_ID, BUILDING_OPEN_ID_MAP['H']]))
+    from lan_bitable_template_portal.portal_service import LI_SHILONG_EMPLOYEE_NO, BUILDING_OPEN_ID_MAP
+    from lan_bitable_template_portal.server import PortalRuntime
+
+    service = getattr(PortalRuntime, 'service', None)
+    person = service._employee_business_recipient(LI_SHILONG_EMPLOYEE_NO) if service else {}
+    return list(dict.fromkeys(filter(None, [person.get('open_id'), BUILDING_OPEN_ID_MAP['H']])))
 
 
 class Monitor:
