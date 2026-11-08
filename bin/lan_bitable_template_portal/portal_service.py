@@ -48333,6 +48333,22 @@ class MaintenancePortalService(RepairOperationsMixin):
             return bool(normal)
         return "正常" if normal else "异常"
 
+    def _critical_guard_archive_managers(self) -> list[dict[str, str]]:
+        rows = personnel_source.read_records(self, fields=["姓名", "员工工号", "员工姓名", "离职/异动情况"])
+        result = []
+        for number, name in (("18871", "马进宇"), ("14258", "梅冰冰")):
+            matches = [item.get("fields") or {} for item in rows
+                       if personnel_source.text((item.get("fields") or {}).get("员工工号")) == number]
+            if len(matches) != 1 or self._signature_person_inactive(matches[0].get("离职/异动情况")):
+                raise PortalError(f"重保归档机房经理 {name}（{number}）未在员工信息池唯一匹配，未使用历史账号。")
+            employee = matches[0].get("员工姓名")
+            user = self._signature_user_info(employee) if not isinstance(employee, list) or len(employee) == 1 else {}
+            identity = str(user.get("open_id") or "").strip()
+            if not identity.startswith("ou_"):
+                raise PortalError(f"重保归档机房经理 {name} 的员工姓名字段未绑定有效飞书账号。")
+            result.append({"id": identity})
+        return result
+
     def _critical_guard_archive_fields(
         self,
         weather_task: dict[str, Any],
@@ -48407,10 +48423,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             ],
             "重保标签": archive_tag,
             "重保戒备等级": str(weather_task.get("guard_level") or ""),
-            "机房经理": [
-                {"id": MA_JINYU_OPEN_ID},
-                {"id": MEI_BINGBING_OPEN_ID},
-            ],
+            "机房经理": self._critical_guard_archive_managers(),
         }
         attachment_paths: dict[str, list[str]] = {}
         rules = {
@@ -48505,7 +48518,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         # Other ambiguous failures still require the existing manual verification.
         permission_retry_due = (
             status == "failed"
-            and "1061004" in str(weather_task.get("archive_error") or "")
+            and any(code in str(weather_task.get("archive_error") or "") for code in ("1061004", "1254066"))
             and attempted_at > 0
             and time.time() - attempted_at >= 15 * 60
         )
