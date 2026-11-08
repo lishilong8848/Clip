@@ -49,6 +49,19 @@ class ToolSelfCheckTest(TestCase):
             install_risk_inspection_routes(app, SimpleNamespace(), SimpleNamespace())
         self.assertFalse(any(route.path.startswith('/api/tool-self-check') for route in app.routes))
 
+    def test_clone_template_preserves_original_and_checks_permissions(self):
+        original = self.templates[0]
+        checks = [dict(item) for item in original['schema']['checks']]
+        checks[0]['name'] = '新的检查项目'
+        body = {'version': original['version'], 'name': '独立新模板', 'checks': checks}
+        created = self.service.clone_template(self.admin, original['id'], body)
+        self.assertNotEqual(created['id'], original['id'])
+        self.assertEqual(created['schema']['checks'][0]['name'], '新的检查项目')
+        unchanged = next(item for item in self.service.list(self.admin)['templates'] if item['id'] == original['id'])
+        self.assertEqual(unchanged['schema']['checks'], original['schema']['checks'])
+        with self.assertRaises(RiskError):
+            self.service.clone_template(actor(), original['id'], body)
+
     def test_scope_and_concurrent_claim(self):
         self.assertEqual([row['scope'] for row in self.service.list(actor())['orders']], ['A'])
         with self.assertRaisesRegex(RiskError, '本楼楼长'):

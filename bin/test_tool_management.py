@@ -17,12 +17,15 @@ class LedgerFixture:
                         'external_cycle': '一年' if index == 0 else '', 'self_last': '', 'external_last': ''}
                        for index in range(3)]
         self.writes = []
+        self.files = []
 
     def inventory(self):
         return self.assets, {'A': ['ou_leader']}
 
     def write(self, dest, order, asset, job, person_for, save_file):
         self.writes.append((dest, order['outcome'], job['remote_id']))
+        if job.get('record_content'):
+            self.files.append((dest,job['record_name'],job['record_content']))
         return job['remote_id'] or 'rec' + dest
 
 
@@ -127,9 +130,13 @@ class ToolManagementTest(TestCase):
         body = {'revision': claimed['revision'], 'records': records, 'outcome': outcome, 'reason': '发现磨损', 'quantity': 1}
         result = self.svc.action(self.leader, order['id'], 'submit', body)
         self.assertEqual(result, self.svc.action(self.leader, order['id'], 'submit', body))
+        self.assertEqual(result['status'], 'review_pending')
+        self.assertFalse(result['sync'])
         with self.assertRaises(RiskError):
             self.svc.action(self.leader, order['id'], 'submit', body | {'outcome': 'normal' if outcome != 'normal' else 'repair'})
-        return result
+        with self.assertRaises(RiskError):
+            self.svc.action(self.supervisor, order['id'], 'review-approve', {'revision': result['revision']})
+        return self.svc.action(self.leader, order['id'], 'review-approve', {'revision': result['revision']})
 
     def test_routes_to_all_ledgers_and_archives_both_types(self):
         self.assertEqual(len(self.orders), 4)
@@ -152,6 +159,11 @@ class ToolManagementTest(TestCase):
             pass
         self.assertEqual(sorted(dest for dest, _, _ in self.cloud.writes),
                          ['change', 'change', 'inspection', 'maintenance', 'repair', 'scrap'])
+        self.assertEqual(sorted(dest for dest,_,_ in self.cloud.files),['maintenance','repair','scrap'])
+        for _,name,content in self.cloud.files:
+            self.assertTrue(name.endswith('.xlsx'))
+            with ZipFile(__import__('io').BytesIO(content)) as record:
+                self.assertIn('xl/workbook.xml',record.namelist())
         repair = self.svc.action(self.leader, repair['id'], 'repair-scrap',
                                  {'revision': repair['revision'], 'reason': '无法修复', 'quantity': 1})
         returned = self.svc.action(self.park, repair['id'], 'reject',
@@ -186,6 +198,64 @@ class ToolManagementTest(TestCase):
             self.svc.download(self.admin, self.month)
         with self.assertRaises(RiskError):
             self.svc.detail(actor(scope='B'), self.orders[0]['id'])
+
+    def test_review_rejection_preserves_draft_and_does_not_create_ledgers(self):
+        order = next(row for row in self.orders if row['kind'] == 'self')
+        claim = self.svc.action(self.leader, order['id'], 'claim', {'revision': order['revision']})
+        records = [{'entry_id': '1' * 32, 'template_id': self.template['id'], 'version': self.template['version'],
+                    'checks': ['是'] * len(self.template['schema']['checks']), 'location': '工具间',
+                    'inspector': '验收人员', 'checked_at': self.date + 'T09:00'}]
+        pending = self.svc.action(self.leader, order['id'], 'submit', {'revision': claim['revision'],
+            'records': records, 'outcome': 'normal', 'reason': '', 'quantity': 1})
+        self.assertEqual(pending['status'], 'review_pending')
+        self.assertEqual(self.svc.detail(self.leader, order['id'])['draft']['outcome'], 'normal')
+        self.assertFalse(self.svc.sync_one())
+        with self.assertRaises(RiskError):
+            self.svc.action(self.supervisor, order['id'], 'review-approve', {'revision': pending['revision']})
+        rejected = self.svc.action(self.leader, order['id'], 'review-reject',
+                                   {'revision': pending['revision'], 'reason': '请核对工具信息'})
+        detail = self.svc.detail(self.leader, order['id'])
+        self.assertTrue(rejected['can_edit'])
+        self.assertEqual(detail['records'][0]['inspector'], '验收人员')
+        self.assertEqual(detail['draft']['outcome'], 'normal')
+        self.assertEqual(detail['review_note'], '请核对工具信息')
+        self.assertEqual(self.cloud.writes, [])
+
+    def test_manual_order_creation_and_safe_soft_delete(self):
+        asset = self.cloud.assets[1]
+        self.assertTrue(any(item['id'] == asset['id'] for item in self.svc.order_candidates(self.leader)['items']))
+        order = self.svc.create_order(self.leader, {'asset_id': asset['id'], 'kind': 'external'})
+        self.assertTrue(order['can_delete'])
+        with self.assertRaises(RiskError):
+            self.svc.create_order(self.leader, {'asset_id': asset['id'], 'kind': 'external'})
+        with self.assertRaises(RiskError):
+            self.svc.cancel_order(self.supervisor, order['id'], {'revision': order['revision']})
+        deleted = self.svc.cancel_order(self.leader, order['id'], {'revision': order['revision']})
+        self.assertEqual(deleted['status'], 'cancelled')
+        self.assertFalse(deleted['can_claim'])
+        with self.svc.connect() as db:
+            self.assertTrue(db.execute("SELECT 1 FROM tool_work_audit WHERE order_id=? AND action='删除工单'", (order['id'],)).fetchone())
+
+    def test_inventory_create_idempotence_and_unconfirmed_result(self):
+        schema=[{'name':'楼栋','type':3,'options':['南通A楼','南通B楼']},
+                {'name':'工具名称','type':1,'options':[]},{'name':'一级分类','type':3,'options':['B工具类']},
+                {'name':'区域对应工具数量','type':2,'options':[]}]
+        calls=[]
+        self.cloud.inventory_fields=lambda:schema
+        def create(fields,operation):
+            calls.append(operation)
+            if operation.startswith('b'):raise RuntimeError('fixture: connection lost')
+            return 'recNewFixture'
+        self.cloud.create_inventory=create
+        fields={'楼栋':'南通A楼','工具名称':'工具验收','一级分类':'B工具类','区域对应工具数量':1}
+        body={'operation_id':'a'*32,'fields':fields}
+        self.assertEqual(self.svc.create_inventory(self.leader,body)['record_id'],'recNewFixture')
+        self.assertEqual(self.svc.create_inventory(self.leader,body)['record_id'],'recNewFixture')
+        with self.assertRaises(RiskError):self.svc.create_inventory(self.leader,body|{'fields':fields|{'楼栋':'南通B楼'}})
+        ambiguous=body|{'operation_id':'b'*32}
+        with self.assertRaises(RiskError):self.svc.create_inventory(self.leader,ambiguous)
+        with self.assertRaises(RiskError):self.svc.create_inventory(self.leader,ambiguous)
+        self.assertEqual(len(calls),2)
 
     def test_report_receipt_reused_after_unconfirmed_create(self):
         class Transport:
@@ -230,3 +300,28 @@ class ToolManagementTest(TestCase):
         self.svc.sync_one()
         self.assertEqual(transport.uploads, 1)
         self.assertEqual(self.svc.detail(self.leader, external['id'])['sync'][0]['state'], 'done')
+
+    def test_self_check_attachment_uses_existing_maintenance_field(self):
+        class Transport:
+            def __init__(self):self.uploads=0;self.fields=None
+            def table_path(self,base,table):return f'{base}/{table}'
+            def all(self,path):
+                return [{'field_name':name,'type':kind,'property':props} for name,kind,props in [
+                    (KEY,1,{}),(STATE,1,{}),(DETAIL,1,{}),('楼栋',3,{}),('维护工具',21,{'table_id':INVENTORY}),
+                    ('计划维护日期',5,{}),('实际维护日期',5,{}),('工具检测是否合格',3,{}),('维护记录单',17,{})]]
+            def request(self,method,path,**kwargs):
+                if path.endswith('/upload_all'):
+                    self.uploads+=1;return {'file_token':'fixture-file'}
+                if path.endswith('/search'):return {'items':[],'has_more':False}
+                self.fields=kwargs['json']['fields'];return {'record':{'record_id':'recFixture'}}
+        transport=Transport();cloud=ToolCloud(transport)
+        order=next(row for row in self.orders if row['kind']=='self')
+        submitted=self.submit_self(order,'normal')
+        with self.svc.connect() as db:
+            row=db.execute('SELECT * FROM tool_work_orders WHERE id=?',(submitted['id'],)).fetchone()
+        saved=[]
+        cloud.write('maintenance',row,json.loads(row['asset']),{'file_token':'','remote_id':'',
+            'record_name':'记录.xlsx','record_content':b'isolated'},self.svc.person_for,saved.append)
+        self.assertEqual(transport.fields['维护记录单'],[{'file_token':'fixture-file'}])
+        self.assertEqual(saved,['fixture-file'])
+        self.assertEqual(transport.uploads,1)

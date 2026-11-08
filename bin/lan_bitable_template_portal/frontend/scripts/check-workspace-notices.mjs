@@ -63,6 +63,7 @@ try {
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-notice-ui' } });
     if (url.pathname === '/api/workbench-events/parse') return ok({}); // Read-only parsing, not a business write.
     if (url.pathname === '/api/workbench-events'||url.pathname === '/api/workbench-events/options') return ok({user_id:'ou_notice_fixture',scopes:['A'],levels:['I3'],sources:['巡检发现'],specialties:['电气'],can_delete:false,defaults:{robot_ids:[],revision:0},robots:[],items:[]});
+    if (url.pathname === '/api/workbench/dingtalk-options') return ok({robots:[{id:'fixture-robot',name:'隔离测试机器人',types:[],scopes:[]}],selected_robot_ids:[]});
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
     if (url.pathname === '/api/workbench/lite-detail') {detailReads++;return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });}
@@ -90,9 +91,16 @@ try {
       }
     }
     const bad=noticeTest.parseNoticeForm('<form id="lite-notice-form"><input type="hidden" name="source_record_id" value="rec-source"><input type="hidden" name="work_type" value="maintenance"><label><span>名称</span><input name="title" required></label><button name="submit_action" value="start"></button><script>window.fixtureExecuted=true<\/script></form>');
-    return {items:result,executed:!!window.fixtureExecuted,missing:noticeTest.validateNotice(bad,'start',{},[])};
+    const missingRobot=noticeTest.validateNotice(bad,'start',{},[]);
+    bad.values.dingtalk_robot_ids=['fixture-robot'];
+    const sample={scope:'D',work_type:'adjust',notice_type:'设备调整',manual:'1',title:'第一条',start_time:'2026-11-08T09:00',end_time:'2026-11-08T18:00',building_codes:['D']};
+    const key=noticeTest.noticeCacheKey(sample,'fixture');
+    const keys=[noticeTest.noticeCacheKey({...sample,title:'第二条'},'fixture'),noticeTest.noticeCacheKey({...sample,scope:'E'},'fixture'),noticeTest.noticeCacheKey({...sample,start_time:'2026-12-08T09:00'},'fixture')];
+    return {missingRobot,items:result,executed:!!window.fixtureExecuted,missing:noticeTest.validateNotice(bad,'start',{},[]),key,keys};
   },fixtures);
+  assert.match(contracts.missingRobot,/钉钉/);
   assert.equal(contracts.executed,false,'HTML metadata never executes scripts');assert.match(contracts.missing,/名称/);
+  for(const key of contracts.keys)assert.notEqual(key,contracts.key,'independent notices must not share pending tasks');
   for(const {kind,view,command,expected,preview,fields,photoRequired} of contracts.items){
     assert.equal(command.operation_id,'fixture-idempotency');assert.equal(command.work_type,kind);
     assert.equal(command.record_id,view==='plan'?(expected.source_record_id||expected.manual_id||expected.record_id||''):(expected.target_record_id||expected.record_id||''));
@@ -179,7 +187,7 @@ try {
           await selectCycle('每季');await page.waitForFunction(()=>!document.querySelector('[data-cycle-warning]'));
           await selectCycle('每月');await editor.locator('[data-cycle-warning="reason"]').waitFor();
           await originals.find(item=>item.key==='progress').input.fill('现场已核对');
-          const preview=editor.getByRole('button',{name:'预览并确认更新',exact:true});assert(await preview.isEnabled());await preview.click();
+          const preview=editor.getByRole('button',{name:'预览并确认更新',exact:true});assert(!await preview.isEnabled(),'missing robot disables sending');await editor.getByRole('checkbox',{name:'隔离测试机器人'}).check();assert(await preview.isEnabled());await preview.click();
           assert.equal(await editor.getByRole('button',{name:'确认发送更新',exact:true}).count(),0,'cycle conflicts must block confirmation');
           assert((await editor.innerText()).includes('修改一致后再发送'));
           await content.fill('每月维保检查');await originals.find(item=>item.key==='reason').input.fill('按月度计划维保');
@@ -194,11 +202,13 @@ try {
       }finally{
         if(await editor.getByRole('button',{name:'返回修改',exact:true}).isVisible())await editor.getByRole('button',{name:'返回修改',exact:true}).click();
         for(const control of originals)await control.input.fill(control.value);
-        if(kind==='maintenance')await selectCycle(originalCycle);
+        if(kind==='maintenance'){await selectCycle(originalCycle);await editor.getByRole('checkbox',{name:'隔离测试机器人'}).uncheck();}
       }
       assert.equal(await warnings.count(),0,'restore original fields before unchanged-layout baselines');
       // Reopen also clears attempted-validation state, not just the edited field values.
       await editor.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
+      const leave=page.getByRole('button',{name:'保留副本并离开',exact:true});
+      if(await leave.isVisible())await leave.click();
       await editor.waitFor({state:'detached'});await entryCard.locator('.v2-notice-open').click();await editor.locator('.v2-notice-field-grid').waitFor();
     }
     await page.waitForTimeout(350);

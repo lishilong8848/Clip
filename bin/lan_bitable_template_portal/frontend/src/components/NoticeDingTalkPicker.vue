@@ -1,6 +1,6 @@
 <template>
-  <fieldset v-if="available.length||selected.length||error" class="notice-dingtalk" :disabled="disabled">
-    <legend>钉钉群推送 <small>至少选择一个；后续更新和结束沿用本通告选择</small></legend>
+  <fieldset class="notice-dingtalk" :disabled="disabled">
+    <legend>钉钉群推送 <strong class="required">必选</strong> <small>{{ selected.length ? `已选 ${selected.length} 个；更新和结束沿用` : '请选择至少一个，否则无法发送' }}</small></legend>
     <p v-if="error" role="alert">{{ error }} <button type="button" @click="load">重新读取</button></p>
     <div v-else class="notice-dingtalk-options">
       <label v-for="robot in available" :key="robot.id" :title="robot.remark"><input type="checkbox" :checked="selected.includes(robot.id)" @change="toggle(robot.id,($event.target as HTMLInputElement).checked)" />{{ robot.name }}<small v-if="robot.remark">{{ robot.remark }}</small></label>
@@ -24,5 +24,6 @@ watch([selected,available],()=>emit('selected-names',selected.value.map(id=>avai
 onBeforeUnmount(()=>generation++);
 </script>
 <style scoped>
-.notice-dingtalk{border:1px solid var(--border-color,#ccd6e2);border-radius:8px;padding:8px 12px;margin:8px 0;color:inherit;min-width:0}.notice-dingtalk legend{font-weight:600}.notice-dingtalk small{font-weight:400;opacity:.75;font-size:12px}.notice-dingtalk-options{display:flex;gap:8px 18px;flex-wrap:wrap}.notice-dingtalk label{display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-height:36px;cursor:pointer}.notice-dingtalk label small{max-width:220px;overflow-wrap:anywhere}.notice-dingtalk input{width:18px;height:18px}.notice-dingtalk p{font-size:13px;margin:4px 0}.notice-dingtalk button{color:inherit}
+.required{color:var(--error-color,#c62828);font-size:13px}
+.notice-dingtalk{border:1px solid var(--border-color,#ccd6e2);border-radius:8px;padding:2px 10px 4px;margin:4px 0;color:inherit;min-width:0}.notice-dingtalk legend{font-weight:600}.notice-dingtalk small{font-weight:400;opacity:.75;font-size:12px}.notice-dingtalk-options{display:flex;gap:8px 18px;flex-wrap:wrap}.notice-dingtalk label{display:flex;gap:6px;align-items:center;flex-wrap:wrap;min-height:36px;cursor:pointer}.notice-dingtalk label small{max-width:220px;overflow-wrap:anywhere}.notice-dingtalk input{width:18px;height:18px}.notice-dingtalk p{font-size:13px;margin:4px 0}.notice-dingtalk button{color:inherit}
 </style>

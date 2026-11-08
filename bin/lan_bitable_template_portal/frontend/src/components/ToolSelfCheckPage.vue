@@ -34,10 +34,22 @@
             <article v-for="template in board.templates" :key="template.id" class="tool-template">
               <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.schema.checks.length }} 项 · {{ template.active ? '已启用' : '已停用' }}</small></div>
               <div class="tool-bar">
+                <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">基于此模板新建</NButton>
                 <NButton size="small" :disabled="busy" @click="chooseImport(template)">导入新版</NButton>
                 <NButton size="small" :disabled="busy" @click="toggleTemplate(template)">{{ template.active ? '停用' : '启用' }}</NButton>
               </div>
             </article>
+            <section v-if="templateClone" class="tool-edit-panel" aria-label="新建自检模板">
+              <h3>新建自检模板</h3>
+              <label>模板名称 <input v-model="templateClone.name" maxlength="100" /></label>
+              <div v-for="(item,index) in templateClone.checks" :key="index" class="tool-edit-panel">
+                <strong>检查项 {{ index+1 }}</strong>
+                <label>自检项目 <input v-model="item.name" maxlength="300" /></label>
+                <label>操作方法 <textarea v-model="item.method" maxlength="1500" /></label>
+                <label>合格标准 <textarea v-model="item.standard" maxlength="1500" /></label>
+              </div>
+              <div class="tool-bar"><NButton :disabled="busy" @click="templateClone=null">取消</NButton><NButton type="primary" :disabled="busy" @click="saveTemplateClone">保存新模板</NButton></div>
+            </section>
             <input ref="fileInput" type="file" accept=".xlsx" hidden @change="importTemplate" />
           </section>
         </div>
@@ -46,6 +58,7 @@
             <div class="tool-counts">
               <template v-if="view === 'orders'">
                 <span><strong>{{ pendingCount }}</strong> 待填写</span>
+                <span><strong>{{ reviewCount }}</strong> 待审核</span>
                 <span><strong>{{ submittedCount }}</strong> 已提交</span>
               </template>
               <template v-else>
@@ -55,8 +68,26 @@
             </div>
             <div v-if="view === 'orders' && board.can_download_month" class="tool-archive">
               <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />下载月度归档</NButton>
-              <span v-else class="tool-muted">{{ board.orders.length && !pendingCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
+              <span v-else class="tool-muted">{{ board.orders.length && !pendingCount && !reviewCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
             </div>
+            <NButton v-if="view==='orders'" :disabled="busy" @click="openNewOrder">新增本月工单</NButton>
+            <NButton v-if="view==='orders'" :disabled="busy" @click="openNewTool">添加工具</NButton>
+          </div>
+          <section v-if="addingTool" class="tool-library" aria-label="添加工具">
+            <h3>添加工具到底表</h3><p>仅填写需要的字段；结果未确认时请先核对底表，避免重复添加。</p>
+            <div class="tool-fields"><label v-for="field in toolFields" :key="field.name">{{field.name}}
+              <select v-if="field.type===3" v-model="newTool[field.name]"><option value="">请选择</option><option v-for="choice in field.options" :key="choice" :value="choice">{{choice}}</option></select>
+              <input v-else-if="field.type===7" v-model="newTool[field.name]" type="checkbox" />
+              <input v-else-if="field.type===2" v-model.number="newTool[field.name]" type="number" min="0" />
+              <input v-else-if="field.type===5" v-model="newTool[field.name]" type="date" />
+              <input v-else v-model="newTool[field.name]" maxlength="500" />
+            </label></div>
+            <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
+          </section>
+          <div v-if="addingOrder" class="tool-filters">
+            <NSelect v-model:value="newAsset" filterable :options="assetOptions" placeholder="选择工具" />
+            <NSelect v-model:value="newKind" :options="[{label:'自检',value:'self'},{label:'送检',value:'external'}]" />
+            <NButton :disabled="busy" @click="addingOrder=false">取消</NButton><NButton type="primary" :disabled="busy||!newAsset" @click="createOrder">创建</NButton>
           </div>
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
@@ -93,6 +124,7 @@
                   <template #trigger><NButton size="small" :disabled="busy">释放领取</NButton></template>
                   草稿将保留，工单可重新领取。
                 </NPopconfirm>
+                <NPopconfirm v-if="row.can_delete" @positive-click="deleteOrder(row)"><template #trigger><NButton size="small" :disabled="busy">删除</NButton></template>删除本月未提交工单？记录和草稿将保留。</NPopconfirm>
               </div>
             </article>
           </div>
@@ -124,7 +156,7 @@
         </div>
         <p v-for="item in order.sync.filter(item => item.error)" :key="item.label" class="tool-pending tool-context">{{ item.label }} · {{ item.error }}</p>
       </section>
-      <div class="tool-form-layout" :class="{ 'tool-has-aside': order.kind === 'self' && (order.can_edit || order.outcome) }">
+      <div class="tool-form-layout" :class="{ 'tool-has-aside': order.kind === 'self' && (order.can_edit || order.outcome || order.status==='review_pending') }">
         <section class="tool-edit-panel" :aria-label="order.kind === 'external' ? '送检报告' : '自检记录'">
           <template v-if="order.kind === 'external'">
             <div class="tool-panel-heading"><h3>送检报告</h3></div>
@@ -173,19 +205,18 @@
               </article>
             </div>
             <details v-if="order.can_edit || active.reviewer || active.reviewed_at || active.notes" class="tool-audit">
-              <summary>审核与说明（选填）</summary>
+              <summary>自检说明与审核</summary>
               <fieldset class="tool-fields" :disabled="busy || !order.can_edit">
-                <label>审核人 <input v-model="active.reviewer" maxlength="80" /></label>
-                <label class="tool-time">审核确认时间 <input v-model="active.reviewed_at" type="datetime-local" /></label>
                 <label class="tool-notes">自检说明 <textarea v-model="active.notes" rows="2" maxlength="1500" /></label>
               </fieldset>
+              <p v-if="active.reviewer">审核人：{{ active.reviewer }} · {{ displayTime(active.reviewed_at) }}</p>
             </details>
           </template>
         </section>
-        <aside v-if="order.kind === 'self' && (order.can_edit || order.outcome)" class="tool-result" aria-label="处理结果">
+        <aside v-if="order.kind === 'self' && (order.can_edit || order.outcome || order.status==='review_pending')" class="tool-result" aria-label="处理结果">
           <div class="tool-panel-heading"><h3>处理结果</h3></div>
           <div v-if="order.can_edit" class="tool-result-fields">
-            <label>工具状态 <NSelect v-model:value="outcome" aria-label="工具状态" :options="outcomeOptions" :disabled="busy" /></label>
+            <label>工具状态 <NSelect v-model:value="outcome" aria-label="工具状态" placeholder="请选择检查结果" :options="outcomeOptions" :disabled="busy" /></label>
             <label v-if="outcome !== 'normal'">处理原因 <textarea v-model="reason" rows="2" maxlength="1000" :disabled="busy" /></label>
             <label v-if="outcome === 'scrap'">报废数量 <input v-model.number="quantity" type="number" min="1" :max="order.quantity" :disabled="busy" /></label>
           </div>
@@ -193,6 +224,7 @@
             <NTag :type="order.can_repair || order.can_approve ? 'warning' : 'default'">{{ outcomeLabels[order.outcome] || '已取消' }}</NTag>
             <p v-if="order.reason">{{ order.reason }}</p><p v-if="order.resolution">{{ order.resolution }}</p>
           </div>
+          <div v-if="order.status==='review_pending'" class="tool-context"><strong>待审核结果：{{ outcomeLabels[outcome] || outcome }}</strong><p v-if="reason">处理原因：{{reason}}</p><p v-if="outcome==='scrap'">报废数量：{{quantity}}</p></div>
           <div v-if="order.can_repair || order.can_approve" class="tool-result-fields">
             <label>处理说明 <textarea v-model="reason" rows="2" maxlength="1000" :disabled="busy" /></label>
             <label v-if="order.can_repair">转报废数量 <input v-model.number="quantity" type="number" min="1" :max="order.quantity" :disabled="busy" /></label>
@@ -207,6 +239,11 @@
         <summary>操作记录 · {{ order.history.length }} 条</summary>
         <p v-for="(entry,index) in order.history" :key="index">{{ displayTime(entry.at) }} · {{ entry.name }} · {{ entry.action }}<span v-if="entry.detail"> · {{ entry.detail }}</span></p>
       </details>
+      <section v-if="order.can_review" class="tool-result" aria-label="自检审核">
+        <strong>本楼楼长审核</strong><p>审核通过后才会同步对应台账；驳回后可由填报人修改。</p>
+        <label>审核意见 <textarea v-model="reviewReason" rows="2" maxlength="1000" :disabled="busy" /></label>
+        <div class="tool-bar"><NButton :disabled="busy" @click="advance('review-reject')">驳回修改</NButton><NButton type="primary" :disabled="busy" @click="advance('review-approve')">审核通过</NButton></div>
+      </section>
       <footer v-if="order.can_edit" class="tool-bar tool-submit">
         <span v-if="order.kind === 'self'">{{ records.length }} 份记录 · {{ answered }} / {{ checkCount }} 项已填写</span>
         <span v-else>{{ order.report_name ? '送检报告已保存' : '上传报告后可提交' }}</span>
@@ -241,10 +278,10 @@ interface Entry {
   location: string; inspector: string; checked_at: string; notes: string; reviewer: string; reviewed_at: string;
 }
 interface Order {
-  id: string; month: string; scope: string; revision: number; status: 'pending' | 'submitted' | 'cancelled'; owner_name: string;
+  id: string; month: string; scope: string; revision: number; status: 'pending' | 'review_pending' | 'submitted' | 'cancelled'; owner_name: string;
   submitted_at: string | null; can_claim: boolean; can_edit: boolean; can_release: boolean;
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
-  supervisor_assigned: boolean; assigned_to_me: boolean; can_approve: boolean; can_repair: boolean;
+  supervisor_assigned: boolean; assigned_to_me: boolean; can_approve: boolean; can_repair: boolean; can_review: boolean; can_delete:boolean;
   actual: string; outcome: string; reason: string; resolution: string; report_name: string;
   sync: { label: string; state: string; error: string }[];
 }
@@ -269,9 +306,19 @@ const page = ref(1);
 const pageSize = 20;
 const root = ref<HTMLElement>();
 const actual = ref('');
-const outcome = ref('normal');
+const outcome = ref('');
 const reason = ref('');
+const reviewReason = ref('');
 const quantity = ref(1);
+const addingOrder=ref(false),newAsset=ref<string|null>(null),newKind=ref('self');
+const assets=ref<{id:string;scope:string;name:string;model:string;location:string}[]>([]);
+const addingTool=ref(false),toolFields=ref<{name:string;type:number;options:string[]}[]>([]),newTool=ref<Record<string,any>>({}),toolOperation=ref('');
+async function openNewTool(){await mutate(async()=>{const data=await requestJson(api+'/inventory/fields') as {fields:typeof toolFields.value;scopes:string[]};toolFields.value=data.fields.map(f=>f.name==='楼栋'?{...f,options:f.options.filter(o=>data.scopes.some(s=>o===s+'楼'||o==='南通'+s+'楼'))}:f);newTool.value={'一级分类':'B工具类'};toolOperation.value=crypto.randomUUID().replace(/-/g,'');addingTool.value=true;});}
+async function createTool(){await mutate(async()=>{await requestJson(api+'/inventory/new',{method:'POST',body:JSON.stringify({operation_id:toolOperation.value,fields:newTool.value})});addingTool.value=false;message.value='工具已添加，库存将在下次同步后显示。';});}
+const assetOptions=computed(()=>assets.value.map(item=>({value:item.id,label:[item.scope+'楼',item.name,item.model,item.location].filter(Boolean).join(' · ')})));
+async function openNewOrder(){await mutate(async()=>{const data=await requestJson(api+'/order-candidates') as {items:typeof assets.value};assets.value=data.items;addingOrder.value=true;});}
+async function createOrder(){if(!newAsset.value)return;await mutate(async()=>{await requestJson(api+'/orders',{method:'POST',body:JSON.stringify({asset_id:newAsset.value,kind:newKind.value})});addingOrder.value=false;newAsset.value=null;await loadBoard();message.value='工单已创建。';});}
+async function deleteOrder(row:Order){await mutate(async()=>{await action(row,'delete');await loadBoard();message.value='工单已删除，历史记录保留。';});}
 const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
@@ -293,6 +340,7 @@ let listPosition = 0;
 
 const active = computed(() => records.value.find(record => record.entry_id === selected.value));
 const pendingCount = computed(() => board.value?.orders.filter(row => row.status === 'pending').length || 0);
+const reviewCount = computed(() => board.value?.orders.filter(row => row.status === 'review_pending').length || 0);
 const submittedCount = computed(() => board.value?.orders.filter(row => row.status === 'submitted').length || 0);
 const repairCount = computed(() => board.value?.followups.filter(row => row.outcome === 'repair').length || 0);
 const tabs = computed(() => [
@@ -302,7 +350,7 @@ const tabs = computed(() => [
 ]);
 const stateOptions = computed(() => [{ value: 'all', label: '全部状态' }, ...(view.value === 'followups'
   ? [{ value: 'repair', label: '检修中' }, { value: 'scrap', label: '待报废审批' }]
-  : [{ value: 'pending', label: '待填写' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' }])]);
+  : [{ value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' }])]);
 const visibleOrders = computed(() => {
   const followups = view.value === 'followups';
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
@@ -327,6 +375,9 @@ const transitions = computed<{ action: string; label: string; type: 'primary' | 
   : [{ action: 'approve', label: '批准报废', type: 'primary' }, { action: 'reject', label: '驳回报废', type: 'warning' }]);
 const templateOptions = computed(() => (board.value?.templates || []).filter(template => template.active)
   .map(template => ({ value: template.id, label: template.name })));
+const templateClone=ref<{id:string;version:number;name:string;checks:{name:string;method:string;standard:string}[]}|null>(null);
+function startTemplateClone(template:Template){templateClone.value={id:template.id,version:template.version,name:template.name+'（新模板）',checks:template.schema.checks.map(item=>({name:item.name,method:item.method,standard:item.standard}))};}
+async function saveTemplateClone(){const value=templateClone.value;if(!value)return;await mutate(async()=>{await requestJson(`${api}/templates/${value.id}/clone`,{method:'POST',body:JSON.stringify(value)});templateClone.value=null;await loadBoard();message.value='新模板已保存，原模板保持不变。';});}
 const payload = computed(() => records.value.map(({ template: _template, ...record }) => record));
 const form = computed(() => order.value?.kind === 'external' ? { actual: actual.value } :
   { records: payload.value, outcome: outcome.value, reason: reason.value, quantity: quantity.value });
@@ -334,7 +385,7 @@ const dirty = computed(() => !!order.value?.can_edit && JSON.stringify(form.valu
 const checkCount = computed(() => records.value.reduce((sum, record) => sum + record.checks.length, 0));
 const answered = computed(() => records.value.reduce((sum, record) => sum + record.checks.filter(Boolean).length, 0));
 const orderPath = (row: Order) => `/orders/${row.id}`;
-const status = (row: Order) => row.status === 'submitted' ? '已提交' : row.status === 'cancelled' ? '已取消' : '待填写';
+const status = (row: Order) => row.status === 'submitted' ? '已提交' : row.status === 'cancelled' ? '已取消' : row.status === 'review_pending' ? '待楼长审核' : '待填写';
 const kindLabel = (row: Order) => row.kind === 'self' ? '自检' : '送检';
 const displayTime = (value: string) => value.slice(0, 19).replace('T', ' ');
 function assignment(row: Order) {
@@ -346,6 +397,7 @@ function assignment(row: Order) {
 function orderAction(row: Order) {
   if (row.can_claim) return '领取并填写';
   if (row.can_edit) return '继续填写';
+  if (row.can_review) return '审核自检';
   if (row.can_approve) return '处理审批';
   if (row.can_repair) return '跟进检修';
   return '查看记录';
@@ -389,7 +441,7 @@ function applyOrder(data: Detail) {
   order.value = data;
   records.value = data.records.map(record => ({ ...record, checks: [...record.checks] }));
   actual.value = data.actual;
-  outcome.value = data.draft?.outcome || 'normal';
+  outcome.value = data.draft?.outcome || '';
   reason.value = data.draft?.reason || '';
   quantity.value = data.draft?.quantity || 1;
   saved.value = JSON.stringify(form.value);
@@ -484,7 +536,7 @@ async function advance(step: string) {
   if (!order.value) return;
   const row = order.value;
   await mutate(async () => {
-    const receipt = await action(row, step, { reason: reason.value, quantity: quantity.value }) as Order;
+    const receipt = await action(row, step, { reason: step.startsWith('review-') ? reviewReason.value : reason.value, quantity: quantity.value }) as Order;
     if (!disposed) order.value = { ...row, ...receipt };
     message.value = '处理结果已保存。';
     try { applyOrder(await requestJson(api + orderPath(row), { cache: 'no-store' }) as Detail); }

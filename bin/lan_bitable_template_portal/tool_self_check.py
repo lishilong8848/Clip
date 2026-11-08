@@ -228,6 +228,39 @@ class ToolSelfChecks:
                        (identity, next_version, name, content, dumps(schema)))
             return self.template_info(self._template(db, identity, next_version))
 
+    def clone_template(self, actor, identity, body):
+        """Create a separate template from a pinned version without changing its layout."""
+        self.access(actor)
+        if not self.administrator(actor):
+            raise RiskError('仅管理员可维护工具自检模板。', 403)
+        name = text(body.get('name'), 100, True)
+        version = body.get('version')
+        if type(version) is not int:
+            raise RiskError('模板版本无效。')
+        with self.connect() as db:
+            source = self._template(db, identity, version)
+            content, schema = source['content'], json.loads(source['schema'])
+        checks = body.get('checks')
+        if not isinstance(checks, list) or len(checks) != len(schema['checks']):
+            raise RiskError('请保留原模板的检查项数量，并填写每项内容。')
+        book = load_workbook(io.BytesIO(content), keep_links=False)
+        try:
+            sheet = book.active
+            for key, address in (('description','C7'),('specialty','G3'),('cycle','C4'),
+                                 ('applicable','C5'),('precautions','C6')):
+                if key in body:
+                    sheet[address] = text(body[key], 1500)
+            for old, new in zip(schema['checks'], checks, strict=True):
+                if not isinstance(new, dict):
+                    raise RiskError('检查项格式无效。')
+                for key, column, maximum in (('name','C',300),('method','E',1500),('standard','G',1500)):
+                    sheet[f'{column}{old["row"]}'] = text(new.get(key), maximum, True)
+            out = io.BytesIO()
+            book.save(out)
+        finally:
+            book.close()
+        return self.save_template(actor, name, out.getvalue())
+
     def availability(self, actor, identity, body):
         self.access(actor)
         if not self.administrator(actor):

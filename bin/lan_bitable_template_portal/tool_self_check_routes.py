@@ -31,6 +31,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.list, actor, request.query_params.get('month', ''))
                 elif path == 'inventory':
                     result = await asyncio.to_thread(svc.inventory, actor)
+                elif path == 'order-candidates':
+                    result = await asyncio.to_thread(svc.order_candidates, actor)
+                elif path == 'inventory/fields':
+                    result = await asyncio.to_thread(svc.new_inventory_fields, actor)
                 elif path.startswith('archive/') or path.endswith('/download'):
                     content = await asyncio.to_thread(svc.download, actor, month, identity)
                     filename = quote(f'{month or identity}-工具管理归档.zip')
@@ -72,6 +76,14 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             body = await controller._read_json_request(request, max_bytes=512 * 1024)
             if not isinstance(body, dict):
                 raise RiskError('工具自检请求格式无效。')
+            if path == 'orders':
+                return response(await asyncio.to_thread(svc.create_order, actor, body))
+            if path == 'inventory/new':
+                return response(await asyncio.to_thread(svc.create_inventory, actor, body))
+            if path.endswith('/delete') and path.startswith('orders/'):
+                return response(await asyncio.to_thread(svc.cancel_order, actor, identity, body))
+            if path.endswith('/clone') and path.startswith('templates/'):
+                return response(await asyncio.to_thread(svc.clone_template, actor, params['identity'], body))
             if path.startswith('templates/'):
                 await asyncio.to_thread(svc.availability, actor, params['identity'], body)
                 return response({'saved': True})
@@ -85,8 +97,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             return response(error=RiskError('操作结果暂未确认，请刷新工单核对已保存内容。', 503))
 
     for path, methods in (('', ['GET']), ('/archive/{month}', ['GET']), ('/inventory', ['GET']),
-                          ('/inventory/{identity}', ['POST']), ('/orders/{identity}', ['GET']),
+                          ('/inventory/fields', ['GET']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']), ('/orders', ['POST']), ('/orders/{identity}', ['GET']),
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),
-                          ('/templates/{identity}/availability', ['POST'])):
+                          ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST'])):
         app.add_api_route(base + path, endpoint, methods=methods)

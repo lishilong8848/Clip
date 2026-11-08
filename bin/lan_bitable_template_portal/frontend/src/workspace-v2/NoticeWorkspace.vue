@@ -52,21 +52,21 @@
         <section v-if="job||ambiguous" class="v2-notice-task-result" role="status" :aria-label="taskTitle">
           <Clock3 v-if="eventWaiting" :size="36" /><NSpin v-else-if="job&&!terminal" size="large" /><CheckCircle2 v-else-if="succeeded" :size="38" class="is-success" /><CircleAlert v-else :size="36" />
           <h2>{{ taskTitle }}</h2><p>{{ eventWaiting?'已保存本次正文、时间和附件；事件结束或删除后自动发送，可返回列表继续办理其它通告。':job?.error || job?.upload_message || job?.message || (ambiguous?'提交响应未确认，已保留原操作标识，请勿重新创建。':succeeded?'已按原业务流程完成，列表正在同步。':'任务已受理，可返回列表继续办理其它通告。') }}</p>
-          <div class="v2-notice-tools"><NButton v-if="job?.phase==='failed'&&job.error_retryable" type="primary" :loading="busy" data-v2-submit @click="retryJob">重试原任务</NButton><NButton v-else-if="job?.phase==='failed'&&job.error_category==='field_or_payload'" type="primary" :disabled="busy" @click="resetRejected">返回填写</NButton><NButton v-if="ambiguous" :loading="busy" data-v2-submit @click="send">核验并重试原提交</NButton><NButton v-if="job&&!terminal" data-v2-navigation @click="pollJob">查询进度</NButton><NButton v-if="job" data-v2-navigation @click="showTaskRecords">查看办理记录</NButton></div>
+          <div class="v2-notice-tools"><NButton v-if="job?.phase==='failed'&&job.error_retryable" type="primary" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="retryJob">重试原任务</NButton><NButton v-else-if="job?.phase==='failed'&&job.error_category==='field_or_payload'" type="primary" :disabled="busy" @click="resetRejected">返回填写</NButton><NButton v-if="ambiguous" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="send">核验并重试原提交</NButton><NButton v-if="job&&!terminal" data-v2-navigation @click="pollJob">查询进度</NButton><NButton v-if="job" data-v2-navigation @click="showTaskRecords">查看办理记录</NButton></div>
         </section>
 
         <div v-if="confirming" class="v2-notice-review" aria-label="发送前确认">
           <header><h2>发送前确认</h2><NTag :bordered="false" type="info">{{ actionLabel(action) }} · {{ form.values.building_codes?.join('、') }}</NTag></header>
           <NAlert v-if="form.values.sync_maintenance_target==='1'||form.values.sync_maintenance_target===true" type="warning" :bordered="false">本次变更同时写入关联的维保目标记录。</NAlert>
-          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ (sop.operator_record_ids??[sop.operator_record_id]).map(sopPersonName).join('、') }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>钉钉群：{{ selectedDingNames.length ? selectedDingNames.join('、') : '本次不发送' }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
+          <div class="v2-notice-review-layout"><pre class="v2-notice-fulltext" tabindex="0" aria-label="待发送通告全文">{{ noticePreview(form,action) }}</pre><aside><h3>本次修改</h3><dl><template v-for="field in changedFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ form.values[field.key] || '—' }}</dd></template></dl><p v-if="!changedFields.length">没有修改已加载字段</p><p v-if="form.photoRequired">现场照片：已有 {{ Number(form.values.site_photo_count||0) }} 张，新增 {{ photos.length }} 张</p><p v-if="form.values.work_type==='change'">阿里确认截图：新增 {{ aliPhotos.length }} 张</p><p v-if="form.sop&&action==='start'">本次工单：{{ sop.exempt?'不使用工单':selectedSopLabel }}</p><p v-if="form.sop&&action==='start'&&!sop.exempt">操作人：{{ (sop.operator_record_ids??[sop.operator_record_id]).map(sopPersonName).join('、') }}<br />审核人：{{ sopPersonName(sop.reviewer_record_id) }}</p><p>钉钉群：{{ selectedDingNames.length ? selectedDingNames.join('、') : '未选择（必选）' }}</p><p>消息接收范围：{{ selectedBuildingLabel }}，其余接收规则沿用原业务流程。</p></aside></div>
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
         <div class="v2-notice-context-row" :class="{'has-tags':form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired}"><div class="v2-notice-context-controls">
         <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound"><template #context><div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div></template></NoticeRelations></div>
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
+          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
         </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
-          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
           <section class="v2-notice-page-fields">
             <header><span>{{ cycleWarnings.length?'维保周期不一致，请修改标红内容后再发送':missingFields.length?'待补充 '+missingFields.length+' 项':'填写内容已齐全，请核对现场情况' }}</span></header>
 
@@ -92,8 +92,8 @@
           <NButton v-if="succeeded&&nextRecord" type="primary" data-v2-navigation @click="openRecord(nextRecord)">办理下一条</NButton>
           <div v-if="form&&!job&&!ambiguous" class="v2-notice-submit-group" data-notice-section="action">
             <NRadioGroup v-if="!confirming" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
-            <NButton v-if="confirming" type="primary" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton>
-            <NButton v-else type="primary" :disabled="locked||!form.actions.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton>
+            <NButton v-if="confirming" type="primary" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton>
+            <NButton v-else type="primary" :disabled="locked||!form.actions.length||!form.values.dingtalk_robot_ids?.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton>
           </div>
         </div>
       </template>
@@ -116,7 +116,7 @@ import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
 import { trackButtonRequest } from './actionMotion';
-import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,type NoticeForm } from './noticeForm';
+import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,noticeCacheKey,type NoticeForm } from './noticeForm';
 import { noticeCycleWarnings } from '../noticeCycleWarnings';
 import NoticePlanBinding from './NoticePlanBinding.vue';
 import NoticeFields from './NoticeFields.vue';
@@ -268,7 +268,7 @@ function changeBuildings(values:string[]){
 }
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
 function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
-function cacheKey(values:Dict){return 'v2-notice:'+props.user.open_id+':'+values.scope+':'+values.work_type+':'+(values.target_record_id||(values.manual==='1'?'manual':values.source_record_id)||'manual');}
+function cacheKey(values:Dict){return noticeCacheKey(values,props.user.open_id);}
 function persist():boolean{if(!form.value||!formKey||job.value?.phase==='success')return true;try{sessionStorage.setItem(formKey,JSON.stringify({schema:2,context:noticeDraftContext({...form.value,values:originalFields.value}),baseValues:originalFields.value,snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));return true;}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';return false;}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
@@ -293,7 +293,17 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     if(next.values.target_record_id){const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:next.values.scope||q.get('scope')||props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;if(draft.draft){draftVersion=Number(draft.draft.version)||0;for(const field of next.fields)if(draft.draft.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];}}
     originalFields.value=JSON.parse(JSON.stringify(next.values));originalProgress=String(next.values.progress||'');progressBeforeEnd=originalProgress;saved.value=snapshot();
     try{
-      const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');
+      let cached=JSON.parse(sessionStorage.getItem(formKey)||'null');
+      // Older versions used one key for every manual notice. Recover it only
+      // when the frozen notice identity really matches the pasted notice.
+      if(!cached&&parsedHtml&&next.values.manual==='1'&&!next.values.target_record_id&&!next.values.source_record_id){
+        const legacyKey='v2-notice:'+props.user.open_id+':'+next.values.scope+':'+next.values.work_type+':manual';
+        const legacy=JSON.parse(sessionStorage.getItem(legacyKey)||'null');
+        const savedValues=legacy?.frozen||legacy?.snapshot?.values||{};
+        const same=['notice_type','title','start_time','end_time'].every(key=>String(savedValues[key]||'')===String(next.values[key]||'')) &&
+          JSON.stringify(savedValues.building_codes||[])===JSON.stringify(next.values.building_codes||[]);
+        if(legacy&&same&&legacy.context===noticeDraftContext({...next,values:originalFields.value}))cached=legacy;
+      }
       if(cached&&Date.now()-cached.at<7*86400000){
         if((!parsedHtml||cached.job||cached.frozen)&&restoreNoticeEdits(next,cached,draftVersion)){
           if(JSON.stringify(cached.snapshot.values.building_codes)!==JSON.stringify(cached.baseValues.building_codes))next.values.building_codes=(cached.snapshot.values.building_codes||[]).filter((s:string)=>buildingOptions.value.some(b=>b.value===s));
@@ -301,8 +311,13 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
           action.value=next.actions.includes(cached.snapshot.action)?cached.snapshot.action:action.value;
         }else if(!parsedHtml)detailError.value='已重新读取当前通告；旧副本缺少来源校验或楼栋、周期、版本已变化，未自动覆盖。';
         // An unresolved write must still be recoverable even when another window saved a newer draft.
-        job.value=cached.job||null;operationId=cached.operationId||'';frozen=cached.frozen||null;ambiguous.value=!!frozen&&!job.value;
-        if(parsedHtml&&(job.value||frozen))detailError.value='同类手填通告有未核验的原任务，请先核验原任务；本次解析尚未提交。';
+        const sameContext=cached.context===noticeDraftContext({...next,values:originalFields.value});
+        if(parsedHtml&&!sameContext&&(cached.job||cached.frozen)){
+          const previous=String(cached.job?.job_id||cached.operationId||cached.at||'unknown');
+          sessionStorage.setItem(formKey+':prior:'+encodeURIComponent(previous),JSON.stringify(cached));
+        }
+        if(!parsedHtml||sameContext){job.value=cached.job||null;operationId=cached.operationId||'';frozen=cached.frozen||null;ambiguous.value=!!frozen&&!job.value;}
+        if(parsedHtml&&sameContext&&(job.value||frozen))detailError.value='本条通告有未核验的原任务，请先核验原任务；本次解析尚未提交。';
       }
     }catch{/* An invalid local draft never replaces the server values. */}
     const localManual=(()=>{try{const cached=JSON.parse(sessionStorage.getItem(formKey)||'null');return cached?.schema===2&&cached.context===noticeDraftContext({...next,values:originalFields.value})&&Date.now()-cached.at<7*86400000?cached.snapshot?.values:null;}catch{return null;}})();
@@ -649,7 +664,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-handling .v2-notice-field-grid .is-wide{grid-column:auto}
 .v2-notice-handling .v2-notice-field{margin-bottom:6px;min-width:0;min-height:0}
 .v2-notice-handling .v2-notice-field .n-form-item-label{padding-bottom:4px;font-size:12px}
-@media(min-width:1200px){.v2-notice-handling .v2-notice-field-grid{grid-template-columns:repeat(5,minmax(0,1fr))}}
+@media(min-width:1200px){.v2-notice-handling .v2-notice-field-grid{grid-template-columns:repeat(6,minmax(0,1fr))}}
 .v2-notice-handling .v2-notice-field .n-form-item-blank{min-height:0;align-items:flex-start}
 .v2-notice-handling .v2-notice-field .n-input--textarea{min-height:34px}
 .v2-notice-handling .v2-notice-review{min-width:0}

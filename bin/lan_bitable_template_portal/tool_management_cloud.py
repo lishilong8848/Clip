@@ -50,6 +50,21 @@ class ToolCloud:
         self.cloud = cloud
         self.fields = {}
 
+    def inventory_fields(self):
+        allowed={'楼栋','工具名称','规格型号','放置区域','一级分类','二级分类','区域对应工具数量','品牌','计数单位','维护周期','送检周期','当前维护日期','当前送检日期','清洁情况','外观完好无破损','配件齐全','功能正常','检查结论'}
+        fields=self.cloud.all(self.cloud.table_path(BASE, INVENTORY)+'/fields')
+        return [{'name':field['field_name'],'type':field['type'],
+                 'options':[str(item.get('name')) for item in ((field.get('property') or {}).get('options') or []) if isinstance(item,dict) and item.get('name')]}
+                for field in fields if field.get('field_name') in allowed and field.get('type') in (1,2,3,5,7)]
+
+    def create_inventory(self, fields, operation):
+        result=self.cloud.request('POST',self.cloud.table_path(BASE,INVENTORY)+'/records',
+            params={'client_token':_stable_uuid4_client_token('tool-inventory:'+operation)},json={'fields':fields})
+        record=result.get('record') or {}
+        if not re.fullmatch(r'rec[A-Za-z0-9]+',str(record.get('record_id') or '')):
+            raise RiskError('工具新增结果未确认，请先核对多维表，勿重复新增。',503)
+        return record['record_id']
+
     def inventory(self):
         path = self.cloud.table_path(BASE, INVENTORY) + '/records/search'
         params, seen, records = {'page_size': 500}, set(), {}
@@ -138,12 +153,29 @@ class ToolCloud:
     def write(self, dest, order, asset, job, person_for, save_file):
         path = self.cloud.table_path(BASE, TABLES[dest])
         schema = self.schema(dest, path)
+        if job.get('record_content') and dest in ('maintenance','repair','scrap'):
+            name='维护记录单' if dest=='maintenance' else '自检记录单'
+            if name not in schema:
+                # A timeout may occur after Feishu created the field. Always
+                # discard the old schema so a retry reads before creating.
+                try:self.cloud.request('POST',path+'/fields',json={'field_name':name,'type':17})
+                finally:self.fields.pop(dest,None)
+                schema=self.schema(dest,path)
+            if (schema.get(name) or {}).get('type')!=17:
+                raise RiskError(f'{DESTINATIONS[dest]}的「{name}」必须为附件字段。',503)
+            if not job['file_token']:
+                job['file_token']=self.upload(job['record_name'],job['record_content'])
+                save_file(job['file_token'])
+            attachment={name:[{'file_token':job['file_token']}]}
+        else:
+            attachment={}
         building = asset['scope'] + '楼'
         key = order['id'] + '/' + dest
         outcomes = {'repair': '检修中', 'repaired': '检修完成', 'scrap': '报废中',
                     'scrapped': '报废完成', 'rejected': '报废未通过'}
         fields = {KEY: key, STATE: OUTCOMES.get(order['outcome'], '已提交'),
                   DETAIL: '\n'.join(dict.fromkeys(filter(None, (order['reason'], order['scrap_reason'], order['resolution']))))}
+        fields.update(attachment)
 
         def link(field):
             metadata = schema.get(field) or {}

@@ -11570,6 +11570,17 @@ class PortalRuntime:
             )
         except Exception:
             return False
+        if action == 'end':
+            # Two matching descriptive fields alone cannot establish that an
+            # end operation actually succeeded. Require its end marker too.
+            from upload_event_module.config import get_field_config
+            try:field_config = get_field_config(notice_type)
+            except Exception:return False
+            markers = [str(field_config.get(key) or '').strip() for key in ('actual_end','end_time')]
+            markers = [key for key in markers if key and key in (desired_fields or {}) and desired_fields[key] not in (None, '', [], {})]
+            if not markers or not any(key in remote_fields and cls._remote_values_equal(
+                    cls._remote_compare_value(desired_fields[key]), cls._remote_compare_value(remote_fields[key])) for key in markers):
+                return False
         compared = 0
         for field_name, desired_value in (desired_fields or {}).items():
             normalized_desired = cls._remote_compare_value(desired_value)
@@ -16266,6 +16277,20 @@ class PortalRuntime:
                         ),
                         restart_recovered=True,
                     )
+            if not ok and str(prepared.get('action') or '').lower() == 'end':
+                # Recover only an uncertain, staged original operation after
+                # reading the target and checking its actual end marker.
+                failed_operation = cls._get_notice_remote_operation(remote_operation_id) or {}
+                evidence = failed_operation.get('result') or {}
+                if cls._remote_operation_outcome_uncertain(failed_operation) and evidence.get('robot_payload'):
+                    try:
+                        verified, verified_id, verified_message, _blocked = cls._reconcile_notice_remote_intent(prepared, failed_operation)
+                    except Exception:
+                        verified = False
+                    if verified:
+                        ok=True;remote_record_id=verified_id;result_message=verified_message
+                        cls._mark_notice_remote_operation(remote_operation_id,status='remote_written',target_record_id=verified_id,
+                            result={'record_id':verified_id,'message':verified_message,'reconciled':True})
             if not ok:
                 target_selection = None
                 if cls._remote_record_not_found(result_message) or (

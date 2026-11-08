@@ -2603,7 +2603,7 @@ def _detail_form(
         {repair_event_link_panel}
         {_target_link_panel(work, target_record_id)}
         {_form_fields(work, draft, scope=scope)}
-        <fieldset data-dingtalk-picker><legend>钉钉群推送（至少选择一个，后续更新/结束沿用）</legend><input type="hidden" name="dingtalk_robot_ids_json" value="[]"><div data-dingtalk-options style="display:flex;flex-wrap:wrap;gap:8px 18px"></div></fieldset>
+        <fieldset data-dingtalk-picker><legend>钉钉群推送（必选，至少一个；后续更新/结束沿用）</legend><input type="hidden" name="dingtalk_robot_ids_json" value="[]"><div data-dingtalk-options style="display:flex;flex-wrap:wrap;gap:8px 18px"></div></fieldset>
         {cycle_warning_html}
         {_polling_work_order_selector(work)}
         {_polling_work_order_status(source, work)}
@@ -6248,6 +6248,8 @@ def render_workbench_lite(
         .filter(([name]) => !previewValue(form, name))
         .map(([, label]) => label);
       if (!selectedBuildingCodes(form).length) missing.unshift('楼栋/范围');
+      const robotField=form?.querySelector('[name="dingtalk_robot_ids_json"]');
+      if(robotField){{try{{const ids=JSON.parse(robotField.value||'[]');if(!Array.isArray(ids)||!ids.length)missing.unshift('钉钉机器人（必选）');}}catch{{missing.unshift('钉钉机器人（必选）');}}}}
       if (
         ['maintenance', 'polling', 'adjust'].includes(workType)
         && String(form?.dataset.action || 'start') === 'start'
@@ -7645,7 +7647,7 @@ def render_workbench_lite(
           const buildings=syncBuildingSelection(form),rawType=form.elements.namedItem('notice_type')?.value||'';
           const type=['上电通告','下电通告'].includes(rawType)?'上下电通告':rawType;
           const robots=(result.data?.robots||[]).filter(r=>(!r.types.length||r.types.includes(type))&&(!r.scopes.length||buildings.some(s=>r.scopes.includes(s))));
-          form.querySelector('[data-dingtalk-picker]').hidden=!robots.length&&!selected.length;
+          form.querySelector('[data-dingtalk-picker]').hidden=false;
           panel.replaceChildren();
           for(const robot of robots){{
             const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.checked=selected.includes(robot.id);input.style.width='18px';input.style.minHeight='18px';label.style.cssText='display:flex;align-items:center;gap:6px;min-height:36px';label.title=robot.remark||'';

@@ -24,6 +24,22 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
     setUp = fixtures.EventRemoteAtomicityTests.setUp
     tearDown = fixtures.EventRemoteAtomicityTests.tearDown
 
+    def test_end_recovery_requires_actual_end_marker(self):
+        from upload_event_module.config import get_field_config
+        for notice_type in ('设备调整', '维保通告', '变更通告', '设备检修', '设备轮巡', '上下电通告', '上电通告', '下电通告', '事件通告'):
+            with self.subTest(notice_type=notice_type):
+                config = get_field_config(notice_type)
+                marker = config.get('actual_end') or config.get('end_time')
+                self.assertTrue(marker)
+                expected = {'名称': '测试设备', '内容': '核对内容', marker: 123456}
+                handler = SimpleNamespace(build_update_fields=lambda _payload: expected)
+                prepared = {'notice_type': notice_type, 'action': 'end', 'text': '隔离测试'}
+                with patch.object(server, 'get_notice_handler', return_value=handler), patch.object(PortalRuntime, '_prepared_to_notice_payload', return_value=object()):
+                    for value in (None, '', 999999):
+                        remote = {'名称': '测试设备', '内容': '核对内容', marker: value}
+                        self.assertFalse(PortalRuntime._remote_record_matches_prepared(prepared, {'fields': remote}))
+                    self.assertTrue(PortalRuntime._remote_record_matches_prepared(prepared, {'fields': expected}))
+
     def request(self, notice_type="维保通告", label="start", action="upload"):
         request = {
             "action_type": action, "operation_id": "qt_notice:" + label,
@@ -304,6 +320,8 @@ class NoticeUploadReliabilityTests(unittest.TestCase):
         handler = MaintenanceNoticeHandler("维保通告")
         response = SimpleNamespace(success=lambda: True, data=SimpleNamespace(record=SimpleNamespace(record_id="rec-robot")))
         with (
+            patch('lan_bitable_template_portal.event_notice_delivery.dispatch'),
+            patch('lan_bitable_template_portal.dingtalk_notices.dispatch'),
             patch.object(PortalRuntime, "_existing_target_for_local_upload", return_value=""),
             patch.object(feishu, "check_token_status"),
             patch.object(feishu, "config", SimpleNamespace(user_token="audit", app_token="audit")),
