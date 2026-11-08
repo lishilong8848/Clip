@@ -37433,13 +37433,24 @@ class MaintenancePortalService(RepairOperationsMixin):
 
         payload = attempt_upload(token)
         code = int(payload.get("code") or 0)
-        if code in TOKEN_ERROR_CODES:
+        # Explicit rejection has not created a file. Refresh only within the
+        # same Qt application, once; never replay an ambiguous transport error.
+        retry_archive_denial = (
+            code == 1061004 and parent_type == "bitable_file"
+            and str(parent_node) == CRITICAL_GUARD_ARCHIVE_APP_TOKEN
+        )
+        if code in TOKEN_ERROR_CODES or retry_archive_denial:
             check_credentials()
             token = str(refresh_feishu_token() or "").strip()
             if not token:
                 raise PortalError(f"{context}失败：飞书登录凭证已失效。")
             payload = attempt_upload(token)
             code = int(payload.get("code") or 0)
+        if code == 1061004:
+            raise PortalError(
+                f"{context}被飞书拒绝（code=1061004，forbidden）。"
+                "请核对当前飞书鉴权身份对目标多维表的附件上传权限；权限生效后可重试原归档任务。"
+            )
         if code != 0:
             raise PortalError(
                 f"{context}失败: {code} - {payload.get('msg') or 'unknown'}"
@@ -37880,14 +37891,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         file_path: str | Path,
         file_name: str = "",
         app_token: str = DEFAULT_APP_TOKEN,
+        context: str = "MOP 文件上传",
     ) -> str:
         path = Path(str(file_path or "")).resolve()
         if not path.is_file():
-            raise PortalError("待上传的已签名 MOP 文件不存在。")
+            raise PortalError(f"{context}失败：文件不存在。")
         upload_name = str(file_name or path.name).strip() or path.name
         size = path.stat().st_size
         if size <= 0:
-            raise PortalError("待上传的已签名 MOP 文件为空。")
+            raise PortalError(f"{context}失败：文件为空。")
 
         return self._upload_drive_media_file(
             file_path=path,
@@ -37895,7 +37907,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             parent_type="bitable_file",
             parent_node=str(app_token or DEFAULT_APP_TOKEN),
             size=size,
-            context="MOP 文件上传",
+            context=context,
         )
 
     def _upload_large_bitable_file(
@@ -48488,7 +48500,16 @@ class MaintenancePortalService(RepairOperationsMixin):
             and attempted_at > 0
             and time.time() - attempted_at >= 15 * 60
         )
-        if status == "failed" and not force_retry:
+        # Permission propagation can finish after the initial rejection. Retry
+        # this explicitly rejected upload periodically, including after restart.
+        # Other ambiguous failures still require the existing manual verification.
+        permission_retry_due = (
+            status == "failed"
+            and "1061004" in str(weather_task.get("archive_error") or "")
+            and attempted_at > 0
+            and time.time() - attempted_at >= 15 * 60
+        )
+        if status == "failed" and not force_retry and not permission_retry_due:
             return {
                 "status": status,
                 "record_id": str(weather_task.get("archive_record_id") or ""),
@@ -48540,7 +48561,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                         file_path=path,
                         file_name=Path(path).name,
                         app_token=CRITICAL_GUARD_ARCHIVE_APP_TOKEN,
-                    )
+                        context="天气重保归档附件上传",                    )
                     for path in paths
                 ]
                 fields[field_name] = [{"file_token": token} for token in tokens if token]
