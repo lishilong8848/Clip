@@ -16,6 +16,7 @@ ORIGINAL_MAPPING_SHEET = '原表映射'
 ORIGINAL_MAPPING_COLUMNS = ('工作表', '单元格', '设备标识', '类型', '测点ID', '参数', '位置', '来源表')
 ORIGINAL_INDEX_SHEET = '原表目录'
 ORIGINAL_INDEX_COLUMNS = ('工作表', '原文件', '原工作表')
+_FORM_ROUND_CLOCKS = {'09:30': '白1', '16:00': '白2', '22:00': '夜1', '04:00': '夜2'}
 
 
 def same_reading(left, right):
@@ -35,7 +36,7 @@ def same_reading(left, right):
 @lru_cache(maxsize=1)
 def template_version():
     path = Path(__file__).resolve().parents[1] / 'resources' / 'daily_inspection_templates.json'
-    return hashlib.sha256(path.read_bytes()).hexdigest()[:20]
+    return hashlib.sha256(b'round-rows-v1:' + path.read_bytes()).hexdigest()[:20]
 
 
 @lru_cache(maxsize=1)
@@ -52,8 +53,28 @@ def display_templates(scope):
     # Export-only XML stays on the server; do not exhaust the browser's layout cache.
     return [{**template,'sheets':[
         {**{key:value for key,value in sheet.items() if key not in ('excel_settings','artwork','excel_styles')},
+         'round_rows': round_rows(sheet),
          'excel_styles':[{key:style[key] for key in ('number_format','alignment','diagonal') if key in style} for style in sheet.get('excel_styles',[])]}
         for sheet in template['sheets']]} for template in original_templates() if template['scope']==scope]
+
+
+def round_rows(sheet):
+    """Recognize the original form's printed time and its vertically merged rows."""
+    result = {}
+    for number, row in enumerate(sheet['rows'], 1):
+        if not row:
+            continue
+        match = re.fullmatch(r'(\d{1,2}):(\d{2})(?::00)?', str(row[0]).strip())
+        if match:
+            slot = _FORM_ROUND_CLOCKS.get(match[1].zfill(2) + ':' + match[2])
+            if slot:
+                result[number] = slot
+    for merge in sheet.get('merges', []):
+        left, start, right, end = range_boundaries(merge)
+        if left == right == 1 and start in result:
+            for row in range(start + 1, end + 1):
+                result.setdefault(row, result[start])
+    return result
 
 
 @lru_cache(maxsize=1)

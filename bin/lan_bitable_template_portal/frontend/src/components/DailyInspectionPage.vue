@@ -24,16 +24,17 @@
     <DailyInspectionHistory v-show="historyOpen" v-if="historyVisited && state?.history_scopes?.length"
       ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
     <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
-      :template-version="state.template_version" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
+      :template-version="state.template_version" :archive-revision="state.archive_revision" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
       :read-only="readOnly || inputsLocked" :parent-busy="!!busy || autoSaving || hasDrafts"
       @changed="load" @scope="switchView" @exit="back">
       <template #start>
-        <div v-if="duty && !readOnly && !active && state.completed_rounds<state.round_limit" class="inspection-actions">
+        <div v-if="duty && !readOnly && !active && canStartRound" class="inspection-actions">
           <label v-for="item in availableProfessions" :key="item.name"><input v-model="selectedProfessions" type="checkbox" :value="item.name"> {{ item.name }}</label>
-          <NButton type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length" @click="start">开始第 {{ state.completed_rounds+1 }} 次巡检</NButton>
+          <NButton v-if="!waitingForSlot" type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length" @click="start">开始第 {{ nextRound }} 次巡检</NButton>
+          <span v-else>第 {{ nextRound }} 轮 {{ time(state.opens_at || 0) }} 自动取数</span>
           <span v-if="previewBusy">正在读取本次数据…</span><span v-if="previewError" class="warning">{{ previewError }}</span>
         </div>
-        <span v-else-if="duty && !active && state.completed_rounds>=state.round_limit">{{ duty.scope }}楼本班 {{ state.round_limit }} 次巡检已完成</span>
+        <span v-else-if="duty && !active && !canStartRound">{{ duty.scope }}楼本班已归档 {{ archivedRounds }} / {{ state.round_limit }} 轮</span>
         <span v-else-if="duty && !active && readOnly">{{ duty.scope }}楼当前为查看模式</span>
       </template>
     </DailyInspectionWorkbook>
@@ -54,9 +55,11 @@
         <template v-else>
           <div class="inspection-actions">
             <h2>{{ duty.scope }}楼本班巡检</h2>
-            <span>已完成 {{ state.completed_rounds }} / {{ state.round_limit }} 次</span>
+            <span>已归档 {{ archivedRounds }} / {{ state.round_limit }} 轮</span>
+            <span v-if="archivedRounds < state.completed_rounds">待归档 {{ state.completed_rounds - archivedRounds }} 轮</span>
           </div>
-          <p v-if="state.completed_rounds>=state.round_limit">本楼本班巡检已全部完成。</p>
+          <p v-if="!canStartRound">本楼本班已无可开始的轮次。</p>
+          <p v-else-if="waitingForSlot">第 {{ nextRound }} 轮将在 {{ time(state.opens_at || 0) }} 自动取数，当前可查看参考读数。</p>
           <p v-else>选择本轮专业；全部确认后统一提交归档。</p>
         </template>
         <p v-if="previewBusy && !preview" role="status">正在读取最新设备数据…</p>
@@ -64,16 +67,16 @@
         <template v-else-if="preview">
           <p v-if="previewError" class="warning" role="alert">{{ previewError }}</p>
           <p v-if="preview.cache_stale" class="warning" role="status">当前显示上次核验的数据（{{ time((preview.cache_refreshed_at || 0)*1000) }}），后台会重试更新；开始巡检前会再次核验。</p>
-          <template v-if="!readOnly && state.completed_rounds<state.round_limit">
+          <template v-if="!readOnly && canStartRound">
             <div class="inspection-actions profession-choices" aria-label="本轮巡检专业">
               <label v-for="item in availableProfessions" :key="item.name">
                 <input v-model="selectedProfessions" type="checkbox" :value="item.name"> {{ item.name }} · {{ item.count }} 台
               </label>
             </div>
-            <NButton type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length"
-              @click="start">开始第 {{ state.completed_rounds+1 }} 次巡检</NButton>
+            <NButton v-if="!waitingForSlot" type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length"
+              @click="start">开始第 {{ nextRound }} 次巡检</NButton>
           </template>
-          <p>最新参考数据 · {{ time(preview.batch) }}<span v-if="!readOnly && state.completed_rounds<state.round_limit"> · 开始巡检后可修改</span></p>
+          <p>最新参考数据 · {{ time(preview.batch) }}<span v-if="!readOnly && canStartRound"> · 开始巡检后可修改</span></p>
           <p v-if="!previewDevices.length">请选择专业查看设备。</p>
           <div v-if="previewDevices.length" id="inspection-room-navigation" class="room-navigation" aria-label="按楼层和房间查看">
             <div class="inspection-actions"><strong>楼层</strong><button v-for="floor in floors" :key="floor" type="button" :aria-pressed="selectedFloor===floor" @click="selectFloor(floor)">{{ floor }}</button></div>
@@ -277,7 +280,7 @@ type Reviews = Record<string,Review>;
 type DraftReview = Review & {base?:Review;pending?:Review;label?:string;parameterLabels?:Record<string,string>};
 type Recovery = {key:string;duty:Duty;round:number;drafts:Record<string,DraftReview>};
 type ProfessionConfirmation = {actor:string;confirmed:number;version:string};
-type State = {template_version?:string;duty:Duty|null; completed_rounds:number; round_limit:number; history_scopes?:string[]; duty_warning?:string;
+type State = {template_version?:string;archive_revision?:string;duty:Duty|null; completed_rounds:number; archived_rounds?:number; round_limit:number; next_round?:number; scheduled?:boolean; opens_at?:number|null; history_scopes?:string[]; duty_warning?:string;
   view_scopes?:string[]; view_scope?:string; can_edit?:boolean;
   active:null|{id:string; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
     professions?:string[]|null;profession_confirmations?:Record<string,ProfessionConfirmation>;profession_versions?:Record<string,string>;
@@ -330,6 +333,10 @@ const emptyReview:Review = {values:{},result:'',note:'',revision:0};
 const active = computed(()=>state.value?.active);
 const readOnly = computed(()=>state.value?.can_edit===false);
 const duty = computed(()=>state.value?.duty);
+const nextRound = computed(()=>state.value?.next_round ?? (state.value?.completed_rounds ?? 0)+1);
+const canStartRound = computed(()=>nextRound.value<=(state.value?.round_limit ?? 2));
+const archivedRounds = computed(()=>state.value?.archived_rounds ?? state.value?.completed_rounds ?? 0);
+const waitingForSlot = computed(()=>(state.value?.opens_at ?? 0)>Date.now());
 const batch = computed(()=>active.value?.batch);
 const devices = computed(()=>batch.value?.devices || []);
 const byId = computed(()=>new Map([...devices.value,...(batch.value?.form_devices || [])].map(device=>[device.id,device])));
@@ -363,7 +370,7 @@ const availableProfessions = computed(()=>{
   return [...counts].map(([name,count])=>({name,count}));
 });
 const previewDevices = computed(()=>{
-  const choosing=!readOnly.value && (state.value?.completed_rounds ?? 0)<(state.value?.round_limit ?? 2);
+  const choosing=!readOnly.value && canStartRound.value;
   const view=choosing && selectedProfessions.value.length===1 ? selectedProfessions.value[0] : 'ALL';
   const ranks=new Map((preview.value?.orders?.[view] || []).map((id,index)=>[id,index]));
   return (preview.value?.devices || []).map((device,index)=>({device,index}))
@@ -781,6 +788,7 @@ async function refreshSharedStatus() {
       || document.visibilityState==='hidden' || busy.value || statusController || autoController) return;
   const request=statusController=new AbortController();
   const params=new URLSearchParams({date:current.duty?.date || '',shift:current.duty?.shift || ''});
+  if(current.archive_revision)params.set('archive_revision',current.archive_revision);
   if (current.view_scope) params.set('view_scope',current.view_scope);
   if (current.active) {
     params.set('id',current.active.id);
@@ -849,11 +857,11 @@ const start = ()=>fetchState('start',{duty:duty.value,professions:selectedProfes
 const entryStarted=new Set<string>();
 watch([()=>preview.value,()=>active.value?.id,()=>busy.value,()=>state.value?.view_scope],()=>{
   const current=state.value,shift=duty.value;
-  if(!current || !shift || busy.value || readOnly.value)return;
+  if(!current || current.scheduled || !shift || busy.value || readOnly.value)return;
   const scope=current.view_scope || shift.scope;
   const key=JSON.stringify([scope,shift.date,shift.shift]);
   if(entryStarted.has(key))return;
-  if(active.value || current.completed_rounds>=current.round_limit){entryStarted.add(key);return;}
+  if(active.value || !canStartRound.value){entryStarted.add(key);return;}
   if(preview.value?.scope===scope && selectedProfessions.value.length){entryStarted.add(key);void start();}
 });
 async function confirmProfession(name:string) {

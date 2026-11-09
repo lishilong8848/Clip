@@ -1,9 +1,11 @@
 import copy
+import datetime as dt
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
-from lan_bitable_template_portal.daily_inspection import DailyInspection, inspection_report, original_templates, RiskError
+from lan_bitable_template_portal.daily_inspection import CN, SOURCES, DailyInspection, inspection_report, original_templates, RiskError
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_daily_inspection import InspectionCloud, DAY
 
@@ -61,6 +63,35 @@ class SheetWorkflowTests(unittest.TestCase):
                          {k:(v['xml'],v['assets']) for k,v in before_art.items()})
         with self.assertRaisesRegex(RiskError,'已被修改'):
             self.svc.edit_archive('D',r['id'],{**body,'cells':[{**edits[0],'value':'999'}]},'丙')
+
+    def test_blank_history_cell_cannot_be_saved_to_a_different_round(self):
+        self.finish(0)
+        self.active = self.svc.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        self.finish(0)
+        rounds = self.report()['rounds']
+        template = next(item for item in original_templates() if item['scope'] == 'D' and item['profession'] == '电气')
+        sheet = next(item for item in template['sheets'] if item['name'].strip() == '电气系统西区')
+        edit = {'template': template['name'], 'sheet': sheet['name'], 'cell': 'B5', 'value': '18'}
+        with self.assertRaisesRegex(RiskError, '另一巡检轮次'):
+            self.svc.edit_archive('D', rounds[1]['id'], {'version': rounds[1]['version'], 'cells': [edit]}, '甲')
+        self.assertEqual(self.cloud.updates, 0)
+        self.svc.edit_archive('D', rounds[0]['id'], {'version': rounds[0]['version'], 'cells': [edit]}, '甲')
+        self.assertEqual(self.cloud.updates, 1)
+
+    def test_sheet_summary_and_single_sheet_keep_same_round_identity(self):
+        self.finish(0)
+        full = self.report()
+        reference = next(cell for cell in full['rounds'][0]['original_cells'] if not cell['read_only'])
+        with patch.object(self.svc, 'download_archive', side_effect=AssertionError('仅摘要不应读附件')):
+            summary = inspection_report(self.svc, 'D', DAY['date'], 'a', '甲', drafts={}, summary_only=True)
+        self.assertEqual(summary['rounds'][0]['round_id'], full['rounds'][0]['round_id'])
+        self.assertEqual(summary['slot_states'][0]['status'], '已归档')
+        self.assertEqual(summary['rounds'][0]['original_cells'], [])
+        pair = (reference['template'], reference['sheet'])
+        filtered = inspection_report(self.svc, 'D', DAY['date'], 'a', '甲', drafts={}, view_sheet=pair)
+        self.assertEqual(filtered['sheet_filter'], list(pair))
+        self.assertIn(reference, filtered['rounds'][0]['original_cells'])
+        self.assertTrue(all((cell['template'], cell['sheet']) == pair for cell in filtered['rounds'][0]['original_cells']))
     def test_foreign_building_and_stale_version_rejected(self):
         t=next(t for t in original_templates() if t['scope']=='E')
         with self.assertRaises(RiskError):
@@ -160,6 +191,65 @@ class SheetWorkflowTests(unittest.TestCase):
         self.assertEqual(len(self.svc.load('D')['history']),1)
         self.assertEqual(self.svc.load('D')['rollovers'],{})
         self.assertTrue(self.report()['rounds'][0]['auto_closed'])
+
+    def test_unvisited_building_archives_each_scheduled_round(self):
+        scope = 'E'
+        source_rows = self.cloud.tables[SOURCES[scope][0][0]]
+        roster = lambda day: {'date': day, 'complete': True, 'people': []}
+        service = DailyInspection(self.store, self.cloud, scheduled=True)
+        service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
+
+        slots = [(3, 9, 30, 8, 1, '白'), (3, 12, 10, 12, 2, '白'),
+                 (3, 20, 10, 20, 1, '夜'), (4, 0, 10, 0, 2, '夜')]
+        for day, hour, minute, batch_hour, number, shift in slots:
+            now = dt.datetime(2026, 11, day, hour, minute, tzinfo=CN)
+            service.rollover_due(scope, now)
+            for row in source_rows:
+                stamp = int(now.replace(hour=batch_hour, minute=5).timestamp() * 1000)
+                row['fields'].update(上传日期=stamp, 源文件时间=stamp)
+            with service.source_cache_lock:
+                cached = service.cached_source(scope)
+                if cached:
+                    cached['refreshed_at'] = 0
+            service.open_scheduled_round(scope, roster, now)
+            state = service.load(scope)
+            self.assertEqual((state['active']['duty']['date'], state['active']['duty']['shift'], state['active']['round']),
+                             (DAY['date'], shift, number))
+            service.open_scheduled_round(scope, roster, now)
+            self.assertEqual(service.load(scope)['active']['id'], state['active']['id'])
+            service.retry_rollovers(scope)
+
+        service.rollover_due(scope, dt.datetime(2026, 11, 4, 9, 30, tzinfo=CN))
+        service.retry_rollovers(scope)
+        restored = DailyInspection(self.store, self.cloud, scheduled=True)
+        restored.download_archive = service.download_archive
+        restored.retry_rollovers(scope)
+        report = inspection_report(restored, scope, DAY['date'], 'a', '甲', drafts={})
+        self.assertEqual([(round_['shift'], round_['round']) for round_ in report['rounds']],
+                         [('白', 1), ('白', 2), ('夜', 1), ('夜', 2)])
+        self.assertTrue(all(round_['auto_closed'] and round_['original_cells'] for round_ in report['rounds']))
+        self.assertEqual(self.cloud.creates, 4)
+        self.assertEqual(restored.load('D')['active']['id'], self.active['id'])
+
+    def test_scheduled_round_waits_for_matching_batch_after_missed_slot(self):
+        service = DailyInspection(self.store, self.cloud, scheduled=True)
+        now = dt.datetime(2026, 11, 3, 12, 10, tzinfo=CN)
+        duty = {**DAY, 'scope': 'E'}
+        roster = lambda day: {'date': day, 'complete': True, 'people': []}
+        for row in self.cloud.tables[SOURCES['E'][0][0]]:
+            row['fields'].update(上传日期=int(now.timestamp() * 1000),
+                                 源文件时间=int(now.replace(hour=10).timestamp() * 1000))
+        service.open_scheduled_round('E', roster, now)
+        self.assertIsNone(service.load('E')['active'])
+        self.assertEqual(service.next_round(service.load('E'), duty, now), 2)
+        for row in self.cloud.tables[SOURCES['E'][0][0]]:
+            row['fields']['源文件时间'] = int(now.timestamp() * 1000)
+        service.cached_source('E')['refreshed_at'] = 0
+        service.open_scheduled_round('E', roster, now)
+        self.assertEqual(service.load('E')['active']['round'], 2)
+        service.rollover_due('E', now.replace(hour=20))
+        self.assertEqual(service.completed_rounds(service.load('E'), duty), 1)
+        self.assertEqual(service.next_round(service.load('E'), duty, now), 3)
 
     def test_unconfirmed_cloud_rollover_is_not_editable(self):
         import datetime as dt
