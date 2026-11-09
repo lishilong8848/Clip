@@ -77,12 +77,12 @@ def install_dingtalk_notice_routes(app,controller,runtime):
                 data=await asyncio.to_thread(service.public)
                 data['deliveries']=await asyncio.to_thread(service.recent)
             else:
+                action=request.path_params.get('action','')
                 actual=urlsplit(request.headers.get('origin') or request.headers.get('referer') or '')
                 expected=urlsplit(controller._request_base_url(request))
                 if not actual.netloc or (actual.scheme,actual.netloc)!=(expected.scheme,expected.netloc) or request.headers.get('sec-fetch-site')=='cross-site':raise DingTalkError('请求来源无效。',403)
-                body=await controller._read_json_request(request,max_bytes=65536)
+                body=await controller._read_json_request(request,max_bytes=512 * 1024 if not action else 2048)
                 if not isinstance(body,dict):raise DingTalkError('请求格式无效。')
-                action=request.path_params.get('action','')
                 if not action:data=await asyncio.to_thread(service.save,body)
                 elif action=='test':
                     operation=str(body.get('operation_id') or '')

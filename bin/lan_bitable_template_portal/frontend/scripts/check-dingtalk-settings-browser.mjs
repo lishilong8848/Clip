@@ -20,35 +20,66 @@ try{
     const page=await browser.newPage({viewport:{width,height}});let writes=[];
     page.on('pageerror',error=>console.error('fixture error:',error.message));
     page.on('console',message=>{if(message.type()==='error')console.error('fixture console:',message.text());});
-    let state={revision:1,types:['变更通告'],scopes:['D','E'],deliveries:[],robots:[...['甲群','乙群','丙群'].map((name,index)=>({id:String(index+1).repeat(32),name,remark:'',configured:true,enabled:true,scopes:[],types:[],mention_mode:'none',mention_user_ids:[],mention_mobiles:[]}))]};
+    let state={revision:1,types:['变更通告'],scopes:['D','E'],deliveries:[],contacts:[],robots:[...['甲群','乙群','丙群'].map((name,index)=>({id:String(index+1).repeat(32),name,remark:'',configured:true,enabled:true,scopes:[],types:[],mention_mode:'none',mention_user_ids:[],mention_contact_ids:[],mention_building_contact_ids:{}}))]};
     await page.route(url=>url.pathname.startsWith('/api/'),async route=>{
       const request=route.request(),url=new URL(request.url());let data;
       if(url.pathname==='/api/dingtalk-notices'){
-        if(request.method()==='POST'){const body=request.postDataJSON();writes.push(body);state={...state,revision:state.revision+1,robots:body.robots.map(r=>({...r,configured:true}))};}
+        if(request.method()==='POST'){const body=request.postDataJSON();writes.push(body);state={...state,revision:state.revision+1,contacts:body.contacts,robots:body.robots.map(r=>({...r,configured:true}))};}
         data=state;
       }else if(url.pathname==='/api/workbench/dingtalk-options')data={robots:state.robots};
       else throw new Error('unexpected API '+url.pathname);
       await route.fulfill({json:{ok:true,data}});
     });
-    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__ding_fixture`);
+    await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__ding_fixture`, {waitUntil:'domcontentloaded',timeout:90000});
     try{await page.locator('.robot').first().waitFor({timeout:10000});}catch(e){console.error('fixture body:',(await page.locator('body').innerText()).slice(0,2000));console.error('fixture html:',(await page.content()).slice(0,2000));throw e;}
-    const robot=page.locator('.robot').first();await robot.locator('.mentions summary').click();
+    const directory = page.locator('.contact-directory');
+    await directory.locator('summary').click();
+    for (const [remark, mobile] of [['通用主管', '13800138000'], ['现场负责人', '13800138001']]) {
+      await directory.getByRole('button', {name:'添加艾特人员'}).click();
+      const row = directory.locator('.contact-row').last();
+      await row.getByLabel('人员备注').fill(remark);
+      await row.getByLabel('手机号').fill(mobile);
+    }
+    const robot = page.locator('.robot').first();
+    const otherRobot = page.locator('.robot').nth(1);
+    async function selectPerson(panel, scope, remark) {
+      const picker = panel.locator(`[data-mention-scope="${scope}"]`);
+      await picker.locator('.n-base-selection').click();
+      const visibleOptions = page.locator('.n-base-select-option__content:visible');
+      await visibleOptions.filter({hasText:remark}).click();
+      await page.mouse.click(1,1);
+      await visibleOptions.first().waitFor({state:'hidden'});
+      assert.match(await picker.innerText(), new RegExp(remark));
+      assert.doesNotMatch(await picker.innerText(), /1380013800[01]/);
+    }
+    await robot.locator('.mentions summary').click();
     await robot.getByLabel('默认艾特方式').selectOption('people');
     await robot.getByLabel('钉钉用户 ID').fill('person_a\nperson_b');
-    await robot.getByLabel('所有楼栋通用手机号',{exact:true}).fill('13800138000');
-    await robot.getByLabel('D楼手机号',{exact:true}).fill('13800138001');
-    await robot.getByLabel('E楼手机号',{exact:true}).fill('13800138002');
-    await page.getByRole('button',{name:'保存配置'}).click();await page.getByRole('status').waitFor();
+    await selectPerson(robot, 'common', '通用主管');
+    await selectPerson(robot, 'D', '现场负责人');
+    await selectPerson(robot, 'E', '现场负责人');
+    await otherRobot.locator('.mentions summary').click();
+    await otherRobot.getByLabel('默认艾特方式').selectOption('people');
+    await selectPerson(otherRobot, 'D', '通用主管');
+    assert(await directory.locator('.contact-row').last().getByRole('button', {name:'移除人员'}).isDisabled());
+    await directory.locator('summary').click();
+    await page.getByRole('button',{name:'保存配置'}).click();
+    await page.getByRole('status').filter({hasText:'配置已保存'}).waitFor();
+    const [common, floorPerson] = writes[0].contacts;
     assert.deepEqual(writes[0].robots[0].mention_user_ids,['person_a','person_b']);
-    assert.deepEqual(writes[0].robots[0].mention_mobiles,['13800138000']);
-    assert.deepEqual(writes[0].robots[0].mention_building_mobiles,{D:['13800138001'],E:['13800138002']});
+    assert.deepEqual(writes[0].robots[0].mention_contact_ids,[common.id]);
+    assert.deepEqual(writes[0].robots[0].mention_building_contact_ids,{D:[floorPerson.id],E:[floorPerson.id]});
+    assert.deepEqual(writes[0].robots[1].mention_building_contact_ids,{D:[common.id]});
+    assert.doesNotMatch(JSON.stringify(writes[0].robots), /1380013800[01]/);
     await page.getByRole('button',{name:'刷新',exact:true}).click();
-    assert.equal(await robot.getByLabel('D楼手机号',{exact:true}).inputValue(),'13800138001');
-    assert.equal(await robot.getByLabel('E楼手机号',{exact:true}).inputValue(),'13800138002');
+    await page.waitForFunction(() => !document.querySelector('.ding-settings fieldset')?.disabled);
+    assert.match(await robot.locator('[data-mention-scope="D"]').innerText(), /现场负责人/);
+    assert.match(await otherRobot.locator('[data-mention-scope="D"]').innerText(), /通用主管/);
     await page.locator('.notice-dingtalk label').filter({hasText:'甲群'}).locator('input').check();
     await page.locator('.notice-dingtalk label').filter({hasText:'乙群'}).locator('input').check();
     assert.equal(await page.locator('#selection').textContent(),'甲群、乙群');
     assert.equal(await page.locator('.notice-dingtalk input:checked').count(),2);
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     await page.screenshot({path:path.join(output,`settings-${width}.png`),fullPage:true});
     console.log(`钉钉配置 ${width}x${height}：通过`);await page.close();
   }

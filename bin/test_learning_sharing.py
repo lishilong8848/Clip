@@ -104,7 +104,9 @@ class SharingTests(unittest.TestCase):
         self.assertEqual(self.learning._get('sharing_delivery', sent['id']), sent)
         self.assertTrue(all(j['status'] in {'sent','skipped'} for j in self.learning._all('sharing_delivery')))
         self.core.schedule(TODAY.replace(hour=13))
-        self.assertEqual(len(self.learning._all('sharing_delivery')), len(jobs))
+        remaining = self.learning._all('sharing_delivery')
+        self.assertEqual(len([job for job in remaining if job['kind'] != 'weekly']), len(jobs))
+        self.assertEqual([job['reports'] for job in remaining if job['kind'] == 'weekly'], [[]])
         self.assertTrue(self.core.delete(self.bid, version, ADMIN)['deleted'])
         worker = SharingRuntime(SimpleNamespace(), lambda:self.learning); worker.core = self.core
         self.assertFalse(worker.update_batch(self.bid, status='draft'))
@@ -156,8 +158,8 @@ class SharingTests(unittest.TestCase):
         self.assertEqual(len([j for j in self.learning._all('sharing_delivery') if j['kind'] == 'reminder']), 2)
         self.submit(self.core.attempts(self.bid)[0])
         self.core.schedule(dt.datetime(2026, 10, 19, 0, tzinfo=TZ))
-        job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly')
-        self.assertEqual(len(job['items']), 2)
+        job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly' and j['date'] == '2026-10-12')
+        self.assertEqual(job['reports'][0]['assigned'], 2)
         text = json.dumps(sharing.weekly_card(job, self.core.batch(self.bid), 'http://portal.test'), ensure_ascii=False)
         self.assertIn('参会 3 人 · 需答 2 人 · 免做 1 人', text)
         self.assertNotIn('人员1', text)
@@ -270,12 +272,42 @@ class SharingTests(unittest.TestCase):
         self.core.schedule(monday); self.core.schedule(monday)
         jobs = [j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly']
         self.assertEqual(len(jobs), 1)
-        self.assertEqual(sum(bool(p['choices']) for p in jobs[0]['items']), 1)
+        self.assertEqual(jobs[0]['reports'][0]['submitted'], 1)
+        self.assertGreater(jobs[0]['reports'][0]['choices'], 0)
         card = sharing.weekly_card(jobs[0], self.core.batch(self.bid), 'http://portal.test')
         text = json.dumps(card, ensure_ascii=False)
         self.assertIn('参会 3 人 · 已答 1 人 · 未答 2 人', text)
-        self.assertIn('暂无选择题首答成绩', text)
+        self.assertIn('选择题首答平均正确率', text)
         self.assertIn('分享会练习 · 每周汇总', text)
+
+    def test_weekly_group_receipt_covers_multiple_batches_once(self):
+        self.publish()
+        second = self.core.create(URL, 'operation-fixture-02', ADMIN, ['single', 'multiple'])['id']
+        with self.learning.transaction() as conn:
+            first = self.core.batch(self.bid, conn)
+            draft = self.core.batch(second, conn)
+            draft.update(status='draft', title='第二场分享会', source=first['source'],
+                         questions=first['questions'], participants=first['participants'])
+            self.learning._put('sharing_batch', second, draft, conn)
+        self.core.publish(second, 1, ADMIN, 'cli_bot')
+        monday = dt.datetime(2026, 10, 19, 9, tzinfo=TZ)
+        self.core.schedule(monday)
+        self.core.schedule(monday)
+        jobs = [job for job in self.learning._all('sharing_delivery') if job['kind'] == 'weekly']
+        self.assertEqual(len(jobs), 1)
+        job = jobs[0]
+        self.assertEqual({row['batch_id'] for row in job['reports']}, {self.bid, second})
+        card = json.dumps(sharing.weekly_card(job, None, 'http://portal.test'), ensure_ascii=False)
+        self.assertIn('分享会 2 场', card)
+        self.assertIn('冷机故障分享会', card)
+        self.assertIn('第二场分享会', card)
+        for batch_id in (self.bid, second):
+            self.assertEqual(self.core.detail(batch_id, ADMIN)['weekly_reports'][0]['date'], job['date'])
+        cloud = SimpleNamespace(upsert_entity=Mock())
+        with patch.object(self.learning, '_cloud', cloud):
+            self.learning._sync_document(('sharing_delivery', job['id'], job['_revision']))
+        cloud.upsert_entity.assert_called_once()
+        self.assertFalse(self.learning._get('sharing_delivery', job['id'])['_dirty'])
 
     def test_weekly_late_restart_counts_cutoff_not_mondays_answers(self):
         self.publish()
@@ -283,7 +315,7 @@ class SharingTests(unittest.TestCase):
             for attempt in self.core.attempts(self.bid): self.submit(attempt)
         self.core.schedule(dt.datetime(2026, 10, 20, 9, tzinfo=TZ))
         job = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly')
-        self.assertTrue(all(item['choices'] == 0 for item in job['items']))
+        self.assertEqual(job['reports'][0]['choices'], 0)
 
     def test_cloud_roundtrip_preserves_papers_grades_and_tickets(self):
         self.publish(); self.submit(self.core.attempts(self.bid)[0])
@@ -422,6 +454,7 @@ class SharingTests(unittest.TestCase):
         self.assertEqual(self.core.detail(self.bid, ADMIN)['question_types'], ['single', 'multiple'])
 
     def test_mixed_and_all_text_cards_keep_answers_without_fabricating_grades(self):
+        expected_choices = {}
         for types, choice_count in ((list(sharing.QUESTION_TYPES), 4), (['interview'], 0)):
             with self.subTest(types=types):
                 bid = self.core.create(URL, 'new-batch-' + '-'.join(types), ADMIN, types)['id']
@@ -452,12 +485,14 @@ class SharingTests(unittest.TestCase):
                 self.assertIn('参考答案', card)
                 self.assertIn('不计入选择题正确率', card)
                 self.assertIn('完整作答已保存', card)
-                self.core.schedule(dt.datetime(2026, 10, 19, tzinfo=TZ))
-                weekly = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly' and j['batch_id'] == bid)
-                self.assertEqual(sum(p['choices'] for p in weekly['items']), choice_count)
-                self.assertEqual(sum(p['answered'] for p in weekly['items']), 5)
+                expected_choices[bid] = choice_count
                 sync = self.core.detail(bid, ADMIN)['bank_sync']
                 self.assertEqual(sync, {'total': 20, 'synced': 0, 'failed': 0, 'error': ''})
+
+        self.core.schedule(dt.datetime(2026, 10, 19, tzinfo=TZ))
+        weekly = next(j for j in self.learning._all('sharing_delivery') if j['kind'] == 'weekly')
+        self.assertEqual({row['batch_id']: row['choices'] for row in weekly['reports']}, expected_choices)
+        self.assertTrue(all(row['answered'] == 5 for row in weekly['reports']))
 
     def test_model_obeys_requested_types_and_defers_mismatch_to_shared_validation(self):
         qs = typed_questions(list(sharing.QUESTION_TYPES), 5)

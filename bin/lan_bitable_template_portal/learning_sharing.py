@@ -483,7 +483,15 @@ class SharingExercises:
                 fields = ('name', 'open_id', 'correct', 'submitted_at') if compact else ('name', 'open_id', 'question_ids', 'answers', 'correct', 'submitted_at')
                 result['results'] = [{k: p.get(k) for k in fields} for p in attempts]
             with closing(self.learning._connect()) as conn:
-                notices = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=? AND json_extract(payload,'$.kind')='weekly' ORDER BY updated DESC LIMIT 10", (identity,))]
+                notices = [json.loads(row[0]) for row in conn.execute("""
+                    SELECT payload FROM documents
+                    WHERE kind='sharing_delivery' AND json_extract(payload,'$.kind')='weekly'
+                      AND (json_extract(payload,'$.batch_id')=? OR EXISTS (
+                          SELECT 1 FROM json_each(documents.payload, '$.reports') AS report
+                          WHERE json_extract(report.value,'$.batch_id')=?
+                      ))
+                    ORDER BY updated DESC LIMIT 10
+                """, (identity, identity))]
             result['weekly_reports'] = [{k: row.get(k) for k in ('date', 'end', 'part', 'parts', 'status', 'error', 'sent_at')} for row in notices]
             with closing(self.learning._connect()) as conn:
                 uploads = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_delivery' AND json_extract(payload,'$.batch_id')=? AND json_extract(payload,'$.kind')='bank'", (identity,))]
@@ -729,33 +737,68 @@ class SharingExercises:
         monday = current.date() - dt.timedelta(days=current.weekday())
         start, end = (monday - dt.timedelta(days=7)).isoformat(), (monday - dt.timedelta(days=1)).isoformat()
         weekly_due = current >= dt.datetime.combine(monday, dt.time.min, TZ)
+        reminders_due = current.strftime('%H:%M') >= '13:00'
+        weekly_enabled = weekly_due and self.learning.settings()['weekly_report_enabled']
         with self.learning.transaction() as conn:
-            batches = [json.loads(row[0]) for row in conn.execute("SELECT payload FROM documents WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('published','closed')")]
+            # Weeks already queued by the old scheduler retain their original
+            # receipts and message IDs, including unconfirmed attempts.
+            build_report = weekly_enabled and not conn.execute("""
+                SELECT 1 FROM documents
+                WHERE kind='sharing_delivery' AND json_extract(payload,'$.kind')='weekly'
+                  AND json_extract(payload,'$.date')=? LIMIT 1
+            """, (start,)).fetchone()
+            if not build_report and not reminders_due:
+                return
+            batches = [json.loads(row[0]) for row in conn.execute("""
+                SELECT payload FROM documents
+                WHERE kind='sharing_batch' AND json_extract(payload,'$.status') IN ('published','closed')
+                ORDER BY json_extract(payload,'$.published_at'), key
+            """)]
+            reports = []
+            incomplete = False
             for batch in batches:
                 attempts = self.attempts(batch['id'], conn)
-                if len(attempts) != len(assigned_participants(batch)):
+                assigned = len(assigned_participants(batch))
+                published = batch['published_at'][:10]
+                closed = batch.get('closed_at', '')[:10]
+                open_at_cutoff = batch['status'] == 'published' or closed > end
+                completed = [item for item in attempts if item['submitted_at'] and item['submitted_at'][:10] <= end]
+                included = (
+                    build_report and published <= end
+                    and (start <= published or start <= closed <= end
+                         or open_at_cutoff and len(completed) < assigned
+                         or any(item['submitted_at'][:10] >= start for item in completed))
+                )
+                if len(attempts) != assigned:
+                    # Do not permanently freeze an incomplete weekly restore.
+                    incomplete = incomplete or included
                     continue
-                if batch['status'] == 'published' and current.strftime('%H:%M') >= '13:00':
+                if batch['status'] == 'published' and reminders_due:
                     for item in attempts:
-                        if not item['submitted_at'] and (batch['published_at'][:10] < day or batch['published_at'][11:16] < '13:00'):
+                        if not item['submitted_at'] and (published < day or batch['published_at'][11:16] < '13:00'):
                             self.enqueue(conn, 'reminder', f"reminder:{day}:{item['id']}", batch_id=batch['id'], attempt_id=item['id'], date=day)
-                open_at_cutoff = batch['status'] == 'published' or batch.get('closed_at', '')[:10] > end
-                if (weekly_due and self.learning.settings()['weekly_report_enabled'] and batch['published_at'][:10] <= end
-                        and (open_at_cutoff and any(not p['submitted_at'] or p['submitted_at'][:10] > end for p in attempts)
-                             or start <= batch.get('closed_at', '')[:10] <= end
-                             or any(start <= p['submitted_at'][:10] <= end for p in attempts))):
-                    snapshot = []
-                    by_id = {q['id']: q for q in batch['questions']}
-                    for p in attempts:
-                        answered = bool(p['submitted_at'] and p['submitted_at'][:10] <= end)
-                        snapshot.append({'name': p['name'], 'person_id': p['person_id'], 'answered': len(p['question_ids']) if answered else 0,
-                            'choices': sum(by_id[qid]['type'] != 'interview' for qid in p['question_ids']) if answered else 0,
-                            'correct': p['correct'] if answered else 0,
-                            'practice': 0, 'papers': 1 if answered else 0, 'scopes': [p['scope']] if p['scope'] else []})
-                    for index in range(0, len(snapshot), 50):
-                        part, parts = index // 50 + 1, (len(snapshot) + 49) // 50
-                        self.enqueue(conn, 'weekly', f"weekly:{start}:{batch['id']}:{part}", batch_id=batch['id'], date=start, end=end,
-                                     items=snapshot[index:index + 50], part=part, parts=parts)
+                if not included:
+                    continue
+                question_types = {q['id']: q['type'] for q in batch['questions']}
+                results = [
+                    (item['correct'], sum(question_types[qid] != 'interview' for qid in item['question_ids']))
+                    for item in completed
+                ]
+                scores = [correct * 100 / choices for correct, choices in results if choices]
+                reports.append({
+                    'batch_id': batch['id'],
+                    'title': batch['title'],
+                    'attendees': len(batch['participants']),
+                    'assigned': assigned,
+                    'submitted': len(completed),
+                    'answered': sum(len(item['question_ids']) for item in completed),
+                    'choices': sum(choices for _, choices in results),
+                    'correct': sum(correct for correct, _ in results),
+                    'average_accuracy': round(sum(scores) / len(scores), 1) if scores else None,
+                })
+            if build_report and not incomplete:
+                self.enqueue(conn, 'weekly', f'weekly:{start}:group', date=start, end=end,
+                             reports=reports, part=1, parts=1)
 
 
 def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
@@ -847,7 +890,49 @@ def exercise_card(batch, attempt, *, reminder=False, result=False, page=None):
     return {'schema': '2.0', 'header': {'title': plain(title), 'template': 'green' if result else 'blue'}, 'body': {'elements': elements}}
 
 
+def sharing_weekly_group_card(job, url):
+    reports = job['reports']
+    assigned = sum(report['assigned'] for report in reports)
+    submitted = sum(report['submitted'] for report in reports)
+    summary = (f"{job['date']} 至 {job['end']}\n"
+               f"分享会 {len(reports)} 场 · 需答 {assigned} 人次 · 已答 {submitted} 人次 · 未答 {assigned - submitted} 人次")
+    elements = [{'tag': 'div', 'text': plain(summary)}]
+    for report in reports[:24]:
+        title = ' '.join(report['title'].split())
+        if len(title) > 120:
+            title = title[:120] + '…'
+        attendance = f"参会 {report['attendees']} 人"
+        exempt = report['attendees'] - report['assigned']
+        if exempt:
+            attendance += f" · 需答 {report['assigned']} 人 · 免做 {exempt} 人"
+        waiting = report['assigned'] - report['submitted']
+        average = report.get('average_accuracy')
+        score = f"选择题首答平均正确率 {average:.1f}%" if average is not None else '暂无选择题首答成绩'
+        elements.append({'tag': 'div', 'text': plain(
+            f"{title}\n{attendance} · 已答 {report['submitted']} 人 · 未答 {waiting} 人\n"
+            f"已答 {report['answered']} 题 · {score}"
+        )})
+    if not reports:
+        elements.append({'tag': 'div', 'text': plain('本周没有需汇总的分享会练习。')})
+    elif len(reports) > 24:
+        elements.append({'tag': 'div', 'text': plain(f"其余 {len(reports) - 24} 场计入上方汇总，详情请进入分享会练习。")})
+    elements.extend([
+        {'tag': 'note', 'elements': [plain('各场成绩统计截至周末。平均正确率按有选择题成绩的人员等权计算。')]},
+        {'tag': 'action', 'actions': [{
+            'tag': 'button', 'type': 'primary', 'text': plain('查看分享会练习'),
+            'url': url.rstrip('/') + '/learning?tab=sharing',
+        }]},
+    ])
+    return {
+        'config': {'wide_screen_mode': True},
+        'header': {'title': plain('分享会练习 · 每周汇总'), 'template': 'blue'},
+        'elements': elements,
+    }
+
+
 def weekly_card(job, batch, url):
+    if 'reports' in job:
+        return sharing_weekly_group_card(job, url)
     from .learning_engagement import summary_card
     card = summary_card({**job, 'scope': ''}, url)
     card['header']['title']['content'] = '分享会练习 · 每周汇总'

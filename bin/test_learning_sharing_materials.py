@@ -111,7 +111,7 @@ class SharingMaterialsTests(unittest.TestCase):
         self.learning.completion_changed.assert_called()
         self.core.schedule(dt.datetime(2026, 10, 19, tzinfo=TZ))
         weekly = next(job for job in self.learning._all('sharing_delivery') if job['kind'] == 'weekly')
-        self.assertEqual(sum(item['answered'] for item in weekly['items']), 11)
+        self.assertEqual(weekly['reports'][0]['answered'], 11)
 
     def test_page_isolation_auth_and_conflicting_save_do_not_overwrite(self):
         _, paper = self.publish(6)

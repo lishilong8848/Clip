@@ -795,7 +795,9 @@ class LearningService:
                 count, dirty = conn.execute("SELECT COUNT(*),COALESCE(SUM(dirty),0) FROM documents WHERE kind='sharing_attempt' AND json_extract(payload,'$.batch_id')=?", (key,)).fetchone()
             if count != len(assigned_participants(payload)) or dirty:
                 return False
-        if kind == 'sharing_delivery':
+        # A grouped report contains its own weekly snapshot and delivery receipt.
+        grouped_sharing_report = payload.get('kind') == 'weekly' and isinstance(payload.get('reports'), list)
+        if kind == 'sharing_delivery' and not grouped_sharing_report:
             batch = self._get('sharing_batch', payload.get('batch_id', ''))
             attempt = self._get('sharing_attempt', payload.get('attempt_id', '')) if payload.get('attempt_id') else None
             if not batch or batch['_dirty'] or payload.get('attempt_id') and (not attempt or attempt['_dirty']):

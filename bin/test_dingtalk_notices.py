@@ -112,6 +112,89 @@ class DingTalkTests(unittest.TestCase):
         self.assertEqual(captured[1]['at'],{'isAtAll':True});self.assertEqual(captured[1]['text']['content'],'原始通告\n@所有人')
         self.assertNotIn('at',captured[2]);self.assertEqual(captured[2]['text']['content'],'原始通告')
 
+    def test_rejected_mention_resumes_original_delivery_without_mention_after_restart(self):
+        robot = self.robot()
+        robot.update(mention_mode='people', mention_mobiles=['13800138000'])
+        saved = self.service.save({'revision': 0, 'robots': [robot]})
+        robot_id = saved['robots'][0]['id']
+        target = self.service.snapshot('维保通告', {'buildings': ['D'], 'dingtalk_robot_ids': [robot_id]})[0]
+        replies = iter([
+            (400, {'errcode': 400001, 'errmsg': 'invalid atMobiles: user is not a group member'}),
+            (200, {'errcode': 0}),
+        ])
+        posted = []
+
+        def send(*args, **kwargs):
+            posted.append(kwargs['json'])
+            status, body = next(replies)
+            return SimpleNamespace(status_code=status, json=lambda: body)
+
+        with (
+            patch('lan_bitable_template_portal.dingtalk_notices._http', return_value=SimpleNamespace(request=send)),
+            patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}),
+        ):
+            first = DingTalkNotices(self.store).deliver('at-fallback', target, '原通告正文')
+            self.assertEqual((first['state'], first['sent_parts']), ('pending', 0))
+            self.assertIn('等待发送正文', first['reason'])
+            self.assertIn('at', posted[0])
+            restarted = DingTalkNotices(self.store)
+            with patch('lan_bitable_template_portal.dingtalk_notices.time.time', return_value=first['next_at'] + 1):
+                done = restarted.deliver('at-fallback', target, '原通告正文')
+                self.assertEqual(done['state'], 'sent')
+                self.assertIn('仅发送正文', done['reason'])
+                self.assertEqual(restarted.deliver('at-fallback', target, '原通告正文')['state'], 'sent')
+        self.assertEqual(len(posted), 2)
+        self.assertEqual(posted[1], {'msgtype': 'text', 'text': {'content': '原通告正文'}})
+
+    def test_invalid_saved_mention_does_not_block_sending_body(self):
+        from openclaw_service.assistant.lighthouse_ai import protect_key
+
+        robot = self.robot()
+        robot.update(mention_mode='people', mention_building_mobiles={'D': ['13800138000', '13800138001']})
+        saved = self.service.save({'revision': 0, 'robots': [robot]})
+        robot_id = saved['robots'][0]['id']
+        stored = self.service.config()
+        stored['contacts_cipher'] = protect_key(json.dumps(saved['contacts'][:1]))
+        self.store.put_document(NS, 'config', stored)
+        request = {'buildings': ['D'], 'dingtalk_robot_ids': [robot_id]}
+        target = self.service.snapshot('维保通告', request)[0]
+        self.assertEqual(self.service._mention(target['mention_cipher'])['mobiles'], ['13800138000'])
+        self.assertIn('已跳过', target['mention_warning'])
+
+        stored['contacts_cipher'] = 'unreadable'
+        self.store.put_document(NS, 'config', stored)
+        target = self.service.snapshot('维保通告', request)[0]
+        self.assertEqual(target['mention_cipher'], '')
+        self.assertIn('仅发送正文', target['mention_warning'])
+        # A previously frozen mention may also become unreadable after restart.
+        done = self.service.deliver('bad-snapshot', {**target, 'mention_cipher': 'unreadable'}, '原通告正文')
+        self.assertEqual(done['state'], 'sent')
+        self.assertIn('仅发送正文', done['reason'])
+        self.assertEqual(self.transport.calls[-1][2:], ('原通告正文', None))
+
+    def test_at_present_does_not_reclassify_security_failure_or_ambiguous_reply(self):
+        import httpx
+        mention = {'mode': 'people', 'user_ids': [], 'mobiles': ['13800138000']}
+        replies = [
+            (SimpleNamespace(status_code=200, json=lambda: {'errcode': 0}), 'sent'),
+            (SimpleNamespace(status_code=200, json=lambda: {'errcode': 310000, 'errmsg': 'sign not match'}), 'failed'),
+            (SimpleNamespace(status_code=502, json=lambda: {'errcode': 400001, 'errmsg': 'invalid atMobiles'}), 'uncertain'),
+            (SimpleNamespace(status_code=200, json=lambda: {'errcode': 410100}), 'pending'),
+            (httpx.ReadTimeout('no receipt'), 'uncertain'),
+        ]
+        for reply, state in replies:
+            def send(*args, **kwargs):
+                if isinstance(reply, Exception):
+                    raise reply
+                return reply
+
+            with (
+                self.subTest(state=state),
+                patch('lan_bitable_template_portal.dingtalk_notices._http', return_value=SimpleNamespace(request=send)),
+                patch('lan_bitable_template_portal.portal_service.external_real_write_guard', return_value={'real_write_allowed': True}),
+            ):
+                self.assertEqual(DingTalkTransport().send('token', 'secret', '正文', mention)['state'], state)
+
     def test_building_mentions_are_frozen_deduplicated_and_do_not_guess(self):
         robot=self.robot();robot.update(mention_mode='people',mention_user_ids=['fixture'],
             mention_mobiles=['13800138000'],mention_building_mobiles={
@@ -128,18 +211,60 @@ class DingTalkTests(unittest.TestCase):
         unknown,u=snapshot(['ALL']);self.assertEqual(u['mobiles'],['13800138000'])
         self.assertIn('未识别通告楼栋',unknown['mention_warning'])
         self.assertNotIn('13800138001',json.dumps(self.service.config(),ensure_ascii=False))
-        saved['robots'][0]['mention_building_mobiles']={'D':['13800138003']}
+        by_id = {person['id']: person for person in saved['contacts']}
+        d_member = saved['robots'][0]['mention_building_contact_ids']['D'][0]
+        by_id[d_member]['mobile'] = '13800138003'
         self.service.save(saved)
+        self.assertEqual(snapshot(['D'])[1]['mobiles'], ['13800138000', '13800138003'])
         self.service.deliver('building-fixture',d_target,'隔离正文',operation_id='test:fixture')
         self.assertEqual(self.transport.calls[-1][3],d)
+
+    def test_legacy_phones_merge_into_one_encrypted_directory_without_changing_bot_routes(self):
+        from openclaw_service.assistant.lighthouse_ai import protect_key
+
+        self.service.save({'revision': 0, 'robots': [self.robot(), self.robot('b')]})
+        stored = self.service.config()
+        stored.pop('contacts_cipher')
+        first, second = stored['robots']
+        shared, other = '13800138001', '13800138002'
+        first['mention_cipher'] = protect_key(json.dumps({
+            'mode': 'people', 'mobiles': [shared], 'building_mobiles': {'D': [shared], 'E': [other]},
+        }))
+        second['mention_cipher'] = protect_key(json.dumps({
+            'mode': 'people', 'building_mobiles': {'D': [other], 'E': [shared]},
+        }))
+        self.store.put_document(NS, 'config', stored)
+        first_id, second_id = first['id'], second['id']
+
+        def for_building(scope):
+            targets = self.service.snapshot('维保通告', {
+                'buildings': [scope], 'dingtalk_robot_ids': [first_id, second_id],
+            })
+            return {row['id']: self.service._mention(row['mention_cipher'])['mobiles'] for row in targets}
+
+        expected_d = {first_id: [shared], second_id: [other]}
+        self.assertEqual(for_building('D'), expected_d)
+        edited = self.service.public()
+        self.assertEqual(len(edited['contacts']), 2)
+        self.assertEqual(self.service.public()['contacts'], edited['contacts'])
+        self.assertNotIn(shared, json.dumps(edited['robots']))
+        edited['contacts'][0]['remark'] = '主管甲'
+        edited = self.service.save(edited)
+        self.assertEqual(for_building('D'), expected_d)
+        self.assertEqual(for_building('E'), {first_id: [shared, other], second_id: [shared]})
+        self.assertNotIn(shared, json.dumps(self.service.config()))
+        self.assertNotIn('building_mobiles', self.service._mention(self.service.config()['robots'][0]['mention_cipher']))
+        with self.assertRaisesRegex(DingTalkError, '请先取消'):
+            self.service.save({**edited, 'contacts': edited['contacts'][1:]})
+        self.assertEqual(self.service.public()['revision'], edited['revision'])
 
     def test_disabling_mentions_preserves_building_configuration(self):
         robot=self.robot();robot.update(mention_mode='people',mention_building_mobiles={'D':['13800138001']})
         saved=self.service.save({'revision':0,'robots':[robot]})
         saved['robots'][0]['mention_mode']='none';saved=self.service.save(saved)
-        self.assertEqual(saved['robots'][0]['mention_building_mobiles'],{'D':['13800138001']})
+        self.assertEqual(saved['robots'][0]['mention_building_contact_ids'], {'D': [saved['contacts'][0]['id']]})
         saved['robots'][0]['mention_mode']='people';saved=self.service.save(saved)
-        self.assertEqual(saved['robots'][0]['mention_building_mobiles'],{'D':['13800138001']})
+        self.assertEqual(saved['robots'][0]['mention_building_contact_ids'], {'D': [saved['contacts'][0]['id']]})
 
     def test_manual_retry_keeps_original_building_audience(self):
         robot=self.robot();robot.update(mention_mode='people',mention_building_mobiles={'D':['13800138001']})
@@ -149,7 +274,7 @@ class DingTalkTests(unittest.TestCase):
         self.service.process(self.runtime)
         delivery=self.service.recent()[0]
         self.assertEqual(delivery['state'],'failed')
-        saved['robots'][0]['mention_building_mobiles']={'D':['13800138002']}
+        saved['contacts'][0]['mobile'] = '13800138002'
         self.service.save(saved)
         self.service.retry(delivery['id'])
         self.store.put_document(NS,'rate:'+saved['robots'][0]['id'],{'next_at':0})

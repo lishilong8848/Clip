@@ -282,9 +282,10 @@ class SharingRuntime:
 
     async def send(self, job):
         async with self.delivery_lock:
-            if job['batch_id'] in self.deleting_batches:
+            batch_id = job.get('batch_id', '')
+            if batch_id in self.deleting_batches:
                 return
-            self.active_delivery_batch = job['batch_id']
+            self.active_delivery_batch = batch_id
             try:
                 await self._send(job)
             finally:
@@ -294,10 +295,15 @@ class SharingRuntime:
         from .portal_service import external_real_write_guard
         from .learning_engagement import WEEKLY_CHAT_ID
         core = self.service()
-        batch = await asyncio.to_thread(core.learning._get, 'sharing_batch', job['batch_id'])
-        if not batch or batch.get('status') == 'deleted':
-            return
-        attempt = await asyncio.to_thread(core.learning._get, 'sharing_attempt', job.get('attempt_id', ''))
+        grouped_week = job['kind'] == 'weekly' and 'reports' in job
+        batch = None
+        attempt = None
+        if not grouped_week:
+            batch = await asyncio.to_thread(core.learning._get, 'sharing_batch', job['batch_id'])
+            if not batch or batch.get('status') == 'deleted':
+                return
+            if job.get('attempt_id'):
+                attempt = await asyncio.to_thread(core.learning._get, 'sharing_attempt', job['attempt_id'])
         skipped = bool(job['kind'] in {'paper', 'reminder'} and (batch['status'] != 'published' or not attempt or attempt['submitted_at']))
         skipped |= (job['kind'] == 'reminder' and job.get('date') != now().date().isoformat())
         skipped |= (job['kind'] == 'weekly' and not core.learning.settings()['weekly_report_enabled'])
@@ -377,7 +383,8 @@ class SharingRuntime:
                     current.update({prefix + '_status': job['status'], prefix + '_error': job.get('error', ''),
                                     prefix + '_at': job.get('sent_at', '')})
                     core.learning._put('sharing_attempt', current['id'], current, conn)
-        core.changed_batch(batch, now().date().isoformat())
+        if batch is not None:
+            core.changed_batch(batch, now().date().isoformat())
 
     async def run(self):
         while not self.closing:

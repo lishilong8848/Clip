@@ -51,6 +51,21 @@ def credentials(webhook,secret):
         raise DingTalkError('请输入钉钉自定义机器人的完整 Webhook 和 SEC 开头的加签密钥。') from None
 
 
+def _explicit_mention_rejection(status, code, message):
+    if status not in (200, 400, 422) or type(code) is not int or not code:
+        return False
+    # The webhook may reject a mention parameter. An unrelated rejection or
+    # a transport error provides no reason to switch delivery modes.
+    if code in {-1, 310000, 400013, 400101, 400102, 400105, 400106, 410100,
+                430101, 430102, 430103, 430104}:
+        return False
+    message = str(message or '')[:500]
+    return bool(
+        re.search(r'\b(?:at[_ ]?mobiles|at[_ ]?user[_ ]?ids|is[_ ]?at[_ ]?all|mentions?|mentioned)\b|艾特|@(?:人|成员|用户|手机号|所有人)', message, re.I)
+        and re.search(r'无效|不支持|不合法|不存在|不在群|非群成员|无法|不能|格式|非法|失败|invalid|illegal|not (?:a (?:group )?member|in|found|allowed|supported)|non-member|must be a group member|unsupported|format', message, re.I)
+    )
+
+
 class DingTalkTransport:
     def send(self,token,secret,text,mention=None):
         from .portal_service import external_real_write_guard
@@ -74,10 +89,16 @@ class DingTalkTransport:
                 json=body,timeout=httpx.Timeout(15,connect=5),follow_redirects=False)
             if response.status_code==429:
                 return {'state':'pending','reason':'钉钉限制发送频率，稍后自动重试。','next_at':time.time()+600}
+            if response.status_code >= 500:
+                return {'state':'uncertain','reason':'钉钉网关未确认发送结果，请先查看群消息。'}
             data=response.json()
-            if response.status_code==200 and type(data.get('errcode')) is int and data['errcode']==0:
-                return {'state':'sent','reason':''}
             code=data.get('errcode')
+            if response.status_code==200 and type(code) is int and code==0:
+                return {'state':'sent','reason':''}
+            if type(code) is int and code==410100:
+                return {'state':'pending','reason':'钉钉限制发送频率，稍后自动重试。','next_at':time.time()+600}
+            if 'at' in body and _explicit_mention_rejection(response.status_code,code,data.get('errmsg')):
+                return {'state':'mention_rejected'}
             if type(code) is int and code!=0:
                 return {'state':'failed','reason':'钉钉拒绝消息，请核对机器人安全设置、可用状态及频率（code='+str(code)[:30]+'）。'}
             return {'state':'uncertain','reason':'钉钉未返回可核验的发送回执，请先查看群消息。'}
@@ -139,41 +160,150 @@ class DingTalkNotices:
         try:
             value=json.loads(unprotect_key(cipher))
             if not isinstance(value,dict) or value.get('mode') not in ('none','people','all'):raise ValueError()
+            for field in ('user_ids', 'mobiles', 'contact_ids'):
+                entries = value.get(field, [])
+                if not isinstance(entries, list) or any(not isinstance(entry, str) for entry in entries):
+                    raise ValueError()
+            for field in ('building_mobiles', 'building_contact_ids'):
+                mapping = value.get(field, {})
+                if not isinstance(mapping, dict) or any(
+                    scope not in SCOPES or not isinstance(entries, list)
+                    or any(not isinstance(entry, str) for entry in entries)
+                    for scope, entries in mapping.items()
+                ):
+                    raise ValueError()
             return value
         except Exception:raise DingTalkError('本机无法读取机器人艾特设置，请重新保存配置。',409) from None
 
     @staticmethod
-    def _validate_mention(value):
-        mode=value.get('mention_mode','none')
-        users=value.get('mention_user_ids',[]);mobiles=value.get('mention_mobiles',[])
-        buildings=value.get('mention_building_mobiles',{})
-        if mode not in ('none','people','all') or not isinstance(users,list) or not isinstance(mobiles,list) or not isinstance(buildings,dict):
+    def _read_contacts(data):
+        cipher = data.get('contacts_cipher')
+        if not cipher:
+            return {}
+        from openclaw_service.assistant.lighthouse_ai import unprotect_key
+        try:
+            return DingTalkNotices._validate_contacts(json.loads(unprotect_key(cipher)))
+        except Exception:
+            raise DingTalkError('本机无法读取钉钉艾特通讯录，请核对配置。', 409) from None
+
+    @staticmethod
+    def _validate_contacts(values):
+        if not isinstance(values, list) or len(values) > 1000:
+            raise DingTalkError('艾特通讯录最多可保存1000人。')
+        contacts, phones, remarks = {}, set(), set()
+        for value in values:
+            if not isinstance(value, dict):
+                raise DingTalkError('艾特人员格式无效。')
+            identity = value.get('id')
+            mobile = str(value.get('mobile') or '').strip()
+            remark = str(value.get('remark') or '').strip()
+            if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity) or identity in contacts:
+                raise DingTalkError('艾特人员标识重复或无效。')
+            if not re.fullmatch(r'\+?[0-9]{6,20}', mobile):
+                raise DingTalkError('请在通讯录中填写有效手机号。')
+            if not remark or len(remark) > 80:
+                raise DingTalkError('请为每位艾特人员填写80字以内的备注。')
+            if mobile in phones:
+                raise DingTalkError('通讯录中同一手机号只能添加一次。')
+            if remark.casefold() in remarks:
+                raise DingTalkError('通讯录中的人员备注重复，请使用可区分的备注。')
+            phones.add(mobile)
+            remarks.add(remark.casefold())
+            contacts[identity] = {'id': identity, 'mobile': mobile, 'remark': remark}
+        return contacts
+
+    @staticmethod
+    def _import_mobiles(contacts, numbers, seed):
+        if not isinstance(numbers, list) or any(
+            not isinstance(number, str) or not re.fullmatch(r'\+?[0-9]{6,20}', number)
+            for number in numbers
+        ):
+            raise DingTalkError('原有艾特手机号格式无效，请核对机器人配置。')
+        by_phone = {person['mobile']: identity for identity, person in contacts.items()}
+        remarks = {person['remark'].casefold() for person in contacts.values()}
+        selected = []
+        for index, number in enumerate(numbers):
+            identity = by_phone.get(number)
+            if identity is None:
+                # Stable during an unsaved upgrade preview; the ID contains no phone data.
+                identity = uuid.uuid5(uuid.NAMESPACE_URL, f'clipflow-ding:{seed}:{index}').hex
+                if identity in contacts:
+                    identity = uuid.uuid4().hex
+                suffix = len(contacts) + 1
+                while f'已导入人员 {suffix:02d}' in remarks:
+                    suffix += 1
+                remark = f'已导入人员 {suffix:02d}'
+                contacts[identity] = {'id': identity, 'mobile': number, 'remark': remark}
+                by_phone[number] = identity
+                remarks.add(remark.casefold())
+            selected.append(identity)
+        return list(dict.fromkeys(selected))
+
+    def _contact_settings(self, data):
+        contacts = self._read_contacts(data)
+        mentions = {}
+        for robot in data['robots']:
+            identity = robot['id']
+            mention = self._mention(robot.get('mention_cipher'))
+            common = mention.get('contact_ids', [])
+            buildings = dict(mention.get('building_contact_ids', {}))
+            if 'mobiles' in mention and mention['mobiles']:
+                common = self._import_mobiles(contacts, mention['mobiles'], f'{identity}:common')
+            for scope, numbers in (mention.get('building_mobiles') or {}).items():
+                buildings[scope] = self._import_mobiles(contacts, numbers, f'{identity}:{scope}')
+            mentions[identity] = {
+                'mode': mention['mode'], 'user_ids': mention.get('user_ids', []),
+                'contact_ids': common, 'building_contact_ids': buildings,
+            }
+        return contacts, mentions
+
+    @staticmethod
+    def _validate_mention(value, contacts):
+        mode = value['mode']
+        users = value['user_ids']
+        common = value['contact_ids']
+        buildings = value['building_contact_ids']
+        if mode not in ('none', 'people', 'all') or not isinstance(users, list) or not isinstance(common, list) or not isinstance(buildings, dict):
             raise DingTalkError('艾特设置格式无效。')
-        if any(scope not in SCOPES or not isinstance(numbers,list) for scope,numbers in buildings.items()):
+        if any(scope not in SCOPES or not isinstance(ids, list) for scope, ids in buildings.items()):
             raise DingTalkError('楼栋艾特设置格式无效。')
-        building_numbers=[number for numbers in buildings.values() for number in numbers]
-        if len(users)+len(mobiles)+len(building_numbers)>50:raise DingTalkError('每个机器人最多设置50个艾特对象。')
-        if any(not isinstance(x,str) or not x.isprintable() or not re.fullmatch(r'[^\s,，;；@]{1,96}',x) for x in users):
+        if any(not isinstance(user, str) or not user.isprintable() or not re.fullmatch(r'[^\s,，;；@]{1,96}', user) for user in users):
             raise DingTalkError('钉钉用户ID格式无效，请使用实际用户ID并以逗号或换行分隔。')
-        if any(not isinstance(x,str) or not re.fullmatch(r'\+?[0-9]{6,20}',x) for x in [*mobiles,*building_numbers]):
-            raise DingTalkError('手机号格式无效，请以逗号或换行分隔。')
-        users=list(dict.fromkeys(users));mobiles=list(dict.fromkeys(mobiles))
-        buildings={scope:list(dict.fromkeys(numbers)) for scope,numbers in buildings.items() if numbers}
-        if sum(len(x.encode('utf-8'))+2 for x in [*users,*mobiles,*building_numbers])>4000:raise DingTalkError('艾特对象信息过长，请减少成员数量。')
-        if mode=='people' and not users and not mobiles and not buildings:raise DingTalkError('请选择指定成员的用户ID或手机号。')
-        result={'mode':mode,'user_ids':users,'mobiles':mobiles}
-        if buildings:result['building_mobiles']=buildings
-        return result
+        selected = [*common, *(identity for ids in buildings.values() for identity in ids)]
+        if any(not isinstance(identity, str) or identity not in contacts for identity in selected):
+            raise DingTalkError('有艾特人员不在通讯录中。请先取消机器人对该人员的选择，再移除人员。')
+        phones = [contacts[identity]['mobile'] for identity in dict.fromkeys(selected)]
+        if len(set(users)) + len(phones) > 50:
+            raise DingTalkError('每个机器人最多设置50个不同的艾特对象。')
+        if sum(len(item.encode('utf-8')) + 2 for item in [*set(users), *phones]) > 4000:
+            raise DingTalkError('艾特对象信息过长，请减少成员数量。')
+        if mode == 'people' and not users and not selected:
+            raise DingTalkError('请从通讯录选择艾特人员，或填写钉钉用户ID。')
+        return {
+            'mode': mode, 'user_ids': list(dict.fromkeys(users)),
+            'contact_ids': list(dict.fromkeys(common)),
+            'building_contact_ids': {scope: list(dict.fromkeys(ids)) for scope, ids in buildings.items() if ids},
+        }
 
     def public(self):
-        data=self.config()
-        robots=[]
-        for r in data['robots']:
-            mention=self._mention(r.get('mention_cipher'))
-            robots.append({k:v for k,v in r.items() if k not in ('token_cipher','secret_cipher','token_hash','mention_cipher')}|
-                {'configured':True,'mention_mode':mention['mode'],'mention_user_ids':mention.get('user_ids',[]),'mention_mobiles':mention.get('mobiles',[]),'mention_building_mobiles':mention.get('building_mobiles',{})})
-        return {'revision':data['revision'],'robots':robots,
-                'types':TYPES,'scopes':SCOPES}
+        data = self.config()
+        contacts, mentions = self._contact_settings(data)
+        robots = []
+        for robot in data['robots']:
+            mention = mentions[robot['id']]
+            robots.append({
+                **{key: value for key, value in robot.items() if key not in
+                   ('token_cipher', 'secret_cipher', 'token_hash', 'mention_cipher')},
+                'configured': True,
+                'mention_mode': mention['mode'],
+                'mention_user_ids': mention['user_ids'],
+                'mention_contact_ids': mention['contact_ids'],
+                'mention_building_contact_ids': mention['building_contact_ids'],
+            })
+        return {
+            'revision': data['revision'], 'robots': robots, 'contacts': list(contacts.values()),
+            'types': TYPES, 'scopes': SCOPES,
+        }
 
     def save(self,payload):
         from openclaw_service.assistant.lighthouse_ai import protect_key
@@ -182,6 +312,9 @@ class DingTalkNotices:
         with self.lock('config'):
             current=self.config()
             if payload.get('revision')!=current['revision']:raise DingTalkError('配置已变化，请刷新后重新核对。',409)
+            contacts, old_mentions = self._contact_settings(current)
+            if 'contacts' in payload:
+                contacts = self._validate_contacts(payload['contacts'])
             old={r['id']:r for r in current['robots']};robots=[];tokens=set();ids=set()
             for value in payload['robots']:
                 if not isinstance(value,dict):raise DingTalkError('机器人配置格式无效。')
@@ -204,21 +337,38 @@ class DingTalkNotices:
                 if robot['token_hash'] in tokens:raise DingTalkError('同一机器人不能重复添加。')
                 tokens.add(robot['token_hash'])
                 robot.update(id=identity,name=name,remark=remark,enabled=value['enabled'],scopes=list(dict.fromkeys(scopes)),types=list(dict.fromkeys(types)))
-                previous_mention=self._mention(previous.get('mention_cipher'))
-                if not any(key in value for key in ('mention_mode','mention_user_ids','mention_mobiles','mention_building_mobiles')):
-                    mention=previous_mention
-                else:mention=self._validate_mention({'mention_mode':previous_mention.get('mode','none'),
-                    'mention_user_ids':previous_mention.get('user_ids',[]),'mention_mobiles':previous_mention.get('mobiles',[]),
-                    'mention_building_mobiles':previous_mention.get('building_mobiles',{}),**value})
-                if mention==previous_mention and previous.get('mention_cipher'):robot['mention_cipher']=previous['mention_cipher']
-                elif mention['mode']!='none' or mention['user_ids'] or mention['mobiles'] or mention.get('building_mobiles'):
-                    robot['mention_cipher']=protect_key(json.dumps(mention,ensure_ascii=False,separators=(',',':')))
+                previous_mention = self._mention(previous.get('mention_cipher'))
+                normalized = old_mentions.get(identity, {})
+                common = value.get('mention_contact_ids', normalized.get('contact_ids', []))
+                buildings = value.get('mention_building_contact_ids', normalized.get('building_contact_ids', {}))
+                # Older configuration clients can still submit explicit phone lists.
+                if 'mention_mobiles' in value and 'mention_contact_ids' not in value:
+                    common = self._import_mobiles(contacts, value['mention_mobiles'], f'{identity}:common')
+                if 'mention_building_mobiles' in value and 'mention_building_contact_ids' not in value:
+                    legacy = value['mention_building_mobiles']
+                    if not isinstance(legacy, dict):
+                        raise DingTalkError('楼栋艾特设置格式无效。')
+                    buildings = {scope: self._import_mobiles(contacts, numbers, f'{identity}:{scope}')
+                                 for scope, numbers in legacy.items()}
+                mention = self._validate_mention({
+                    'mode': value.get('mention_mode', normalized.get('mode', 'none')),
+                    'user_ids': value.get('mention_user_ids', normalized.get('user_ids', [])),
+                    'contact_ids': common, 'building_contact_ids': buildings,
+                }, contacts)
+                if mention == previous_mention and previous.get('mention_cipher'):
+                    robot['mention_cipher'] = previous['mention_cipher']
+                elif mention['mode'] != 'none' or any(mention[key] for key in ('user_ids', 'contact_ids', 'building_contact_ids')):
+                    robot['mention_cipher'] = protect_key(json.dumps(mention, ensure_ascii=False, separators=(',', ':')))
                 # Remarks/names do not invalidate pending deliveries; credential or route changes do.
                 routing=('token_cipher','secret_cipher','enabled','scopes','types')
                 changed=any(robot.get(k)!=previous.get(k) for k in routing)
                 robot['revision']=previous.get('revision',0)+int(changed or not previous)
                 robots.append(robot)
-            self.store.put_document(NS,'config',{'revision':current['revision']+1,'robots':robots})
+            contacts = self._validate_contacts(list(contacts.values()))
+            contacts_cipher = protect_key(json.dumps(list(contacts.values()), ensure_ascii=False, separators=(',', ':'))) if contacts else ''
+            self.store.put_document(NS, 'config', {
+                'revision': current['revision'] + 1, 'robots': robots, 'contacts_cipher': contacts_cipher,
+            })
         return self.public()
 
     def snapshot(self,notice_type,payload):
@@ -232,20 +382,51 @@ class DingTalkNotices:
         if not isinstance(mention_input,list):raise DingTalkError('通告楼栋格式无效。')
         from .portal_service import MaintenancePortalService
         mention_buildings=set(MaintenancePortalService._building_codes_from_value(mention_input))
-        targets=[]
-        for robot in self.config()['robots']:
+        targets = []
+        data = self.config()
+        contacts = None
+        for robot in data['robots']:
             if not robot['enabled'] or robot['id'] not in selected or (robot['types'] and notice_type not in robot['types']) or (robot['scopes'] and not buildings.intersection(robot['scopes'])):continue
-            cipher=robot.get('mention_cipher','');warning=''
-            mention=self._mention(cipher)
-            mapping=mention.get('building_mobiles') or {}
-            if mention['mode']=='people' and mapping:
-                phones=list(dict.fromkeys([*(mention.get('mobiles') or []),*(number for scope in SCOPES if scope in mention_buildings for number in mapping.get(scope,[]))]))
-                resolved={'mode':'people' if phones or mention.get('user_ids') else 'none','user_ids':mention.get('user_ids') or [],'mobiles':phones}
-                from openclaw_service.assistant.lighthouse_ai import protect_key
-                cipher=protect_key(json.dumps(resolved,ensure_ascii=False,separators=(',',':')))
-                missing=[scope for scope in SCOPES if scope in mention_buildings and scope not in mapping]
-                if not mention_buildings:warning='未识别通告楼栋，未附加楼栋专属艾特。'
-                elif missing:warning='部分楼栋未配置专属艾特手机号：'+'、'.join(missing)+'。'
+            cipher = robot.get('mention_cipher', '')
+            warnings = []
+            try:
+                mention = self._mention(cipher)
+                if mention['mode'] == 'people':
+                    mapping = mention.get('building_contact_ids') or {}
+                    legacy_mapping = mention.get('building_mobiles') or {}
+                    ids = list(mention.get('contact_ids') or [])
+                    phones = list(mention.get('mobiles') or [])
+                    for scope in SCOPES:
+                        if scope in mention_buildings:
+                            ids.extend(mapping.get(scope, []))
+                            phones.extend(legacy_mapping.get(scope, []))
+                    if ids:
+                        if contacts is None:
+                            contacts = self._read_contacts(data)
+                        if any(identity not in contacts for identity in ids):
+                            warnings.append('部分艾特人员不在通讯录中，已跳过。')
+                        phones.extend(contacts[identity]['mobile'] for identity in ids if identity in contacts)
+                    users = mention.get('user_ids') or []
+                    resolved = {
+                        'mode': 'people' if phones or users else 'none',
+                        'user_ids': users, 'mobiles': list(dict.fromkeys(phones)),
+                    }
+                    from openclaw_service.assistant.lighthouse_ai import protect_key
+                    try:
+                        cipher = protect_key(json.dumps(resolved, ensure_ascii=False, separators=(',', ':')))
+                    except Exception:
+                        raise DingTalkError('本机无法保存艾特名单。') from None
+                    configured_buildings = mapping.keys() | legacy_mapping.keys()
+                    if configured_buildings:
+                        missing = [scope for scope in SCOPES if scope in mention_buildings and scope not in configured_buildings]
+                        if not mention_buildings:
+                            warnings.append('未识别通告楼栋，未附加楼栋专属艾特。')
+                        elif missing:
+                            warnings.append('部分楼栋未配置专属艾特人员：' + '、'.join(missing) + '。')
+            except DingTalkError:
+                cipher = ''
+                warnings.append('艾特设置暂不可用，本次仅发送正文。')
+            warning = ' '.join(warnings)
             targets.append({'id':robot['id'],'revision':robot['revision'],'name':robot['name'],'mention_cipher':cipher,'mention_warning':warning})
         if set(selected)!={r['id'] for r in targets}:raise DingTalkError('所选钉钉机器人已停用、删除或不适用于当前楼栋和通告类型，请重新选择。')
         return targets
@@ -270,21 +451,26 @@ class DingTalkNotices:
         actual=[value['id'] for value in targets]
         return len(requested)==len(set(requested)) and len(actual)==len(set(actual)) and set(actual)==set(requested)
 
+    def _delivery_mention(self, data):
+        if not data.get('mention_omitted_reason'):
+            try:
+                return self._mention(data.get('mention_cipher'))
+            except DingTalkError:
+                data['mention_omitted_reason'] = '原任务的艾特名单无法读取，本次仅发送正文。'
+        return self._mention(None)
+
     def deliver(self,key,target,text,*,retry=False,operation_id=''):
         from openclaw_service.assistant.lighthouse_ai import unprotect_key
         with self.lock('delivery:'+key):
             data=self.store.get_document(NS,'delivery:'+key)
             if not data:
-                try:mention=self._mention(target.get('mention_cipher'))
-                except DingTalkError as error:
-                    data={'id':key,'robot_id':target['id'],'robot_name':target['name'],'target':target,'mention_cipher':target.get('mention_cipher',''),
-                        'text':text,'parts':message_parts(text),'sent_parts':0,'state':'failed','reason':str(error),'created_at':time.time(),'operation_id':operation_id}
-                    self._save_delivery(key,data);return data
+                data={'id':key,'robot_id':target['id'],'robot_name':target['name'],'target':target,
+                    'mention_cipher':target.get('mention_cipher',''),'text':text,
+                    'sent_parts':0,'state':'pending','created_at':time.time(),'operation_id':operation_id}
+                mention = self._delivery_mention(data)
                 suffix='@所有人' if mention['mode']=='all' else ' '.join('@'+item for item in [*mention.get('user_ids',[]),*mention.get('mobiles',[])]) if mention['mode']=='people' else ''
                 limit=15000-len(suffix.encode('utf-8'))-64 if suffix else 15000
-                data={'id':key,'robot_id':target['id'],'robot_name':target['name'],'target':target,
-                    'mention_cipher':target.get('mention_cipher',''),'text':text,'parts':message_parts(text,limit),
-                    'sent_parts':0,'state':'pending','created_at':time.time(),'operation_id':operation_id}
+                data['parts'] = message_parts(text, limit)
             if data['text']!=text:raise DingTalkError('原任务正文发生变化，已停止发送。',409)
             if data['state']=='sent':return data
             if data['state']=='posting':
@@ -303,9 +489,7 @@ class DingTalkNotices:
                 try:token=unprotect_key(robot['token_cipher']);secret=unprotect_key(robot['secret_cipher'])
                 except Exception:
                     data.update(state='failed',reason='本机无法读取机器人密钥，请重新保存配置。');self._save_delivery(key,data);return data
-                try:mention=self._mention(data.get('mention_cipher'))
-                except DingTalkError as error:
-                    data.update(state='failed',reason=str(error));self._save_delivery(key,data);return data
+                mention = self._delivery_mention(data)
                 data.update(state='posting',target=target,next_at=0,updated_at=time.time())
                 self.store.put_documents(NS,{'delivery:'+key:data,'rate:'+target['id']:{'next_at':time.time()+4}})
                 part=data['parts'][data['sent_parts']]
@@ -316,7 +500,18 @@ class DingTalkNotices:
                     data.setdefault('first_sent_at',time.time())
                     data['sent_parts']+=1
                     complete=data['sent_parts']==len(data['parts'])
-                    data.update(state='sent' if complete else 'pending',reason=target.get('mention_warning','') if complete else '',next_at=time.time()+4)
+                    warnings = ' '.join(filter(None, (
+                        target.get('mention_warning', ''), data.get('mention_omitted_reason', ''),
+                    )))
+                    data.update(state='sent' if complete else 'pending',reason=warnings if complete else '',next_at=time.time()+4)
+                elif result['state'] == 'mention_rejected':
+                    # Persist the fallback before the next attempt. The prior
+                    # request was rejected and cannot have delivered this part.
+                    data.update(
+                        state='pending', next_at=time.time()+4,
+                        reason='钉钉拒绝艾特参数，正在等待发送正文。',
+                        mention_omitted_reason='钉钉拒绝艾特参数，本次仅发送正文。',
+                    )
                 else:
                     data.update(result)
                     if data['state']=='pending' and data.get('operation_id','').startswith('test:'):data['state']='failed'
