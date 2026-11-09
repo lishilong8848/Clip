@@ -236,6 +236,40 @@ class ToolManagementTest(TestCase):
         with self.svc.connect() as db:
             self.assertTrue(db.execute("SELECT 1 FROM tool_work_audit WHERE order_id=? AND action='删除工单'", (order['id'],)).fetchone())
 
+    def test_batch_delete_is_atomic_and_prevents_regeneration(self):
+        first, second, untouched = self.orders[:3]
+        entries = [{key: order[key] for key in ('id', 'revision')} for order in (first, second)]
+        body = {'month': self.month, 'orders': entries}
+        with self.assertRaises(RiskError):
+            self.svc.cancel_orders(self.leader, body | {'orders': [entries[0], entries[1] | {'revision': second['revision'] + 1}]})
+        with self.assertRaises(RiskError):
+            self.svc.cancel_orders(self.leader, body | {'orders': [entries[0], entries[0]]})
+        for order in (first, second):
+            detail = self.svc.detail(self.leader, order['id'])
+            self.assertEqual(detail['status'], 'pending')
+            self.assertEqual(detail['revision'], order['revision'])
+            self.assertNotIn('删除工单', [entry['action'] for entry in detail['history']])
+
+        self.assertEqual(self.svc.cancel_orders(self.leader, body), {'deleted_ids': [first['id'], second['id']]})
+        with self.assertRaises(RiskError):
+            self.svc.cancel_orders(self.leader, body)
+        self.svc.schedule()
+        for order in (first, second):
+            detail = self.svc.detail(self.leader, order['id'])
+            self.assertEqual(detail['status'], 'cancelled')
+            self.assertFalse(detail['can_delete'])
+            self.assertEqual([entry['action'] for entry in detail['history']].count('删除工单'), 1)
+        self.assertEqual(self.svc.detail(self.leader, untouched['id'])['status'], 'pending')
+        self.assertEqual(len(self.svc.list(self.leader)['orders']), len(self.orders))
+        self.assertEqual(self.cloud.writes, [])
+
+    def test_batch_delete_respects_delete_permission(self):
+        order = next(row for row in self.orders if row['kind'] == 'external')
+        self.assertFalse(self.svc.detail(self.supervisor, order['id'])['can_delete'])
+        with self.assertRaises(RiskError):
+            self.svc.cancel_orders(self.supervisor, {'month': self.month, 'orders': [{'id': order['id'], 'revision': order['revision']}]})
+        self.assertEqual(self.svc.detail(self.leader, order['id'])['status'], 'pending')
+
     def test_inventory_create_idempotence_and_unconfirmed_result(self):
         schema=[{'name':'楼栋','type':3,'options':['南通A楼','南通B楼']},
                 {'name':'工具名称','type':1,'options':[]},{'name':'一级分类','type':3,'options':['B工具类']},

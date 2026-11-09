@@ -23,6 +23,7 @@ OUTCOMES = {'normal': '正常', 'repair': '检修中', 'repaired': '检修完成
 DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档表', 'repair': '检修跟踪表',
                 'scrap': '工具报废表', 'change': '异动台账'}
 MAX_REPORT = 12 * 1024 * 1024
+MAX_ORDER_DELETIONS = 200
 
 
 def full_access(actor):
@@ -336,21 +337,52 @@ class ToolManagement(ToolSelfChecks):
             self.audit(db,order_id,actor,'手动新增工单')
             return self.work_info(db,actor,self._work(db,actor,order_id))
 
+    def check_order_deletion(self, db, actor, identity, revision, month):
+        row = self._work(db, actor, identity)
+        if not (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)):
+            raise RiskError('仅本楼楼长或有权限的管理员可删除工单。', 403)
+        self.check_revision(row, revision)
+        if row['month'] != month or row['submitted_at'] or row['outcome']:
+            raise RiskError('仅本月未提交工单可删除。', 409)
+        if db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+            raise RiskError('本月已归档，不能删除工单。', 409)
+        if db.execute("SELECT 1 FROM tool_work_reviews WHERE order_id=? AND status='pending'", (identity,)).fetchone():
+            raise RiskError('待审核工单不能删除，请先驳回。', 409)
+        if db.execute('SELECT 1 FROM tool_work_sync WHERE order_id=?', (identity,)).fetchone():
+            raise RiskError('已有台账同步记录，不能删除工单。', 409)
+
+    def mark_order_deleted(self, db, actor, identity):
+        db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution='手动删除工单',revision=revision+1
+            WHERE id=?""", (identity,))
+        self.audit(db, identity, actor, '删除工单', '保留历史及草稿')
+
     def cancel_order(self, actor, identity, body):
         with self.connect(True) as db:
-            row=self._work(db,actor,identity)
-            if not (self.is_building_leader(db,actor,row['scope']) or self.administrator(actor)):
-                raise RiskError('仅本楼楼长或有权限的管理员可删除工单。',403)
-            self.check_revision(row,body.get('revision'))
-            if row['month']!=clock().strftime('%Y-%m') or row['submitted_at'] or row['outcome']:
-                raise RiskError('仅本月未提交工单可删除。',409)
-            if db.execute("SELECT 1 FROM tool_work_reviews WHERE order_id=? AND status='pending'",(identity,)).fetchone():
-                raise RiskError('待审核工单不能删除，请先驳回。',409)
-            if db.execute('SELECT 1 FROM tool_work_sync WHERE order_id=?',(identity,)).fetchone():
-                raise RiskError('已有台账同步记录，不能删除工单。',409)
-            db.execute("UPDATE tool_work_orders SET outcome='cancelled',resolution='手动删除工单',revision=revision+1 WHERE id=?",(identity,))
-            self.audit(db,identity,actor,'删除工单','保留历史及草稿')
-            return self.work_info(db,actor,self._work(db,actor,identity))
+            self.check_order_deletion(db, actor, identity, body.get('revision'), clock().strftime('%Y-%m'))
+            self.mark_order_deleted(db, actor, identity)
+            return self.work_info(db, actor, self._work(db, actor, identity))
+
+    def cancel_orders(self, actor, body):
+        entries = body.get('orders')
+        if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_ORDER_DELETIONS:
+            raise RiskError(f'请选择 1 至 {MAX_ORDER_DELETIONS} 张工单。')
+        revisions = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or type(entry.get('revision')) is not int or entry['revision'] < 0:
+                raise RiskError('批量删除工单或版本格式无效。')
+            identity = text(entry.get('id'), 120, True)
+            if identity in revisions:
+                raise RiskError('所选工单重复，请重新选择。')
+            revisions[identity] = entry['revision']
+        with self.connect(True) as db:
+            month = clock().strftime('%Y-%m')
+            if body.get('month') != month:
+                raise RiskError('仅支持批量删除本月工单，请刷新后重新选择。', 409)
+            for identity, revision in revisions.items():
+                self.check_order_deletion(db, actor, identity, revision, month)
+            for identity in revisions:
+                self.mark_order_deleted(db, actor, identity)
+        return {'deleted_ids': list(revisions)}
 
     def schedule(self, current=None):
         today = (current or clock()).astimezone(TZ).date()
@@ -422,7 +454,9 @@ class ToolManagement(ToolSelfChecks):
                          'status': 'cancelled' if row['outcome'] == 'cancelled' else 'review_pending' if awaiting_review else 'pending' if open_order else 'submitted',
                          'review_note': review['note'] if review else '',
                          'can_review': awaiting_review and (self.is_building_leader(db, actor, row['scope']) or full_access(actor)),
-                         'can_delete': open_order and not awaiting_review and row['month']==clock().strftime('%Y-%m') and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
+                         'can_delete': (open_order and not row['outcome'] and not awaiting_review and not sync
+                                        and row['month'] == clock().strftime('%Y-%m')
+                                        and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor))),
                          'can_claim': open_order and not awaiting_review and not row['owner'] and eligible,
                          'can_edit': open_order and not awaiting_review and mine,
                          'can_release': open_order and not awaiting_review and bool(row['owner']) and self.administrator(actor),
