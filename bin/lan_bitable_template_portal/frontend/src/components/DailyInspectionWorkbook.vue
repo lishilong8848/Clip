@@ -2,7 +2,10 @@
   <section ref="rootElement" class="inspection-workbook" :class="{'full-height':mobileSheet,'rotate-landscape':rotation==='landscape','rotate-portrait':rotation==='portrait','compact-editor-view':mobileSheet && editing && (availableHeight<260 || rotatedWidth<300)}" :style="{'--available-height':availableHeight+'px','--rotated-width':rotatedWidth+'px'}" aria-label="巡检原表">
     <div v-if="mobileSheet" class="mobile-sheet-bar">
       <button aria-label="退出巡检表" @click="emit('exit')">返回</button>
-      <label class="mobile-sheet-picker"><span>{{ scope }}楼 · {{ day.slice(5) }}</span><select aria-label="切换巡检工作表" data-native-select :value="pageKey" :disabled="!sheetOptions.length" @change="changeSheet"><option v-for="item in sheetOptions" :key="item.value" :value="item.value">{{ item.label }}</option></select></label>
+      <div class="mobile-sheet-context">
+        <span>{{ scope }}楼 · {{ day.slice(5) }}</span>
+        <strong aria-live="polite">{{ mobilePhase }}</strong>
+      </div>
       <button :aria-label="screenLayout==='landscape'?'切换竖屏':'切换横屏'" @click="toggleScreenLayout">{{ screenLayout==='landscape'?'竖屏':'横屏' }}</button>
       <button :aria-expanded="compactMenu" aria-label="巡检菜单" @click="compactMenu=!compactMenu">{{ compactMenu?'收起':'菜单' }}</button>
     </div>
@@ -29,6 +32,12 @@
       <span v-if="editing" class="editing-address">正在编辑 {{ editing }}</span><span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '单元格修改自动保存' }}</span>
       <button v-if="dirty && !saving" @click="flush">重试保存</button><button v-if="dirty && !saving" @click="compareLatest">核对最新数据</button>
     </div>
+    <div v-if="report && (!mobileSheet || compactMenu)" class="round-tabs" role="group" :aria-label="isChiller?'冷机巡检轮次':'巡检轮次与状态'">
+      <button v-for="state in roundStates" :key="state.slot" type="button" :class="{selected:shownSlot===state.slot}" :aria-pressed="shownSlot===state.slot" :disabled="!isChiller && !roundsBySlot.get(state.slot)" @click="selectSlot(state.slot)">
+        <strong>{{ state.slot }}</strong><span>{{ state.label }}</span><small v-if="state.autoClosed">自动收尾</small><small v-if="state.sourceClock">取数 {{ state.sourceClock }}</small><small v-else-if="state.scheduledClock && state.label==='未到时点'">{{ state.scheduledClock }}</small>
+      </button>
+      <span v-if="needsFreeRound" class="round-hint">自由格请先选择已归档轮次</span>
+    </div>
     </div>
     <div v-if="mobileSheet && !compactMenu && dirty && !saving" class="mobile-save-recovery"><span>修改尚未保存</span><button @click="flush">重试保存</button><button @click="compareLatest">核对最新数据</button></div>
     <div v-if="mobileSheet && !compactMenu && isCurrentDate && !active" class="mobile-start"><slot name="start" /></div>
@@ -44,11 +53,12 @@
     </section>
     <p v-if="loading && !report" role="status">正在打开巡检表…</p>
     <template v-if="report">
-      <div class="round-tabs" role="group" :aria-label="isChiller?'冷机巡检轮次':'巡检轮次与状态'">
-        <button v-for="state in roundStates" :key="state.slot" type="button" :class="{selected:shownSlot===state.slot}" :aria-pressed="shownSlot===state.slot" :disabled="!isChiller && !roundsBySlot.get(state.slot)" @click="selectSlot(state.slot)">
-          <strong>{{ state.slot }}</strong><span>{{ state.label }}</span><small v-if="state.autoClosed">自动收尾</small><small v-if="state.sourceClock">取数 {{ state.sourceClock }}</small><small v-else-if="state.scheduledClock && state.label==='未到时点'">{{ state.scheduledClock }}</small>
-        </button>
-        <span v-if="needsFreeRound" class="round-hint">自由格请先选择已归档轮次</span>
+      <div v-if="mobileSheet && orderedBase.length" class="sheet-navigation">
+        <div ref="sheetTabs" class="sheet-tabs" role="group" aria-label="巡检工作表">
+          <button v-for="item in orderedBase" :key="item.key" type="button" :aria-pressed="pageKey===item.key"
+            :title="item.name.trim()" @click="selectPage(item.key)">{{ item.name.trim() }}</button>
+        </div>
+        <button class="sheet-sort" aria-label="调整工作表顺序" :disabled="!preferencesReady || saving || dirty || orderedBase.length<2" @click="openSort">排序</button>
       </div>
       <p v-if="currentPage && !sheetLoaded && loading" class="book-pending" role="status">正在读取当前工作表数据…</p>
       <div v-if="currentPage" ref="scrollElement" class="book-scroll" tabindex="0" aria-label="可编辑巡检表格" :key="viewKey" @touchstart="startPinch" @touchmove="movePinch" @touchend="endPinch" @touchcancel="endPinch">
@@ -86,22 +96,22 @@
           <button type="button" class="primary" @mousedown.prevent @click="completeEdit">完成</button>
         </div>
       </div>
-      <footer v-if="currentActive && !readOnly" class="book-submit">
-        <span v-if="!allVisited">已查看 {{ requiredPages.filter(p=>visited.has(p.baseKey)).length }} / {{ requiredPages.length }} 页</span>
-        <span v-if="mobileSheet" role="status">{{ saving?'保存中…':dirty?'待保存':'修改自动保存' }}</span>
+      <footer v-if="currentActive && !readOnly && (!mobileSheet || allVisited || currentActive.pending)" class="book-submit">
+        <span v-if="!mobileSheet && !allVisited">已查看 {{ requiredPages.filter(p=>visited.has(p.baseKey)).length }} / {{ requiredPages.length }} 页</span>
         <button v-if="allVisited || active?.pending" class="primary" :disabled="saving || dirty || loading || parentBusy" @click="confirmSubmit=true">{{ active?.pending?'重试提交归档':'确认提交' }}</button>
       </footer>
     </template>
     <NModal v-model:show="settingsOpen" :to="rootElement" preset="card" title="表格设置" style="width:min(94%,460px)">
       <div class="book-settings-content">
         <div class="settings-section"><strong>表格字号</strong><div class="settings-choices" aria-label="表格字号"><button v-for="(label,i) in ['紧凑','标准','放大','更大']" :key="i" :aria-pressed="zoom===[12,14,18,22][i]" @click="zoom=[12,14,18,22][i]">{{ label }}</button></div></div>
-        <div class="settings-section"><strong>个人阅读顺序</strong><span>当前：{{ professionView==='ALL'?'全部专业':professionView }}，与账号同步</span><NButton block :disabled="!preferencesReady || saving || dirty" @click="openSort">调整工作表顺序</NButton></div>
+        <div v-if="!mobileSheet" class="settings-section"><strong>个人阅读顺序</strong><span>当前：{{ professionView==='ALL'?'全部专业':professionView }}，与账号同步</span><NButton block :disabled="!preferencesReady || saving || dirty" @click="openSort">调整工作表顺序</NButton></div>
         <div v-if="currentActive && !readOnly && currentPage" class="settings-section"><strong>本班专业归属</strong><span>{{ currentPage.name.trim() }}</span><div class="settings-choices two"><button v-for="name in ['电气','暖通']" :key="name" :disabled="saving || dirty || parentBusy" :aria-pressed="currentPage.profession===name" @click="moveProfession(name)">{{ name }}</button></div><small>仅影响本楼本班次，下一班恢复默认。</small></div>
       </div>
       <template #footer><NButton type="primary" block @click="settingsOpen=false">完成</NButton></template>
     </NModal>
     <NModal v-model:show="sortOpen" :to="rootElement" preset="card" title="个人工作表排序" style="width:min(94%,560px)" :mask-closable="false">
       <p>{{ professionView==='ALL'?'全部':professionView }}视图 · 排序同步到当前账号，手机和电脑通用</p>
+      <p v-if="preferencesError" class="book-error" role="alert">{{ preferencesError }}</p>
       <div class="sort-list"><div v-for="(key,index) in sortDraft" :key="key" class="sort-row"><span>{{ basePages.find(p=>p.baseKey===key)?.name.trim() }}</span><button :disabled="index===0" @click="shiftSort(index,-1)">上移</button><button :disabled="index===sortDraft.length-1" @click="shiftSort(index,1)">下移</button></div>
       </div><button :disabled="saving" @click="saveSort">保存排序</button>
     </NModal>
@@ -124,7 +134,7 @@ type SlotState={slot:string;status:string;scheduled_at:number;source_time?:numbe
 type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
 type Job={scope:string;date:string;round:RoundMeta;cells:CellEdit[];attempted?:boolean};
-const props=defineProps<{immersive?:boolean;scopes:string[];templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;active?:InspectionVisibilityActive & {id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null};readOnly:boolean;parentBusy:boolean}>();
+const props=defineProps<{immersive?:boolean;scopes:string[];templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:InspectionVisibilityActive & {id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null};readOnly:boolean;parentBusy:boolean}>();
 const emit=defineEmits<{changed:[];scope:[scope:string];exit:[]}>();
 const compactMenu=ref(false);
 const phoneMedia=window.matchMedia('(max-width:760px), (max-height:500px) and (pointer:coarse)');
@@ -160,6 +170,7 @@ const slotOf=(round?:Pick<Round,'shift'|'round'>)=>round?round.shift+round.round
 const isCurrentDate=computed(()=>scope.value===props.defaultScope && day.value===props.defaultDate);
 const currentActive=computed(()=>props.active?.duty.scope===scope.value && props.active?.duty.date===day.value?props.active:undefined);
 const activeSlot=computed(()=>currentActive.value?currentActive.value.duty.shift+currentActive.value.round:'');
+const currentSlot=computed(()=>activeSlot.value||(isCurrentDate.value&&props.defaultShift?props.defaultShift+Math.min(props.nextRound||1,2):''));
 const activeRound=computed(()=>report.value?.rounds.find(r=>r.round_id===currentActive.value?.id));
 const roundsBySlot=computed(()=>{
  const result=new Map<string,Round|undefined>();
@@ -190,7 +201,7 @@ const sheetOptions=computed(()=>orderedBase.value.map(p=>({value:p.key,label:`${
 const requiredPages=computed(()=>basePages.value);
 const allVisited=computed(()=>!!report.value?.draft_key && requiredPages.value.length>0 && requiredPages.value.every(p=>visited.value.has(p.baseKey)));
 const isChiller=computed(()=>currentPage.value?.name.trim()==='暖通冷机系统巡检表');
-const chillerSlot=computed(()=>chillerSelection.value||activeSlot.value||slots.find(slot=>roundsBySlot.value.get(slot))||slots[0]);
+const chillerSlot=computed(()=>chillerSelection.value||(mobileSheet.value?currentSlot.value:activeSlot.value)||slots.find(slot=>roundsBySlot.value.get(slot))||slots[0]);
 const viewKey=computed(()=>JSON.stringify([pageKey.value,isChiller.value?chillerSlot.value:'']));
 const freeRound=computed(()=>{
  if(selectedSlot.value)return roundsBySlot.value.get(selectedSlot.value);
@@ -198,6 +209,13 @@ const freeRound=computed(()=>{
  return report.value?.rounds.length===1?report.value.rounds[0]:undefined;
 });
 const shownSlot=computed(()=>isChiller.value?chillerSlot.value:slotOf(freeRound.value));
+const mobilePhase=computed(()=>{
+ const slot=currentSlot.value;
+ const viewing=shownSlot.value;
+ if(!slot)return viewing?`历史巡检 · ${viewing}`:'历史巡检';
+ const state=roundStates.value.find(item=>item.slot===slot);
+ return viewing&&viewing!==slot?`当前 ${slot} · 查看 ${viewing}`:`${slot} · ${state?.label||'未开始'}`;
+});
 const needsFreeRound=computed(()=>!isChiller.value&&!currentActive.value&&!freeRound.value&&!!report.value?.can_edit_history&&[...roundsBySlot.value.values()].some(r=>r&&hasArchiveReceipt(r)));
 const vFocus={mounted:(el:HTMLElement)=>{el.focus({preventScroll:true});if(el instanceof HTMLInputElement)el.select();}};
 function address(r:number,c:number){let s='';for(c++;c;c=Math.floor((c-1)/26))s=String.fromCharCode(65+(c-1)%26)+s;return s+(r+1);}
@@ -319,17 +337,17 @@ const editNeighbors=computed(()=>{
 });
 function finishEdit(){if(editor)commit(editor.cell);}
 function selectPage(key:string){
- if(key===pageKey.value)return;
- finishEdit();if(abnormal.value)return;
- rememberScroll();pageKey.value=key;void nextTick(restoreScroll);
-}
-function changeSheet(event:Event){
- const select=event.target as HTMLSelectElement;selectPage(select.value);select.value=pageKey.value;
+ if(key!==pageKey.value){
+  finishEdit();if(abnormal.value)return;
+  rememberScroll();pageKey.value=key;void nextTick(restoreScroll);
+ }
+ if(mobileSheet.value)compactMenu.value=false;
 }
 function selectSlot(slot:string){
  finishEdit();if(abnormal.value)return;
  if(isChiller.value){rememberScroll();chillerSelection.value=slot;void nextTick(restoreScroll);}
  else selectedSlot.value=selectedSlot.value===slot?'':slot;
+ if(mobileSheet.value)compactMenu.value=false;
 }
 watch(viewKey,markViewed);
 function beginEdit(cell:GridCell){
@@ -476,6 +494,14 @@ watch([()=>props.archiveRevision,archiveRefreshIdle],([revision,idle])=>{
 watch(()=>props.parentBusy,busy=>{if(!busy&&dirty.value&&!error.value)scheduleSave();});
 watch([()=>currentPage.value?.baseKey,dirty],()=>{if(currentPage.value&&!sheetLoaded.value&&!storageUnverified)void load();});
 const scrollElement=ref<HTMLElement>();const scrollPositions=new Map<string,{left:number;top:number}>();
+const sheetTabs=ref<HTMLElement>();
+watch([sheetTabs,pageKey,orderedBase,rotation],()=>{
+ const tabs=sheetTabs.value,tab=tabs?.querySelector<HTMLElement>('button[aria-pressed="true"]');
+ if(!tabs||!tab)return;
+ const left=tab.offsetLeft,right=left+tab.offsetWidth;
+ if(left<tabs.scrollLeft)tabs.scrollLeft=left;
+ else if(right>tabs.scrollLeft+tabs.clientWidth)tabs.scrollLeft=right-tabs.clientWidth;
+},{flush:'post'});
 function rememberScroll(){const el=scrollElement.value;if(el)scrollPositions.set(viewKey.value,{left:el.scrollLeft,top:el.scrollTop});}
 function restoreScroll(){const el=scrollElement.value,pos=scrollPositions.get(viewKey.value);if(el){el.scrollLeft=pos?.left||0;el.scrollTop=pos?.top||0;}}
 function resizeSheet(delta:number){const el=scrollElement.value,previous=zoom.value;const next=Math.max(7,Math.min(28,previous+delta));const left=el?.scrollLeft||0,top=el?.scrollTop||0;zoom.value=next;void nextTick(()=>{if(el){el.scrollLeft=left*next/previous;el.scrollTop=top*next/previous;}});}
@@ -508,7 +534,7 @@ async function loadPreferences(){const generation=++preferenceGeneration;prefere
  catch(e){if(generation===preferenceGeneration)preferencesError.value=e instanceof Error?e.message:'个人排序读取失败';}}
 function openSettings(){finishEdit();settingsOpen.value=true;}
 let sortTarget:{scope:string;view:string;revision:number;orders:Record<string,string[]>}|undefined;
-function openSort(){settingsOpen.value=false;sortTarget={scope:scope.value,view:professionView.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
+function openSort(){finishEdit();if(abnormal.value||dirty.value)return;settingsOpen.value=false;sortTarget={scope:scope.value,view:professionView.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
 function shiftSort(index:number,delta:number){const list=sortDraft.value.slice();[list[index],list[index+delta]]=[list[index+delta],list[index]];sortDraft.value=list;}
 async function saveSort(){if(!preferencesReady.value||saving.value||!sortTarget||sortTarget.scope!==scope.value)return;const target=sortTarget,key=context();saving.value=true;const value={version:1,orders:{...target.orders,[target.view]:sortDraft.value}};
  try{const result=await requestJson('/api/workspace-layouts/desktop/inspection-sheets-'+target.scope,{method:'PUT',body:JSON.stringify({revision:target.revision,value})}) as {revision:number};if(disposed||key!==context())return;preferencesRevision.value=result.revision;orders.value=value.orders;sortOpen.value=false;preferencesError.value='';}
@@ -546,11 +572,19 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .mobile-sheet-bar>button{flex:0 0 auto;min-height:44px;min-width:44px;padding:3px;font-size:13px;white-space:nowrap}
 .mobile-zoom-tools{display:flex;gap:4px}
 .mobile-zoom-tools button{min-width:44px}
-.mobile-sheet-picker{display:flex;flex:1;flex-direction:column;min-width:0;overflow:hidden}
-.mobile-sheet-picker>span{font-size:10px;line-height:14px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.mobile-sheet-picker>select{width:100%;min-width:0;min-height:27px;padding:0 2px;font-size:16px;text-overflow:ellipsis;border:0}
+.mobile-sheet-context{display:flex;flex:1;flex-wrap:wrap;align-items:baseline;gap:0 8px;min-width:0;padding:0 5px;line-height:1.35}
+.mobile-sheet-context>span{font-size:11px;color:var(--inspection-muted);white-space:nowrap}
+.mobile-sheet-context>strong{font-size:13px;font-weight:650}
+.sheet-navigation{display:flex;flex-shrink:0;min-width:0;gap:4px;align-items:stretch;padding:0 2px 2px;border-bottom:1px solid var(--inspection-line)}
+.sheet-tabs{position:relative;display:flex;flex:1;min-width:0;gap:4px;overflow:auto hidden;scrollbar-width:none}
+.sheet-tabs::-webkit-scrollbar{display:none}
+.sheet-tabs>button{flex:0 0 auto;max-width:min(90%,320px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sheet-tabs>button,.sheet-sort{min-height:36px;padding:4px 8px;font-size:13px}
+.sheet-tabs>button[aria-pressed=true]{border-color:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));background:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));color:var(--v2-palette-on-accent-text,#fff)}
+.sheet-sort{flex:0 0 auto;min-width:44px}
 .full-height>.book-options{display:none}
 .full-height>.book-options.expanded{display:flex;flex-direction:column;gap:6px;flex-shrink:0;max-height:min(38dvh,38%);overflow:auto;padding:6px;border-bottom:1px solid var(--inspection-line)}
+.full-height .sort-list{max-height:min(55dvh,max(80px,calc(var(--available-height) - 170px)))}
 .full-height>.book-submit{min-height:30px;padding:2px 6px;flex-shrink:0;font-size:11px;gap:4px;border-top:1px solid var(--inspection-line)}
 .full-height>.book-submit .primary{min-height:38px;padding:6px 16px}
 .mobile-save-recovery,.mobile-start{display:flex;align-items:center;gap:4px;flex-shrink:0;font-size:12px;padding:2px 5px}
@@ -560,9 +594,9 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .round-tabs button:disabled{opacity:1;background:var(--inspection-soft,var(--inspection-surface))}
 .round-tabs button:disabled.selected{background:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));color:var(--v2-palette-on-accent-text,#fff)}
 .round-tabs small,.round-hint{font-size:12px}
-.full-height>.round-tabs{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;padding:2px;flex-shrink:0}
-.full-height>.round-tabs button{flex-wrap:wrap;gap:1px 4px;min-height:36px;padding:2px;font-size:12px;line-height:1.15;white-space:normal}
-.full-height>.round-tabs small{font-size:11px}
+.full-height .round-tabs{order:-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;flex-shrink:0}
+.full-height .round-tabs button{flex-wrap:wrap;gap:1px 4px;min-height:36px;padding:2px;font-size:12px;line-height:1.15;white-space:normal}
+.full-height .round-tabs small{font-size:11px}
 .full-height .round-hint{grid-column:1/-1;padding-inline:3px}
 .full-height>.cell-editor-tools{flex-wrap:wrap;gap:4px;padding:4px 6px;border-top:1px solid var(--inspection-line);max-height:100%;overflow:auto}
 .full-height .cell-editor-tools :is(input,select){flex:1 1 110px;min-width:0;min-height:40px;font-size:16px}
@@ -570,8 +604,8 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .full-height .cell-editor-actions{margin-left:auto;min-width:0;flex-wrap:wrap;justify-content:flex-end}
 .full-height .cell-editor-actions button{min-height:40px;padding-inline:8px}
 .book-scroll td.mobile-editing-cell{outline:2px solid var(--v2-palette-accent-text,#2457d6);outline-offset:-2px}
-.compact-editor-view>.mobile-sheet-bar,.compact-editor-view>.round-tabs,.compact-editor-view>.book-options.expanded{display:none}
-@media(max-height:500px) and (pointer:coarse){.mobile-sheet-bar{padding:0 2px}.mobile-sheet-bar>button{min-height:34px}.mobile-sheet-picker{flex-direction:row;align-items:center;gap:4px}.mobile-sheet-picker>span{flex:0 0 auto}.mobile-sheet-picker>select{flex:1;min-height:34px}.full-height>.book-submit{min-height:22px;padding:0 6px}.full-height>.book-submit .primary{min-height:34px}}
+.compact-editor-view>.mobile-sheet-bar,.compact-editor-view>.sheet-navigation,.compact-editor-view>.book-options.expanded{display:none}
+@media(max-height:500px) and (pointer:coarse){.mobile-sheet-bar{padding:0 2px}.mobile-sheet-bar>button,.sheet-tabs>button,.sheet-sort{min-height:34px}.full-height>.book-submit{min-height:22px;padding:0 6px}.full-height>.book-submit .primary{min-height:34px}}
 /* Cell contents must not enlarge Excel's saved row heights, including merged cells. */
 .book-scroll td{position:relative;line-height:normal}
 .book-scroll td>.cell-content{position:absolute;inset:0 2px;display:flex;flex-direction:column;overflow:hidden;line-height:normal}

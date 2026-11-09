@@ -24,7 +24,8 @@
     <DailyInspectionHistory v-show="historyOpen" v-if="historyVisited && state?.history_scopes?.length"
       ref="historyPage" :scopes="state.history_scopes" :default-scope="duty?.scope" @close="historyOpen=false" />
     <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
-      :template-version="state.template_version" :archive-revision="state.archive_revision" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date" :active="active || undefined"
+      :template-version="state.template_version" :archive-revision="state.archive_revision" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date"
+      :default-shift="duty?.shift" :next-round="state.next_round" :active="active || undefined"
       :read-only="readOnly || inputsLocked" :parent-busy="!!busy || autoSaving || hasDrafts"
       @changed="load" @scope="switchView" @exit="back">
       <template #start>

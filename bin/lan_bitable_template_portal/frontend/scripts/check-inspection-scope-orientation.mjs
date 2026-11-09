@@ -13,21 +13,28 @@ const browser=await chromium.launch({headless:true});
 try{
  for(const legacy of [false,true]){
   const page=await browser.newPage({viewport:{width:390,height:844},isMobile:true,hasTouch:true}),errors=[],starts=[];page.on('pageerror',e=>errors.push(e.message));
-  const states={},reports={},values={D:'220',E:'380'},writes=[];
+  const states={},reports={},values={D:'220',E:'380'},writes=[],preferences={};
   for(const scope of ['D','E']){
-   const duty={scope,date:'2026-11-06',shift:'白'},template=scope+'.xlsx';
-   const point={id:'point',point_id:'source',enabled:true,template,sheet:'巡检表一',round_cells:{白1:'B2'}};
+   const duty={scope,date:'2026-11-06',shift:scope==='D'?'白':'夜'},template=scope+'.xlsx';
+   const round=scope==='D'?1:2;
+   const point={id:'point',point_id:'source',enabled:true,template,sheet:'巡检表一',round_cells:{[duty.shift+round]:'B2'}};
    const device={id:scope+'-device',scope,name:scope+'设备',profession:'电气',points:[point],sections:[],parameters:[{id:'p',name:'电压',point:'point',reference:scope==='D'?220:380}]};
-   const active={id:scope+'-round',duty,round:1,pending:false,draft_key:scope+'-draft',reviews:{},review_version:0,batch:{devices:[device],count:1,batch:1},professions:['电气']};
+   const active={id:scope+'-round',duty,round,pending:false,draft_key:scope+'-draft',reviews:{},review_version:0,batch:{devices:[device],count:1,batch:1},professions:['电气']};
    const templates=[{scope,name:template,profession:'电气',sheets:[{name:'封面',rows:[['封面']],merges:[]},{name:'巡检表一',rows:[['项目','数值'],['电压',null]],merges:[]},{name:'巡检表二',rows:[['设备','状态'],['设备',null]],merges:[]}]}];
    states[scope]={template_version:'v1',duty,view_scope:scope,view_scopes:['D','E'],can_edit:true,history_scopes:['D','E'],history:[],completed_rounds:0,round_limit:2,active:scope==='D'?active:null};
    reports[scope]={scope,date:duty.date,draft_key:scope+'-owner-date',template_version:'v1',sheet_groups:{},can_edit_history:true,original_templates:templates,rounds:[]};
    states[scope]._fixtureActive=active;
   }
-  function report(scope){const value=structuredClone(reports[scope]);const active=states[scope].active;if(active)value.rounds=[{round_id:active.id,shift:'白',round:1,version:active.review_version,status:'进行中',original_cells:[{template:scope+'.xlsx',sheet:'巡检表一',cell:'B2',parameter:'电压',value:values[scope]}]}];return value;}
+  function report(scope){const value=structuredClone(reports[scope]);const active=states[scope].active;if(active)value.rounds=[{round_id:active.id,shift:active.duty.shift,round:active.round,version:active.review_version,status:'进行中',original_cells:[{template:scope+'.xlsx',sheet:'巡检表一',cell:'B2',parameter:'电压',value:values[scope]}]}];return value;}
   await page.route(url=>url.pathname.startsWith('/api/'),async route=>{const req=route.request(),url=new URL(req.url()),s=url.searchParams.get('view_scope')||'D',ok=data=>route.fulfill({json:{ok:true,data}});
    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'fixture',name:'隔离人员',role:'admin',category:'engineer',level:'L0',modules:['daily']},allowed_scopes:['D','E'],scope_options:[{value:'D',label:'D楼'},{value:'E',label:'E楼'}],default_scope:'D'});
    if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'fixture'}});
+   if(url.pathname.includes('/inspection-sheets-')){
+    const entry=preferences[url.pathname]||{revision:0,value:null};
+    if(req.method()==='GET')return ok(entry);
+    const {revision,value}=req.postDataJSON();assert.equal(revision,entry.revision);
+    return ok(preferences[url.pathname]={revision:revision+1,value});
+   }
    if(url.pathname.startsWith('/api/workspace-layouts/'))return ok({revision:0,value:null});
    if(url.pathname==='/api/daily-inspection')return ok(states[s]);
    if(url.pathname==='/api/daily-inspection/status')return ok({unchanged:true,history_scopes:['D','E']});
@@ -41,12 +48,27 @@ try{
   await page.goto(legacy?origin+'/daily-inspection?frontend=legacy':origin+'/assets/workspace-v2/index.html?__page=%2Fdaily-inspection&scope=D');
   const book=page.locator('.inspection-workbook');try{await book.getByText('220',{exact:true}).waitFor({timeout:15000});}catch(e){console.error('页面状态:',(await page.locator('body').innerText()).slice(0,2000));console.error('页面错误:',errors);await page.screenshot({path:path.join(output,'fixture-error.png')});throw e;}
   assert(await book.evaluate(el=>el.classList.contains('rotate-landscape')),'手机默认横屏，表格和文字共同旋转');
-  const picker=book.getByLabel('切换巡检工作表');assert.equal(await picker.locator('option').filter({hasText:'封面'}).count(),0);
-  await picker.selectOption({label:'巡检表二'});await page.waitForTimeout(150);
+  const tabs=book.getByRole('group',{name:'巡检工作表',exact:true});
+  const menu=book.getByRole('button',{name:'巡检菜单'});
+  await book.getByText('白1 · 进行中',{exact:true}).waitFor();
+  assert.equal(await tabs.getByRole('button',{name:'封面',exact:true}).count(),0);
+  assert.equal(await book.getByLabel('切换巡检工作表').count(),0);
+  assert.equal(await book.getByRole('group',{name:'巡检轮次与状态'}).count(),0);
+  assert.equal(await book.locator('.book-submit').count(),0);
+  await menu.click();await book.getByRole('group',{name:'巡检轮次与状态'}).getByRole('button',{name:/白1/}).click();
+  assert.equal(await menu.getAttribute('aria-expanded'),'false');
+  await tabs.getByRole('button',{name:'巡检表二',exact:true}).click();
+  await book.getByRole('button',{name:'确认提交',exact:true}).waitFor();
+  await book.getByRole('button',{name:'调整工作表顺序'}).click();
+  const sort=page.getByRole('dialog');await sort.getByRole('button',{name:'上移'}).nth(1).click();
+  await sort.getByRole('button',{name:'保存排序'}).click();await sort.waitFor({state:'hidden'});
+  assert.equal(await tabs.getByRole('button').first().innerText(),'巡检表二');
   const viewedD=await page.evaluate(()=>JSON.parse(localStorage.getItem('inspection-viewed:D-owner-date:D-round')||'[]'));
   assert.equal(viewedD.length,2);
-  await book.getByRole('button',{name:'巡检菜单'}).click();await book.getByLabel('楼栋',{exact:true}).selectOption('E');
+  await menu.click();await book.getByLabel('楼栋',{exact:true}).selectOption('E');
   await book.getByText('380',{exact:true}).waitFor();assert.deepEqual(starts,['E'],'E楼独立自动开始');
+  await book.getByText('夜2 · 进行中',{exact:true}).waitFor();
+  assert.equal(await tabs.getByRole('button').first().innerText(),'巡检表一');
   assert.equal(await book.getByText('220',{exact:true}).count(),0);
   await book.getByRole('button',{name:'切换竖屏'}).click();assert(!await book.evaluate(el=>el.classList.contains('rotate-landscape')));
   await book.getByRole('button',{name:'切换横屏'}).click();assert(await book.evaluate(el=>el.classList.contains('rotate-landscape')));
@@ -66,7 +88,10 @@ try{
   await book.getByRole('cell',{name:'B2 380',exact:true}).click();await book.getByRole('textbox',{name:'编辑 B2'}).fill('381');
   await book.getByRole('textbox',{name:'编辑 B2'}).press('Enter');await page.waitForFunction(()=>!localStorage.getItem('inspection-sheet-edits:E-owner-date'));
   assert.equal(values.E,'381');assert.equal(values.D,'220');assert.equal(writes.length,1);
-  await book.getByLabel('楼栋',{exact:true}).selectOption('D');await book.getByText('220',{exact:true}).waitFor();
+  await book.getByLabel('楼栋',{exact:true}).selectOption('D');
+  await tabs.getByRole('button',{name:'巡检表一',exact:true}).click();await book.getByText('220',{exact:true}).waitFor();
+  assert.equal(await menu.getAttribute('aria-expanded'),'false');
+  assert.equal(await tabs.getByRole('button').first().innerText(),'巡检表二');
   assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('inspection-viewed:D-owner-date:D-round')||'[]').length),2);
   assert.equal(await page.evaluate(()=>JSON.parse(localStorage.getItem('inspection-viewed:E-owner-date:E-round')||'[]').length),1);
   await page.screenshot({path:path.join(output,(legacy?'legacy':'v2')+'-landscape.png')});assert.deepEqual(errors,[]);
