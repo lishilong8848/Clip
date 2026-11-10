@@ -101,7 +101,9 @@
           <div v-if="view === 'orders' && bulkMode" class="tool-bulk-bar" aria-label="批量删除工单">
             <NCheckbox :checked="pageAllSelected" :indeterminate="pageSomeSelected && !pageAllSelected"
               :disabled="busy || loading || !selectablePage.length" @update:checked="checked => toggleSelection(selectablePage, checked)">选择本页</NCheckbox>
-            <span class="tool-muted" aria-live="polite">已选 {{ selectedRows.length }} 张</span>
+            <NCheckbox :checked="allSelected" :indeterminate="allSomeSelected && !allSelected"
+              :disabled="busy || loading || !selectableAll.length" @update:checked="checked => toggleSelection(selectableAll, checked)">勾选全部</NCheckbox>
+            <span class="tool-muted" aria-live="polite">已选 {{ selectedRows.length }} 张<span v-if="allSelected">（当前筛选下全部可删工单）</span></span>
             <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }" @positive-click="deleteSelectedOrders">
               <template #trigger><NButton size="small" type="error" :loading="busy" :disabled="loading || !selectedRows.length">删除所选</NButton></template>
               确认删除 {{ month }} 的 {{ selectedRows.length }} 张工单？操作记录和草稿将保留。
@@ -389,6 +391,9 @@ const selectablePage = computed(() => pagedOrders.value.filter(row => row.can_de
 const selectedRows = computed(() => visibleOrders.value.filter(row => row.can_delete && selectedIds.value.has(row.id)));
 const pageAllSelected = computed(() => !!selectablePage.value.length && selectablePage.value.every(row => selectedIds.value.has(row.id)));
 const pageSomeSelected = computed(() => selectablePage.value.some(row => selectedIds.value.has(row.id)));
+const selectableAll = computed(() => visibleOrders.value.filter(row => row.can_delete));
+const allSelected = computed(() => !!selectableAll.value.length && selectableAll.value.every(row => selectedIds.value.has(row.id)));
+const allSomeSelected = computed(() => selectableAll.value.some(row => selectedIds.value.has(row.id)));
 function exitBulkMode() {
   bulkMode.value = false;
   selectedIds.value.clear();
