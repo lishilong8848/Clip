@@ -33,6 +33,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.inventory, actor)
                 elif path == 'order-candidates':
                     result = await asyncio.to_thread(svc.order_candidates, actor)
+                elif path == 'orders/batch-create':
+                    result = await asyncio.to_thread(svc.planned_order_candidates, actor)
                 elif path == 'inventory/fields':
                     result = await asyncio.to_thread(svc.new_inventory_fields, actor)
                 elif path.startswith('archive/') or path.endswith('/download'):
@@ -78,6 +80,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 raise RiskError('工具自检请求格式无效。')
             if path == 'orders':
                 return response(await asyncio.to_thread(svc.create_order, actor, body))
+            if path == 'orders/batch-create':
+                return response(await asyncio.to_thread(svc.create_planned_orders, actor, body))
             if path == 'orders/batch-delete':
                 return response(await asyncio.to_thread(svc.cancel_orders, actor, body))
             if path == 'inventory/new':
@@ -86,6 +90,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 return response(await asyncio.to_thread(svc.cancel_order, actor, identity, body))
             if path.endswith('/clone') and path.startswith('templates/'):
                 return response(await asyncio.to_thread(svc.clone_template, actor, params['identity'], body))
+            if path.endswith('/delete') and path.startswith('templates/'):
+                return response(await asyncio.to_thread(svc.delete_template, actor, identity, body))
             if path.startswith('templates/'):
                 await asyncio.to_thread(svc.availability, actor, params['identity'], body)
                 return response({'saved': True})
@@ -99,8 +105,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             return response(error=RiskError('操作结果暂未确认，请刷新工单核对已保存内容。', 503))
 
     for path, methods in (('', ['GET']), ('/archive/{month}', ['GET']), ('/inventory', ['GET']),
-                          ('/inventory/fields', ['GET']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']), ('/orders', ['POST']), ('/orders/batch-delete', ['POST']), ('/orders/{identity}', ['GET']),
+                          ('/inventory/fields', ['GET']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']),
+                          ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']), ('/orders/{identity}', ['GET']),
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),
-                          ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST'])):
+                          ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),
+                          ('/templates/{identity}/delete', ['POST'])):
         app.add_api_route(base + path, endpoint, methods=methods)

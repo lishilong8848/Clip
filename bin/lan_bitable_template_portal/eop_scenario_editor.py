@@ -29,6 +29,8 @@ TABLE = 'tblKXuy3V1CWK4Q8'
 VIEW = 'vewOjTVH4H'
 MAIN = ('场景名称', '专业', '系统/设备', '原优先级')
 LONG = ('处置正文（原文）', '原通告模板', '原演练场景', '原EOP精炼（参考）')
+SCENARIO_CODE = '场景编号'
+DETAIL_FIELDS = (*MAIN, SCENARIO_CODE, *LONG)
 STEPS, IMAGES, LINK = '原通告重点项', '图片', '步骤图片关联'
 SELECTS = MAIN[1:]
 MAX_UPLOAD = 18 * 1024 * 1024
@@ -104,7 +106,7 @@ class EopEditor:
         with self.schema_lock:
             schema = self.schema()
             self.detail_schema = (getattr(self.cloud, 'config_hash', None), time.monotonic() + SCHEMA_TTL, schema)
-        selected_fields = [name for name in (*MAIN, *LONG, STEPS, IMAGES, LINK) if name in schema]
+        selected_fields = [name for name in (*DETAIL_FIELDS, STEPS, IMAGES, LINK) if name in schema]
         for _ in range(50):
             params = {'page_size': 250} | ({'page_token': cursor} if cursor else {})
             data = self.cloud.request('POST', self.path + '/records/search', params=params,
@@ -154,7 +156,7 @@ class EopEditor:
         if priority_scope not in ('p0','other'):
             raise RiskError('场景范围无效。',400)
         value = self.cache()
-        return {'items': [{'id': rid, 'fields': {name: plain(fields.get(name)) for name in MAIN},
+        return {'items': [{'id': rid, 'fields': {name: plain(fields.get(name)) for name in (*MAIN, SCENARIO_CODE)},
                            'has_steps': bool(split_steps(plain(fields.get(STEPS)))),
                            'has_template': bool(plain(fields.get('原通告模板')).strip()),
                            'has_images': bool(attachment_rows(fields))}
@@ -233,8 +235,10 @@ class EopEditor:
 
     @staticmethod
     def revision(fields):
-        return digest([{name: plain(fields.get(name)) for name in (*MAIN, *LONG, STEPS, LINK)},
-                       list(attachment_rows(fields))])
+        values = {name: plain(fields.get(name)) for name in (*MAIN, *LONG, STEPS, LINK)}
+        if code := plain(fields.get(SCENARIO_CODE)):
+            values[SCENARIO_CODE] = code
+        return digest([values, list(attachment_rows(fields))])
 
     def detail(self, rid, user, editable):
         fields = self.read(rid)
@@ -264,7 +268,8 @@ class EopEditor:
             assigned.update(current)
             result.append({'text': step, 'images': current})
         return {'id': rid, 'revision': self.revision(fields), 'editable': editable,
-                'fields': {name: plain(fields.get(name)) for name in (*MAIN, *LONG)}, 'steps': result,
+                'fields': {name: plain(fields.get(name)) for name in DETAIL_FIELDS}, 'steps': result,
+                'readonly_fields': [SCENARIO_CODE] if schema.get(SCENARIO_CODE, {}).get('type', 1) != 1 else [],
                 'options': {name: [item['name'] for item in (schema[name].get('property') or {}).get('options', [])]
                             for name in SELECTS},
                 'images': [{'token': token, 'name': names.get(token) or item.get('name') or '场景图片',
@@ -285,7 +290,7 @@ class EopEditor:
                 raise RiskError('该记录已变化。请保留当前草稿，重新打开并核对飞书记录。', 409)
             schema = self.schema()
             values, steps, images = body.get('fields'), body.get('steps'), body.get('images')
-            if not isinstance(values, dict) or set(values) != set((*MAIN, *LONG)):
+            if not isinstance(values, dict) or not set((*MAIN, *LONG)) <= values.keys() <= set(DETAIL_FIELDS):
                 raise RiskError('场景字段不完整。')
             if not isinstance(steps, list) or len(steps) > 200 or not isinstance(images, list) or len(images) > 100:
                 raise RiskError('每条记录最多编辑 200 个步骤及 100 张图片。')
@@ -331,6 +336,8 @@ class EopEditor:
                     raise RiskError('请填写场景名称。')
                 if value == plain(current.get(name)):
                     continue
+                if name == SCENARIO_CODE and schema.get(name, {}).get('type', 1) != 1:
+                    raise RiskError('飞书场景编号字段不是可编辑的文本字段。')
                 if name in SELECTS and value and value not in {
                         option['name'] for option in (schema[name].get('property') or {}).get('options', [])}:
                     raise RiskError(f'「{name}」请从原表选项中选择。')
@@ -359,6 +366,11 @@ class EopEditor:
                     changes[LINK] = ''
             observed = current
             if changes:
+                if SCENARIO_CODE in changes and SCENARIO_CODE not in schema:
+                    self.cloud.request('POST', self.path + '/fields', json={'field_name': SCENARIO_CODE, 'type': 1})
+                    schema = self.schema()
+                    if schema.get(SCENARIO_CODE, {}).get('type') != 1:
+                        raise RiskError('飞书未确认场景编号文本字段，请刷新后重试。', 503)
                 data = self.cloud.request('PUT', self.path + '/records/' + rid, json={'fields': changes})
                 if (data.get('record') or {}).get('record_id') != rid:
                     raise RiskError('保存结果未确认，请重新打开核对。', 503)

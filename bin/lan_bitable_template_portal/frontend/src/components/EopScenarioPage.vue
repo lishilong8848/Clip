@@ -53,15 +53,30 @@
     </section>
 
     <template v-else>
-      <section v-if="editing" class="eop-panel eop-meta" aria-label="编辑场景信息">
-        <label class="eop-name">场景名称 <input v-model="record.fields['场景名称']" maxlength="200" :disabled="busy" /></label>
-        <label v-for="field in selectFields" :key="field">{{ field }}
-          <select v-model="record.fields[field]" :disabled="busy">
-            <option value="">未填写</option>
-            <option v-for="option in choices(field)" :key="option" :value="option">{{ option }}</option>
-          </select>
-        </label>
-      </section>
+      <div class="eop-reference-grid">
+        <details v-for="field in referenceFields" :key="field" class="eop-panel eop-reference" :aria-label="field">
+          <summary class="eop-reference-summary">
+            <h2>{{ field }}</h2>
+            <small>{{ referenceBrief(record.fields[field]) }}</small>
+          </summary>
+          <textarea v-if="editing" v-model="record.fields[field]" :aria-label="field" :disabled="busy" rows="5" maxlength="100000" />
+          <p v-else class="eop-step-text" :tabindex="record.fields[field] ? 0 : undefined">{{ record.fields[field] || '未填写' }}</p>
+        </details>
+      </div>
+
+      <details ref="metaDetails" class="eop-panel eop-meta">
+        <summary>场景信息 <small v-if="record.fields['场景编号']">{{ record.fields['场景编号'] }}</small></summary>
+        <div class="eop-meta-fields">
+          <label v-for="field in metaFields" :key="field" :class="{'eop-name': field === '场景名称'}">{{ field }}
+            <select v-if="editing && selectFields.includes(field)" v-model="record.fields[field]" :disabled="busy">
+              <option value="">未填写</option>
+              <option v-for="option in choices(field)" :key="option" :value="option">{{ option }}</option>
+            </select>
+            <input v-else-if="editing && !record.readonly_fields?.includes(field)" v-model="record.fields[field]" maxlength="200" :disabled="busy" />
+            <span v-else>{{ record.fields[field] || '未填写' }}<small v-if="editing"> · 飞书只读字段</small></span>
+          </label>
+        </div>
+      </details>
 
       <div class="eop-workspace" :class="{ 'with-pool': unassigned.length || editing }">
       <section class="eop-panel eop-work" aria-label="步骤与图片" @paste="pastePictures($event,'')">
@@ -89,17 +104,20 @@
                 <NButton quaternary size="small" type="error" class="eop-delete-step" :disabled="busy" :aria-label="`删除第 ${index+1} 步`" title="删除步骤，图片移回待分配" @click="record.steps.splice(index,1)"><Trash2 :size="16" /></NButton>
               </div>
             </div>
-            <textarea v-if="editing" v-model="step.text" rows="3" maxlength="16000" :aria-label="`第 ${index+1} 步内容`" placeholder="填写这一项需要执行或通告的内容" :disabled="busy" />
+            <textarea v-if="editing" v-model="step.text" rows="2" maxlength="16000" :aria-label="`第 ${index+1} 步内容`" placeholder="填写这一项需要执行或通告的内容" :disabled="busy" />
             <p v-else class="eop-step-text">{{ step.text }}</p>
             <NButton v-if="editing && !step.images.length" class="eop-add-image" size="small" :disabled="busy || record.images.length >= 100" :aria-label="`为第 ${index+1} 步添加图片`" @click="choosePictures(step.key)"><ImagePlus :size="16" />添加图片</NButton>
           </div>
-          <div v-if="step.images.length" class="eop-step-media">
-            <div class="eop-media-head"><strong>对应图片 <small>{{ step.images.length }} 张</small></strong>
+          <details v-if="step.images.length" class="eop-step-media">
+            <summary>对应图片 <small>{{ step.images.length }} 张</small></summary>
+            <div v-if="editing" class="eop-media-head">
               <NButton v-if="editing" size="small" :disabled="busy || record.images.length >= 100" :aria-label="`为第 ${index+1} 步添加图片`" @click="choosePictures(step.key)"><ImagePlus :size="16" />添加图片</NButton>
             </div>
             <div class="eop-gallery">
               <figure v-for="photo in stepPictures(step)" :key="photo.token">
-                <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name" @click="openPreview(photo, stepPictures(step), `第 ${index+1} 步`, $event)">
+                <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name"
+                  @mouseenter="showHover(photo,$event)" @mouseleave="hideHover" @focus="showHover(photo,$event)" @blur="hideHover"
+                  @click="openPreview(photo, stepPictures(step), `第 ${index+1} 步`, $event)">
                   <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" @error="broken.add(photo.token)" />
                   <span v-else>打开原图</span>
                 </button>
@@ -108,7 +126,7 @@
                 </figcaption>
               </figure>
             </div>
-          </div>
+          </details>
         </article>
       </section>
 
@@ -127,6 +145,7 @@
             <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name"
               :draggable="editing && !busy && record.steps.length>0"
               @dragstart="startPictureDrag(photo.token,$event)" @dragend="clearPictureDrag"
+              @mouseenter="showHover(photo,$event)" @mouseleave="hideHover" @focus="showHover(photo,$event)" @blur="hideHover"
               @click="openPreview(photo, unassigned, '待分配图片', $event)">
               <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" decoding="async" draggable="false" @error="broken.add(photo.token)" />
               <span v-else>打开原图</span>
@@ -145,11 +164,18 @@
       </div>
 
       <section class="eop-panel eop-source" aria-label="原文资料">
-        <header class="eop-section-head"><h2>原文资料</h2></header>
-        <details v-for="field in longFields" :key="field">
-          <summary>{{ field }} <small v-if="!record.fields[field]">未填写</small></summary>
-          <textarea v-if="editing" v-model="record.fields[field]" :aria-label="field" :disabled="busy" rows="7" maxlength="100000" />
-          <p v-else class="eop-step-text">{{ record.fields[field] || '—' }}</p>
+        <details>
+          <summary>处置正文（原文） <small v-if="!record.fields[dispositionField]">未填写</small></summary>
+          <textarea v-if="editing" v-model="record.fields[dispositionField]" :aria-label="dispositionField" :disabled="busy" rows="6" maxlength="100000" />
+          <details v-if="editing && dispositionGroups.length" class="eop-source-preview"><summary>分层预览</summary>
+            <EopDisposition :groups="dispositionGroups" />
+          </details>
+          <EopDisposition v-else-if="!editing" :groups="dispositionGroups" />
+        </details>
+        <details>
+          <summary>原演练场景 <small v-if="!record.fields['原演练场景']">未填写</small></summary>
+          <textarea v-if="editing" v-model="record.fields['原演练场景']" aria-label="原演练场景" :disabled="busy" rows="6" maxlength="100000" />
+          <p v-else class="eop-step-text">{{ record.fields['原演练场景'] || '—' }}</p>
         </details>
       </section>
       <footer v-if="editing" class="eop-save">
@@ -161,7 +187,10 @@
       </footer>
       <input ref="fileInput" hidden type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp" @change="uploadPictures" />
     </template>
-    <NModal :show="!!preview" preset="card" :title="previewTitle" class="eop-preview" style="width:min(94vw,1000px)" @update:show="show => { if (!show) closePreview(); }" @after-leave="restorePreviewFocus">
+    <div v-if="hoverPhoto" class="eop-hover-zoom" :style="hoverStyle" aria-hidden="true">
+      <img :src="hoverPhoto.url" alt="" />
+    </div>
+    <NModal :show="!!preview" preset="card" :title="previewTitle" class="eop-preview" style="width:min(94vw,1200px)" @update:show="show => { if (!show) closePreview(); }" @after-leave="restorePreviewFocus">
       <div v-if="preview" @keydown.left.prevent="changePreview(-1)" @keydown.right.prevent="changePreview(1)">
         <img :key="preview.token" :src="preview.ticket ? preview.url : preview.url + '?original=1'" :alt="preview.name" class="eop-original" @error="previewError = true" />
         <NAlert v-if="previewError" type="warning" :bordered="false">图片暂时无法读取，可关闭后重试。</NAlert>
@@ -185,6 +214,8 @@ import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NSelect } from 'n
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, ImagePlus, Pencil, Plus, RefreshCw, Search, Trash2, Upload } from 'lucide-vue-next';
 import { requestBinaryJson, requestJson } from '../api/client';
 import { registerNavigationGuard } from '../navigation';
+import EopDisposition from './EopDisposition.vue';
+import { groupEopDisposition } from './eopDisposition';
 
 defineOptions({ inheritAttrs: false });
 defineProps<{embedded?:boolean}>();
@@ -193,14 +224,18 @@ const emit=defineEmits<{close:[]}>();
 interface Row { id: string; fields: Record<string,string>; has_steps?:boolean; has_template?:boolean; has_images?:boolean }
 interface Photo { token: string; name: string; url: string; ticket?: string }
 interface Step { key: string; text: string; images: string[] }
-interface Detail extends Row { revision: string; editable: boolean; options: Record<string,string[]>; steps: Step[]; images: Photo[] }
+interface Detail extends Row { revision: string; editable: boolean; options: Record<string,string[]>; steps: Step[]; images: Photo[]; readonly_fields?: string[] }
 const api = '/api/eop-scenarios';
 const selectFields = ['专业', '系统/设备', '原优先级'];
-const longFields = ['处置正文（原文）', '原通告模板', '原演练场景', '原EOP精炼（参考）'];
+const metaFields = ['场景名称', '场景编号', ...selectFields];
+const referenceFields = ['原EOP精炼（参考）', '原通告模板'];
+const dispositionField = '处置正文（原文）';
 const rows = ref<Row[]>([]);
 const listMode=ref<'p0'|'other'>('p0'),priority=ref('');
 const priorities=computed(()=>[{label:'全部等级',value:''},...Array.from(new Set(rows.value.map(r=>r.fields['原优先级']||'等级未设置'))).sort().map(value=>({label:value,value}))]);
 const record = ref<Detail>();
+const metaDetails = ref<HTMLDetailsElement>();
+const dispositionGroups = computed(() => groupEopDisposition(record.value?.fields[dispositionField] || ''));
 const opening = shallowRef<Row>();
 const editing = ref(false);
 const search = ref('');
@@ -269,7 +304,8 @@ const assignedPhoto = computed(() => {
 });
 watch([search,specialty,missing,priority], () => { page.value = 1; });
 watch(() => filtered.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length/pageSize))); });
-watch(preview, () => { previewError.value = false; });
+watch(preview, value => { previewError.value = false; if (value) hideHover(); });
+watch(record, () => hideHover());
 const choices = (field: string) => [...new Set([...(record.value?.options[field] || []),record.value?.fields[field] || ''])].filter(Boolean);
 const stepPictures = (step: Step) => step.images.flatMap(token => photos.value.get(token) || []);
 function focusSection(section: HTMLElement | null | undefined, anchor: HTMLElement | null | undefined = section) {
@@ -288,10 +324,44 @@ function jumpToStep(event: Event) {
   select.value = '';
 }
 function openPreview(photo: Photo, group: Photo[], label: string, event: MouseEvent) {
+  hideHover();
   previewTrigger = event.currentTarget as HTMLElement;
   previewGroup.value = label;
   previewIndex.value = group.findIndex(item => item.token === photo.token);
   previewPhotos.value = group;
+}
+const hoverPhoto = shallowRef<Photo>();
+const hoverBox = ref<{top:number;left:number;width:number;height:number}>();
+const hoverStyle = computed(() => hoverBox.value
+  ? {top:`${hoverBox.value.top}px`,left:`${hoverBox.value.left}px`,width:`${hoverBox.value.width}px`,height:`${hoverBox.value.height}px`}
+  : undefined);
+let hoverTimer: ReturnType<typeof setTimeout> | undefined;
+function showHover(photo: Photo, event: Event) {
+  if (preview.value || draggedPhoto.value || busy.value) return;
+  if (typeof matchMedia === 'function' && matchMedia('(hover: none)').matches) return;
+  const target = event.currentTarget as HTMLElement;
+  clearTimeout(hoverTimer);
+  hoverTimer = setTimeout(() => {
+    if (preview.value || draggedPhoto.value) return;
+    const rect = target.getBoundingClientRect();
+    const width = Math.min(420, Math.max(240, Math.round(rect.width * 2.6)));
+    const height = Math.round(width * 0.75);
+    let left = rect.right + 10;
+    if (left + width > window.innerWidth - 8) left = Math.max(8, rect.left - width - 10);
+    const top = Math.min(Math.max(8, rect.top + rect.height / 2 - height / 2), Math.max(8, window.innerHeight - height - 8));
+    hoverBox.value = {top: Math.round(top), left: Math.round(left), width, height};
+    hoverPhoto.value = photo;
+  }, 220);
+}
+function hideHover() {
+  clearTimeout(hoverTimer);
+  hoverPhoto.value = undefined;
+  hoverBox.value = undefined;
+}
+function referenceBrief(value: string) {
+  const text = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!text) return '未填写';
+  return text.length > 28 ? `${text.slice(0, 28)}…` : text;
 }
 function changePreview(delta: number) {
   const next = previewIndex.value + delta;
@@ -522,6 +592,7 @@ async function save() {
   const current = record.value;
   if (!current?.editable || !editing.value || busy.value || !dirty.value) return;
   if (!current.fields['场景名称'].trim() || current.steps.some(step => !step.text.trim())) {
+    if (!current.fields['场景名称'].trim() && metaDetails.value) metaDetails.value.open = true;
     error.value = '请填写场景名称和每个步骤的内容。';
     return;
   }
@@ -555,8 +626,8 @@ const unregister = registerNavigationGuard((_target,proceed) => {
 });
 function beforeUnload(event: BeforeUnloadEvent) { if (busy.value || dirty.value) event.preventDefault(); }
 let refreshTimer:ReturnType<typeof setInterval> | undefined;
-onMounted(() => { void loadList(); refreshTimer=setInterval(()=>{if (!record.value && !opening.value && !loading.value) void loadList();},300000); window.addEventListener('beforeunload',beforeUnload); });
-onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refreshTimer); activeRead?.abort(); unregister(); revokePictures(); window.removeEventListener('beforeunload',beforeUnload); });
+onMounted(() => { void loadList(); refreshTimer=setInterval(()=>{if (!record.value && !opening.value && !loading.value) void loadList();},300000); window.addEventListener('beforeunload',beforeUnload); window.addEventListener('scroll',hideHover,true); window.addEventListener('resize',hideHover); });
+onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refreshTimer); activeRead?.abort(); unregister(); revokePictures(); clearTimeout(hoverTimer); window.removeEventListener('beforeunload',beforeUnload); window.removeEventListener('scroll',hideHover,true); window.removeEventListener('resize',hideHover); });
 </script>
 
 <style scoped>
@@ -567,7 +638,7 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
   display:grid; gap:12px; padding:12px 14px; margin:auto; color:var(--ep-ink); min-width:0; box-sizing:border-box; max-width:1500px;
 }
 .eop-header,.eop-panel,.eop-save { min-width:0; border:1px solid var(--ep-line); border-radius:10px; background:var(--ep-surface); }
-.eop-opening { min-height:96px; display:grid; place-items:center; color:var(--ep-muted); }
+.eop-opening { min-height:72px; display:grid; place-items:center; color:var(--ep-muted); }
 .eop-pool .eop-thumb[draggable=true] { cursor:grab; }
 .eop-work .eop-step.eop-drop-ready { outline:1px dashed var(--ep-accent); outline-offset:-2px; }
 .eop-work .eop-step.eop-drop-active { outline:2px solid var(--ep-accent); background:var(--ep-soft); }
@@ -580,7 +651,10 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-header-actions { flex:none; }
 .eop-summary { margin-top:6px; }
 .eop-tag { display:inline-block; padding:2px 7px; border-radius:5px; background:var(--ep-soft); color:var(--ep-ink); font-size:12px; overflow-wrap:anywhere; }
-.eop-toolbar,.eop-meta,.eop-work,.eop-pool,.eop-source { padding:12px; }
+.eop-toolbar,.eop-meta,.eop-work,.eop-pool,.eop-source,.eop-reference { padding:10px 12px; }
+.eop-reference-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }
+.eop-reference .eop-step-text { max-block-size:14rem; overflow:auto; }
+.eop-reference textarea { margin-top:6px; }
 .eop-workspace { display:grid; grid-template-columns:minmax(0,1fr); align-items:start; gap:12px; min-width:0; }
 @media(min-width:1100px){
   .eop-workspace.with-pool { grid-template-columns:minmax(0,1fr) minmax(245px,320px); }
@@ -588,8 +662,8 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
   .eop-workspace .eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,110px),1fr)); }
 }
 .eop-toolbar { justify-content:flex-start; }
-.eop-stats { display:flex; flex-wrap:wrap; gap:6px; padding:12px 12px 0; }
-.eop-stats button { display:flex; align-items:center; gap:6px; padding:6px 9px; border:1px solid var(--ep-line); border-radius:6px; background:var(--ep-surface); color:var(--ep-ink); cursor:pointer; font:inherit; font-size:13px; }
+.eop-stats { display:flex; flex-wrap:wrap; gap:6px; padding:10px 12px 0; }
+.eop-stats button { display:flex; align-items:center; gap:6px; padding:5px 8px; border:1px solid var(--ep-line); border-radius:6px; background:var(--ep-surface); color:var(--ep-ink); cursor:pointer; font:inherit; font-size:13px; }
 .eop-stats button.selected { border-color:var(--ep-accent); background:var(--ep-soft); }
 .eop-cache-note { margin:8px 12px 0; color:var(--ep-muted); font-size:12px; }
 .eop-presence { display:flex; flex-wrap:wrap; gap:4px; font-size:12px; }
@@ -597,7 +671,7 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-presence .missing { color:#c3413b; font-weight:600; }
 .eop-search { flex:1 1 210px; }
 .eop-filter { width:128px; }
-.eop-list-head,.eop-list-row { display:grid; grid-template-columns:minmax(180px,2.5fr) minmax(0,1fr) minmax(0,1.5fr) minmax(170px,1.4fr) 16px; gap:8px; align-items:center; padding:10px 12px; }
+.eop-list-head,.eop-list-row { display:grid; grid-template-columns:minmax(180px,2.5fr) minmax(0,1fr) minmax(0,1.5fr) minmax(170px,1.4fr) 16px; gap:8px; align-items:center; padding:8px 12px; }
 .eop-list-head { background:var(--ep-soft); color:var(--ep-muted); font-size:12px; font-weight:700; }
 .eop-list-row { width:100%; border:0; border-top:1px solid var(--ep-line); background:transparent; text-align:left; cursor:pointer; font:inherit; color:inherit; }
 .eop-list-row:hover { background:var(--ep-soft); }
@@ -606,16 +680,22 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-row-tags { display:contents; }
 .eop-empty { padding:20px 0; }
 .eop-page-controls { display:flex; justify-content:flex-end; padding:10px 12px; border-top:1px solid var(--ep-line); }
-.eop-meta { display:grid; grid-template-columns:minmax(210px,2fr) repeat(3,minmax(0,1fr)); gap:8px 12px; }
+.eop-meta-fields { display:grid; grid-template-columns:minmax(180px,2fr) repeat(4,minmax(0,1fr)); gap:8px 12px; margin-top:8px; }
 .eop-meta label { display:grid; gap:5px; min-width:0; font-size:13px; }
+.eop-meta label span { overflow-wrap:anywhere; }
+.eop-meta summary,.eop-step-media summary { cursor:pointer; font-weight:600; }
+.eop-meta small,.eop-step-media small { color:var(--ep-muted); font-weight:400; overflow-wrap:anywhere; }
 .eop-page input,.eop-page select,.eop-page textarea { min-width:0; max-width:100%; box-sizing:border-box; padding:7px 9px; border:1px solid var(--ep-line); border-radius:6px; background:var(--ep-surface); color:inherit; font:inherit; }
 .eop-page textarea { display:block; width:100%; line-height:1.6; resize:vertical; }
 .eop-section-head h2 { margin:0; font-size:16px; }
-.eop-step { display:grid; grid-template-columns:minmax(0,1fr); border:1px solid var(--ep-line); border-radius:9px; margin-top:10px; overflow:hidden; }
-.eop-step.has-images { grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); }
-.eop-step-body,.eop-step-media { min-width:0; padding:10px; }
-.eop-step-media { background:var(--ep-soft); border-left:1px solid var(--ep-line); }
-.eop-step-title { margin-bottom:7px; }
+.eop-step { display:grid; grid-template-columns:minmax(0,1fr); border:1px solid var(--ep-line); border-radius:7px; margin-top:6px; overflow:hidden; }
+.eop-step.has-images { grid-template-columns:minmax(0,1fr) minmax(130px,24%); }
+.eop-step-body,.eop-step-media { min-width:0; padding:7px 9px; }
+.eop-step-media { background:var(--ep-soft); border-inline-start:1px solid var(--ep-line); align-self:start; font-size:13px; }
+.eop-step-media[open] { align-self:stretch; }
+.eop-step-media .eop-media-head { justify-content:flex-start; margin-top:6px; }
+.eop-step-media .eop-gallery { grid-template-columns:repeat(auto-fill,minmax(min(100%,76px),1fr)); }
+.eop-step-title { margin-bottom:4px; }
 .eop-step-title h3 { margin:0; padding:3px 7px; border-radius:5px; background:var(--ep-soft); color:var(--ep-ink); font-size:14px; }
 .eop-step-actions { display:flex; gap:4px; }
 .eop-delete-step { margin-inline-start:8px; }
@@ -623,8 +703,8 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-step-tools select { max-width:min(215px,100%); }
 .eop-header,.eop-step-title h3,.eop-pool h2 { scroll-margin-top:12px; }
 .eop-step-text { margin:4px 0; line-height:1.6; white-space:pre-wrap; overflow-wrap:anywhere; }
-.eop-gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,118px),1fr)); gap:8px; margin-top:8px; }
-.eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,155px),1fr)); }
+.eop-gallery { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,104px),1fr)); gap:8px; margin-top:8px; }
+.eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,132px),1fr)); }
 .eop-gallery figure { margin:0; min-width:0; padding:5px; border:1px solid var(--ep-line); border-radius:7px; background:var(--ep-surface); }
 .eop-thumb { display:grid; place-items:center; width:100%; aspect-ratio:4/3; padding:0; overflow:hidden; background:var(--ep-soft); border:0; cursor:zoom-in; color:inherit; }
 .eop-thumb img { width:100%; height:100%; min-height:0; object-fit:contain; }
@@ -633,26 +713,32 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-gallery figcaption .n-button { justify-self:start; }
 .eop-pool-empty { margin:10px 0 0; color:var(--ep-muted); font-size:13px; line-height:1.6; }
 .eop-assigned { display:flex; align-items:center; flex-wrap:wrap; gap:6px 12px; padding:7px 9px; margin-top:8px; background:var(--ep-soft); border-radius:6px; font-size:13px; overflow-wrap:anywhere; }
-.eop-source details { border-top:1px solid var(--ep-line); }
-.eop-source details:first-of-type { margin-top:8px; }
-.eop-source summary { cursor:pointer; padding:9px 0; }
+.eop-source > details + details,.eop-source-preview { border-top:1px solid var(--ep-line); margin-top:6px; }
+.eop-source summary { cursor:pointer; padding:6px 0; font-weight:600; }
 .eop-source summary small { margin-inline-start:8px; color:var(--ep-muted); }
 .eop-save { position:sticky; bottom:0; padding:8px 12px; z-index:2; box-shadow:0 -3px 14px rgb(15 30 50 / 6%); }
 .eop-save-actions { margin-inline-start:auto; }
 :global(.workspace-v2 .eop-page .eop-save) { padding-inline-end:64px; }
-.eop-original { display:block; max-width:100%; max-height:72vh; margin:auto; object-fit:contain; }
+.eop-original { display:block; max-width:100%; max-height:80vh; margin:auto; object-fit:contain; }
+.eop-reference-summary { display:flex; align-items:baseline; gap:8px; cursor:pointer; }
+.eop-reference-summary h2 { margin:0; font-size:15px; }
+.eop-reference-summary small { color:var(--ep-muted); font-size:12px; font-weight:400; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.eop-hover-zoom { position:fixed; z-index:70; pointer-events:none; padding:6px; border:1px solid var(--ep-line); border-radius:10px; background:var(--ep-surface); box-shadow:0 10px 30px rgb(15 30 50 / 18%); }
+.eop-hover-zoom img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; border-radius:6px; background:var(--ep-soft); }
+@media (hover:none) { .eop-hover-zoom { display:none; } }
 .eop-preview-actions { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:10px; overflow-wrap:anywhere; }
 .eop-preview-actions>div { display:flex; gap:6px; margin-inline-start:auto; }
 @media(max-width:760px) {
   .eop-page { padding:6px 4px; gap:8px; }
   .eop-workspace { gap:8px; }
-  .eop-meta { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .eop-reference-grid { grid-template-columns:minmax(0,1fr); gap:8px; }
+  .eop-meta-fields { grid-template-columns:repeat(2,minmax(0,1fr)); }
   .eop-name { grid-column:1/-1; }
   .eop-header { gap:6px; }
   .eop-header h1 { font-size:17px; }
   .eop-header-actions .n-button { padding-inline:8px; }
   .eop-step.has-images { grid-template-columns:minmax(0,1fr); }
-  .eop-step-media { border-left:0; border-top:1px solid var(--ep-line); }
+  .eop-step-media { border-inline-start:0; border-top:1px solid var(--ep-line); }
   .eop-list-head { display:none; }
   .eop-list-row { grid-template-columns:minmax(0,1fr) 16px; gap:4px 8px; }
   .eop-row-tags { display:flex; flex-wrap:wrap; gap:4px; grid-column:1; }

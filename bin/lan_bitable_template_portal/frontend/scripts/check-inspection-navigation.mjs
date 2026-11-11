@@ -8,6 +8,7 @@ import {chromium} from 'playwright';
 const frontend = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const legacy = process.env.INSPECTION_LEGACY_DIR || path.join(frontend, 'dist');
 const workspace = process.env.INSPECTION_WORKSPACE_DIR || path.join(legacy, 'assets/workspace-v2');
+const eopOnly = process.argv.includes('--eop-only');
 const contentTypes = {'.html':'text/html', '.js':'text/javascript', '.css':'text/css', '.svg':'image/svg+xml'};
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://127.0.0.1');
@@ -40,11 +41,12 @@ const detail = {...archive,version:'v1',draft_key:'fixture-history-user',can_edi
   profession:'电气',result:'正常',note:'',rows:[{id:'current',name:'电流',reference:10,value:'10',
     location:'一层',source:'',read_only:false}]}]};
 const scenario = {id:'recEop',revision:'v1',editable:true,
-  fields:{'场景名称':'隔离测试场景','专业':'电气','系统/设备':'变压器','原优先级':'高',
-    '处置正文（原文）':'测试正文','原通告模板':'','原演练场景':'','原EOP精炼（参考）':''},
-  options:{'专业':['电气'],'系统/设备':['变压器'],'原优先级':['高']},
-  steps:[{text:'检查设备',images:[]},{text:'记录结果',images:[]}],
-  images:[{token:'photo1',name:'测试图片',url:'/api/eop-scenarios/recEop/image/fixture'}]};
+  fields:{'场景名称':'隔离测试场景','场景编号':'EOP-001','专业':'电气','系统/设备':'变压器','原优先级':'P0-高',
+    '处置正文（原文）':'1、首轮核对\n（1）现场确认\n2、通报\n1、复核 2、记录','原通告模板':'测试模板','原演练场景':'','原EOP精炼（参考）':'测试精炼'},
+  options:{'专业':['电气'],'系统/设备':['变压器'],'原优先级':['P0-高']},
+  steps:[{text:'检查设备',images:['photo1']},{text:'记录结果',images:[]}],
+  images:[{token:'photo1',name:'已关联图片',url:'/api/eop-scenarios/recEop/image/fixture'},
+    {token:'photo2',name:'待分配图片',url:'/api/eop-scenarios/recEop/image/fixture'}]};
 
 function entry(route, legacyMode) {
   return legacyMode ? origin + route + '?frontend=legacy'
@@ -200,7 +202,7 @@ async function discardDialog(page,accept) {
 }
 
 try {
-  for (const legacyMode of process.env.INSPECTION_ONLY_LEGACY ? [true] : [false,true]) {
+  for (const legacyMode of eopOnly ? [] : process.env.INSPECTION_ONLY_LEGACY ? [true] : [false,true]) {
     for (const width of [402,440,1440]) {
       const page=await browser.newPage({viewport:{width,height:900}});
       if (process.env.INSPECTION_ONLY_LEGACY) page.setDefaultTimeout(6000);
@@ -243,18 +245,50 @@ try {
       console.log('巡检返回、历史编辑和提交保护通过',legacyMode?'旧版':'新版',width);
     }
   }
-  for (const [legacyMode,width] of [[false,1440],[false,402],[false,440],[true,402],[true,440]]) {
+  for (const legacyMode of [false,true]) for (const width of [1440,402,440]) {
     const page=await browser.newPage({viewport:{width,height:900}});
     await fixture(page);
     await page.goto(entry('/eop-scenarios',legacyMode));
     const root=page.locator('.eop-page');
     await root.getByRole('button',{name:/隔离测试场景/}).click();
+    const refined=root.getByRole('region',{name:'原EOP精炼（参考）'});
+    const template=root.getByRole('region',{name:'原通告模板'});
+    await refined.getByText('测试精炼').waitFor();
+    const left=await refined.boundingBox();
+    const right=await template.boundingBox();
+    if(width>760) assert(left.x<right.x && Math.abs(left.width-right.width)<2 && left.y===right.y);
+    else assert(left.y<right.y && Math.abs(left.width-right.width)<2);
+    assert.equal(await root.locator('.disposition-group').count(),2);
+    assert.equal(await root.locator('.disposition-group').last().locator('li').count(),2);
+    assert.match(await root.getByText('现场确认',{exact:true}).locator('..').getAttribute('style'),/--indent: 1/);
+    const gallery=root.locator('.eop-step-media').first();
+    assert.equal(await gallery.locator('figure').first().isVisible(),false);
+    await gallery.locator('summary').click();
+    await gallery.getByRole('button',{name:'预览 已关联图片'}).waitFor();
+    await gallery.locator('summary').click();
     if (width>760) {
       const work=await root.locator('.eop-work').boundingBox();
       const pool=await root.locator('.eop-pool').boundingBox();
       assert(pool.x>work.x+work.width-2,'desktop places unassigned photos beside the steps');
     }
     await root.getByRole('button',{name:'编辑',exact:true}).click();
+    const code=root.getByRole('textbox',{name:'场景编号'});
+    assert.equal(await code.isVisible(),false);
+    await root.locator('.eop-meta summary').click();
+    assert.equal(await code.inputValue(),'EOP-001');
+    await root.getByRole('textbox',{name:'场景名称'}).fill('隔离测试场景 · 已编辑');
+    await code.fill('EOP-002');
+    let submitted;
+    await page.route('**/api/eop-scenarios/recEop', async route => {
+      if (route.request().method()!=='PUT') return route.fallback();
+      submitted=route.request().postDataJSON();
+      await route.fulfill({json:{saved:true,record:{...scenario,revision:'v2',fields:submitted.fields,steps:submitted.steps}}});
+    });
+    await root.getByRole('button',{name:'保存记录'}).click();
+    await root.getByText('记录已保存到飞书。').waitFor();
+    assert.equal(submitted.fields['场景编号'],'EOP-002');
+    assert.equal(submitted.fields['处置正文（原文）'],scenario.fields['处置正文（原文）']);
+    assert.deepEqual(submitted.steps[0].images,['photo1']);
     await root.getByRole('textbox',{name:'第 1 步内容'}).fill('未保存的步骤');
     await root.getByRole('button',{name:'返回场景列表'}).click();
     await page.getByRole('dialog').getByText('有未保存的更改').waitFor();
@@ -263,9 +297,13 @@ try {
     await root.getByRole('button',{name:'返回场景列表'}).click();
     await page.getByRole('button',{name:'放弃更改'}).click();
     await root.getByRole('button',{name:/隔离测试场景/}).waitFor();
-    await root.getByRole('button',{name:'返回',exact:true}).click();
-    await page.waitForURL(url => legacyMode ? url.pathname==='/' && url.searchParams.get('entry')==='special'
-      : url.searchParams.get('__page')==='/' && url.searchParams.get('view')==='functions');
+    const back=root.getByRole('button',{name:'返回',exact:true});
+    if (legacyMode) {
+      await back.click();
+      await page.waitForURL(url => url.pathname==='/' && url.searchParams.get('entry')==='special');
+    } else {
+      assert.equal(await back.count(),0,'新版场景列表使用工作台导航');
+    }
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
     await page.close();
     console.log('EOP 返回、未保存保护和布局通过',legacyMode?'旧版':'新版',width);
@@ -276,19 +314,20 @@ try {
     let releaseList, listRequested;
     const pending=new Promise(resolve=>{releaseList=resolve;});
     const requested=new Promise(resolve=>{listRequested=resolve;});
-    await page.route('**/api/eop-scenarios',async route=>{
+    await page.route(url=>url.pathname==='/api/eop-scenarios',async route=>{
       listRequested();
       await pending;
       try { await route.abort(); } catch { /* Navigation can cancel the request first. */ }
     });
-    await page.goto(entry('/eop-scenarios',false));
+    await page.goto(entry('/eop-scenarios',true));
     await requested;
     await page.locator('.eop-page').getByRole('button',{name:'返回',exact:true}).click();
-    await page.waitForURL(url=>url.searchParams.get('__page')==='/' && url.searchParams.get('view')==='functions');
+    await page.waitForURL(url=>url.pathname==='/' && url.searchParams.get('entry')==='special');
     releaseList();
     await page.close();
     console.log('EOP 列表读取期间可返回');
   }
+  if (!eopOnly) {
   {
     const page=await browser.newPage({viewport:{width:402,height:900}});
     await fixture(page);
@@ -603,6 +642,7 @@ try {
     assert.equal(mock.historyBodies.length,1,'历史版本冲突时不能自动覆盖');
     await page.close();
     console.log('历史巡检多人修改冲突保护通过');
+  }
   }
   assert.deepEqual(errors,[]);
 } catch (error) {

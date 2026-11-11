@@ -1,0 +1,670 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>灯塔 · 数据中心运维管理平台 — 功能价值汇报</title>
+<style>
+  :root{
+    --ink:#0e2340; --ink-2:#27405f; --muted:#5b6b80; --line:#dbe4f0; --bg:#f9fafc;
+    --accent:#2563eb; --accent-soft:#e8f0fe; --gold:#b7791f; --gold-soft:#fdf6e7;
+    --green:#18805e; --green-soft:#e7f5ef; --violet:#6d4fc4; --violet-soft:#f0ecfb;
+    --card:#ffffff; --shadow:0 1px 2px rgb(15 35 64 / .05), 0 10px 30px rgb(15 35 64 / .07);
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:15px/1.75 "Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;}
+  .wrap{max-width:1180px;margin:0 auto;padding:0 22px}
+  /* ---------- hero ---------- */
+  .hero{background:linear-gradient(135deg,#0b1f3a 0%,#123b6d 55%,#1d4ed8 130%);color:#fff;padding:58px 0 46px;position:relative;overflow:hidden}
+  .hero::after{content:"";position:absolute;right:-140px;top:-140px;width:460px;height:460px;border-radius:50%;
+    background:radial-gradient(closest-side,rgb(96 165 250 / .35),transparent 70%)}
+  .hero .kicker{letter-spacing:.35em;font-size:12px;color:#9dc0f7;text-transform:uppercase}
+  .hero h1{margin:10px 0 6px;font-size:40px;line-height:1.25;letter-spacing:.02em}
+  .hero h1 small{display:block;font-size:16px;font-weight:400;color:#c7dbfa;margin-top:6px;letter-spacing:.06em}
+  .hero p.lede{max-width:820px;color:#dbe7fb;margin:14px 0 0;font-size:15.5px}
+  .stats{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin-top:30px}
+  .stat{background:rgb(255 255 255 / .08);border:1px solid rgb(255 255 255 / .16);border-radius:10px;padding:12px 10px;text-align:center;backdrop-filter:blur(2px)}
+  .stat b{display:block;font-size:24px;line-height:1.2;color:#fff}
+  .stat span{font-size:12px;color:#bcd3f5}
+  /* ---------- toc ---------- */
+  .toc{position:sticky;top:0;z-index:40;background:rgb(255 255 255 / .94);backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+  .toc .wrap{display:flex;gap:4px;overflow-x:auto;padding:8px 22px}
+  .toc a{flex:none;text-decoration:none;color:var(--ink-2);font-size:13.5px;padding:7px 13px;border-radius:999px;border:1px solid transparent}
+  .toc a:hover{background:var(--accent-soft);color:var(--accent);border-color:#c9dcfb}
+  /* ---------- sections ---------- */
+  section.block{padding:46px 0 8px}
+  .sec-head{display:flex;align-items:baseline;gap:14px;border-left:5px solid var(--accent);padding-left:14px;margin-bottom:6px}
+  .sec-head .no{font-size:13px;font-weight:700;color:var(--accent);letter-spacing:.18em}
+  .sec-head h2{margin:0;font-size:26px;letter-spacing:.02em}
+  .sec-head p{margin:0 0 0 auto;color:var(--muted);font-size:13px}
+  .sec-intro{color:var(--muted);margin:8px 0 22px;max-width:900px}
+  /* ---------- module cards ---------- */
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);overflow:hidden;display:flex;flex-direction:column}
+  .thumb{position:relative;background:#eef3fa;border-bottom:1px solid var(--line);cursor:zoom-in;display:block;padding:0;border:0;width:100%}
+  .thumb svg{display:block;width:100%;height:auto}
+  .thumb::after{content:"点击放大查看";position:absolute;right:10px;bottom:10px;background:rgb(14 35 64 / .78);color:#fff;
+    font-size:12px;padding:4px 10px;border-radius:999px;opacity:0;transform:translateY(4px);transition:.18s}
+  .thumb:hover::after,.thumb:focus-visible::after{opacity:1;transform:none}
+  .thumb:focus-visible{outline:3px solid var(--accent);outline-offset:-3px}
+  .card .body{padding:16px 18px 18px;display:flex;flex-direction:column;gap:10px;flex:1}
+  .card h3{margin:0;font-size:17.5px;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+  .card h3 .pill{font-size:11px;font-weight:600;color:var(--accent);background:var(--accent-soft);border:1px solid #cfe0fc;padding:1px 8px;border-radius:999px}
+  .card .tag{margin:-4px 0 0;color:var(--ink-2);font-size:13.5px}
+  .vlist{margin:0;padding:0;list-style:none;display:grid;gap:7px;font-size:13.5px;color:var(--ink-2)}
+  .vlist li{display:flex;gap:8px;align-items:flex-start}
+  .vlist .k{flex:none;font-size:11.5px;font-weight:700;line-height:1.9;padding:0 7px;border-radius:5px}
+  .k.use{color:var(--accent);background:var(--accent-soft)}
+  .k.fix{color:var(--gold);background:var(--gold-soft)}
+  .k.val{color:var(--green);background:var(--green-soft)}
+  /* ---------- overview ---------- */
+  .ov-grid{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);gap:18px;align-items:stretch}
+  .ov-card{background:var(--card);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:18px}
+  .ov-card h3{margin:0 0 10px;font-size:16px}
+  .chips{display:flex;flex-wrap:wrap;gap:8px}
+  .chips span{font-size:12.5px;color:var(--ink-2);background:#f1f5fb;border:1px solid var(--line);border-radius:999px;padding:4px 11px}
+  .points{margin:12px 0 0;padding:0;list-style:none;display:grid;gap:9px;font-size:13.5px;color:var(--ink-2)}
+  .points b{color:var(--ink)}
+  /* ---------- flow diagram ---------- */
+  .flow-card{margin-top:18px}
+  .flow-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}
+  .flow-head h3{margin:0;font-size:16px}
+  .flow-head .tip{color:var(--muted);font-size:12.5px}
+  .flow-tools{margin-left:auto;display:flex;gap:6px}
+  .flow-tools button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 12px;color:var(--ink-2)}
+  .flow-tools button:hover{border-color:var(--accent);color:var(--accent)}
+  .flow-view{overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#f6f9fd;cursor:grab;touch-action:none}
+  .flow-view.drag{cursor:grabbing}
+  .flow-view svg{width:100%;height:auto;display:block;user-select:none;min-height:620px}
+  .flow-legend{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px;font-size:12.5px;color:var(--ink-2)}
+  .flow-legend i{display:inline-block;width:26px;height:0;border-top:2.5px solid;vertical-align:middle;margin-right:6px}
+  .flow-notes{margin:12px 0 0;padding-left:20px;display:grid;gap:6px;font-size:13.5px;color:var(--ink-2)}
+  .flow-notes b{color:var(--ink)}
+  /* ---------- summary ---------- */
+  .pillars{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:18px}
+  .pillar{background:var(--card);border:1px solid var(--line);border-top:4px solid var(--accent);border-radius:12px;box-shadow:var(--shadow);padding:16px 18px}
+  .pillar:nth-child(2){border-top-color:var(--green)} .pillar:nth-child(3){border-top-color:var(--gold)}
+  .pillar:nth-child(4){border-top-color:var(--violet)} .pillar:nth-child(5){border-top-color:#0e7490} .pillar:nth-child(6){border-top-color:#b4239a}
+  .pillar h3{margin:0 0 6px;font-size:16px}
+  .pillar p{margin:0;font-size:13.5px;color:var(--ink-2)}
+  .closing{margin:26px 0 0;background:linear-gradient(120deg,#0b1f3a,#1d4ed8);color:#eaf1fd;border-radius:14px;padding:24px 26px;font-size:15px}
+  .closing b{color:#fff}
+  footer{color:var(--muted);font-size:12.5px;padding:30px 0 40px;text-align:center}
+  /* ---------- lightbox ---------- */
+  .lb{position:fixed;inset:0;z-index:90;background:rgb(8 18 34 / .78);backdrop-filter:blur(3px);display:none;align-items:center;justify-content:center;padding:4vh 4vw}
+  .lb.on{display:flex}
+  .lb-box{background:#fff;border-radius:14px;max-width:min(1060px,94vw);width:100%;overflow:hidden;box-shadow:0 30px 80px rgb(0 0 0 / .45)}
+  .lb-art{background:#eef3fa;border-bottom:1px solid var(--line)}
+  .thumb .shot{width:100%;aspect-ratio:16/9;object-fit:cover;object-position:top left;display:block;background:#e8eef7}
+.thumb .art-tag,.ver-bar .art-tag{position:absolute;right:8px;top:8px;background:rgb(14 35 64 / .72);color:#fff;font-size:11px;padding:2px 8px;border-radius:999px}
+.thumb{position:relative}
+.ver-chips{position:absolute;left:8px;top:8px;display:flex;gap:4px}
+.ver{font-size:11px;padding:2px 9px;border-radius:999px;border:1px solid rgb(255 255 255 / .6);background:rgb(14 35 64 / .55);color:#fff;cursor:pointer}
+.ver.on{background:var(--accent);border-color:var(--accent)}
+.ver-bar{display:flex;gap:8px;justify-content:center;padding:8px 0 2px}
+.ver-bar .ver{position:static;background:#eef3fa;color:var(--ink-2);border-color:var(--line)}
+.ver-bar .ver.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.shot.big{width:100%;max-height:66vh;object-fit:contain;background:#0b1626}
+.lb-art svg{display:block;width:100%;height:auto;max-height:62vh}
+  .lb-cap{padding:14px 18px 16px}
+  .lb-cap h3{margin:0 0 4px;font-size:17px}
+  .lb-cap p{margin:0;font-size:13.5px;color:var(--ink-2)}
+  .lb-bar{display:flex;align-items:center;gap:8px;padding:10px 14px;border-top:1px solid var(--line);background:#fbfcfe}
+  .lb-bar .idx{margin-inline-start:auto;font-size:12.5px;color:var(--muted)}
+  .lb button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 13px;color:var(--ink-2)}
+  .lb button:hover{border-color:var(--accent);color:var(--accent)}
+  @media(max-width:900px){
+    .stats{grid-template-columns:repeat(4,1fr)} .grid,.ov-grid,.pillars{grid-template-columns:minmax(0,1fr)}
+    .hero h1{font-size:30px} .sec-head{flex-wrap:wrap} .sec-head p{margin:0}
+  }
+  @media print{ .toc,.lb{display:none!important} .card{break-inside:avoid} }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="kicker">南通数据中心 · 运维数字化平台</div>
+    <h1>灯塔 · 数据中心运维管理平台<small>灯塔 —— 桌面 · 网页 · 飞书 · 智能助手四端一体的运维全流程管理系统</small></h1>
+    <p class="lede">灯塔面向数据中心一线运维场景，把事件响应、通告办理、巡检检查、设备与能耗管理、人员训练与知识沉淀整合进统一平台：以飞书多维表为协作与数据中枢，以桌面端保障事件秒级响应，以网页工作台承载日常业务，以本地智能助手提供受控的智能办理能力。</p>
+    <div class="stats">
+      <div class="stat"><b>30+</b><span>业务功能模块</span></div>
+      <div class="stat"><b>7 类</b><span>通告全生命周期</span></div>
+      <div class="stat"><b>37</b><span>飞书多维表绑定</span></div>
+      <div class="stat"><b>139</b><span>本地数据表</span></div>
+      <div class="stat"><b>52</b><span>智能助手业务工具</span></div>
+      <div class="stat"><b>651</b><span>服务接口声明</span></div>
+      <div class="stat"><b>268</b><span>回归测试文件</span></div>
+    </div>
+  </div>
+</header>
+
+<nav class="toc" aria-label="汇报目录">
+  <div class="wrap">
+    <a href="#overview">项目概览</a>
+    <a href="#s1">事件响应与通告中枢</a>
+    <a href="#s2">日常运行与安全管理</a>
+    <a href="#s3">设备资产与能耗管理</a>
+    <a href="#s4">组织人员与训练</a>
+    <a href="#s5">智能能力与知识资产</a>
+    <a href="#s6">平台底座与可靠交付</a>
+    <a href="#summary">整体价值总结</a>
+  </div>
+</nav>
+
+<main class="wrap">
+
+  <section class="block" id="overview">
+    <div class="sec-head"><span class="no">概览</span><h2>项目概览</h2><p>定位 · 架构 · 技术组成</p></div>
+    <p class="sec-intro">灯塔不是单点工具集合，而是一条覆盖"感知 → 办理 → 留痕 → 归档 → 复盘"的运维业务主线：桌面端感知剪贴板与事件，网页端承载六类通告与三十余项业务办理，飞书侧完成协作通知与数据归档，智能助手在受控权限内提供查询与办理辅助，全链路以幂等、回执与审计保障可追溯。</p>
+    <div class="ov-grid">
+      <div class="ov-card">
+        <h3>系统架构一览</h3>
+        <div id="archArt" class="lb-art" style="border:1px solid var(--line);border-radius:10px;overflow:hidden"></div>
+      </div>
+      <div class="ov-card">
+        <h3>技术组成与部署形态</h3>
+        <div class="chips">
+          <span>桌面客户端入口</span><span>业务后端服务</span><span>双版本网页前端</span><span>本地状态数据库持久化</span>
+          <span>飞书多维表 / 消息 / 文档</span><span>本地智能运行时</span><span>本地向量知识库</span>
+          <span>公网隔离入口</span><span>飞书分片更新分发</span>
+        </div>
+        <ul class="points">
+          <li><b>一套数据主线：</b>业务状态本地持久化，飞书侧作为协作与归档镜像，双写均有回执与版本核验。</li>
+          <li><b>两种使用形态：</b>值班桌面端秒级响应事件；电脑 / 手机浏览器办理日常业务，个人布局按账号与设备保存。</li>
+          <li><b>三层安全边界：</b>账号权限（岗位×级别×楼栋×模块）、公网隔离入口白名单、智能助手业务写入必须经人工确认。</li>
+          <li><b>一条交付链路：</b>构建 → 分片上传飞书 → 回读哈希校验 → 发布清单 → 客户端增量更新，全程可追溯。</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="ov-card flow-card">
+      <div class="flow-head">
+        <h3>模块关系与数据流向图</h3>
+        <span class="tip">滚轮缩放 · 按住拖动查看细节 · 箭头方向即数据流通方向</span>
+        <div class="flow-tools">
+          <button type="button" id="fzIn" aria-label="放大">放大 +</button>
+          <button type="button" id="fzOut" aria-label="缩小">缩小 −</button>
+          <button type="button" id="fzReset">复位</button>
+        </div>
+      </div>
+      <div class="flow-view" id="flowView" aria-label="模块关系与数据流向图，可缩放拖动"></div>
+      <div class="flow-legend">
+        <span><i style="border-color:#2563eb"></i>调用 / 请求</span>
+        <span><i style="border-color:#b7791f"></i>写入 / 归档</span>
+        <span><i style="border-color:#0e7490;border-top-style:dashed"></i>探针 / 读取</span>
+        <span><i style="border-color:#6d4fc4"></i>消息推送</span>
+        <span><i style="border-color:#64748b"></i>更新分发</span>
+      </div>
+      <ol class="flow-notes">
+        <li><b>通告办理链：</b>输入＝剪贴板 / 网页表单 / 助手草拟的通告文本 → 处理＝解析与身份归一 → 模块·楼栋·对象权限校验 → 任务队列幂等冻结 → 飞书目标表写入与回执核验 → 输出＝目标记录＋群消息＋源计划状态回写＋每日汇总投影。</li>
+        <li><b>巡检数据链：</b>输入＝全景平台测点配置与监控数值批次（飞书源表） → 处理＝配置指纹 / 批次标记探针 → 单元格映射计算 → 人工核对与轮次冻结 → 输出＝四轮巡检表＋飞书归档＋可追溯历史快照。</li>
+        <li><b>智能办理链：</b>输入＝会话指令与附件 → 处理＝助手工具准备业务计划 → 人工确认 → 门户原权限链执行 → 输出＝业务写入结果＋会话归档＋操作审计。</li>
+        <li><b>版本交付链：</b>输入＝代码构建产物 → 处理＝分片＋哈希校验 → 飞书分发表上传与回读拼接校验 → 输出＝发布清单 → 客户端增量更新（用户数据全保留）。</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="block" id="s1">
+    <div class="sec-head"><span class="no">01</span><h2>事件响应与通告中枢</h2><p>值班一线的核心生产力</p></div>
+    <p class="sec-intro">值班场景要求"快、准、留痕"。本组功能把通告从抄写、发送、更新到结束的全过程标准化，并在事件高峰时自动维护响应秩序。</p>
+    <div class="grid" id="grid-s1"></div>
+  </section>
+
+  <section class="block" id="s2">
+    <div class="sec-head"><span class="no">02</span><h2>日常运行与安全管理</h2><p>让例行业务自动流转、可核查</p></div>
+    <p class="sec-intro">巡检、检查、重保、排查、演练等例行业务过去依赖纸质与多人汇总。本组功能将其转为结构化流程：自动取数、按班次调度、异常闭环、归档可追溯。</p>
+    <div class="grid" id="grid-s2"></div>
+  </section>
+
+  <section class="block" id="s3">
+    <div class="sec-head"><span class="no">03</span><h2>设备资产与能耗管理</h2><p>千台机柜与能耗数据的透明化</p></div>
+    <p class="sec-intro">设备状态与能耗数据是运维决策的基础。本组功能建立机柜、维修、水耗三条数据主线，让资产状态一眼可见、操作批量可控、异常提前暴露。</p>
+    <div class="grid" id="grid-s3"></div>
+  </section>
+
+  <section class="block" id="s4">
+    <div class="sec-head"><span class="no">04</span><h2>组织人员与训练</h2><p>权限清晰、交接顺畅、训练有据</p></div>
+    <p class="sec-intro">运维质量最终取决于人。本组功能把权限、签名、交接、训练四类组织活动数字化：责任到人、过程留痕、能力可量化。</p>
+    <div class="grid" id="grid-s4"></div>
+  </section>
+
+  <section class="block" id="s5">
+    <div class="sec-head"><span class="no">05</span><h2>智能能力与知识资产</h2><p>在安全边界内释放智能生产力</p></div>
+    <p class="sec-intro">智能助手的价值在于减少重复劳动，而非绕过管理。本组功能让助手在既有权限与确认链内查询与办理业务，并把公司知识沉淀为本地可检索资产。</p>
+    <div class="grid" id="grid-s5"></div>
+  </section>
+
+  <section class="block" id="s6">
+    <div class="sec-head"><span class="no">06</span><h2>平台底座与可靠交付</h2><p>体验统一、访问安全、更新可控</p></div>
+    <p class="sec-intro">平台底座决定业务功能能否稳定送达一线。本组功能覆盖多端体验、公网安全访问与版本分发三条支撑链路。</p>
+    <div class="grid" id="grid-s6"></div>
+  </section>
+
+  <section class="block" id="summary">
+    <div class="sec-head"><span class="no">总结</span><h2>项目整体价值总结</h2><p>六维价值 · 一条主线</p></div>
+    <div class="pillars">
+      <div class="pillar"><h3>效率价值</h3><p>通告、巡检、晨会、水耗、学习题单等高频业务由人工汇总转为自动流转，值班与管理人员的重复录入与跨表核对大幅减少，业务办理以分钟计而非小时计。</p></div>
+      <div class="pillar"><h3>合规价值</h3><p>权限四维投影、电子签名一次性链接、业务操作审计、删除审计与冻结归档共同构成证据链，满足内控与审计对"谁在何时做了什么"的全部追问。</p></div>
+      <div class="pillar"><h3>协同价值</h3><p>桌面、网页、飞书、钉钉四端打通：一次办理，多端同步；群通知、卡片交互、表单补录与回执核验让跨班组协作不再依赖口头与截图。</p></div>
+      <div class="pillar"><h3>智能价值</h3><p>智能助手与本地知识库在权限与人工确认边界内提供查询、草拟与办理辅助，把专家经验转化为可复用的技能与检索资产，降低新人上手成本。</p></div>
+      <div class="pillar"><h3>可靠价值</h3><p>幂等键、远端回执、不确定结果核验、事件优先排队、公网健康探针与自动降级，使系统在网络波动与并发高峰下仍保持"不重、不丢、不错"。</p></div>
+      <div class="pillar"><h3>资产价值</h3><p>设备台账、学习画像、知识库、演练与应急场景库持续沉淀为组织资产：历史可追溯、能力可量化、经验可检索，支撑管理决策与持续改进。</p></div>
+    </div>
+    <div class="closing">
+      <b>总结：</b>灯塔以一条"感知—办理—留痕—归档—复盘"的业务主线，把数据中心运维从分散的工具与表格整合为统一平台。它对内的价值是<b>让一线更快、让管理更清、让审计更实</b>；对外的价值是<b>以数字化与智能化能力保障数据中心运行的稳定与合规</b>。平台已具备完整的交付与更新链路、充分的回归测试覆盖和清晰的安全边界，可作为运维数字化建设的长期底座持续演进。
+    </div>
+  </section>
+
+  <footer>灯塔 · 数据中心运维管理平台 功能价值汇报 · 本页为单文件离线演示，效果图为界面示意缩略图，点击可放大查看</footer>
+</main>
+
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="效果图放大查看">
+  <div class="lb-box">
+    <div class="lb-art" id="lbArt"></div>
+    <div class="lb-cap"><h3 id="lbTitle"></h3><p id="lbText"></p></div>
+    <div class="lb-bar">
+      <button type="button" id="lbPrev">上一张</button>
+      <button type="button" id="lbNext">下一张</button>
+      <button type="button" id="lbClose">关闭 (Esc)</button>
+      <span class="idx" id="lbIdx"></span>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============ SVG 效果图生成器（界面示意） ============ */
+const INK='#0e2340', MUT='#9db1c9', LINE='#d7e1ee', SOFT='#eef3fa';
+function frame(title, accent, inner){
+  return `<svg viewBox="0 0 640 400" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${title} 界面效果图">
+  <rect width="640" height="400" fill="${SOFT}"/>
+  <rect x="14" y="14" width="612" height="372" rx="12" fill="#fff" stroke="${LINE}"/>
+  <rect x="14" y="14" width="612" height="34" rx="12" fill="#f4f7fc"/>
+  <rect x="14" y="36" width="612" height="12" fill="#f4f7fc"/>
+  <circle cx="34" cy="31" r="4.5" fill="#f28b82"/><circle cx="50" cy="31" r="4.5" fill="#fbd28b"/><circle cx="66" cy="31" r="4.5" fill="#9adeb4"/>
+  <rect x="86" y="24" width="150" height="14" rx="7" fill="${accent}" opacity=".85"/>
+  <rect x="520" y="24" width="90" height="14" rx="7" fill="${LINE}"/>
+  ${inner}</svg>`;
+}
+const bar=(x,y,w,h,c,r=4,o=1)=>`<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${r}" fill="${c}" opacity="${o}"/>`;
+const txt=(x,y,s,c=INK,size=13,w=600)=>`<text x="${x}" y="${y}" fill="${c}" font-size="${size}" font-weight="${w}" font-family="Microsoft YaHei,sans-serif">${s}</text`;
+function kindList(a){ let rows=''; for(let i=0;i<5;i++){const y=78+i*58; const st=i%3===0?a:i%3===1?'#e8a33d':'#9db1c9';
+  rows+=bar(150,y,34,34,'#e3ebf6',8)+bar(196,y+6,180,10,MUT)+bar(196,y+22,120,8,'#c6d3e4')+`<rect x="520" y="${y+4}" width="70" height="24" rx="12" fill="${st}" opacity=".18"/><rect x="532" y="${y+13}" width="46" height="6" rx="3" fill="${st}"/>`;}
+  return frame(a.t,a.a, bar(30,62,104,308,'#f4f7fc')+bar(44,80,76,10,a.a)+bar(44,104,76,8,MUT)+bar(44,124,76,8,MUT)+bar(44,144,76,8,MUT)+bar(150,62,460,1,'')+rows );}
+function kindBoard(a){ let cols=''; for(let c=0;c<3;c++){const x=40+c*196; cols+=bar(x,66,180,16,c===0?a.a:'#c9d6e8',8)+bar(x,66+0,0,0,'#fff');
+  for(let r=0;r<(c===1?3:2);r++){const y=94+r*88; cols+=`<rect x="${x}" y="${y}" width="180" height="76" rx="9" fill="#fff" stroke="${LINE}"/>`+bar(x+12,y+12,120,9,MUT)+bar(x+12,y+30,150,7,'#c6d3e4')+bar(x+12,y+48,70,14,c===2?'#e7f5ef':'#e8f0fe',7);} }
+  return frame(a.t,a.a,cols);}
+function kindChart(a){ let bars=''; const hs=[46,72,58,96,80,120,64]; for(let i=0;i<7;i++){bars+=bar(90+i*66,250-hs[i],38,hs[i],i===5?a.a:'#bcd3f0',5);}
+  return frame(a.t,a.a, bar(70,60,4,210,LINE)+bar(70,268,500,2,LINE)+bars+
+   `<polyline points="90,150 156,132 222,158 288,110 354,128 420,86 486,140" fill="none" stroke="${a.a}" stroke-width="3"/>`+
+   `<circle cx="420" cy="86" r="5" fill="${a.a}"/>`+bar(470,64,120,10,MUT)+bar(470,82,90,8,'#c6d3e4'));}
+function kindSheet(a){ let g=''; for(let r=0;r<6;r++){for(let c=0;c<8;c++){const x=40+c*71,y=66+r*48; const fill=r===0?'#f0f5fc':(r===3&&c>1&&c<5?'#e8f0fe':'#fff');
+  g+=`<rect x="${x}" y="${y}" width="71" height="48" fill="${fill}" stroke="${LINE}"/>`; if(r===3&&c>1&&c<5) g+=`<rect x="${x+14}" y="${y+20}" width="42" height="8" rx="4" fill="${a.a}"/>`; else if(r>0) g+=bar(x+10,y+20,44,8,'#c6d3e4');}}
+  return frame(a.t,a.a,g+bar(40,356,180,10,MUT));}
+function kindChat(a){ return frame(a.t,a.a,
+   `<rect x="40" y="66" width="330" height="52" rx="10" fill="#f1f5fb"/>`+bar(56,82,220,9,MUT)+bar(56,98,160,8,'#c6d3e4')+
+   `<rect x="270" y="130" width="300" height="66" rx="10" fill="${a.a}" opacity=".14"/>`+bar(286,146,240,9,a.a,.75)+bar(286,164,190,8,a.a,.45)+
+   `<rect x="40" y="208" width="360" height="52" rx="10" fill="#f1f5fb"/>`+bar(56,224,260,9,MUT)+bar(56,240,140,8,'#c6d3e4')+
+   `<rect x="40" y="276" width="530" height="40" rx="20" fill="#fff" stroke="${LINE}"/>`+bar(58,292,180,9,'#c6d3e4')+`<circle cx="546" cy="296" r="14" fill="${a.a}"/>`+
+   bar(430,66,140,26,'#e8f0fe',13)+bar(444,75,60,8,a.a,.7)+bar(510,75,46,8,MUT));}
+function kindFlow(a){ const n=(x,y,w,c)=>`<rect x="${x}" y="${y}" width="${w}" height="46" rx="9" fill="${c}" stroke="${LINE}"/>`;
+  const ar=(x1,y1,x2,y2)=>`<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${a.a}" stroke-width="2.5" marker-end="url(#arw)"/>`;
+  return frame(a.t,a.a,`<defs><marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${a.a}"/></marker></defs>`+
+   n(40,80,140,'#e8f0fe')+ar(180,103,240,103)+n(240,80,150,'#fff')+ar(390,103,450,103)+n(450,80,140,'#e7f5ef')+
+   n(240,180,150,'#fdf6e7')+ar(315,146,315,180)+ar(390,203,450,203)+n(450,180,140,'#fff')+
+   n(40,280,140,'#fff')+ar(180,303,240,303)+n(240,280,150,'#e8f0fe')+ar(390,303,450,303)+n(450,280,140,'#f0ecfb')+
+   bar(60,96,100,10,MUT)+bar(260,96,110,10,MUT)+bar(470,96,100,10,MUT)+bar(260,196,110,10,MUT)+bar(470,196,100,10,MUT)+bar(60,296,100,10,MUT)+bar(260,296,110,10,MUT)+bar(470,296,100,10,MUT));}
+function kindGrid(a){ let dots=''; for(let r=0;r<5;r++)for(let c=0;c<10;c++){const on=(r*10+c)%7<4; dots+=`<circle cx="${120+c*34}" cy="${110+r*40}" r="7" fill="${on?a.a:'#c9d6e8'}" opacity="${on?.85:1}"/>`;}
+  return frame(a.t,a.a,`<rect x="60" y="70" width="420" height="250" rx="10" fill="#fff" stroke="${LINE}"/>`+dots+
+   bar(500,80,90,60,'#e8f0fe',8)+bar(512,96,66,9,a.a,.7)+bar(500,152,90,44,'#e7f5ef',8)+bar(512,166,66,9,'#18805e',.7)+bar(500,208,90,44,'#fdf6e7',8)+bar(512,222,66,9,'#b7791f',.7)+bar(60,336,220,10,MUT));}
+function kindForm(a){ return frame(a.t,a.a,
+   bar(40,66,120,10,MUT)+`<rect x="40" y="84" width="360" height="34" rx="7" fill="#fff" stroke="${LINE}"/>`+bar(54,97,200,9,'#c6d3e4')+
+   bar(420,66,90,10,MUT)+`<rect x="420" y="84" width="180" height="34" rx="7" fill="#fff" stroke="${LINE}"/>`+bar(434,97,110,9,'#c6d3e4')+
+   bar(40,136,120,10,MUT)+`<rect x="40" y="154" width="560" height="70" rx="7" fill="#fff" stroke="${LINE}"/>`+bar(54,170,420,9,'#c6d3e4')+bar(54,190,360,9,'#c6d3e4')+
+   `<path d="M60 300 C 110 250, 150 330, 200 272 S 300 250, 330 300" fill="none" stroke="${a.a}" stroke-width="4" stroke-linecap="round"/>`+
+   `<circle cx="470" cy="290" r="42" fill="none" stroke="#c0392b" stroke-width="3" opacity=".7"/>`+txt(446,296,'已签章','#c0392b',13)+
+   bar(40,344,240,10,MUT));}
+function kindDonut(a){ return frame(a.t,a.a,
+   `<circle cx="170" cy="190" r="86" fill="none" stroke="#e3ebf6" stroke-width="30"/>
+    <circle cx="170" cy="190" r="86" fill="none" stroke="${a.a}" stroke-width="30" stroke-dasharray="330 540" transform="rotate(-90 170 190)"/>
+    <circle cx="170" cy="190" r="86" fill="none" stroke="#57b08a" stroke-width="30" stroke-dasharray="120 540" stroke-dashoffset="-330" transform="rotate(-90 170 190)"/>`+
+   bar(150,178,44,14,INK,4)+bar(330,110,14,14,a.a,4)+bar(354,112,150,10,MUT)+bar(330,146,14,14,'#57b08a',4)+bar(354,148,130,10,MUT)+bar(330,182,14,14,'#e3ebf6',4)+bar(354,184,110,10,MUT)+
+   bar(330,236,240,1,'#e3ebf6')+bar(330,254,220,9,'#c6d3e4')+bar(330,272,180,9,'#c6d3e4'));}
+function kindMatrix(a){ let rows=''; for(let i=0;i<5;i++){const y=80+i*52; const ok=i!==2;
+   rows+=bar(60,y,180,26,'#f4f7fc',6)+bar(72,y+9,120,8,MUT)+bar(270,y,180,26,'#f4f7fc',6)+bar(282,y+9,120,8,MUT)+
+   `<line x1="240" y1="${y+13}" x2="270" y2="${y+13}" stroke="${ok?a.a:'#e8a33d'}" stroke-width="2.5"/>`+
+   `<circle cx="486" cy="${y+13}" r="11" fill="${ok?'#e7f5ef':'#fdf1ec'}"/><path d="${ok?`M481 ${y+13} l4 4 l8 -8`:`M482 ${y+9} l8 8 M490 ${y+9} l-8 8`}" stroke="${ok?'#18805e':'#c0562b'}" stroke-width="2.5" fill="none"/>`;}
+  return frame(a.t,a.a,rows+bar(60,348,260,10,MUT));}
+function kindCheck(a){ let rows=''; for(let i=0;i<5;i++){const y=72+i*56; const st=i===2?'#e8a33d':i===4?'#c0392b':'#18805e';
+   rows+=`<rect x="46" y="${y}" width="420" height="44" rx="9" fill="#fff" stroke="${LINE}"/>`+`<circle cx="72" cy="${y+22}" r="9" fill="none" stroke="${st}" stroke-width="2.5"/>`+
+   (i!==0?`<path d="M67 ${y+22} l4 4 l8 -9" stroke="${st}" stroke-width="2.5" fill="none"/>`:'')+
+   bar(94,y+12,190,9,MUT)+bar(94,y+27,120,7,'#c6d3e4')+`<rect x="486" y="${y+6}" width="108" height="32" rx="7" fill="${i>=2?'#fdf6e7':'#f1f5fb'}"/>`+bar(498,y+18,60,8,i>=2?'#b7791f':MUT,.8);}
+  return frame(a.t,a.a,rows);}
+const ART={list:kindList,board:kindBoard,chart:kindChart,sheet:kindSheet,chat:kindChat,flow:kindFlow,grid:kindGrid,form:kindForm,donut:kindDonut,matrix:kindMatrix,check:kindCheck};
+
+/* ============ 模块数据（价值导向） ============ */
+const MODULES=[
+/* 01 事件响应与通告中枢 */
+{s:'s1',art:'list',a:'#2563eb',t:'桌面事件感知',name:'桌面剪贴板事件感知',pill:'值班桌面端',tag:'常驻桌面的事件雷达：复制即识别、倒计时提醒、关键节点语音播报。',
+ use:'自动识别剪贴板中的事件/通告文本并建档，按等级路由到对应群组，事件全过程倒计时与语音提醒。',
+ fix:'解决事件靠人工抄录转发、响应时点无记录、高峰时遗漏播报的问题。',
+ val:'事件登记零延迟、响应时效全程可量化，值班注意力集中在处置而非转录。'},
+{s:'s1',art:'form',a:'#1d4ed8',t:'通告办理',img:{v2:'img/notice-v2.jpg','v1':'img/notice-v1.jpg'},name:'七类通告全生命周期办理',pill:'核心业务',tag:'维保 / 变更 / 检修 / 上下电 / 轮巡 / 调整 / 事件，开始—更新—结束一站式办理。',
+ use:'统一表单与字段契约，自动生成规范化通告文本，写入飞书目标表并推送群组机器人，源计划状态同步回写。',
+ fix:'解决通告格式不统一、多表重复登记、漏发错发与状态不同步的问题。',
+ val:'通告输出标准化、一次办理多端同步，沟通返工与合规风险显著下降。'},
+{s:'s1',art:'flow',a:'#0e7490',t:'事件优先',name:'事件优先排队机制',pill:'响应秩序',tag:'有未结束事件时，非事件操作自动排队，事件闭环后自动恢复。',
+ use:'全局阻塞判定与持久化等待队列：排队任务保留正文、附件与身份，事件结束或删除后自动继续原操作。',
+ fix:'解决事件高峰期间并发办理互相打断、关键事件响应被稀释的问题。',
+ val:'保障关键时刻响应秩序，降低误操作与漏处置风险，恢复过程无需人工重排。'},
+{s:'s1',art:'check',a:'#6d4fc4',t:'工单与维护单',img:{v2:'img/mop-v2.jpg','v1':'img/mop-v1.jpg'},name:'步骤工单与维护单',pill:'作业合规',tag:'模板化步骤展开、照片留证、签名审核；维护单电子表格自动填写与签名归档。',
+ use:'步骤云目录按版本展开工单步骤，执行人/审核人分离、令牌化公开链接；维护单保留合并单元格与公式定位填写并归档签名版。',
+ fix:'解决现场作业无标准约束、纸质记录难追溯、维护单填写格式易错的问题。',
+ val:'作业过程合规可控、证据链完整可审计，模板修改不影响历史工单。'},
+/* 02 日常运行与安全管理 */
+{s:'s2',art:'chart',a:'#2563eb',t:'事件分析',img:{v2:'img/events-v2.jpg','v1':'img/events-v1.jpg'},name:'事件管理与时效分析',pill:'管理视图',tag:'事件月度快照与周/月/自定义区间统计，响应时效达标自动核算。',
+ use:'按事件发生时间统一口径统计，超时与待发送自动标红，详情页与卡片数据同源。',
+ fix:'解决事件数据散落多表、时效考核依赖人工汇总且口径不一的问题。',
+ val:'响应时效量化到分钟，复盘与考核有统一数据依据。'},
+{s:'s2',art:'sheet',a:'#18805e',t:'每日任务',img:{v2:'img/daily-v2.jpg','v1':'img/daily-v1.jpg'},name:'每日任务与晨会生成',pill:'例行业务',tag:'楼栋每日任务自动汇总，晨会表一键生成并推送。',
+ use:'聚合通告、维修、检查等当日事项，按楼栋生成每日汇总卡片与晨会电子表格模板。',
+ fix:'解决晨会准备依赖多人跨表整理、信息口径不一致的问题。',
+ val:'晨会准备从半小时级压缩到分钟级，全班信息同一起点。'},
+{s:'s2',art:'sheet',a:'#0e7490',t:'日常巡检',img:{v2:'img/inspection-v2.jpg','v1':'img/inspection-v1.jpg'},name:'楼宇日常巡检',pill:'自动取数',tag:'测点配置驱动自动取数，四轮巡检表生成、冻结归档与历史追溯。',
+ use:'按测点配置将监控读数自动填入巡检表对应单元格，班次轮次调度、人工核对留痕、归档快照冻结。',
+ fix:'解决巡检抄表易错、表格版本混乱、历史数据无法追溯的问题。',
+ val:'巡检数据自动流转、归档合规，跨班次追溯一键可达。'},
+{s:'s2',art:'check',a:'#b7791f',t:'班前检查',img:{v2:'img/preshift-v2.jpg'},name:'班前检查',pill:'执行核查',tag:'检查项按频率排班调度，逐项异常备注与照片留证，云端归档。',
+ use:'楼栋＋班次粒度完成判定，任一有权人员完成即停止提醒；异常项独立备注并附照片证据。',
+ fix:'解决班前检查执行不可核查、记录散落个人、补做无依据的问题。',
+ val:'检查执行率可视化、异常闭环可追溯，交接班质量有保障。'},
+{s:'s2',art:'flow',a:'#c0392b',t:'重保',img:{v2:'img/guard-v2.jpg','v1':'img/guard-v1.jpg'},name:'重保管理与天气触发',pill:'安全保障',tag:'重保模板分楼派发、人员签名确认，天气预警自动触发戒备任务。',
+ use:'模板化戒备检查表按楼栋生成任务并跟踪签名；气象预警按有效期与级别升级规则自动发布任务。',
+ fix:'解决重保组织靠临时拉群、天气响应滞后、执行状态不可见的问题。',
+ val:'重保组织标准化、预警响应前置化，关键时期保障能力可核查。'},
+{s:'s2',art:'list',a:'#6d4fc4',t:'专项排查',img:{v2:'img/risk-v2.jpg','v1':'img/risk-v1.jpg'},name:'专项排查（风险排查）',pill:'动态模板',tag:'排查模板动态发布、移动端填报、审核与云端结果同步。',
+ use:'模板字段动态结构化校验，发布登记与结果表按次生成，填报审核隔离、结果自动汇总。',
+ fix:'解决专项排查模板固化、纸质填报汇总慢、结果难对比的问题。',
+ val:'排查组织灵活、结果汇总实时，安全隐患闭环管理。'},
+{s:'s2',art:'matrix',a:'#0e7490',t:'计划收敛',img:{v2:'img/convergence-v2.jpg','v1':'img/convergence-v1.jpg'},name:'计划收敛审查',pill:'质量把关',tag:'远端屏蔽记录与本地设备/点位规则自动匹配，审查检修与变更收敛性。',
+ use:'核对链自动比对屏蔽明细、实例点位与规则集，通过结果可定位回原屏蔽记录并高亮。',
+ fix:'解决屏蔽与计划不一致靠人工逐条核对、易漏易错的问题。',
+ val:'收敛审查从小时级人工核对变为分钟级自动比对，降低漏报错报。'},
+{s:'s2',art:'form',a:'#18805e',t:'演练与应急',img:{v2:'img/drill-v2.jpg','v1':'img/drill-v1.jpg'},name:'演练管理与应急场景库',pill:'应急资产',tag:'演练定义—执行—签名—评估—归档全流程；应急场景步骤与图片关联维护。',
+ use:'演练模板保留行结构与签名区，执行记录与定义分离；应急场景将处置步骤与现场图片结构化关联。',
+ fix:'解决演练组织文书量大、场景资料散落个人、应急预案难复用问题。',
+ val:'演练全程数字化、应急预案资产化，培训与实战共用一套场景库。'},
+/* 03 设备资产与能耗 */
+{s:'s3',art:'grid',a:'#2563eb',t:'机柜管理',img:{v2:'img/cabinet-v2.jpg','v1':'img/cabinet-v1.jpg'},name:'机柜上下电管理',pill:'资产透明',tag:'分楼机柜台账、上下电操作登记、批量办理、平面图展示与报表归档。',
+ use:'目录与状态两层数据分离，批量操作按批次留痕并可续做；平面图按楼栋配置渲染状态色。',
+ fix:'解决机柜状态台账不清、批量操作风险高、报表手工整理的问题。',
+ val:'数千机柜状态一目了然，批量操作全程可追溯，报表自动归档。'},
+{s:'s3',art:'donut',a:'#0e7490',t:'水耗',img:{v2:'img/water-v2.jpg','v1':'img/water-v1.jpg'},name:'水耗管理',pill:'能耗洞察',tag:'水表读数录入、照片核验、异常变化率阈值自动核查。',
+ use:'读数与照片共同核验，变化率超阈值强制异常说明，编辑次数受控，趋势可视化。',
+ fix:'解决水耗统计滞后、异常靠经验发现、数据缺证据的问题。',
+ val:'能耗数据实时可信、异常提前暴露，支撑节能决策。'},
+{s:'s3',art:'board',a:'#b7791f',t:'维修台账',img:{v2:'img/repair-v2.jpg','v1':'img/repair-v1.jpg'},name:'维修项目与设备台账',pill:'闭环管理',tag:'维修汇总—跟进—检修目标多源关联，设备台账本地可搜索快照。',
+ use:'以关联字段串联维修全链路，跟进更新保护受控字段；台账"读全—验证—原子替换"刷新。',
+ fix:'解决维修进度不透明、设备型号关联混乱、远端限流清空目录的问题。',
+ val:'维修闭环管理、台账支撑资产决策，历史进度随时可查。'},
+/* 04 组织人员与训练 */
+{s:'s4',art:'matrix',a:'#6d4fc4',t:'权限',img:{v2:'img/admin-v2.jpg','v1':'img/admin-v1.jpg'},name:'账号与多维权限体系',pill:'安全底座',tag:'岗位 × 级别 × 楼栋 × 模块四维权限投影，飞书统一登录与密码登录，冒充操作审计。',
+ use:'权限后端二次校验，固定账号锁定与同级/上级修改限制；管理员冒充全程审计留痕。',
+ fix:'解决共享账号责任不清、跨楼栋越权操作、离职权限回收滞后的问题。',
+ val:'最小权限落地、操作责任到人，安全与审计要求同时满足。'},
+{s:'s4',art:'form',a:'#c0392b',t:'签名',img:{v2:'img/signature-v2.jpg','v1':'img/signature-v1.jpg'},name:'统一电子签名管理',pill:'合规效率',tag:'签名目录、一次性链接签名、临时人员签名与业务引用权限分离。',
+ use:'签名加密材料后端维护，链接有效期与保存一次失效规则受控；管理预览与代签权限严格区分。',
+ fix:'解决纸质签名收集慢、代签冒签风险、临时人员签名无通道的问题。',
+ val:'签名合规与效率兼得，风险边界清晰可审计。'},
+{s:'s4',art:'board',a:'#18805e',t:'交接',img:{v2:'img/handover-v2.jpg','v1':'img/handover-v1.jpg'},name:'人员工作交接',pill:'责任连续',tag:'交接单版本快照、双方确认、附件与通知回执全留痕。',
+ use:'接收人以发送快照为准，版本控制与撤回重发保留；新附件不向旧接收人暴露。',
+ fix:'解决交接信息丢失、责任边界不清、口头交接无凭据的问题。',
+ val:'交接全程留痕、班次衔接顺畅，责任界定有据可依。'},
+{s:'s4',art:'donut',a:'#2563eb',t:'学练',img:{v2:'img/learning-v2.jpg','v1':'img/learning-v1.jpg'},name:'画像学练与训练闭环',pill:'能力量化',tag:'每日题单固定配比、七天去重、首次/复习分离，个人与楼栋画像及周回顾卡片。',
+ use:'按排班自动推送提醒，超时督促与周回顾汇总；正确率与错题历史驱动个人画像。',
+ fix:'解决训练缺乏针对性、效果无法量化、提醒覆盖不全的问题。',
+ val:'以考促学数据化，班组能力画像支撑排班与培养决策。'},
+/* 05 智能与知识 */
+{s:'s5',art:'chat',a:'#6d4fc4',t:'智能助手',img:{v2:'img/assistant-v2.jpg'},name:'灯塔智能助手',pill:'智能办理',tag:'52 个业务工具 + 技能体系，多账号模型管理，业务写入必须人工确认。',
+ use:'会话内查询业务数据、草拟通告与计划、生成文档图表；写操作走"准备—确认—原权限链执行"。',
+ fix:'解决业务查询入口分散、重复性操作多、外部智能工具数据外泄风险的问题。',
+ val:'对话式办理释放重复劳动，安全边界内享受智能生产力。'},
+{s:'s5',art:'list',a:'#0e7490',t:'知识库',img:{v2:'img/knowledge-v2.jpg','v1':'img/knowledge-v1.jpg'},name:'本地共享知识库',pill:'知识资产',tag:'本地嵌入模型 + 向量检索，文档版本与分组管理，敏感内容自动检测。',
+ use:'公司文档本地向量化检索，答案附证据位置引用；分组共享与权限控制，索引可重建。',
+ fix:'解决公司知识散落个人经验、公网检索存在泄密风险的问题。',
+ val:'知识资产本地闭环、问答有据可查，新人上手成本下降。'},
+{s:'s5',art:'flow',a:'#1d4ed8',t:'多渠道',name:'飞书智能体与多渠道送达',pill:'协同触达',tag:'飞书长连接收件、话题与表单任务，钉钉机器人推送，送达健康自动选链。',
+ use:'入站消息判重与身份解析，表单缺项续办；消息链接按公网健康结果自动选择公网或局域网。',
+ fix:'解决多渠道通知不一致、送达失败无感知、跨应用身份混淆的问题。',
+ val:'通知送达率有保障、渠道故障自动降级，协同不断线。'},
+/* 06 平台底座 */
+{s:'s6',art:'board',a:'#2563eb',t:'工作台',img:{v2:'img/home-v2.jpg'},name:'双版本网页工作台',pill:'统一入口',tag:'新旧版本平滑共存，个人布局按账号×设备保存，移动端深度适配。',
+ use:'模块化导航与权限映射，仪表盘部件可配置排布；水印、主题与减少动画等体验细节统一。',
+ fix:'解决多角色多设备体验割裂、个人工作区无法定制的问题。',
+ val:'统一工作入口、千人千面工作台，一线使用意愿与效率双提升。'},
+{s:'s6',art:'flow',a:'#0e7490',t:'公网',name:'公网安全访问与健康探针',pill:'安全远程',tag:'专用隧道 + 隔离入口白名单 + 30 秒健康探针，故障自动降级局域网。',
+ use:'公网入口独立策略层：路由白名单、跨站请求防护与认证限流；健康探针事故判重并通知管理员。',
+ fix:'解决远程办公与外部交付的安全矛盾、公网故障发现滞后的问题。',
+ val:'安全前提下支持远程访问，故障秒级感知、自动降级不影响局域网。'},
+{s:'s6',art:'grid',a:'#b7791f',t:'交付',name:'打包更新与分片分发',pill:'可控交付',tag:'飞书多维表分片分发、哈希回读校验、发布清单与客户端增量更新。',
+ use:'构建—检查—分片上传—回读拼接校验—发布清单全链路自动化；更新保留全部用户数据。',
+ fix:'解决版本分发渠道不可信、更新完整性无法验证、升级丢数据的问题。',
+ val:'发布可控、更新可溯、升级无损，现场维护成本大幅降低。'},
+];
+
+/* ============ 渲染 ============ */
+function thumbInner(m, ver){
+  if(m.img && m.img[ver]) return `<img class="shot" src="${m.img[ver]}" alt="${m.name} 界面截图" loading="lazy"/>` + verChips(m, ver);
+  return m.svg + `<span class="art-tag">示意图</span>`;
+}
+function verChips(m, ver){
+  if(!m.img || !m.img.v1) return '';
+  return `<span class="ver-chips" role="group" aria-label="切换界面版本">` +
+    `<button type="button" class="ver ${ver==='v2'?'on':''}" data-ver="v2" data-i="${m.i}">新版</button>` +
+    `<button type="button" class="ver ${ver==='v1'?'on':''}" data-ver="v1" data-i="${m.i}">旧版</button></span>`;
+}
+const secTitles={s1:'事件响应与通告中枢',s2:'日常运行与安全管理',s3:'设备资产与能耗管理',s4:'组织人员与训练',s5:'智能能力与知识资产',s6:'平台底座与可靠交付'};
+MODULES.forEach((m,i)=>{m.i=i;m.svg=ART[m.art]({a:m.a,t:m.t});});
+for(const key of Object.keys(secTitles)){
+  const host=document.getElementById('grid-'+key);
+  for(const m of MODULES.filter(x=>x.s===key)){
+    const card=document.createElement('article');
+    card.className='card';
+    card.innerHTML=`<div class="thumb" role="button" tabindex="0" data-i="${m.i}" aria-label="放大查看 ${m.name} 效果图">${thumbInner(m,'v2')}</div>
+      <div class="body"><h3>${m.name}<span class="pill">${m.pill}</span></h3><p class="tag">${m.tag}</p>
+      <ul class="vlist">
+        <li><span class="k use">功能</span><span>${m.use}</span></li>
+        <li><span class="k fix">解题</span><span>${m.fix}</span></li>
+        <li><span class="k val">价值</span><span>${m.val}</span></li>
+      </ul></div>`;
+    host.appendChild(card);
+  }
+}
+document.getElementById('archArt').innerHTML=frame('灯塔系统架构','#1d4ed8',
+  `<defs><marker id="aarw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker></defs>`+
+  `<rect x="40" y="70" width="150" height="52" rx="10" fill="#e8f0fe" stroke="${LINE}"/>`+txt(66,101,'桌面客户端','#1d4ed8',14)+
+  `<rect x="40" y="150" width="150" height="52" rx="10" fill="#e8f0fe" stroke="${LINE}"/>`+txt(58,181,'双版本网页前端','#1d4ed8',14)+
+  `<rect x="40" y="230" width="150" height="52" rx="10" fill="#e8f0fe" stroke="${LINE}"/>`+txt(62,261,'飞书智能体','#1d4ed8',14)+
+  `<rect x="250" y="150" width="150" height="72" rx="10" fill="#1d4ed8"/>`+txt(272,182,'业务后端服务','#fff',15)+txt(268,202,'业务·权限·任务','#c7dbfa',11,400)+
+  `<line x1="190" y1="96" x2="250" y2="170" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<line x1="190" y1="176" x2="250" y2="186" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<line x1="190" y1="256" x2="250" y2="200" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<rect x="460" y="70" width="150" height="46" rx="9" fill="#e7f5ef" stroke="${LINE}"/>`+txt(486,99,'本地状态数据库','#18805e',13)+
+  `<rect x="460" y="130" width="150" height="46" rx="9" fill="#fdf6e7" stroke="${LINE}"/>`+txt(478,159,'飞书多维表/消息','#b7791f',13)+
+  `<rect x="460" y="190" width="150" height="46" rx="9" fill="#f0ecfb" stroke="${LINE}"/>`+txt(478,219,'智能助手服务','#6d4fc4',13)+
+  `<rect x="460" y="250" width="150" height="46" rx="9" fill="#eef3fa" stroke="${LINE}"/>`+txt(482,279,'公网隔离入口','#0e7490',13)+
+  `<line x1="400" y1="170" x2="460" y2="93" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<line x1="400" y1="182" x2="460" y2="153" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<line x1="400" y1="196" x2="460" y2="213" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  `<line x1="400" y1="208" x2="460" y2="273" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
+  bar(40,320,570,1,LINE)+txt(40,344,'感知 → 办理 → 留痕 → 归档 → 复盘：一条运维业务主线贯穿四端','#27405f',13,600));
+
+/* ============ 模块关系与数据流向图（可缩放/拖动） ============ */
+(function(){
+  const W=1200,H=720;
+  const bands=[
+    {y:44,h:92,label:'接入与感知层',c:'#2563eb'},
+    {y:152,h:100,label:'服务中枢层',c:'#1d4ed8'},
+    {y:268,h:132,label:'业务模块层',c:'#0e7490'},
+    {y:452,h:112,label:'数据与归档层',c:'#18805e'},
+    {y:600,h:96,label:'外部协作与分发层',c:'#64748b'}];
+  const N=[
+    {x:80,y:62,w:180,h:58,t:'桌面客户端',s:'剪贴板感知·事件倒计时',c:'#2563eb'},
+    {x:300,y:62,w:180,h:58,t:'网页工作台',s:'双版本·移动适配',c:'#2563eb'},
+    {x:520,y:62,w:180,h:58,t:'飞书智能体',s:'长连接收件·表单',c:'#2563eb'},
+    {x:740,y:62,w:180,h:58,t:'公网与远程入口',s:'手机·外部协作',c:'#2563eb'},
+    {x:80,y:170,w:200,h:64,t:'智能助手服务',s:'桥接·工具·多账号',c:'#1d4ed8'},
+    {x:320,y:170,w:360,h:64,t:'业务后端服务',s:'权限链·任务队列·状态推送',c:'#1d4ed8'},
+    {x:740,y:170,w:180,h:64,t:'公网隔离网关',s:'白名单·限流',c:'#1d4ed8'},
+    {x:80,y:286,w:180,h:100,t:'智能与知识簇',s:'知识库·技能·文件生成',c:'#6d4fc4'},
+    {x:300,y:286,w:180,h:100,t:'通告办理簇',s:'七类通告·步骤工单·维护单',c:'#1d4ed8'},
+    {x:520,y:286,w:180,h:100,t:'运行管理簇',s:'巡检·班前·重保·排查·收敛·演练',c:'#0e7490'},
+    {x:740,y:286,w:180,h:100,t:'设备与能耗簇',s:'机柜·水耗·维修台账',c:'#b7791f'},
+    {x:960,y:286,w:180,h:100,t:'组织与人员簇',s:'权限·签名·交接·学练',c:'#6d4fc4'},
+    {x:80,y:470,w:200,h:78,t:'本地知识库',s:'向量·检索索引·片段',c:'#6d4fc4'},
+    {x:320,y:470,w:260,h:78,t:'本地状态数据库',s:'16 库 139 表·任务/身份/审计·冻结归档',c:'#18805e'},
+    {x:620,y:470,w:300,h:78,t:'飞书多维表/消息/文档',s:'37 固定表·群机器人·归档回执',c:'#b7791f'},
+    {x:960,y:470,w:180,h:78,t:'钉钉机器人',s:'群组推送通道',c:'#0e7490'},
+    {x:80,y:618,w:200,h:62,t:'飞书补丁分发表',s:'分片·哈希校验·清单',c:'#64748b'},
+    {x:360,y:618,w:200,h:62,t:'智航与监控源',s:'屏蔽记录·告警规则',c:'#64748b'},
+    {x:620,y:618,w:260,h:62,t:'全景平台',s:'测点配置·数值批次重传',c:'#64748b'}];
+  const T={call:'#2563eb',write:'#b7791f',read:'#0e7490',push:'#6d4fc4',upd:'#64748b'};
+  /* 集散条：进入与离开均为带箭头的独立线段 */
+  const BAR=[
+    {x:340,y:250,w:720,h:18,l:'统一调度总线（调用＋权限校验）'},
+    {x:340,y:424,w:720,h:18,l:'统一输出汇集（写入／归档／推送）'}];
+  const E=[
+    {p:[[170,120],[420,170]],k:'call',l:'剪贴板/事件文本',lx:248,ly:138},
+    {p:[[390,120],[470,170]],k:'call',l:'请求/实时推送',lx:436,ly:138},
+    {p:[[610,120],[560,170]],k:'call',l:'入站消息/卡片回调',lx:606,ly:138},
+    {p:[[830,120],[830,170]],k:'call',l:'公网请求',lx:838,ly:140,la:'start'},
+    {p:[[740,202],[680,202]],k:'call',l:'白名单隔离转发',lx:710,ly:192},
+    {p:[[320,202],[280,202]],k:'call',l:'桥接调用/结果返回',lx:300,ly:192},
+    {p:[[500,234],[500,250]],k:'call'},
+    {p:[[390,268],[390,286]],k:'call'},
+    {p:[[610,268],[610,286]],k:'call'},
+    {p:[[830,268],[830,286]],k:'call'},
+    {p:[[1050,268],[1050,286]],k:'call'},
+    {p:[[180,234],[170,286]],k:'call',l:'工具/技能调度',lx:188,ly:262,la:'start'},
+    {p:[[390,386],[390,424]],k:'write'},
+    {p:[[610,386],[610,424]],k:'write'},
+    {p:[[830,386],[830,424]],k:'write'},
+    {p:[[1050,386],[1050,424]],k:'write'},
+    {p:[[450,442],[450,470]],k:'write',l:'任务/身份/审计/冻结归档',lx:442,ly:460,la:'end'},
+    {p:[[770,442],[770,470]],k:'write',l:'目标表/归档表写入＋回执核验',lx:778,ly:460,la:'start'},
+    {p:[[980,442],[980,470]],k:'push',l:'群机器人推送',lx:988,ly:460,la:'start'},
+    {p:[[170,386],[170,470]],k:'write',l:'向量/片段入库',lx:178,ly:432,la:'start'},
+    {p:[[120,548],[120,580],[60,580],[60,202],[80,202]],k:'read',l:'检索结果/证据',lx:66,ly:340,la:'start'},
+    {p:[[660,470],[660,386]],k:'read',l:'探针:配置指纹/批次标记',lx:668,ly:410,la:'start',jump:[[660,424],[660,442]]},
+    {p:[[460,618],[460,590],[640,590],[640,386]],k:'read',l:'屏蔽/规则记录(专线)',lx:648,ly:566,la:'start',jump:[[640,424],[640,442]]},
+    {p:[[750,618],[750,548]],k:'write',l:'测点配置＋数值批次',lx:758,ly:586,la:'start'},
+    {p:[[180,618],[40,618],[40,91],[80,91]],k:'upd',l:'分片下载·增量更新',lx:46,ly:606,la:'start'}];
+  let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="模块关系与数据流向图">
+   <defs>${Object.entries(T).map(([k,c])=>`<marker id="fa-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('')}</defs>
+   <rect width="${W}" height="${H}" fill="#f6f9fd"/>
+   <g id="flowVp">`;
+  for(const b of bands){
+    s+=`<rect x="48" y="${b.y}" width="1104" height="${b.h}" rx="12" fill="${b.c}" opacity="0.05"/>
+        <rect x="48" y="${b.y}" width="5" height="${b.h}" rx="2.5" fill="${b.c}" opacity=".55"/>
+        <text x="1144" y="${b.y+18}" font-size="12" fill="${b.c}" font-weight="700" text-anchor="end" font-family="Microsoft YaHei,sans-serif">${b.label}</text>`;
+  }
+  const edge=(p,k,width)=>{
+    const dash=k==='read'?' stroke-dasharray="6 4"':'';
+    return `<path d="M${p.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="${T[k]}" stroke-width="${width||1.9}"${dash} marker-end="url(#fa-${k})"/>`;
+  };
+  const casing=(p)=>`<path d="M${p.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="#f6f9fd" stroke-width="7"/>`;
+  for(const e of E){ if(e.jump) s+=casing(e.jump); }
+  for(const b of BAR){
+    s+=`<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="9" fill="#e8f0fe" stroke="#bcd3f0"/>
+        <text x="${b.x+b.w/2}" y="${b.y+13}" font-size="11" fill="#1d4ed8" font-weight="600" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
+  }
+  for(const e of E){
+    s+=edge(e.p,e.k);
+    if(e.l){
+      const lx=e.lx!==undefined?e.lx:(e.p[0][0]+e.p[e.p.length-1][0])/2;
+      const ly=e.ly!==undefined?e.ly:(e.p[0][1]+e.p[e.p.length-1][1])/2-6;
+      s+=`<text x="${lx}" y="${ly}" font-size="11.5" fill="#41546e" text-anchor="${e.la||'middle'}" style="paint-order:stroke" stroke="#f6f9fd" stroke-width="4.5" font-family="Microsoft YaHei,sans-serif">${e.l}</text>`;
+    }
+  }
+  for(const n of N){
+    s+=`<g><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="10" fill="#fff" stroke="${LINE}"/>
+        <rect x="${n.x}" y="${n.y}" width="${n.w}" height="5" rx="2.5" fill="${n.c}"/>
+        <text x="${n.x+12}" y="${n.y+26}" font-size="14" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${n.t}</text>
+        <text x="${n.x+12}" y="${n.y+46}" font-size="11" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.s}</text></g>`;
+  }
+  s+=`</g></svg>`;
+  const view=document.getElementById('flowView');
+  view.innerHTML=s;
+  const vp=view.querySelector('#flowVp');
+  let k=1,tx=0,ty=0,drag=null;
+  const apply=()=>vp.setAttribute('transform',`translate(${tx} ${ty}) scale(${k})`);
+  const scaleOf=()=>{const r=view.getBoundingClientRect();return {sx:W/r.width, sy:H/r.height};};
+  view.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const r=view.getBoundingClientRect(), sc=scaleOf();
+    const px=(e.clientX-r.left)*sc.sx, py=(e.clientY-r.top)*sc.sy;
+    const nk=Math.min(3,Math.max(.5,k*(e.deltaY<0?1.15:1/1.15)));
+    tx=px-(px-tx)*(nk/k); ty=py-(py-ty)*(nk/k); k=nk; apply();
+  },{passive:false});
+  view.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,tx,ty};view.setPointerCapture(e.pointerId);view.classList.add('drag');});
+  view.addEventListener('pointermove',e=>{
+    if(!drag)return;
+    const sc=scaleOf();
+    tx=drag.tx+(e.clientX-drag.x)*sc.sx; ty=drag.ty+(e.clientY-drag.y)*sc.sy; apply();
+  });
+  for(const t of ['pointerup','pointercancel','pointerleave']) view.addEventListener(t,()=>{drag=null;view.classList.remove('drag');});
+  document.getElementById('fzIn').onclick=()=>{k=Math.min(3,k*1.2);apply();};
+  document.getElementById('fzOut').onclick=()=>{k=Math.max(.5,k/1.2);apply();};
+  document.getElementById('fzReset').onclick=()=>{k=1;tx=0;ty=0;apply();};
+})();
+
+/* ============ 灯箱 ============ */
+const lb=document.getElementById('lb'),lbArt=document.getElementById('lbArt'),lbTitle=document.getElementById('lbTitle'),
+      lbText=document.getElementById('lbText'),lbIdx=document.getElementById('lbIdx');
+let cur=-1;
+function lbInner(m,ver){
+  if(m.img && m.img[ver]) return `<img class="shot big" src="${m.img[ver]}" alt="${m.name} 界面截图"/>`+
+    (m.img.v1?`<div class="ver-bar"><button type="button" class="ver ${ver==='v2'?'on':''}" data-lbver="v2">新版页面</button><button type="button" class="ver ${ver==='v1'?'on':''}" data-lbver="v1">旧版页面</button></div>`:'');
+  return m.svg+`<div class="ver-bar"><span class="art-tag">示意图</span></div>`;
+}
+let lbVer='v2';
+function openLb(i){cur=i;lbVer='v2';const m=MODULES[i];lbArt.innerHTML=lbInner(m,'v2');lbTitle.textContent=m.name+'　|　'+m.pill;
+  lbText.textContent=m.tag+' 价值：'+m.val;lbIdx.textContent=(i+1)+' / '+MODULES.length;lb.classList.add('on');document.body.style.overflow='hidden';}
+function closeLb(){lb.classList.remove('on');document.body.style.overflow='';cur=-1;}
+function step(d){if(cur<0)return;openLb((cur+d+MODULES.length)%MODULES.length);}
+document.getElementById('lbArt').addEventListener('click',e=>{
+  const b=e.target.closest('[data-lbver]'); if(!b||cur<0)return;
+  lbVer=b.dataset.lbver; lbArt.innerHTML=lbInner(MODULES[cur],lbVer);
+});
+document.addEventListener('error',e=>{
+  const img=e.target;
+  if(!(img instanceof HTMLImageElement) || !img.classList.contains('shot')) return;
+  const thumb=img.closest('.thumb');
+  if(thumb){
+    const m=MODULES[+thumb.dataset.i];
+    if(m) thumb.innerHTML=m.svg+`<span class="art-tag">示意图</span>`+verChips(m,'v2');
+  } else if(img.classList.contains('big') && cur>=0){
+    lbArt.innerHTML=MODULES[cur].svg;
+  }
+},true);
+document.addEventListener('click',e=>{
+  const chip=e.target.closest('.ver');
+  if(chip){ e.stopPropagation(); const m=MODULES[+chip.dataset.i]; const ver=chip.dataset.ver;
+    chip.closest('.thumb').innerHTML=thumbInner(m,ver); return; }
+  const t=e.target.closest('.thumb');if(t)openLb(+t.dataset.i);
+});
+document.addEventListener('keydown',e=>{
+  if(e.key!=='Enter'&&e.key!==' ')return;
+  const t=e.target&&e.target.closest?e.target.closest('.thumb'):null;
+  if(t&&!e.target.closest('.ver')){e.preventDefault();openLb(+t.dataset.i);}
+});
+document.getElementById('lbClose').onclick=closeLb;
+document.getElementById('lbPrev').onclick=()=>step(-1);
+document.getElementById('lbNext').onclick=()=>step(1);
+lb.addEventListener('click',e=>{if(e.target===lb)closeLb();});
+document.addEventListener('keydown',e=>{if(cur<0)return;if(e.key==='Escape')closeLb();if(e.key==='ArrowLeft')step(-1);if(e.key==='ArrowRight')step(1);});
+</script>
+</body>
+</html>

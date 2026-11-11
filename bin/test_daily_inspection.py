@@ -82,9 +82,15 @@ class InspectionCloud:
                               'record_ids_sha256':hashlib.sha256(json.dumps(sorted(row['record_id'] for row in rows),
                                   ensure_ascii=False,separators=(',',':')).encode()).hexdigest()}
                     fields['备注'] = 'INSPECTION_BATCH_V1:' + json.dumps(marker,ensure_ascii=False,separators=(',',':'))
-            if data.get('filter'):
-                rows = [row for row in rows if all(row['fields'].get(condition['field_name']) == condition['value'][0]
-                                                   for condition in data['filter']['conditions'])]
+            conditions = (data.get('filter') or data).get('conditions')
+            if conditions:
+                def _match(row, condition):
+                    actual = row['fields'].get(condition['field_name'])
+                    expected = condition['value'][0]
+                    if condition.get('operator') == 'contains':
+                        return str(expected) in str(actual or '')
+                    return actual == expected
+                rows = [row for row in rows if all(_match(row, condition) for condition in conditions)]
             return copy.deepcopy({'items': rows[:kwargs['params']['page_size']], 'total': len(rows), 'has_more': False})
         if method == 'GET':
             return {'record': copy.deepcopy(next(row for row in self.tables[table] if row['record_id'] == extra[0]))}

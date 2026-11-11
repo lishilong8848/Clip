@@ -2,20 +2,27 @@ import copy
 import tempfile
 import unittest
 from pathlib import Path
-from lan_bitable_template_portal.eop_scenario_editor import EopEditor,MAIN,LONG,SELECTS,STEPS,IMAGES,LINK,RiskError
+from lan_bitable_template_portal.eop_scenario_editor import EopEditor,MAIN,LONG,SELECTS,STEPS,IMAGES,LINK,SCENARIO_CODE,RiskError
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 class Cloud:
     def __init__(self):
         self.rows={}
+        self.code_kind = None
         for rid,priority in [('recHigh','P0-高'),('recOther','P1-中'),('recBlank','')]:
             self.rows[rid]={**dict.fromkeys((*MAIN,*LONG),''),'场景名称':rid,'专业':'电气','系统/设备':'变压器','原优先级':priority,STEPS:'检查设备',IMAGES:[{'file_token':'photo1','name':'现场图片'}]}
     def table_path(self,*args):return 'table'
     def all(self,path):
         kinds=dict.fromkeys((*LONG,MAIN[0],STEPS,LINK),1)|dict.fromkeys(SELECTS,3)|{IMAGES:17}
+        if self.code_kind is not None:
+            kinds[SCENARIO_CODE] = self.code_kind
         return [{'field_name':name,'field_id':'field'+str(i),'type':kind,'property':{'options':[{'name':n} for n in ['电气','变压器','P0-高','P1-中','P2-低']]}} for i,(name,kind) in enumerate(kinds.items())]
     def request(self,method,path,**kw):
         if path.endswith('/search'):return {'items':[{'record_id':rid,'fields':copy.deepcopy(f)} for rid,f in self.rows.items()],'has_more':False}
+        if method == 'POST' and path.endswith('/fields'):
+            assert kw['json'] == {'field_name': SCENARIO_CODE, 'type': 1}
+            self.code_kind = 1
+            return {}
         rid=path.rsplit('/',1)[1]
         if method=='PUT':self.rows[rid].update(copy.deepcopy(kw['json']['fields']))
         return {'record':{'record_id':rid,'fields':copy.deepcopy(self.rows[rid])}}
@@ -40,5 +47,28 @@ class EopPriorityTests(unittest.TestCase):
         self.assertIn('recOther',[r['id'] for r in self.editor.cached_list()['items']])
         self.assertNotIn('recOther',[r['id'] for r in self.editor.cached_list('other')['items']])
         with self.assertRaisesRegex(RiskError,'记录已变化'):self.editor.save('recOther','admin',body)
+
+    def test_scene_code_can_be_saved_on_legacy_table_and_preserves_record_identity(self):
+        detail = self.editor.cached_detail('recHigh', 'admin', True)
+        body = {key: detail[key] for key in ('revision', 'fields', 'steps', 'images')}
+        body['fields'][SCENARIO_CODE] = 'EOP-001'
+        result = self.editor.save('recHigh', 'admin', body)['record']
+        self.assertEqual(result['id'], 'recHigh')
+        self.assertEqual(result['fields'][SCENARIO_CODE], 'EOP-001')
+        self.assertEqual(result['images'][0]['token'], 'photo1')
+        self.assertEqual(self.editor.cached_list()['items'][0]['fields'][SCENARIO_CODE], 'EOP-001')
+        with self.assertRaisesRegex(RiskError, '记录已变化'):
+            self.editor.save('recHigh', 'admin', body)
+
+    def test_readonly_scene_code_is_not_overwritten(self):
+        self.cloud.code_kind = 1005
+        self.cloud.rows['recHigh'][SCENARIO_CODE] = '0001'
+        detail = self.editor.cached_detail('recHigh', 'admin', True)
+        self.assertIn(SCENARIO_CODE, detail['readonly_fields'])
+        body = {key: detail[key] for key in ('revision', 'fields', 'steps', 'images')}
+        body['fields'][SCENARIO_CODE] = '0002'
+        with self.assertRaisesRegex(RiskError, '不是可编辑的文本字段'):
+            self.editor.save('recHigh', 'admin', body)
+        self.assertEqual(self.cloud.rows['recHigh'][SCENARIO_CODE], '0001')
 
 if __name__=='__main__':unittest.main()

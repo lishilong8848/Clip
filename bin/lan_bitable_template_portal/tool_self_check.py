@@ -131,6 +131,8 @@ class ToolSelfChecks:
                 CREATE TABLE IF NOT EXISTS tool_check_templates(
                     id TEXT NOT NULL, version INTEGER NOT NULL, name TEXT NOT NULL, active INTEGER NOT NULL,
                     content BLOB NOT NULL, schema TEXT NOT NULL, PRIMARY KEY(id,version));
+                CREATE TABLE IF NOT EXISTS tool_check_template_deletions(
+                    id TEXT NOT NULL PRIMARY KEY, deleted_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS tool_check_orders(
                     month TEXT NOT NULL, scope TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
                     owner TEXT NOT NULL DEFAULT '', owner_name TEXT NOT NULL DEFAULT '', records TEXT NOT NULL DEFAULT '[]',
@@ -193,8 +195,10 @@ class ToolSelfChecks:
         return month
 
     @staticmethod
-    def _template(db, identity, version=None):
+    def _template(db, identity, version=None, *, include_deleted=False):
         sql = 'SELECT * FROM tool_check_templates WHERE id=?'
+        if version is None and not include_deleted:
+            sql += ' AND id NOT IN (SELECT id FROM tool_check_template_deletions)'
         row = (db.execute(sql + ' ORDER BY version DESC LIMIT 1', (identity,)).fetchone() if version is None
                else db.execute(sql + ' AND version=?', (identity, version)).fetchone())
         if not row:
@@ -205,6 +209,12 @@ class ToolSelfChecks:
     def template_info(row):
         return {'id': row['id'], 'version': row['version'], 'name': row['name'], 'active': bool(row['active']),
                 'schema': json.loads(row['schema'])}
+
+    def list_templates(self, db, administrator):
+        return [self.template_info(row) for row in db.execute('''SELECT t.id,t.version,t.name,t.active,t.schema
+            FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
+            AND t.id NOT IN (SELECT id FROM tool_check_template_deletions) AND (? OR t.active=1)
+            ORDER BY t.name''', (administrator,))]
 
     def save_template(self, actor, name, content, identity='', version=None):
         self.access(actor)
@@ -220,10 +230,13 @@ class ToolSelfChecks:
                 next_version = version + 1
             else:
                 identity = hashlib.sha256(name.encode() + b'\x00' + content).hexdigest()[:24]
-                existing = db.execute('SELECT 1 FROM tool_check_templates WHERE id=?', (identity,)).fetchone()
-                if existing:
-                    raise RiskError('相同模板已导入。', 409)
+                existing = db.execute('SELECT MAX(version) FROM tool_check_templates WHERE id=?', (identity,)).fetchone()[0]
                 next_version = 1
+                if existing:
+                    removed = db.execute('DELETE FROM tool_check_template_deletions WHERE id=?', (identity,))
+                    if not removed.rowcount:
+                        raise RiskError('相同模板已导入。', 409)
+                    next_version = existing + 1
             db.execute('INSERT INTO tool_check_templates VALUES(?,?,?,1,?,?)',
                        (identity, next_version, name, content, dumps(schema)))
             return self.template_info(self._template(db, identity, next_version))
@@ -238,6 +251,7 @@ class ToolSelfChecks:
         if type(version) is not int:
             raise RiskError('模板版本无效。')
         with self.connect() as db:
+            self._template(db, identity)
             source = self._template(db, identity, version)
             content, schema = source['content'], json.loads(source['schema'])
         checks = body.get('checks')
@@ -274,6 +288,21 @@ class ToolSelfChecks:
             db.execute('UPDATE tool_check_templates SET active=? WHERE id=? AND version=?',
                        (body['active'], identity, row['version']))
 
+    def delete_template(self, actor, identity, body):
+        self.access(actor)
+        if not self.administrator(actor):
+            raise RiskError('仅管理员可删除工具自检模板。', 403)
+        version = body.get('version')
+        if type(version) is not int or version < 1:
+            raise RiskError('模板版本无效。')
+        with self.connect(True) as db:
+            row = self._template(db, identity, include_deleted=True)
+            if row['version'] != version:
+                raise RiskError('模板已更新，请刷新后重试。', 409)
+            db.execute('INSERT OR IGNORE INTO tool_check_template_deletions VALUES(?,?)',
+                       (identity, dt.datetime.now(TZ).isoformat(timespec='seconds')))
+        return {'deleted': True}
+
     @staticmethod
     def _order(db, month, scope):
         row = db.execute('SELECT * FROM tool_check_orders WHERE month=? AND scope=?', (month, scope)).fetchone()
@@ -302,9 +331,7 @@ class ToolSelfChecks:
         with self.connect() as db:
             orders = [self.order_info(actor, row) for row in db.execute(
                 'SELECT * FROM tool_check_orders WHERE month=? ORDER BY scope', (month,)) if row['scope'] in scopes]
-            templates = [self.template_info(row) for row in db.execute('''SELECT t.id,t.version,t.name,t.active,t.schema
-                FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
-                ORDER BY name''') if admin or row['active']]
+            templates = self.list_templates(db, admin)
             archive = db.execute('SELECT created_at FROM tool_check_archives WHERE month=?', (month,)).fetchone()
         return {'month': month, 'current_month': current, 'orders': orders, 'templates': templates,
                 'can_manage_templates': admin, 'can_download_month': admin and set(scopes) == set(BUILDINGS),

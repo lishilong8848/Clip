@@ -24,6 +24,7 @@ DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档
                 'scrap': '工具报废表', 'change': '异动台账'}
 MAX_REPORT = 12 * 1024 * 1024
 MAX_ORDER_DELETIONS = 200
+MAX_ORDER_CREATIONS = 200
 
 
 def full_access(actor):
@@ -263,6 +264,80 @@ class ToolManagement(ToolSelfChecks):
                     items.append({key:asset.get(key) for key in ('id','scope','name','model','location')})
             return {'items':items}
 
+    def order_creation_scopes(self, db, actor):
+        return {scope for scope in BUILDINGS if can_scope(actor, scope)
+                and (self.administrator(actor) or self.is_building_leader(db, actor, scope))}
+
+    def planned_order_candidates(self, actor):
+        self.access(actor)
+        with self.connect() as db:
+            scopes = self.order_creation_scopes(db, actor)
+            if not scopes:
+                raise RiskError('仅本楼楼长或有权限的管理员可新增工单。', 403)
+            today = clock().date()
+            month = today.strftime('%Y-%m')
+            archived = bool(db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone())
+            items = []
+            if not archived:
+                for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
+                    asset = self.effective(row)
+                    if asset['scope'] not in scopes:
+                        continue
+                    for kind, due in self.planned_kinds(db, asset, today).items():
+                        items.append({**{key: asset.get(key) for key in ('scope', 'name', 'model', 'location')},
+                                      'asset_id': asset['id'], 'kind': kind, 'due': due})
+            items.sort(key=lambda item: (item['scope'], item['due'], item['name'] or '', item['asset_id'], item['kind']))
+            return {'month': month, 'items': items, 'archived': archived, 'limit': MAX_ORDER_CREATIONS}
+
+    def create_planned_orders(self, actor, body):
+        self.access(actor)
+        entries = body.get('orders')
+        if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_ORDER_CREATIONS:
+            raise RiskError(f'请选择 1 至 {MAX_ORDER_CREATIONS} 项计划。')
+        selection = {}
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get('kind') not in ('self', 'external'):
+                raise RiskError('请选择自检或送检工单。')
+            asset_id = text(entry.get('asset_id'), 120, True)
+            kinds = selection.setdefault(asset_id, set())
+            if entry['kind'] in kinds:
+                raise RiskError('所选计划重复，请重新选择。')
+            kinds.add(entry['kind'])
+        with self.connect(True) as db:
+            today = clock().date()
+            month = today.strftime('%Y-%m')
+            if body.get('month') != month:
+                raise RiskError('计划月份已变更，请重新读取本月计划。', 409)
+            scopes = self.order_creation_scopes(db, actor)
+            if not scopes:
+                raise RiskError('仅本楼楼长或有权限的管理员可新增工单。', 403)
+            if db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+                raise RiskError('本月已归档，不能新增工单。', 409)
+            pending = []
+            existing_count = 0
+            for asset_id, kinds in selection.items():
+                row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (asset_id,)).fetchone()
+                if not row:
+                    raise RiskError('所选工具已停用，请重新选择本月计划。', 409)
+                asset = self.effective(row)
+                if asset['scope'] not in scopes:
+                    raise RiskError('所选工具超出可新增工单的楼栋范围。', 403)
+                existing = {row['kind']: row['outcome'] for row in db.execute(
+                    'SELECT kind,outcome FROM tool_work_orders WHERE month=? AND asset_id=?', (month, asset_id))}
+                planned = self.planned_kinds(db, asset, today)
+                for kind in KINDS.keys() & kinds:
+                    if kind in existing and existing[kind] != 'cancelled':
+                        existing_count += 1
+                    elif kind in planned:
+                        pending.append((asset, kind, planned[kind]))
+                    else:
+                        raise RiskError(f'{asset["name"]}的{KINDS[kind]}已不在可创建的本月计划中，请重新选择。', 409)
+            for asset, kind, due in pending:
+                order_id = uuid.uuid4().hex
+                self.insert_work_order(db, order_id, month, asset, kind, due)
+                self.audit(db, order_id, actor, '手动新增工单', '批量创建')
+        return {'month': month, 'created_count': len(pending), 'existing_count': existing_count}
+
     def new_inventory_fields(self, actor):
         self.access(actor)
         if not self.available_to(actor):raise RiskError('当前账号没有工具管理权限。',403)
@@ -332,10 +407,15 @@ class ToolManagement(ToolSelfChecks):
             if db.execute('SELECT 1 FROM tool_work_orders WHERE month=? AND asset_id=? AND kind=?',(month,identity,kind)).fetchone():
                 raise RiskError('本月该工具已有此类工单，请在列表中查看。',409)
             order_id=uuid.uuid4().hex
-            db.execute('INSERT INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor) VALUES(?,?,?,?,?,?,?,?)',
-                (order_id,month,identity,scope,kind,current.date().isoformat(),dumps(asset),asset.get('supervisor','') if kind=='external' else ''))
+            self.insert_work_order(db, order_id, month, asset, kind, current.date().isoformat())
             self.audit(db,order_id,actor,'手动新增工单')
             return self.work_info(db,actor,self._work(db,actor,order_id))
+
+    @staticmethod
+    def insert_work_order(db, identity, month, asset, kind, due):
+        db.execute('''INSERT INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor)
+            VALUES(?,?,?,?,?,?,?,?)''', (identity, month, asset['id'], asset['scope'], kind, due,
+                                         dumps(asset), asset.get('supervisor', '') if kind == 'external' else ''))
 
     def check_order_deletion(self, db, actor, identity, revision, month):
         row = self._work(db, actor, identity)
@@ -384,38 +464,43 @@ class ToolManagement(ToolSelfChecks):
                 self.mark_order_deleted(db, actor, identity)
         return {'deleted_ids': list(revisions)}
 
+    @staticmethod
+    def planned_kinds(db, asset, today):
+        month = today.strftime('%Y-%m')
+        first_day = today.replace(day=1)
+        end = month_offset(first_day, 1)
+        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty
+            FROM tool_work_orders WHERE asset_id=?''', (asset['id'],)).fetchall()
+        scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
+        if asset.get('retired') or scrapped >= asset['quantity'] or any(
+                entry['outcome'] in {'repair', 'scrap'} for entry in history):
+            return {}
+        planned = {}
+        for kind in KINDS:
+            cycle = CYCLES.get(asset.get(kind + '_cycle'))
+            entries = [entry for entry in history if entry['kind'] == kind]
+            if not cycle or any(entry['month'] == month or not entry['submitted_at']
+                                and entry['outcome'] != 'cancelled' for entry in entries):
+                continue
+            latest = max([asset.get(kind + '_last', '')] + [entry['actual'] for entry in entries if entry['submitted_at']])
+            due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
+                asset.get(kind + '_first') or first_day.isoformat())
+            if due < end:
+                planned[kind] = due.isoformat()
+        return planned
+
     def schedule(self, current=None):
         today = (current or clock()).astimezone(TZ).date()
         month = today.strftime('%Y-%m')
-        end = month_offset(today.replace(day=1), 1)
         with self.connect(True) as db:
             if self.state(db, 'inventory_at')[:10] != today.isoformat() or db.execute(
                     'SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
                 return
-            rows = db.execute('SELECT * FROM tool_inventory WHERE active=1').fetchall()
-            for row in rows:
+            for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
                 asset = self.effective(row)
-                history = db.execute("""SELECT kind,actual,outcome,submitted_at,scrap_qty FROM tool_work_orders
-                    WHERE asset_id=?""", (row['id'],)).fetchall()
-                scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
-                if asset['retired'] or scrapped >= asset['quantity'] or any(
-                        entry['outcome'] in {'repair', 'scrap'} for entry in history):
-                    continue
-                for kind in KINDS:
-                    cycle = CYCLES.get(asset.get(kind + '_cycle'))
-                    if not cycle or any(entry['kind'] == kind and not entry['submitted_at']
-                                        and entry['outcome'] != 'cancelled' for entry in history):
-                        continue
-                    latest = max([asset.get(kind + '_last', '')] +
-                                 [entry['actual'] for entry in history if entry['kind'] == kind and entry['submitted_at']])
-                    due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
-                        asset.get(kind + '_first') or today.replace(day=1).isoformat())
-                    if due >= end:
-                        continue
+                for kind, due in self.planned_kinds(db, asset, today).items():
                     identity = hashlib.sha256(f'{month}:{row["id"]}:{kind}'.encode()).hexdigest()[:32]
-                    db.execute("""INSERT OR IGNORE INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor)
-                        VALUES(?,?,?,?,?,?,?,?)""", (identity, month, row['id'], asset['scope'], kind,
-                                                     due.isoformat(), dumps(asset), asset.get('supervisor', '') if kind == 'external' else ''))
+                    self.insert_work_order(db, identity, month, asset, kind, due)
 
     def is_building_leader(self, db, actor, scope):
         leaders = json.loads(self.state(db, 'leaders') or '{}')
@@ -478,11 +563,10 @@ class ToolManagement(ToolSelfChecks):
             admin = self.administrator(actor)
             all_scopes = admin and all(can_scope(actor, scope) for scope in BUILDINGS)
             archive = db.execute('SELECT created_at FROM tool_work_archives WHERE month=?', (month,)).fetchone()
-            templates = [self.template_info(row) for row in db.execute("""SELECT id,version,name,active,schema
-                FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
-                ORDER BY name""") if admin or row['active']]
+            templates = self.list_templates(db, admin)
             return {'month': month, 'orders': [row for row in visible if row['month'] == month],
                     'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap'}],
+                    'can_create_orders': bool(self.order_creation_scopes(db, actor)),
                     'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
                     'archived_at': archive[0] if archive and all_scopes else None,
                     'inventory_at': self.state(db, 'inventory_at'), 'inventory_error': self.state(db, 'inventory_error'),

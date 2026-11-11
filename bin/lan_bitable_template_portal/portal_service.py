@@ -24789,6 +24789,14 @@ class MaintenancePortalService(RepairOperationsMixin):
             return dt.datetime.fromtimestamp(float(sort_time)).strftime("%H:%M")
         return ""
 
+    @staticmethod
+    def _daily_task_date_text(sort_time: float) -> str:
+        if float(sort_time or 0) <= 0:
+            return ""
+        with suppress(OSError, OverflowError, ValueError):
+            return dt.datetime.fromtimestamp(float(sort_time)).strftime("%Y-%m-%d")
+        return ""
+
     @classmethod
     def _daily_task_status_tone(cls, status: Any) -> str:
         text = str(status or "").strip()
@@ -24942,6 +24950,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "status_tone": self._daily_task_status_tone(status),
                     "time": self._daily_task_time_text(sort_time),
                     "sort_time": sort_time,
+                    "sort_date": self._daily_task_date_text(sort_time),
                     "action_summary": self._daily_action_summary(labels),
                     "building": self._daily_task_building_label(
                         item.get("building"),
@@ -27022,6 +27031,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         stats = report.get("stats") or {}
         event_sla = report.get("event_sla") or {}
         sla_stats = event_sla.get("stats") or {}
+        window_end_date = str(report.get("window_end") or "")[:10]
         building_sections = [
             item
             for item in report.get("building_sections") or []
@@ -27084,6 +27094,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                 action = action[2:]
             action = action.replace(" ", "")
             time_text = self._daily_report_markdown(task.get("time"), limit=10)
+            sort_date = str(task.get("sort_date") or "").strip()
+            if (
+                sort_date
+                and window_end_date
+                and sort_date != window_end_date
+                and "开始" not in action
+            ):
+                time_text = f"{sort_date[5:]} {time_text}".strip()
             details = []
             if time_text and action:
                 details.append(f"{time_text}{action}")
@@ -35416,9 +35434,49 @@ class MaintenancePortalService(RepairOperationsMixin):
         ]
         if len(candidates) != 1:
             return ""
+        candidate = candidates[0]
+        if not isinstance(candidate, dict):
+            return ""
+        if self._target_status_is_finished(candidate.get("status")):
+            return ""
+        if not self._target_candidate_fresh_for_auto_bind(candidate):
+            return ""
         return str(
-            candidates[0].get("target_record_id") or candidates[0].get("record_id") or ""
+            candidate.get("target_record_id") or candidate.get("record_id") or ""
         ).strip()
+
+    @classmethod
+    def _target_candidate_fresh_for_auto_bind(
+        cls,
+        candidate: dict[str, Any],
+        *,
+        now: dt.datetime | None = None,
+        grace_days: int = 14,
+    ) -> bool:
+        """唯一候选自动绑定只接受日期仍新鲜的未结束记录。
+
+        防止更新/结束按标题静默绑到上一周期残留、已结束或尚未到期的
+        目标记录，避免每日汇总出现本周期从未发送的“已完成通告”。
+        没有任何可解析日期时保持原有行为，交由调用方继续显式选择目标。
+        """
+        current = now or dt.datetime.now()
+        parsed: list[dt.datetime] = []
+        for field in ("start_time", "end_time"):
+            text = str((candidate or {}).get(field) or "").strip()
+            if not text:
+                continue
+            value = cls._parse_notice_datetime(text)
+            if value is not None:
+                parsed.append(value)
+        if not parsed:
+            return True
+        earliest = min(parsed)
+        latest = max(parsed)
+        if earliest > current + dt.timedelta(days=1):
+            return False
+        if latest.year == current.year and latest.month == current.month:
+            return True
+        return (current - latest) <= dt.timedelta(days=grace_days)
 
     def _resolve_target_record_id_for_source_update(
         self,

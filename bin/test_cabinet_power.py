@@ -2954,6 +2954,24 @@ EA118  A{operation['room'][0]}-{int(operation['room'][1:])}.EA118  {operation['r
         with migrated._connect() as conn:
             self.assertFalse(conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'notice_summary_%'").fetchall())
 
+    def test_a_september_export_preserves_confirmed_counts_after_history_edit(self):
+        snapshot = self.service._snapshot("A")
+        operations = copy.deepcopy(snapshot["operations"])
+        record = next(op for op in operations if op["room"] == "402" and op["rack"] == "G02"
+                      and any(event["actual"] == "2026-09-03 10:12:20" for event in op["events"]))
+        event = next(event for event in record["events"] if event["actual"] == "2026-09-03 10:12:20")
+        self.assertIn(event["id"], snapshot["config"]["baseline_event_ids"])
+        event["id"] = "event_recreated_down:0"
+
+        book = Workbook(export_workbook((TEMPLATES / "A.xlsm").read_bytes(), snapshot["config"], operations))
+        rows = list(dict(book.rows("机柜上电汇总表")).values())
+        day = next(row for row in rows if row.get(2) == "2026.9.3")
+        month = next(row for row in rows if row.get(9) == "2026年9月")
+        self.assertEqual((day[3], day[4], day[5], day[6]), (1, "2026.9.3", 1, 970))
+        self.assertEqual((month[10], month[11], month[12]), (1, 1, 970))
+        self.assertEqual(next(row[11] for row in rows if row.get(9) == "2026年3月"), 1)
+        self.assertEqual(next(row[6] for row in rows if row.get(2) == "2026.5.14"), 971)
+
     def test_mail_daily_and_monthly_statistics_all_buildings(self):
         for scope in "ABCDE":
             with self.subTest(scope=scope):

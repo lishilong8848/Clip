@@ -1,0 +1,13 @@
+{
+  "template_sha256": "efdcbb8979c30971415ff896d7ae8de25c60706260f14b067075aeee8c601054",
+  "source_sha256": "5880d605d4943a340c85bc0e5546d6348ca219c4cf71998e1c44a3449bb47f1a",
+  "days": [
+    {"date": "2026-01-19", "up": 0, "down": 1, "onsite": 966},
+    {"date": "2026-01-22", "up": 3, "down": 0, "onsite": 969},
+    {"date": "2026-02-06", "up": 1, "down": 0, "onsite": 970},
+    {"date": "2026-03-19", "up": 0, "down": 1, "onsite": 969},
+    {"date": "2026-04-02", "up": 1, "down": 0, "onsite": 970},
+    {"date": "2026-05-14", "template_date": "2026-05-13", "up": 1, "down": 0, "onsite": 971},
+    {"date": "2026-09-03", "up": 1, "down": 1, "onsite": 970}
+  ]
+}

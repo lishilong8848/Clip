@@ -894,6 +894,69 @@ def parameters(device):
     return rows
 
 
+def review_parameter_identities(device):
+    """Stable identities of review rows, independent of source record ids.
+
+    Point rows key on the configured point id only: renaming a point in the
+    configuration must not orphan saved human values.
+    """
+    identities = {}
+    for row in parameters(device):
+        if 'point' in row:
+            point = next((item for item in device['points'] if item['id'] == row['point']), {})
+            identities[row['id']] = ('point', point.get('point_id'))
+        else:
+            section = device['sections'][row['section']]
+            identities[row['id']] = ('section', section.get('location'), section.get('form'), row['name'])
+    return identities
+
+
+def remap_review_values(old_devices, new_devices, reviews, orphan_identities=None):
+    """Carry human review values across a live batch replacement.
+
+    Values whose parameter disappeared (point removed from configuration) are
+    kept under their original key together with a recorded identity, so they
+    stay invisible while removed and revive unchanged when the point returns
+    -- even when the producer assigned a fresh source record id on re-add.
+    Returns ``(remapped_reviews, orphan_identities)``.
+    """
+    ledger = {device_id: dict(rows) for device_id, rows in (orphan_identities or {}).items()}
+    if not reviews:
+        return reviews, ledger
+    old_ids = {device['id']: review_parameter_identities(device) for device in old_devices}
+    new_ids = {}
+    for device in new_devices:
+        new_ids[device['id']] = {identity: row_id
+                                 for row_id, identity in review_parameter_identities(device).items()}
+    remapped = {}
+    for device_id, review in reviews.items():
+        source = dict(old_ids.get(device_id, {}))
+        source.update({row_id: tuple(identity) for row_id, identity in
+                       (ledger.get(device_id) or {}).items()})
+        targets = new_ids.get(device_id, {})
+        carried = dict(review.get('values') or {})
+        device_orphans = dict(ledger.get(device_id) or {})
+        for row_id, value in list(carried.items()):
+            target = targets.get(source.get(row_id))
+            if target == row_id:
+                device_orphans.pop(row_id, None)
+                continue
+            if target:
+                carried.pop(row_id, None)
+                carried[target] = value
+                device_orphans.pop(row_id, None)
+                continue
+            identity = source.get(row_id)
+            if identity:
+                device_orphans[row_id] = list(identity)
+        if device_orphans:
+            ledger[device_id] = device_orphans
+        else:
+            ledger.pop(device_id, None)
+        remapped[device_id] = {**review, 'values': carried}
+    return remapped, ledger
+
+
 def display_device(device):
     return {**device, 'parameters': parameters(device),
             'deferred_sections': [index for index, section in enumerate(device['sections'])
@@ -997,12 +1060,19 @@ def review_devices(active, scope):
 
 
 def profession_version(active, scope, profession):
+    # Confirmations attest to the readings a profession saw, so live-updated
+    # automatic values must invalidate an earlier confirmation.
     reviews = active.get('reviews', {})
     devices = [*selected_devices(active, scope),
                *(device for device in selected_form_devices(active, scope) if device['id'] in reviews)]
-    revisions = sorted((device['id'], reviews.get(device['id'], {}).get('revision', 0))
-                       for device in devices if device_profession(device) == profession)
-    return hashlib.sha256(json.dumps(revisions, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+    payload = []
+    for device in devices:
+        if device_profession(device) != profession:
+            continue
+        readings = sorted((row['id'], source_text(row['reference'])) for row in parameters(device))
+        payload.append([device['id'], reviews.get(device['id'], {}).get('revision', 0), readings])
+    payload.sort(key=lambda item: item[0])
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
 
 
 def all_professions_confirmed(active, scope, confirmations):
@@ -1106,6 +1176,9 @@ def finalize_reviews(devices, reviews, actor, confirmations=None):
 
 
 class DailyInspection:
+    PROBE_INTERVAL = 5
+    CACHE_HARD_TTL = 900
+
     def __init__(self, store, cloud, source_clouds=None, *, scheduled=False):
         self.store, self.cloud = store, cloud
         self.source_clouds = source_clouds or {}
@@ -1180,8 +1253,52 @@ class DailyInspection:
             batch = marker['upload_time']
             devices = devices_for(scope, rows, points, templates)
             batches[scope] = {'batch': batch, 'rows': rows, 'devices': devices,
+                              'config_fp': self.config_fingerprint(scope, points),
                               'form_devices': omit_occupied_form_cells(copy.deepcopy(supplemental_form_devices(scope)), devices)}
         return batches
+
+    def config_fingerprint(self, scope, rows=None):
+        """Stable digest of the point-configuration table contents."""
+        if rows is None:
+            table, view = SOURCES[scope][1]
+            rows = self.records(table, {'view_id': view}, cloud=self.source_clouds.get(scope, self.cloud))
+        dump = json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+
+    def source_batch_probe(self, scope):
+        """Cheap single-row probe of the sealed source batch marker.
+
+        One bounded request only: records() would paginate the whole table,
+        which is exactly the cost the probe exists to avoid. The completion
+        marker lives on device rows, so the probe filters on record type
+        instead of gambling on the first row of an unordered table.
+        """
+        table = SOURCES[scope][0][0]
+        cloud = self.source_clouds.get(scope, self.cloud)
+        # Feishu expects conditions nested under "filter"; the marker lives on
+        # exactly one device row, so filter on record type and the marker
+        # prefix instead of gambling on the first row of an unordered table.
+        query = {'filter': {'conjunction': 'and', 'conditions': [
+            {'field_name': '记录类型', 'operator': 'is', 'value': ['设备巡检']},
+            {'field_name': '备注', 'operator': 'contains', 'value': [INSPECTION_BATCH_PREFIX]}]}}
+        try:
+            result = cloud.request('POST', self.path(table) + '/records/search',
+                                   params={'page_size': 1}, json=query)
+        except Exception:
+            return None
+        rows = result.get('items') if isinstance(result, dict) else None
+        if not isinstance(rows, list):
+            return None
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get('fields'), dict):
+                continue
+            note = plain(row['fields'].get('备注'))
+            if note.startswith(INSPECTION_BATCH_PREFIX):
+                try:
+                    return int(json.loads(note[len(INSPECTION_BATCH_PREFIX):]).get('upload_time'))
+                except (ValueError, TypeError, AttributeError):
+                    return None
+        return None
 
     def cached_source(self, scope):
         with self.source_cache_lock:
@@ -1202,10 +1319,24 @@ class DailyInspection:
     def refresh_source(self, scope):
         with self.source_locks[scope]:
             cached = self.cached_source(scope)
-            if cached and time.time() - cached.get('refreshed_at', 0) < 300:
+            now = time.time()
+            if cached and now - cached.get('probed_at', 0) < self.PROBE_INTERVAL:
                 return cached
+            if cached:
+                config_fp = self.config_fingerprint(scope)
+                batch_marker = self.source_batch_probe(scope)
+                age = now - cached.get('refreshed_at', 0)
+                if (config_fp == cached.get('config_fp')
+                        and batch_marker is not None
+                        and batch_marker == cached['batch'].get('batch')
+                        and age < self.CACHE_HARD_TTL):
+                    cached['probed_at'] = now
+                    with self.source_cache_lock:
+                        self.source_cache[scope] = cached
+                    return cached
             batch = self.capture_fresh([scope])[scope]
-            value = {'version': 2, 'refreshed_at': time.time(), 'batch': batch}
+            value = {'version': 2, 'refreshed_at': time.time(), 'probed_at': time.time(),
+                     'config_fp': batch.get('config_fp'), 'batch': batch}
             with self.source_cache_lock:
                 self.source_cache[scope] = value
             if self.store:
@@ -1220,15 +1351,94 @@ class DailyInspection:
         for scope in scopes:
             if scope not in SOURCES:
                 raise RiskError('巡检楼栋无效。', 400)
-            value = self.cached_source(scope)
-            stale = not value or time.time() - value.get('refreshed_at', 0) >= 300
-            if stale and not (allow_stale and value):
+            cached = self.cached_source(scope)
+            try:
                 value = self.refresh_source(scope)
                 stale = False
+            except RiskError:
+                if not (allow_stale and cached):
+                    raise
+                value, stale = cached, True
             result[scope] = copy.deepcopy(value['batch'])
             result[scope]['cache_refreshed_at'] = value['refreshed_at']
             result[scope]['cache_stale'] = stale and bool(allow_stale)
         return result
+
+    def sync_active_live(self, scope):
+        """Re-derive an open round's automatic data from the latest source batch.
+
+        Point-configuration or batch changes on the producer side update the
+        round's positions and values in real time. Human review values are
+        carried over by stable parameter identity, and the review version is
+        bumped so concurrent editors refresh instead of overwriting each other.
+        Finished or pending-freeze rounds keep their frozen snapshot.
+        """
+        with self.locks[scope]:
+            state = self.load(scope)
+            active = state.get('active')
+            if not active or 'completed' in active:
+                return state
+            stored = active.get('live_fp') or {}
+            try:
+                live = self.capture([scope])[scope]
+            except RiskError:
+                return state
+            fp = {'batch': live.get('batch'), 'config_fp': live.get('config_fp')}
+            if stored.get('batch') == fp['batch'] and stored.get('config_fp') == fp['config_fp']:
+                return state
+            if not self.live_batch_belongs_to_round(active, live):
+                return state
+            old_batch = active['batches'].get(scope) or {}
+            if (old_batch.get('batch') == fp['batch']
+                    and old_batch.get('config_fp') == fp['config_fp']):
+                active['live_fp'] = fp
+                self.store.put_document(NS, 'building:' + scope, state)
+                return state
+            active['reviews'], orphan_ledger = remap_review_values(
+                old_batch.get('devices') or [], live.get('devices') or [],
+                active.get('reviews') or {}, active.get('review_orphan_identities'))
+            if orphan_ledger:
+                active['review_orphan_identities'] = orphan_ledger
+            else:
+                active.pop('review_orphan_identities', None)
+            active['batches'][scope] = {key: live[key] for key in
+                                        ('batch', 'rows', 'devices', 'config_fp', 'form_devices') if key in live}
+            active['live_fp'] = fp
+            active['review_version'] = active.get('review_version', 0) + 1
+            active['live_synced_at'] = int(time.time() * 1000)
+            self.store.put_document(NS, 'building:' + scope, state)
+            return state
+
+    def live_batch_belongs_to_round(self, active, live):
+        """Never pull another slot's or another shift's batch into an open round.
+
+        Scheduled rounds only accept the batch sealed from their own slot's
+        two-hour source bucket (a configuration retransmit of the same bucket
+        keeps the same source stamps and stays acceptable); manual rounds
+        accept batches sealed no later than the round cutoff. Without this,
+        rollover would archive the next round's readings into this round.
+        """
+        duty = active.get('duty') or {}
+        round_number = active.get('round') or 1
+        now_ms = dt.datetime.now(CN).timestamp() * 1000
+        upload = live.get('batch') or 0
+        if not upload or upload > now_ms:
+            return False
+        if self.scheduled:
+            from .daily_inspection_reminders import slot_time
+            slot = slot_time(duty.get('date'), duty.get('shift'), round_number)
+            start = slot.replace(hour=slot.hour - slot.hour % 2, minute=0, second=0, microsecond=0)
+            start_ms, end_ms = start.timestamp() * 1000, (start + dt.timedelta(hours=2)).timestamp() * 1000
+            stamps = [row['fields'].get('源文件时间') for row in live.get('rows') or []
+                      if isinstance(row, dict) and isinstance(row.get('fields'), dict)]
+            return bool(stamps) and all(type(stamp) is int and start_ms <= stamp < end_ms for stamp in stamps) \
+                and upload >= start_ms
+        from .daily_inspection_reminders import shift_bounds
+        shift_end_ms = shift_bounds(duty.get('date'), duty.get('shift'))[1] * 1000
+        cutoff_ms = self.round_cutoff(duty, round_number).timestamp() * 1000
+        # A batch sealed after this round's rollover cutoff belongs to the next
+        # round even when the shift itself has not ended yet.
+        return upload <= min(cutoff_ms, shift_end_ms)
 
     def load(self, scope):
         return self.store.get_document(NS, 'building:' + scope) or {'active': None, 'history': []}
@@ -1396,6 +1606,7 @@ class DailyInspection:
         now = now or dt.datetime.now(CN)
         with self.locks[scope]:
             state = self.load(scope)
+            state = self.sync_active_live(scope)
             active = state.get('active')
             if not active:
                 return
@@ -1450,6 +1661,7 @@ class DailyInspection:
         state_key = 'building:' + scope
         with self.locks[scope]:
             state = self.load(scope)
+            state = self.sync_active_live(scope)
             if action == 'start':
                 submitted_duty = data.get('duty')
                 if not isinstance(submitted_duty, dict) or any(submitted_duty.get(key) != value
@@ -2496,6 +2708,7 @@ def install_daily_inspection(app, controller, runtime):
                 raise RiskError('只能办理本人当班楼栋的巡检。', 403)
             if request.method == 'GET':
                 state = await asyncio.to_thread(svc.load, scope)
+                state = await asyncio.to_thread(svc.sync_active_live, scope)
                 if action == 'source':
                     if not viewer and scope not in home_scopes and not can_manage:
                         raise RiskError('没有当前参考数据的查看权限。', 403)

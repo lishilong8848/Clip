@@ -37,6 +37,11 @@
                 <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">基于此模板新建</NButton>
                 <NButton size="small" :disabled="busy" @click="chooseImport(template)">导入新版</NButton>
                 <NButton size="small" :disabled="busy" @click="toggleTemplate(template)">{{ template.active ? '停用' : '启用' }}</NButton>
+                <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }"
+                  @positive-click="deleteTemplate(template)">
+                  <template #trigger><NButton size="small" type="error" quaternary :disabled="busy">删除</NButton></template>
+                  删除「{{ template.name }}」？已有自检记录仍可查看和导出。
+                </NPopconfirm>
               </div>
             </article>
             <section v-if="templateClone" class="tool-edit-panel" aria-label="新建自检模板">
@@ -70,8 +75,8 @@
               <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />下载月度归档</NButton>
               <span v-else class="tool-muted">{{ board.orders.length && !pendingCount && !reviewCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
             </div>
-            <NButton v-if="view==='orders'" :disabled="busy" @click="openNewOrder">新增本月工单</NButton>
-            <NButton v-if="view === 'orders' && !bulkMode && visibleOrders.some(row => row.can_delete)" :disabled="busy || loading" @click="bulkMode = true">批量删除</NButton>
+            <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading || !!newOrderPlan" @click="openNewOrder">新增本月工单</NButton>
+            <NButton v-if="view === 'orders' && !newOrderPlan && !bulkMode && visibleOrders.some(row => row.can_delete)" :disabled="busy || loading" @click="bulkMode = true">批量删除</NButton>
             <NButton v-if="view==='orders'" :disabled="busy" @click="openNewTool">添加工具</NButton>
           </div>
           <section v-if="addingTool" class="tool-library" aria-label="添加工具">
@@ -85,11 +90,8 @@
             </label></div>
             <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
           </section>
-          <div v-if="addingOrder" class="tool-filters">
-            <NSelect v-model:value="newAsset" filterable :options="assetOptions" placeholder="选择工具" />
-            <NSelect v-model:value="newKind" :options="[{label:'自检',value:'self'},{label:'送检',value:'external'}]" />
-            <NButton :disabled="busy" @click="addingOrder=false">取消</NButton><NButton type="primary" :disabled="busy||!newAsset" @click="createOrder">创建</NButton>
-          </div>
+          <ToolOrderBatchCreate v-if="view === 'orders' && newOrderPlan" :plan="newOrderPlan" :busy="busy"
+            @close="newOrderPlan = null" @create="createOrders" />
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :disabled="busy" :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
               <template #prefix><Search :size="16" /></template>
@@ -284,8 +286,9 @@
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, Settings2, Trash2, Upload, Wrench } from 'lucide-vue-next';
-import { downloadFile, requestBinaryJson, requestJson } from '../api/client';
+import { ApiError, downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
+import ToolOrderBatchCreate, { type OrderCreationPlan, type PlannedOrder } from './ToolOrderBatchCreate.vue';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
 defineProps<{ scope?: string; embedded?: boolean }>();
@@ -313,7 +316,7 @@ interface Detail extends Order {
 }
 interface Board {
   month: string; orders: Order[]; followups: Order[]; templates: Template[]; can_manage_templates: boolean;
-  can_download_month: boolean; archived_at: string | null; actor_name: string;
+  can_download_month: boolean; archived_at: string | null; actor_name: string; can_create_orders: boolean;
   inventory_at: string; inventory_error: string;
 }
 const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', label: '自检工单' }, { value: 'external', label: '送检工单' }];
@@ -335,14 +338,41 @@ const outcome = ref('');
 const reason = ref('');
 const reviewReason = ref('');
 const quantity = ref(1);
-const addingOrder=ref(false),newAsset=ref<string|null>(null),newKind=ref('self');
-const assets=ref<{id:string;scope:string;name:string;model:string;location:string}[]>([]);
+const newOrderPlan = ref<OrderCreationPlan | null>(null);
 const addingTool=ref(false),toolFields=ref<{name:string;type:number;options:string[]}[]>([]),newTool=ref<Record<string,any>>({}),toolOperation=ref('');
 async function openNewTool(){await mutate(async()=>{const data=await requestJson(api+'/inventory/fields') as {fields:typeof toolFields.value;scopes:string[]};toolFields.value=data.fields.map(f=>f.name==='楼栋'?{...f,options:f.options.filter(o=>data.scopes.some(s=>o===s+'楼'||o==='南通'+s+'楼'))}:f);newTool.value={'一级分类':'B工具类'};toolOperation.value=crypto.randomUUID().replace(/-/g,'');addingTool.value=true;});}
 async function createTool(){await mutate(async()=>{await requestJson(api+'/inventory/new',{method:'POST',body:JSON.stringify({operation_id:toolOperation.value,fields:newTool.value})});addingTool.value=false;message.value='工具已添加，库存将在下次同步后显示。';});}
-const assetOptions=computed(()=>assets.value.map(item=>({value:item.id,label:[item.scope+'楼',item.name,item.model,item.location].filter(Boolean).join(' · ')})));
-async function openNewOrder(){await mutate(async()=>{const data=await requestJson(api+'/order-candidates') as {items:typeof assets.value};assets.value=data.items;addingOrder.value=true;});}
-async function createOrder(){if(!newAsset.value)return;await mutate(async()=>{await requestJson(api+'/orders',{method:'POST',body:JSON.stringify({asset_id:newAsset.value,kind:newKind.value})});addingOrder.value=false;newAsset.value=null;await loadBoard();message.value='工单已创建。';});}
+async function readOrderPlan() {
+  return await requestJson(api + '/orders/batch-create', { cache: 'no-store' }) as OrderCreationPlan;
+}
+async function openNewOrder() {
+  await mutate(async () => {
+    newOrderPlan.value = await readOrderPlan();
+    addingTool.value = false;
+    exitBulkMode();
+  });
+}
+async function createOrders(items: PlannedOrder[]) {
+  const plan = newOrderPlan.value;
+  if (!plan || !items.length) return;
+  await mutate(async () => {
+    const orders = items.map(({ asset_id, kind }) => ({ asset_id, kind }));
+    let result: { month: string; created_count: number; existing_count: number };
+    try {
+      result = await requestJson(api + '/orders/batch-create', {
+        method: 'POST', body: JSON.stringify({ month: plan.month, orders }),
+      }) as typeof result;
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 409) {
+        try { newOrderPlan.value = await readOrderPlan(); } catch { /* Show the original conflict. */ }
+      }
+      throw failure;
+    }
+    newOrderPlan.value = null;
+    await loadBoard(result.month);
+    message.value = `已创建 ${result.created_count} 张工单${result.existing_count ? `，已有 ${result.existing_count} 张` : ''}。`;
+  });
+}
 const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
@@ -416,7 +446,7 @@ const emptyDescription = computed(() => {
   if (view.value === 'followups') return '暂无待处理的检修或报废审批';
   return board.value?.inventory_at ? '本月暂无工单' : '正在等待工具底表首次同步';
 });
-watch(view, () => { stateFilter.value = 'all'; });
+watch(view, () => { stateFilter.value = 'all'; newOrderPlan.value = null; });
 watch([view, month], exitBulkMode);
 watch([view, search, stateFilter, kindFilter, month], () => {
   page.value = 1;
@@ -569,6 +599,7 @@ function back() {
 }
 function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
+  else if (newOrderPlan.value) void openNewOrder();
   else void loadBoard();
 }
 function addRecord() {
@@ -663,6 +694,18 @@ async function toggleTemplate(template: Template) {
     await requestJson(`${api}/templates/${template.id}/availability`, { method: 'POST',
       body: JSON.stringify({ version: template.version, active: !template.active }) });
     await loadBoard();
+  });
+}
+async function deleteTemplate(template: Template) {
+  await mutate(async () => {
+    await requestJson(`${api}/templates/${template.id}/delete`, {
+      method: 'POST', body: JSON.stringify({ version: template.version }),
+    });
+    if (board.value) board.value.templates = board.value.templates.filter(item => item.id !== template.id);
+    if (templateClone.value?.id === template.id) templateClone.value = null;
+    if (templateId.value === template.id) templateId.value = null;
+    await loadBoard();
+    message.value = '模板已删除。';
   });
 }
 function leave(proceed: () => void) {

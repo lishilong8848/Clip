@@ -1290,6 +1290,13 @@ def export_workbook(content, config, operations):
                 item={"room":op["room"],"rack":op["rack"],"action":event["action"],
                       "date":event["actual"][:10],"sent_at":event["actual"],"direction":direction}
                 if direction in ("up","down"): mail_items[key]=item
+    if mail_items.keys() - baseline_keys:
+        # Editing a legacy row can assign a new event ID without changing the operation.
+        baseline_keys.update(
+            (event["room"],event["rack"],event["action"],event["actual"])
+            for event in parse_template(content,config["scope"])["operations"]
+            if completed_state_event(event)
+        )
     mail_items=[item for key,item in mail_items.items() if key not in baseline_keys]
     parts=finalize_mail_summary(parts,book,config,mail_items)
     out=io.BytesIO()
@@ -1335,7 +1342,13 @@ def _summary_period_counts(config, items):
 
 
 def _apply_period_summary(root,book,config,daily,monthly):
-    if not daily and not monthly:
+    confirmed_rows = []
+    if config["scope"] == "A":
+        source = Path(__file__).parent / "templates/cabinet_power/A.summary-baseline.json"
+        confirmed = json.loads(source.read_text(encoding="utf-8"))
+        if config["template_data"]["hash"] == confirmed["template_sha256"]:
+            confirmed_rows = confirmed["days"]
+    if not daily and not monthly and not confirmed_rows:
         return
     sheet_data=root.find(T("sheetData")); mapping={cell.get("r"):cell for cell in root.iter(T("c"))}
     def value(ref,current=None): return book.value((current or mapping).get(ref))
@@ -1378,6 +1391,24 @@ def _apply_period_summary(root,book,config,daily,monthly):
     def data_rows(section):
         return [int(row.get("r")) for row in sheet_data if int(row.get("r"))>section["header"] and any(
             value(f"{col_name(column)}{int(row.get('r'))}") not in (None,"") for column in range(section["start"],section["start"]+section["width"]))]
+    if confirmed_rows:
+        # The A building source records on-site totals separately from operation counts.
+        section = next(item for item in sections if item["kind"] == "split")
+        rows_by_date = {}
+        for row in data_rows(section):
+            for offset in (1, 3):
+                date = period_key(value(f"{col_name(section['start']+offset)}{row}"))
+                if date:
+                    rows_by_date[date] = row
+        for item in confirmed_rows:
+            row = rows_by_date[item.get("template_date", item["date"])]
+            date = ".".join(str(int(part)) for part in item["date"].split("-"))
+            values = (date if item["up"] else "", item["up"] or "",
+                      date if item["down"] else "", item["down"] or "", item["onsite"])
+            for offset, raw in enumerate(values, 1):
+                ref = f"{col_name(section['start']+offset)}{row}"
+                sample = mapping.get(f"{col_name(section['start']+offset)}{row-1}")
+                put(ref, raw, sample.get("s", "0") if sample is not None else 0)
     for section in sections:
         rows=data_rows(section); sample=rows[-1] if rows else section["header"]+1
         section["styles"]=[]

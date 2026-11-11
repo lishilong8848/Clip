@@ -1,4 +1,6 @@
+import io
 import json
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -221,6 +223,43 @@ class ToolManagementTest(TestCase):
         self.assertEqual(detail['review_note'], '请核对工具信息')
         self.assertEqual(self.cloud.writes, [])
 
+    def test_delete_template_keeps_pinned_draft_and_download(self):
+        with self.svc.connect() as db:
+            content = self.svc._template(db, self.template['id'], self.template['version'])['content']
+        template = self.svc.save_template(self.admin, '待删除测试模板', content)
+        identity = template['id']
+        version = {'version': template['version']}
+        order = next(row for row in self.orders if row['kind'] == 'self')
+        claim = self.svc.action(self.leader, order['id'], 'claim', {'revision': order['revision']})
+        record = {'entry_id': '2' * 32, 'template_id': identity, **version,
+                  'checks': ['是'] * len(template['schema']['checks']), 'location': '工具间',
+                  'inspector': '验收人员', 'checked_at': self.date + 'T09:00'}
+        body = {'revision': claim['revision'], 'records': [record], 'outcome': 'normal', 'quantity': 1}
+        draft = self.svc.action(self.leader, order['id'], 'draft', body)
+        with self.assertRaisesRegex(RiskError, '仅管理员'):
+            self.svc.delete_template(self.leader, identity, version)
+        self.assertEqual(self.svc.delete_template(self.admin, identity, version), {'deleted': True})
+        self.assertEqual(self.svc.delete_template(self.admin, identity, version), {'deleted': True})
+        for viewer in (self.admin, self.leader):
+            self.assertNotIn(identity, [item['id'] for item in self.svc.list(viewer)['templates']])
+        with self.assertRaises(RiskError):
+            self.svc.availability(self.admin, identity, version | {'active': True})
+        with self.assertRaises(RiskError):
+            self.svc.clone_template(self.admin, identity, version | {'name': '不可复制'})
+
+        body['revision'] = draft['revision']
+        with self.assertRaises(RiskError):
+            self.svc.action(self.leader, order['id'], 'draft', body | {'records': [record | {'entry_id': '3' * 32}]})
+        self.assertEqual(self.svc.detail(self.leader, order['id'])['records'][0]['template'], template)
+        pending = self.svc.action(self.leader, order['id'], 'submit', body)
+        self.svc.action(self.leader, order['id'], 'review-approve', {'revision': pending['revision']})
+        with ZipFile(io.BytesIO(self.svc.download(self.leader, identity=order['id']))) as archive:
+            self.assertTrue(any(name.endswith('待删除测试模板.xlsx') for name in archive.namelist()))
+        reimported = self.svc.save_template(self.admin, template['name'], content)
+        self.assertEqual((reimported['id'], reimported['version']), (identity, template['version'] + 1))
+        with self.assertRaisesRegex(RiskError, '模板已更新'):
+            self.svc.delete_template(self.admin, identity, version)
+
     def test_manual_order_creation_and_safe_soft_delete(self):
         asset = self.cloud.assets[1]
         self.assertTrue(any(item['id'] == asset['id'] for item in self.svc.order_candidates(self.leader)['items']))
@@ -235,6 +274,39 @@ class ToolManagementTest(TestCase):
         self.assertFalse(deleted['can_claim'])
         with self.svc.connect() as db:
             self.assertTrue(db.execute("SELECT 1 FROM tool_work_audit WHERE order_id=? AND action='删除工单'", (order['id'],)).fetchone())
+
+    def test_batch_create_uses_current_month_plan_and_retries_without_duplicates(self):
+        first_day = clock().date().replace(day=1)
+        due = (first_day + timedelta(days=14)).isoformat()
+        asset = self.cloud.assets[0] | {'id': 'recBatch', 'self_first': due, 'external_first': due}
+        next_month = (first_day + timedelta(days=32)).replace(day=1).isoformat()
+        future = asset | {'id': 'recFuture', 'self_first': next_month, 'external_first': next_month}
+        other_scope = asset | {'id': 'recOther', 'scope': 'B'}
+        self.cloud.assets.extend([asset, future, other_scope])
+        self.svc.refresh()
+
+        plan = self.svc.planned_order_candidates(self.leader)
+        self.assertEqual(plan['month'], self.month)
+        self.assertEqual({(row['asset_id'], row['kind'], row['due']) for row in plan['items']},
+                         {('recBatch', 'self', due), ('recBatch', 'external', due)})
+        selection = [{'asset_id': row['asset_id'], 'kind': row['kind']} for row in plan['items']]
+        body = {'month': self.month, 'orders': selection}
+        for invalid in ('recFuture', 'recOther'):
+            with self.assertRaises(RiskError):
+                self.svc.create_planned_orders(self.leader, body | {'orders': [*selection, {'asset_id': invalid, 'kind': 'self'}]})
+        with self.assertRaises(RiskError):
+            self.svc.create_planned_orders(self.supervisor, body)
+        with self.assertRaises(RiskError):
+            self.svc.create_planned_orders(self.leader, body | {'month': '2000-01'})
+        self.assertEqual(len(self.svc.list(self.leader)['orders']), len(self.orders))
+        self.assertEqual(self.svc.create_planned_orders(self.leader, body),
+                         {'month': self.month, 'created_count': 2, 'existing_count': 0})
+        self.assertEqual(self.svc.create_planned_orders(self.leader, body),
+                         {'month': self.month, 'created_count': 0, 'existing_count': 2})
+        self.svc.schedule()
+        new_orders = [row for row in self.svc.list(self.leader)['orders'] if row['id'] not in {item['id'] for item in self.orders}]
+        self.assertEqual(sorted((row['kind'], row['due']) for row in new_orders), [('external', due), ('self', due)])
+        self.assertEqual(self.svc.planned_order_candidates(self.leader)['items'], [])
 
     def test_batch_delete_is_atomic_and_prevents_regeneration(self):
         first, second, untouched = self.orders[:3]
