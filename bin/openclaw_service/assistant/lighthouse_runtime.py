@@ -32,6 +32,9 @@ LOGGER = logging.getLogger(__name__)
 class AssistantStartupError(AssistantError):
     code = "runtime_startup"
 
+    def __init__(self, message, status=503, *, category="runtime_startup"):
+        super().__init__(message, status, category=category or self.code)
+
 
 def account_key(identity):
     if not isinstance(identity, str) or not identity.strip():
@@ -233,6 +236,10 @@ class OpenClawRuntime:
         self.http_lock = asyncio.Lock()
         self.plugin_hash = None
         self.tool_names = None
+        # Cool down between failures and clear the compile cache after repeated failures.
+        self._gateway_failure_count = 0
+        self._gateway_retry_at = 0.0
+        self._recovery_threshold = 3
 
     async def prepare(self, *, progress=lambda _: None):
         """Verify/install dependencies before a question, without account credentials."""
@@ -310,7 +317,9 @@ class OpenClawRuntime:
                 return existing
             node, entry = await self.prepare(progress=progress)
             async with self.lock:
-                if self.gateway and self.gateway['process'].poll() is not None:
+                gateway_process = self.gateway.get('process') if self.gateway else None
+                if (gateway_process is not None and gateway_process.poll() is not None
+                        and (self.startup is None or self.startup.done())):
                     self.gateway['stopped'] = True
                     await asyncio.to_thread(self.gateway['output'].close)
                     self.gateway = None
@@ -318,6 +327,8 @@ class OpenClawRuntime:
                         old_item['stopped'] = True
                     self.accounts.clear()
                     self.startup = None
+                if self.startup is None and time.monotonic() < self._gateway_retry_at:
+                    raise AssistantStartupError('助手网关正在恢复，请稍后重试。', 503)
                 if 0 < self.maximum <= sum(bool(item.get('busy')) for item in self.accounts.values()):
                     raise AssistantError("助手正在处理其他会话，请稍后继续。", 503)
                 if self.plugin_hash is not None and self.plugin_hash != plugin_hash:
@@ -376,9 +387,18 @@ class OpenClawRuntime:
         tool_names = self.tool_names if self.tool_names is not None else tool_names
         config = build_configuration(gateway['root'], self.accounts if accounts is None else accounts, gateway['port'], model_url=self.model_url(),
                                      plugin=gateway['plugin'], tool_names=tool_names, max_concurrent=self._openclaw_max_concurrent)
-        digest = hashlib.sha256(json.dumps(config, sort_keys=True).encode()).hexdigest()
+        config_json = json.dumps(config, sort_keys=True)
+        digest = hashlib.sha256(config_json.encode()).hexdigest()
         if gateway.get('config_digest') == digest:
             return
+        roster = self.accounts if accounts is None else accounts
+        if set(config.get('agents', {}).get('entries', {})) != {item['agent_id'] for item in roster.values()}:
+            from openclaw_service.diagnostics import capture
+            capture('startup', 'config_anomaly', category='config_anomaly',
+                    details={'startup_stage': 'config_anomaly'})
+            startup_log('startup_failed', error='ConfigAnomaly', config_size=len(config_json))
+            raise AssistantStartupError('助手配置缺少预期账号，原配置已保留。', 503,
+                                 category='config_anomaly')
         for attempt in range(8):
             try:
                 await asyncio.to_thread(atomic_json, gateway['root'] / 'openclaw.json', config)
@@ -395,7 +415,7 @@ class OpenClawRuntime:
         import shutil
         # Prewarm the reply runtime once before registering a login burst.
         await asyncio.sleep(.1)
-        process, log, gateway = None, None, None
+        process, log, gateway, probe = None, None, None, None
         try:
             async with self.lock:
                 root = self.root / 'shared-gateway'
@@ -462,21 +482,37 @@ class OpenClawRuntime:
                     item['configured'] = True
             startup_log('gateway_ready', pid=process.pid, port=port, protocol=gateway['protocol'],
                         elapsed_ms=round((time.monotonic() - started) * 1000, 1))
+            self._gateway_failure_count = 0
+            self._gateway_retry_at = 0.0
         except BaseException as exc:
             from openclaw_service.diagnostics import capture
-            capture('startup', 'startup_failed', category=getattr(exc, 'category', ''), error=exc)
-            startup_log('startup_failed', error=type(exc).__name__)
+            stage = (probe or {}).get('startup_stage', '')
+            if not stage and process is not None and process.poll() is not None:
+                stage = 'process_exited'
+            capture('startup', 'startup_failed', category=getattr(exc, 'category', '') or stage, error=exc,
+                    details={'startup_stage': stage} if stage else None)
+            startup_log('startup_failed', error=type(exc).__name__, startup_stage=stage or 'unknown')
             await asyncio.to_thread(self._terminate_startup_process, process)
             if log:
                 await asyncio.to_thread(log.close)
             if gateway:
                 gateway['stopped'] = True
-            self.gateway = None
-            self.startup = None
-            self.plugin_hash = None
-            for item in self.accounts.values():
-                item['stopped'] = True
-            self.accounts.clear()
+            async with self.lock:
+                self.gateway = None
+                self.plugin_hash = None
+                for item in self.accounts.values():
+                    item['stopped'] = True
+                self.accounts.clear()
+                if not isinstance(exc, asyncio.CancelledError):
+                    self._gateway_failure_count += 1
+                    self._gateway_retry_at = time.monotonic() + 120
+                    if self._gateway_failure_count >= self._recovery_threshold and (
+                            process is None or process.poll() is not None):
+                        await asyncio.to_thread(self._clear_gateway_caches)
+                        self._gateway_failure_count = 0
+                        startup_log('gateway_starting', phase='auto_recovery',
+                                    failures=self._recovery_threshold)
+                self.startup = None
             raise
 
     async def _configured(self, item):
@@ -535,11 +571,31 @@ class OpenClawRuntime:
             except (subprocess.TimeoutExpired, OSError):
                 pass
 
+    def _clear_gateway_caches(self):
+        """Remove stale caches that may cause persistent gateway startup failures.
+
+        Called automatically after consecutive failures exceed the recovery
+        threshold. Only removes regenerable caches; never touches runtime files,
+        account state, or configuration that cannot be rebuilt.
+        """
+        import shutil
+        root = self.root.resolve() / 'shared-gateway'
+        compile_cache = root / 'node-compile-cache'
+        try:
+            if compile_cache.is_dir() and compile_cache.resolve() == compile_cache:
+                shutil.rmtree(compile_cache)
+                LOGGER.info('Gateway auto-recovery cleared: node-compile-cache')
+        except OSError:
+            LOGGER.warning('Gateway auto-recovery could not clear the compile cache')
+
     async def _ready(self, item, deadline, GatewayClient, GatewayError):
         from websockets.exceptions import InvalidHandshake
         process, port, token = item['process'], item['port'], item['token']
+        started = time.monotonic()
+        last_phase = ''
         while not self.closing and time.monotonic() < deadline:
             if process.poll() is not None:
+                item["startup_stage"] = "process_exited"
                 raise AssistantStartupError("助手运行环境启动失败，请查看本机助手诊断。", 503)
             try:
                 async with asyncio.timeout(min(15, max(.01, deadline - time.monotonic()))):
@@ -552,17 +608,30 @@ class OpenClawRuntime:
                         return item
             except (OSError, InvalidHandshake):
                 item["startup_stage"] = "port_unavailable"
+                if last_phase != 'port_unavailable':
+                    startup_log('gateway_starting', phase='port_unavailable',
+                                elapsed_ms=round((time.monotonic() - started) * 1000))
+                    last_phase = 'port_unavailable'
                 await asyncio.sleep(.2)
             except asyncio.TimeoutError:
                 item["startup_stage"] = "handshake_timeout"
+                if last_phase != 'handshake_timeout':
+                    startup_log('gateway_starting', phase='handshake_timeout',
+                                elapsed_ms=round((time.monotonic() - started) * 1000))
+                    last_phase = 'handshake_timeout'
                 await asyncio.sleep(.2)
             except GatewayError as exc:
                 item["startup_stage"] = exc.code
+                if last_phase != exc.code:
+                    startup_log('gateway_starting', phase=exc.code,
+                                elapsed_ms=round((time.monotonic() - started) * 1000))
+                    last_phase = exc.code
                 if exc.code in {"UNAVAILABLE", "DISCONNECTED", "HANDSHAKE_TIMEOUT", "TIMEOUT"}:
                     await asyncio.sleep(.3)
                 else:
                     raise AssistantStartupError("助手网关握手未通过（" + exc.code + "），未启动会话。", 503) from None
-        raise AssistantStartupError("助手启动超时，原消息已保留，可继续。", 503)
+        raise AssistantStartupError("助手启动超时，原消息已保留，可继续。", 503,
+                                    category=item.get("startup_stage", ""))
 
     async def _verify_tools(self, client, item):
         from .lighthouse_ai import model_capabilities

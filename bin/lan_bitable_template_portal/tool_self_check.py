@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import io
 import json
+import logging
 import re
 from pathlib import Path
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
@@ -21,6 +22,9 @@ TEMPLATES = Path(__file__).resolve().parents[1] / 'resources' / 'tool_self_check
 MAX_FILE = 2 * 1024 * 1024
 MAX_RECORDS = 20
 RESULTS = ('是', '否')
+ELECTRICAL_HEADER = ('自检项目', '操作方法', '合格标准', '完成情况')
+HVAC_HEADER = ('自检项目', '检查内容', '', '完成情况')
+HVAC_FIELDS = {'C3': '仪器名称', 'C4': '规格／型号', 'G4': '制造厂商', 'C10': '建议下次校准日期'}
 
 
 def dumps(data):
@@ -45,7 +49,7 @@ def timestamp(value):
 
 
 def parse_template(data):
-    """Accept the supplied record layout with a variable number of check rows."""
+    """Recognize the record worksheet and keep its original workbook intact."""
     if not data or len(data) > MAX_FILE:
         raise RiskError('请选择 2 MB 以内的 XLSX 自检记录单。')
     try:
@@ -58,37 +62,67 @@ def parse_template(data):
                 raise RiskError('模板不能包含外部工作簿、嵌入对象或宏。')
         book = load_workbook(io.BytesIO(data), keep_links=False)
         try:
-            sheet = book.active
-            if len(book.worksheets) != 1 or not 15 <= sheet.max_row <= 113 or not 9 <= sheet.max_column <= 24:
-                raise RiskError('请选择与现有自检记录单布局一致的单工作表。')
-            cells = list(sheet.iter_rows())
-            if any(cell.data_type == 'f' for row in cells for cell in row):
-                raise RiskError('自检模板的填写区不能包含公式。')
+            sheets = [item for item in book.worksheets if item.title.strip() != '封面']
+            if len(sheets) != 1 or len(book.worksheets) > 2:
+                raise RiskError('每份模板应有一张自检记录表，可附一张封面。')
+            sheet = sheets[0]
+            if not 15 <= sheet.max_row <= 113 or sheet.max_column < 9:
+                raise RiskError('模板的自检记录区尺寸不符合要求。')
+            # Excel may serialize empty formatting near XFD. Check sparse
+            # values without materializing all the empty columns.
+            if any(cell.data_type == 'f' or cell.column > 24 and str(cell.value or '').strip()
+                   for item in book.worksheets for cell in item._cells.values()):
+                raise RiskError('自检模板包含公式或表格范围之外的数据。')
 
             def value(row, col):
-                return str(cells[row - 1][col - 1].value or '').strip()
+                return str(sheet.cell(row, col).value or '').strip()
 
-            headers = [value(10, col) for col in (3, 5, 7, 9)]
-            if headers != ['自检项目', '操作方法', '合格标准', '完成情况']:
-                raise RiskError('模板第 10 行缺少自检项目、操作方法、合格标准或完成情况。')
+            def headers(row):
+                return tuple(value(row, col) for col in (3, 5, 7, 9))
+
+            hvac = headers(13) == HVAC_HEADER
+            if not hvac and headers(10) != ELECTRICAL_HEADER:
+                raise RiskError('找不到支持的电气或暖通自检表头。')
             checks = []
-            for row in range(11, sheet.max_row + 1):
+            calibration = []
+            group = ''
+            group_row = 0
+            in_calibration = False
+            for row in range(14 if hvac else 11, sheet.max_row + 1):
                 if value(row, 2) == '结果审核':
                     break
                 name, method, standard = (value(row, col) for col in (3, 5, 7))
-                if not all((name, method, standard)) or not re.fullmatch(r'是\s*\[\s*\]\s*否\s*\[\s*\]', value(row, 9)):
+                completion = value(row, 9)
+                if hvac and name:
+                    group, group_row = name, row
+                if hvac and (method, standard, completion) == ('校准点', '示值', '修正值'):
+                    in_calibration = True
+                    continue
+                if hvac and in_calibration and not any((method, standard, completion)):
+                    calibration.append({'row': row, 'label': group,
+                                        'fields': {f'E{row}': '校准点', f'G{row}': '示值', f'I{row}': '修正值'}})
+                    continue
+                if not ((group and method if hvac else name and method and standard)
+                        and re.fullmatch(r'是\s*\[\s*\]\s*否\s*\[\s*\]', completion)):
                     raise RiskError(f'模板第 {row} 行的检查项目或是／否栏不完整。')
-                checks.append({'row': row, 'name': text(name, 300, True), 'method': text(method, 1500, True),
-                               'standard': text(standard, 1500, True)})
+                in_calibration = False
+                checks.append({'row': row, 'name': text(group if hvac else name, 300, True),
+                               'method': text(method, 1500, True), 'standard': text(standard, 1500),
+                               **({'group_row': group_row} if hvac else {})})
             if (not checks or row + 2 > sheet.max_row or value(row, 2) != '结果审核'
                     or value(row + 1, 2) != '完成情况' or not value(row + 2, 2).startswith('审核人')):
                 raise RiskError('模板缺少检查事项或结果审核区。')
-            inputs = ['C3', 'G4', 'C6', 'D8', 'G8', f'E{row + 1}', f'E{row + 2}', f'G{row + 2}']
+            inputs = (['C5', 'G6', 'C8', 'D11', 'G11', *HVAC_FIELDS,
+                       *(address for entry in calibration for address in entry['fields'])]
+                      if hvac else ['C3', 'G4', 'C6', 'D8', 'G8'])
+            inputs.extend([f'E{row + 1}', f'E{row + 2}', f'G{row + 2}', *(f'I{item["row"]}' for item in checks)])
             if any(isinstance(sheet[address], MergedCell) for address in inputs):
                 raise RiskError('模板的合并单元格覆盖了填写位置。')
-            return {'description': value(7, 3), 'specialty': value(3, 7), 'cycle': value(4, 3),
-                    'applicable': value(5, 3), 'precautions': value(6, 3),
-                    'checks': checks, 'result_row': row + 1, 'review_row': row + 2}
+            offset = 2 if hvac else 0
+            return {'description': value(7 + offset, 3), 'specialty': value(3 + offset, 7), 'cycle': value(4 + offset, 3),
+                    'applicable': value(5 + offset, 3), 'precautions': value(6 + offset, 3),
+                    'checks': checks, 'result_row': row + 1, 'review_row': row + 2, 'sheet': sheet.title,
+                    **({'layout': 'hvac', 'fields': HVAC_FIELDS, 'calibration': calibration} if hvac else {})}
         finally:
             book.close()
     except RiskError:
@@ -100,13 +134,17 @@ def parse_template(data):
 def fill_template(content, schema, record, scope):
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
-        sheet = book.active
+        sheet = book[schema['sheet']] if schema.get('sheet') else book.active
+        hvac = schema.get('layout') == 'hvac'
         review = schema['review_row']
-        fields = {'C3': scope + '楼', 'G4': record['inspector'], 'D8': record['location'],
-                  'G8': record['checked_at'].replace('T', ' '),
+        fields = {'C5' if hvac else 'C3': scope + '楼', 'G6' if hvac else 'G4': record['inspector'],
+                  'D11' if hvac else 'D8': record['location'], 'G11' if hvac else 'G8': record['checked_at'].replace('T', ' '),
                   f'E{schema["result_row"]}': '已完成' if all(check == '是' for check in record['checks']) else '未完成'}
+        if hvac:
+            allowed = set(schema['fields']) | {address for entry in schema['calibration'] for address in entry['fields']}
+            fields.update({key: value for key, value in record.get('template_values', {}).items() if key in allowed and value})
         if record['notes']:
-            fields['C6'] = '\n'.join(filter(None, (schema['precautions'], record['notes'])))
+            fields['C8' if hvac else 'C6'] = '\n'.join(filter(None, (schema['precautions'], record['notes'])))
         if record['reviewer']:
             fields[f'E{review}'] = record['reviewer']
         if record['reviewed_at']:
@@ -143,6 +181,7 @@ class ToolSelfChecks:
                 CREATE TABLE IF NOT EXISTS tool_check_archives(
                     month TEXT PRIMARY KEY, created_at TEXT NOT NULL, content BLOB NOT NULL);
             ''')
+            db.execute('BEGIN IMMEDIATE')
             if not db.execute('SELECT 1 FROM tool_check_templates LIMIT 1').fetchone():
                 seeds = [(path, path.read_bytes()) for path in sorted(templates.glob('*.xlsx'))]
                 if not seeds:
@@ -150,6 +189,24 @@ class ToolSelfChecks:
                 db.executemany('INSERT OR IGNORE INTO tool_check_templates VALUES(?,1,?,1,?,?)', [
                     (hashlib.sha256(path.name.encode()).hexdigest()[:24], path.stem, content, dumps(parse_template(content)))
                     for path, content in seeds])
+            for path in sorted((templates / 'folder_imports').rglob('*.xlsx')):
+                try:
+                    if path.stat().st_size > MAX_FILE:
+                        raise RiskError('模板文件超过大小限制。')
+                    content = path.read_bytes()
+                    identity = self.import_identity(path.stem, content)
+                    if db.execute('SELECT 1 FROM tool_check_templates WHERE id=?', (identity,)).fetchone():
+                        continue
+                    schema = parse_template(content)
+                except (RiskError, OSError) as exc:
+                    logging.warning('Bundled tool template skipped (%s): %s', type(exc).__name__, path.name)
+                else:
+                    db.execute('INSERT INTO tool_check_templates VALUES(?,1,?,1,?,?)',
+                               (identity, path.stem, content, dumps(schema)))
+
+    @staticmethod
+    def import_identity(name, content):
+        return hashlib.sha256(name.encode() + b'\x00' + content).hexdigest()[:24]
 
     @staticmethod
     def access(actor):
@@ -229,7 +286,7 @@ class ToolSelfChecks:
                     raise RiskError('模板已更新，请刷新后重试。', 409)
                 next_version = version + 1
             else:
-                identity = hashlib.sha256(name.encode() + b'\x00' + content).hexdigest()[:24]
+                identity = self.import_identity(name, content)
                 existing = db.execute('SELECT MAX(version) FROM tool_check_templates WHERE id=?', (identity,)).fetchone()[0]
                 next_version = 1
                 if existing:
@@ -259,15 +316,19 @@ class ToolSelfChecks:
             raise RiskError('请保留原模板的检查项数量，并填写每项内容。')
         book = load_workbook(io.BytesIO(content), keep_links=False)
         try:
-            sheet = book.active
-            for key, address in (('description','C7'),('specialty','G3'),('cycle','C4'),
-                                 ('applicable','C5'),('precautions','C6')):
+            sheet = book[schema['sheet']] if schema.get('sheet') else book.active
+            hvac = schema.get('layout') == 'hvac'
+            fields = (('description','C9'),('specialty','G5'),('cycle','C6'),('applicable','C7'),('precautions','C8')) if hvac else (
+                ('description','C7'),('specialty','G3'),('cycle','C4'),('applicable','C5'),('precautions','C6'))
+            for key, address in fields:
                 if key in body:
                     sheet[address] = text(body[key], 1500)
             for old, new in zip(schema['checks'], checks, strict=True):
                 if not isinstance(new, dict):
                     raise RiskError('检查项格式无效。')
                 for key, column, maximum in (('name','C',300),('method','E',1500),('standard','G',1500)):
+                    if hvac and (key == 'standard' or key == 'name' and old.get('group_row') != old['row']):
+                        continue
                     sheet[f'{column}{old["row"]}'] = text(new.get(key), maximum, True)
             out = io.BytesIO()
             book.save(out)
@@ -367,8 +428,9 @@ class ToolSelfChecks:
             template = self._template(db, identity, version if pinned else None)
             if not pinned and (not template['active'] or template['version'] != version):
                 raise RiskError('新选模板已更新或停用，请刷新模板后重新选用。', 409)
+            schema = json.loads(template['schema'])
             checks = entry.get('checks')
-            if (not isinstance(checks, list) or len(checks) != len(json.loads(template['schema'])['checks'])
+            if (not isinstance(checks, list) or len(checks) != len(schema['checks'])
                     or any(answer not in (*RESULTS, '') for answer in checks) or submit and '' in checks):
                 raise RiskError(f'请逐项填写「{template["name"]}」的完成情况。')
             record = {'entry_id': entry_id, 'template_id': identity, 'version': version, 'checks': checks,
@@ -379,6 +441,17 @@ class ToolSelfChecks:
                       'reviewed_at': timestamp(entry.get('reviewed_at', ''))}
             if submit and not record['checked_at']:
                 raise RiskError(f'请填写「{template["name"]}」的检查开始时间。')
+            if schema.get('layout') == 'hvac':
+                values = entry.get('template_values', {})
+                allowed = set(schema['fields']) | {key for row in schema['calibration'] for key in row['fields']}
+                if not isinstance(values, dict) or values.keys() - allowed or any(not isinstance(item, str) for item in values.values()):
+                    raise RiskError('暖通模板的仪器或校准数据格式无效。')
+                record['template_values'] = {key: text(item, 200) for key, item in values.items() if item.strip()}
+                if submit:
+                    for row in schema['calibration']:
+                        filled = row['fields'].keys() & record['template_values'].keys()
+                        if filled and filled != row['fields'].keys():
+                            raise RiskError(f'请补齐「{template["name"]}」第 {row["row"]} 行的校准点、示值和修正值。')
             records.append(record)
         return records
 

@@ -150,6 +150,9 @@ class ToolManagement(ToolSelfChecks):
                     operation TEXT PRIMARY KEY, actor TEXT NOT NULL, fingerprint TEXT NOT NULL,
                     status TEXT NOT NULL, record_id TEXT NOT NULL DEFAULT '');
             """)
+            db.execute('BEGIN IMMEDIATE')
+            if not any(row['name'] == 'needs_refresh' for row in db.execute('PRAGMA table_info(tool_work_archives)')):
+                db.execute('ALTER TABLE tool_work_archives ADD COLUMN needs_refresh INTEGER NOT NULL DEFAULT 0')
 
     @staticmethod
     def state(db, key):
@@ -277,17 +280,25 @@ class ToolManagement(ToolSelfChecks):
             today = clock().date()
             month = today.strftime('%Y-%m')
             archived = bool(db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone())
+            inventory_at = self.state(db, 'inventory_at')
+            inventory_error = self.state(db, 'inventory_error')
+            excluded = {}
+            def count(reason):
+                excluded[reason] = excluded.get(reason, 0) + 1
             items = []
-            if not archived:
-                for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
-                    asset = self.effective(row)
-                    if asset['scope'] not in scopes:
-                        continue
-                    for kind, due in self.planned_kinds(db, asset, today).items():
-                        items.append({**{key: asset.get(key) for key in ('scope', 'name', 'model', 'location')},
-                                      'asset_id': asset['id'], 'kind': kind, 'due': due})
+            tool_count = 0
+            for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
+                asset = self.effective(row)
+                if asset['scope'] not in scopes:
+                    continue
+                tool_count += 1
+                for kind, due in self.planned_kinds(db, asset, today, count).items():
+                    items.append({**{key: asset.get(key) for key in ('scope', 'name', 'model', 'location')},
+                                  'asset_id': asset['id'], 'kind': kind, 'due': due})
             items.sort(key=lambda item: (item['scope'], item['due'], item['name'] or '', item['asset_id'], item['kind']))
-            return {'month': month, 'items': items, 'archived': archived, 'limit': MAX_ORDER_CREATIONS}
+            return {'month': month, 'items': items, 'archived': archived, 'limit': MAX_ORDER_CREATIONS,
+                    'tool_count': tool_count, 'excluded': excluded,
+                    'inventory_at': inventory_at, 'inventory_error': inventory_error}
 
     def create_planned_orders(self, actor, body):
         self.access(actor)
@@ -311,8 +322,6 @@ class ToolManagement(ToolSelfChecks):
             scopes = self.order_creation_scopes(db, actor)
             if not scopes:
                 raise RiskError('仅本楼楼长或有权限的管理员可新增工单。', 403)
-            if db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
-                raise RiskError('本月已归档，不能新增工单。', 409)
             pending = []
             existing_count = 0
             for asset_id, kinds in selection.items():
@@ -336,6 +345,8 @@ class ToolManagement(ToolSelfChecks):
                 order_id = uuid.uuid4().hex
                 self.insert_work_order(db, order_id, month, asset, kind, due)
                 self.audit(db, order_id, actor, '手动新增工单', '批量创建')
+            if pending:
+                db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (month,))
         return {'month': month, 'created_count': len(pending), 'existing_count': existing_count}
 
     def new_inventory_fields(self, actor):
@@ -424,7 +435,7 @@ class ToolManagement(ToolSelfChecks):
         self.check_revision(row, revision)
         if row['month'] != month or row['submitted_at'] or row['outcome']:
             raise RiskError('仅本月未提交工单可删除。', 409)
-        if db.execute('SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+        if db.execute('SELECT 1 FROM tool_work_archives WHERE month=? AND needs_refresh=0', (month,)).fetchone():
             raise RiskError('本月已归档，不能删除工单。', 409)
         if db.execute("SELECT 1 FROM tool_work_reviews WHERE order_id=? AND status='pending'", (identity,)).fetchone():
             raise RiskError('待审核工单不能删除，请先驳回。', 409)
@@ -465,7 +476,7 @@ class ToolManagement(ToolSelfChecks):
         return {'deleted_ids': list(revisions)}
 
     @staticmethod
-    def planned_kinds(db, asset, today):
+    def planned_kinds(db, asset, today, count=lambda _: None):
         month = today.strftime('%Y-%m')
         first_day = today.replace(day=1)
         end = month_offset(first_day, 1)
@@ -474,19 +485,30 @@ class ToolManagement(ToolSelfChecks):
         scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
         if asset.get('retired') or scrapped >= asset['quantity'] or any(
                 entry['outcome'] in {'repair', 'scrap'} for entry in history):
+            count('unavailable')
             return {}
         planned = {}
         for kind in KINDS:
             cycle = CYCLES.get(asset.get(kind + '_cycle'))
             entries = [entry for entry in history if entry['kind'] == kind]
-            if not cycle or any(entry['month'] == month or not entry['submitted_at']
-                                and entry['outcome'] != 'cancelled' for entry in entries):
+            same_month = next((entry for entry in entries if entry['month'] == month), None)
+            if same_month:
+                count('deleted' if same_month['outcome'] == 'cancelled' else 'created')
+                continue
+            if not cycle:
+                if asset.get(kind + '_cycle'):
+                    count('unscheduled')
+                continue
+            if any(not entry['submitted_at'] and entry['outcome'] != 'cancelled' for entry in entries):
+                count('unfinished')
                 continue
             latest = max([asset.get(kind + '_last', '')] + [entry['actual'] for entry in entries if entry['submitted_at']])
             due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
                 asset.get(kind + '_first') or first_day.isoformat())
             if due < end:
                 planned[kind] = due.isoformat()
+            else:
+                count('later')
         return planned
 
     def schedule(self, current=None):
@@ -562,13 +584,14 @@ class ToolManagement(ToolSelfChecks):
             visible = [self.work_info(db, actor, row) for row in rows if self.visible(db, actor, row)]
             admin = self.administrator(actor)
             all_scopes = admin and all(can_scope(actor, scope) for scope in BUILDINGS)
-            archive = db.execute('SELECT created_at FROM tool_work_archives WHERE month=?', (month,)).fetchone()
+            archive = db.execute('SELECT created_at,needs_refresh FROM tool_work_archives WHERE month=?', (month,)).fetchone()
             templates = self.list_templates(db, admin)
             return {'month': month, 'orders': [row for row in visible if row['month'] == month],
                     'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap'}],
                     'can_create_orders': bool(self.order_creation_scopes(db, actor)),
                     'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
                     'archived_at': archive[0] if archive and all_scopes else None,
+                    'archive_updating': bool(archive and archive['needs_refresh'] and all_scopes),
                     'inventory_at': self.state(db, 'inventory_at'), 'inventory_error': self.state(db, 'inventory_error'),
                     'actor_name': actor['name']}
 
@@ -847,7 +870,8 @@ class ToolManagement(ToolSelfChecks):
     def archive_ready(self):
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
-            ready = db.execute("""SELECT month FROM tool_work_orders WHERE month NOT IN(SELECT month FROM tool_work_archives)
+            ready = db.execute("""SELECT month FROM tool_work_orders WHERE month NOT IN(
+                SELECT month FROM tool_work_archives WHERE needs_refresh=0)
                 GROUP BY month HAVING SUM(submitted_at IS NULL AND outcome<>'cancelled')=0 ORDER BY month LIMIT 1""").fetchone()
             if not ready:
                 return
@@ -865,9 +889,11 @@ class ToolManagement(ToolSelfChecks):
                 pending = db.execute("""SELECT 1 FROM tool_work_orders WHERE month=?
                     AND submitted_at IS NULL AND outcome<>'cancelled' LIMIT 1""", (month,)).fetchone()
                 if actual == signature and not pending and not db.execute(
-                        'SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+                        'SELECT 1 FROM tool_work_archives WHERE month=? AND needs_refresh=0', (month,)).fetchone():
                     os.replace(path, self.archive_dir / f'{month}.zip')
-                    db.execute('INSERT INTO tool_work_archives VALUES(?,?)', (month, clock().isoformat(timespec='seconds')))
+                    db.execute('''INSERT INTO tool_work_archives(month,created_at,needs_refresh) VALUES(?,?,0)
+                        ON CONFLICT(month) DO UPDATE SET created_at=excluded.created_at,needs_refresh=0''',
+                        (month, clock().isoformat(timespec='seconds')))
         finally:
             path.unlink(missing_ok=True)
 

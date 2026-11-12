@@ -1,0 +1,9 @@
+.inspection-theme {
+  --inspection-ink: var(--cf-text);
+  --inspection-muted: var(--cf-muted);
+  --inspection-line: var(--cf-border);
+  --inspection-surface: var(--cf-surface);
+  --inspection-accent: var(--cf-brand-blue, #1e63ff);
+  --inspection-on-accent: var(--v2-palette-on-accent-text, var(--v2-on-accent, #fff));
+  --inspection-soft: color-mix(in srgb, var(--inspection-surface) 93%, var(--inspection-accent));
+}

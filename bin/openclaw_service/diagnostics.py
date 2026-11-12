@@ -16,7 +16,7 @@ _version = 'development'
 _lock = threading.RLock()
 MODULES = {'assistant', 'feishu', 'startup'}
 STAGES = {'answer', 'model_attempt', 'delivery', 'deadline', 'startup_failed', 'service_failed', 'runtime_auth_failed',
-    'gateway', 'model_request'}
+    'gateway', 'model_request', 'config_anomaly'}
 VERSION_PATTERN = r'(?:development|(?:ClipFlow_)?[Vv]?\d+(?:[._-]\d+){0,8})'
 REASONS = {
     'no callable tools remain': 'tools_not_registered',
@@ -54,6 +54,9 @@ DETAIL_ENUMS = {
         'error', 'aborted', 'missing', 'other'}),
     'response_type': frozenset({'event_stream', 'json', 'html', 'other'}),
     'model_family': frozenset({'deepseek', 'minimax', 'glm', 'qwen', 'other'}),
+    'startup_stage': frozenset({'port_unavailable', 'handshake_timeout', 'UNAVAILABLE', 'DISCONNECTED',
+        'HANDSHAKE_TIMEOUT', 'TIMEOUT', 'process_exited', 'config_anomaly', 'runtime_unavailable',
+        'module_missing', 'port_conflict', 'plugin_load_failed', 'unknown'}),
 }
 DETAIL_MAX_INT = 100000000
 GATEWAY_LINE_LIMIT = 4096
@@ -64,6 +67,10 @@ GATEWAY_MARKERS = (
     ('empty response retries exhausted', 'empty_response'),
     ('model response too large', 'response_limit'),
     ('missing assistant terminal message detected', 'missing_response'),
+    ('config observe anomaly', 'config_anomaly'),
+    ('verified gateway runtime or port is unavailable', 'runtime_unavailable'),
+    ('cannot find module', 'module_missing'),
+    ('eaddrinuse', 'port_conflict'),
 )
 # The pinned native logger emits ids as `lh-<20-64 hex>:<32 hex>`, optionally followed by
 # `:fallback:<n>`, `:validation[:<n>]`, or the combined `:fallback:<n>:validation:<n>` suffix.

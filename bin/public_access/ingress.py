@@ -34,6 +34,7 @@ ANONYMOUS = {
     ('POST', '/api/auth/password/reset'), ('GET', '/api/auth/logout'), ('POST', '/api/auth/logout'),
     ('POST', '/api/auth/guest'),
     ('POST', '/api/auth/impersonation/stop'),
+    ('GET', '/api/assistant/health'),
 }
 # These original endpoints verify their own scoped, expiring link tokens.
 SIGNED = {

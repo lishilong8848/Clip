@@ -77,9 +77,99 @@
   .flow-tools button:hover{border-color:var(--accent);color:var(--accent)}
   .flow-view{overflow:hidden;border:1px solid var(--line);border-radius:10px;background:#f6f9fd;cursor:grab;touch-action:none}
   .flow-view.drag{cursor:grabbing}
-  .flow-view svg{width:100%;height:auto;display:block;user-select:none;min-height:620px}
+  .flow-view svg{width:100%;height:auto;display:block;user-select:none;min-height:900px}
   .flow-legend{display:flex;flex-wrap:wrap;gap:8px 18px;margin-top:10px;font-size:12.5px;color:var(--ink-2)}
   .flow-legend i{display:inline-block;width:26px;height:0;border-top:2.5px solid;vertical-align:middle;margin-right:6px}
+  .flow-view .nd{cursor:pointer;transition:opacity .25s}
+  .flow-view .fe{transition:opacity .25s}
+  .flow-view.dimmed .nd.dim,.flow-view.dimmed .fe.dim{opacity:.14}
+  .flow-view.mainonly .biz{display:none}
+  .flow-view .mainnote{display:none}
+  .flow-view.mainonly .mainnote{display:block}
+  .toc .wrap{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .toc-links{display:flex;flex-wrap:wrap;gap:4px 18px}
+  .toc-views{display:flex;gap:8px;flex:none}
+  .toc-views button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;color:var(--ink-2)}
+  .toc-views button.on{background:#087a61;color:#fff;border-color:transparent}
+  body:not([data-view="all"]) .toc-links{display:none}
+  body[data-view="home"] #viewAll,body[data-view="home"] #viewModule,
+  body[data-view="module"] #viewAll,body[data-view="module"] #viewHome,
+  body[data-view="all"] #viewHome,body[data-view="all"] #viewModule{display:none}
+  .home-hero{padding:52px 0 6px}
+  .home-hero h1{font-size:34px;margin:0 0 10px}
+  .home-hero p{color:var(--ink-2);max-width:900px;line-height:1.9;margin:0}
+  .tile-sec{margin:30px 0 12px;font-size:17px}
+  .tile-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(232px,1fr));gap:12px}
+  .tile{position:relative;text-align:left;border:1px solid var(--line);background:#fff;border-radius:12px;padding:14px 14px 12px 20px;cursor:pointer;transition:transform .15s}
+  .tile:hover{transform:translateY(-2px)}
+  .tile i{position:absolute;left:0;top:12px;bottom:12px;width:5px;border-radius:3px}
+  .tile strong{font-size:15px}
+  .tile .pill{margin-left:6px}
+  .tile p{margin:7px 0 0;font-size:12px;color:var(--ink-2);line-height:1.7;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+  .mod-wrap{padding:26px 0 60px}
+  .mod-back{border:1px solid var(--line);background:#fff;border-radius:8px;padding:7px 14px;cursor:pointer;font-size:13px;color:var(--ink-2);margin-bottom:16px}
+  .mod-head h1{font-size:28px;margin:0 0 8px}
+  .mod-head p{color:var(--ink-2);line-height:1.9;max-width:920px;margin:0}
+  .mod-sec{margin:28px 0 10px;font-size:17px}
+  .mflow-box{border:1px solid var(--line);border-radius:12px;background:#f6f9fd;padding:10px;overflow-x:auto}
+  .mflow-box svg{width:100%;height:auto;display:block;min-width:960px}
+  .val-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
+  .val-card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px 16px}
+  .val-card b{display:block;font-size:13px;margin-bottom:8px}
+  .val-card p{margin:0;font-size:13px;color:var(--ink-2);line-height:1.85}
+  .mod-shots{display:flex;gap:14px;flex-wrap:wrap}
+  .mod-shots .thumb{width:360px}
+  /* ---- 主页 / 模块页 视觉升级 ---- */
+  .home-hero{position:relative;background:linear-gradient(135deg,#063a30 0%,#087a61 55%,#0e9b7a 100%);border-radius:18px;color:#fff;padding:44px 44px 38px;margin-top:26px;overflow:hidden}
+  .home-hero::after{content:"";position:absolute;right:-70px;top:-70px;width:300px;height:300px;border-radius:50%;background:rgb(255 255 255 / .07)}
+  .home-hero::before{content:"";position:absolute;right:70px;bottom:-110px;width:240px;height:240px;border-radius:50%;background:rgb(255 255 255 / .05)}
+  .home-hero .kicker{color:rgb(255 255 255 / .72);font-size:12.5px;letter-spacing:.14em}
+  .home-hero h1{font-size:36px;margin:8px 0 12px;color:#fff}
+  .home-hero p{color:rgb(255 255 255 / .85);max-width:920px;line-height:1.95;margin:0;font-size:14px}
+  .home-stats{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+  .home-stats span{background:rgb(255 255 255 / .13);border:1px solid rgb(255 255 255 / .2);border-radius:999px;padding:6px 15px;font-size:12.5px}
+  .tile-sec{display:flex;align-items:center;gap:10px;margin:36px 0 14px;font-size:17px}
+  .tile-sec i{width:10px;height:10px;border-radius:3px;display:inline-block}
+  .tile-sec small{font-weight:400;color:var(--ink-2);font-size:12.5px}
+  .tile{box-shadow:0 1px 2px rgb(15 40 70 / .05);transition:transform .16s,box-shadow .16s,border-color .16s}
+  .tile:hover{transform:translateY(-3px);box-shadow:0 10px 24px rgb(15 40 70 / .1);border-color:rgb(8 122 97 / .45)}
+  .tile strong{display:block;margin-bottom:2px}
+  .tile .pill{float:right;margin-left:6px}
+  .mod-head{border-left:6px solid var(--mc,#087a61);padding-left:18px}
+  .mod-head h1{font-size:30px}
+  .mflow-box{padding:18px 14px}
+  .val-card{position:relative;padding:16px 18px 14px;box-shadow:0 1px 2px rgb(15 40 70 / .05)}
+  .val-card b{display:flex;align-items:center;gap:8px;font-size:13.5px}
+  .val-card b i{width:9px;height:9px;border-radius:3px;display:inline-block}
+  .mod-shots .thumb{box-shadow:0 2px 10px rgb(15 40 70 / .08)}
+  .home-bar{display:flex;align-items:center;gap:12px;margin:26px 0 4px;flex-wrap:wrap}
+  .home-search{flex:1;min-width:260px;max-width:520px;border:1px solid var(--line);border-radius:10px;padding:10px 14px;font-size:14px;background:#fff;color:var(--ink)}
+  .home-search:focus{outline:2px solid rgb(8 122 97 / .35);border-color:#087a61}
+  .home-count{font-size:12.5px;color:var(--ink-2)}
+  .tile.hide{display:none}
+  .shot-pair{display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start}
+  .shot-cell{display:flex;flex-direction:column;gap:6px}
+  .shot-cell small{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:6px}
+  .shot-cell small i{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .mod-rel{display:flex;gap:8px;flex-wrap:wrap}
+  .mod-rel button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font-size:12.5px;cursor:pointer;color:var(--ink-2);transition:border-color .15s,color .15s}
+  .mod-rel button:hover{border-color:#087a61;color:#087a61}
+  #toTop{position:fixed;right:22px;bottom:26px;z-index:60;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);background:#fff;box-shadow:0 6px 18px rgb(15 40 70 / .14);cursor:pointer;font-size:17px;color:var(--ink-2);display:none}
+  #toTop.show{display:block}
+  #hoverPrev{position:fixed;z-index:80;pointer-events:none;display:none;width:520px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px;box-shadow:0 14px 44px rgb(10 30 60 / .28)}
+  #hoverPrev img{display:block;width:100%;border-radius:8px}
+  .met-chips{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 0}
+  .met-chips span{background:#f0f6f4;border:1px solid rgb(8 122 97 / .28);color:#087a61;border-radius:999px;padding:5px 13px;font-size:12px}
+  .toc-links a.on{color:#087a61;font-weight:700}
+  .view.anim{animation:vin .28s ease}
+  @keyframes vin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  @media print{
+    .toc,#toTop,.toc-views{display:none!important}
+    #viewHome,#viewModule{display:none!important}
+    #viewAll{display:block!important}
+    .flow-view{overflow:visible!important}
+    .block{break-inside:avoid}
+  }
   .flow-notes{margin:12px 0 0;padding-left:20px;display:grid;gap:6px;font-size:13.5px;color:var(--ink-2)}
   .flow-notes b{color:var(--ink)}
   /* ---------- summary ---------- */
@@ -124,6 +214,28 @@
 </head>
 <body>
 
+<nav class="toc" aria-label="汇报目录">
+  <div class="wrap">
+    <div class="toc-links">
+      <a href="#overview">项目概览</a>
+      <a href="#s1">事件响应与通告中枢</a>
+      <a href="#s2">日常运行与安全管理</a>
+      <a href="#s3">设备资产与能耗管理</a>
+      <a href="#s4">组织人员与训练</a>
+      <a href="#s5">智能能力与知识资产</a>
+      <a href="#s6">平台底座与可靠交付</a>
+      <a href="#summary">整体价值总结</a>
+    </div>
+    <div class="toc-views">
+      <button type="button" id="goHome">主页</button>
+      <button type="button" id="goAll">更多介绍</button>
+    </div>
+  </div>
+</nav>
+<div id="viewHome" class="view" aria-label="主页"></div>
+<div id="viewModule" class="view" aria-label="模块详情"></div>
+<div id="viewAll">
+
 <header class="hero">
   <div class="wrap">
     <div class="kicker">南通数据中心 · 运维数字化平台</div>
@@ -140,19 +252,6 @@
     </div>
   </div>
 </header>
-
-<nav class="toc" aria-label="汇报目录">
-  <div class="wrap">
-    <a href="#overview">项目概览</a>
-    <a href="#s1">事件响应与通告中枢</a>
-    <a href="#s2">日常运行与安全管理</a>
-    <a href="#s3">设备资产与能耗管理</a>
-    <a href="#s4">组织人员与训练</a>
-    <a href="#s5">智能能力与知识资产</a>
-    <a href="#s6">平台底座与可靠交付</a>
-    <a href="#summary">整体价值总结</a>
-  </div>
-</nav>
 
 <main class="wrap">
 
@@ -183,8 +282,10 @@
     <div class="ov-card flow-card">
       <div class="flow-head">
         <h3>模块关系与数据流向图</h3>
-        <span class="tip">滚轮缩放 · 按住拖动查看细节 · 箭头方向即数据流通方向</span>
+        <span class="tip">滚轮缩放 · 按住拖动 · 点节点高亮其上下游链路 · 主干流程只看骨架 · 复位看全览</span>
         <div class="flow-tools">
+          <button type="button" id="fmAll">完整流程</button>
+          <button type="button" id="fmMain">主干流程</button>
           <button type="button" id="fzIn" aria-label="放大">放大 +</button>
           <button type="button" id="fzOut" aria-label="缩小">缩小 −</button>
           <button type="button" id="fzReset">复位</button>
@@ -192,11 +293,11 @@
       </div>
       <div class="flow-view" id="flowView" aria-label="模块关系与数据流向图，可缩放拖动"></div>
       <div class="flow-legend">
-        <span><i style="border-color:#2563eb"></i>调用 / 请求</span>
-        <span><i style="border-color:#b7791f"></i>写入 / 归档</span>
-        <span><i style="border-color:#0e7490;border-top-style:dashed"></i>探针 / 读取</span>
-        <span><i style="border-color:#6d4fc4"></i>消息推送</span>
-        <span><i style="border-color:#64748b"></i>更新分发</span>
+        <span><i style="border-color:#2563eb"></i>调用 / 请求接入</span>
+        <span><i style="border-color:#18805e"></i>调度派发（权限校验后）</span>
+        <span><i style="border-color:#b7791f"></i>结果写入 / 归档 / 审计</span>
+        <span><i style="border-color:#0e7490;border-top-style:dashed"></i>检索 / 探针读取</span>
+        <span>◇ 菱形＝管理判定点（事件优先／权限校验，带是否分支）</span>
       </div>
       <ol class="flow-notes">
         <li><b>通告办理链：</b>输入＝剪贴板 / 网页表单 / 助手草拟的通告文本 → 处理＝解析与身份归一 → 模块·楼栋·对象权限校验 → 任务队列幂等冻结 → 飞书目标表写入与回执核验 → 输出＝目标记录＋群消息＋源计划状态回写＋每日汇总投影。</li>
@@ -260,6 +361,10 @@
 
   <footer>灯塔 · 数据中心运维管理平台 功能价值汇报 · 本页为单文件离线演示，效果图为界面示意缩略图，点击可放大查看</footer>
 </main>
+</div>
+
+<button type="button" id="toTop" aria-label="回到顶部" title="回到顶部">↑</button>
+<div id="hoverPrev" aria-hidden="true"><img alt="" /></div>
 
 <div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="效果图放大查看">
   <div class="lb-box">
@@ -501,124 +606,402 @@ document.getElementById('archArt').innerHTML=frame('灯塔系统架构','#1d4ed8
   `<line x1="400" y1="208" x2="460" y2="273" stroke="#2563eb" stroke-width="2.5" marker-end="url(#aarw)"/>`+
   bar(40,320,570,1,LINE)+txt(40,344,'感知 → 办理 → 留痕 → 归档 → 复盘：一条运维业务主线贯穿四端','#27405f',13,600));
 
-/* ============ 模块关系与数据流向图（可缩放/拖动） ============ */
+/* ============ 模块关系与数据流向图（流程图样式 · 缩放/拖动 · 点节点聚焦） ============ */
 (function(){
-  const W=1200,H=720;
-  const bands=[
-    {y:44,h:92,label:'接入与感知层',c:'#2563eb'},
-    {y:152,h:100,label:'服务中枢层',c:'#1d4ed8'},
-    {y:268,h:132,label:'业务模块层',c:'#0e7490'},
-    {y:452,h:112,label:'数据与归档层',c:'#18805e'},
-    {y:600,h:96,label:'外部协作与分发层',c:'#64748b'}];
-  const N=[
-    {x:80,y:62,w:180,h:58,t:'桌面客户端',s:'剪贴板感知·事件倒计时',c:'#2563eb'},
-    {x:300,y:62,w:180,h:58,t:'网页工作台',s:'双版本·移动适配',c:'#2563eb'},
-    {x:520,y:62,w:180,h:58,t:'飞书智能体',s:'长连接收件·表单',c:'#2563eb'},
-    {x:740,y:62,w:180,h:58,t:'公网与远程入口',s:'手机·外部协作',c:'#2563eb'},
-    {x:80,y:170,w:200,h:64,t:'智能助手服务',s:'桥接·工具·多账号',c:'#1d4ed8'},
-    {x:320,y:170,w:360,h:64,t:'业务后端服务',s:'权限链·任务队列·状态推送',c:'#1d4ed8'},
-    {x:740,y:170,w:180,h:64,t:'公网隔离网关',s:'白名单·限流',c:'#1d4ed8'},
-    {x:80,y:286,w:180,h:100,t:'智能与知识簇',s:'知识库·技能·文件生成',c:'#6d4fc4'},
-    {x:300,y:286,w:180,h:100,t:'通告办理簇',s:'七类通告·步骤工单·维护单',c:'#1d4ed8'},
-    {x:520,y:286,w:180,h:100,t:'运行管理簇',s:'巡检·班前·重保·排查·收敛·演练',c:'#0e7490'},
-    {x:740,y:286,w:180,h:100,t:'设备与能耗簇',s:'机柜·水耗·维修台账',c:'#b7791f'},
-    {x:960,y:286,w:180,h:100,t:'组织与人员簇',s:'权限·签名·交接·学练',c:'#6d4fc4'},
-    {x:80,y:470,w:200,h:78,t:'本地知识库',s:'向量·检索索引·片段',c:'#6d4fc4'},
-    {x:320,y:470,w:260,h:78,t:'本地状态数据库',s:'16 库 139 表·任务/身份/审计·冻结归档',c:'#18805e'},
-    {x:620,y:470,w:300,h:78,t:'飞书多维表/消息/文档',s:'37 固定表·群机器人·归档回执',c:'#b7791f'},
-    {x:960,y:470,w:180,h:78,t:'钉钉机器人',s:'群组推送通道',c:'#0e7490'},
-    {x:80,y:618,w:200,h:62,t:'飞书补丁分发表',s:'分片·哈希校验·清单',c:'#64748b'},
-    {x:360,y:618,w:200,h:62,t:'智航与监控源',s:'屏蔽记录·告警规则',c:'#64748b'},
-    {x:620,y:618,w:260,h:62,t:'全景平台',s:'测点配置·数值批次重传',c:'#64748b'}];
-  const T={call:'#2563eb',write:'#b7791f',read:'#0e7490',push:'#6d4fc4',upd:'#64748b'};
-  /* 集散条：进入与离开均为带箭头的独立线段 */
+  const W=2560,H=1740;
+  const lanes=[
+    {y:36,h:150,label:'① 接入与感知层 · 数据与请求从哪里来',c:'#2563eb'},
+    {y:206,h:176,label:'② 调度与治理层 · 解析、排队、校验如何把关',c:'#1d4ed8'},
+    {y:440,h:1040,label:'③ 业务功能层 · 25 个功能模块与各自职责',c:'#0e7490'},
+    {y:1542,h:150,label:'④ 输出与送达层 · 结果到哪里去',c:'#18805e'}];
   const BAR=[
-    {x:340,y:250,w:720,h:18,l:'统一调度总线（调用＋权限校验）'},
-    {x:340,y:424,w:720,h:18,l:'统一输出汇集（写入／归档／推送）'}];
+    {x:240,y:398,w:2080,h:22,l:'统一调度总线（任务调度 ＋ 四维权限校验 ＋ 事件优先）'},
+    {x:240,y:1500,w:2080,h:22,l:'统一输出汇集（写入 ／ 归档 ／ 推送 ／ 审计）'}];
+  const SRC=[
+    {id:'clip',t:'桌面剪贴板感知',d:['复制即识别七类通告文本','倒计时提醒、语音播报']},
+    {id:'web',t:'双版本网页入口',d:['新旧版平滑共存、按账号记忆','移动端深度适配统一工作台']},
+    {id:'feishu',t:'飞书 / 钉钉通道',d:['长连接收件、话题与表单任务','群机器人推送与送达回执']},
+    {id:'pano',t:'全景平台联动',d:['测点配置变更即时触发重传','两小时桶数值批次同步']},
+    {id:'field',t:'现场照片与表计',d:['水表、巡检、交接照片留证','图片随业务记录归档']},
+    {id:'ext',t:'外部信号源',d:['天气预警、培训签到接口','公网健康探针与白名单']}];
+  const GOV={
+    handler:{id:'handler',kind:'proc',x:240,y:234,w:420,h:94,t:'七类通告 Handler',d:['事件/变更/维保/上下电/轮巡/检修/调整','文本解析、字段契约与幂等写入']},
+    queue:{id:'queue',kind:'dec',cx:860,cy:281,rx:150,ry:55,t:'事件优先判定',s:'有未结束事件？'},
+    auth:{id:'auth',kind:'dec',cx:1210,cy:281,rx:150,ry:55,t:'权限校验判定',s:'身份×级别×楼栋×模块'},
+    probe:{id:'probe',kind:'proc',x:1410,y:234,w:420,h:94,t:'探针与补传闭环',d:['≤5 秒变更探针替代固定缓存','待传标记、回执核验与看门狗']},
+    hold:{id:'hold',kind:'pill',x:760,y:340,w:200,h:36,t:'保留队列 · 闭环后自动释放'},
+    reject:{id:'reject',kind:'pill',x:1880,y:254,w:260,h:54,t:'拦截并写入审计留痕'}};
+  const OUT=[
+    {id:'o_feishu',t:'飞书群通知与卡片',d:['通告/事件/晨会卡片送达','表单补录与回执核验']},
+    {id:'o_excel',t:'Excel 生成与冻结归档',d:['晨会/巡检/交接/演练表生成','收尾冻结、历史可追溯']},
+    {id:'o_audit',t:'审计与合规证据链',d:['操作审计、删除审计','签名与交接证据链留存']},
+    {id:'o_multi',t:'多端工作台送达',d:['公网工作台、桌面播报','移动端与值班屏适配']}];
+  const SEC=[
+    {name:'事件响应与通告中枢',sub:'4 个功能',c:'#1d4ed8',rows:[[
+      {t:'桌面剪贴板事件感知',d:['复制即识别七类通告文本','建档、倒计时与语音播报']},
+      {t:'事件优先排队机制',d:['未闭环事件阻塞非事件操作','闭环后自动恢复队列']},
+      {t:'七类通告全生命周期办理',d:['开始—更新—结束一站式办理','飞书同步与回执核验']},
+      {t:'步骤工单与维护单',d:['模板步骤展开、照片留证','维护单表格自动填写签名归档']}]]},
+    {name:'日常运行与安全管理',sub:'8 个功能',c:'#0e7490',rows:[[
+      {t:'事件管理与时效分析',d:['月度快照与周/月区间统计','响应时效达标自动核算']},
+      {t:'每日任务与晨会生成',d:['楼栋任务自动汇总去重','晨会表一键生成推送飞书']},
+      {t:'楼宇日常巡检',d:['测点配置驱动自动取数','四轮巡检表冻结归档追溯']},
+      {t:'班前检查',d:['检查项按频率排班调度','逐项异常备注与照片留证']}],
+      [
+      {t:'重保管理与天气触发',d:['重保模板分楼派发签名确认','天气预警自动触发戒备']},
+      {t:'专项排查（风险排查）',d:['排查模板动态发布','移动端填报、审核与云同步']},
+      {t:'计划收敛审查',d:['远端屏蔽与本地规则自动匹配','检修/变更收敛性把关']},
+      {t:'演练管理与应急场景库',d:['演练定义—执行—签名—评估归档','场景步骤与图片关联维护']}]]},
+    {name:'设备资产与能耗管理',sub:'3 个功能',c:'#b7791f',rows:[[
+      {t:'机柜上下电管理',d:['分楼台账、平面图与批量登记','上下电操作留痕报表归档']},
+      {t:'水耗管理',d:['水表录入与照片核验','变化率阈值自动核查异常']},
+      {t:'维修项目与设备台账',d:['维修汇总—跟进—检修目标关联','设备台账本地可搜索快照']}]]},
+    {name:'组织人员与训练',sub:'4 个功能',c:'#6d4fc4',rows:[[
+      {t:'账号与多维权限体系',d:['岗位×级别×楼栋×模块投影','飞书统一登录与冒充审计']},
+      {t:'统一电子签名管理',d:['一次性链接本人签名','临时人员签名与引用权限分离']},
+      {t:'人员工作交接',d:['交接单版本快照双方确认','附件与通知回执全留痕']},
+      {t:'画像学练与训练闭环',d:['每日题单配比、七天去重','个人/楼栋画像与周回顾']}]]},
+    {name:'智能能力与知识资产',sub:'3 个功能',c:'#7c3aed',rows:[[
+      {t:'灯塔智能助手',d:['52 个业务工具与技能体系','业务写入必须人工确认']},
+      {t:'本地共享知识库',d:['本地嵌入模型＋向量检索','文档版本分组与敏感检测']},
+      {t:'飞书智能体与多渠道送达',d:['长连接收件、话题与表单','钉钉推送与健康自动选链']}]]},
+    {name:'平台底座与可靠交付',sub:'3 个功能',c:'#64748b',rows:[[
+      {t:'双版本网页工作台',d:['新旧共存、布局按账号×设备','GridStack 自定义与移动适配']},
+      {t:'公网安全访问与探针',d:['专用隧道＋隔离白名单','30 秒探针故障降级局域网']},
+      {t:'打包更新与分片分发',d:['飞书分片上传、哈希回读校验','发布清单与客户端增量更新']}]]}];
+  const T={call:'#2563eb',disp:'#18805e',write:'#b7791f',read:'#0e7490'};
+  const NX=260,NP=376,NW=352,ROW0=470,ROWP=144,NH=118;
+  const rowY=i=>ROW0+i*ROWP;
+  /* 直角肘形连线定义：from/to 用于点节点聚焦高亮 */
   const E=[
-    {p:[[170,120],[420,170]],k:'call',l:'剪贴板/事件文本',lx:248,ly:138},
-    {p:[[390,120],[470,170]],k:'call',l:'请求/实时推送',lx:436,ly:138},
-    {p:[[610,120],[560,170]],k:'call',l:'入站消息/卡片回调',lx:606,ly:138},
-    {p:[[830,120],[830,170]],k:'call',l:'公网请求',lx:838,ly:140,la:'start'},
-    {p:[[740,202],[680,202]],k:'call',l:'白名单隔离转发',lx:710,ly:192},
-    {p:[[320,202],[280,202]],k:'call',l:'桥接调用/结果返回',lx:300,ly:192},
-    {p:[[500,234],[500,250]],k:'call'},
-    {p:[[390,268],[390,286]],k:'call'},
-    {p:[[610,268],[610,286]],k:'call'},
-    {p:[[830,268],[830,286]],k:'call'},
-    {p:[[1050,268],[1050,286]],k:'call'},
-    {p:[[180,234],[170,286]],k:'call',l:'工具/技能调度',lx:188,ly:262,la:'start'},
-    {p:[[390,386],[390,424]],k:'write'},
-    {p:[[610,386],[610,424]],k:'write'},
-    {p:[[830,386],[830,424]],k:'write'},
-    {p:[[1050,386],[1050,424]],k:'write'},
-    {p:[[450,442],[450,470]],k:'write',l:'任务/身份/审计/冻结归档',lx:442,ly:460,la:'end'},
-    {p:[[770,442],[770,470]],k:'write',l:'目标表/归档表写入＋回执核验',lx:778,ly:460,la:'start'},
-    {p:[[980,442],[980,470]],k:'push',l:'群机器人推送',lx:988,ly:460,la:'start'},
-    {p:[[170,386],[170,470]],k:'write',l:'向量/片段入库',lx:178,ly:432,la:'start'},
-    {p:[[120,548],[120,580],[60,580],[60,202],[80,202]],k:'read',l:'检索结果/证据',lx:66,ly:340,la:'start'},
-    {p:[[660,470],[660,386]],k:'read',l:'探针:配置指纹/批次标记',lx:668,ly:410,la:'start',jump:[[660,424],[660,442]]},
-    {p:[[460,618],[460,590],[640,590],[640,386]],k:'read',l:'屏蔽/规则记录(专线)',lx:648,ly:566,la:'start',jump:[[640,424],[640,442]]},
-    {p:[[750,618],[750,548]],k:'write',l:'测点配置＋数值批次',lx:758,ly:586,la:'start'},
-    {p:[[180,618],[40,618],[40,91],[80,91]],k:'upd',l:'分片下载·增量更新',lx:46,ly:606,la:'start'}];
+    {f:'clip',t:'handler',k:'call',p:[[436,158],[436,196],[450,196],[450,234]],l:'剪贴板文本生成通告',lx:458,ly:192},
+    {f:'feishu',t:'handler',k:'call',p:[[1188,158],[1188,180],[520,180],[520,234]],l:'入站消息 / 卡片回调',lx:854,ly:174},
+    {f:'field',t:'handler',k:'call',p:[[1940,158],[1940,170],[590,170],[590,234]],l:'照片 / 表计随单进入',lx:1264,ly:164},
+    {f:'web',t:'auth',k:'call',p:[[812,158],[812,196],[1210,196],[1210,226]],l:'请求带身份进入',lx:1010,ly:190},
+    {f:'pano',t:'probe',k:'call',p:[[1564,158],[1564,196],[1620,196],[1620,234]],l:'配置保存触发重传',lx:1628,ly:192},
+    {f:'ext',t:'probe',k:'call',p:[[2316,158],[2316,196],[1700,196],[1700,234]],l:'预警 / 探针信号',lx:2006,ly:190},
+    {f:'handler',t:'queue',k:'call',p:[[660,281],[705,281]]},
+    {f:'queue',t:'auth',k:'call',p:[[1010,281],[1055,281]],l:'否／已释放',lx:1032,ly:270},
+    {f:'queue',t:'hold',k:'call',p:[[860,336],[860,340]],l:'是',lx:872,ly:352},
+    {f:'hold',t:'auth',k:'call',p:[[960,358],[1035,358],[1035,281],[1055,281]],l:'释放重入',lx:1042,ly:332},
+    {f:'auth',t:'bus',k:'call',p:[[1210,336],[1210,398]],l:'通过',lx:1222,ly:372},
+    {f:'auth',t:'reject',k:'write',p:[[1360,281],[1876,281]],l:'否',lx:1600,ly:270},
+    {f:'handler',t:'bus',k:'call',p:[[450,328],[450,398]]},
+    {f:'probe',t:'bus',k:'call',p:[[1620,328],[1620,398]]}];
+  /* 跨线白套管（跳线） */
+  const JUMP=[[[1188,158],[1188,182]],[[560,180],[620,180]],[[520,190],[520,202]],[[590,190],[590,202]]];
   let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="模块关系与数据流向图">
-   <defs>${Object.entries(T).map(([k,c])=>`<marker id="fa-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('')}</defs>
+   <defs>${Object.entries(T).map(([k,c])=>`<marker id="fa-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('')}</defs>
    <rect width="${W}" height="${H}" fill="#f6f9fd"/>
    <g id="flowVp">`;
-  for(const b of bands){
-    s+=`<rect x="48" y="${b.y}" width="1104" height="${b.h}" rx="12" fill="${b.c}" opacity="0.05"/>
-        <rect x="48" y="${b.y}" width="5" height="${b.h}" rx="2.5" fill="${b.c}" opacity=".55"/>
-        <text x="1144" y="${b.y+18}" font-size="12" fill="${b.c}" font-weight="700" text-anchor="end" font-family="Microsoft YaHei,sans-serif">${b.label}</text>`;
+  for(const b of lanes){
+    s+=`<rect x="48" y="${b.y}" width="2464" height="${b.h}" rx="14" fill="${b.c}" opacity="0.05"/>
+        <rect x="48" y="${b.y}" width="6" height="${b.h}" rx="3" fill="${b.c}" opacity=".55"/>
+        <text x="2500" y="${b.y+24}" font-size="15" fill="${b.c}" font-weight="700" text-anchor="end" font-family="Microsoft YaHei,sans-serif">${b.label}</text>`;
   }
-  const edge=(p,k,width)=>{
-    const dash=k==='read'?' stroke-dasharray="6 4"':'';
-    return `<path d="M${p.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="${T[k]}" stroke-width="${width||1.9}"${dash} marker-end="url(#fa-${k})"/>`;
-  };
-  const casing=(p)=>`<path d="M${p.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="#f6f9fd" stroke-width="7"/>`;
-  for(const e of E){ if(e.jump) s+=casing(e.jump); }
+  const txt=(x,y,str,size,color,anchor,weight)=>`<text x="${x}" y="${y}" font-size="${size}" fill="${color}" text-anchor="${anchor||'start'}" font-weight="${weight||400}" style="paint-order:stroke" stroke="#f6f9fd" stroke-width="4" font-family="Microsoft YaHei,sans-serif">${str}</text>`;
+  const edge=(p,k,w,dash,cls)=>`<path class="fe ${cls||''}" d="M${p.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="${T[k]}" stroke-width="${w||2}"${dash?' stroke-dasharray="7 5"':''} marker-end="url(#fa-${k})"/>`;
+  /* 集散条 */
   for(const b of BAR){
-    s+=`<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="9" fill="#e8f0fe" stroke="#bcd3f0"/>
-        <text x="${b.x+b.w/2}" y="${b.y+13}" font-size="11" fill="#1d4ed8" font-weight="600" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
+    s+=`<rect x="${b.x}" y="${b.y}" width="${b.w}" height="${b.h}" rx="11" fill="#e8f0fe" stroke="#bcd3f0"/>
+        <text x="${b.x+b.w/2}" y="${b.y+15.5}" font-size="13" fill="#1d4ed8" font-weight="700" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
   }
+  for(const j of JUMP) s+=`<path d="M${j.map(q=>q.join(' ')).join(' L ')}" fill="none" stroke="#f6f9fd" stroke-width="7"/>`;
+  /* 接入层节点 */
+  for(const n of SRC){const i=SRC.indexOf(n),x=NX+i*NP,y=64;
+    s+=`<g class="nd" data-nid="${n.id}"><rect x="${x}" y="${y}" width="${NW}" height="94" rx="10" fill="#fff" stroke="${LINE}"/>
+        <rect x="${x}" y="${y}" width="${NW}" height="5" rx="2.5" fill="#2563eb"/>
+        <text x="${x+14}" y="${y+28}" font-size="15" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${n.t}</text>
+        <text x="${x+14}" y="${y+52}" font-size="11.5" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[0]}</text>
+        <text x="${x+14}" y="${y+72}" font-size="11.5" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[1]}</text></g>`;}
+  /* 治理层：流程框 / 判定菱形 / 终止胶囊 */
+  const govNode=g=>{
+    if(g.kind==='proc') return `<g class="nd" data-nid="${g.id}"><rect x="${g.x}" y="${g.y}" width="${g.w}" height="${g.h}" rx="10" fill="#fff" stroke="${LINE}"/>
+        <rect x="${g.x}" y="${g.y}" width="${g.w}" height="5" rx="2.5" fill="#1d4ed8"/>
+        <text x="${g.x+16}" y="${g.y+30}" font-size="15.5" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${g.t}</text>
+        <text x="${g.x+16}" y="${g.y+56}" font-size="12" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${g.d[0]}</text>
+        <text x="${g.x+16}" y="${g.y+76}" font-size="12" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${g.d[1]}</text></g>`;
+    if(g.kind==='dec') return `<g class="nd" data-nid="${g.id}"><polygon points="${g.cx},${g.cy-g.ry} ${g.cx+g.rx},${g.cy} ${g.cx},${g.cy+g.ry} ${g.cx-g.rx},${g.cy}" fill="#fff" stroke="#1d4ed8" stroke-width="2"/>
+        <text x="${g.cx}" y="${g.cy-6}" font-size="14.5" font-weight="700" fill="#1d4ed8" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${g.t}</text>
+        <text x="${g.cx}" y="${g.cy+16}" font-size="11" fill="#5b6b80" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${g.s}</text></g>`;
+    return `<g class="nd" data-nid="${g.id}"><rect x="${g.x}" y="${g.y}" width="${g.w}" height="${g.h}" rx="${g.h/2}" fill="#eef2f7" stroke="#b9c6d8"/>
+        <text x="${g.x+g.w/2}" y="${g.y+g.h/2+4.5}" font-size="11.5" fill="#41546e" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${g.t}</text></g>`;};
+  s+=govNode(GOV.handler)+govNode(GOV.queue)+govNode(GOV.auth)+govNode(GOV.probe)+govNode(GOV.hold)+govNode(GOV.reject);
+  /* 业务层：分区芯片 + 模块流程框 */
+  let row=0; const rowLastX=[];
+  for(const grp of SEC){
+    const start=row, span=grp.rows.length;
+    for(const r of grp.rows){
+      const y=rowY(row);
+      r.forEach((n,i)=>{const x=NX+i*NP;
+        s+=`<g class="nd biz" data-nid="b${row}_${i}"><rect x="${x}" y="${y}" width="${NW}" height="${NH}" rx="10" fill="#fff" stroke="${LINE}"/>
+            <rect x="${x}" y="${y}" width="5" height="${NH}" rx="2.5" fill="${grp.c}"/>
+            <text x="${x+16}" y="${y+30}" font-size="15" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${n.t}</text>
+            <text x="${x+16}" y="${y+56}" font-size="11.5" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[0]}</text>
+            <text x="${x+16}" y="${y+76}" font-size="11.5" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[1]}</text></g>`;});
+      rowLastX[row]=NX+(r.length-1)*NP+NW;
+      row++;
+    }
+    const cy=rowY(start), ch=span*ROWP-26;
+    s+=`<g class="biz"><rect x="84" y="${cy}" width="150" height="${ch}" rx="12" fill="${grp.c}" opacity=".09"/>
+        <rect x="84" y="${cy}" width="5" height="${ch}" rx="2.5" fill="${grp.c}"/>
+        <text x="159" y="${cy+ch/2-8}" font-size="14" font-weight="700" fill="${grp.c}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${grp.name.slice(0,6)}</text>
+        <text x="159" y="${cy+ch/2+14}" font-size="14" font-weight="700" fill="${grp.c}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${grp.name.slice(6)}</text>
+        <text x="159" y="${cy+ch/2+38}" font-size="11" fill="#5b6b80" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${grp.sub}</text></g>`;
+  }
+  /* 输出层节点 */
+  for(const n of OUT){const i=OUT.indexOf(n),x=240+i*560,y=1570;
+    s+=`<g class="nd" data-nid="${n.id}"><rect x="${x}" y="${y}" width="520" height="94" rx="10" fill="#fff" stroke="${LINE}"/>
+        <rect x="${x}" y="${y}" width="520" height="5" rx="2.5" fill="#18805e"/>
+        <text x="${x+16}" y="${y+30}" font-size="15.5" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${n.t}</text>
+        <text x="${x+16}" y="${y+56}" font-size="12" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[0]}</text>
+        <text x="${x+16}" y="${y+76}" font-size="12" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.d[1]}</text></g>`;}
+  /* 治理层连线 */
   for(const e of E){
     s+=edge(e.p,e.k);
-    if(e.l){
-      const lx=e.lx!==undefined?e.lx:(e.p[0][0]+e.p[e.p.length-1][0])/2;
-      const ly=e.ly!==undefined?e.ly:(e.p[0][1]+e.p[e.p.length-1][1])/2-6;
-      s+=`<text x="${lx}" y="${ly}" font-size="11.5" fill="#41546e" text-anchor="${e.la||'middle'}" style="paint-order:stroke" stroke="#f6f9fd" stroke-width="4.5" font-family="Microsoft YaHei,sans-serif">${e.l}</text>`;
-    }
+    if(e.l) s+=txt(e.lx,e.ly,e.l,11.5,'#41546e','start');
   }
-  for(const n of N){
-    s+=`<g><rect x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="10" fill="#fff" stroke="${LINE}"/>
-        <rect x="${n.x}" y="${n.y}" width="${n.w}" height="5" rx="2.5" fill="${n.c}"/>
-        <text x="${n.x+12}" y="${n.y+26}" font-size="14" font-weight="700" fill="${INK}" font-family="Microsoft YaHei,sans-serif">${n.t}</text>
-        <text x="${n.x+12}" y="${n.y+46}" font-size="11" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">${n.s}</text></g>`;
-  }
+  s+=`<circle cx="1055" cy="281" r="4" fill="${T.call}"/>`;
+  /* 左干线：总线→六大分区（调度派发） */
+  s+=`<path d="M240,409 L64,409 L64,${rowY(6)+59}" fill="none" stroke="${T.disp}" stroke-width="2.4"/>`;
+  for(let r=0;r<7;r++){const y=rowY(r)+59;s+=edge([[64,y],[84,y]],'disp',2.2,'','biz');}
+  s+=txt(58,rowY(0)+40,'统一调度派发',12,'#18805e','start');
+  s+=`<text x="52" y="${rowY(3)+59}" font-size="12" fill="#18805e" font-weight="600" writing-mode="tb" font-family="Microsoft YaHei,sans-serif">权限校验后分发到六大功能分区</text>`;
+  /* 右干线：各分区→输出汇集（结果归档） */
+  s+=`<path d="M2504,${rowY(0)+59} L2504,1500" fill="none" stroke="${T.write}" stroke-width="2.4"/>`;
+  for(let r=0;r<7;r++){const y=rowY(r)+59;s+=edge([[rowLastX[r]+8,y],[2504,y]],'write',2.2,'','biz');}
+  s+=`<text x="2520" y="${rowY(2)}" font-size="12" fill="#b7791f" font-weight="600" writing-mode="tb" font-family="Microsoft YaHei,sans-serif">结果写入／归档／推送／审计统一汇集</text>`;
+  /* 总线→输出层 */
+  s+=edge([[500,1522],[500,1570]],'write')+edge([[1060,1522],[1060,1570]],'write')+edge([[1620,1522],[1620,1570]],'write')+edge([[2180,1522],[2180,1570]],'write');
+  /* 虚线：知识库→助手 检索支撑 */
+  s+=edge([[988,rowY(5)+59],[636,rowY(5)+59]],'read',2,true,'biz')+`<g class="biz">`+txt(812,rowY(5)+48,'向量检索支撑作答',11.5,'#0e7490','middle')+`</g>`;
+  s+=`<text class="mainnote" x="1280" y="${rowY(3)+66}" font-size="26" fill="#0e7490" font-weight="700" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">25 个业务功能与各自职责见「完整流程」视图</text>`;
   s+=`</g></svg>`;
   const view=document.getElementById('flowView');
   view.innerHTML=s;
   const vp=view.querySelector('#flowVp');
-  let k=1,tx=0,ty=0,drag=null;
+  const DEF={k:2.6,tx:-156,ty:-988};
+  let k=DEF.k,tx=DEF.tx,ty=DEF.ty,drag=null,lastMoved=0;
   const apply=()=>vp.setAttribute('transform',`translate(${tx} ${ty}) scale(${k})`);
   const scaleOf=()=>{const r=view.getBoundingClientRect();return {sx:W/r.width, sy:H/r.height};};
+  const zoomAt=(cx,cy,nk)=>{nk=Math.min(6,Math.max(.6,nk));tx=cx-(cx-tx)*(nk/k);ty=cy-(cy-ty)*(nk/k);k=nk;apply();};
   view.addEventListener('wheel',e=>{
     e.preventDefault();
     const r=view.getBoundingClientRect(), sc=scaleOf();
-    const px=(e.clientX-r.left)*sc.sx, py=(e.clientY-r.top)*sc.sy;
-    const nk=Math.min(3,Math.max(.5,k*(e.deltaY<0?1.15:1/1.15)));
-    tx=px-(px-tx)*(nk/k); ty=py-(py-ty)*(nk/k); k=nk; apply();
+    zoomAt((e.clientX-r.left)*sc.sx,(e.clientY-r.top)*sc.sy,k*(e.deltaY<0?1.15:1/1.15));
   },{passive:false});
-  view.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,tx,ty};view.setPointerCapture(e.pointerId);view.classList.add('drag');});
+  view.addEventListener('pointerdown',e=>{drag={x:e.clientX,y:e.clientY,tx,ty,moved:0};view.setPointerCapture(e.pointerId);view.classList.add('drag');});
   view.addEventListener('pointermove',e=>{
     if(!drag)return;
     const sc=scaleOf();
-    tx=drag.tx+(e.clientX-drag.x)*sc.sx; ty=drag.ty+(e.clientY-drag.y)*sc.sy; apply();
+    const dx=(e.clientX-drag.x)*sc.sx, dy=(e.clientY-drag.y)*sc.sy;
+    drag.moved=Math.max(drag.moved,Math.abs(dx)+Math.abs(dy));
+    tx=drag.tx+dx; ty=drag.ty+dy; apply();
   });
-  for(const t of ['pointerup','pointercancel','pointerleave']) view.addEventListener(t,()=>{drag=null;view.classList.remove('drag');});
-  document.getElementById('fzIn').onclick=()=>{k=Math.min(3,k*1.2);apply();};
-  document.getElementById('fzOut').onclick=()=>{k=Math.max(.5,k/1.2);apply();};
-  document.getElementById('fzReset').onclick=()=>{k=1;tx=0;ty=0;apply();};
+  for(const t of ['pointerup','pointercancel','pointerleave']) view.addEventListener(t,()=>{lastMoved=drag?drag.moved:0;drag=null;view.classList.remove('drag');});
+  /* 点节点聚焦：高亮其上下游连线与邻接节点，点空白还原 */
+  const clearFocus=()=>{view.classList.remove('dimmed');
+    vp.querySelectorAll('.dim').forEach(el=>el.classList.remove('dim'));};
+  view.addEventListener('click',e=>{
+    if(lastMoved>6){lastMoved=0;return;}
+    const g=e.target.closest&&e.target.closest('[data-nid]');
+    if(!g){clearFocus();return;}
+    const nid=g.dataset.nid;
+    const rel=new Set([nid]); const eidx=new Set();
+    E.forEach((ed,i)=>{if(ed.f===nid||ed.t===nid){eidx.add(i);rel.add(ed.f);rel.add(ed.t);}});
+    clearFocus();
+    view.classList.add('dimmed');
+    vp.querySelectorAll('[data-nid]').forEach(el=>{if(!rel.has(el.dataset.nid))el.classList.add('dim');});
+    vp.querySelectorAll('path.fe').forEach(el=>{el.classList.add('dim');});
+    let i=0; vp.querySelectorAll('path.fe').forEach(el=>{ if(!el.classList.contains('biz')&&eidx.has(i)) el.classList.remove('dim'); i++; });
+  });
+  document.getElementById('fzIn').onclick=()=>{const r=view.getBoundingClientRect(),sc=scaleOf();zoomAt(r.width/2*sc.sx,r.height/2*sc.sy,k*1.25);};
+  document.getElementById('fzOut').onclick=()=>{const r=view.getBoundingClientRect(),sc=scaleOf();zoomAt(r.width/2*sc.sx,r.height/2*sc.sy,k/1.25);};
+  document.getElementById('fzReset').onclick=()=>{k=1;tx=0;ty=0;apply();clearFocus();};
+  document.getElementById('fmAll').onclick=()=>{view.classList.remove('mainonly');clearFocus();};
+  document.getElementById('fmMain').onclick=()=>{view.classList.add('mainonly');clearFocus();};
+  apply();
 })();
+/* ============ 三视图路由：主页 / 模块详情 / 更多介绍（整页） ============ */
+const SECCOLOR={s1:'#1d4ed8',s2:'#0e7490',s3:'#b7791f',s4:'#6d4fc4',s5:'#7c3aed',s6:'#64748b'};
+const FLOWS=[
+ {src:['剪贴板文本','通告计划表'],proc:['常驻监听识别七类语义','自动建档关联事件/通告','倒计时与状态推送','关键节点语音播报'],out:['桌面提醒','事件档案']},
+ {src:['剪贴板/飞书/手工创建','七类 Handler 解析'],proc:['统一表单字段契约','开始—更新—结束状态推进','飞书表幂等写入','回执核验与自动重试'],out:['飞书通告卡片','通告状态台账']},
+ {src:['事件状态','非事件操作请求'],proc:['检测未闭环事件','非事件进入等待队列','事件闭环后自动放行','队列状态推送'],out:['有序通告执行','队列审计记录']},
+ {src:['维保通告','MOP 表格库'],proc:['通告绑定表格','模板步骤展开','照片留证与填写','签名审核上传归档'],out:['维护单 Excel','签名归档']},
+ {src:['事件记录','检修联动记录'],proc:['月度快照归集','周/月/自定义区间统计','响应时效自动核算','等级与楼栋分布'],out:['事件概览','时效分析报告']},
+ {src:['当日通告/水耗/检修数据'],proc:['按楼栋自动汇总','同源任务去重合并','晨会表生成','一键推送飞书'],out:['每日任务清单','晨会表']},
+ {src:['测点配置','两小时桶数值'],proc:['≤5 秒变更探针','四轮巡检表生成','自动取数填写','收尾冻结归档'],out:['巡检表','冻结归档']},
+ {src:['检查项配置','班次排班'],proc:['按频率排班调度','逐项填写与异常备注','照片留证','云端归档'],out:['检查记录','归档凭证']},
+ {src:['重保模板','天气预警'],proc:['分楼派发任务','人员签名确认','预警自动触发戒备','结果汇总'],out:['重保检查表','戒备记录']},
+ {src:['排查模板'],proc:['动态发布模板','移动端填报','审核与驳回','云端结果同步'],out:['排查结果','审核台账']},
+ {src:['智航屏蔽记录','本地设备/点位规则'],proc:['探针拉取屏蔽列表','规则自动匹配','检修/变更交叉核对','输出收敛结论'],out:['收敛审查表','屏蔽台账']},
+ {src:['演练定义','应急场景库'],proc:['发布演练计划','执行填写与签名','评估表生成','Excel 同步归档'],out:['演练记录','评估表']},
+ {src:['机柜台账','上下电申请'],proc:['分楼台账与平面图','批量登记','待办与核实','报表归档'],out:['上电状态表','操作留痕']},
+ {src:['水表读数','现场照片'],proc:['录入与照片核验','变化率阈值核查','异常标记复核','月度汇总统计'],out:['水耗台账','异常清单']},
+ {src:['告警/事件源','维修工单'],proc:['维修汇总自动归集','跟进与进度管理','检修目标多源关联','本地台账快照'],out:['维修闭环单','设备台账']},
+ {src:['飞书人员目录','权限申请'],proc:['四维权限投影','统一登录与冒充审计','审批与变更记录','模块可见性控制'],out:['权限矩阵','审计日志']},
+ {src:['人员目录','业务引用请求'],proc:['一次性链接签名','临时人员签名','版本与失效管理','引用权限分离'],out:['签名目录','证据凭证']},
+ {src:['交接发起','业务待办事项'],proc:['版本快照生成','双方确认','附件与通知回执','归档留痕'],out:['交接单','回执记录']},
+ {src:['题库','答题记录'],proc:['每日题单固定配比','七天去重','首答/复习分离','画像与周回顾'],out:['学习画像','回顾卡片']},
+ {src:['自然语言指令','知识库与 52 工具'],proc:['意图解析与技能匹配','工具编排调用','业务写入人工确认','结果回答与留痕'],out:['办理结果','会话轨迹']},
+ {src:['文档上传','分组与权限'],proc:['本地嵌入向量化','FAISS 索引检索','版本与分组管理','敏感内容检测'],out:['检索片段','文档台账']},
+ {src:['飞书长连接消息','话题与表单任务'],proc:['消息解析与路由','卡片交互与表单补录','钉钉机器人推送','送达健康选链'],out:['多渠道送达','送达回执']},
+ {src:['账号身份','布局配置'],proc:['新旧版平滑路由','布局按账号×设备','GridStack 自定义 widgets','移动端适配'],out:['个人工作台','移动端视图']},
+ {src:['公网请求','白名单配置'],proc:['隧道入口隔离','白名单与限流','30 秒健康探针','故障降级局域网'],out:['安全工作台','探针报告']},
+ {src:['版本构建','补丁包'],proc:['飞书表分片上传','哈希回读校验','发布清单管理','客户端增量更新'],out:['发布清单','增量补丁']}];
+function showView(v){
+  document.body.dataset.view=v;
+  document.getElementById('goHome').classList.toggle('on',v==='home');
+  document.getElementById('goAll').classList.toggle('on',v==='all');
+  const el=document.getElementById(v==='home'?'viewHome':v==='module'?'viewModule':'viewAll');
+  if(el){el.classList.remove('anim');void el.offsetWidth;el.classList.add('anim');}
+  window.scrollTo(0,0);}
+function renderHome(){
+  let h=`<div class="wrap"><div class="home-hero"><div class="kicker">南通数据中心 · 运维数字化平台</div>
+    <h1>灯塔 · 数据中心运维管理平台</h1>
+    <p>点击任意功能模块，查看该模块专属的流程图、功能价值与界面效果图；点击右上角「更多介绍」查看单页完整汇报（项目概览、模块关系与数据流向总图、整体价值总结）。</p>
+    <div class="home-stats"><span>25 个功能模块</span><span>7 类通告全生命周期</span><span>37 张飞书多维表</span><span>139 张本地数据表</span><span>52 个智能助手工具</span><span>桌面 · 网页 · 飞书 · 助手四端一体</span></div>
+    </div>
+    <div class="home-bar"><input id="homeSearch" class="home-search" type="search" placeholder="搜索模块名称或关键词，如：巡检 / 签名 / 知识库" aria-label="搜索功能模块"><span class="home-count" id="homeCount">共 25 个功能模块</span></div>
+    <div style="padding-bottom:56px">`;
+  for(const key of Object.keys(secTitles)){
+    const list=MODULES.filter(x=>x.s===key);
+    h+=`<h3 class="tile-sec" style="color:${SECCOLOR[key]}"><i style="background:${SECCOLOR[key]}"></i>${secTitles[key]}<small>${list.length} 个功能</small></h3><div class="tile-grid">`;
+    for(const m of list)
+      h+=`<button type="button" class="tile" data-mod="${m.i}"><i style="background:${m.a}"></i><span class="pill">${m.pill}</span><strong>${m.name}</strong><p>${m.tag}</p></button>`;
+    h+=`</div>`;}
+  document.getElementById('viewHome').innerHTML=h+`</div></div>`;}
+function mflowSVG(f){
+  const W=1240,H=470,sH=64,sG=16,pH=56,pG=26;
+  const nS=f.src.length,nP=f.proc.length,nO=f.out.length;
+  const yS=(H-(nS*sH+(nS-1)*sG))/2,yP=(H-(nP*pH+(nP-1)*pG))/2,yO=(H-(nO*sH+(nO-1)*sG))/2;
+  const head=(x,w,t,c)=>`<rect x="${x+w/2-52}" y="10" width="104" height="26" rx="13" fill="${c}" opacity=".1"/><text x="${x+w/2}" y="28" font-size="12.5" font-weight="700" fill="${c}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;
+  const box=(x,y,w,hh,t,fill,stroke,fs,tc)=>`<rect x="${x}" y="${y}" width="${w}" height="${hh}" rx="10" fill="${fill}" stroke="${stroke}"/><text x="${x+w/2}" y="${y+hh/2+5}" font-size="${fs}" fill="${tc}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;
+  let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="功能流程图">
+   <defs><marker id="mfa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
+   <marker id="mfg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#18805e"/></marker></defs>
+   <rect width="${W}" height="${H}" rx="12" fill="#f8fbff"/>
+   ${head(40,260,'输入 / 来源','#2563eb')}${head(430,380,'处理 / 办理','#1d4ed8')}${head(940,260,'输出 / 交付','#18805e')}`;
+  const sc=[],pc=[],oc=[];
+  for(let i=0;i<nS;i++){const y=yS+i*(sH+sG);sc.push(y+sH/2);
+    s+=box(40,y,260,sH,f.src[i],'#eef4fe','#bcd3f0',12.5,'#243447')+`<rect x="40" y="${y}" width="5" height="${sH}" rx="2.5" fill="#2563eb"/>`;}
+  for(let i=0;i<nP;i++){const y=yP+i*(pH+pG);pc.push(y+pH/2);
+    s+=box(430,y,380,pH,f.proc[i],'#fff','#9db9e8',13,'#243447')+`<circle cx="456" cy="${y+pH/2}" r="12" fill="#1d4ed8"/><text x="456" y="${y+pH/2+4.5}" font-size="12" font-weight="700" fill="#fff" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${i+1}</text>`;}
+  for(let i=0;i<nO;i++){const y=yO+i*(sH+sG);oc.push(y+sH/2);
+    s+=box(940,y,260,sH,f.out[i],'#eaf6f0','#bfe0cf',12.5,'#243447')+`<rect x="1195" y="${y}" width="5" height="${sH}" rx="2.5" fill="#18805e"/>`;}
+  const lTop=Math.min(sc[0],pc[0]),lBot=Math.max(sc[nS-1],pc[0]);
+  s+=`<path d="M360,${lTop} L360,${lBot}" fill="none" stroke="#2563eb" stroke-width="2"/>`;
+  for(const y of sc) s+=`<path d="M300,${y} L360,${y}" fill="none" stroke="#2563eb" stroke-width="2"/>`;
+  s+=`<path d="M360,${pc[0]} L424,${pc[0]}" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#mfa)"/>`;
+  for(let i=1;i<nP;i++) s+=`<path d="M620,${pc[i-1]+28} L620,${pc[i]-28}" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#mfa)"/>`;
+  const rTop=Math.min(pc[nP-1],oc[0]),rBot=Math.max(pc[nP-1],oc[nO-1]);
+  s+=`<path d="M810,${pc[nP-1]} L900,${pc[nP-1]}" fill="none" stroke="#18805e" stroke-width="2"/>`;
+  s+=`<path d="M900,${rTop} L900,${rBot}" fill="none" stroke="#18805e" stroke-width="2"/>`;
+  for(const y of oc) s+=`<path d="M900,${y} L934,${y}" fill="none" stroke="#18805e" stroke-width="2" marker-end="url(#mfg)"/>`;
+  return s+`</svg>`;}
+const METRICS=[
+ ['常驻桌面雷达','复制即识别','关键节点语音播报'],
+ ['7 类通告','计划通告 39','进行中 1','飞书同步＋回执'],
+ ['事件优先','非事件自动排队','闭环后自动恢复'],
+ ['MOP 表格 179','本月维保 15','步骤展开＋照片留证'],
+ ['本月事件 23','I2 及以上 0','时效自动核算'],
+ ['今日任务 3','晨会表一键生成','飞书推送'],
+ ['每日四轮','探针 ≤5 秒','冻结归档可追溯'],
+ ['全楼栋班次覆盖','逐项照片留证','云端归档'],
+ ['已完成 14','天气自动触发','签名确认'],
+ ['动态模板','移动端填报','反馈 30/30'],
+ ['屏蔽记录 535','屏蔽中 35','规则自动匹配'],
+ ['10 月演练 5 项','签名＋评估','场景图片库'],
+ ['机柜 998','已上电 970','上电率 97.2%','台账 1245'],
+ ['本月记录 22','耗水量 3,806 t','照片核验'],
+ ['维修全部 114','已完成 111','多源关联'],
+ ['账号 94','已授权 90','四维权限投影'],
+ ['可用签名 68','目录 97 人','一次性链接'],
+ ['版本快照','双方确认','回执留痕'],
+ ['每日题单配比','七天去重','画像周回顾'],
+ ['业务工具 52','写入人工确认','多账号模型'],
+ ['BGE small zh','FAISS 本地向量','敏感检测'],
+ ['飞书长连接','钉钉推送','健康自动选链'],
+ ['双版本共存','布局账号×设备','移动适配'],
+ ['白名单隔离','30 秒健康探针','故障降级局域网'],
+ ['分片 14MiB/片','哈希回读校验','增量更新']];
+const REL={0:[1,2],1:[0,2,3,5],2:[1,4],3:[1,16],4:[2,14],5:[1,6,13],6:[5,20],7:[5,16],8:[4,21],9:[16,21],10:[9,6],11:[16,20],12:[14,23],13:[5,12],14:[4,12],15:[16,22],16:[15,17],17:[16,21],18:[11,19],19:[20,21,1],20:[19],21:[19,17],22:[15,23],23:[22,24],24:[22]};
+function openModule(i){
+  const m=MODULES[i],f=FLOWS[i],mc=SECCOLOR[m.s]||'#087a61';
+  const shots=m.img?`<h3 class="mod-sec">界面效果图</h3><div class="shot-pair">
+    <div class="shot-cell"><div class="thumb" data-i="${i}" role="button" tabindex="0" aria-label="放大查看 ${m.name} 新版效果图">${thumbInner(m,'v2')}</div><small><i style="background:#087a61"></i>新版界面（芯片可切旧版）</small></div>
+    ${m.img.v1?`<div class="shot-cell"><div class="thumb" data-i="${i}" data-openver="v1" role="button" tabindex="0" aria-label="放大查看 ${m.name} 旧版效果图"><img class="shot" src="${m.img.v1}" alt="${m.name} 旧版界面截图" loading="lazy"/></div><small><i style="background:#64748b"></i>旧版界面</small></div>`:''}
+   </div>`:'';
+  const rel=(REL[i]||[]).map(j=>`<button type="button" data-mod="${j}">${MODULES[j].name}</button>`).join('');
+  document.getElementById('viewModule').innerHTML=`<div class="wrap mod-wrap" style="--mc:${mc}">
+    <button type="button" class="mod-back" id="modBack">← 返回主页</button>
+    <header class="mod-head"><div class="kicker" style="color:${mc};font-size:12.5px;letter-spacing:.12em;margin-bottom:6px">${secTitles[m.s]}</div>
+      <h1>${m.name}　<span class="pill">${m.pill}</span></h1><p>${m.tag}</p>
+      <div class="met-chips">${(METRICS[i]||[]).map(x=>`<span>${x}</span>`).join('')}</div></header>
+    <h3 class="mod-sec">功能流程图</h3><div class="mflow-box">${mflowSVG(f)}</div>
+    <h3 class="mod-sec">价值与介绍</h3>
+    <div class="val-grid">
+      <div class="val-card"><b style="color:#2563eb"><i style="background:#2563eb"></i>介绍</b><p>${m.tag}</p></div>
+      <div class="val-card"><b style="color:#18805e"><i style="background:#18805e"></i>功能</b><p>${m.use}</p></div>
+      <div class="val-card"><b style="color:#b7791f"><i style="background:#b7791f"></i>解决的问题</b><p>${m.fix}</p></div>
+      <div class="val-card"><b style="color:#6d4fc4"><i style="background:#6d4fc4"></i>业务价值</b><p>${m.val}</p></div>
+    </div>${shots}${rel?`<h3 class="mod-sec">关联模块</h3><div class="mod-rel">${rel}</div>`:''}</div>`;
+  showView('module');}
+document.getElementById('goHome').onclick=()=>showView('home');
+document.getElementById('goAll').onclick=()=>showView('all');
+document.addEventListener('click',e=>{
+  const tile=e.target.closest('[data-mod]');
+  if(tile){openModule(+tile.dataset.mod);return;}
+  if(e.target.closest('#modBack')){showView('home');return;}
+  const link=e.target.closest('.toc-links a');
+  if(link&&document.body.dataset.view!=='all')showView('all');});
+renderHome();
+showView('home');
+document.addEventListener('input',e=>{
+  if(e.target.id!=='homeSearch')return;
+  const q=e.target.value.trim().toLowerCase();let n=0;
+  document.querySelectorAll('#viewHome .tile').forEach(t=>{
+    const m=MODULES[+t.dataset.mod];
+    const hit=!q||(m.name+m.tag+m.pill+m.use).toLowerCase().includes(q);
+    t.classList.toggle('hide',!hit);if(hit)n++;});
+  const c=document.getElementById('homeCount');
+  if(c)c.textContent=q?`匹配 ${n} 个功能模块`:`共 ${MODULES.length} 个功能模块`;});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'&&cur<0&&document.body.dataset.view==='module')showView('home');});
+const toTop=document.getElementById('toTop');
+window.addEventListener('scroll',()=>{toTop.classList.toggle('show',window.scrollY>600);},{passive:true});
+toTop.onclick=()=>window.scrollTo({top:0,behavior:'smooth'});
+/* 整页视图目录滚动高亮 */
+const tocLinks=Array.from(document.querySelectorAll('.toc-links a'));
+window.addEventListener('scroll',()=>{
+  if(document.body.dataset.view!=='all')return;
+  let cur=tocLinks[0];
+  for(const a of tocLinks){const sec=document.querySelector(a.getAttribute('href'));
+    if(sec&&sec.getBoundingClientRect().top<170)cur=a;}
+  tocLinks.forEach(a=>a.classList.toggle('on',a===cur));
+},{passive:true});
+/* 缩略图悬浮"稍大"预览：220ms 延时、边缘自动翻转、触屏禁用 */
+const hp=document.getElementById('hoverPrev'),hpImg=hp.querySelector('img');
+const HPW=520,HPH=300;
+let hpTimer=0;
+const hpPlace=e=>{let x=e.clientX+18,y=e.clientY+18;
+  if(x+HPW>window.innerWidth-8)x=e.clientX-HPW-18;
+  if(y+HPH>window.innerHeight-8)y=e.clientY-HPH-18;
+  hp.style.left=Math.max(8,x)+'px';hp.style.top=Math.max(8,y)+'px';};
+document.addEventListener('mouseover',e=>{
+  if('ontouchstart' in window)return;
+  const img=e.target.closest?e.target.closest('.thumb img.shot'):null;
+  if(!img||!img.complete||!img.naturalWidth)return;
+  clearTimeout(hpTimer);
+  hpTimer=setTimeout(()=>{hpImg.src=img.getAttribute('src');hp.style.display='block';hpPlace(e);},220);});
+document.addEventListener('mousemove',e=>{
+  if(hp.style.display==='block')hpPlace(e);});
+document.addEventListener('mouseout',e=>{
+  const from=e.target.closest?e.target.closest('.thumb'):null;
+  const to=e.relatedTarget&&e.relatedTarget.closest?e.relatedTarget.closest('.thumb'):null;
+  if(from&&!to){clearTimeout(hpTimer);hp.style.display='none';}});
+window.addEventListener('scroll',()=>{clearTimeout(hpTimer);hp.style.display='none';},{passive:true});
 
 /* ============ 灯箱 ============ */
 const lb=document.getElementById('lb'),lbArt=document.getElementById('lbArt'),lbTitle=document.getElementById('lbTitle'),
@@ -653,7 +1036,9 @@ document.addEventListener('click',e=>{
   const chip=e.target.closest('.ver');
   if(chip){ e.stopPropagation(); const m=MODULES[+chip.dataset.i]; const ver=chip.dataset.ver;
     chip.closest('.thumb').innerHTML=thumbInner(m,ver); return; }
-  const t=e.target.closest('.thumb');if(t)openLb(+t.dataset.i);
+  const t=e.target.closest('.thumb');if(t){openLb(+t.dataset.i);
+    const ov=t.dataset.openver;
+    if(ov){lbVer=ov;lbArt.innerHTML=lbInner(MODULES[cur],ov);}}
 });
 document.addEventListener('keydown',e=>{
   if(e.key!=='Enter'&&e.key!==' ')return;

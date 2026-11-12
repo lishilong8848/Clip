@@ -685,6 +685,29 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.prepare()
             self.assertEqual(install.call_count, 2)
 
+    async def test_gateway_cooldown_expires_and_recovers_without_reinstall(self):
+        self.popen.side_effect = [_FakeProcess() for _ in range(4)]
+        gateway = self.runtime.root / 'shared-gateway'
+        cache = gateway / 'node-compile-cache'
+        cache.mkdir(parents=True)
+        (cache / 'compile-cache').write_bytes(b'fixture')
+        ready = AsyncMock(side_effect=[lrt.AssistantStartupError('暂时无法连接。')] * 3 + [{}])
+        with patch.object(self.runtime, '_ready', ready), patch.object(lrt, 'runtime_files',
+                return_value=(Path('node.exe'), Path('openclaw.mjs'))) as runtime_files:
+            for attempt in range(3):
+                with self.assertRaises(lrt.AssistantStartupError):
+                    await self.acquire()
+                with self.assertRaisesRegex(lrt.AssistantStartupError, '正在恢复'):
+                    await self.acquire()
+                self.assertEqual(self.popen.call_count, attempt + 1)
+                self.runtime._gateway_retry_at = 0
+            self.assertFalse(cache.exists())
+            self.assertTrue((gateway / 'openclaw.json').is_file())
+            self.assertTrue((gateway / 'gateway.log').is_file())
+            self.assertTrue((await self.acquire())['configured'])
+            self.assertEqual(self.popen.call_count, 4)
+            runtime_files.assert_called_once()
+
     async def test_shutdown_idempotent_terminates_shared_process_once(self):
         await self.acquire('first')
         await self.acquire('second')

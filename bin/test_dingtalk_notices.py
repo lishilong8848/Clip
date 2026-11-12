@@ -258,6 +258,51 @@ class DingTalkTests(unittest.TestCase):
             self.service.save({**edited, 'contacts': edited['contacts'][1:]})
         self.assertEqual(self.service.public()['revision'], edited['revision'])
 
+    def test_blank_contact_row_does_not_veto_other_edits_and_errors_name_their_row(self):
+        from openclaw_service.assistant.lighthouse_ai import protect_key
+
+        # A robot configured before the directory existed: its people are still bare phone numbers.
+        self.service.save({'revision': 0, 'robots': [self.robot()]})
+        stored = self.service.config(); stored.pop('contacts_cipher')
+        stored['robots'][0]['mention_cipher'] = protect_key(json.dumps({
+            'mode': 'people', 'mobiles': ['+8613800138001'], 'building_mobiles': {},
+        }))
+        self.store.put_document(NS, 'config', stored)
+
+        edited = self.service.public()
+        self.assertEqual([c['remark'] for c in edited['contacts']], ['已导入人员 01'])
+
+        # The user renames the imported person, then leaves a freshly added row blank.
+        edited['contacts'][0]['remark'] = '运维主管 王工'
+        edited['contacts'].append({'id': 'f' * 32, 'remark': '', 'mobile': ''})
+        saved = self.service.save(edited)
+
+        # The rename survives and the blank row is dropped instead of vetoing the whole save.
+        self.assertEqual([c['remark'] for c in saved['contacts']], ['运维主管 王工'])
+        mention = self.service._mention(self.service.config()['robots'][0]['mention_cipher'])
+        self.assertNotIn('mobiles', mention)
+        # Re-reading must not regenerate 已导入人员 01 now that the directory is materialised.
+        self.assertEqual([c['remark'] for c in self.service.public()['contacts']], ['运维主管 王工'])
+
+        # A +86 stored form must still match a bare submitted number, not spawn a duplicate.
+        directory = {'a' * 32: {'id': 'a' * 32, 'mobile': '+8613800138001', 'remark': '运维主管 王工'}}
+        self.assertEqual(self.service._import_mobiles(directory, ['13800138001'], 'x:common'), ['a' * 32])
+        self.assertEqual(len(directory), 1, '归一化匹配命中已有人员，不再新建「已导入人员」')
+
+        # Partially filled rows are rejected, but every problem is reported at once with its row.
+        broken = self.service.public()
+        broken['contacts'].append({'id': 'e' * 32, 'remark': '', 'mobile': '13800138009'})
+        broken['contacts'].append({'id': 'd' * 32, 'remark': '运维主管 王工', 'mobile': '13800138008'})
+        with self.assertRaises(DingTalkError) as caught:
+            self.service.save(broken)
+        message = str(caught.exception)
+        self.assertIn('2 处需要修改', message)
+        self.assertRegex(message, r'第 2 位（未填备注）：备注未填写')
+        self.assertRegex(message, r'第 3 位（运维主管 王工）：备注与其他人员重复')
+        # A rejected save leaves the stored directory and revision untouched.
+        self.assertEqual([c['remark'] for c in self.service.public()['contacts']], ['运维主管 王工'])
+        self.assertEqual(self.service.public()['revision'], saved['revision'])
+
     def test_disabling_mentions_preserves_building_configuration(self):
         robot=self.robot();robot.update(mention_mode='people',mention_building_mobiles={'D':['13800138001']})
         saved=self.service.save({'revision':0,'robots':[robot]})

@@ -164,6 +164,24 @@ def install_lighthouse_routes(app, controller, runtime):
 
     app.add_api_route('/api/assistant/service-bridge', business_bridge, methods=['POST'], name='lighthouse_service_bridge')
 
+    async def assistant_health():
+        """Expose control-channel availability without internal process details."""
+        from openclaw_service.protocol import descriptor as read_descriptor
+        current = client
+        root = Path(runtime.state_store.db_path).parent / 'lighthouse_openclaw'
+        try:
+            saved = await asyncio.to_thread(read_descriptor, current.root, current.project) if current else (
+                await asyncio.to_thread(read_descriptor, root))
+        except Exception:
+            saved = None
+        connected = bool(saved and current and not current.closing and not current.disconnected
+                         and saved['instance'] == current.instance)
+        return JSONResponse({'ok': connected, 'service': 'lighthouse_assistant',
+                             'resident_service': saved is not None, 'connected': connected},
+                            status_code=200 if connected else 503, headers={'Cache-Control': 'no-store'})
+
+    app.add_api_route('/api/assistant/health', assistant_health, methods=['GET'], name='lighthouse_assistant_health')
+
     async def endpoint(request: Request):
         import httpx
         upstream = connection = None

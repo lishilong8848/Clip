@@ -1463,7 +1463,10 @@ def _is_development_only_path(path: Path, root: Path, *, relative_path: Path | N
     parts = tuple(part.lower() for part in rel.parts)
     if not parts:
         return False
-    if parts[0] in {".codex-audit", ".pytest_cache", "docs", ".deepcode", ".agents", ".codex", ".claude"} or parts[0].startswith(".patch-"):
+    if parts[0] in {
+        ".codex-audit", ".pytest_cache", "docs", ".deepcode", ".agents", ".codex", ".claude",
+        ".browser-screenshots", "qwenwork", "交付快照", "灯塔汇报-index.html",
+    } or parts[0].startswith(".patch-"):
         return True
     if parts[:2] == ("bin", "tests"):
         return True

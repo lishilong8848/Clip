@@ -3,6 +3,266 @@
   "activePage": "index.html",
   "version": 1,
   "createdAt": "2026-11-11T02:35:37.055Z",
-  "updatedAt": "2026-11-11T02:39:56.399Z",
-  "frames": []
+  "updatedAt": "2026-11-12T01:53:43.852Z",
+  "frames": [
+    {
+      "id": "index",
+      "kind": "html-file",
+      "title": "Main Canvas",
+      "fileName": "index.html",
+      "x": 0,
+      "y": 0,
+      "width": 1440,
+      "height": 900,
+      "status": "draft",
+      "createdAt": "2026-11-11T05:43:22.851Z",
+      "updatedAt": "2026-11-11T05:50:26.898Z"
+    },
+    {
+      "id": "frame",
+      "kind": "snapshot",
+      "title": "个人工作台 · 班次行动中枢（高保真原型）",
+      "url": "http://localhost:5173/index.html",
+      "designUrl": "http://localhost:5173/index.html",
+      "previewUrl": "http://localhost:5173/index.html",
+      "sourceUrl": "http://localhost:5173/index.html",
+      "x": 1500,
+      "y": 0,
+      "width": 1440,
+      "height": 900,
+      "status": "active",
+      "source": "imported",
+      "createdAt": "2026-11-11T05:51:42.908Z",
+      "updatedAt": "2026-11-11T05:51:42.908Z"
+    }
+  ],
+  "activeFrameId": "frame",
+  "tweaks": [
+    {
+      "control": "preset",
+      "group": "外观",
+      "label": "外观",
+      "presetOptions": [
+        {
+          "label": "浅色",
+          "patches": [
+            {
+              "value": "#eef2ef",
+              "variable": "--seed-bg"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-surface"
+            },
+            {
+              "value": "#24312e",
+              "variable": "--seed-fg"
+            },
+            {
+              "value": "#087b69",
+              "variable": "--seed-primary"
+            },
+            {
+              "value": "#3d8f6f",
+              "variable": "--seed-accent"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-on-primary"
+            },
+            {
+              "value": "#252e2c",
+              "variable": "--seed-nav"
+            },
+            {
+              "value": "#1d6e40",
+              "variable": "--seed-success"
+            },
+            {
+              "value": "#8f6208",
+              "variable": "--seed-warning"
+            },
+            {
+              "value": "#b23a26",
+              "variable": "--seed-danger"
+            },
+            {
+              "value": "#3a6ea5",
+              "variable": "--seed-info"
+            },
+            {
+              "value": "#f0fff7",
+              "variable": "--seed-on-nav"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-on-solid"
+            },
+            {
+              "value": "#0b0f0d",
+              "variable": "--seed-scrim"
+            }
+          ],
+          "value": "light"
+        },
+        {
+          "label": "深色",
+          "patches": [
+            {
+              "value": "#151b19",
+              "variable": "--seed-bg"
+            },
+            {
+              "value": "#1f2725",
+              "variable": "--seed-surface"
+            },
+            {
+              "value": "#e3ebe6",
+              "variable": "--seed-fg"
+            },
+            {
+              "value": "#3fbf9f",
+              "variable": "--seed-primary"
+            },
+            {
+              "value": "#7dddaf",
+              "variable": "--seed-accent"
+            },
+            {
+              "value": "#0e1a16",
+              "variable": "--seed-on-primary"
+            },
+            {
+              "value": "#0f1413",
+              "variable": "--seed-nav"
+            },
+            {
+              "value": "#57c98a",
+              "variable": "--seed-success"
+            },
+            {
+              "value": "#e0a92e",
+              "variable": "--seed-warning"
+            },
+            {
+              "value": "#f0705a",
+              "variable": "--seed-danger"
+            },
+            {
+              "value": "#7fb2e4",
+              "variable": "--seed-info"
+            }
+          ],
+          "value": "dark"
+        },
+        {
+          "label": "高对比",
+          "patches": [
+            {
+              "value": "#f6faf7",
+              "variable": "--seed-bg"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-surface"
+            },
+            {
+              "value": "#0d1310",
+              "variable": "--seed-fg"
+            },
+            {
+              "value": "#04594c",
+              "variable": "--seed-primary"
+            },
+            {
+              "value": "#04594c",
+              "variable": "--seed-accent"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-on-primary"
+            },
+            {
+              "value": "#0d1310",
+              "variable": "--seed-nav"
+            },
+            {
+              "value": "#14532d",
+              "variable": "--seed-success"
+            },
+            {
+              "value": "#6b4a05",
+              "variable": "--seed-warning"
+            },
+            {
+              "value": "#7f1d1d",
+              "variable": "--seed-danger"
+            },
+            {
+              "value": "#1e3a8a",
+              "variable": "--seed-info"
+            },
+            {
+              "value": "#f2fbf6",
+              "variable": "--seed-on-nav"
+            },
+            {
+              "value": "#ffffff",
+              "variable": "--seed-on-solid"
+            },
+            {
+              "value": "#050807",
+              "variable": "--seed-scrim"
+            }
+          ],
+          "value": "high-contrast"
+        }
+      ],
+      "value": "light",
+      "variable": "--appearance-preset"
+    },
+    {
+      "control": "slider",
+      "group": "密度",
+      "label": "队列行密度",
+      "max": 16,
+      "min": 8,
+      "step": 1,
+      "unit": "px",
+      "value": "11px",
+      "variable": "--seed-row-pad"
+    },
+    {
+      "control": "slider",
+      "group": "密度",
+      "label": "区块间距",
+      "max": 20,
+      "min": 8,
+      "step": 2,
+      "unit": "px",
+      "value": "12px",
+      "variable": "--seed-gap"
+    },
+    {
+      "control": "slider",
+      "group": "排版",
+      "label": "字号比例",
+      "max": 1.12,
+      "min": 0.92,
+      "step": 0.02,
+      "value": "1",
+      "variable": "--seed-type"
+    },
+    {
+      "control": "slider",
+      "group": "形态",
+      "label": "圆角",
+      "max": 10,
+      "min": 0,
+      "step": 1,
+      "unit": "px",
+      "value": "4px",
+      "variable": "--seed-radius"
+    }
+  ]
 }

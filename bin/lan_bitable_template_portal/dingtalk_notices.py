@@ -182,34 +182,58 @@ class DingTalkNotices:
             return {}
         from openclaw_service.assistant.lighthouse_ai import unprotect_key
         try:
-            return DingTalkNotices._validate_contacts(json.loads(unprotect_key(cipher)))
+            return DingTalkNotices._validate_contacts(json.loads(unprotect_key(cipher)), stored=True)
         except Exception:
             raise DingTalkError('本机无法读取钉钉艾特通讯录，请核对配置。', 409) from None
 
     @staticmethod
-    def _validate_contacts(values):
+    def _normalize_mobile(value):
+        """Digits only, dropping a leading CN country code so +86 / 86 / bare forms match."""
+        digits = re.sub(r'\D', '', str(value or ''))
+        return digits[2:] if len(digits) == 13 and digits.startswith('86') else digits
+
+    @staticmethod
+    def _validate_contacts(values, stored=False):
         if not isinstance(values, list) or len(values) > 1000:
             raise DingTalkError('艾特通讯录最多可保存1000人。')
         contacts, phones, remarks = {}, set(), set()
-        for value in values:
+        # Already-stored data was accepted under the raw-phone rule; only tighten new submissions,
+        # so an upgrade can never turn a readable directory into a 409.
+        phone_key = (lambda raw: raw) if stored else DingTalkNotices._normalize_mobile
+        problems = []
+        for position, value in enumerate(values, start=1):
             if not isinstance(value, dict):
                 raise DingTalkError('艾特人员格式无效。')
             identity = value.get('id')
             mobile = str(value.get('mobile') or '').strip()
             remark = str(value.get('remark') or '').strip()
+            # A row added but never filled in must not veto everybody else's edits.
+            if not mobile and not remark:
+                continue
             if not isinstance(identity, str) or not re.fullmatch(r'[a-f0-9]{32}', identity) or identity in contacts:
                 raise DingTalkError('艾特人员标识重复或无效。')
+            issues = []
             if not re.fullmatch(r'\+?[0-9]{6,20}', mobile):
-                raise DingTalkError('请在通讯录中填写有效手机号。')
-            if not remark or len(remark) > 80:
-                raise DingTalkError('请为每位艾特人员填写80字以内的备注。')
-            if mobile in phones:
-                raise DingTalkError('通讯录中同一手机号只能添加一次。')
-            if remark.casefold() in remarks:
-                raise DingTalkError('通讯录中的人员备注重复，请使用可区分的备注。')
-            phones.add(mobile)
+                issues.append('手机号无效')
+            elif phone_key(mobile) in phones:
+                issues.append('手机号与其他人员重复')
+            if not remark:
+                issues.append('备注未填写')
+            elif len(remark) > 80:
+                issues.append('备注超过80字')
+            elif remark.casefold() in remarks:
+                issues.append('备注与其他人员重复')
+            if issues:
+                # Report every problem at once, with its row, instead of failing one row at a time.
+                problems.append('第 ' + str(position) + ' 位（' + (remark[:20] or '未填备注') + '）：' + '、'.join(issues))
+                continue
+            phones.add(phone_key(mobile))
             remarks.add(remark.casefold())
             contacts[identity] = {'id': identity, 'mobile': mobile, 'remark': remark}
+        if problems:
+            shown = '；'.join(problems[:5])
+            raise DingTalkError('艾特通讯录有 ' + str(len(problems)) + ' 处需要修改 —— ' + shown
+                                + ('；其余 ' + str(len(problems) - 5) + ' 处请继续核对。' if len(problems) > 5 else '。'))
         return contacts
 
     @staticmethod
@@ -219,11 +243,17 @@ class DingTalkNotices:
             for number in numbers
         ):
             raise DingTalkError('原有艾特手机号格式无效，请核对机器人配置。')
-        by_phone = {person['mobile']: identity for identity, person in contacts.items()}
+        # Match on normalized digits: a stored +86 form must not spawn a duplicate 已导入人员 entry
+        # and silently re-point the robot away from the remark the user just edited.
+        by_exact_phone = {person['mobile']: identity for identity, person in contacts.items()}
+        by_phone = {}
+        for identity, person in contacts.items():
+            by_phone.setdefault(DingTalkNotices._normalize_mobile(person['mobile']), identity)
         remarks = {person['remark'].casefold() for person in contacts.values()}
         selected = []
         for index, number in enumerate(numbers):
-            identity = by_phone.get(number)
+            key = DingTalkNotices._normalize_mobile(number)
+            identity = by_exact_phone.get(number) or by_phone.get(key)
             if identity is None:
                 # Stable during an unsaved upgrade preview; the ID contains no phone data.
                 identity = uuid.uuid5(uuid.NAMESPACE_URL, f'clipflow-ding:{seed}:{index}').hex
@@ -234,7 +264,7 @@ class DingTalkNotices:
                     suffix += 1
                 remark = f'已导入人员 {suffix:02d}'
                 contacts[identity] = {'id': identity, 'mobile': number, 'remark': remark}
-                by_phone[number] = identity
+                by_phone[key] = identity
                 remarks.add(remark.casefold())
             selected.append(identity)
         return list(dict.fromkeys(selected))

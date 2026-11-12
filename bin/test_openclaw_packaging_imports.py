@@ -148,15 +148,18 @@ class SmokeImportContractTests(unittest.TestCase):
 
 
 class ResidentArtifactTests(unittest.TestCase):
-    def test_bin_root_test_files_are_excluded_for_every_extension_without_removing_runtime(self):
+    def test_development_files_are_excluded_without_removing_runtime(self):
         excluded = {
             'bin/test_fixture.py', 'bin/test_learning_completion_browser.mjs',
             'bin/test_fixture.js', 'bin/test_fixture.json', 'bin/test_fixture',
             'bin/TEST_FIXTURE.MJS', 'bin/mock_lan_notice_pressure.py',
+            '.browser-screenshots/preview.jpg', 'qwenwork/canvas/preview.html',
+            '交付快照/灯塔汇报/index.html', '灯塔汇报-index.html',
         }
         kept = {
             'bin/refactored_main.py', 'bin/learning_completion_browser.mjs',
             'bin/openclaw_service/test_runtime.mjs', 'bin/openclaw_service/test_runtime.py',
+            'bin/resources/tool_self_checks/folder_imports/暖通/模板.xlsx',
         }
         with tempfile.TemporaryDirectory(prefix='resident-filter-') as directory:
             root = Path(directory) / 'source'

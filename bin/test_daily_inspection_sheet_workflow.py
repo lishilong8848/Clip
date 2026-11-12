@@ -5,7 +5,8 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
-from lan_bitable_template_portal.daily_inspection import CN, SOURCES, DailyInspection, inspection_report, original_templates, RiskError
+from lan_bitable_template_portal.daily_inspection import (CN, SOURCES, DailyInspection, inspection_report,
+    original_templates, required_sheets, default_sheet_groups, RiskError)
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_daily_inspection import InspectionCloud, DAY
 
@@ -39,6 +40,59 @@ class SheetWorkflowTests(unittest.TestCase):
         self.finish(saved['review_version'])
         archived=self.report()['rounds'][0]
         self.assertEqual(next(x['value'] for x in archived['original_cells'] if all(x[k]==edit[k] for k in ('template','sheet','cell'))),'123')
+
+    def test_workbook_progress_and_signoff_follow_effective_groups(self):
+        duty = {**DAY, 'scope': 'E'}
+        defaults = default_sheet_groups('E')
+        moved = next(key for key, name in defaults.items() if name == '暖通')
+        self.svc.change('a', '甲', duty, 'sheet-group', {'id': '', 'duty': duty, 'groups': {moved: '电气'}})
+        active = self.svc.change('a', '甲', duty, 'start',
+            {'duty': duty, 'worksheet_mode': True, 'professions': ['电气']})['active']
+        identity = active['id']
+        self.assertEqual(active['sheet_groups'], {moved: '电气'})
+        self.assertEqual(self.svc.load('D')['active']['id'], self.active['id'])
+        chosen = self.svc.change('b', '乙', duty, 'append-profession', {'id': identity,
+            'profession': '暖通', 'review_version': active['review_version']})['active']
+        self.assertEqual(chosen['professions'], ['电气', '暖通'])
+        required = required_sheets(self.svc.load('E')['active'], 'E', ['电气'])
+        self.assertIn(moved, required)
+        with self.assertRaisesRegex(RiskError, '尚未确认'):
+            self.svc.change('a', '甲', duty, 'finish', {'id': identity, 'review_version': chosen['review_version'],
+                'sheet_workflow': True, 'visited_sheets': list(defaults)})
+        self.svc.change('a', '甲', duty, 'view-sheet', {'id': identity, 'sheet': moved, 'visited_sheets': list(required)})
+        restored = DailyInspection(self.store, self.cloud)
+        receipt = restored.view(restored.load('E'), 'a', duty)['active']
+        self.assertEqual(set(receipt['visited_sheets']), required)
+        self.assertEqual(receipt['review_version'], chosen['review_version'])
+        sign = {'id': identity, 'profession': '电气', 'profession_version': receipt['profession_versions']['电气']}
+        with self.assertRaisesRegex(RiskError, '逐页'):
+            restored.change('b', '乙', duty, 'confirm-profession', sign)
+        signed = restored.change('a', '甲', duty, 'confirm-profession', sign)['active']
+        self.assertEqual(signed['profession_confirmations']['电气']['actor'], '甲')
+        reset = restored.change('b', '乙', duty, 'sheet-group', {'id': identity,
+            'review_version': signed['review_version'], 'groups': {moved: None}})['active']
+        self.assertEqual(reset['sheet_groups'], {})
+        self.assertIn('归属已调整', reset['confirmation_invalidations']['电气'])
+        for owner, actor, name in (('a', '甲', '电气'), ('b', '乙', '暖通')):
+            pages = sorted(required_sheets(restored.load('E')['active'], 'E', [name]))
+            restored.change(owner, actor, duty, 'view-sheet', {'id': identity, 'sheet': pages[0], 'visited_sheets': pages})
+            reset = restored.change(owner, actor, duty, 'confirm-profession', {'id': identity, 'profession': name,
+                'profession_version': reset['profession_versions'][name]})['active']
+        self.assertEqual({name: row['actor'] for name, row in reset['profession_confirmations'].items()}, {'电气': '甲', '暖通': '乙'})
+        restored.download_archive = self.svc.download_archive
+        result = restored.change('b', '乙', duty, 'finish', {'id': identity, 'review_version': reset['review_version'],
+            'sheet_workflow': True})
+        self.assertIsNone(result['active'])
+        self.assertEqual(self.cloud.creates, 1)
+        self.assertEqual(restored.load('D')['active']['id'], self.active['id'])
+
+    def test_workbook_start_defaults_professions_and_cannot_skip_confirmation(self):
+        duty = {**DAY, 'scope': 'E'}
+        active = self.svc.change('a', '甲', duty, 'start', {'duty': duty, 'worksheet_mode': True})['active']
+        self.assertEqual(active['professions'], ['电气', '暖通'])
+        with self.assertRaisesRegex(RiskError, '尚未确认'):
+            self.svc.change('a', '甲', duty, 'finish', {'id': active['id'], 'review_version': active['review_version']})
+        self.assertEqual(self.cloud.creates, 0)
     def test_history_cells_retry_loss_and_free_cell_preserved(self):
         c=self.target();self.finish(0);r=self.report()['rounds'][0]
         import io

@@ -1,4 +1,5 @@
 import datetime as dt
+import hashlib
 import io
 import json
 import os
@@ -18,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from bin.lan_bitable_template_portal.risk_inspection import MODULE, RiskError, RiskInspections
 from bin.lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes, tool_management_enabled
-from bin.lan_bitable_template_portal.tool_self_check import BUILDINGS, ToolSelfChecks
+from bin.lan_bitable_template_portal.tool_self_check import BUILDINGS, TEMPLATES, ToolSelfChecks, fill_template
 
 
 def actor(scope='A', identity='leader', *, admin=False):
@@ -93,12 +94,14 @@ class ToolSelfCheckTest(TestCase):
                 [(month, len(BUILDINGS)) for month in ('2026-11', '2026-12', '2027-01')])
 
     def test_template_version_and_archive_round_trip(self):
-        self.assertEqual(len(self.templates), 13)
+        legacy_ids = {hashlib.sha256(path.name.encode()).hexdigest()[:24] for path in TEMPLATES.glob('*.xlsx')}
+        legacy = [template for template in self.templates if template['id'] in legacy_ids]
+        self.assertEqual(len(legacy), 13)
         for scope in BUILDINGS:
             owner = actor(scope)
             claim = self.service.action(owner, self.month, scope, 'claim', {'revision': 0})
             self.assertEqual(claim, self.service.action(owner, self.month, scope, 'claim', {'revision': 0}))
-            selected = self.templates if scope == 'A' else self.templates[1:2]
+            selected = legacy if scope == 'A' else legacy[1:2]
             records = [
                 {'entry_id': f'{index:032x}', 'template_id': template['id'], 'version': 1, 'location': '=1+1',
                  'inspector': '验收楼长', 'checked_at': self.month + '-01T08:30', 'reviewer': '验收审核人',
@@ -143,3 +146,41 @@ class ToolSelfCheckTest(TestCase):
                     self.assertEqual(len(sheet._images), 1)
                 finally:
                     workbook.close()
+
+    def test_bundled_folders_import_without_overwriting_existing_versions(self):
+        paths = list((TEMPLATES / 'folder_imports').rglob('*.xlsx'))
+        ids = {self.service.import_identity(path.stem, path.read_bytes()) for path in paths}
+        added = [template for template in self.templates if template['id'] in ids]
+        self.assertEqual(len(added), 15)
+        self.assertEqual(sum(t['schema'].get('layout') == 'hvac' for t in added), 4)
+        template = next(t for t in added if t['schema'].get('calibration'))
+        with self.db.connect() as db:
+            content = self.service._template(db, template['id'], 1)['content']
+        exported = fill_template(content, template['schema'], {'inspector': '测试人员', 'location': '测试位置',
+            'checked_at': self.month + '-01T09:00', 'notes': '', 'reviewer': '', 'reviewed_at': '',
+            'checks': ['是'] * len(template['schema']['checks']),
+            'template_values': {'C3': '温湿度仪', 'E20': '45', 'G20': '46', 'I20': '-1'}}, 'A')
+        with io.BytesIO(exported) as stream:
+            book = load_workbook(stream)
+            try:
+                self.assertEqual(book['封面']['A1'].value, '自检记录单')
+                sheet = book[template['schema']['sheet']]
+                self.assertEqual([sheet[cell].value for cell in ('C3', 'C5', 'E20', 'G20', 'I20')],
+                                 ['温湿度仪', 'A楼', '45', '46', '-1'])
+            finally:
+                book.close()
+        self.service.delete_template(self.admin, template['id'], {'version': 1})
+        reopened = ToolSelfChecks(self.db)
+        self.assertNotIn(template['id'], [row['id'] for row in reopened.list(self.admin)['templates']])
+
+    def test_one_bad_bundled_template_preserves_library(self):
+        with TemporaryDirectory() as temporary:
+            imports = Path(temporary) / 'folder_imports'
+            imports.mkdir()
+            (imports / '损坏.xlsx').write_bytes(b'invalid workbook')
+            source = next(TEMPLATES.glob('*.xlsx'))
+            name, content = '新增有效模板', source.read_bytes()
+            (imports / (name + '.xlsx')).write_bytes(content)
+            with self.assertLogs(level='WARNING'):
+                reopened = ToolSelfChecks(self.db, Path(temporary))
+            self.assertEqual(len(reopened.list(self.admin)['templates']), len(self.templates) + 1)

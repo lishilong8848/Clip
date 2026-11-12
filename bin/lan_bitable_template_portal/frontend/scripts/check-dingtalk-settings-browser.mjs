@@ -11,7 +11,9 @@ await mkdir(output,{recursive:true});
 const server=await createServer({root,server:{host:'127.0.0.1',port:0},plugins:[{name:'ding-fixture',configureServer(s){
   s.middlewares.use('/__ding_fixture',async(_req,res)=>{res.setHeader('Content-Type','text/html');res.end(await s.transformIndexHtml('/__ding_fixture',`<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"></head><body><div id="app"></div><script type="module">
   import {createApp,ref,h} from 'vue'; import Settings from '/src/components/DingTalkNoticeSettings.vue'; import Picker from '/src/components/NoticeDingTalkPicker.vue';
-  createApp({setup(){const selected=ref([]),names=ref([]);return ()=>h('main',[h(Settings),h(Picker,{modelValue:selected.value,workType:'change',noticeType:'变更通告',buildings:['D'],'onUpdate:modelValue':v=>selected.value=v,onSelectedNames:v=>names.value=v}),h('p',{id:'selection'},names.value.join('、'))]);}}).mount('#app');
+  import AdminTools from '/src/components/AdminTools.vue';
+  if(location.search.includes('admin=1')) createApp({render:()=>h(AdminTools,{open:true,systemAdmin:true,initialTab:'dingtalk',scopeOptions:[]})}).mount('#app');
+  else createApp({setup(){const selected=ref([]),names=ref([]);return ()=>h('main',[h(Settings),h(Picker,{modelValue:selected.value,workType:'change',noticeType:'变更通告',buildings:['D'],'onUpdate:modelValue':v=>selected.value=v,onSelectedNames:v=>names.value=v}),h('p',{id:'selection'},names.value.join('、'))]);}}).mount('#app');
   </script></body></html>`));});}}]});
 await server.listen();
 const browser=await chromium.launch({headless:true});
@@ -27,13 +29,14 @@ try{
         if(request.method()==='POST'){const body=request.postDataJSON();writes.push(body);state={...state,revision:state.revision+1,contacts:body.contacts,robots:body.robots.map(r=>({...r,configured:true}))};}
         data=state;
       }else if(url.pathname==='/api/workbench/dingtalk-options')data={robots:state.robots};
+      else if(new URL(page.url()).searchParams.has('admin'))data={items:[]};
       else throw new Error('unexpected API '+url.pathname);
       await route.fulfill({json:{ok:true,data}});
     });
     await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__ding_fixture`, {waitUntil:'domcontentloaded',timeout:90000});
     try{await page.locator('.robot').first().waitFor({timeout:10000});}catch(e){console.error('fixture body:',(await page.locator('body').innerText()).slice(0,2000));console.error('fixture html:',(await page.content()).slice(0,2000));throw e;}
     const directory = page.locator('.contact-directory');
-    await directory.locator('summary').click();
+    // The directory is permanently visible now; it used to hide behind a <details> disclosure.
     for (const [remark, mobile] of [['通用主管', '13800138000'], ['现场负责人', '13800138001']]) {
       await directory.getByRole('button', {name:'添加艾特人员'}).click();
       const row = directory.locator('.contact-row').last();
@@ -62,7 +65,6 @@ try{
     await otherRobot.getByLabel('默认艾特方式').selectOption('people');
     await selectPerson(otherRobot, 'D', '通用主管');
     assert(await directory.locator('.contact-row').last().getByRole('button', {name:'移除人员'}).isDisabled());
-    await directory.locator('summary').click();
     await page.getByRole('button',{name:'保存配置'}).click();
     await page.getByRole('status').filter({hasText:'配置已保存'}).waitFor();
     const [common, floorPerson] = writes[0].contacts;
@@ -75,12 +77,51 @@ try{
     await page.waitForFunction(() => !document.querySelector('.ding-settings fieldset')?.disabled);
     assert.match(await robot.locator('[data-mention-scope="D"]').innerText(), /现场负责人/);
     assert.match(await otherRobot.locator('[data-mention-scope="D"]').innerText(), /通用主管/);
+
+    // A row added but never filled in is dropped instead of vetoing everybody else's edits.
+    const writesBefore = writes.length;
+    await directory.getByRole('button', {name:'添加艾特人员'}).click();
+    const blank = directory.locator('.contact-row').last();
+    await blank.locator('.row-hint').filter({hasText:'保存时会忽略'}).waitFor();
+    await page.getByRole('button',{name:'保存配置'}).click();
+    await page.getByRole('status').filter({hasText:'配置已保存'}).waitFor();
+    assert.equal(writes.length, writesBefore + 1);
+    assert.deepEqual(writes.at(-1).contacts.map(c=>c.remark), ['通用主管','现场负责人'], '空行不进入提交集');
+
+    // A half-filled row is refused next to the button, and nothing is written at all.
+    await directory.getByRole('button', {name:'添加艾特人员'}).click();
+    const partial = directory.locator('.contact-row').last();
+    await partial.getByLabel('手机号').fill('13800138009');
+    await partial.locator('.row-error').filter({hasText:'备注未填写'}).waitFor();
+    await page.getByRole('button',{name:'保存配置'}).click();
+    await page.locator('.save-bar').getByRole('alert').filter({hasText:'1 处需要修改'}).waitFor();
+    assert.equal(writes.length, writesBefore + 1, '校验未通过时不发送任何写入');
+    // Removing the offending row retires the banner and leaves the config clean and unmodified.
+    await partial.getByRole('button',{name:'移除人员'}).click();
+    await page.locator('.save-bar').getByRole('alert').waitFor({state:'hidden'});
+    assert.equal(await directory.locator('.contact-row').count(), 2);
+    assert.equal(writes.length, writesBefore + 1);
+
     await page.locator('.notice-dingtalk label').filter({hasText:'甲群'}).locator('input').check();
     await page.locator('.notice-dingtalk label').filter({hasText:'乙群'}).locator('input').check();
     assert.equal(await page.locator('#selection').textContent(),'甲群、乙群');
     assert.equal(await page.locator('.notice-dingtalk input:checked').count(),2);
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
     await page.screenshot({path:path.join(output,`settings-${width}.png`),fullPage:true});
+    if(width===1440){
+      await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__ding_fixture?admin=1`);
+      const row=page.locator('.contact-row').first();
+      await row.getByLabel('人员备注').fill('本机未保存备注');
+      const accounts=page.getByRole('navigation',{name:'管理员工作区'}).getByRole('button',{name:'账号与权限'});
+      await accounts.click();
+      const dialog=page.getByRole('dialog',{name:'有未保存的修改'});
+      await dialog.getByRole('button',{name:'继续编辑'}).click();
+      assert.equal(await row.getByLabel('人员备注').inputValue(),'本机未保存备注');
+      await accounts.click();
+      await dialog.getByRole('button',{name:'仍要离开'}).click();
+      await page.locator('.ding-settings').waitFor({state:'hidden'});
+      assert.equal(writes.length,writesBefore+1);
+    }
     console.log(`钉钉配置 ${width}x${height}：通过`);await page.close();
   }
 }finally{await browser.close();await server.close();}

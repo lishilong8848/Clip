@@ -1,6 +1,7 @@
 <template>
-  <section ref="rootElement" class="inspection-workbook" :class="{'full-height':mobileSheet,'rotate-landscape':rotation==='landscape','rotate-portrait':rotation==='portrait','compact-editor-view':mobileSheet && editing && (availableHeight<260 || rotatedWidth<300)}" :style="{'--available-height':availableHeight+'px','--rotated-width':rotatedWidth+'px'}" aria-label="巡检原表">
-    <div v-if="mobileSheet" class="mobile-sheet-bar">
+  <section ref="rootElement" class="inspection-workbook inspection-theme" :class="{'full-height':mobileSheet,'rotate-landscape':rotation==='landscape','rotate-portrait':rotation==='portrait','compact-editor-view':mobileSheet && editing && (availableHeight<260 || rotatedWidth<300)}" :style="{'--available-height':availableHeight+'px','--rotated-width':rotatedWidth+'px'}" aria-label="巡检原表">
+    <div v-if="mobileSheet" class="mobile-header">
+    <div class="mobile-sheet-bar">
       <button aria-label="退出巡检表" @click="emit('exit')">返回</button>
       <div class="mobile-sheet-context">
         <span>{{ scope }}楼 · {{ day.slice(5) }}</span>
@@ -9,17 +10,32 @@
       <button :aria-label="screenLayout==='landscape'?'切换竖屏':'切换横屏'" @click="toggleScreenLayout">{{ screenLayout==='landscape'?'竖屏':'横屏' }}</button>
       <button :aria-expanded="compactMenu" aria-label="巡检菜单" @click="compactMenu=!compactMenu">{{ compactMenu?'收起':'菜单' }}</button>
     </div>
+      <div v-if="orderedBase.length" class="sheet-navigation">
+        <div ref="sheetTabs" class="sheet-tabs" role="group" aria-label="巡检工作表">
+          <button v-for="item in orderedBase" :key="item.key" type="button" :aria-pressed="pageKey===item.key"
+            :aria-label="item.name.trim()" :title="item.name.trim()" @click="selectPage(item.key)">{{ item.name.trim() }}
+            <small>{{ item.profession }}{{ item.profession!==item.homeProfession?' · 已调整':'' }}</small>
+          </button>
+        </div>
+        <button class="sheet-sort" aria-label="调整工作表顺序" :disabled="!preferencesReady || saving || dirty || orderedBase.length<2" @click="openSort">排序</button>
+      </div>
+    </div>
     <div class="book-options" :class="{expanded:compactMenu}">
-    <div class="book-tools" aria-label="巡检表工具">
-      <label><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
-      <label><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
-      <button :disabled="loading || saving || dirty || !!editing" @click="load">刷新</button>
-      <button :disabled="loading || saving || dirty || !!editing || !report?.rounds.length" @click="download">导出</button>
+    <div class="book-tools" aria-label="巡检楼栋与日期">
+      <label :title="lockReason"><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
+      <label :title="lockReason"><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
+      <NButton size="small" :disabled="loading || saving || dirty || !!editing" :title="lockReason" @click="load">刷新</NButton>
+      <NButton size="small" :disabled="loading || saving || dirty || !!editing || !report?.rounds.length" :title="!report?.rounds.length ? '本楼本日尚无巡检记录' : lockReason" @click="download">导出</NButton>
+      <NButton size="small" class="book-settings" @click="openSettings">表格设置</NButton>
+      <NButton v-if="canGroup" size="small" @click="openGroups">专业分工<template v-if="Object.keys(currentGroups).length"> · {{ Object.keys(currentGroups).length }} 已调整</template></NButton>
+    </div>
+    <div class="book-tools" aria-label="工作表导航">
       <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部</option><option value="电气">电气</option><option value="暖通">暖通</option></select></label>
       <div v-if="!mobileSheet && report" class="sheet-picker">
         <NSelect :value="pageKey || null" :options="sheetOptions" filterable placeholder="搜索或切换工作表" :input-props="{'aria-label':'搜索或切换工作表'}" @update:value="selectPage" />
       </div>
-      <button class="book-settings" @click="openSettings">表格设置</button>
+      <NButton size="small" :disabled="!basePages.length" @click="openLookup('search')">定位单元格</NButton>
+      <NButton size="small" :disabled="!viewedRound || !sheetLoaded" @click="openLookup('abnormal')">异常 {{ roundAbnormal.length }}</NButton>
     </div>
     <div v-if="mobileSheet" class="mobile-zoom-tools" role="group" aria-label="巡检表缩放">
       <button aria-label="缩小巡检表" :disabled="zoom<=7" @click="resizeSheet(-2)">−</button>
@@ -28,9 +44,19 @@
     </div>
     <slot name="start" v-if="isCurrentDate && !active" />
     <span v-if="preferencesError" class="book-error">{{ preferencesError }}<button @click="loadPreferences">重读排序</button></span>
-    <div class="book-status" role="status"><span class="current-key"></span>本次巡检 <span class="history-key"></span>历史巡检
-      <span v-if="editing" class="editing-address">正在编辑 {{ editing }}</span><span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '单元格修改自动保存' }}</span>
-      <button v-if="dirty && !saving" @click="flush">重试保存</button><button v-if="dirty && !saving" @click="compareLatest">核对最新数据</button>
+    <div class="book-status">
+      <span v-if="currentActive?.started_by">{{ currentActive.started_by }} 开轮<template v-if="presence.length"> · {{ presence.length }} 人在看</template></span>
+      <span class="status-legend" aria-hidden="true"><i class="current-key"></i>本次巡检<i class="history-key"></i>历史巡检</span>
+      <span v-if="currentActive && !readOnly" class="status-review">
+        <button type="button" :disabled="!pendingRows.length" :title="pendingRows.length?'跳到本表下一个待填写单元格':'本表没有待填写项'" @click="gotoNextEmpty">待填 {{ pendingRows.length }}</button>
+        <button type="button" title="核对本表待填项与上一轮差异" @click="reviewOpen=true">本表核对</button>
+      </span>
+      <span class="status-save" role="status">
+        <strong v-if="editing" class="editing-address">正在编辑 {{ editing }}</strong>
+        <span v-if="lockReason" class="lock-reason">{{ lockReason }}</span>
+        <span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '单元格修改自动保存' }}</span>
+        <button v-if="dirty && !saving" @click="flush">重试保存</button><button v-if="dirty && !saving" @click="compareLatest">核对最新数据</button>
+      </span>
     </div>
     <div v-if="report && (!mobileSheet || compactMenu)" class="round-tabs" role="group" :aria-label="isChiller?'冷机巡检轮次':'巡检轮次与状态'">
       <button v-for="state in roundStates" :key="state.slot" type="button" :class="{selected:shownSlot===state.slot}" :aria-pressed="shownSlot===state.slot" :disabled="!isChiller && !roundsBySlot.get(state.slot)" @click="selectSlot(state.slot)">
@@ -43,6 +69,7 @@
     <div v-if="mobileSheet && !compactMenu && isCurrentDate && !active" class="mobile-start"><slot name="start" /></div>
     <p v-if="report?.archive_warning" class="book-pending">{{ report.archive_warning }}</p>
     <p v-if="report?.rounds.some(r=>r.status==='自动确认·待上传')" class="book-pending">上轮数据已在本地保存并自动收尾，飞书上传待重试。</p>
+    <p v-if="invalidationText" class="book-pending" role="status">{{ invalidationText }} <NButton v-if="sheetLoaded" size="tiny" @click="openComparison">对照上一轮</NButton></p>
     <p v-if="error" class="book-error" role="alert">{{ error }}</p>
     <section v-if="comparison" class="book-error" aria-label="核对单元格冲突">
       <p>请核对共享数据，选择保留哪一份；未选择的修改不会自动覆盖。</p>
@@ -53,13 +80,6 @@
     </section>
     <p v-if="loading && !report" role="status">正在打开巡检表…</p>
     <template v-if="report">
-      <div v-if="mobileSheet && orderedBase.length" class="sheet-navigation">
-        <div ref="sheetTabs" class="sheet-tabs" role="group" aria-label="巡检工作表">
-          <button v-for="item in orderedBase" :key="item.key" type="button" :aria-pressed="pageKey===item.key"
-            :title="item.name.trim()" @click="selectPage(item.key)">{{ item.name.trim() }}</button>
-        </div>
-        <button class="sheet-sort" aria-label="调整工作表顺序" :disabled="!preferencesReady || saving || dirty || orderedBase.length<2" @click="openSort">排序</button>
-      </div>
       <p v-if="currentPage && !sheetLoaded && loading" class="book-pending" role="status">正在读取当前工作表数据…</p>
       <div v-if="currentPage" ref="scrollElement" class="book-scroll" tabindex="0" aria-label="可编辑巡检表格" :key="viewKey" @touchstart="startPinch" @touchmove="movePinch" @touchend="endPinch" @touchcancel="endPinch">
         <div class="book-canvas" :style="{width:(columnWidths.reduce((a,b)=>a+b,0)+42)+'px'}">
@@ -96,16 +116,37 @@
           <button type="button" class="primary" @mousedown.prevent @click="completeEdit">完成</button>
         </div>
       </div>
-      <footer v-if="currentActive && !readOnly && (!mobileSheet || allVisited || currentActive.pending)" class="book-submit">
-        <span v-if="!mobileSheet && !allVisited">已查看 {{ requiredPages.filter(p=>visited.has(p.baseKey)).length }} / {{ requiredPages.length }} 页</span>
-        <button v-if="allVisited || active?.pending" class="primary" :disabled="saving || dirty || loading || parentBusy" @click="confirmSubmit=true">{{ active?.pending?'重试提交归档':'确认提交' }}</button>
+      <footer v-if="currentActive && !readOnly" class="book-submit">
+        <div v-if="!currentActive.pending" class="book-signoffs" aria-label="专业确认">
+          <template v-for="name in selectedProfessions" :key="name">
+            <span v-if="confirmedProfessions.includes(name)" :title="confirmationLabel(name)">{{ name }} · {{ confirmationLabel(name) }}</span>
+            <NButton v-else size="small" :disabled="actionLocked || !hasViewed(name)" :title="progressLabel(name)" @click="confirmProfession(name)">{{ name }}确认 · {{ progressLabel(name) }}</NButton>
+          </template>
+          <NButton v-for="name in joinableProfessions" :key="name" size="small" :disabled="actionLocked" @click="joinProfession(name)">本轮加入{{ name }}</NButton>
+          <span v-if="!selectedProfessions.length" :title="unvisitedNames">已查看 {{ visitedCount }} / {{ requiredPages.length }} 页</span>
+          <NButton v-if="nextUnvisited" size="tiny" :title="'还需查看 '+unvisitedNames" :disabled="actionLocked" @click="openPage(nextUnvisited.key)">下一未查看表</NButton>
+          <span v-if="saving || dirty" role="status">{{ saving?'正在保存…':'修改待保存' }}</span>
+        </div>
+        <NButton type="primary" size="small" class="submit-action" :disabled="!canSubmit || actionLocked"
+          :title="submitReason" @click="confirmSubmit=true">{{ currentActive.pending?'重试提交归档':'确认提交' }}</NButton>
       </footer>
     </template>
     <NModal v-model:show="settingsOpen" :to="rootElement" preset="card" title="表格设置" style="width:min(94%,460px)">
       <div class="book-settings-content">
         <div class="settings-section"><strong>表格字号</strong><div class="settings-choices" aria-label="表格字号"><button v-for="(label,i) in ['紧凑','标准','放大','更大']" :key="i" :aria-pressed="zoom===[12,14,18,22][i]" @click="zoom=[12,14,18,22][i]">{{ label }}</button></div></div>
         <div v-if="!mobileSheet" class="settings-section"><strong>个人阅读顺序</strong><span>当前：{{ professionView==='ALL'?'全部专业':professionView }}，与账号同步</span><NButton block :disabled="!preferencesReady || saving || dirty" @click="openSort">调整工作表顺序</NButton></div>
-        <div v-if="currentActive && !readOnly && currentPage" class="settings-section"><strong>本班专业归属</strong><span>{{ currentPage.name.trim() }}</span><div class="settings-choices two"><button v-for="name in ['电气','暖通']" :key="name" :disabled="saving || dirty || parentBusy" :aria-pressed="currentPage.profession===name" @click="moveProfession(name)">{{ name }}</button></div><small>仅影响本楼本班次，下一班恢复默认。</small></div>
+        <div v-if="canGroup && showGroups" ref="groupPanel" class="settings-section">
+          <strong>本班专业归属</strong><small>仅影响{{ scope }}楼{{ defaultShift }}班，下一班恢复默认。</small>
+          <div class="group-list">
+            <label v-for="page in basePages" :key="page.key"><span>{{ page.name.trim() }}<small>默认 {{ page.homeProfession }}{{ groupValue(page)!==page.homeProfession?' · 已调整':'' }}</small></span>
+              <select :value="groupValue(page)" :disabled="actionLocked" :aria-label="page.name.trim()+'归属'" @change="stageGroup(page,$event)"><option v-for="name in professions" :key="name">{{ name }}</option></select>
+            </label>
+          </div>
+          <div class="group-actions"><NButton size="small" :disabled="actionLocked" @click="restoreGroups">恢复全部默认</NButton><NButton size="small" type="primary" :disabled="actionLocked || !Object.keys(groupDraft).length" @click="requestGroupSave">保存归属</NButton></div>
+        </div>
+        <NButton v-else-if="canGroup" size="small" @click="openGroups">查看本班专业分工</NButton>
+        <div v-else-if="currentPage && frozenProfession" class="settings-section"><strong>该轮专业归属</strong><span>{{ currentPage.name.trim() }} · {{ frozenProfession }}<template v-if="shownSlot"> · {{ shownSlot }}</template></span><small v-if="frozenProfession!==currentGroup(currentPage)">本班对应归属为 {{ currentGroup(currentPage) }}。</small></div>
+        <div v-if="currentActive" class="settings-section"><strong>本轮协作</strong><span v-if="currentActive.started_by">开轮 {{ currentActive.started_by }} · {{ roundClock.format(currentActive.started || 0) }}</span><span v-for="person in presence" :key="person.actor+person.sheet">{{ person.actor }} · 正在查看 {{ basePages.find(page=>page.key===person.sheet)?.name.trim() }}</span></div>
       </div>
       <template #footer><NButton type="primary" block @click="settingsOpen=false">完成</NButton></template>
     </NModal>
@@ -115,27 +156,68 @@
       <div class="sort-list"><div v-for="(key,index) in sortDraft" :key="key" class="sort-row"><span>{{ basePages.find(p=>p.baseKey===key)?.name.trim() }}</span><button :disabled="index===0" @click="shiftSort(index,-1)">上移</button><button :disabled="index===sortDraft.length-1" @click="shiftSort(index,1)">下移</button></div>
       </div><button :disabled="saving" @click="saveSort">保存排序</button>
     </NModal>
-    <NModal v-model:show="confirmSubmit" :to="rootElement" preset="dialog" title="确认提交本轮巡检" content="确认已核对所有工作表。填写会保存到本地并上传归档；上传未确认时保留原任务供重试。" positive-text="确认提交" negative-text="继续查看" @positive-click="submit" />
+    <NModal v-model:show="confirmSubmit" :to="rootElement" preset="dialog" title="确认提交本轮巡检" content="保存已填写内容及可用源值并上传归档。没有读数的测点保留空白，上传未确认时可重试原轮次。" positive-text="确认提交" negative-text="继续查看" @positive-click="submit" />
     <NModal :show="!!abnormal" :to="rootElement" preset="dialog" title="填写异常说明" positive-text="保存" negative-text="返回修改" @positive-click="saveAbnormal" @negative-click="abnormal=undefined" @update:show="v=>{if(!v)abnormal=undefined}"><textarea v-model="abnormalNote" placeholder="请描述该设备异常，随单元格修改保存" rows="3" /></NModal>
+    <NModal :show="!!pendingSwap" :to="rootElement" preset="dialog" type="warning" title="调整本班专业归属？"
+      :content="swapWarning" positive-text="仍要调整" negative-text="取消"
+      @positive-click="applySwap" @update:show="v=>{if(!v)pendingSwap=false}" />
+    <NModal v-model:show="reviewOpen" :to="rootElement" preset="card" :title="'本表核对 · '+(currentPage?.name||'').trim()" style="width:min(94%,560px)" @after-leave="applyPendingFocus">
+      <div class="review-filters" role="group" aria-label="核对筛选">
+        <button type="button" :aria-pressed="reviewFilter==='all'" @click="reviewFilter='all'">全部 {{ reviewRows.length }}</button>
+        <button type="button" :aria-pressed="reviewFilter==='pending'" @click="reviewFilter='pending'">待填 {{ pendingRows.length }}</button>
+        <button type="button" :aria-pressed="reviewFilter==='changed'" @click="reviewFilter='changed'">与上轮有差异 {{ changedRows.length }}</button>
+      </div>
+      <p class="settings-note">{{ previousSlot ? '上轮＝'+previousSlot+'，按测点身份比对，不受各轮所在列不同的影响。' : '本日该时点之前没有可比对的轮次，仅列出待填项。' }}</p>
+      <p class="settings-note">待填表示本轮没有可用读数。归档时保留空白，可用源值会随本轮记录保存。</p>
+      <div class="review-list">
+        <button v-for="row in shownReviewRows" :key="row.address" type="button" class="review-row" @click="focusReviewCell(row)">
+          <span class="review-label">{{ row.label }}<small>{{ row.address }}</small></span>
+          <span class="review-values">
+            <i :class="{'review-empty':row.empty}">{{ row.current || '待填写' }}</i>
+            <em v-if="row.hasPrevious">{{ row.previous || '空' }}</em>
+            <b v-if="row.changed">变化</b>
+          </span>
+        </button>
+        <p v-if="!shownReviewRows.length" class="settings-note">{{ reviewFilter==='pending' ? '本表没有待填写项。' : reviewFilter==='changed' ? '与上一轮没有差异。' : '本表没有需要核对的映射单元格。' }}</p>
+      </div>
+    </NModal>
+    <NModal :show="!!lookupMode" :to="rootElement" preset="card" :title="lookupMode==='abnormal'?'本轮异常 · '+shownSlot:'定位工作表单元格'" style="width:min(94%,560px)" @update:show="v=>{if(!v)lookupMode=''}" @after-leave="applyLookupTarget">
+      <input v-if="lookupMode==='search'" v-model.trim="lookupQuery" maxlength="100" type="search" aria-label="查找表名、表内文字或格号" placeholder="搜索表名、设备、测点或格号">
+      <p v-if="lookupPending" class="settings-note" role="status">正在查询本轮设备和测点…</p>
+      <p v-else-if="lookupError" class="settings-note" role="status">{{ lookupError }}</p>
+      <div class="review-list">
+        <button v-for="row in lookupRows" :key="row.key+row.cell" type="button" class="review-row" @click="selectLookup(row)"><span class="review-label">{{ row.label }}<small>{{ row.sheet.trim() }} · {{ row.cell }}</small></span></button>
+        <p v-if="!lookupRows.length && !lookupPending" class="settings-note">{{ lookupMode==='abnormal'?'本轮无已保存的异常状态。':lookupQuery?'没有匹配的单元格。':'输入关键字定位原表。' }}</p>
+      </div>
+    </NModal>
   </section>
 </template>
 <script setup lang="ts">
 import {computed,nextTick,onBeforeUnmount,onMounted,ref,shallowRef,watch} from 'vue';
 import {NModal,NButton,NSelect} from 'naive-ui';
+import './inspection.css';
 import {requestJson,downloadFile} from '../api/client';
 import {registerNavigationGuard} from '../navigation';
 import {inspectionCellText} from './inspectionCellFormat';
 import {configuredInspectionPositions,manuallyFilledInspectionPositions,inspectionPosition,type InspectionVisibilityActive} from './inspectionCellVisibility';
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
-type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_type?:string;device?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
-type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;original_cells:Reading[];extra_cells?:Reading[]};
-type Page={key:string;baseKey:string;template:string;profession:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
+type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
+type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
+type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
 type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
 type Job={scope:string;date:string;round:RoundMeta;cells:CellEdit[];attempted?:boolean};
-const props=defineProps<{immersive?:boolean;scopes:string[];templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:InspectionVisibilityActive & {id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null};readOnly:boolean;parentBusy:boolean}>();
-const emit=defineEmits<{changed:[];scope:[scope:string];exit:[]}>();
+type Presence={actor:string;sheet:string;seen_at:number};
+type Progress={visited_sheets?:string[];presence?:Presence[]};
+type Active=InspectionVisibilityActive & Progress & {
+ id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null;
+ started_by?:string;started?:number;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
+ profession_confirmations?:Record<string,{actor?:string;confirmed?:number;version?:string}>;
+ profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;
+};
+const props=defineProps<{immersive?:boolean;scopes:string[];templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:Active;plannedGroups?:Record<string,string>;readOnly:boolean;parentBusy:boolean}>();
+const emit=defineEmits<{changed:[];scope:[scope:string];exit:[];'round-state':[state:any]}>();
 const compactMenu=ref(false);
 const phoneMedia=window.matchMedia('(max-width:760px), (max-height:500px) and (pointer:coarse)');
 const phoneScreen=ref(phoneMedia.matches);
@@ -164,6 +246,11 @@ const professionView=ref('ALL'),preferencesReady=ref(false),preferencesError=ref
 const orders=ref<Record<string,string[]>>({ALL:[],电气:[],暖通:[]}),sortOpen=ref(false),settingsOpen=ref(false),sortDraft=ref<string[]>([]);
 const jobs=ref<Job[]>([]);const savingCells=ref(false);const dirty=computed(()=>jobs.value.length>0);const confirmSubmit=ref(false);
 const abnormal=ref<{round:RoundMeta;edit:CellEdit}>(),abnormalNote=ref('');
+const professions=['电气','暖通'];
+// Disabled toolbar controls must say why; dirty/saving are already reported by the save status.
+const lockReason=computed(()=>abnormal.value?'填写异常说明后即可切换楼栋或日期'
+ :editing.value?'完成当前单元格编辑后即可切换楼栋或日期'
+ :sortOpen.value?'关闭排序窗口后即可切换楼栋或日期':'');
 const slots=['白1','白2','夜1','夜2'];
 const selectedSlot=ref(''),chillerSelection=ref('');
 const slotOf=(round?:Pick<Round,'shift'|'round'>)=>round?round.shift+round.round:'';
@@ -187,7 +274,14 @@ const roundStates=computed(()=>slots.map(slot=>{
   sourceClock:state?.source_time?roundClock.format(state.source_time):'',
   scheduledClock:state?.scheduled_at?roundClock.format(state.scheduled_at):''};
 }));
-const basePages=computed<Page[]>(()=>report.value?.original_templates.flatMap(t=>t.sheets.filter(s=>s.name.trim()!=='封面').map(s=>{const key=JSON.stringify([t.name,s.name]);return {...s,template:t.name,profession:report.value?.sheet_groups?.[key]||t.profession,key,baseKey:key};}))||[]);
+const currentGroups=computed(()=>currentActive.value?.sheet_groups || (isCurrentDate.value ? props.plannedGroups : undefined) || report.value?.sheet_groups || {});
+const historicalGroupRound=computed(()=>roundsBySlot.value.get(
+ (report.value?.original_templates.some(t=>t.sheets.some(s=>s.name.trim()==='暖通冷机系统巡检表'&&JSON.stringify([t.name,s.name])===pageKey.value))
+  ? chillerSelection.value : selectedSlot.value))
+ || (!currentActive.value ? report.value?.rounds.slice(-1)[0] : undefined));
+const displayedGroups=computed(()=>historicalGroupRound.value && historicalGroupRound.value.round_id!==currentActive.value?.id
+ ? historicalGroupRound.value.sheet_groups || {} : currentGroups.value);
+const basePages=computed<Page[]>(()=>report.value?.original_templates.flatMap(t=>t.sheets.filter(s=>s.name.trim()!=='封面').map(s=>{const key=JSON.stringify([t.name,s.name]);return {...s,template:t.name,profession:displayedGroups.value[key]||t.profession,homeProfession:t.profession,key,baseKey:key};}))||[]);
 const orderedBase=computed(()=>{
  const order=orders.value[professionView.value]||[];
  return basePages.value.filter(p=>professionView.value==='ALL'||p.profession===professionView.value).slice().sort((a,b)=>{
@@ -198,8 +292,17 @@ const currentPage=computed(()=>orderedBase.value.find(p=>p.key===pageKey.value))
 const sheetLoaded=computed(()=>!!report.value?.draft_key && !report.value.summary_only &&
  (!report.value.sheet_filter || JSON.stringify(report.value.sheet_filter)===currentPage.value?.baseKey));
 const sheetOptions=computed(()=>orderedBase.value.map(p=>({value:p.key,label:`${p.profession} · ${p.name.trim()}${currentActive.value?(visited.value.has(p.baseKey)?' · 已查看':' · 未查看'):''}`})));
-const requiredPages=computed(()=>basePages.value);
+const selectedProfessions=computed(()=>currentActive.value?.professions || []);
+const requiredPages=computed(()=>basePages.value.filter(p=>!selectedProfessions.value.length || selectedProfessions.value.includes(currentGroup(p))));
 const allVisited=computed(()=>!!report.value?.draft_key && requiredPages.value.length>0 && requiredPages.value.every(p=>visited.value.has(p.baseKey)));
+const visitedCount=computed(()=>requiredPages.value.filter(p=>visited.value.has(p.baseKey)).length);
+// Naming the remaining sheets turns a missing submit button into an actionable checklist.
+const unvisitedNames=computed(()=>{
+ const names=requiredPages.value.filter(p=>!confirmedProfessions.value.includes(currentGroup(p)) && !visited.value.has(p.baseKey)).map(p=>p.name.trim());
+ if(!names.length)return '';
+ return names.length>3 ? names.slice(0,3).join('、')+' 等 '+names.length+' 张' : names.join('、');
+});
+const nextUnvisited=computed(()=>requiredPages.value.find(page=>!confirmedProfessions.value.includes(currentGroup(page))&&!visited.value.has(page.key)));
 const isChiller=computed(()=>currentPage.value?.name.trim()==='暖通冷机系统巡检表');
 const chillerSlot=computed(()=>chillerSelection.value||(mobileSheet.value?currentSlot.value:activeSlot.value)||slots.find(slot=>roundsBySlot.value.get(slot))||slots[0]);
 const viewKey=computed(()=>JSON.stringify([pageKey.value,isChiller.value?chillerSlot.value:'']));
@@ -209,6 +312,28 @@ const freeRound=computed(()=>{
  return report.value?.rounds.length===1?report.value.rounds[0]:undefined;
 });
 const shownSlot=computed(()=>isChiller.value?chillerSlot.value:slotOf(freeRound.value));
+// Top-level sheet_groups reflects a single shift (the active one, else the day's last round), so a
+// round's own frozen grouping is the only trustworthy source when reviewing an archived round.
+const viewedRound=computed(()=>isChiller.value?roundsBySlot.value.get(chillerSlot.value):freeRound.value);
+const frozenProfession=computed(()=>currentPage.value && viewedRound.value
+ ? viewedRound.value.sheet_groups?.[currentPage.value.baseKey] || currentPage.value.homeProfession : '');
+const actionLocked=computed(()=>saving.value||dirty.value||!!editing.value||!!abnormal.value||loading.value||props.parentBusy);
+const currentGroup=(page:Page)=>currentGroups.value[page.key]||page.homeProfession||page.profession;
+const pagesFor=(name:string)=>requiredPages.value.filter(page=>currentGroup(page)===name);
+const hasViewed=(name:string)=>!!report.value?.draft_key && pagesFor(name).every(page=>
+ (currentActive.value?.worksheet_mode ? syncedVisited.value : visited.value).has(page.key));
+function progressLabel(name:string){
+ const pages=pagesFor(name),count=pages.filter(page=>visited.value.has(page.key)).length;
+ return hasViewed(name) ? '可确认' : count===pages.length ? '进度待同步' : `已查看 ${count}/${pages.length}`;
+}
+const canSubmit=computed(()=>!!currentActive.value && (currentActive.value.pending ||
+ (selectedProfessions.value.length ? selectedProfessions.value.every(name=>confirmedProfessions.value.includes(name)) : allVisited.value)));
+const submitReason=computed(()=>canSubmit.value ? lockReason.value : selectedProfessions.value.length
+ ? '请逐页查看并完成所选专业确认' : '还需查看 '+unvisitedNames.value);
+const joinableProfessions=computed(()=>selectedProfessions.value.length && !confirmedProfessions.value.length
+ ? (currentActive.value?.available_professions || professions).filter(name=>!selectedProfessions.value.includes(name)) : []);
+const invalidationText=computed(()=>Object.entries(currentActive.value?.confirmation_invalidations || {})
+ .filter(([name])=>selectedProfessions.value.includes(name)).map(([name,reason])=>name+' · '+reason).join(' '));
 const mobilePhase=computed(()=>{
  const slot=currentSlot.value;
  const viewing=shownSlot.value;
@@ -300,6 +425,7 @@ const grid=computed(()=>{
   const excluded=(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});
   const editable=sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
    ? !excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
+     && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))
    : report.value?.can_edit_history&&hasArchiveReceipt(round));
   const value=collisions.has(a)?'位置冲突，请核对映射':override?override.value:v?(v.visible?v.value:''):cell.raw;
   const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
@@ -309,19 +435,194 @@ const grid=computed(()=>{
  }));
 });
 type GridCell=(typeof grid.value)[number][number];
+type ReviewRow={cell:GridCell;address:string;label:string;current:string;previous:string;hasPrevious:boolean;empty:boolean;changed:boolean};
+// Except for the chiller sheet, one sheet holds all four slots in different columns, so the same
+// measurement never repeats a cell address across rounds. Compare by semantic identity, not address.
+function readingIdentity(reading:Reading):string{
+ if(reading.kind==='paired'&&reading.members?.length)return reading.members.map(readingIdentity).sort().join('+');
+ if(reading.kind==='point')return 'point|'+(reading.device||'')+'|'+(reading.point_id||'')+'|'+(reading.parameter||'');
+ if(reading.kind==='section')return 'section|'+(reading.device||'')+'|'+(reading.location||'')+'|'+(reading.form||'')+'|'+(reading.parameter||'');
+ return 'cell|'+reading.cell;
+}
+const reviewOpen=ref(false),reviewFilter=ref<'all'|'pending'|'changed'>('all'),pendingFocus=ref('');
+const previousSlot=computed(()=>{
+ const index=slots.indexOf(shownSlot.value||activeSlot.value);
+ for(let i=index-1;i>=0;i--)if(roundsBySlot.value.get(slots[i]))return slots[i];
+ return '';
+});
+const reviewRows=computed<ReviewRow[]>(()=>{
+ const page=currentPage.value,active=activeRound.value;
+ if(!page||!active)return [];
+ const entries=sheetReadings.value.get(page.baseKey)||[];
+ const previous=previousSlot.value?roundsBySlot.value.get(previousSlot.value):undefined;
+ const previousByIdentity=new Map<string,string>();
+ if(previous)for(const {reading,round} of entries)if(round.round_id===previous.round_id)previousByIdentity.set(readingIdentity(reading),text(reading.value));
+ const identityByCell=new Map<string,string>(),parameterByCell=new Map<string,string>();
+ for(const {reading,round} of entries)if(round.round_id===active.round_id){
+  identityByCell.set(reading.cell,readingIdentity(reading));
+  parameterByCell.set(reading.cell,reading.parameter||'');
+ }
+ const rows:ReviewRow[]=[];
+ for(const row of grid.value)for(const cell of row){
+  if(cell.hidden||!cell.mapped||cell.round?.round_id!==active.round_id||rowHeight(cell.rowIndex)===0)continue;
+  const identity=identityByCell.get(cell.address),previousValue=identity?previousByIdentity.get(identity):undefined;
+  // The sheet's own row header is what an inspector actually reads; device ids are opaque.
+  const header=text(page.rows[cell.rowIndex]?.[0]).trim();
+  const current=cell.text.trim();
+  rows.push({cell,address:cell.address,current,
+   label:[header,parameterByCell.get(cell.address)].filter(Boolean).join(' · ')||cell.address,
+   previous:(previousValue||'').trim(),hasPrevious:previousValue!==undefined,
+   empty:!current,changed:previousValue!==undefined&&(previousValue||'').trim()!==current});
+ }
+ return rows;
+});
+const pendingRows=computed(()=>reviewRows.value.filter(row=>row.cell.editable&&row.empty));
+const changedRows=computed(()=>reviewRows.value.filter(row=>row.changed));
+const shownReviewRows=computed(()=>reviewFilter.value==='pending'?pendingRows.value:reviewFilter.value==='changed'?changedRows.value:reviewRows.value);
+function openComparison(){reviewFilter.value=previousSlot.value?'changed':'all';reviewOpen.value=true;}
+type Locator={key:string;sheet:string;cell:string;label:string;abnormal?:Reading};
+const lookupMode=ref<''|'search'|'abnormal'>(''),lookupQuery=ref('');
+const lookupTarget=ref<Locator>();
+const lookupMatches=ref<Reading[]>([]),lookupPending=ref(false),lookupError=ref('');
+const roundAbnormal=computed(()=>viewedRound.value?.abnormal_cells || []);
+const lookupRows=computed<Locator[]>(()=>{
+ if(lookupMode.value==='abnormal')return roundAbnormal.value.map(row=>({key:JSON.stringify([row.template,row.sheet]),
+  sheet:row.sheet,cell:row.cell,abnormal:row,label:[row.device_name,row.parameter,row.note || '未填写备注'].filter(Boolean).join(' · ')}));
+ const query=lookupQuery.value.toLowerCase();
+ if(!query)return [];
+ const results:Locator[]=[];
+ for(const page of basePages.value){
+  if(page.name.trim().toLowerCase().includes(query))results.push({key:page.key,sheet:page.name,cell:'A1',label:page.name.trim()});
+  page.rows.some((row,i)=>row.some((value,j)=>{
+   const label=text(value),cell=address(i,j);
+   if((label && label.toLowerCase().includes(query))||cell.toLowerCase()===query)results.push({key:page.key,sheet:page.name,cell,label:label||cell});
+   return results.length>=100;
+  }));
+  if(results.length>=100)break;
+ }
+ return [...new Map([...lookupMatches.value.map(row=>({key:JSON.stringify([row.template,row.sheet]),
+  sheet:row.sheet,cell:row.cell,label:[row.device_name,row.parameter].filter(Boolean).join(' · ')})),...results]
+  .map(row=>[row.key+row.cell,row])).values()].slice(0,100);
+});
+watch([lookupMode,lookupQuery,()=>viewedRound.value?.round_id],([mode,query,id],_,cleanup)=>{
+ lookupMatches.value=[];lookupPending.value=false;lookupError.value='';
+ if(mode!=='search'||!query||!id)return;
+ const ctl=new AbortController(),key=context();
+ lookupPending.value=true;
+ const timer=window.setTimeout(async()=>{
+  try{
+   const data=await requestJson('/api/daily-inspection/day-sheet',{method:'POST',body:JSON.stringify({
+    scope:scope.value,date:day.value,drafts:{},form_only:true,lookup:query,lookup_round:id,
+   }),signal:ctl.signal,timeoutMs:15000}) as {matches?:Reading[]};
+   if(!ctl.signal.aborted&&key===context())lookupMatches.value=data.matches || [];
+  }catch{if(!ctl.signal.aborted)lookupError.value='设备和测点查询暂未完成，仍可查看原表匹配。';}
+  finally{if(!ctl.signal.aborted)lookupPending.value=false;}
+ },250);
+ cleanup(()=>{window.clearTimeout(timer);ctl.abort();});
+});
+function openLookup(mode:'search'|'abnormal'){
+ finishEdit();if(abnormal.value)return;
+ lookupQuery.value='';lookupMode.value=mode;
+}
+function selectLookup(row:Locator){lookupTarget.value=row;lookupMode.value='';}
+function applyLookupTarget(){
+ const target=lookupTarget.value;
+ if(!target)return;
+ if(!basePages.value.some(page=>page.key===target.key)){lookupTarget.value=undefined;return;}
+ if(!orderedBase.value.some(page=>page.key===target.key))professionView.value='ALL';
+ selectPage(target.key);
+ void nextTick(focusLookupTarget);
+}
+function focusLookupTarget(){
+ const target=lookupTarget.value;
+ if(!target||target.key!==pageKey.value||!sheetLoaded.value)return;
+ lookupTarget.value=undefined;
+ const [row,col]=coords(target.cell);
+ const cell=cellLayout.value[row]?.[col];
+ const merged=cell?.hidden ? grid.value.flat().find(entry=>!entry.hidden && entry.rowIndex<=row && entry.colIndex<=col &&
+  entry.rowIndex+entry.rowspan>row && entry.colIndex+entry.colspan>col) : cell;
+ const element=cellElement(merged?.address || target.cell);
+ element?.scrollIntoView({block:'center',inline:'center'});
+ if(element){element.tabIndex=element.tabIndex<0?-1:element.tabIndex;element.focus({preventScroll:true});}
+ if(target.abnormal){
+  const reading=grid.value[row]?.[col];
+  if(reading?.editable && reading.round && reading.mapped && reading.text==='×'){
+   abnormal.value={round:roundMeta(reading.round),edit:{template:target.abnormal.template,sheet:target.sheet,cell:target.cell,value:'×'}};
+   abnormalNote.value=target.abnormal.note || '';
+  }
+ }
+}
+function jumpToCell(address:string){
+ if(abnormal.value)return;
+ finishEdit();
+ if(abnormal.value)return;
+ // Re-resolve from the live grid: committing an edit can rebuild it underneath us.
+ void nextTick(()=>{
+  const fresh=grid.value.flat().find(cell=>cell.address===address);
+  cellElement(address)?.scrollIntoView({block:'center',inline:'center'});
+  if(fresh)beginEdit(fresh);
+ });
+}
+// NModal hands focus back to its trigger on close, which would blur the editor we just opened
+// and commit it away. Wait for the leave transition instead of racing it.
+function focusReviewCell(row:ReviewRow){
+ if(abnormal.value)return;
+ if(reviewOpen.value){pendingFocus.value=row.address;reviewOpen.value=false;return;}
+ jumpToCell(row.address);
+}
+function applyPendingFocus(){const address=pendingFocus.value;pendingFocus.value='';if(address)jumpToCell(address);}
+function gotoNextEmpty(){
+ const rows=pendingRows.value;
+ if(!rows.length)return;
+ const index=rows.findIndex(row=>row.address===editing.value);
+ focusReviewCell(rows[(index+1)%rows.length]||rows[0]);
+}
 let timer:number|undefined,controller:AbortController|undefined,disposed=false,storageKey='',storageUnverified=false;
 let requestedArchiveRevision=props.archiveRevision;
+const presence=ref<Presence[]>([]);
+const syncedVisited=ref(new Set<string>());
+let progressRequest:AbortController|undefined;
 function persist(){try{if(storageKey&&!storageUnverified){if(dirty.value)localStorage.setItem(storageKey,JSON.stringify(jobs.value));else localStorage.removeItem(storageKey);}}catch{error.value='浏览器暂存失败，请保持页面打开直到保存完成。';}}
 function viewedKey(){return report.value?.scope===scope.value && report.value.date===day.value && report.value.draft_key && currentActive.value ? 'inspection-viewed:'+report.value.draft_key+':'+currentActive.value.id : '';}
 function restoreViewed(){
  const key=viewedKey();let saved:string[]=[];
  if(key)try{const value=JSON.parse(localStorage.getItem(key)||'[]');if(Array.isArray(value))saved=value.filter((v):v is string=>typeof v==='string');}catch{/* Reading progress is optional; never affect saved data. */}
- const valid=new Set(basePages.value.map(page=>page.baseKey));visited.value=new Set(saved.filter(value=>valid.has(value)));
+ const valid=new Set(basePages.value.map(page=>page.baseKey));
+ if(key){
+  syncedVisited.value=new Set([...(currentActive.value?.visited_sheets || []),...syncedVisited.value]);
+  presence.value=currentActive.value?.presence ?? presence.value;
+ }
+ visited.value=new Set([...saved,...syncedVisited.value].filter(value=>valid.has(value)));
 }
 function markViewed(){
- const key=viewedKey();if(!key||!currentPage.value||!sheetLoaded.value||(isChiller.value&&chillerSlot.value!==activeSlot.value))return;
+ const key=viewedKey();if(!key||!currentPage.value||!sheetLoaded.value||!activeRound.value||readOnly.value
+  ||currentActive.value?.pending||(isChiller.value&&chillerSlot.value!==activeSlot.value))return;
  visited.value=new Set([...visited.value,currentPage.value.baseKey]);
  try{localStorage.setItem(key,JSON.stringify([...visited.value]));}catch{/* The user can still confirm after viewing again. */}
+ void syncProgress();
+}
+const readOnly=computed(()=>props.readOnly);
+async function syncProgress(){
+ const active=currentActive.value,page=currentPage.value;
+ if(!active||!page||active.pending||props.readOnly||!activeRound.value||!sheetLoaded.value||document.hidden
+  ||(isChiller.value&&chillerSlot.value!==activeSlot.value)||progressRequest)return;
+ const controller=progressRequest=new AbortController();
+ const key=context(),id=active.id;
+ try{
+  const data=await requestJson('/api/daily-inspection/view-sheet?view_scope='+encodeURIComponent(scope.value),{
+   method:'POST',body:JSON.stringify({id,sheet:page.key,visited_sheets:[...visited.value]}),signal:controller.signal,timeoutMs:8000,
+  }) as Progress;
+  if(disposed||controller.signal.aborted||key!==context()||id!==currentActive.value?.id)return;
+  syncedVisited.value=new Set([...syncedVisited.value,...(data.visited_sheets || [])]);
+  visited.value=new Set([...visited.value,...syncedVisited.value]);
+  presence.value=data.presence || [];
+ }catch{/* Viewing progress is retried by the next poll. It cannot modify readings. */}
+ finally{
+  if(progressRequest===controller){
+   progressRequest=undefined;
+   if(key===context()&&id===currentActive.value?.id&&page.key!==currentPage.value?.key)void syncProgress();
+  }
+ }
 }
 function roundMeta(r:RoundMeta):RoundMeta{return {id:r.id,round_id:r.round_id,shift:r.shift,round:r.round,version:r.version,status:r.status};}
 function context(){return JSON.stringify([scope.value,day.value]);}
@@ -342,6 +643,10 @@ function selectPage(key:string){
   rememberScroll();pageKey.value=key;void nextTick(restoreScroll);
  }
  if(mobileSheet.value)compactMenu.value=false;
+}
+function openPage(key:string){
+ if(!orderedBase.value.some(page=>page.key===key))professionView.value='ALL';
+ selectPage(key);
 }
 function selectSlot(slot:string){
  finishEdit();if(abnormal.value)return;
@@ -415,7 +720,7 @@ async function load(){
   }catch{storageUnverified=true;error.value='暂存修改无法核验，请先核对本机数据；未自动提交。';}
   restoreViewed();
   if(!currentPage.value)pageKey.value=preferredPage();
-  await nextTick();markViewed();measureHeight();restoreScroll();
+  await nextTick();markViewed();measureHeight();restoreScroll();focusLookupTarget();
  }catch(e){if(!ctl.signal.aborted&&key===context())error.value=e instanceof Error?e.message:'巡检表读取失败';}
   finally{if(controller===ctl){
    loading.value=false;
@@ -427,8 +732,17 @@ function applySaved(job:Job,version:string|number){
  report.value={...value,rounds:value.rounds.map(r=>{
   if(r.round_id!==job.round.round_id)return r;
   const readings=r.original_cells.map(c=>({...c})),extras=(r.extra_cells||[]).map(c=>({...c}));
-  for(const edit of job.cells){const existing=[...readings,...extras].find(c=>c.template===edit.template&&c.sheet===edit.sheet&&c.cell===edit.cell);if(existing)existing.value=edit.value;else extras.push({...edit});}
-  return {...r,version,original_cells:readings,extra_cells:extras};
+  const abnormal=[...(r.abnormal_cells || [])];
+  for(const edit of job.cells){
+   const matches=(cell:Reading)=>cell.template===edit.template&&cell.sheet===edit.sheet&&cell.cell===edit.cell;
+   const existing=[...readings,...extras].find(matches);
+   if(existing)Object.assign(existing,{value:edit.value,...(edit.note ? {note:edit.note} : {})});
+   else extras.push({...edit});
+   const index=abnormal.findIndex(matches);
+   if(index>=0)abnormal.splice(index,1);
+   if(edit.value==='×')abnormal.push({...existing,...edit});
+  }
+  return {...r,version,original_cells:readings,extra_cells:extras,abnormal_cells:abnormal};
  })};
  for(const queued of jobs.value)if(queued!==job&&queued.round.round_id===job.round.round_id)queued.round.version=version;
 }
@@ -476,15 +790,17 @@ function resolveJob(job:Job,keep:boolean){
  const unresolved=jobs.value.some(j=>j!==job&&(!comparison.value?.rounds.some(r=>r.round_id===j.round.round_id)||comparison.value?.rounds.some(r=>r.round_id===j.round.round_id&&r.version!==j.round.version)));
  if(!unresolved){report.value=comparison.value;comparison.value=undefined;error.value='';persist();if(dirty.value)void flush();}else persist();
 }
-async function submit(){if(!currentActive.value||saving.value||dirty.value||!allVisited.value&&!currentActive.value.pending)return;saving.value=true;error.value='';
- try{await requestJson('/api/daily-inspection/finish?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:report.value?.rounds.find(r=>r.round_id===currentActive.value?.id)?.version??currentActive.value.review_version,sheet_workflow:true,visited_sheets:[...visited.value]}),timeoutMs:180000});emit('changed');}
+async function submit(){if(!currentActive.value||actionLocked.value||!canSubmit.value)return;saving.value=true;error.value='';
+ try{await requestJson('/api/daily-inspection/finish?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:currentActive.value.review_version,sheet_workflow:true,visited_sheets:[...visited.value]}),timeoutMs:180000});emit('changed');}
  catch(e){error.value=e instanceof Error?e.message:'提交未确认，请重试原任务。';}finally{saving.value=false;await load();}}
 async function download(){try{await downloadFile('/api/daily-inspection/day-export',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{}}),timeoutMs:180000});}catch(e){error.value=e instanceof Error?e.message:'导出失败';}}
 function changeScope(e:Event){if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;scope.value=(e.target as HTMLSelectElement).value;emit('scope',scope.value);void loadPreferences();reset();}
 function changeDay(e:Event){if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;day.value=(e.target as HTMLInputElement).value;reset();}
-function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.value=false;sortOpen.value=false;sortTarget=undefined;controller?.abort();window.clearTimeout(timer);storageKey='';mutation++;scrollPositions.clear();editor=undefined;editing.value='';comparison.value=undefined;report.value=undefined;visited.value=new Set();pageKey.value='';selectedSlot.value='';chillerSelection.value='';void loadTemplates();void load();}
+function clearProgress(){progressRequest?.abort();progressRequest=undefined;syncedVisited.value=new Set();presence.value=[];}
+function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.value=false;sortOpen.value=false;lookupMode.value='';lookupTarget.value=undefined;reviewOpen.value=false;groupDraft.value={};sortTarget=undefined;controller?.abort();window.clearTimeout(timer);storageKey='';mutation++;scrollPositions.clear();editor=undefined;editing.value='';comparison.value=undefined;report.value=undefined;visited.value=new Set();clearProgress();pageKey.value='';selectedSlot.value='';chillerSelection.value='';void loadTemplates();void load();}
 watch(()=>props.defaultScope,v=>{if(v&&v!==scope.value&&!dirty.value&&!saving.value&&!editing.value&&!abnormal.value){scope.value=v;void loadPreferences();reset();}});
-watch(()=>currentActive.value?.id,()=>{restoreViewed();void nextTick(markViewed);if(!saving.value&&!dirty.value)void load();});
+watch(()=>currentActive.value?.id,()=>{clearProgress();restoreViewed();void nextTick(markViewed);if(!saving.value&&!dirty.value)void load();});
+watch([()=>currentActive.value?.visited_sheets,()=>currentActive.value?.presence],restoreViewed);
 watch(()=>props.active?.review_version,version=>{if(!saving.value&&!dirty.value&&!editing.value&&report.value?.rounds.find(r=>r.round_id===currentActive.value?.id)?.version!==version)void load();});
 const archiveRefreshIdle=computed(()=>!loading.value&&!saving.value&&!dirty.value&&!editing.value&&!abnormal.value&&!comparison.value&&
  !sortOpen.value&&!settingsOpen.value&&!confirmSubmit.value&&!props.parentBusy);
@@ -532,36 +848,135 @@ function preferencesUrl(){return '/api/workspace-layouts/desktop/inspection-shee
 async function loadPreferences(){const generation=++preferenceGeneration;preferencesReady.value=false;preferencesError.value='';orders.value={ALL:[],电气:[],暖通:[]};
  try{const result=await requestJson(preferencesUrl()) as {revision:number;value:{orders:Record<string,string[]>}|null};if(disposed||generation!==preferenceGeneration)return;preferencesRevision.value=result.revision;orders.value=result.value?.orders||{ALL:[],电气:[],暖通:[]};preferencesReady.value=true;}
  catch(e){if(generation===preferenceGeneration)preferencesError.value=e instanceof Error?e.message:'个人排序读取失败';}}
-function openSettings(){finishEdit();settingsOpen.value=true;}
+const showGroups=ref(false),groupPanel=ref<HTMLElement>();
+function openSettings(){finishEdit();if(!abnormal.value){showGroups.value=false;settingsOpen.value=true;}}
+function openGroups(){finishEdit();if(!abnormal.value){showGroups.value=true;settingsOpen.value=true;void nextTick(()=>groupPanel.value?.scrollIntoView({block:'nearest'}));}}
 let sortTarget:{scope:string;view:string;revision:number;orders:Record<string,string[]>}|undefined;
 function openSort(){finishEdit();if(abnormal.value||dirty.value)return;settingsOpen.value=false;sortTarget={scope:scope.value,view:professionView.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
 function shiftSort(index:number,delta:number){const list=sortDraft.value.slice();[list[index],list[index+delta]]=[list[index+delta],list[index]];sortDraft.value=list;}
 async function saveSort(){if(!preferencesReady.value||saving.value||!sortTarget||sortTarget.scope!==scope.value)return;const target=sortTarget,key=context();saving.value=true;const value={version:1,orders:{...target.orders,[target.view]:sortDraft.value}};
  try{const result=await requestJson('/api/workspace-layouts/desktop/inspection-sheets-'+target.scope,{method:'PUT',body:JSON.stringify({revision:target.revision,value})}) as {revision:number};if(disposed||key!==context())return;preferencesRevision.value=result.revision;orders.value=value.orders;sortOpen.value=false;preferencesError.value='';}
  catch(e){preferencesError.value=e instanceof Error?e.message:'排序保存失败，调整仍保留';}finally{saving.value=false;}}
-async function moveProfession(e:Event|string|number){const profession=typeof e==='object'?(e.target as HTMLSelectElement).value:String(e);if(!currentPage.value||!currentActive.value||saving.value)return;saving.value=true;error.value='';
- try{await requestJson('/api/daily-inspection/sheet-group?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:currentActive.value.review_version,sheet:currentPage.value.baseKey,profession})});emit('changed');}
- catch(e){error.value=e instanceof Error?e.message:'本班分组未保存';}finally{saving.value=false;await load();}}
+const groupDraft=ref<Record<string,string|null>>({});
+const pendingSwap=ref(false);
+const confirmedProfessions=computed(()=>Object.entries(currentActive.value?.profession_confirmations || {})
+ .filter(([name,item])=>item.version && (!currentActive.value?.profession_versions || item.version===currentActive.value.profession_versions[name]))
+ .map(([name])=>name));
+const canGroup=computed(()=>isCurrentDate.value && !props.readOnly && !!props.defaultShift &&
+ (!currentActive.value || (!currentActive.value.pending && viewedRound.value?.round_id===currentActive.value.id)));
+const groupValue=(page:Page)=>page.key in groupDraft.value ? groupDraft.value[page.key] || page.homeProfession : currentGroup(page);
+const swapWarning=computed(()=>`调整归属会使 ${confirmedProfessions.value.join('、')} 的已有确认作废，需要重新核对。`);
+function stageGroup(page:Page,event:Event){
+ const value=(event.target as HTMLSelectElement).value;
+ const next={...groupDraft.value};
+ if(value===currentGroup(page))delete next[page.key];
+ else next[page.key]=value===page.homeProfession ? null : value;
+ groupDraft.value=next;
+}
+function restoreGroups(){
+ groupDraft.value=Object.fromEntries(basePages.value.filter(page=>currentGroup(page)!==page.homeProfession).map(page=>[page.key,null]));
+}
+function requestGroupSave(){
+ if(!canGroup.value||actionLocked.value||!Object.keys(groupDraft.value).length)return;
+ if(confirmedProfessions.value.length){pendingSwap.value=true;return;}
+ void applySwap();
+}
+async function applySwap(){
+ pendingSwap.value=false;
+ if(!canGroup.value)return;
+ const active=currentActive.value;
+ const duty={scope:scope.value,date:day.value,shift:props.defaultShift};
+ if(await writeRoundAction('sheet-group',{id:active?.id || '',duty,review_version:active?.review_version,groups:groupDraft.value})){
+  groupDraft.value={};settingsOpen.value=false;
+ }
+}
+function confirmationLabel(name:string){
+ const receipt=currentActive.value?.profession_confirmations?.[name];
+ return [receipt?.actor || '已确认',receipt?.confirmed ? roundClock.format(receipt.confirmed) : ''].filter(Boolean).join(' · ');
+}
+async function writeRoundAction(action:string,body:object){
+ if(actionLocked.value||props.readOnly)return false;
+ saving.value=true;error.value='';
+ try{
+  const key=context(),activeId=currentActive.value?.id;
+  const state=await requestJson('/api/daily-inspection/'+action+'?view_scope='+encodeURIComponent(scope.value),{
+   method:'POST',body:JSON.stringify(body),timeoutMs:30000,
+  });
+  if(!disposed&&key===context()&&activeId===currentActive.value?.id)emit('round-state',state);
+  return true;
+ }catch(e){
+  error.value=e instanceof Error?e.message:'本轮操作未确认，请刷新状态后重试。';
+  emit('changed');
+  return false;
+ }finally{saving.value=false;}
+}
+function confirmProfession(profession:string){
+ const active=currentActive.value,version=active?.profession_versions?.[profession];
+ if(!active||active.pending||!version||!hasViewed(profession))return;
+ void writeRoundAction('confirm-profession',{id:active.id,profession,profession_version:version});
+}
+function joinProfession(profession:string){
+ const active=currentActive.value;
+ if(!active||active.pending||!joinableProfessions.value.includes(profession))return;
+ void writeRoundAction('append-profession',{id:active.id,profession,review_version:active.review_version});
+}
 function allowNavigation(){finishEdit();if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value){error.value='请先保存单元格修改，再离开巡检表。';return false;}return true;}
 const unregister=registerNavigationGuard(allowNavigation);
 defineExpose({allowNavigation});
 function unload(e:BeforeUnloadEvent){if(dirty.value||saving.value||editing.value||abnormal.value)e.preventDefault();}
 window.addEventListener('beforeunload',unload);
+const progressTimer=window.setInterval(()=>void syncProgress(),12000);
 void loadTemplates();void load();void loadPreferences();
-onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer);cancelAnimationFrame(pinchFrame);pinch=undefined;persist();unregister();phoneMedia.removeEventListener('change',updatePhoneScreen);window.removeEventListener('beforeunload',unload);window.removeEventListener('resize',measureHeight);window.removeEventListener('orientationchange',measureHeight);window.screen.orientation?.removeEventListener?.('change',measureHeight);window.visualViewport?.removeEventListener('resize',measureHeight);});
+onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.clearInterval(progressTimer);window.clearTimeout(timer);cancelAnimationFrame(pinchFrame);pinch=undefined;persist();unregister();phoneMedia.removeEventListener('change',updatePhoneScreen);window.removeEventListener('beforeunload',unload);window.removeEventListener('resize',measureHeight);window.removeEventListener('orientationchange',measureHeight);window.screen.orientation?.removeEventListener?.('change',measureHeight);window.visualViewport?.removeEventListener('resize',measureHeight);});
 </script>
 <style scoped>
-.inspection-workbook{display:grid;gap:8px;min-width:0}.book-tools,.book-status,.round-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.book-tools label{display:flex;gap:4px;align-items:center}button,input,select,textarea{font:inherit;color:inherit;border:1px solid var(--inspection-line);background:var(--inspection-surface);padding:6px;min-height:34px;box-sizing:border-box}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.selected{background:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));color:var(--v2-palette-on-accent-text,#fff)}p{margin:0}.book-scroll{overflow:auto;max-height:calc(100dvh - 230px);min-height:240px;border:1px solid var(--inspection-line);overscroll-behavior:contain}table{border-collapse:collapse;min-width:100%;width:max-content;table-layout:fixed}td{border:1px solid var(--inspection-line);height:30px;min-width:72px;max-width:210px;padding:4px;white-space:pre-wrap;text-align:center;overflow-wrap:anywhere}td[tabindex]{cursor:text}td:focus{outline:2px solid #2457d6;outline-offset:-2px}td input{width:100%;min-width:72px;max-width:210px;padding:2px}.current-cell,.current-key{background:color-mix(in srgb,var(--inspection-surface) 75%,#ffc83d)}.history-cell,.history-key{background:color-mix(in srgb,var(--inspection-surface) 92%,#5783a9)}.current-key,.history-key{display:inline-block;width:14px;height:14px;border:1px solid var(--inspection-line)}.empty-cell{color:var(--cf-warning)}.book-status{font-size:12px}.book-submit{display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;bottom:0;padding:8px 0 max(8px,env(safe-area-inset-bottom));background:var(--inspection-surface)}.primary{background:var(--v2-palette-accent-text,#2457d6);color:var(--v2-palette-on-accent-text,#fff);padding:9px 25px;margin-left:auto}.book-error{color:var(--cf-danger)}textarea{width:100%}@media(max-width:760px){.toolbar-label{display:none}input,select{font-size:16px}.book-tools{font-size:13px}.book-tools input[type=date]{width:142px}.book-scroll{max-height:calc(100dvh - 250px)}}
+.inspection-workbook{
+  display:grid;gap:8px;min-width:0}.book-tools,.book-status,.round-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.book-tools label{display:flex;gap:4px;align-items:center}button,input,select,textarea{font:inherit;color:inherit;border:1px solid var(--inspection-line);background:var(--inspection-surface);padding:6px;min-height:34px;box-sizing:border-box}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.selected{background:var(--inspection-accent);color:var(--inspection-on-accent)}p{margin:0}.book-scroll{overflow:auto;max-height:calc(100dvh - 230px);min-height:240px;border:1px solid var(--inspection-line);overscroll-behavior:contain}table{border-collapse:collapse;min-width:100%;width:max-content;table-layout:fixed}td{border:1px solid var(--inspection-line);height:30px;min-width:72px;max-width:210px;padding:4px;white-space:pre-wrap;text-align:center;overflow-wrap:anywhere}td[tabindex]{cursor:text}td:focus{outline:2px solid var(--inspection-accent);outline-offset:-2px}td input{width:100%;min-width:72px;max-width:210px;padding:2px}.current-cell,.current-key{background:color-mix(in srgb,var(--inspection-surface) 75%,#ffc83d)}.history-cell,.history-key{background:color-mix(in srgb,var(--inspection-surface) 92%,#5783a9)}.current-key,.history-key{display:inline-block;width:14px;height:14px;border:1px solid var(--inspection-line)}.empty-cell{color:var(--cf-warning)}.book-status{font-size:12px}.book-submit{display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;bottom:0;padding:8px 0 max(8px,env(safe-area-inset-bottom));background:var(--inspection-surface)}.primary{background:var(--inspection-accent);color:var(--inspection-on-accent);padding:9px 25px;margin-left:auto}.book-error{color:var(--cf-danger)}textarea{width:100%}@media(max-width:760px){.toolbar-label{display:none}input,select{font-size:16px}.book-tools{font-size:13px}.book-tools input[type=date]{width:142px}.book-scroll{max-height:calc(100dvh - 250px)}}
 .book-settings-content{display:grid;gap:12px}.book-settings-content label{display:flex;justify-content:space-between;align-items:center;gap:8px}.book-settings-content select{font-size:16px;min-height:40px}.book-error{max-height:20dvh;overflow:auto;flex-shrink:0}.sort-list{max-height:55dvh;overflow:auto}.sort-row{display:flex;align-items:center;gap:5px;margin:5px 0}.sort-row span{flex:1}.full-height{height:var(--available-height);display:flex;flex-direction:column;overflow:hidden}.full-height>.book-tools,.full-height>.book-status,.full-height>.book-submit{flex-shrink:0}.full-height>.book-scroll{flex:1;min-height:0;max-height:none;touch-action:pan-x pan-y}.full-height .book-submit{position:static}
 @media(max-height:500px) and (hover:none){.full-height .book-status{display:none}.full-height .book-tools{gap:3px}.full-height button,.full-height input,.full-height select{min-height:30px}.full-height .book-submit{padding:3px 0}.full-height{gap:4px}}
 
+/* The colour legend and the save state are different things; they must not read as one sentence. */
+.status-legend{display:inline-flex;align-items:center;gap:5px;opacity:.78;white-space:nowrap}
+.status-save{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;margin-left:auto}
+.lock-reason{color:var(--inspection-muted)}
+/* The submit footer stays visible on phones so a gated button explains itself instead of vanishing. */
+.book-signoffs,.group-actions{display:flex;flex-wrap:wrap;align-items:center;gap:5px;min-width:0}
+.book-signoffs{font-size:12px}
+.sheet-tabs button small{margin-inline-start:5px;font-size:10px;opacity:.78}
+.submit-action{margin-left:auto;flex:none}
+.group-list{max-height:32dvh;overflow:auto;display:grid;gap:4px}
+.group-list label{padding:4px 0;border-bottom:1px solid var(--inspection-line)}
+.group-list small{display:block;color:var(--inspection-muted)}
+.submit-remaining{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--cf-warning)}
+.book-submit .primary:disabled{cursor:not-allowed}
+
+/* Review drawer: pending cells and cross-round differences, joined by measurement identity. */
+.status-review{display:inline-flex;align-items:center;gap:5px}
+.status-review button{min-height:28px;padding:2px 9px;font-size:12px}
+.review-filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;margin-bottom:8px}
+.review-filters button{min-height:38px;padding:5px 6px;font-size:13px;border:1px solid var(--inspection-line);border-radius:7px;background:transparent;color:inherit;cursor:pointer}
+.review-filters button[aria-pressed=true]{background:var(--inspection-accent);border-color:var(--inspection-accent);color:var(--inspection-on-accent)}
+.settings-note{margin:0 0 8px;font-size:12px;line-height:1.5;color:var(--inspection-muted)}
+.review-list{display:grid;gap:2px;max-height:min(56dvh,420px);overflow:auto}
+.review-list .settings-note{padding:8px 6px}
+.review-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px;width:100%;
+  padding:7px 6px;border:0;border-bottom:1px solid var(--inspection-line);background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.review-row:hover{background:var(--inspection-soft)}
+.review-label{min-width:0;font-size:13px;overflow-wrap:anywhere}
+.review-label small{display:block;font-size:11px;color:var(--inspection-muted)}
+.review-values{display:inline-flex;align-items:baseline;gap:7px;flex:none;font-size:13px;font-variant-numeric:tabular-nums}
+.review-values i{font-style:normal;font-weight:600}
+.review-values i.review-empty{color:var(--cf-warning)}
+.review-values em{font-style:normal;font-size:12px;color:var(--inspection-muted)}
+.review-values b{font-size:11px;font-weight:600;color:var(--cf-danger)}
+
 .book-scroll{width:100%;max-width:100%;min-width:0;box-sizing:border-box;isolation:isolate}
-.book-scroll table{min-width:0;max-width:none;table-layout:fixed}.book-scroll td{min-width:0;max-width:none;box-sizing:border-box;overflow:hidden}.book-scroll td>span{display:block;overflow:hidden;white-space:inherit;overflow-wrap:normal;line-height:normal}.book-scroll td input,.book-scroll td select{min-width:0;max-width:100%;width:100%;box-sizing:border-box}.book-scroll td:focus-within{outline:2px solid var(--v2-palette-accent-text,#2457d6);outline-offset:-2px}
+.book-scroll table{min-width:0;max-width:none;table-layout:fixed}.book-scroll td{min-width:0;max-width:none;box-sizing:border-box;overflow:hidden}.book-scroll td>span{display:block;overflow:hidden;white-space:inherit;overflow-wrap:normal;line-height:normal}.book-scroll td input,.book-scroll td select{min-width:0;max-width:100%;width:100%;box-sizing:border-box}.book-scroll td:focus-within{outline:2px solid var(--inspection-accent);outline-offset:-2px}
 .settings-section{display:flex;flex-direction:column;gap:10px;padding-bottom:16px;border-bottom:1px solid rgba(130,145,165,.22)}.settings-section span,.settings-section small{font-size:13px;opacity:.75}.book-pending{font-size:12px;color:var(--cf-warning);flex-shrink:0}
 
-.book-scroll th{height:28px;border:1px solid var(--inspection-line);background:var(--inspection-soft,var(--inspection-surface));font-size:12px;font-weight:500;text-align:center;box-sizing:border-box}.column-number{position:sticky;top:0;z-index:3}.row-number{position:sticky;left:0;z-index:2;min-width:42px}.grid-corner{position:sticky;left:0;top:0;z-index:4}.editing-address{font-weight:600;color:var(--v2-palette-accent-text,#2457d6)}
+.book-scroll th{height:28px;border:1px solid var(--inspection-line);background:var(--inspection-soft,var(--inspection-surface));font-size:12px;font-weight:500;text-align:center;box-sizing:border-box}.column-number{position:sticky;top:0;z-index:3}.row-number{position:sticky;left:0;z-index:2;min-width:42px}.grid-corner{position:sticky;left:0;top:0;z-index:4}.editing-address{font-weight:600;color:var(--inspection-accent)}
 .cell-editor-tools{display:flex;align-items:center;gap:7px;padding:6px 0;flex-shrink:0;background:var(--inspection-surface)}.cell-editor-tools strong{font-size:13px;margin-right:auto;white-space:nowrap}.cell-editor-actions{display:flex;gap:4px}.cell-editor-tools button{min-height:40px;padding:7px 12px;white-space:nowrap}.cell-editor-tools .primary{margin-left:0}.cell-editor-tools~.book-submit{display:none}
-.settings-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.settings-choices.two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-choices>button{appearance:none;display:flex;align-items:center;justify-content:center;position:relative;width:100%;height:40px;min-width:0;padding:6px;border:1px solid rgba(130,145,165,.4);border-radius:7px;background:transparent;color:inherit;line-height:1.4}.settings-choices>button[aria-pressed=true]{background:#2457d6;border-color:#2457d6;color:#fff}.book-settings-content{max-height:min(70dvh,calc(var(--available-height) - 180px));overflow:auto;padding:2px}
+.settings-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.settings-choices.two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-choices>button{appearance:none;display:flex;align-items:center;justify-content:center;position:relative;width:100%;height:40px;min-width:0;padding:6px;border:1px solid rgba(130,145,165,.4);border-radius:7px;background:transparent;color:inherit;line-height:1.4}.settings-choices>button[aria-pressed=true]{background:var(--inspection-accent);border-color:var(--inspection-accent);color:var(--inspection-on-accent)}.book-settings-content{max-height:min(70dvh,calc(var(--available-height) - 180px));overflow:auto;padding:2px}
 .book-options{display:contents}
 .full-height{position:fixed;inset:0 0 auto;z-index:1000;box-sizing:border-box;gap:2px;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);background:var(--inspection-surface,#fff);width:100%;max-width:100vw}
 .full-height.rotate-landscape,.full-height.rotate-portrait{inset:0 auto auto 0;width:var(--rotated-width);max-width:none;transform-origin:top left}
@@ -580,8 +995,13 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .sheet-tabs::-webkit-scrollbar{display:none}
 .sheet-tabs>button{flex:0 0 auto;max-width:min(90%,320px);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sheet-tabs>button,.sheet-sort{min-height:36px;padding:4px 8px;font-size:13px}
-.sheet-tabs>button[aria-pressed=true]{border-color:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));background:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));color:var(--v2-palette-on-accent-text,#fff)}
+.sheet-tabs>button[aria-pressed=true]{border-color:var(--inspection-accent);background:var(--inspection-accent);color:var(--inspection-on-accent)}
 .sheet-sort{flex:0 0 auto;min-width:44px}
+.mobile-header{min-width:0;display:grid;gap:2px;flex-shrink:0}
+.rotate-landscape .mobile-header{grid-template-columns:auto minmax(0,1fr)}
+@media(max-height:500px) and (pointer:coarse){
+ .full-height:not(.rotate-portrait) .mobile-header{grid-template-columns:auto minmax(0,1fr)}
+}
 .full-height>.book-options{display:none}
 .full-height>.book-options.expanded{display:flex;flex-direction:column;gap:6px;flex-shrink:0;max-height:min(38dvh,38%);overflow:auto;padding:6px;border-bottom:1px solid var(--inspection-line)}
 .full-height .sort-list{max-height:min(55dvh,max(80px,calc(var(--available-height) - 170px)))}
@@ -592,7 +1012,7 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .round-tabs{font-size:13px}
 .round-tabs button{display:flex;align-items:center;justify-content:center;gap:5px;white-space:nowrap}
 .round-tabs button:disabled{opacity:1;background:var(--inspection-soft,var(--inspection-surface))}
-.round-tabs button:disabled.selected{background:var(--v2-palette-accent-text,var(--inspection-primary,#2457d6));color:var(--v2-palette-on-accent-text,#fff)}
+.round-tabs button:disabled.selected{background:var(--inspection-accent);color:var(--inspection-on-accent)}
 .round-tabs small,.round-hint{font-size:12px}
 .full-height .round-tabs{order:-1;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:3px;flex-shrink:0}
 .full-height .round-tabs button{flex-wrap:wrap;gap:1px 4px;min-height:36px;padding:2px;font-size:12px;line-height:1.15;white-space:normal}
@@ -603,8 +1023,8 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.clearTimeout(timer
 .full-height .cell-editor-tools strong{margin:0}
 .full-height .cell-editor-actions{margin-left:auto;min-width:0;flex-wrap:wrap;justify-content:flex-end}
 .full-height .cell-editor-actions button{min-height:40px;padding-inline:8px}
-.book-scroll td.mobile-editing-cell{outline:2px solid var(--v2-palette-accent-text,#2457d6);outline-offset:-2px}
-.compact-editor-view>.mobile-sheet-bar,.compact-editor-view>.sheet-navigation,.compact-editor-view>.book-options.expanded{display:none}
+.book-scroll td.mobile-editing-cell{outline:2px solid var(--inspection-accent);outline-offset:-2px}
+.compact-editor-view>.mobile-header,.compact-editor-view>.book-options.expanded{display:none}
 @media(max-height:500px) and (pointer:coarse){.mobile-sheet-bar{padding:0 2px}.mobile-sheet-bar>button,.sheet-tabs>button,.sheet-sort{min-height:34px}.full-height>.book-submit{min-height:22px;padding:0 6px}.full-height>.book-submit .primary{min-height:34px}}
 /* Cell contents must not enlarge Excel's saved row heights, including merged cells. */
 .book-scroll td{position:relative;line-height:normal}

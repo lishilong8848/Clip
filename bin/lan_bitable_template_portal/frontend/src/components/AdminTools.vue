@@ -6,7 +6,7 @@
         <div>
           <h1>{{ systemAdmin ? '管理员设置' : '账号与权限' }}</h1>
         </div>
-        <button type="button" class="btn ghost" @click="$emit('close')"><ArrowLeft :size="17" />返回首页</button>
+        <button type="button" class="btn ghost" @click="closeAdmin"><ArrowLeft :size="17" />返回首页</button>
       </header>
 
       <div class="admin-settings-layout" :class="{ 'accounts-only': !systemAdmin }">
@@ -114,7 +114,7 @@
       />
 
       <FeishuAssistantSettings v-else-if="tab === 'feishu'" />
-      <DingTalkNoticeSettings v-else-if="tab === 'dingtalk'" />
+      <DingTalkNoticeSettings v-else-if="tab === 'dingtalk'" ref="dingTalkSettings" />
       <ReleaseJournalPage v-else-if="tab === 'development'" />
 
       <AdminPressurePane
@@ -175,6 +175,7 @@ const emit = defineEmits<{
 const buildingScopes = adminBuildingScopes;
 
 const tab = ref<AdminTabKey>("permissions");
+const dingTalkSettings = ref<{canLeave:(proceed:()=>void)=>boolean}>();
 const busy = ref(false);
 const message = ref("");
 const statusUnavailable = ref("");
@@ -328,6 +329,16 @@ watch([() => props.open, () => props.initialTab], ([open]) => {
 function selectAdminTab(next: AdminTabKey): void {
   if (props.systemAdmin === false) { tab.value = 'permissions'; return; }
   if (initializedTab && tab.value === next) return;
+  const proceed = () => applyAdminTab(next);
+  if (dingTalkSettings.value?.canLeave(proceed) !== false) proceed();
+}
+
+function closeAdmin(): void {
+  const proceed = () => emit('close');
+  if (dingTalkSettings.value?.canLeave(proceed) !== false) proceed();
+}
+
+function applyAdminTab(next: AdminTabKey): void {
   initializedTab = true;
   if (next === "pressure" && !advancedDiagnosticsVisible.value) {
     advancedDiagnosticsVisible.value = true;

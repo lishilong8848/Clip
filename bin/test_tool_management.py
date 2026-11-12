@@ -335,6 +335,31 @@ class ToolManagementTest(TestCase):
         self.assertEqual(len(self.svc.list(self.leader)['orders']), len(self.orders))
         self.assertEqual(self.cloud.writes, [])
 
+    def test_archived_month_keeps_prior_archive_while_supplementing_due_plans(self):
+        with self.svc.connect(True) as db:
+            db.execute("UPDATE tool_work_orders SET submitted_at=?,actual=? WHERE month=?", (self.date, self.date, self.month))
+        self.svc.archive_ready()
+        archive = self.svc.download(self.admin, self.month)
+        previous = archive.read_bytes()
+        self.cloud.assets.append(self.cloud.assets[0] | {'id': 'recSupplement', 'self_cycle': ''})
+        self.svc.refresh()
+        plan = self.svc.planned_order_candidates(self.leader)
+        self.assertTrue(plan['archived'])
+        self.assertEqual([(item['asset_id'], item['kind']) for item in plan['items']], [('recSupplement', 'external')])
+        self.assertEqual(plan['excluded']['created'], len(self.orders))
+        payload = {'month': self.month, 'orders': [{'asset_id': 'recSupplement', 'kind': 'external'}]}
+        self.assertEqual(self.svc.create_planned_orders(self.leader, payload)['created_count'], 1)
+        self.assertEqual(self.svc.create_planned_orders(self.leader, payload)['existing_count'], 1)
+        self.assertTrue(self.svc.list(self.admin)['archive_updating'])
+        self.svc.archive_ready()
+        self.assertEqual(archive.read_bytes(), previous)
+        with self.svc.connect(True) as db:
+            db.execute("UPDATE tool_work_orders SET submitted_at=?,actual=? WHERE asset_id='recSupplement'", (self.date, self.date))
+        self.svc.archive_ready()
+        self.assertFalse(self.svc.list(self.admin)['archive_updating'])
+        with ZipFile(archive) as package:
+            self.assertEqual(len(json.loads(package.read('归档清单.json'))['orders']), len(self.orders) + 1)
+
     def test_batch_delete_respects_delete_permission(self):
         order = next(row for row in self.orders if row['kind'] == 'external')
         self.assertFalse(self.svc.detail(self.supervisor, order['id'])['can_delete'])

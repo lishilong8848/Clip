@@ -1056,12 +1056,85 @@ def selected_form_devices(active, scope):
 
 
 def review_devices(active, scope):
+    if active.get('worksheet_mode'):
+        # A sheet can move between professions without changing its source devices.
+        batch = active['batches'][scope]
+        return [*batch['devices'], *omit_occupied_form_cells(batch.get('form_devices', []), [])]
     return [*selected_devices(active, scope), *selected_form_devices(active, scope)]
+
+
+SHEET_PROFESSIONS = ('电气', '暖通')
+
+
+def sheet_group_key(duty):
+    return f'sheet-groups:{duty["scope"]}:{duty["date"]}:{duty["shift"]}'
+
+
+def default_sheet_groups(scope):
+    return {json.dumps([item['name'], sheet['name']], ensure_ascii=False, separators=(',', ':')): item['profession']
+            for item in original_templates() if item['scope'] == scope
+            for sheet in item['sheets'] if sheet['name'].strip() != '封面'}
+
+
+def required_sheets(active, scope, professions=None):
+    defaults = default_sheet_groups(scope)
+    overrides = active.get('sheet_groups', {})
+    return {key for key, default in defaults.items()
+            if professions is None or overrides.get(key, default) in professions}
+
+
+def invalidate_professions(active, reason, scope=None):
+    confirmations = active.get('profession_confirmations', {})
+    for name, receipt in list(confirmations.items()):
+        if scope is None or receipt.get('version') != profession_version(active, scope, name):
+            confirmations.pop(name)
+            active.setdefault('confirmation_invalidations', {})[name] = reason
+
+
+def worksheet_parameters(active, scope, sheets):
+    targets = {(template, sheet.strip()): sheet for template, sheet in map(json.loads, sheets)}
+    slot = active['duty']['shift'] + str(active['round'])
+    catalogue = catalog_locations()
+    for device in review_devices(active, scope):
+        points = {point['id']: point for point in device['points']}
+        for row in parameters(device):
+            if row.get('read_only'):
+                continue
+            if 'section' in row:
+                section = device['sections'][row['section']]
+                point = catalogue.get((scope + '楼', device['name'], device['profession'], section['location'],
+                                       section['form'].strip(), row['name']), {})
+                location = point.get('cells', {}).get(slot)
+            else:
+                point = points.get(row.get('point'), {})
+                location = (point.get('round_cells') or {}).get(slot)
+            key = (point.get('template'), str(point.get('sheet') or '').strip())
+            if not location or key not in targets:
+                continue
+            yield device['id'], row, key[0], targets[key], location
+
+
+def worksheet_review_versions(active, scope, profession):
+    sheets = required_sheets(active, scope, [profession])
+    targets = {(template, sheet) for template, sheet in map(json.loads, sheets)}
+    reviews = active.get('reviews', {})
+    payload = []
+    for identity, row, template, sheet, location in worksheet_parameters(active, scope, sheets):
+        review = reviews.get(identity, {})
+        value = review.get('values', {}).get(row['id'], source_text(row['reference']))
+        payload.append([template, sheet, location, identity, row['name'],
+                        value, review.get('note', '') if value == '×' else ''])
+    overrides = [entry for entry in active.get('sheet_overrides', [])
+                 if (entry['template'], entry['sheet']) in targets]
+    return [sorted(sheets), sorted(payload), overrides]
 
 
 def profession_version(active, scope, profession):
     # Confirmations attest to the readings a profession saw, so live-updated
     # automatic values must invalidate an earlier confirmation.
+    if active.get('worksheet_mode'):
+        payload = worksheet_review_versions(active, scope, profession)
+        return hashlib.sha256(json.dumps(payload, ensure_ascii=False, separators=(',', ':'), sort_keys=True).encode()).hexdigest()
     reviews = active.get('reviews', {})
     devices = [*selected_devices(active, scope),
                *(device for device in selected_form_devices(active, scope) if device['id'] in reviews)]
@@ -1144,7 +1217,7 @@ def merge_reviews(active, devices, submitted, actor):
     return reviews, active.get('review_version', 0) + int(changed)
 
 
-def finalize_reviews(devices, reviews, actor, confirmations=None):
+def finalize_reviews(devices, reviews, actor, confirmations=None, worksheet_scope=None):
     if not devices:
         raise RiskError('没有可归档的巡检设备。', 409)
     finalized = {}
@@ -1163,14 +1236,21 @@ def finalize_reviews(devices, reviews, actor, confirmations=None):
                     raise RiskError(f'「{device["name"]}」的源数据含无效字符，请先核对。', 409)
                 values[item['id']] = value
         complete = bool(rows) and all(values.get(item['id'], '').strip() for item in rows)
-        states = [values.get(item['id'], '').strip() for item in rows if item.get('value_type') == '状态']
+        applicable = rows if worksheet_scope is None else [item for item in rows
+                     if (device['id'], item['id']) in worksheet_scope]
+        states = [values.get(item['id'], '').strip() for item in applicable if item.get('value_type') == '状态']
         if any(value not in ('', '√', '×', '△') for value in states):
             raise RiskError(f'「{device["name"]}」的运行状态需选择 √、× 或 △。', 400)
         if '×' in states and not review['note'].strip():
             raise RiskError(f'「{device["name"]}」有异常状态，请填写备注。', 400)
-        confirmed_by = (confirmations or {}).get(device_profession(device), {}).get('actor') or actor
+        signed_by = ({worksheet_scope[device['id'], item['id']] for item in applicable} if worksheet_scope is not None
+                     else {device_profession(device)})
+        confirmed_by = next(iter(signed_by)) if worksheet_scope is not None and len(signed_by) == 1 else ''
+        if worksheet_scope is None:
+            confirmed_by = (confirmations or {}).get(device_profession(device), {}).get('actor') or actor
         finalized[device['id']] = {**previous, 'values': values,
-            'result': '异常' if '×' in states else review['result'] or ('正常' if complete else ''), 'note': review['note'],
+            'result': '异常' if '×' in states else review['result'] or ('正常' if complete and len(applicable) == len(rows) else ''),
+            'note': review['note'],
             'actor': previous.get('actor') or confirmed_by}
     return finalized
 
@@ -1189,6 +1269,19 @@ class DailyInspection:
         self.source_cache_lock = threading.RLock()
         self.source_cache = {}
         self.schema_lock = threading.Lock()
+        self.report_locks = {scope: threading.Lock() for scope in SOURCES}
+        self.active_reports = {}
+
+    def active_report_content(self, active, scope):
+        key = (active['id'], active.get('review_version', 0), bool(active.get('completed')), template_version())
+        with self.report_locks[scope]:
+            cached = self.active_reports.get(scope)
+            if cached and cached[0] == key:
+                return cached[1]
+            content = workbook(active, {scope: []}, strict_original=False, presentation=False)
+            data = archived_report_content.__wrapped__(content, scope, active['id'], active['duty']['shift'], active['round'], False)
+            self.active_reports[scope] = (key, data)
+            return data
 
     def path(self, table):
         return self.cloud.table_path(BASE, table)
@@ -1320,7 +1413,8 @@ class DailyInspection:
         with self.source_locks[scope]:
             cached = self.cached_source(scope)
             now = time.time()
-            if cached and now - cached.get('probed_at', 0) < self.PROBE_INTERVAL:
+            if (cached and now - cached.get('probed_at', 0) < self.PROBE_INTERVAL
+                    and now - cached.get('refreshed_at', 0) < self.CACHE_HARD_TTL):
                 return cached
             if cached:
                 config_fp = self.config_fingerprint(scope)
@@ -1406,6 +1500,7 @@ class DailyInspection:
             active['live_fp'] = fp
             active['review_version'] = active.get('review_version', 0) + 1
             active['live_synced_at'] = int(time.time() * 1000)
+            invalidate_professions(active, '源数据或测点配置已更新，请重新核对。', scope)
             self.store.put_document(NS, 'building:' + scope, state)
             return state
 
@@ -1512,9 +1607,13 @@ class DailyInspection:
                   'archived_rounds': archived, 'next_round': number, 'round_limit': ROUNDS_PER_SHIFT, 'active': None,
                   'scheduled': self.scheduled, 'opens_at': int(opens_at.timestamp() * 1000) if opens_at else None,
                   'archive_revision': self.archive_revision(state)}
+        result['planned_sheet_groups'] = (self.store.get_document(NS, sheet_group_key(duty)) or {}).get('groups', {})
         if active:
             batch = active['batches'][scope]
-            selected = {device['id'] for device in selected_devices(active, scope)}
+            devices = batch['devices'] if active.get('worksheet_mode') else selected_devices(active, scope)
+            selected = {device['id'] for device in devices}
+            forms = (omit_occupied_form_cells(batch.get('form_devices', []), []) if active.get('worksheet_mode')
+                     else selected_form_devices(active, scope))
             professions = list(dict.fromkeys(device_profession(device) for device in selected_devices(active, scope)))
             result['active'] = {'id': active['id'], 'duty': active['duty'], 'round': active['round'],
                                 'started': active['started'], 'pending': 'completed' in active,
@@ -1523,7 +1622,13 @@ class DailyInspection:
                                 'manual_sheet_cells': active.get('manual_sheet_cells'),
                                 'manual_sheet_cells_legacy': bool(active.get('manual_sheet_cells_legacy')),
                                 'professions': active.get('professions'),
+                                'started_by': active.get('started_by') or active.get('actor'),
+                                'worksheet_mode': bool(active.get('worksheet_mode')),
+                                'available_professions': list(SHEET_PROFESSIONS),
+                                'sheet_groups': active.get('sheet_groups', {}),
+                                **self.collaboration(active, owner),
                                 'profession_confirmations': active.get('profession_confirmations', {}),
+                                'confirmation_invalidations': active.get('confirmation_invalidations', {}),
                                 'profession_versions': {profession: profession_version(active, scope, profession)
                                     for profession in active.get('professions', [])},
                                 'orders': {view: self.order(owner, scope, view) for view in ['ALL', *professions]},
@@ -1531,9 +1636,70 @@ class DailyInspection:
                                           'devices': [display_device(device)
                                                       for device in self.ordered(batch, self.order(owner, scope))
                                                       if device['id'] in selected],
-                                          'form_devices': [display_device(device)
-                                                           for device in selected_form_devices(active, scope)]}}
+                                          'form_devices': [display_device(device) for device in forms]}}
         return result
+
+    def collaboration(self, active, owner, progress=None):
+        if progress is None:
+            progress = self.store.get_document(NS, 'sheet-progress:' + active['id']) or {}
+        cutoff = int(time.time() * 1000) - 30000
+        return {'visited_sheets': progress.get('visited_sheets', {}).get(owner, []),
+                'presence': [entry for identity, entry in progress.get('presence', {}).items()
+                             if identity != owner and entry['seen_at'] >= cutoff]}
+
+    def view_sheet_progress(self, owner, actor, duty, data):
+        scope = duty['scope']
+        with self.locks[scope]:
+            state = self.load(scope)
+            active = self.current(state, data.get('id'))
+            if 'completed' in active or duty_key(active['duty']) != duty_key(duty):
+                raise RiskError('本轮巡检已结束，请刷新状态。', 409)
+            known = default_sheet_groups(scope)
+            sheet = data.get('sheet')
+            if not isinstance(sheet, str) or sheet not in known:
+                raise RiskError('工作表无效。', 400)
+            pages = data.get('visited_sheets', [])
+            if (not isinstance(pages, list) or len(pages) > len(known)
+                    or any(not isinstance(page, str) or page not in known for page in pages)):
+                raise RiskError('查看进度包含无效工作表。', 400)
+            key = 'sheet-progress:' + active['id']
+            progress = self.store.get_document(NS, key) or {}
+            visited = progress.setdefault('visited_sheets', {})
+            visited[owner] = sorted(set(visited.get(owner, [])) | {sheet} | set(pages))
+            now = int(time.time() * 1000)
+            progress['presence'] = {identity: entry for identity, entry in progress.get('presence', {}).items()
+                                  if entry['seen_at'] >= now - 30000}
+            progress['presence'][owner] = {'actor': actor, 'sheet': sheet, 'seen_at': now}
+            self.store.put_document(NS, key, progress)
+            return self.collaboration(active, owner, progress)
+
+    def save_sheet_groups(self, state, duty, data):
+        scope = duty['scope']
+        key = sheet_group_key(duty)
+        known = default_sheet_groups(scope)
+        active = state.get('active')
+        if active:
+            if (data.get('id') != active['id'] or 'completed' in active or duty_key(active['duty']) != duty_key(duty)
+                    or data.get('review_version') != active.get('review_version', 0)):
+                raise RiskError('本班次巡检状态已变化，请刷新后调整。', 409)
+            previous = active.get('sheet_groups', {})
+        else:
+            if data.get('id') or data.get('duty') != duty_key(duty):
+                raise RiskError('当前班次已变化，请刷新后调整。', 409)
+            previous = (self.store.get_document(NS, key) or {}).get('groups', {})
+        changes = data.get('groups', {data['sheet']: data.get('profession')} if isinstance(data.get('sheet'), str) else {})
+        if (not isinstance(changes, dict) or not changes
+                or any(sheet not in known or value not in (*SHEET_PROFESSIONS, None) for sheet, value in changes.items())):
+            raise RiskError('工作表或专业无效。', 400)
+        groups = {sheet: value for sheet, value in {**previous, **changes}.items()
+                  if sheet in known and value is not None and value != known[sheet]}
+        if groups == previous:
+            return
+        if active:
+            active['sheet_groups'] = groups
+            active['review_version'] = active.get('review_version', 0) + 1
+            invalidate_professions(active, '工作表专业归属已调整，请重新核对。')
+        self.store.put_documents(NS, {'building:' + scope: state, key: {'groups': groups}})
 
     @staticmethod
     def round_cutoff(duty, number):
@@ -1550,7 +1716,7 @@ class DailyInspection:
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                   'started': int(started.timestamp() * 1000), 'duty': duty, 'round': number,
                   'batches': batches, 'manual_sheet_cells': []}
-        active['sheet_groups'] = (self.store.get_document(NS, f'sheet-groups:{scope}:{day}:{shift}') or {}).get('groups', {})
+        active['sheet_groups'] = (self.store.get_document(NS, sheet_group_key(duty)) or {}).get('groups', {})
         if professions is not None:
             active.update(professions=professions, profession_confirmations={})
         inherit_manual_states(state, active, scope)
@@ -1597,8 +1763,9 @@ class DailyInspection:
             if (current >= self.round_cutoff(duty, number) or state['active']
                     or self.next_round(state, duty, current) > number):
                 return
-            professions = list(dict.fromkeys(device_profession(device) for device in batches[scope]['devices']))
+            professions = list(SHEET_PROFESSIONS)
             state['active'] = self.new_round(state, duty, number, batches, SYSTEM_INSPECTION_ACTOR, current, professions)
+            state['active']['worksheet_mode'] = True
             self.store.put_document(NS, 'building:' + scope, state)
 
     def rollover_due(self, scope, now=None):
@@ -1657,6 +1824,8 @@ class DailyInspection:
             worker_lock.release()
 
     def change(self, owner, actor, duty, action, data):
+        if action == 'view-sheet':
+            return self.view_sheet_progress(owner, actor, duty, data)
         scope = duty['scope']
         state_key = 'building:' + scope
         with self.locks[scope]:
@@ -1685,14 +1854,23 @@ class DailyInspection:
                     current = dt.datetime.now(CN)
                     if current >= self.round_cutoff(duty, number) or not self.matches_scheduled_batch(batches[scope], duty, number, current):
                         raise RiskError('本轮设备数据尚未同步完整，请刷新巡检状态。', 409)
-                available = list(dict.fromkeys(device_profession(device) for device in batches[scope]['devices']))
+                worksheet_mode = data.get('worksheet_mode') is True
+                available = list(SHEET_PROFESSIONS) if worksheet_mode else list(dict.fromkeys(
+                    device_profession(device) for device in batches[scope]['devices']))
                 requested = data.get('professions')
+                if worksheet_mode and requested is None:
+                    requested = available
                 if requested is not None and (not isinstance(requested, list) or not requested
                         or any(not isinstance(item, str) for item in requested)
                         or len(requested) != len(set(requested)) or set(requested) - set(available)):
                     raise RiskError('可巡检专业已变化，请刷新后重新选择。', 409)
                 professions = None if requested is None else [item for item in available if item in requested]
                 state['active'] = self.new_round(state, duty, number, batches, actor, now, professions)
+                if worksheet_mode:
+                    state['active']['worksheet_mode'] = True
+            elif action == 'sheet-group':
+                self.save_sheet_groups(state, duty, data)
+                return self.view(state, owner, duty)
             elif action == 'cancel':
                 raise RiskError('取消本轮功能已移除，请继续完成并归档当前巡检。', 409)
             else:
@@ -1723,29 +1901,37 @@ class DailyInspection:
                     self.store.put_document(NS, key,
                                             {'ids': [next(reordered) if item in selected_ids else item for item in combined]})
                     return self.view(state, owner, duty)
-                elif action == 'sheet-group':
-                    if 'completed' in active or duty_key(active['duty']) != duty_key(duty) or data.get('review_version') != active.get('review_version', 0):
-                        raise RiskError('本班次巡检状态已变化，请刷新后调整。', 409)
-                    known = {json.dumps([item['name'], sh['name']], ensure_ascii=False, separators=(',', ':'))
-                        for item in original_templates() if item['scope'] == scope for sh in item['sheets']}
-                    if data.get('sheet') not in known or data.get('profession') not in ('电气', '暖通'):
-                        raise RiskError('工作表或专业无效。', 400)
-                    groups = dict(active.get('sheet_groups', {}))
-                    groups[data['sheet']] = data['profession']
-                    active['sheet_groups'] = groups
+                elif action == 'append-profession':
+                    name = data.get('profession')
+                    if ('completed' in active or duty_key(active['duty']) != duty_key(duty)
+                            or data.get('review_version') != active.get('review_version', 0)):
+                        raise RiskError('本轮状态已变化，请刷新后加入。', 409)
+                    if name not in SHEET_PROFESSIONS:
+                        raise RiskError('巡检专业无效。', 400)
+                    chosen = active.get('professions') or list(SHEET_PROFESSIONS)
+                    if name in chosen:
+                        return self.view(state, owner, duty)
+                    if any(row.get('version') == profession_version(active, scope, key)
+                           for key, row in active.get('profession_confirmations', {}).items()):
+                        raise RiskError('本轮已有专业确认，无法追加专业。', 409)
+                    active['professions'] = [*chosen, name]
                     active['review_version'] = active.get('review_version', 0) + 1
-                    active['profession_confirmations'] = {}
-                    self.store.put_documents(NS, {state_key: state,
-                        'sheet-groups:' + scope + ':' + duty['date'] + ':' + duty['shift']: {'groups': groups}})
-                    return self.view(state, owner, duty)
                 else:
                     if 'completed' not in active:
+                        if active.get('worksheet_mode') and action in {'finish', 'confirm-profession'} and (
+                                data.get('reviews') or data.get('sheet_cells')):
+                            raise RiskError('请先保存修改，再确认本轮巡检。', 409)
                         if data.get('sheet_cells'):
                             fingerprint = hashlib.sha256(json.dumps([data.get('review_version'), data['sheet_cells']], sort_keys=True).encode()).hexdigest()
                             if active.get('last_sheet_edit') == fingerprint:
                                 return self.view(state, owner, duty)
                             if data.get('review_version') != active.get('review_version', 0):
                                 raise RiskError('巡检表已有其他修改，请刷新核对后重试，您的填写仍保留。', 409)
+                            if active.get('worksheet_mode') and isinstance(data['sheet_cells'], list):
+                                allowed = required_sheets(active, scope, active.get('professions'))
+                                if any(isinstance(cell, dict) and json.dumps([cell.get('template'), cell.get('sheet')],
+                                       ensure_ascii=False, separators=(',', ':')) not in allowed for cell in data['sheet_cells']):
+                                    raise RiskError('请先把该工作表的专业加入本轮巡检。', 409)
                             with archived_workbook(workbook(active, {scope: []}, strict_original=False, presentation=False), active['id'], scope) as book:
                                 edits = apply_cells(book, scope, data['sheet_cells'], actor, enforce_exclusions=True,
                                                     slot=active['duty']['shift'] + str(active['round']))
@@ -1794,24 +1980,29 @@ class DailyInspection:
                             active['manual_sheet_cells'] = list(manual.values())
                             active['last_sheet_edit'] = fingerprint
                             active['review_version'] = active.get('review_version', 0) + 1
-                            active['profession_confirmations'] = {}
+                            if not active.get('worksheet_mode'):
+                                invalidate_professions(active, '工作表数据已修改，请重新核对。')
                         if action == 'finish' and data.get('sheet_workflow'):
-                            required = {json.dumps([item['name'], sh['name']], ensure_ascii=False, separators=(',', ':'))
-                                for item in original_templates() if item['scope'] == scope
-                                for sh in item['sheets'] if sh['name'].strip() != '封面'}
-                            visited = data.get('visited_sheets')
-                            if not isinstance(visited, list) or any(not isinstance(item, str) for item in visited) or not required.issubset(visited):
-                                raise RiskError('请先逐页查看本次所有工作表后再确认提交。', 409)
                             if data.get('reviews'):
                                 raise RiskError('请先保存单元格修改后再确认提交。', 409)
-                            active['profession_confirmations'] = {name: {'actor': actor, 'confirmed': int(time.time()*1000),
-                                'version': profession_version(active, scope, name)} for name in active.get('professions', [])}
+                            if not active.get('worksheet_mode') and not (
+                                    active.get('professions') and all_professions_confirmed(
+                                        active, scope, active.get('profession_confirmations', {}))):
+                                required = required_sheets(active, scope, active.get('professions'))
+                                visited = data.get('visited_sheets')
+                                if not isinstance(visited, list) or any(not isinstance(item, str) for item in visited) or not required.issubset(visited):
+                                    raise RiskError('请先逐页查看本轮所选专业的工作表后再确认提交。', 409)
+                                active['profession_confirmations'] = {name: {'actor': actor, 'confirmed': int(time.time()*1000),
+                                    'version': profession_version(active, scope, name)} for name in active.get('professions', [])}
                         profession = data.get('profession') if action == 'confirm-profession' else None
                         chosen = active.get('professions')
                         if action == 'confirm-profession':
                             if (not isinstance(chosen, list) or profession not in chosen
                                     or data.get('profession_version') != profession_version(active, scope, profession)):
                                 raise RiskError('该专业资料已变化，请刷新核对后再确认。', 409)
+                            if active.get('worksheet_mode') and not required_sheets(active, scope, [profession]).issubset(
+                                    self.collaboration(active, owner)['visited_sheets']):
+                                raise RiskError('请先逐页查看该专业的工作表后再确认。', 409)
                             allowed = {device['id'] for device in devices if device_profession(device) == profession}
                             if not isinstance(data.get('reviews', {}), dict) or data.get('reviews', {}).keys() - allowed:
                                 raise RiskError('只能确认当前专业的设备。', 400)
@@ -1824,9 +2015,10 @@ class DailyInspection:
                         before = active.get('reviews', {})
                         reviews, version = merge_reviews(active, devices, data.get('reviews', {}), actor)
                         confirmations = dict(active.get('profession_confirmations', {}))
-                        for device in devices:
-                            if review_content(before.get(device['id'], {})) != review_content(reviews.get(device['id'], {})):
-                                confirmations.pop(device_profession(device), None)
+                        if not active.get('worksheet_mode'):
+                            for device in devices:
+                                if review_content(before.get(device['id'], {})) != review_content(reviews.get(device['id'], {})):
+                                    confirmations.pop(device_profession(device), None)
                         if action == 'finish' and isinstance(chosen, list) and not all(item in confirmations for item in chosen):
                             raise RiskError('已确认的专业数据发生变化，请重新确认。', 409)
                         active.update(reviews=reviews, review_version=version)
@@ -1838,10 +2030,18 @@ class DailyInspection:
                                     'version': confirmed_version}
                                 active['review_version'] += 1
                             active['profession_confirmations'] = confirmations
+                            active.get('confirmation_invalidations', {}).pop(profession, None)
                         elif isinstance(chosen, list):
                             active['profession_confirmations'] = confirmations
+                            if active.get('worksheet_mode'):
+                                invalidate_professions(active, '工作表数据已修改，请重新核对。', scope)
                         if action == 'finish':
-                            active['reviews'] = finalize_reviews(devices, reviews, actor, confirmations)
+                            worksheet_scope = None
+                            if active.get('worksheet_mode'):
+                                worksheet_scope = {(identity, row['id']): receipt['actor']
+                                    for name, receipt in confirmations.items()
+                                    for identity, row, *_ in worksheet_parameters(active, scope, required_sheets(active, scope, [name]))}
+                            active['reviews'] = finalize_reviews(devices, reviews, actor, confirmations, worksheet_scope)
                     elif action != 'finish':
                         raise RiskError('本轮已进入归档，现场数据已锁定。', 409)
                     if action == 'finish':
@@ -2139,9 +2339,11 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
 
     summary, readings, reviews = [], [], []
     for scope, batch in active['batches'].items():
-        selected = {device['id'] for device in selected_devices(active, scope)}
+        selected = {device['id'] for device in (batch['devices'] if active.get('worksheet_mode') else selected_devices(active, scope))}
         ordered = [item for item in DailyInspection.ordered(batch, orders.get(scope, [])) if item['id'] in selected]
-        for order, device in enumerate([*ordered, *selected_form_devices(active, scope)], 1):
+        form_devices = (omit_occupied_form_cells(batch.get('form_devices', []), []) if active.get('worksheet_mode')
+                        else selected_form_devices(active, scope))
+        for order, device in enumerate([*ordered, *form_devices], 1):
             for section in device['sections']:
                 prefix = (scope + '楼', order, device['name'], device['profession'], section['location'], section['form'])
                 for label, value in section['values'].items():
@@ -2179,8 +2381,11 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
             catalogue = original_templates()
             for scope in active['batches']:
                 selected_professions = active.get('professions')
-                templates = [item for item in catalogue if item.get('scope') == scope and
-                             (not isinstance(selected_professions, list) or item.get('profession') in selected_professions)]
+                required = required_sheets(active, scope, selected_professions)
+                templates = [{**item, 'sheets': [sheet for sheet in item['sheets']
+                             if json.dumps([item['name'], sheet['name']], ensure_ascii=False,
+                                           separators=(',', ':')) in required]}
+                             for item in catalogue if item.get('scope') == scope]
                 source_sheets = [{'name':'测点读数','rows':[point_columns, *readings]},
                                  {'name':REVIEW_SHEET,'rows':[REVIEW_COLUMNS, *reviews]}]
                 conflicts = [entry for entry in original_cells(source_sheets, templates, duty.get('shift'), active.get('round'))
@@ -2225,7 +2430,8 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
         for scope in active['batches']:
             professions = active.get('professions')
             templates = [item for item in catalogue if item.get('scope') == scope and
-                         (not isinstance(professions, list) or item.get('profession') in professions)]
+                         (active.get('worksheet_mode') or not isinstance(professions, list)
+                          or item.get('profession') in professions)]
             report_sheets = [{'name':'测点读数','rows':[point_columns, *readings]},
                              {'name':REVIEW_SHEET,'rows':[REVIEW_COLUMNS, *reviews]}]
             entries = original_cells(report_sheets, templates, duty.get('shift'), active.get('round'))
@@ -2290,6 +2496,14 @@ def archived_report_content(content, scope, identity, shift, number, frozen):
         else:
             entries = original_cells(sheets, templates, shift, number)
         extras = form_extras(book, templates, entries) if ORIGINAL_INDEX_SHEET in book else []
+        devices = {row[2]: (row[3], row[12]) for row in book[REVIEW_SHEET].iter_rows(
+                   min_row=2, max_col=len(REVIEW_COLUMNS), values_only=True) if row[2]}
+        for entry in entries:
+            label, note = devices.get(entry.get('device'), (None, None))
+            if label:
+                entry['device_name'] = label
+            if str(entry.get('value') or '').strip() == '×' and note:
+                entry['note'] = note
         groups = {row[0]:row[1] for row in book['工作表分组'].iter_rows(min_row=2, values_only=True) if row[0]} if '工作表分组' in book else {}
         automatic = '确认方式' in book and book['确认方式']['A2'].value == '自动收尾'
         info = book['巡检信息']
@@ -2299,7 +2513,7 @@ def archived_report_content(content, scope, identity, shift, number, frozen):
 
 
 def inspection_report(service, scope, day, owner, actor, *, include_active=False, drafts=None, active_id=None,
-                      summary_only=False, view_sheet=None):
+                      summary_only=False, view_sheet=None, lookup=None, lookup_round=None):
     """Read one duty date's archived sheets and, when authorized, the current snapshot."""
     try:
         day = dt.date.fromisoformat(day).isoformat()
@@ -2352,25 +2566,42 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
               'sheet_filter': list(view_sheet) if view_sheet else None, 'summary_only': summary_only}
     cells = 0
 
-    def collect(summary, content=None):
+    def collect(summary, content=None, parsed=None):
         nonlocal cells
         if summary_only:
             result['rounds'].append({**summary, 'original_cells': [], 'extra_cells': []})
             return
         frozen = summary['status'] == '已归档'
-        reader = archived_report_content if frozen and len(content) <= 2 * 1024 * 1024 else archived_report_content.__wrapped__
-        count, data = reader(content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
+        if parsed is None:
+            reader = archived_report_content if frozen and len(content) <= 2 * 1024 * 1024 else archived_report_content.__wrapped__
+            parsed = reader(content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
+        count, data = parsed
         cells += count
         if cells > 1000000:
             raise RiskError('当日巡检数据过大，请分开查看原记录。', 413)
         if view_sheet:
+            summary['abnormal_cells'] = [
+                {key: entry.get(key) for key in ('template', 'sheet', 'cell', 'device_name', 'parameter', 'note')}
+                for entry in data['original_cells'] + data['extra_cells'] if str(entry.get('value') or '').strip() == '×'
+            ]
             data = {**data, **{key: [cell for cell in data[key] if (cell['template'], cell['sheet']) == view_sheet]
                               for key in ('original_cells', 'extra_cells')}}
+        if lookup and (not lookup_round or lookup_round == summary['round_id']):
+            summary['lookup_cells'] = [
+                {key: entry.get(key) for key in ('template', 'sheet', 'cell', 'device_name', 'parameter')}
+                for entry in data['original_cells']
+                if lookup in ' '.join(str(entry.get(key) or '') for key in ('device_name', 'parameter')).casefold()
+            ][:100]
+        if lookup:
+            result['rounds'].append(summary)
+            return
         result['rounds'].append({**summary, **data})
 
     archived_ids = set()
     for summary in archives:
         confirmed, attachment = summary, None
+        if lookup and lookup_round and summary['round_id'] != lookup_round:
+            continue
         if not summary_only:
             _, confirmed, attachment, _ = service.archive_record(scope, summary['id'])
             if any(confirmed.get(key) != summary.get(key) for key in ('round_id', 'date', 'scope', 'shift', 'round')):
@@ -2391,13 +2622,15 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                 service.download_archive(attachment) if attachment else None)
     for pending in pending_rounds:
         saved = pending.get('active')
-        if saved and saved['duty']['scope']==scope and saved['duty']['date']==day and saved['id'] not in archived_ids:
+        if (saved and saved['duty']['scope']==scope and saved['duty']['date']==day and saved['id'] not in archived_ids
+                and (not lookup or not lookup_round or saved['id'] == lookup_round)):
             collect({'round_id':saved['id'],'scope':scope,'date':day,'shift':saved['duty']['shift'],
                      'round':saved['round'],'version':saved.get('review_version',0),'status':'自动确认·待上传',
                      'auto_closed':bool(saved.get('auto_closed')),'local_draft':False,
                      'source_time': source_query_time(saved['batches'][scope])},
                     None if summary_only else workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False,presentation=False))
-    if active and active.get('duty', {}).get('date') == day:
+    if (active and active.get('duty', {}).get('date') == day
+            and (not lookup or not lookup_round or active['id'] == lookup_round)):
         if active['id'] in archived_ids:
             if drafts:
                 raise RiskError('本轮已归档，本机修改尚未保存，请刷新核对。', 409)
@@ -2405,9 +2638,16 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             summary = {'round_id': active['id'], 'scope': scope, 'date': day,
                        'shift': active['duty']['shift'], 'round': active['round'],
                        'actor': active.get('actor', ''), 'version': active.get('review_version', 0), 'status': '待归档' if 'completed' in active else '进行中',
-                       'local_draft': bool(drafts), 'source_time': source_query_time(active['batches'][scope])}
-            collect(summary, None if summary_only else workbook(
-                active, {scope: active.get('archive_order', order)}, strict_original=False, presentation=False))
+                       'local_draft': bool(drafts), 'source_time': source_query_time(active['batches'][scope]),
+                       'sheet_groups': active.get('sheet_groups', {})}
+            if view_sheet or lookup:
+                if not drafts:
+                    collect(summary, parsed=service.active_report_content(active, scope))
+                else:
+                    collect(summary, workbook(active, {scope: order}, strict_original=False, presentation=False))
+            else:
+                collect(summary, None if summary_only else workbook(
+                    active, {scope: active.get('archive_order', order)}, strict_original=False, presentation=False))
     result['rounds'].sort(key=lambda item: (0 if item.get('shift') == '白' else 1,
                                             item.get('round') or 0, item['round_id']))
     from .daily_inspection_reminders import slot_time
@@ -2565,14 +2805,15 @@ def install_daily_inspection(app, controller, runtime):
                 if state.get('active') and duty_key(state['active']['duty'])==duty_key(duty):
                     duty=state['active']['duty']
                 if action=='status' and state.get('active') and request.query_params.get('id')==state['active']['id'] and request.query_params.get('version')==str(state['active'].get('review_version',0)) and request.query_params.get('pending')==str(int('completed' in state['active'])) and request.query_params.get('date')==date and request.query_params.get('shift')==shift and request.query_params.get('archive_revision', svc.archive_revision(state)) == svc.archive_revision(state):
-                    data={'unchanged':True,'history_scopes':history_scopes}
+                    data={'unchanged':True,'history_scopes':history_scopes, **svc.collaboration(state['active'], owner)}
                 else:
                     data=await asyncio.to_thread(svc.view,state,owner,duty)
                     data.update(history_scopes=history_scopes,view_scope=scope,view_scopes=scopes if viewer else home_scopes,can_edit=not session.get('impersonation') and session.get('source')!='admin_impersonation')
                 return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, no-store'})
             report_action = action in {'day-sheet', 'day-export'}
             if request.method == 'POST':
-                local_actions = {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession', 'history-edit', 'sheet-group'}
+                local_actions = {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession', 'history-edit',
+                                 'sheet-group', 'append-profession', 'view-sheet'}
                 if not can_manage and not report_action and not ((local_write or viewer) and action in local_actions):
                     raise RiskError('当前账号仅可查看本楼历史巡检。', 403)
                 source = urlsplit(request.headers.get('origin') or request.headers.get('referer') or '')
@@ -2586,6 +2827,9 @@ def install_daily_inspection(app, controller, runtime):
                     raise RiskError('巡检资料格式无效或超过提交大小限制。', 400) from error
                 if not isinstance(payload, dict) or (action != 'start' and not report_action and not isinstance(payload.get('id'), str)):
                     raise RiskError('巡检请求格式无效。', 400)
+                if action in {'sheet-group', 'view-sheet', 'append-profession', 'confirm-profession'} and (
+                        session.get('impersonation') or session.get('source') == 'admin_impersonation'):
+                    raise RiskError('代登录仅可查看巡检。', 403)
             if report_action:
                 if request.method != 'POST':
                     raise RiskError('巡检操作不存在。', 404)
@@ -2606,6 +2850,11 @@ def install_daily_inspection(app, controller, runtime):
                     raise RiskError('只有本楼有权限的人员可以带入本机填写。', 403)
                 form_only = action == 'day-sheet' and payload.get('form_only') is True
                 summary_only = form_only and payload.get('summary_only') is True
+                lookup = payload.get('lookup') if form_only and not summary_only else None
+                lookup_round = payload.get('lookup_round') if lookup else None
+                if lookup is not None and (not isinstance(lookup, str) or not lookup.strip() or len(lookup) > 100
+                        or not isinstance(lookup_round, str) or not re.fullmatch(r'[a-f0-9]{32}', lookup_round)):
+                    raise RiskError('巡检搜索条件无效。', 400)
                 sheet_filter = payload.get('view_sheet') if form_only else None
                 if sheet_filter is not None:
                     if (not isinstance(sheet_filter, list) or len(sheet_filter) != 2
@@ -2618,7 +2867,11 @@ def install_daily_inspection(app, controller, runtime):
                         raise RiskError('该楼栋没有所选巡检工作表。', 404)
                 report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
                     user.get('name') or owner, include_active=viewer or can_write_scope or scope in home_scopes,
-                    drafts=submitted, active_id=payload.get('active_id'), summary_only=summary_only, view_sheet=sheet_filter)
+                    drafts=submitted, active_id=payload.get('active_id'), summary_only=summary_only, view_sheet=sheet_filter,
+                    lookup=lookup.strip().casefold() if lookup else None, lookup_round=lookup_round)
+                if lookup:
+                    matches = [cell for item in report['rounds'] for cell in item.get('lookup_cells', [])]
+                    return JSONResponse({'ok': True, 'data': {'matches': matches}}, headers={'Cache-Control': 'private, no-store'})
                 if form_only:
                     for item in report['rounds']:
                         item.pop('sheets', None)
@@ -2703,7 +2956,8 @@ def install_daily_inspection(app, controller, runtime):
                         headers={'Cache-Control': 'private, no-store'})
                 raise RiskError('没有可办理的 D 楼或 E 楼当班排班。', 403)
             scope = duty['scope']
-            await asyncio.to_thread(svc.rollover_due, scope)
+            if action != 'view-sheet':
+                await asyncio.to_thread(svc.rollover_due, scope)
             if request.method == 'POST' and selected_scope and selected_scope != scope:
                 raise RiskError('只能办理本人当班楼栋的巡检。', 403)
             if request.method == 'GET':
@@ -2740,15 +2994,18 @@ def install_daily_inspection(app, controller, runtime):
                             and request.query_params.get('date') == duty['date']
                             and request.query_params.get('shift') == duty['shift']
                             and request.query_params.get('archive_revision', svc.archive_revision(state)) == svc.archive_revision(state)):
-                        return JSONResponse({'ok': True, 'data': {'unchanged': True, 'history_scopes': scopes}},
+                        return JSONResponse({'ok': True, 'data': {'unchanged': True, 'history_scopes': scopes,
+                                             **svc.collaboration(active, owner)}},
                                             headers={'Cache-Control': 'private, no-store'})
                 elif action:
                     raise RiskError('巡检操作不存在。', 404)
                 data = await asyncio.to_thread(svc.view, state, owner, duty)
             else:
-                if action not in {'start', 'order', 'draft', 'cancel', 'finish', 'confirm-profession', 'sheet-group'}:
+                if action not in local_actions - {'history-edit'}:
                     raise RiskError('巡检操作不存在。', 404)
                 data = await asyncio.to_thread(svc.change, owner, user.get('name') or owner, duty, action, payload)
+                if action == 'view-sheet':
+                    return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
             data['history_scopes'] = history_scopes
             if viewer or home_scopes:
                 local_views = list(dict.fromkeys(value for value in (roster_scope, *home_scopes) if value))

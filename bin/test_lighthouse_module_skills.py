@@ -14,6 +14,21 @@ from openclaw_service.assistant import lighthouse_skills as skills
 
 
 class ModuleGuideTests(unittest.TestCase):
+    def test_public_assistant_health_omits_resident_process_details(self):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from lan_bitable_template_portal import lighthouse_routes
+        app = FastAPI()
+        runtime = SimpleNamespace(state_store=SimpleNamespace(db_path='fixture.sqlite3'))
+        lighthouse_routes.install_lighthouse_routes(app, SimpleNamespace(), runtime)
+        with patch('openclaw_service.protocol.descriptor', return_value={
+                'pid': 123, 'port': 8765, 'instance': 'private-instance'}) as descriptor:
+            response = TestClient(app).get('/api/assistant/health')
+        descriptor.assert_called_once_with(Path('lighthouse_openclaw'))
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json(), {'ok': False, 'service': 'lighthouse_assistant',
+                                         'resident_service': True, 'connected': False})
+
     def test_every_registered_business_group_has_a_packaged_guide(self):
         groups = {label for _, label in api._GROUP_BY_PREFIX}
         self.assertLessEqual(groups, set(skills.MODULE_GUIDES))

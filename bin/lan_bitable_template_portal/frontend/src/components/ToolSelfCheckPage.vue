@@ -28,9 +28,17 @@
           <section class="tool-library" aria-label="自检模板">
             <div class="tool-panel-heading">
               <div><h3>自检模板</h3><span>{{ board.templates.length }} 份 · XLSX</span></div>
-              <NButton :disabled="busy" @click="chooseImport()"><Upload :size="16" />导入模板</NButton>
+              <div class="tool-bar">
+                <NButton :disabled="busy" @click="chooseImport()"><Upload :size="16" />导入模板</NButton>
+                <NButton :disabled="busy" @click="folderInput?.click()"><Upload :size="16" />导入文件夹</NButton>
+              </div>
             </div>
-            <p class="tool-muted">模板需沿用现有记录单布局。</p>
+            <p class="tool-muted">支持带封面的电气和暖通 XLSX 自检记录单。</p>
+            <p v-if="folderProgress" class="tool-muted" role="status">{{ folderProgress }}</p>
+            <details v-if="folderFailures.length" open>
+              <summary>{{ folderFailures.length }} 份模板未导入</summary>
+              <ul><li v-for="(item,index) in folderFailures" :key="index">{{ item.file }} · {{ item.reason }}</li></ul>
+            </details>
             <article v-for="template in board.templates" :key="template.id" class="tool-template">
               <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.schema.checks.length }} 项 · {{ template.active ? '已启用' : '已停用' }}</small></div>
               <div class="tool-bar">
@@ -49,13 +57,15 @@
               <label>模板名称 <input v-model="templateClone.name" maxlength="100" /></label>
               <div v-for="(item,index) in templateClone.checks" :key="index" class="tool-edit-panel">
                 <strong>检查项 {{ index+1 }}</strong>
-                <label>自检项目 <input v-model="item.name" maxlength="300" /></label>
+                <label v-if="!item.sharedName">自检项目 <input v-model="item.name" maxlength="300" /></label>
+                <strong v-else>{{ item.name }}</strong>
                 <label>操作方法 <textarea v-model="item.method" maxlength="1500" /></label>
-                <label>合格标准 <textarea v-model="item.standard" maxlength="1500" /></label>
+                <label v-if="!templateClone.hvac">合格标准 <textarea v-model="item.standard" maxlength="1500" /></label>
               </div>
               <div class="tool-bar"><NButton :disabled="busy" @click="templateClone=null">取消</NButton><NButton type="primary" :disabled="busy" @click="saveTemplateClone">保存新模板</NButton></div>
             </section>
             <input ref="fileInput" type="file" accept=".xlsx" hidden @change="importTemplate" />
+            <input ref="folderInput" type="file" accept=".xlsx" webkitdirectory multiple hidden @change="importTemplateFolder" />
           </section>
         </div>
         <div v-else class="tool-worklist">
@@ -72,7 +82,7 @@
               </template>
             </div>
             <div v-if="view === 'orders' && board.can_download_month" class="tool-archive">
-              <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />下载月度归档</NButton>
+              <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />{{ board.archive_updating?'下载上次归档':'下载月度归档' }}</NButton>
               <span v-else class="tool-muted">{{ board.orders.length && !pendingCount && !reviewCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
             </div>
             <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading || !!newOrderPlan" @click="openNewOrder">新增本月工单</NButton>
@@ -91,7 +101,7 @@
             <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
           </section>
           <ToolOrderBatchCreate v-if="view === 'orders' && newOrderPlan" :plan="newOrderPlan" :busy="busy"
-            @close="newOrderPlan = null" @create="createOrders" />
+            @close="newOrderPlan = null" @create="createOrders" @refresh="openNewOrder" />
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :disabled="busy" :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
               <template #prefix><Search :size="16" /></template>
@@ -216,17 +226,31 @@
               <label>检查人 <input v-model="active.inspector" maxlength="80" required /></label>
               <label class="tool-time">检查开始时间 <input v-model="active.checked_at" type="datetime-local" required /></label>
             </fieldset>
+            <fieldset v-if="active.template.schema.fields && active.template_values" class="tool-fields" :disabled="busy || !order.can_edit">
+              <label v-for="(label,address) in active.template.schema.fields" :key="address">{{ label }}
+                <input v-model="active.template_values[address]" maxlength="200" />
+              </label>
+            </fieldset>
             <div class="tool-grid" aria-label="自检项目">
               <div class="tool-grid-head" aria-hidden="true"><b>自检项目</b><b>操作方法</b><b>合格标准</b><b>完成情况</b></div>
               <article v-for="(check,index) in active.template.schema.checks" :key="`${active.entry_id}-${check.row}`" class="tool-grid-row">
                 <strong>{{ index + 1 }}. {{ check.name }}</strong>
                 <p><span>操作方法</span>{{ check.method }}</p>
-                <p><span>合格标准</span>{{ check.standard }}</p>
+                <p><span>合格标准</span>{{ check.standard || '—' }}</p>
                 <NRadioGroup v-if="order.can_edit" v-model:value="active.checks[index]" :name="`${active.entry_id}-${index}`" :disabled="busy" :aria-label="check.name + '完成情况'">
                   <NRadioButton value="是">是</NRadioButton><NRadioButton value="否">否</NRadioButton>
                 </NRadioGroup>
                 <span v-else>{{ active.checks[index] || '未填写' }}</span>
               </article>
+            </div>
+            <div v-if="active.template.schema.calibration?.length && active.template_values">
+              <h3>校准记录</h3>
+              <fieldset v-for="(entry,index) in active.template.schema.calibration" :key="entry.row"
+                class="tool-fields" :disabled="busy || !order.can_edit" :aria-label="entry.label+' '+(index+1)">
+                <label v-for="(label,address) in entry.fields" :key="address">{{ label }}
+                  <input v-model="active.template_values[address]" maxlength="200" />
+                </label>
+              </fieldset>
             </div>
             <details v-if="order.can_edit || active.reviewer || active.reviewed_at || active.notes" class="tool-audit">
               <summary>自检说明与审核</summary>
@@ -296,11 +320,13 @@ const api = '/api/tool-self-check';
 interface Template {
   id: string; version: number; name: string; active: boolean;
   schema: { specialty: string; cycle: string; applicable: string; precautions: string;
-    checks: { row: number; name: string; method: string; standard: string }[] };
+    checks: { row: number; name: string; method: string; standard: string; group_row?:number }[];
+    layout?:'hvac'; fields?:Record<string,string>; calibration?:{row:number;label:string;fields:Record<string,string>}[] };
 }
 interface Entry {
   entry_id: string; template_id: string; version: number; checks: string[]; template: Template;
   location: string; inspector: string; checked_at: string; notes: string; reviewer: string; reviewed_at: string;
+  template_values?:Record<string,string>;
 }
 interface Order {
   id: string; month: string; scope: string; revision: number; status: 'pending' | 'review_pending' | 'submitted' | 'cancelled'; owner_name: string;
@@ -316,7 +342,7 @@ interface Detail extends Order {
 }
 interface Board {
   month: string; orders: Order[]; followups: Order[]; templates: Template[]; can_manage_templates: boolean;
-  can_download_month: boolean; archived_at: string | null; actor_name: string; can_create_orders: boolean;
+  can_download_month: boolean; archived_at: string | null; archive_updating?: boolean; actor_name: string; can_create_orders: boolean;
   inventory_at: string; inventory_error: string;
 }
 const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', label: '自检工单' }, { value: 'external', label: '送检工单' }];
@@ -386,6 +412,9 @@ const error = ref('');
 const message = ref('');
 const saved = ref('[]');
 const fileInput = ref<HTMLInputElement>();
+const folderInput = ref<HTMLInputElement>();
+const folderProgress = ref('');
+const folderFailures = ref<{file:string;reason:string}[]>([]);
 const replacing = shallowRef<Template>();
 const afterDiscard = shallowRef<(() => void) | null>(null);
 let reader: AbortController | undefined;
@@ -458,8 +487,11 @@ const transitions = computed<{ action: string; label: string; type: 'primary' | 
   : [{ action: 'approve', label: '批准报废', type: 'primary' }, { action: 'reject', label: '驳回报废', type: 'warning' }]);
 const templateOptions = computed(() => (board.value?.templates || []).filter(template => template.active)
   .map(template => ({ value: template.id, label: template.name })));
-const templateClone=ref<{id:string;version:number;name:string;checks:{name:string;method:string;standard:string}[]}|null>(null);
-function startTemplateClone(template:Template){templateClone.value={id:template.id,version:template.version,name:template.name+'（新模板）',checks:template.schema.checks.map(item=>({name:item.name,method:item.method,standard:item.standard}))};}
+const templateClone=ref<{id:string;version:number;name:string;hvac:boolean;checks:{name:string;method:string;standard:string;sharedName:boolean}[]}|null>(null);
+function startTemplateClone(template:Template){
+  templateClone.value={id:template.id,version:template.version,name:template.name+'（新模板）',hvac:template.schema.layout==='hvac',
+    checks:template.schema.checks.map(item=>({name:item.name,method:item.method,standard:item.standard,sharedName:!!item.group_row&&item.group_row!==item.row}))};
+}
 async function saveTemplateClone(){const value=templateClone.value;if(!value)return;await mutate(async()=>{await requestJson(`${api}/templates/${value.id}/clone`,{method:'POST',body:JSON.stringify(value)});templateClone.value=null;await loadBoard();message.value='新模板已保存，原模板保持不变。';});}
 const payload = computed(() => records.value.map(({ template: _template, ...record }) => record));
 const form = computed(() => order.value?.kind === 'external' ? { actual: actual.value } :
@@ -523,7 +555,8 @@ function changeMonth(event: Event) {
 }
 function applyOrder(data: Detail) {
   order.value = data;
-  records.value = data.records.map(record => ({ ...record, checks: [...record.checks] }));
+  records.value = data.records.map(record => ({ ...record, checks: [...record.checks],
+    ...(record.template.schema.layout==='hvac' ? {template_values:{...record.template_values}} : {}) }));
   actual.value = data.actual;
   outcome.value = data.draft?.outcome || '';
   reason.value = data.draft?.reason || '';
@@ -608,7 +641,8 @@ function addRecord() {
   const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
   records.value.push({ entry_id: id, template_id: template.id, version: template.version, template,
     checks: template.schema.checks.map(() => ''), location: order.value.location, inspector: order.value.actor_name,
-    checked_at: '', notes: '', reviewer: '', reviewed_at: '' });
+    checked_at: '', notes: '', reviewer: '', reviewed_at: '',
+    ...(template.schema.layout==='hvac' ? {template_values:{C3:order.value.tool_name,C4:order.value.model}} : {}) });
   selected.value = id;
   templateId.value = null;
 }
@@ -687,6 +721,32 @@ async function importTemplate(event: Event) {
     await requestBinaryJson(api + '/templates?' + params, file);
     await loadBoard();
     message.value = '模板已保存。';
+  });
+}
+async function importTemplateFolder(event:Event){
+  const input=event.target as HTMLInputElement;
+  const files=Array.from(input.files || []).filter(file=>/\.xlsx$/i.test(file.name)&&!file.name.startsWith('~$'));
+  input.value='';
+  if(!files.length){error.value='所选文件夹没有可导入的 XLSX 模板。';return;}
+  await mutate(async()=>{
+    folderFailures.value=[];
+    let imported=0,skipped=0,processed=0;
+    for(const file of files){
+      if(disposed)break;
+      folderProgress.value=`正在导入 ${processed+1}/${files.length} · ${file.name}`;
+      try{
+        const params=new URLSearchParams({name:file.name.replace(/\.xlsx$/i,'')});
+        await requestBinaryJson(api+'/templates?'+params,file);
+        imported++;
+      }catch(failure){
+        if(failure instanceof ApiError && failure.status===409 && failure.message.includes('相同模板已导入'))skipped++;
+        else folderFailures.value.push({file:file.webkitRelativePath || file.name,reason:failure instanceof Error?failure.message:'上传未确认'});
+      }
+      processed++;
+    }
+    if(disposed)return;
+    await loadBoard();
+    folderProgress.value=`已导入 ${imported} 份，跳过重复 ${skipped} 份，失败 ${folderFailures.value.length} 份。`;
   });
 }
 async function toggleTemplate(template: Template) {

@@ -2,8 +2,11 @@
   <section class="batch-plan" aria-label="新增本月工单">
     <header>
       <strong>{{ plan.month }} 月度计划</strong>
-      <span>可创建 {{ plan.items.length }} 项</span>
+      <span v-if="plan.inventory_at || plan.items.length">可创建 {{ plan.items.length }} 项</span>
+      <NButton size="tiny" :disabled="busy" @click="emit('refresh')">重读计划</NButton>
     </header>
+    <p v-if="plan.archived && plan.items.length" class="batch-empty" role="status">本月已有归档。新增工单后可继续下载上次归档，补充工单全部提交后会重新生成。</p>
+    <p v-if="plan.inventory_error" class="batch-empty" role="status">{{ plan.inventory_error }}</p>
     <div v-if="plan.items.length" class="batch-filters">
       <NInput v-model:value="search" clearable :disabled="busy" placeholder="搜索工具、型号或位置"
         :input-props="{ 'aria-label': '搜索计划工具' }" />
@@ -39,8 +42,11 @@
       <NPagination v-if="filtered.length > pageSize" v-model:page="page" :item-count="filtered.length"
         :page-size="pageSize" :disabled="busy" simple />
     </template>
-    <p v-else class="batch-empty">{{ plan.archived ? '本月已归档。' : plan.items.length
-      ? '没有符合筛选条件的计划。' : '本月暂无待创建的自检或送检计划。' }}</p>
+    <p v-else class="batch-empty">{{ emptyText }}</p>
+    <div v-if="!plan.items.length && plan.inventory_at" class="batch-selection" aria-label="计划排查结果">
+      <span>可管理工具 {{ plan.tool_count ?? 0 }} 台</span>
+      <span v-for="reason in exclusionReasons" :key="reason.label">{{ reason.label }} {{ reason.count }}{{ reason.unit }}</span>
+    </div>
     <footer>
       <span aria-live="polite">已选 {{ selectedItems.length }} 项</span>
       <NButton size="small" :disabled="busy || !selectedItems.length" @click="selected = new Set()">清空选择</NButton>
@@ -66,6 +72,10 @@ export interface OrderCreationPlan {
   items: PlannedOrder[];
   archived: boolean;
   limit: number;
+  inventory_at?: string;
+  inventory_error?: string;
+  tool_count?: number;
+  excluded?: Partial<Record<'created'|'deleted'|'unfinished'|'later'|'unscheduled'|'unavailable',number>>;
 }
 </script>
 
@@ -74,7 +84,7 @@ import { computed, ref, watch } from 'vue';
 import { NButton, NCheckbox, NInput, NPagination } from 'naive-ui';
 
 const props = defineProps<{ plan: OrderCreationPlan; busy: boolean }>();
-const emit = defineEmits<{ close: []; create: [orders: PlannedOrder[]] }>();
+const emit = defineEmits<{ close: []; create: [orders: PlannedOrder[]]; refresh: [] }>();
 const search = ref('');
 const scope = ref('all');
 const kind = ref('all');
@@ -82,6 +92,20 @@ const page = ref(1);
 const pageSize = 12;
 const selected = ref(new Set<string>());
 const kindLabels = { self: '自检', external: '送检' };
+const emptyText = computed(() => {
+  if (props.plan.items.length) return '没有符合筛选条件的计划。';
+  if (!props.plan.inventory_at) return '工具底表尚未完成首次同步，稍后可重读计划。';
+  if (!props.plan.tool_count) return '当前可管理的楼栋暂无工具记录。';
+  return '本月没有待创建的自检或送检计划。';
+});
+const exclusionReasons = computed(() => [
+  { label:'本月已有工单', count:props.plan.excluded?.created, unit:'项' },
+  { label:'本月已删除', count:props.plan.excluded?.deleted, unit:'项' },
+  { label:'上期工单未完成', count:props.plan.excluded?.unfinished, unit:'项' },
+  { label:'以后月份到期', count:props.plan.excluded?.later, unit:'项' },
+  { label:'未识别或已停用的周期', count:props.plan.excluded?.unscheduled, unit:'项' },
+  { label:'报废、检修中或数量无效', count:props.plan.excluded?.unavailable, unit:'台' },
+].filter(reason=>reason.count));
 const scopeOptions = computed(() => [{ value: 'all', label: '全部楼栋' },
   ...Array.from(new Set(props.plan.items.map(item => item.scope)), value => ({ value, label: `${value}楼` }))]);
 const key = (item: PlannedOrder) => `${item.asset_id}:${item.kind}`;
