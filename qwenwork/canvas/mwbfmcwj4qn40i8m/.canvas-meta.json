@@ -3,7 +3,7 @@
   "activePage": "index.html",
   "version": 1,
   "createdAt": "2026-11-11T02:35:37.055Z",
-  "updatedAt": "2026-11-12T01:53:43.852Z",
+  "updatedAt": "2026-11-12T09:48:32.926Z",
   "frames": [
     {
       "id": "index",
@@ -15,13 +15,13 @@
       "width": 1440,
       "height": 900,
       "status": "draft",
-      "createdAt": "2026-11-11T05:43:22.851Z",
-      "updatedAt": "2026-11-11T05:50:26.898Z"
+      "createdAt": "2026-11-12T08:14:57.715Z",
+      "updatedAt": "2026-11-12T08:14:57.715Z"
     },
     {
-      "id": "frame",
+      "id": "v0-1",
       "kind": "snapshot",
-      "title": "个人工作台 · 班次行动中枢（高保真原型）",
+      "title": "个人工作台 · V0.1 评审稿对齐（高保真原型）",
       "url": "http://localhost:5173/index.html",
       "designUrl": "http://localhost:5173/index.html",
       "previewUrl": "http://localhost:5173/index.html",
@@ -32,11 +32,11 @@
       "height": 900,
       "status": "active",
       "source": "imported",
-      "createdAt": "2026-11-11T05:51:42.908Z",
-      "updatedAt": "2026-11-11T05:51:42.908Z"
+      "createdAt": "2026-11-12T08:17:42.691Z",
+      "updatedAt": "2026-11-12T08:17:42.691Z"
     }
   ],
-  "activeFrameId": "frame",
+  "activeFrameId": "v0-1",
   "tweaks": [
     {
       "control": "preset",
@@ -47,7 +47,7 @@
           "label": "浅色",
           "patches": [
             {
-              "value": "#eef2ef",
+              "value": "#eef2f7",
               "variable": "--seed-bg"
             },
             {
@@ -55,15 +55,15 @@
               "variable": "--seed-surface"
             },
             {
-              "value": "#24312e",
+              "value": "#16202b",
               "variable": "--seed-fg"
             },
             {
-              "value": "#087b69",
+              "value": "#14468f",
               "variable": "--seed-primary"
             },
             {
-              "value": "#3d8f6f",
+              "value": "#0e8f7e",
               "variable": "--seed-accent"
             },
             {
@@ -71,27 +71,27 @@
               "variable": "--seed-on-primary"
             },
             {
-              "value": "#252e2c",
+              "value": "#0e2a4d",
               "variable": "--seed-nav"
             },
             {
-              "value": "#1d6e40",
+              "value": "#1d7a46",
               "variable": "--seed-success"
             },
             {
-              "value": "#8f6208",
+              "value": "#92400e",
               "variable": "--seed-warning"
             },
             {
-              "value": "#b23a26",
+              "value": "#b91c1c",
               "variable": "--seed-danger"
             },
             {
-              "value": "#3a6ea5",
+              "value": "#1d6fa5",
               "variable": "--seed-info"
             },
             {
-              "value": "#f0fff7",
+              "value": "#eaf2fb",
               "variable": "--seed-on-nav"
             },
             {
@@ -99,7 +99,7 @@
               "variable": "--seed-on-solid"
             },
             {
-              "value": "#0b0f0d",
+              "value": "#0a1220",
               "variable": "--seed-scrim"
             }
           ],
@@ -109,39 +109,39 @@
           "label": "深色",
           "patches": [
             {
-              "value": "#151b19",
+              "value": "#0d1420",
               "variable": "--seed-bg"
             },
             {
-              "value": "#1f2725",
+              "value": "#16202e",
               "variable": "--seed-surface"
             },
             {
-              "value": "#e3ebe6",
+              "value": "#e6ecf4",
               "variable": "--seed-fg"
             },
             {
-              "value": "#3fbf9f",
+              "value": "#7db0f5",
               "variable": "--seed-primary"
             },
             {
-              "value": "#7dddaf",
+              "value": "#35c2a5",
               "variable": "--seed-accent"
             },
             {
-              "value": "#0e1a16",
+              "value": "#0b1a2e",
               "variable": "--seed-on-primary"
             },
             {
-              "value": "#0f1413",
+              "value": "#0a1220",
               "variable": "--seed-nav"
             },
             {
-              "value": "#57c98a",
+              "value": "#4cc38a",
               "variable": "--seed-success"
             },
             {
-              "value": "#e0a92e",
+              "value": "#e5a83c",
               "variable": "--seed-warning"
             },
             {
@@ -159,7 +159,7 @@
           "label": "高对比",
           "patches": [
             {
-              "value": "#f6faf7",
+              "value": "#f4f7fb",
               "variable": "--seed-bg"
             },
             {
@@ -167,15 +167,15 @@
               "variable": "--seed-surface"
             },
             {
-              "value": "#0d1310",
+              "value": "#0a1220",
               "variable": "--seed-fg"
             },
             {
-              "value": "#04594c",
+              "value": "#0b3168",
               "variable": "--seed-primary"
             },
             {
-              "value": "#04594c",
+              "value": "#0a6b5e",
               "variable": "--seed-accent"
             },
             {
@@ -183,7 +183,7 @@
               "variable": "--seed-on-primary"
             },
             {
-              "value": "#0d1310",
+              "value": "#0a1220",
               "variable": "--seed-nav"
             },
             {
@@ -191,7 +191,7 @@
               "variable": "--seed-success"
             },
             {
-              "value": "#6b4a05",
+              "value": "#7c2d12",
               "variable": "--seed-warning"
             },
             {
@@ -203,7 +203,7 @@
               "variable": "--seed-info"
             },
             {
-              "value": "#f2fbf6",
+              "value": "#f0f6ff",
               "variable": "--seed-on-nav"
             },
             {
@@ -211,7 +211,7 @@
               "variable": "--seed-on-solid"
             },
             {
-              "value": "#050807",
+              "value": "#05080f",
               "variable": "--seed-scrim"
             }
           ],
@@ -224,23 +224,23 @@
     {
       "control": "slider",
       "group": "密度",
-      "label": "队列行密度",
+      "label": "待办行密度",
       "max": 16,
       "min": 8,
-      "step": 1,
+      "step": 2,
       "unit": "px",
-      "value": "11px",
+      "value": "12px",
       "variable": "--seed-row-pad"
     },
     {
       "control": "slider",
       "group": "密度",
-      "label": "区块间距",
-      "max": 20,
+      "label": "区块间距（8px 体系）",
+      "max": 24,
       "min": 8,
-      "step": 2,
+      "step": 8,
       "unit": "px",
-      "value": "12px",
+      "value": "16px",
       "variable": "--seed-gap"
     },
     {

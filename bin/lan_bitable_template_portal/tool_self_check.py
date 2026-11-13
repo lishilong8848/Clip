@@ -268,10 +268,25 @@ class ToolSelfChecks:
                 'schema': json.loads(row['schema'])}
 
     def list_templates(self, db, administrator):
-        return [self.template_info(row) for row in db.execute('''SELECT t.id,t.version,t.name,t.active,t.schema
+        templates = [self.template_info(row) for row in db.execute('''SELECT t.id,t.version,t.name,t.active,t.schema
             FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
             AND t.id NOT IN (SELECT id FROM tool_check_template_deletions) AND (? OR t.active=1)
             ORDER BY t.name''', (administrator,))]
+        # Open orders pin the template they were filled against. Deleting stays safe for them,
+        # but the confirmation must say so up front instead of surprising whoever is mid-inspection.
+        usage = {}
+        for row in db.execute('SELECT records FROM tool_check_orders WHERE submitted_at IS NULL'):
+            try:
+                records = json.loads(row['records'])
+            except Exception:
+                continue
+            for record in records if isinstance(records, list) else []:
+                identity = record.get('template_id') if isinstance(record, dict) else None
+                if isinstance(identity, str):
+                    usage[identity] = usage.get(identity, 0) + 1
+        for template in templates:
+            template['open_usage'] = usage.get(template['id'], 0)
+        return templates
 
     def save_template(self, actor, name, content, identity='', version=None):
         self.access(actor)

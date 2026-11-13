@@ -3,6 +3,8 @@
     <header>
       <strong>{{ plan.month }} 月度计划</strong>
       <span v-if="plan.inventory_at || plan.items.length">可创建 {{ plan.items.length }} 项</span>
+      <NButton v-if="!plan.inventory_at || plan.inventory_error" size="tiny" :disabled="busy"
+        title="清单来自本地工具底表；底表未同步或同步失败时，重读计划只会读到同一份旧数据" @click="emit('sync')">同步工具底表</NButton>
       <NButton size="tiny" :disabled="busy" @click="emit('refresh')">重读计划</NButton>
     </header>
     <p v-if="plan.archived && plan.items.length" class="batch-empty" role="status">本月已有归档。新增工单后可继续下载上次归档，补充工单全部提交后会重新生成。</p>
@@ -84,7 +86,7 @@ import { computed, ref, watch } from 'vue';
 import { NButton, NCheckbox, NInput, NPagination } from 'naive-ui';
 
 const props = defineProps<{ plan: OrderCreationPlan; busy: boolean }>();
-const emit = defineEmits<{ close: []; create: [orders: PlannedOrder[]]; refresh: [] }>();
+const emit = defineEmits<{ close: []; create: [orders: PlannedOrder[]]; refresh: []; sync: [] }>();
 const search = ref('');
 const scope = ref('all');
 const kind = ref('all');

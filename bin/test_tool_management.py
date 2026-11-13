@@ -367,6 +367,29 @@ class ToolManagementTest(TestCase):
             self.svc.cancel_orders(self.supervisor, {'month': self.month, 'orders': [{'id': order['id'], 'revision': order['revision']}]})
         self.assertEqual(self.svc.detail(self.leader, order['id'])['status'], 'pending')
 
+    def test_manual_inventory_refresh_surfaces_failure_instead_of_silent_empty_plan(self):
+        from bin.lan_bitable_template_portal.risk_inspection import RiskError
+
+        # A building leader can force the sync the monthly plan is built from.
+        plan = self.svc.refresh_inventory(self.leader)
+        self.assertEqual(plan['inventory_error'], '')
+        self.assertTrue(plan['inventory_at'])
+
+        # When the cloud read fails the operator gets a reason, not a silently empty list.
+        original = self.cloud.inventory
+        self.cloud.inventory = lambda: (_ for _ in ()).throw(RiskError('飞书读取超时', 503))
+        try:
+            with self.assertRaisesRegex(RiskError, '本月清单暂无法生成'):
+                self.svc.refresh_inventory(self.leader)
+        finally:
+            self.cloud.inventory = original
+        self.assertIn('飞书读取超时', self.svc.planned_order_candidates(self.leader)['inventory_error'])
+        self.assertEqual(self.svc.refresh_inventory(self.leader)['inventory_error'], '')
+
+        # Plain supervisors cannot force a sync.
+        with self.assertRaisesRegex(RiskError, '仅本楼楼长'):
+            self.svc.refresh_inventory(self.supervisor)
+
     def test_inventory_create_idempotence_and_unconfirmed_result(self):
         schema=[{'name':'楼栋','type':3,'options':['南通A楼','南通B楼']},
                 {'name':'工具名称','type':1,'options':[]},{'name':'一级分类','type':3,'options':['B工具类']},

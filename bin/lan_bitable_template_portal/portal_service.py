@@ -1219,6 +1219,15 @@ BUILDING_OPEN_ID_MAP = {
     "E": "ou_fb53efe356466339f4f3cc22f2c7f9fb",
     "H": "ou_3e7a45be43f809cd54e277243e9821ab",
 }
+# Ops groups per building. A repair record only notifies the groups of its own buildings;
+# buildings without a configured group are skipped rather than fanned out to every group.
+BUILDING_CHAT_ID_MAP = {
+    "A": "oc_f254e858dd3552912f6d2261068abc8b",
+    "B": "oc_8d64cb31e9376c8bdb9085a29dc0c765",
+    "C": "oc_76fcc146da00d745c7d580a44d6b0a16",
+    "D": "oc_e9137be471e5139070fec9fba2ca33cf",
+    "E": "oc_bc066efc71810c3b6c79f224f4f350c3",
+}
 SCOPE_OPTIONS = [
     {"value": "110", "label": "110站"},
     {"value": "A", "label": "A楼"},
@@ -14712,6 +14721,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                     ),
                     "fault_time": self._repair_management_plain_text(
                         project_fields.get("故障发生时间")
+                    ),
+                    "repair_start_time": self._repair_management_plain_text(
+                        project_fields.get("维修开始时间")
+                        or project_raw_fields.get("维修开始时间")
                     ),
                     "location": self._repair_management_plain_text(
                         project_fields.get("位置")

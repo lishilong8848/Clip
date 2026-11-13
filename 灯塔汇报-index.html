@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>灯塔 · 数据中心运维管理平台 — 功能价值汇报</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a61'/%3E%3Cpath d='M16 5l7 12h-4.5v8h-5v-8H9z' fill='white'/%3E%3C/svg%3E" />
 <style>
   :root{
     --ink:#0e2340; --ink-2:#27405f; --muted:#5b6b80; --line:#dbe4f0; --bg:#f9fafc;
@@ -154,6 +155,36 @@
   .mod-rel{display:flex;gap:8px;flex-wrap:wrap}
   .mod-rel button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 14px;font-size:12.5px;cursor:pointer;color:var(--ink-2);transition:border-color .15s,color .15s}
   .mod-rel button:hover{border-color:#087a61;color:#087a61}
+  .mod-pn{display:flex;justify-content:space-between;gap:12px;margin-top:28px}
+  .mod-pn button{flex:1;border:1px solid var(--line);background:#fff;border-radius:10px;padding:10px 16px;font-size:13px;cursor:pointer;color:var(--ink-2);transition:border-color .15s,color .15s}
+  .mod-pn button:hover{border-color:#087a61;color:#087a61}
+  .mod-pn button:last-child{text-align:right}
+  .hero-cta{margin-top:20px;background:#fff;color:#087a61;border:0;border-radius:10px;padding:10px 20px;font-size:13.5px;font-weight:700;cursor:pointer;box-shadow:0 4px 14px rgb(0 0 0 / .18)}
+  .hero-cta:hover{transform:translateY(-1px)}
+  :focus-visible{outline:2px solid #087a61;outline-offset:2px;border-radius:6px}
+  .met-chips b{background:none;border:0;color:var(--ink-2);font-size:12px;font-weight:600;padding:5px 2px}
+  #lbArt img.shot.big{transition:transform .12s ease;transform-origin:center center;cursor:zoom-in}
+  .home-arch{margin:24px 0 0;border:1px solid var(--line);border-radius:14px;background:#fff;padding:16px 18px 12px}
+  .home-arch h3{margin:0 0 10px;font-size:16px;display:flex;align-items:center;gap:10px}
+  .home-arch h3 button{border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 12px;font-size:12px;cursor:pointer;color:var(--ink-2);font-weight:400}
+  .home-arch h3 button:hover{border-color:#087a61;color:#087a61}
+  .home-arch svg{width:100%;height:auto;display:block}
+  .value-band{margin:36px 0 0;background:linear-gradient(135deg,#063a30,#087a61);border-radius:16px;padding:26px 28px;color:#fff}
+  .value-band h3{margin:0 0 14px;font-size:18px}
+  .value-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:12px}
+  .value-card{background:rgb(255 255 255 / .1);border:1px solid rgb(255 255 255 / .18);border-radius:12px;padding:12px 14px}
+  .value-card b{display:block;font-size:13.5px;margin-bottom:6px}
+  .value-card p{margin:0;font-size:12px;line-height:1.8;color:rgb(255 255 255 / .82)}
+  .value-cta{margin-top:16px;background:#fff;color:#087a61;border:0;border-radius:10px;padding:9px 18px;font-weight:700;font-size:13px;cursor:pointer}
+  .pn-tip{margin:10px 0 0;font-size:12px;color:var(--ink-2)}
+  .tile-met{display:inline-block;margin-top:9px;font-size:11px;color:#087a61;background:#f0f6f4;border:1px solid rgb(8 122 97 / .2);border-radius:999px;padding:3px 10px}
+  .home-foot{margin:20px 0 0;padding-bottom:44px;font-size:12px;color:var(--ink-2);text-align:center}
+  .card-more{margin-top:10px;border:0;background:none;color:#087a61;font-size:12.5px;cursor:pointer;padding:0}
+  .card-more:hover{text-decoration:underline}
+  .demo-route{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin:12px 0 0;font-size:12.5px;color:var(--ink-2)}
+  .demo-route i{font-style:normal;color:var(--ink-2)}
+  .demo-route button{border:1px dashed rgb(8 122 97 / .45);background:#fff;color:#087a61;border-radius:999px;padding:5px 13px;font-size:12px;cursor:pointer}
+  .demo-route button:hover{border-style:solid;border-color:#087a61}
   #toTop{position:fixed;right:22px;bottom:26px;z-index:60;width:42px;height:42px;border-radius:50%;border:1px solid var(--line);background:#fff;box-shadow:0 6px 18px rgb(15 40 70 / .14);cursor:pointer;font-size:17px;color:var(--ink-2);display:none}
   #toTop.show{display:block}
   #hoverPrev{position:fixed;z-index:80;pointer-events:none;display:none;width:520px;background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px;box-shadow:0 14px 44px rgb(10 30 60 / .28)}
@@ -163,12 +194,19 @@
   .toc-links a.on{color:#087a61;font-weight:700}
   .view.anim{animation:vin .28s ease}
   @keyframes vin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  #printOne{display:none}
   @media print{
-    .toc,#toTop,.toc-views{display:none!important}
-    #viewHome,#viewModule{display:none!important}
-    #viewAll{display:block!important}
-    .flow-view{overflow:visible!important}
-    .block{break-inside:avoid}
+    .toc,#toTop,#hoverPrev,#viewHome,#viewModule,#viewAll{display:none!important}
+    #printOne{display:block!important}
+    #printOne h1{font-size:20px;margin:0 0 6px}
+    #printOne h2{font-size:13.5px;margin:12px 0 5px;color:#087a61}
+    #printOne p,#printOne li{font-size:10.5px;line-height:1.75;margin:0 0 3px}
+    #printOne .p-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}
+    #printOne .p-sec{margin:0 0 4px;font-size:10.5px;line-height:1.7}
+    #printOne .p-sec b{color:#1d4ed8}
+    #printOne svg{width:100%;height:auto;display:block;margin-top:4px}
+    #printOne .p-foot{margin-top:10px;font-size:9.5px;color:#6b7a8c}
+    @page{margin:14mm}
   }
   .flow-notes{margin:12px 0 0;padding-left:20px;display:grid;gap:6px;font-size:13.5px;color:var(--ink-2)}
   .flow-notes b{color:var(--ink)}
@@ -227,6 +265,8 @@
       <a href="#summary">整体价值总结</a>
     </div>
     <div class="toc-views">
+      <button type="button" id="fsBtn" title="全屏演示（Esc 退出）">全屏</button>
+      <button type="button" id="printBtn" title="输出一页纸汇报摘要 PDF">打印/PDF</button>
       <button type="button" id="goHome">主页</button>
       <button type="button" id="goAll">更多介绍</button>
     </div>
@@ -366,6 +406,8 @@
 <button type="button" id="toTop" aria-label="回到顶部" title="回到顶部">↑</button>
 <div id="hoverPrev" aria-hidden="true"><img alt="" /></div>
 
+<section id="printOne" aria-label="汇报摘要打印版"></section>
+
 <div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="效果图放大查看">
   <div class="lb-box">
     <div class="lb-art" id="lbArt"></div>
@@ -373,6 +415,7 @@
     <div class="lb-bar">
       <button type="button" id="lbPrev">上一张</button>
       <button type="button" id="lbNext">下一张</button>
+      <button type="button" id="lbMod">查看模块详情 →</button>
       <button type="button" id="lbClose">关闭 (Esc)</button>
       <span class="idx" id="lbIdx"></span>
     </div>
@@ -583,7 +626,8 @@ for(const key of Object.keys(secTitles)){
         <li><span class="k use">功能</span><span>${m.use}</span></li>
         <li><span class="k fix">解题</span><span>${m.fix}</span></li>
         <li><span class="k val">价值</span><span>${m.val}</span></li>
-      </ul></div>`;
+      </ul>
+      <button type="button" class="card-more" data-mod="${m.i}">查看模块详情 →</button></div>`;
     host.appendChild(card);
   }
 }
@@ -856,21 +900,54 @@ function showView(v){
   document.getElementById('goAll').classList.toggle('on',v==='all');
   const el=document.getElementById(v==='home'?'viewHome':v==='module'?'viewModule':'viewAll');
   if(el){el.classList.remove('anim');void el.offsetWidth;el.classList.add('anim');}
+  if(v!=='module')history.replaceState(null,'',v==='all'?'#/all':'#/');
   window.scrollTo(0,0);}
+const PILLARS=[
+ ['效率价值','通告、任务、巡检、晨会一站式办理与自动生成，一线表务与重复录入大幅减少。'],
+ ['秩序价值','事件优先排队与计划收敛审查，让响应与变更始终有序，避免漏办与冲突。'],
+ ['资产价值','机柜、水耗、维修台账透明量化，能耗异常与设备风险即时核查发现。'],
+ ['合规价值','签名、交接、审计与冻结归档构成完整证据链，满足内控与审计追问。'],
+ ['协同价值','桌面、网页、飞书、钉钉多端同步，跨班组协作不再依赖口头与截图。'],
+ ['智能价值','智能助手与本地知识库把专家经验沉淀为可复用技能，降低新人上手成本。']];
+function archMini(){
+  const bands=[
+    {l:'接入',c:'#2563eb',n:['桌面剪贴板','网页工作台','飞书 / 钉钉','公网隧道']},
+    {l:'治理',c:'#1d4ed8',n:['七类 Handler','事件优先排队','四维权限校验','探针补传闭环']},
+    {l:'业务',c:'#0e7490',n:['事件通告中枢','日常运行安全','设备资产能耗','组织人员训练','智能能力知识','平台底座交付']},
+    {l:'输出',c:'#18805e',n:['飞书送达','Excel 冻结归档','审计证据链','多端工作台']}];
+  const W=1160,H=308;let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="平台架构一览">
+   <defs><marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8aa0b8"/></marker></defs>`;
+  bands.forEach((b,bi)=>{
+    const y=10+bi*76;
+    s+=`<rect x="8" y="${y}" width="86" height="56" rx="10" fill="${b.c}"/><text x="51" y="${y+34}" font-size="15" font-weight="700" fill="#fff" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
+    const n=b.n.length,cw=(W-120-(n-1)*10)/n;
+    b.n.forEach((t,i)=>{const x=104+i*(cw+10);
+      s+=`<rect x="${x}" y="${y}" width="${cw}" height="56" rx="10" fill="${b.c}" opacity=".08" stroke="${b.c}" stroke-opacity=".35"/>
+          <text x="${x+cw/2}" y="${y+34}" font-size="12.5" fill="${b.c}" font-weight="600" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;});
+    if(bi<3)s+=`<path d="M${W/2},${y+56} L${W/2},${y+72}" stroke="#8aa0b8" stroke-width="2" marker-end="url(#ara)"/>`;});
+  return s+`</svg>`;}
+function valueBand(){
+  return `<div class="value-band"><h3>整体价值 · 六维一条主线</h3><div class="value-grid">`+
+    PILLARS.map(p=>`<div class="value-card"><b>${p[0]}</b><p>${p[1]}</p></div>`).join('')+
+    `</div><button type="button" class="value-cta" id="valCta">查看整体价值总结 →</button></div>`;}
 function renderHome(){
   let h=`<div class="wrap"><div class="home-hero"><div class="kicker">南通数据中心 · 运维数字化平台</div>
     <h1>灯塔 · 数据中心运维管理平台</h1>
     <p>点击任意功能模块，查看该模块专属的流程图、功能价值与界面效果图；点击右上角「更多介绍」查看单页完整汇报（项目概览、模块关系与数据流向总图、整体价值总结）。</p>
     <div class="home-stats"><span>25 个功能模块</span><span>7 类通告全生命周期</span><span>37 张飞书多维表</span><span>139 张本地数据表</span><span>52 个智能助手工具</span><span>桌面 · 网页 · 飞书 · 助手四端一体</span></div>
+    <button type="button" class="hero-cta" id="heroAll">查看完整汇报 →</button>
     </div>
+    <div class="home-arch"><h3>平台架构一览<button type="button" id="archFull">查看完整流向图 →</button></h3>${archMini()}</div>
     <div class="home-bar"><input id="homeSearch" class="home-search" type="search" placeholder="搜索模块名称或关键词，如：巡检 / 签名 / 知识库" aria-label="搜索功能模块"><span class="home-count" id="homeCount">共 25 个功能模块</span></div>
+    <div class="demo-route"><span>推荐演示路线：</span>${[1,6,12,16,19].map(i=>`<button type="button" data-mod="${i}">${MODULES[i].name}</button>`).join('<i>→</i>')}<i>→</i><button type="button" id="demoSummary">整体价值总结</button></div>
     <div style="padding-bottom:56px">`;
   for(const key of Object.keys(secTitles)){
     const list=MODULES.filter(x=>x.s===key);
     h+=`<h3 class="tile-sec" style="color:${SECCOLOR[key]}"><i style="background:${SECCOLOR[key]}"></i>${secTitles[key]}<small>${list.length} 个功能</small></h3><div class="tile-grid">`;
     for(const m of list)
-      h+=`<button type="button" class="tile" data-mod="${m.i}"><i style="background:${m.a}"></i><span class="pill">${m.pill}</span><strong>${m.name}</strong><p>${m.tag}</p></button>`;
+      h+=`<button type="button" class="tile" data-mod="${m.i}"><i style="background:${m.a}"></i><span class="pill">${m.pill}</span><strong>${m.name}</strong><p>${m.tag}</p><span class="tile-met">${(METRICS[m.i]||[])[0]||m.pill}</span></button>`;
     h+=`</div>`;}
+  h+=valueBand()+`<p class="home-foot">截图与指标快照时间 2026-11-11 · 本页面为单文件、可双击离线演示 · 支持全屏演示、打印/PDF 导出与模块链接复制</p>`;
   document.getElementById('viewHome').innerHTML=h+`</div></div>`;}
 function mflowSVG(f){
   const W=1240,H=470,sH=64,sG=16,pH=56,pG=26;
@@ -927,18 +1004,23 @@ const METRICS=[
  ['白名单隔离','30 秒健康探针','故障降级局域网'],
  ['分片 14MiB/片','哈希回读校验','增量更新']];
 const REL={0:[1,2],1:[0,2,3,5],2:[1,4],3:[1,16],4:[2,14],5:[1,6,13],6:[5,20],7:[5,16],8:[4,21],9:[16,21],10:[9,6],11:[16,20],12:[14,23],13:[5,12],14:[4,12],15:[16,22],16:[15,17],17:[16,21],18:[11,19],19:[20,21,1],20:[19],21:[19,17],22:[15,23],23:[22,24],24:[22]};
+let curMod=-1;
 function openModule(i){
   const m=MODULES[i],f=FLOWS[i],mc=SECCOLOR[m.s]||'#087a61';
+  const pv=MODULES[(i-1+MODULES.length)%MODULES.length],nx=MODULES[(i+1)%MODULES.length];
   const shots=m.img?`<h3 class="mod-sec">界面效果图</h3><div class="shot-pair">
     <div class="shot-cell"><div class="thumb" data-i="${i}" role="button" tabindex="0" aria-label="放大查看 ${m.name} 新版效果图">${thumbInner(m,'v2')}</div><small><i style="background:#087a61"></i>新版界面（芯片可切旧版）</small></div>
     ${m.img.v1?`<div class="shot-cell"><div class="thumb" data-i="${i}" data-openver="v1" role="button" tabindex="0" aria-label="放大查看 ${m.name} 旧版效果图"><img class="shot" src="${m.img.v1}" alt="${m.name} 旧版界面截图" loading="lazy"/></div><small><i style="background:#64748b"></i>旧版界面</small></div>`:''}
    </div>`:'';
   const rel=(REL[i]||[]).map(j=>`<button type="button" data-mod="${j}">${MODULES[j].name}</button>`).join('');
   document.getElementById('viewModule').innerHTML=`<div class="wrap mod-wrap" style="--mc:${mc}">
-    <button type="button" class="mod-back" id="modBack">← 返回主页</button>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+      <button type="button" class="mod-back" id="modBack" style="margin-bottom:0">← 返回主页</button>
+      <button type="button" class="mod-back" id="copyLink" style="margin-bottom:0">复制模块链接</button>
+    </div>
     <header class="mod-head"><div class="kicker" style="color:${mc};font-size:12.5px;letter-spacing:.12em;margin-bottom:6px">${secTitles[m.s]}</div>
       <h1>${m.name}　<span class="pill">${m.pill}</span></h1><p>${m.tag}</p>
-      <div class="met-chips">${(METRICS[i]||[]).map(x=>`<span>${x}</span>`).join('')}</div></header>
+      <div class="met-chips"><b>数据快照</b>${(METRICS[i]||[]).map(x=>`<span>${x}</span>`).join('')}</div></header>
     <h3 class="mod-sec">功能流程图</h3><div class="mflow-box">${mflowSVG(f)}</div>
     <h3 class="mod-sec">价值与介绍</h3>
     <div class="val-grid">
@@ -946,11 +1028,24 @@ function openModule(i){
       <div class="val-card"><b style="color:#18805e"><i style="background:#18805e"></i>功能</b><p>${m.use}</p></div>
       <div class="val-card"><b style="color:#b7791f"><i style="background:#b7791f"></i>解决的问题</b><p>${m.fix}</p></div>
       <div class="val-card"><b style="color:#6d4fc4"><i style="background:#6d4fc4"></i>业务价值</b><p>${m.val}</p></div>
-    </div>${shots}${rel?`<h3 class="mod-sec">关联模块</h3><div class="mod-rel">${rel}</div>`:''}</div>`;
-  showView('module');}
+    </div>${shots}${rel?`<h3 class="mod-sec">关联模块</h3><div class="mod-rel">${rel}</div>`:''}
+    <div class="mod-pn"><button type="button" data-mod="${pv.i}">← ${pv.name}</button><button type="button" data-mod="${nx.i}">${nx.name} →</button></div>
+    <p class="pn-tip">提示：键盘 ← / → 切换上一个 / 下一个模块，Esc 返回主页；效果图点击放大、滚轮缩放、双击还原。</p></div>`;
+  showView('module');
+  curMod=i;
+  history.replaceState(null,'','#/m'+i);}
 document.getElementById('goHome').onclick=()=>showView('home');
 document.getElementById('goAll').onclick=()=>showView('all');
 document.addEventListener('click',e=>{
+  if(e.target.closest('#copyLink')){
+    const b=e.target.closest('#copyLink');
+    const done=()=>{const t=b.textContent;b.textContent='已复制 ✓';setTimeout(()=>{b.textContent=t;},1200);};
+    if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(location.href).then(done,done);}
+    else{const ta=document.createElement('textarea');ta.value=location.href;document.body.appendChild(ta);ta.select();try{document.execCommand('copy');}catch(_e){}ta.remove();done();}
+    return;}
+  if(e.target.closest('#heroAll')){showView('all');return;}
+  if(e.target.closest('#valCta')||e.target.closest('#demoSummary')){showView('all');setTimeout(()=>{const s=document.getElementById('summary');if(s)s.scrollIntoView();},60);return;}
+  if(e.target.closest('#archFull')){showView('all');setTimeout(()=>{const s=document.getElementById('flowView');if(s)s.scrollIntoView({block:'center'});},60);return;}
   const tile=e.target.closest('[data-mod]');
   if(tile){openModule(+tile.dataset.mod);return;}
   if(e.target.closest('#modBack')){showView('home');return;}
@@ -972,6 +1067,11 @@ document.addEventListener('keydown',e=>{
 const toTop=document.getElementById('toTop');
 window.addEventListener('scroll',()=>{toTop.classList.toggle('show',window.scrollY>600);},{passive:true});
 toTop.onclick=()=>window.scrollTo({top:0,behavior:'smooth'});
+/* 全屏演示与打印/PDF */
+const fsBtn=document.getElementById('fsBtn');
+fsBtn.onclick=()=>{if(!document.fullscreenElement){document.documentElement.requestFullscreen&&document.documentElement.requestFullscreen();}else{document.exitFullscreen&&document.exitFullscreen();}};
+document.addEventListener('fullscreenchange',()=>{fsBtn.textContent=document.fullscreenElement?'退出全屏':'全屏';});
+document.getElementById('printBtn').onclick=()=>{setTimeout(()=>window.print(),30);};
 /* 整页视图目录滚动高亮 */
 const tocLinks=Array.from(document.querySelectorAll('.toc-links a'));
 window.addEventListener('scroll',()=>{
@@ -979,7 +1079,8 @@ window.addEventListener('scroll',()=>{
   let cur=tocLinks[0];
   for(const a of tocLinks){const sec=document.querySelector(a.getAttribute('href'));
     if(sec&&sec.getBoundingClientRect().top<170)cur=a;}
-  tocLinks.forEach(a=>a.classList.toggle('on',a===cur));
+  tocLinks.forEach(a=>{const on=a===cur;a.classList.toggle('on',on);
+    if(on)a.setAttribute('aria-current','true');else a.removeAttribute('aria-current');});
 },{passive:true});
 /* 缩略图悬浮"稍大"预览：220ms 延时、边缘自动翻转、触屏禁用 */
 const hp=document.getElementById('hoverPrev'),hpImg=hp.querySelector('img');
@@ -991,17 +1092,70 @@ const hpPlace=e=>{let x=e.clientX+18,y=e.clientY+18;
   hp.style.left=Math.max(8,x)+'px';hp.style.top=Math.max(8,y)+'px';};
 document.addEventListener('mouseover',e=>{
   if('ontouchstart' in window)return;
-  const img=e.target.closest?e.target.closest('.thumb img.shot'):null;
-  if(!img||!img.complete||!img.naturalWidth)return;
+  const near=e.target&&e.target.closest;
+  const img=near?e.target.closest('.thumb img.shot'):null;
+  const tile=!img&&near?e.target.closest('.tile'):null;
+  let src='';
+  if(img&&img.complete&&img.naturalWidth)src=img.getAttribute('src');
+  else if(tile){const mm=MODULES[+tile.dataset.mod];if(mm&&mm.img&&mm.img.v2)src=mm.img.v2;else return;}
+  else return;
   clearTimeout(hpTimer);
-  hpTimer=setTimeout(()=>{hpImg.src=img.getAttribute('src');hp.style.display='block';hpPlace(e);},220);});
+  hpTimer=setTimeout(()=>{hpImg.src=src;hp.style.display='block';hpPlace(e);},220);});
 document.addEventListener('mousemove',e=>{
   if(hp.style.display==='block')hpPlace(e);});
 document.addEventListener('mouseout',e=>{
-  const from=e.target.closest?e.target.closest('.thumb'):null;
-  const to=e.relatedTarget&&e.relatedTarget.closest?e.relatedTarget.closest('.thumb'):null;
+  const c=e.target&&e.target.closest;
+  const from=c?(e.target.closest('.thumb')||e.target.closest('.tile')):null;
+  const r=e.relatedTarget&&e.relatedTarget.closest;
+  const to=r?(e.relatedTarget.closest('.thumb')||e.relatedTarget.closest('.tile')):null;
   if(from&&!to){clearTimeout(hpTimer);hp.style.display='none';}});
 window.addEventListener('scroll',()=>{clearTimeout(hpTimer);hp.style.display='none';},{passive:true});
+/* URL 哈希路由：#/m12 直达模块页、#/all 整页，便于分享演示链接 */
+(function(){
+  const h=location.hash||'';
+  const mm=h.match(/^#\/m(\d+)$/);
+  if(mm&&MODULES[+mm[1]])openModule(+mm[1]);
+  else if(h==='#/all')showView('all');
+})();
+/* "/" 快捷键聚焦主页搜索；搜索框回车直达首个匹配模块 */
+document.addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&e.target&&e.target.id==='homeSearch'){
+    const t=document.querySelector('#viewHome .tile:not(.hide)');
+    if(t)openModule(+t.dataset.mod);
+    return;}
+  if(e.key==='/'&&document.body.dataset.view==='home'){
+    const a=document.activeElement;
+    if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'))return;
+    const s=document.getElementById('homeSearch');
+    if(s){e.preventDefault();s.focus();}
+  }});
+/* 模块页键盘翻页：← / → */
+document.addEventListener('keydown',e=>{
+  if(document.body.dataset.view!=='module'||cur>=0)return;
+  const a=document.activeElement;
+  if(a&&(a.tagName==='INPUT'||a.tagName==='TEXTAREA'))return;
+  if(e.key==='ArrowLeft')openModule((curMod-1+MODULES.length)%MODULES.length);
+  else if(e.key==='ArrowRight')openModule((curMod+1)%MODULES.length);
+});
+/* 打印/PDF 一页纸领导摘要 */
+function buildPrintOne(){
+  const secList=Object.keys(secTitles).map(k=>{
+    const names=MODULES.filter(m=>m.s===k).map(m=>m.name).join('、');
+    return `<p class="p-sec"><b>${secTitles[k]}：</b>${names}</p>`;}).join('');
+  const mets=[[1,'7 类通告、计划通告 39、飞书同步＋回执'],[12,'机柜 998、上电率 97.2%、台账 1245'],[16,'可用签名 68、目录 97 人、一次性链接'],[6,'每日四轮、探针 ≤5 秒、冻结归档'],[3,'MOP 表格 179、本月维保 15'],[4,'本月事件 23、时效自动核算'],[13,'本月记录 22、耗水 3,806 t'],[14,'维修全部 114、已完成 111'],[15,'账号 94、已授权 90、四维权限'],[10,'屏蔽记录 535、屏蔽中 35'],[19,'业务工具 52、写入人工确认'],[24,'分片 14MiB/片、哈希回读校验']]
+    .map(x=>`<li>${MODULES[x[0]].name}：${x[1]}</li>`).join('');
+  document.getElementById('printOne').innerHTML=
+   `<h1>灯塔 · 数据中心运维管理平台 — 功能价值汇报（摘要）</h1>
+    <p>灯塔面向数据中心一线运维场景，把事件响应、通告办理、巡检检查、设备与能耗管理、人员训练与知识沉淀整合进统一平台：以飞书多维表为协作与数据中枢，桌面端保障事件秒级响应，网页工作台承载日常业务，本地智能助手提供受控的智能办理能力。</p>
+    <h2>一、整体价值（六维）</h2><div class="p-grid">${PILLARS.map(p=>`<p><b>${p[0]}：</b>${p[1]}</p>`).join('')}</div>
+    <h2>二、六大功能分区与 25 个模块</h2>${secList}
+    <h2>三、关键数据快照（界面指标）</h2><ul style="margin:0;padding-left:16px">${mets}</ul>
+    <h2>四、平台架构与数据流向</h2>${archMini()}
+    <p class="p-foot">快照时间 2026-11-11 · 线上地址 dt.sjhl.online · 本页为单文件离线演示版，屏幕浏览支持三视图交互、全屏与模块直达链接</p>`;}
+buildPrintOne();
+/* 空闲预加载全部效果图：悬浮预览与灯箱零延迟 */
+const preloadAll=()=>{MODULES.forEach(m=>{if(m.img)[m.img.v2,m.img.v1].forEach(s=>{if(s){const im=new Image();im.src=s;}});});};
+if('requestIdleCallback' in window)requestIdleCallback(preloadAll,{timeout:4000});else setTimeout(preloadAll,1500);
 
 /* ============ 灯箱 ============ */
 const lb=document.getElementById('lb'),lbArt=document.getElementById('lbArt'),lbTitle=document.getElementById('lbTitle'),
@@ -1012,14 +1166,25 @@ function lbInner(m,ver){
     (m.img.v1?`<div class="ver-bar"><button type="button" class="ver ${ver==='v2'?'on':''}" data-lbver="v2">新版页面</button><button type="button" class="ver ${ver==='v1'?'on':''}" data-lbver="v1">旧版页面</button></div>`:'');
   return m.svg+`<div class="ver-bar"><span class="art-tag">示意图</span></div>`;
 }
-let lbVer='v2';
-function openLb(i){cur=i;lbVer='v2';const m=MODULES[i];lbArt.innerHTML=lbInner(m,'v2');lbTitle.textContent=m.name+'　|　'+m.pill;
+let lbVer='v2',lbScale=1;
+function openLb(i){cur=i;lbVer='v2';lbScale=1;const m=MODULES[i];lbArt.innerHTML=lbInner(m,'v2');lbTitle.textContent=m.name+'　|　'+m.pill;
   lbText.textContent=m.tag+' 价值：'+m.val;lbIdx.textContent=(i+1)+' / '+MODULES.length;lb.classList.add('on');document.body.style.overflow='hidden';}
 function closeLb(){lb.classList.remove('on');document.body.style.overflow='';cur=-1;}
 function step(d){if(cur<0)return;openLb((cur+d+MODULES.length)%MODULES.length);}
 document.getElementById('lbArt').addEventListener('click',e=>{
   const b=e.target.closest('[data-lbver]'); if(!b||cur<0)return;
-  lbVer=b.dataset.lbver; lbArt.innerHTML=lbInner(MODULES[cur],lbVer);
+  lbVer=b.dataset.lbver; lbScale=1; lbArt.innerHTML=lbInner(MODULES[cur],lbVer);
+});
+lbArt.addEventListener('wheel',e=>{
+  const img=lbArt.querySelector('img.shot.big');if(!img)return;
+  e.preventDefault();
+  lbScale=Math.min(4,Math.max(.5,lbScale*(e.deltaY<0?1.15:1/1.15)));
+  img.style.transform='scale('+lbScale+')';
+  img.title='缩放 '+Math.round(lbScale*100)+'% · 双击还原';
+},{passive:false});
+lbArt.addEventListener('dblclick',e=>{
+  const img=lbArt.querySelector('img.shot.big');
+  if(img){lbScale=1;img.style.transform='scale(1)';img.title='';}
 });
 document.addEventListener('error',e=>{
   const img=e.target;
@@ -1048,6 +1213,7 @@ document.addEventListener('keydown',e=>{
 document.getElementById('lbClose').onclick=closeLb;
 document.getElementById('lbPrev').onclick=()=>step(-1);
 document.getElementById('lbNext').onclick=()=>step(1);
+document.getElementById('lbMod').onclick=()=>{if(cur<0)return;const i=cur;closeLb();openModule(i);};
 lb.addEventListener('click',e=>{if(e.target===lb)closeLb();});
 document.addEventListener('keydown',e=>{if(cur<0)return;if(e.key==='Escape')closeLb();if(e.key==='ArrowLeft')step(-1);if(e.key==='ArrowRight')step(1);});
 </script>

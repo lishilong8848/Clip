@@ -13230,6 +13230,15 @@ class FastAPIPortalController:
         except Exception:
             log_warning("日常巡检提醒暂未完成，将在重试时段内继续尝试。")
 
+    def _run_scheduled_repair_progress_notifications(self) -> None:
+        if _mock_external_enabled() or self._stopping_event.is_set():
+            return
+        from lan_bitable_template_portal.repair_progress_notifications import run
+        try:
+            run(PortalRuntime.state_store, PortalRuntime.service)
+        except Exception:
+            log_warning('维修进度跟进提醒暂未完成，将在下次检查时重试。')
+
     def _run_scheduled_cold_source_monitor(self) -> None:
         if _mock_external_enabled() or self._stopping_event.is_set():
             return
@@ -13597,6 +13606,15 @@ class FastAPIPortalController:
             id="repair_maintenance",
             executor="maintenance",
             misfire_grace_time=3600,
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        scheduler.add_job(
+            self._run_scheduled_repair_progress_notifications,
+            "interval",
+            minutes=1,
+            id="repair_progress_notifications",
             replace_existing=True,
             max_instances=1,
             coalesce=True,

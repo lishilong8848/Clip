@@ -1,6 +1,6 @@
 /* The expanded navigation floats over the workspace; content never resizes. */
 html.workspace-v2 .v2-shell.has-rail:not(.is-print){--head-height:0px;--nav-width:72px}
-html.workspace-v2 .v2-shell.has-rail>.v2-sidebar.v2-rail{position:fixed;inset:0 auto 0 0;width:72px;height:100dvh;border-radius:20px;display:flex;flex-direction:column;overflow:hidden;z-index:80;border-right:1px solid var(--v2-border);transition:width 220ms ease-out,box-shadow 220ms ease-out;background:linear-gradient(165deg,var(--v2-nav-side),var(--v2-nav-side-bottom))}
+html.workspace-v2 .v2-shell.has-rail>.v2-sidebar.v2-rail{position:fixed;inset:0 auto 0 0;width:72px;height:100dvh;border-radius:0;display:flex;flex-direction:column;overflow:hidden;z-index:80;border-right:1px solid var(--v2-border);transition:width 220ms ease-out,box-shadow 220ms ease-out;background:linear-gradient(165deg,var(--v2-nav-side),var(--v2-nav-side-bottom))}
 html.workspace-v2 .v2-shell.has-rail>.v2-rail[data-collapsed=false]{width:240px;box-shadow:8px 0 24px #10202e26}
 .v2-rail-brand{height:72px;display:flex;align-items:center;gap:8px;padding:12px;flex:none;overflow:hidden}
 .v2-rail-brand>button:first-child{border:0;background:transparent;display:flex;align-items:center;gap:12px;padding:0;cursor:pointer;color:var(--v2-nav-text)}

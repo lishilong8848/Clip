@@ -86,6 +86,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 return response(await asyncio.to_thread(svc.cancel_orders, actor, body))
             if path == 'inventory/new':
                 return response(await asyncio.to_thread(svc.create_inventory, actor, body))
+            if path == 'inventory/refresh':
+                return response(await asyncio.to_thread(svc.refresh_inventory, actor))
             if path.endswith('/delete') and path.startswith('orders/'):
                 return response(await asyncio.to_thread(svc.cancel_order, actor, identity, body))
             if path.endswith('/clone') and path.startswith('templates/'):
@@ -105,7 +107,9 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             return response(error=RiskError('操作结果暂未确认，请刷新工单核对已保存内容。', 503))
 
     for path, methods in (('', ['GET']), ('/archive/{month}', ['GET']), ('/inventory', ['GET']),
-                          ('/inventory/fields', ['GET']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']),
+                          ('/inventory/fields', ['GET']),
+                          # Must precede the /inventory/{identity} catch-all below.
+                          ('/inventory/refresh', ['POST']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']),
                           ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']), ('/orders/{identity}', ['GET']),
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),

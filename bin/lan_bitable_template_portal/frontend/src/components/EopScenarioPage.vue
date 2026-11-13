@@ -92,6 +92,7 @@
           </div>
         </header>
         <NEmpty v-if="!record.steps.length" class="eop-empty" description="原记录暂无步骤" />
+        <div v-else class="eop-steps">
         <article v-for="(step,index) in record.steps" :key="step.key" :id="'eop-step-'+step.key" class="eop-step"
           :class="{ 'has-images': step.images.length, 'eop-drop-ready': draggedPhoto, 'eop-drop-active': dropStep===step.key }"
           @paste.stop="pastePictures($event,step.key)" @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop.stop="dropPicture(step.key,$event)">
@@ -108,15 +109,16 @@
             <p v-else class="eop-step-text">{{ step.text }}</p>
             <NButton v-if="editing && !step.images.length" class="eop-add-image" size="small" :disabled="busy || record.images.length >= 100" :aria-label="`为第 ${index+1} 步添加图片`" @click="choosePictures(step.key)"><ImagePlus :size="16" />添加图片</NButton>
           </div>
-          <details v-if="step.images.length" class="eop-step-media">
-            <summary>对应图片 <small>{{ step.images.length }} 张</small></summary>
-            <div v-if="editing" class="eop-media-head">
+          <!-- Photos stay visible: collapsing them behind a disclosure hid exactly the evidence
+               this page exists to review. -->
+          <div v-if="step.images.length" class="eop-step-media">
+            <div class="eop-media-head">
+              <strong>对应图片 <small>{{ step.images.length }} 张</small></strong>
               <NButton v-if="editing" size="small" :disabled="busy || record.images.length >= 100" :aria-label="`为第 ${index+1} 步添加图片`" @click="choosePictures(step.key)"><ImagePlus :size="16" />添加图片</NButton>
             </div>
             <div class="eop-gallery">
               <figure v-for="photo in stepPictures(step)" :key="photo.token">
                 <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name"
-                  @mouseenter="showHover(photo,$event)" @mouseleave="hideHover" @focus="showHover(photo,$event)" @blur="hideHover"
                   @click="openPreview(photo, stepPictures(step), `第 ${index+1} 步`, $event)">
                   <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" @error="broken.add(photo.token)" />
                   <span v-else>打开原图</span>
@@ -126,8 +128,9 @@
                 </figcaption>
               </figure>
             </div>
-          </details>
+          </div>
         </article>
+        </div>
       </section>
 
       <section v-if="unassigned.length || editing" class="eop-panel eop-pool" aria-label="待分配图片" @paste="pastePictures($event,'')" @dragover="overFiles" @drop="dropFiles($event,'')">
@@ -145,7 +148,6 @@
             <button type="button" class="eop-thumb" :aria-label="'预览 '+photo.name"
               :draggable="editing && !busy && record.steps.length>0"
               @dragstart="startPictureDrag(photo.token,$event)" @dragend="clearPictureDrag"
-              @mouseenter="showHover(photo,$event)" @mouseleave="hideHover" @focus="showHover(photo,$event)" @blur="hideHover"
               @click="openPreview(photo, unassigned, '待分配图片', $event)">
               <img v-if="!broken.has(photo.token)" :src="photo.url" alt="" loading="lazy" decoding="async" draggable="false" @error="broken.add(photo.token)" />
               <span v-else>打开原图</span>
@@ -187,9 +189,6 @@
       </footer>
       <input ref="fileInput" hidden type="file" multiple accept="image/png,image/jpeg,image/gif,image/webp" @change="uploadPictures" />
     </template>
-    <div v-if="hoverPhoto" class="eop-hover-zoom" :style="hoverStyle" aria-hidden="true">
-      <img :src="hoverPhoto.url" alt="" />
-    </div>
     <NModal :show="!!preview" preset="card" :title="previewTitle" class="eop-preview" style="width:min(94vw,1200px)" @update:show="show => { if (!show) closePreview(); }" @after-leave="restorePreviewFocus">
       <div v-if="preview" @keydown.left.prevent="changePreview(-1)" @keydown.right.prevent="changePreview(1)">
         <img :key="preview.token" :src="preview.ticket ? preview.url : preview.url + '?original=1'" :alt="preview.name" class="eop-original" @error="previewError = true" />
@@ -304,8 +303,7 @@ const assignedPhoto = computed(() => {
 });
 watch([search,specialty,missing,priority], () => { page.value = 1; });
 watch(() => filtered.value.length, length => { page.value = Math.min(page.value, Math.max(1, Math.ceil(length/pageSize))); });
-watch(preview, value => { previewError.value = false; if (value) hideHover(); });
-watch(record, () => hideHover());
+watch(preview, value => { previewError.value = false; });
 const choices = (field: string) => [...new Set([...(record.value?.options[field] || []),record.value?.fields[field] || ''])].filter(Boolean);
 const stepPictures = (step: Step) => step.images.flatMap(token => photos.value.get(token) || []);
 function focusSection(section: HTMLElement | null | undefined, anchor: HTMLElement | null | undefined = section) {
@@ -324,39 +322,10 @@ function jumpToStep(event: Event) {
   select.value = '';
 }
 function openPreview(photo: Photo, group: Photo[], label: string, event: MouseEvent) {
-  hideHover();
   previewTrigger = event.currentTarget as HTMLElement;
   previewGroup.value = label;
   previewIndex.value = group.findIndex(item => item.token === photo.token);
   previewPhotos.value = group;
-}
-const hoverPhoto = shallowRef<Photo>();
-const hoverBox = ref<{top:number;left:number;width:number;height:number}>();
-const hoverStyle = computed(() => hoverBox.value
-  ? {top:`${hoverBox.value.top}px`,left:`${hoverBox.value.left}px`,width:`${hoverBox.value.width}px`,height:`${hoverBox.value.height}px`}
-  : undefined);
-let hoverTimer: ReturnType<typeof setTimeout> | undefined;
-function showHover(photo: Photo, event: Event) {
-  if (preview.value || draggedPhoto.value || busy.value) return;
-  if (typeof matchMedia === 'function' && matchMedia('(hover: none)').matches) return;
-  const target = event.currentTarget as HTMLElement;
-  clearTimeout(hoverTimer);
-  hoverTimer = setTimeout(() => {
-    if (preview.value || draggedPhoto.value) return;
-    const rect = target.getBoundingClientRect();
-    const width = Math.min(420, Math.max(240, Math.round(rect.width * 2.6)));
-    const height = Math.round(width * 0.75);
-    let left = rect.right + 10;
-    if (left + width > window.innerWidth - 8) left = Math.max(8, rect.left - width - 10);
-    const top = Math.min(Math.max(8, rect.top + rect.height / 2 - height / 2), Math.max(8, window.innerHeight - height - 8));
-    hoverBox.value = {top: Math.round(top), left: Math.round(left), width, height};
-    hoverPhoto.value = photo;
-  }, 220);
-}
-function hideHover() {
-  clearTimeout(hoverTimer);
-  hoverPhoto.value = undefined;
-  hoverBox.value = undefined;
 }
 function referenceBrief(value: string) {
   const text = String(value || '').replace(/\s+/g, ' ').trim();
@@ -626,8 +595,8 @@ const unregister = registerNavigationGuard((_target,proceed) => {
 });
 function beforeUnload(event: BeforeUnloadEvent) { if (busy.value || dirty.value) event.preventDefault(); }
 let refreshTimer:ReturnType<typeof setInterval> | undefined;
-onMounted(() => { void loadList(); refreshTimer=setInterval(()=>{if (!record.value && !opening.value && !loading.value) void loadList();},300000); window.addEventListener('beforeunload',beforeUnload); window.addEventListener('scroll',hideHover,true); window.addEventListener('resize',hideHover); });
-onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refreshTimer); activeRead?.abort(); unregister(); revokePictures(); clearTimeout(hoverTimer); window.removeEventListener('beforeunload',beforeUnload); window.removeEventListener('scroll',hideHover,true); window.removeEventListener('resize',hideHover); });
+onMounted(() => { void loadList(); refreshTimer=setInterval(()=>{if (!record.value && !opening.value && !loading.value) void loadList();},300000); window.addEventListener('beforeunload',beforeUnload); });
+onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refreshTimer); activeRead?.abort(); unregister(); revokePictures(); window.removeEventListener('beforeunload',beforeUnload); });
 </script>
 
 <style scoped>
@@ -688,13 +657,15 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-page input,.eop-page select,.eop-page textarea { min-width:0; max-width:100%; box-sizing:border-box; padding:7px 9px; border:1px solid var(--ep-line); border-radius:6px; background:var(--ep-surface); color:inherit; font:inherit; }
 .eop-page textarea { display:block; width:100%; line-height:1.6; resize:vertical; }
 .eop-section-head h2 { margin:0; font-size:16px; }
-.eop-step { display:grid; grid-template-columns:minmax(0,1fr); border:1px solid var(--ep-line); border-radius:7px; margin-top:6px; overflow:hidden; }
-.eop-step.has-images { grid-template-columns:minmax(0,1fr) minmax(130px,24%); }
-.eop-step-body,.eop-step-media { min-width:0; padding:7px 9px; }
-.eop-step-media { background:var(--ep-soft); border-inline-start:1px solid var(--ep-line); align-self:start; font-size:13px; }
-.eop-step-media[open] { align-self:stretch; }
-.eop-step-media .eop-media-head { justify-content:flex-start; margin-top:6px; }
-.eop-step-media .eop-gallery { grid-template-columns:repeat(auto-fill,minmax(min(100%,76px),1fr)); }
+/* Steps read as self-contained cards in a responsive grid: several per row instead of one tall
+   row each, and the photos sit inside the card, always visible. */
+.eop-steps { display:grid; grid-template-columns:repeat(auto-fill,minmax(min(100%,300px),1fr)); gap:10px; align-items:start; }
+.eop-step { display:flex; flex-direction:column; gap:8px; min-width:0; padding:8px 10px;
+  border:1px solid var(--ep-line); border-radius:7px; background:var(--ep-surface); }
+.eop-step-body,.eop-step-media { min-width:0; }
+.eop-step-media { border-top:1px solid var(--ep-line); padding-top:8px; font-size:13px; }
+.eop-step-media .eop-media-head { margin-bottom:6px; }
+.eop-step-media .eop-gallery { margin-top:0; grid-template-columns:repeat(auto-fill,minmax(min(100%,76px),1fr)); }
 .eop-step-title { margin-bottom:4px; }
 .eop-step-title h3 { margin:0; padding:3px 7px; border-radius:5px; background:var(--ep-soft); color:var(--ep-ink); font-size:14px; }
 .eop-step-actions { display:flex; gap:4px; }
@@ -707,7 +678,9 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-pool-grid { grid-template-columns:repeat(auto-fill,minmax(min(100%,132px),1fr)); }
 .eop-gallery figure { margin:0; min-width:0; padding:5px; border:1px solid var(--ep-line); border-radius:7px; background:var(--ep-surface); }
 .eop-thumb { display:grid; place-items:center; width:100%; aspect-ratio:4/3; padding:0; overflow:hidden; background:var(--ep-soft); border:0; cursor:zoom-in; color:inherit; }
-.eop-thumb img { width:100%; height:100%; min-height:0; object-fit:contain; }
+.eop-thumb img { width:100%; height:100%; min-height:0; object-fit:contain; transition:transform .12s ease; }
+/* Hover gives a slight in-place zoom as a peek; clicking still opens the full preview. */
+.eop-thumb:hover img,.eop-thumb:focus-visible img { transform:scale(1.08); }
 .eop-gallery figcaption { display:grid; gap:4px; margin-top:4px; font-size:12px; }
 .eop-gallery figcaption>span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .eop-gallery figcaption .n-button { justify-self:start; }
@@ -723,9 +696,6 @@ onBeforeUnmount(() => { disposed = true; if (refreshTimer) clearInterval(refresh
 .eop-reference-summary { display:flex; align-items:baseline; gap:8px; cursor:pointer; }
 .eop-reference-summary h2 { margin:0; font-size:15px; }
 .eop-reference-summary small { color:var(--ep-muted); font-size:12px; font-weight:400; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.eop-hover-zoom { position:fixed; z-index:70; pointer-events:none; padding:6px; border:1px solid var(--ep-line); border-radius:10px; background:var(--ep-surface); box-shadow:0 10px 30px rgb(15 30 50 / 18%); }
-.eop-hover-zoom img { display:block; width:100%; height:100%; min-height:0; object-fit:contain; border-radius:6px; background:var(--ep-soft); }
-@media (hover:none) { .eop-hover-zoom { display:none; } }
 .eop-preview-actions { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-top:10px; overflow-wrap:anywhere; }
 .eop-preview-actions>div { display:flex; gap:6px; margin-inline-start:auto; }
 @media(max-width:760px) {

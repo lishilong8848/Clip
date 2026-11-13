@@ -300,6 +300,27 @@ class ToolManagement(ToolSelfChecks):
                     'tool_count': tool_count, 'excluded': excluded,
                     'inventory_at': inventory_at, 'inventory_error': inventory_error}
 
+    def refresh_inventory(self, actor):
+        """Manual escape hatch for the monthly plan.
+
+        The plan is built from the local inventory mirror, which only the background worker
+        refreshes every five minutes. When that sync keeps failing the plan stays empty and
+        「重读计划」 just re-reads the same stale mirror, so the monthly list can never appear.
+        Letting the operator force a sync turns a silent dead end into either a list or a reason.
+        """
+        self.access(actor)
+        with self.connect() as db:
+            if not self.order_creation_scopes(db, actor):
+                raise RiskError('仅本楼楼长或有权限的管理员可同步工具底表。', 403)
+        try:
+            self.refresh()
+        except Exception as exc:
+            reason = str(exc) if isinstance(exc, RiskError) else '工具底表读取失败，保留上次库存并自动重试。'
+            with self.connect(True) as db:
+                self.set_state(db, 'inventory_error', reason)
+            raise RiskError('工具底表同步失败，本月清单暂无法生成：' + reason, 503) from None
+        return self.planned_order_candidates(actor)
+
     def create_planned_orders(self, actor, body):
         self.access(actor)
         entries = body.get('orders')

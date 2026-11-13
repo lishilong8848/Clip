@@ -48,7 +48,7 @@
                 <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }"
                   @positive-click="deleteTemplate(template)">
                   <template #trigger><NButton size="small" type="error" quaternary :disabled="busy">删除</NButton></template>
-                  删除「{{ template.name }}」？已有自检记录仍可查看和导出。
+                  删除「{{ template.name }}」？<template v-if="template.open_usage">该模板正被 {{ template.open_usage }} 张未提交工单引用：删除后这些工单仍按已保存的版本继续填写和提交，但不能再新选此模板。</template><template v-else>当前没有未提交工单引用它。</template>已有自检记录仍可查看和导出。
                 </NPopconfirm>
               </div>
             </article>
@@ -101,7 +101,7 @@
             <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
           </section>
           <ToolOrderBatchCreate v-if="view === 'orders' && newOrderPlan" :plan="newOrderPlan" :busy="busy"
-            @close="newOrderPlan = null" @create="createOrders" @refresh="openNewOrder" />
+            @close="newOrderPlan = null" @create="createOrders" @refresh="openNewOrder" @sync="syncInventory" />
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :disabled="busy" :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
               <template #prefix><Search :size="16" /></template>
@@ -318,7 +318,7 @@ const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManageme
 defineProps<{ scope?: string; embedded?: boolean }>();
 const api = '/api/tool-self-check';
 interface Template {
-  id: string; version: number; name: string; active: boolean;
+  id: string; version: number; name: string; active: boolean; open_usage?: number;
   schema: { specialty: string; cycle: string; applicable: string; precautions: string;
     checks: { row: number; name: string; method: string; standard: string; group_row?:number }[];
     layout?:'hvac'; fields?:Record<string,string>; calibration?:{row:number;label:string;fields:Record<string,string>}[] };
@@ -376,6 +376,15 @@ async function openNewOrder() {
     newOrderPlan.value = await readOrderPlan();
     addingTool.value = false;
     exitBulkMode();
+  });
+}
+async function syncInventory() {
+  await mutate(async () => {
+    // 「重读计划」 only re-reads the local mirror; this forces the cloud sync the plan depends on.
+    newOrderPlan.value = await requestJson(api + '/inventory/refresh', {
+      method: 'POST', body: JSON.stringify({}), cache: 'no-store',
+    }) as OrderCreationPlan;
+    message.value = '工具底表已同步，本月清单已重新生成。';
   });
 }
 async function createOrders(items: PlannedOrder[]) {
