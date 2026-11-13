@@ -1,0 +1,320 @@
+/* ==========================================================================
+   灯塔 · 数据中心运维管理平台 — 模块详情与交互组件样式
+   作用域：模块详情视图、流程图容器、业务场景、界面效果图、
+           灯箱（Lightbox）、悬浮预览、关联模块、翻页、打印摘要
+   ========================================================================== */
+
+/* ==========================================================================
+   模块详情视图
+   ========================================================================== */
+.mod{padding:22px 0 60px}
+
+/* 面包屑 + 操作条 */
+.mod-bar{
+  display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  margin-bottom:14px;
+}
+.mback{
+  border:1px solid var(--line);background:#fff;
+  border-radius:8px;padding:7px 14px;cursor:pointer;
+  font-size:13px;color:var(--ink-2);
+  transition:border-color .15s,color .15s,transform .15s;
+}
+.mback:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px)}
+.crumb{
+  color:var(--ink-2);font-size:12.5px;
+  display:flex;align-items:center;gap:6px;margin-left:4px;
+}
+.crumb b{color:var(--mc,#087a61);font-weight:600}
+.crumb .sep{color:var(--ink-3)}
+
+/* 模块头部 */
+.mhead{
+  border-left:6px solid var(--mc,#087a61);
+  padding-left:18px;margin-bottom:8px;
+}
+.mhead .kick{
+  font-size:12.5px;letter-spacing:.12em;
+  color:var(--mc,#087a61);margin-bottom:6px;text-transform:uppercase;
+}
+.mhead h1{
+  font-size:28px;margin:0 0 8px;line-height:1.35;
+  display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+}
+.mhead p{
+  color:var(--ink-2);max-width:940px;margin:0;
+  line-height:1.9;font-size:13.5px;
+}
+
+.pill{
+  display:inline-block;font-size:11px;font-weight:600;
+  color:var(--acc);background:var(--acc-soft);
+  border-radius:var(--r-pill);padding:3px 10px;
+  vertical-align:middle;
+}
+
+/* 数据快照芯片 */
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0 0;align-items:center}
+.chips b{
+  background:none;border:0;color:var(--ink-2);
+  font-size:12px;font-weight:600;padding:5px 2px;
+}
+.chips span{
+  background:#f0f6f4;
+  border:1px solid var(--acc-line);
+  color:var(--acc);
+  border-radius:var(--r-pill);
+  padding:5px 13px;font-size:12px;
+  transition:transform .15s,box-shadow .15s;
+}
+.chips span:hover{transform:translateY(-1px);box-shadow:0 3px 8px rgba(8,122,97,.14)}
+
+/* 段落小标题 */
+.h2{
+  margin:26px 0 10px;font-size:16.5px;
+  display:flex;align-items:center;gap:10px;color:#0b3f36;
+}
+.h2::before{
+  content:"";width:4px;height:15px;
+  background:var(--mc,var(--acc));border-radius:2px;
+}
+
+/* ==========================================================================
+   流程图容器
+   ========================================================================== */
+.flowbox{
+  border:1px solid var(--line);
+  border-radius:var(--r-md);
+  background:#f8fbff;
+  padding:14px 12px;overflow-x:auto;
+  position:relative;
+}
+.flowbox svg{display:block;width:100%;height:auto;min-width:1180px}
+.flowbox .zoombar{
+  position:absolute;right:12px;top:12px;
+  display:flex;gap:6px;z-index:2;
+}
+.flowbox .zoombar button{
+  border:1px solid var(--line);background:#fff;
+  border-radius:6px;padding:4px 10px;font-size:12px;
+  cursor:pointer;color:var(--ink-2);
+}
+.flowbox .zoombar button:hover{border-color:var(--acc);color:var(--acc)}
+
+/* ==========================================================================
+   业务场景 · 三段价值（因为 / 所以 / 带来）
+   ========================================================================== */
+.scene{
+  border:1px solid var(--line);
+  border-radius:var(--r-lg);
+  background:#fff;padding:18px 20px 16px;
+  box-shadow:var(--sh-1);
+}
+.scene .quote{
+  border-left:5px solid var(--mc,#087a61);
+  background:#f6faf8;border-radius:8px;
+  padding:12px 16px;font-size:13.5px;
+  color:#33475c;line-height:1.95;
+}
+.scene .quote b{color:var(--mc,#087a61);margin-right:6px;font-size:12.5px}
+.scene .cols{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(228px,1fr));
+  gap:12px;margin-top:14px;
+}
+.scene .step{
+  border-radius:var(--r-md);
+  padding:13px 15px;font-size:12.5px;
+  line-height:1.85;color:var(--ink-2);
+  border:1px solid transparent;
+  transition:transform .18s,box-shadow .18s;
+}
+.scene .step:hover{transform:translateY(-2px);box-shadow:var(--sh-1)}
+.scene .step b{display:block;font-size:12.5px;margin-bottom:6px;font-weight:700}
+.scene .step.why{background:#fdf7ec;border-color:#f0dcb5}
+.scene .step.why b{color:#b7791f}
+.scene .step.how{background:#eef4fe;border-color:#c9dbf7}
+.scene .step.how b{color:#1d4ed8}
+.scene .step.val{background:#eaf6f0;border-color:#c0e2d0}
+.scene .step.val b{color:#18805e}
+
+/* ==========================================================================
+   界面效果图（新旧版）
+   ========================================================================== */
+.shots{display:flex;gap:14px;flex-wrap:wrap}
+.shotcell{display:flex;flex-direction:column;gap:6px}
+.shotcell small{
+  font-size:12px;color:var(--ink-2);
+  display:flex;align-items:center;gap:6px;
+}
+.shotcell small i{width:8px;height:8px;border-radius:2px;display:inline-block}
+.thumb{
+  position:relative;width:380px;
+  border:1px solid var(--line);border-radius:var(--r-md);
+  overflow:hidden;cursor:zoom-in;background:#fff;
+  transition:transform .18s,box-shadow .18s,border-color .18s;
+}
+.thumb:hover{transform:translateY(-2px);box-shadow:var(--sh-3);border-color:var(--acc)}
+.thumb img{
+  width:100%;aspect-ratio:16/9;
+  object-fit:cover;object-position:top left;display:block;
+}
+.thumb .noimg{
+  width:100%;aspect-ratio:16/9;
+  display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:var(--ink-3);
+  background:linear-gradient(135deg,#eef3fa,#e3ebf5);
+  padding:0 16px;text-align:center;
+}
+.verchip{position:absolute;left:8px;top:8px;display:flex;gap:4px}
+.verchip button{
+  border:0;border-radius:6px;padding:3px 9px;font-size:11px;
+  cursor:pointer;background:rgba(255,255,255,.92);color:var(--ink-2);
+  transition:background .15s,color .15s;
+}
+.verchip button:hover{background:#fff;color:var(--acc)}
+.verchip button.on{background:var(--acc);color:#fff}
+
+/* ==========================================================================
+   关联模块 + 翻页导航
+   ========================================================================== */
+.rel{display:flex;gap:8px;flex-wrap:wrap}
+.rel button{
+  border:1px solid #c9d6e2;background:#fff;
+  border-radius:var(--r-pill);
+  padding:7px 15px;font-size:12.5px;cursor:pointer;color:#33475c;
+  display:inline-flex;align-items:center;gap:6px;
+  box-shadow:0 1px 2px rgba(15,40,70,.05);
+  transition:border-color .15s,color .15s,transform .15s,box-shadow .15s;
+}
+.rel button::before{
+  content:"";width:7px;height:7px;border-radius:50%;
+  background:var(--mc,var(--acc));opacity:.8;flex:none;
+}
+.rel button:hover{
+  border-color:var(--mc,var(--acc));color:var(--mc,var(--acc));
+  transform:translateY(-1px);
+  box-shadow:0 4px 12px rgba(15,40,70,.12);
+}
+
+.pn{display:flex;justify-content:space-between;gap:12px;margin-top:26px}
+.pn button{
+  flex:1;border:1px solid var(--line);background:#fff;
+  border-radius:var(--r-md);
+  padding:11px 16px;font-size:13px;cursor:pointer;color:var(--ink-2);
+  transition:border-color .15s,color .15s,transform .15s,box-shadow .15s;
+  text-align:left;
+}
+.pn button:hover{
+  border-color:var(--acc);color:var(--acc);
+  transform:translateY(-1px);box-shadow:var(--sh-1);
+}
+.pn button:last-child{text-align:right}
+.pn button small{display:block;color:var(--ink-3);font-size:11px;margin-bottom:2px}
+
+.tip{margin:12px 0 0;font-size:12px;color:var(--ink-2);line-height:1.85}
+
+/* ==========================================================================
+   灯箱（Lightbox）
+   ========================================================================== */
+.lb{
+  position:fixed;inset:0;z-index:70;
+  display:none;background:rgba(10,20,34,.62);
+  align-items:center;justify-content:center;padding:26px;
+  backdrop-filter:blur(3px);
+  -webkit-backdrop-filter:blur(3px);
+}
+.lb.on{display:flex;animation:lbin .2s ease}
+@keyframes lbin{from{opacity:0}to{opacity:1}}
+.lb-box{
+  background:#fff;border-radius:var(--r-lg);
+  max-width:1180px;width:100%;max-height:92vh;overflow:auto;
+  padding:16px 18px;box-shadow:var(--sh-4);
+}
+.lb-art{overflow:hidden;border-radius:8px}
+.lb-art img{
+  width:100%;border-radius:8px;display:block;
+  transition:transform .12s ease;transform-origin:center;cursor:zoom-in;
+}
+.lb-cap{
+  display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+  margin:12px 2px 4px;
+}
+.lb-cap h3{margin:0;font-size:16px;flex:1}
+.lb-cap .idx{font-size:12px;color:var(--ink-2)}
+.lb-bar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+.lb-bar button{
+  border:1px solid var(--line);background:#fff;
+  border-radius:8px;padding:6px 13px;font-size:12.5px;
+  cursor:pointer;color:var(--ink-2);
+  transition:border-color .15s,color .15s;
+}
+.lb-bar button:hover{border-color:var(--acc);color:var(--acc)}
+.lb-bar button.primary{background:var(--acc);color:#fff;border-color:transparent}
+.lb-bar button.primary:hover{background:var(--acc-mid);color:#fff}
+
+/* ==========================================================================
+   悬浮预览
+   ========================================================================== */
+#hoverPrev{
+  position:fixed;z-index:80;pointer-events:none;display:none;
+  width:520px;background:#fff;
+  border:1px solid var(--line);border-radius:var(--r-md);
+  padding:6px;box-shadow:var(--sh-4);
+}
+#hoverPrev img{display:block;width:100%;border-radius:8px}
+
+/* ==========================================================================
+   打印摘要（一页纸）
+   ========================================================================== */
+#printOne{display:none}
+
+@media print{
+  .top,#toTop,#hoverPrev,#viewHome,#viewModule,.lb{display:none!important}
+  #printOne{display:block!important}
+  #printOne h1{font-size:20px;margin:0 0 6px}
+  #printOne h2{font-size:13.5px;margin:12px 0 5px;color:var(--acc)}
+  #printOne p,#printOne li{font-size:10.5px;line-height:1.75;margin:0 0 3px}
+  #printOne .cols2{display:grid;grid-template-columns:1fr 1fr;gap:4px 18px}
+  #printOne svg{width:100%;height:auto;display:block;margin-top:4px}
+  #printOne .pfoot{margin-top:10px;font-size:9.5px;color:#6b7a8c}
+  @page{margin:14mm}
+}
+
+/* ==========================================================================
+   响应式
+   ========================================================================== */
+@media (max-width:1024px){
+  .thumb{width:320px}
+  .mhead h1{font-size:24px}
+}
+@media (max-width:768px){
+  .mod{padding:16px 0 40px}
+  .mhead h1{font-size:20px}
+  .mhead p{font-size:12.5px;line-height:1.85}
+  .h2{font-size:15px;margin:20px 0 8px}
+  .scene{padding:14px 14px 12px}
+  .scene .quote{font-size:12.5px;padding:10px 12px;line-height:1.85}
+  .scene .cols{grid-template-columns:1fr;gap:10px}
+  .thumb{width:100%}
+  .shots{gap:12px}
+  .shotcell{width:100%}
+  .pn{flex-direction:column;gap:8px}
+  .pn button{text-align:left}
+  .pn button:last-child{text-align:left}
+  .lb{padding:12px}
+  .lb-box{padding:12px 14px;border-radius:var(--r-md)}
+  .lb-cap h3{font-size:14px}
+  .lb-bar{gap:6px}
+  .lb-bar button{padding:5px 10px;font-size:12px}
+  #hoverPrev{display:none!important}
+  .flowbox{padding:10px 8px}
+  .flowbox .zoombar{display:none}
+}
+@media (max-width:480px){
+  .mhead h1{font-size:18px}
+  .chips span{font-size:11.5px;padding:4px 10px}
+  .mod-bar{gap:6px}
+  .mback{padding:6px 11px;font-size:12px}
+  .crumb{font-size:11.5px;margin-left:0;width:100%;order:-1}
+}

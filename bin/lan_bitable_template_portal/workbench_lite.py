@@ -6741,6 +6741,11 @@ def render_workbench_lite(
       if (handleLiteAuthRequired(response, data)) return false;
       if (!response.ok || data.ok === false) throw new Error(data.error || '源表绑定失败');
       const result = data.data || data;
+      if (result.binding_pending) {{
+        closeManualSourceCandidates();
+        setLiteStatus(result.message || '关联状态待核验，后台将继续核对。');
+        return false;
+      }}
       const formChangedWhileSaving = (
         JSON.stringify(captureNoticeFormValues(form)) !== formValuesAtStart
       );
@@ -6762,8 +6767,7 @@ def render_workbench_lite(
         const confirmButton = document.getElementById('lite-manual-source-confirm');
         setButtonBusy(confirmButton, true);
         try {{
-          await bindExistingOngoingSource(form, candidate);
-          setLiteStatus('已绑定计划通告');
+          if (await bindExistingOngoingSource(form, candidate)) setLiteStatus('已绑定计划通告');
         }} catch (error) {{
           showLiteError(error && error.message ? error.message : '源表绑定失败');
         }} finally {{

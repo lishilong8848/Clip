@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="灯塔 · 数据中心运维管理平台功能价值汇报：架构总览、思维导图、六大功能域与 25 个模块详情。" />
+<title>灯塔 · 数据中心运维管理平台 — 功能价值汇报</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a61'/%3E%3Cpath d='M16 5l7 12h-4.5v8h-5v-8H9z' fill='white'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="assets/css/base.css" />
+<link rel="stylesheet" href="assets/css/home.css" />
+<link rel="stylesheet" href="assets/css/print.css" media="print" />
+</head>
+<body data-page="home">
+
+<!-- ======================= 顶栏 ======================= -->
+<nav class="top" aria-label="顶部导航">
+  <div class="wrap">
+    <a class="brand" href="index.html"><i aria-hidden="true"></i>灯塔 · 功能价值汇报<small>数据中心运维管理平台</small></a>
+    <span class="top-sp"></span>
+    <div class="seg" id="viewSeg" role="tablist" aria-label="总览视图切换">
+      <button type="button" role="tab" data-view="arch" class="on" aria-selected="true">架构总览</button>
+      <button type="button" role="tab" data-view="mind" aria-selected="false">思维导图</button>
+      <button type="button" role="tab" data-view="list" aria-selected="false">模块清单</button>
+    </div>
+    <button type="button" class="btn" id="btnPrint" title="输出一页纸汇报摘要 PDF">打印/PDF</button>
+    <button type="button" class="btn" id="btnFull" title="全屏演示（Esc 退出）">全屏</button>
+  </div>
+</nav>
+
+<main>
+  <div class="wrap">
+
+    <!-- ======================= 横幅 ======================= -->
+    <section class="hero" id="hero" aria-label="项目概览"></section>
+
+    <!-- ======================= 视图①：架构总览 ======================= -->
+    <section class="panel view on" id="view-arch" role="tabpanel" aria-label="平台架构总览">
+      <div class="panel-h">
+        <h2><i aria-hidden="true"></i>平台整体架构</h2>
+        <p>接入层 → 中枢层 →（统一调度总线）→ 六大功能域 ↔ 数据底座 → 输出层。图上每个节点均可点击：功能模块进入详情页，功能域跳转到清单分组。</p>
+      </div>
+      <div class="canvas-bar">
+        <button type="button" class="btn sm ico" id="archIn" title="放大">＋</button>
+        <button type="button" class="btn sm ico" id="archOut" title="缩小">－</button>
+        <button type="button" class="btn sm" id="archFitW" title="按画布宽度适配，保证文字可读（默认）">适应宽度</button>
+        <button type="button" class="btn sm" id="archFitAll" title="把整幅架构图收进画布">全图</button>
+        <span class="tag" id="archZoom">100%</span>
+        <span class="hint">滚轮缩放 · 按住拖动平移 · 双击复位 · 键盘 1/2/3 切换视图</span>
+      </div>
+      <div class="canvas" id="archHost"></div>
+      <div class="legend">
+        <span><i class="bus"></i>统一调度总线（中枢 → 功能域）</span>
+        <span><i class="wr"></i>写入 / 归档（功能域 → 底座）</span>
+        <span><i class="rd"></i>读取 / 探针（底座 → 功能域）</span>
+        <span><i></i>层间数据流</span>
+        <span><i class="dot"></i>可点击节点（右上角圆点标记）</span>
+      </div>
+    </section>
+
+    <!-- ======================= 视图②：思维导图 ======================= -->
+    <section class="panel view" id="view-mind" role="tabpanel" aria-label="平台思维导图">
+      <div class="panel-h">
+        <h2><i aria-hidden="true"></i>功能思维导图</h2>
+        <p>以「灯塔」为根，六大功能域为枝干，25 个模块为叶片，每个叶片附一句话职责。点击功能域节点可折叠 / 展开，点击模块叶片进入详情页。</p>
+      </div>
+      <div class="canvas-bar">
+        <button type="button" class="btn sm ico" id="mindIn" title="放大">＋</button>
+        <button type="button" class="btn sm ico" id="mindOut" title="缩小">－</button>
+        <button type="button" class="btn sm" id="mindFitAll" title="把整幅思维导图收进画布（默认）">全图</button>
+        <button type="button" class="btn sm" id="mindFitW" title="按画布宽度适配，放大查看文字">适应宽度</button>
+        <button type="button" class="btn sm" id="mindAll">全部展开</button>
+        <button type="button" class="btn sm" id="mindNone">全部折叠</button>
+        <span class="tag" id="mindZoom">100%</span>
+        <span class="hint" id="mindCount">25 / 25 个模块展开</span>
+      </div>
+      <div class="canvas" id="mindHost"></div>
+    </section>
+
+    <!-- ======================= 视图③：模块清单 ======================= -->
+    <section class="panel view" id="view-list" role="tabpanel" aria-label="模块清单">
+      <div class="panel-h">
+        <h2><i aria-hidden="true"></i>模块清单与职责</h2>
+        <p>按六大功能域分组，每张卡片为一个功能模块：一句话定位 ＋ 职责说明 ＋ 关键指标。点击卡片进入该模块的详情页。</p>
+        <button type="button" class="btn sm" id="listOpen">全部展开</button>
+        <button type="button" class="btn sm" id="listClose">全部折叠</button>
+      </div>
+      <div class="panel-b" id="listBody"></div>
+    </section>
+
+    <!-- ======================= 数据底座 ======================= -->
+    <section class="foundation" id="foundation" aria-label="数据底座"></section>
+
+    <!-- ======================= 六维价值 ======================= -->
+    <section class="band" id="band" aria-label="整体价值"></section>
+
+    <p class="foot" id="foot"></p>
+  </div>
+</main>
+
+<!-- ======================= 一页纸打印摘要 ======================= -->
+<section id="printOne" aria-label="汇报摘要打印版"></section>
+
+<!-- ======================= 浮层 ======================= -->
+<div id="nodeTip" aria-hidden="true"></div>
+<div id="hoverPrev" aria-hidden="true"><img alt="" /></div>
+<button type="button" id="toTop" aria-label="回到顶部" title="回到顶部">↑</button>
+
+<script src="assets/js/data.js"></script>
+<script src="assets/js/svg.js"></script>
+<script src="assets/js/common.js"></script>
+<script src="assets/js/home.js"></script>
+</body>
+</html>

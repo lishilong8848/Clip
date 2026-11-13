@@ -37,17 +37,21 @@ from .portal_service import (
     DEFAULT_APP_TOKEN,
     DEFAULT_TABLE_ID,
     MaintenancePortalService,
+    NoticeSourcePending,
     NOTICE_TYPE_CHANGE,
     NOTICE_TYPE_MAINTENANCE,
     NOTICE_TYPE_POWER_DOWN,
     NOTICE_TYPE_POWER_UP,
     NOTICE_TYPE_POLLING,
+    NOTICE_TYPE_REPAIR,
     NOTICE_TYPE_ADJUST,
     PortalConflictError,
     PortalConfirmationRequiredError,
     PortalError,
     PortalExternalError,
     PortalNotFoundError,
+    REPAIR_END_UNDO_NAMESPACE,
+    REPAIR_SNAPSHOT_SOURCE_NOTICES,
     SCOPE_OPTIONS,
     SOURCE_CACHE_TTL_SECONDS,
     STATE_NS_ACTION_JOB,
@@ -3495,6 +3499,7 @@ class PortalRuntime:
     @classmethod
     def process_source_end_sync(cls):
         from .portal_service import NoticeSourcePending, NoticeSourceSuperseded
+        cls._resume_repair_end_undos()
         cls._resume_source_end_staging()
         due = sorted((row['payload'] for row in cls.state_store.list_documents('notice_source_recovery')
                       if row['payload'].get('state') in {'pending', 'attention_required'}
@@ -10943,12 +10948,169 @@ class PortalRuntime:
 
     @classmethod
     def execute_notice_undo(cls, undo_id: str, *, job_id: str = "", requested_by: str = "") -> dict:
+        undo = cls.state_store.get_notice_undo_action(undo_id) or {}
+        if undo.get("action_type") != "end" or undo.get("work_type") != WORK_TYPE_REPAIR:
+            return cls._execute_notice_undo(undo_id, job_id=job_id, requested_by=requested_by)
+        target_id = str(undo.get("target_record_id") or "")
+        if not target_id.startswith("rec"):
+            raise PortalError("检修结束回退缺少目标多维记录 ID。")
+        scope = str(((cls.service.get_job(job_id) or {}).get("request") or {}).get("scope")
+                    or undo.get("scope") or "ALL") if job_id else str(undo.get("scope") or "ALL")
+        source_id = cls.service._repair_undo_source_id(undo)
+        source_lock = cls.service._repair_management_record_lock(source_id) if source_id else nullcontext()
+        key, owner, error = cls._acquire_event_operation_lock(
+            undo, action_type="repair_end_undo", target_record_id=target_id,
+        )
+        if error:
+            raise PortalError(error)
+        try:
+            with source_lock, cls.service._repair_management_record_lock(f"repair-target:{target_id}"):
+                return cls._execute_notice_undo(
+                    undo_id, job_id=job_id, requested_by=requested_by, repair_scope=scope,
+                )
+        finally:
+            cls._release_event_operation_lock(key, owner)
+
+    @classmethod
+    def _resume_repair_end_undos(cls) -> None:
+        from .module_access import allowed_modules
+
+        now = time.time()
+        due = [row["payload"] for row in cls.state_store.list_documents(REPAIR_END_UNDO_NAMESPACE)
+               if row["payload"].get("state") in {"pending", "write_rejected"}
+               and float(row["payload"].get("next_check_at") or 0) <= now]
+        for receipt in due[:3]:
+            undo_id, job_id, actor = (str(receipt.get(name) or "") for name in ("undo_id", "job_id", "actor"))
+            undo = cls.state_store.get_notice_undo_action(undo_id) or {}
+            if not undo:
+                continue
+            if actor != "qt":
+                session = {"user": {"open_id": actor}}
+                if (not actor or not cls.auth_manager.scope_allowed(session, receipt.get("scope"))
+                        or WORK_TYPE_REPAIR not in allowed_modules(cls.auth_manager, session)):
+                    target_id = str(undo.get("target_record_id") or "")
+                    with cls.service._repair_management_record_lock(f"repair-target:{target_id}"):
+                        current = cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+                        if current.get("undo_id") == undo_id and current.get("state") in {"pending", "write_rejected"}:
+                            cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {
+                                **current, "next_check_at": now + 300,
+                                "last_error": "发起人的楼栋或检修权限已变化，等待有权人员核验。",
+                            })
+                    continue
+            try:
+                if undo.get("status") == "undone":
+                    target_id = str(undo.get("target_record_id") or "")
+                    with cls.service._repair_management_record_lock(f"repair-target:{target_id}"):
+                        current = cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+                        if current.get("undo_id") == undo_id and current.get("state") in {"pending", "write_rejected"}:
+                            cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {
+                                **current, "state": "restored", "next_check_at": 0,
+                            })
+                    result = {"record_id": target_id, "message": str(undo.get("remote_message") or "回退成功")}
+                else:
+                    result = cls.execute_notice_undo(undo_id, job_id=job_id, requested_by=actor)
+                cls.clear_payload_cache()
+                if job_id:
+                    cls.service.mark_job(job_id, phase="success", record_id=result["record_id"],
+                                         upload_message=result["message"], error="", error_retryable=False)
+            except Exception as exc:
+                target_id = str(undo.get("target_record_id") or "")
+                with cls.service._repair_management_record_lock(f"repair-target:{target_id}"):
+                    current = cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+                    if current.get("undo_id") == undo_id and current.get("state") in {"pending", "write_rejected"}:
+                        cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {
+                            **current, "next_check_at": now + 60, "last_error": str(exc),
+                        })
+
+    @classmethod
+    def _restore_repair_undo_target(
+        cls, undo: dict, target_id: str, fields: dict, *,
+        scope: str, job_id: str, actor: str,
+    ) -> None:
+        notice_type = str(undo["notice_type"])
+        field_config = get_field_config(notice_type)
+        status_field = field_config["status"]
+        end_field = field_config["actual_end"]
+        expected_status = cls.service._clean_source_text(fields.get(status_field))
+        if not cls.service._target_status_is_active(expected_status):
+            raise PortalError("检修结束回退缺少可核验的进行中目标快照。")
+        ok, record = query_record_by_id(target_id, notice_type)
+        if not ok or not isinstance(record, dict) or not isinstance(record.get("fields"), dict):
+            raise PortalError("无法读取检修目标记录，未完成回退。")
+        if record.get("record_id", target_id) != target_id:
+            raise PortalError("回读返回了其他检修记录。")
+        current = record["fields"]
+        buildings = cls.service._target_record_building_codes(current, field_config)
+        original_buildings = cls.service._target_record_building_codes(fields, field_config)
+        if scope != "ALL" and (
+            not cls.service._scope_matches_buildings(scope, buildings)
+            or (original_buildings and not cls.service._scope_matches_buildings(scope, original_buildings))
+        ):
+            raise PortalError("当前账号无权回退该楼栋检修通告。")
+        receipt = cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+        same_undo = receipt.get("undo_id") == undo.get("undo_id") and receipt.get("state") != "write_rejected"
+        if receipt.get("undo_id") == undo.get("undo_id") and receipt.get("scope") != scope:
+            raise PortalError("当前楼栋与原回退申请不一致。")
+        if not same_undo:
+            if receipt.get("state") in {"pending", "write_rejected"} and receipt.get("undo_id") != undo.get("undo_id"):
+                raise PortalError("该通告已有回退正在核验。")
+            current_status = cls.service._clean_source_text(current.get(status_field))
+            already_restored = (
+                not receipt and not cls.service._repair_undo_source_id(undo)
+                and current_status == expected_status
+                and cls.service._repair_management_datetime_ms(current.get(end_field))
+                == cls.service._repair_management_datetime_ms(fields.get(end_field))
+                and bool(cls.service._clean_source_text(current.get(end_field)))
+                == bool(cls.service._clean_source_text(fields.get(end_field)))
+                and "未恢复关联源表" in str(undo.get("error") or "")
+            )
+            if not already_restored and not cls.service._target_status_is_finished(current_status):
+                raise PortalError("目标检修已不处于结束状态，请核验原通告。")
+            receipt = {"undo_id": undo["undo_id"], "state": "pending", "scope": scope,
+                       "actor": actor, "job_id": job_id, "started_at": (
+                           float(receipt.get("started_at") or 0)
+                           if receipt.get("undo_id") == undo.get("undo_id") else time.time()
+                       ),
+                       "next_check_at": time.time() + 60}
+            cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, receipt)
+            if already_restored:
+                return
+            ok, result = update_bitable_record_fields(
+                target_id, notice_type, {**fields, end_field: fields.get(end_field)},
+            )
+            if not ok and cls._remote_record_data_not_ready(result):
+                # This response confirms the write was rejected before execution.
+                cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {
+                    **receipt, "state": "write_rejected",
+                })
+                raise NoticeSourcePending("关联状态待核验，目标表暂未接受回退，后台将重试原任务。")
+            if ok and result and result != target_id:
+                raise PortalError("回退返回了其他检修记录。")
+            ok, record = query_record_by_id(target_id, notice_type)
+            current = record.get("fields") if ok and isinstance(record, dict) and record.get("record_id", target_id) == target_id else None
+        if (not isinstance(current, dict)
+                or cls.service._clean_source_text(current.get(status_field)) != expected_status
+                or cls.service._repair_management_datetime_ms(current.get(end_field))
+                != cls.service._repair_management_datetime_ms(fields.get(end_field))
+                or bool(cls.service._clean_source_text(current.get(end_field)))
+                != bool(cls.service._clean_source_text(fields.get(end_field)))):
+            raise NoticeSourcePending("关联状态待核验，目标检修尚未读回，后台将继续确认。")
+
+    @classmethod
+    def _execute_notice_undo(cls, undo_id: str, *, job_id: str = "", requested_by: str = "",
+                             repair_scope: str = "ALL") -> dict:
         undo = cls.state_store.get_notice_undo_action(undo_id)
         if not undo:
             raise PortalError("回退记录不存在。")
         if str(undo.get("status") or "") != "available":
             raise PortalError("该回退记录不可用或已处理。")
-        if float(undo.get("expires_at") or 0) <= time.time():
+        repair_receipt = (
+            cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, str(undo.get("target_record_id") or "")) or {}
+            if undo.get("action_type") == "end" and undo.get("work_type") == WORK_TYPE_REPAIR else {}
+        )
+        if (float(undo.get("expires_at") or 0) <= time.time()
+                and not (repair_receipt.get("undo_id") == undo_id
+                         and repair_receipt.get("state") in {"pending", "write_rejected"})):
             cls.state_store.mark_notice_undo_action(undo_id, "expired", error="回退记录已过期")
             raise PortalError("该回退记录已过期。")
         undo, paired_undo = cls.service.paired_notice_undo(undo)
@@ -11062,14 +11224,16 @@ class PortalRuntime:
             elif not guard["real_write_allowed"]:
                 raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
             elif action_type in {"update", "end"}:
-                ok, result = update_bitable_record_fields(
-                    target_record_id,
-                    notice_type,
-                    remote_fields,
-                )
-                if not ok:
-                    raise PortalError(str(result or "回退多维失败。"))
-                restored_record_id = str(result or target_record_id)
+                if is_repair_end:
+                    cls._restore_repair_undo_target(
+                        undo, target_record_id, remote_fields,
+                        scope=repair_scope, job_id=job_id, actor=requested_by,
+                    )
+                else:
+                    ok, result = update_bitable_record_fields(target_record_id, notice_type, remote_fields)
+                    if not ok:
+                        raise PortalError(str(result or "回退多维失败。"))
+                    restored_record_id = str(result or target_record_id)
                 remote_message = "多维已恢复"
             elif action_type == "delete":
                 ok, query_result = query_record_by_id(target_record_id, notice_type)
@@ -11156,17 +11320,22 @@ class PortalRuntime:
                 raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
             else:
                 related_remote_result = cls.service.restore_notice_undo_related_remote(
-                    undo,
+                    {**undo, "scope": repair_scope} if is_repair_end else undo,
                     target_record_id=restored_record_id,
                 )
-                if not bool(related_remote_result.get("restored")):
+                no_repair_source = (
+                    is_repair_end and related_remote_result.get("reason") == "no_source_at_end"
+                    and not cls.service._repair_undo_source_id(undo)
+                )
+                if not (related_remote_result.get("restored") or no_repair_source):
                     raise PortalError("结束回退未恢复关联源表，未完成本次回退。")
                 remote_message = "；".join(
                     item
                     for item in (
                         remote_message,
-                        "维修单及跟进记录已恢复"
-                        if is_repair_end
+                        "结束时未关联维修项目，已跳过源表恢复"
+                        if no_repair_source
+                        else "维修单及跟进记录已恢复" if is_repair_end
                         else "关联源表已恢复",
                     )
                     if item
@@ -11179,6 +11348,13 @@ class PortalRuntime:
                     "work_order_end_remote_receipt": {**receipt_binding, "state": "restored",
                         "remote_message": remote_message, "related_remote": related_remote_result}}):
                 raise PortalError("回退远端回执保存失败，请核验原回退；未标记为已完成。")
+        if is_repair_end and not guard["mock_external"]:
+            cls.service._upsert_repair_snapshot_fields(
+                source_key=REPAIR_SNAPSHOT_SOURCE_NOTICES,
+                record_id=target_record_id,
+                fields={**remote_fields, get_field_config(notice_type)["actual_end"]:
+                        remote_fields.get(get_field_config(notice_type)["actual_end"])},
+            )
         if job_id:
             cls.service.mark_job(job_id, phase="undoing_local", upload_message=remote_message)
         if action_type == "start":
@@ -11241,6 +11417,11 @@ class PortalRuntime:
             **({"related_actions": related_actions} if related_actions else {}),
         ):
             raise PortalError("通告已恢复，但回退状态保存未完成，请继续原回退。")
+        if is_repair_end and not guard["mock_external"]:
+            receipt = cls.state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_record_id) or {}
+            cls.state_store.put_document(REPAIR_END_UNDO_NAMESPACE, target_record_id, {
+                **receipt, "state": "restored", "next_check_at": 0,
+            })
         if notice_type in {NOTICE_TYPE_POWER_UP, NOTICE_TYPE_POWER_DOWN}:
             undo_action = {"start": "delete", "update": "update", "end": "undo_end", "delete": "undo_delete"}.get(action_type)
             if undo_action:
@@ -12341,6 +12522,8 @@ class PortalRuntime:
                     "本次阿里确认截图已被替换或删除，请重新上传后再发送。",
                     record_id,
                 )
+        if notice_type == NOTICE_TYPE_REPAIR and not external_real_write_guard()["mock_external"]:
+            cls.service.verify_repair_notice_before_write(prepared, record_id, action=action)
         checkpoint_id = cls._create_backend_undo_checkpoint(
             "end" if action == "end" else "update",
             {
@@ -14079,6 +14262,8 @@ class PortalRuntime:
             fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
             remote_fields_for_action = dict(fields) if isinstance(fields, dict) else {}
             if action_type in {"update", "end"}:
+                if notice_type == NOTICE_TYPE_REPAIR and not external_real_write_guard()["mock_external"]:
+                    cls.service.verify_repair_notice_before_write(data, query_record_id, action=action_type)
                 checkpoint_id = cls._create_backend_undo_checkpoint(
                     "end" if action_type == "end" else "update",
                     {

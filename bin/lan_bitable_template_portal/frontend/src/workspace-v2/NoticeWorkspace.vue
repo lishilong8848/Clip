@@ -503,7 +503,16 @@ function bindSource(){
   dialog.warning({title:'确认绑定源表事项',content:'将绑定“'+(sourceOptions.value.find(o=>o.value===selected)?.label||'所选计划')+'”。只更新关联，不重复发送通告；保存后重新读取，未保存的填写将重置。',positiveText:'确认绑定',negativeText:'返回核对',onPositiveClick:async()=>{
     if(form.value!==current||locked.value)return false;
     const v=current.values;busy.value=true;detailError.value='';
-    try{const result=await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:'ongoing',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id,source_record_id:selected,source_month:v.source_month||applied.value.month,source_binding_only:true,target_record_id:v.target_record_id,title:v.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time})});await associationBound(result);message.success('源表事项已绑定');}
+    try{
+      const result=await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:'ongoing',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id,source_record_id:selected,source_month:v.source_month||applied.value.month,source_binding_only:true,target_record_id:v.target_record_id,title:v.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time})});
+      if(result.binding_pending){
+        if(form.value===current)detailError.value=String(result.message||'关联状态待核验，后台将继续核对。');
+        return;
+      }
+      if(form.value!==current)return;
+      await associationBound(result);
+      message.success('源表事项已绑定');
+    }
     catch(e){detailError.value=(e as Error).message;return false;}finally{busy.value=false;}
   }});
 }

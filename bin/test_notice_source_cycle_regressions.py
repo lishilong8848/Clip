@@ -1,6 +1,7 @@
 """Local-only regressions for source provenance, lifecycle and cycle isolation."""
 import copy
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -8,8 +9,10 @@ from unittest.mock import Mock, patch
 from bin.test_notice_memory_history import _HistoryMemoryService, _source_record
 from lan_bitable_template_portal.portal_service import (
     STATE_NS_DAILY_SUMMARY, STATE_NS_MEMORY, STATE_NS_WORK_STATUS, FieldMeta, MaintenancePortalService, NoticeSourcePending,
-    PortalError, REPAIR_SNAPSHOT_SOURCE_PROJECTS, REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID,
+    PortalError, REPAIR_END_UNDO_NAMESPACE, REPAIR_END_WRITE_NAMESPACE, REPAIR_SNAPSHOT_SOURCE_PROJECTS,
+    REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID, REPAIR_TARGET_SUMMARY_ID_FIELD_NAME,
 )
+from lan_bitable_template_portal.server import PortalRuntime
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 
@@ -36,6 +39,190 @@ class NoticeSourceCycleRegressionTests(unittest.TestCase):
     def tearDown(self):
         self.service._state_store.shutdown_write_worker(timeout=2)
         self.tmp.cleanup()
+
+    def repair_undo(self, **overrides):
+        undo = {
+            "undo_id": "undo-repair", "identity_key": "repair:target:recRepairNotice",
+            "identity_keys": ["repair:target:recRepairNotice"], "action_type": "end",
+            "notice_type": "设备检修", "work_type": "repair", "scope": "D",
+            "active_item_id": "manual:repair:1", "target_record_id": "recRepairNotice",
+            "building_codes": ["D"],
+            "remote": {"fields": {"检修状态": "更新", "楼栋": "D楼"}},
+            "context": {"work_type": "repair", "notice_type": "设备检修",
+                        "target_record_id": "recRepairNotice", "scope": "D",
+                        "title": "EA118_C01机房D楼设备检修", "building_codes": ["D"]},
+            **overrides,
+        }
+        self.service._state_store.create_notice_undo_action(undo)
+        return undo
+
+    def test_independent_repair_undo_recovers_after_restart_then_binds_and_validates_end(self):
+        undo = self.repair_undo()
+        target_id, source_id = undo["target_record_id"], "recRepairProject"
+        store = self.service._state_store
+        ended = {"检修状态": "结束", "楼栋": "D楼", "实际结束时间": 1794016800000}
+        active = {"检修状态": "更新", "楼栋": "D楼", "实际结束时间": None}
+        guard = {"mock_external": False, "real_write_allowed": True, "reason": ""}
+        query = "lan_bitable_template_portal.server.query_record_by_id"
+        update = "lan_bitable_template_portal.server.update_bitable_record_fields"
+        with (
+            patch.object(PortalRuntime, "service", self.service),
+            patch.object(PortalRuntime, "state_store", store),
+            patch("lan_bitable_template_portal.server.external_real_write_guard", return_value=guard),
+            patch(query, side_effect=[(True, {"fields": ended}), (True, {"fields": ended})]),
+            patch(update, return_value=(True, target_id)) as write,
+        ):
+            with self.assertRaisesRegex(NoticeSourcePending, "关联状态待核验"):
+                PortalRuntime.execute_notice_undo(undo["undo_id"], requested_by="qt")
+            self.assertEqual(store.list_visible_qt_active_items(), [])
+            self.assertEqual(store.get_notice_undo_action(undo["undo_id"])["status"], "available")
+            write.assert_called_once()
+        pending = store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id)
+        store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {**pending, "next_check_at": 0})
+        store.shutdown_write_worker(timeout=2)
+        self.service = self.new_service()
+        store = self.service._state_store
+        with (
+            patch.object(PortalRuntime, "service", self.service),
+            patch.object(PortalRuntime, "state_store", store),
+            patch.object(PortalRuntime, "clear_payload_cache"),
+            patch("lan_bitable_template_portal.server.external_real_write_guard", return_value=guard),
+            patch(query, return_value=(True, {"fields": active})),
+            patch(update) as write,
+        ):
+            PortalRuntime._resume_repair_end_undos()
+            write.assert_not_called()
+        receipt = store.get_notice_undo_action(undo["undo_id"])
+        self.assertEqual(receipt["status"], "undone")
+        self.assertEqual(receipt["related_remote"]["reason"], "no_source_at_end")
+        self.assertEqual(store.list_visible_qt_active_items()[0]["payload"]["target_record_id"], target_id)
+
+        source = {"record_id": source_id, "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                  "raw_fields": {}, "display_fields": {"所属数据中心/楼栋-使用": "D楼"}}
+        target = {"record_id": target_id, "display_fields": active, "raw_fields": {}}
+        def write_binding(*args, **kwargs):
+            source["raw_fields"]["设备检修关联-L"] = target_id
+            target["raw_fields"][REPAIR_TARGET_SUMMARY_ID_FIELD_NAME] = source_id
+            return {"fields": {}}
+
+        with (
+            patch.object(self.service, "_read_repair_project_for_notice", return_value=(source, {})),
+            patch.object(self.service, "_read_repair_target_for_notice", return_value=target),
+            patch.object(self.service, "update_repair_management_record", side_effect=write_binding) as bind,
+            patch.object(self.service, "_ensure_repair_target_relation_synced", return_value={}),
+            patch("lan_bitable_template_portal.portal_service.external_mock_enabled", return_value=False),
+        ):
+            result = self.service.bind_repair_notice_target(
+                summary_record_id=source_id, target_record_id=target_id, scope="D", require_active=True,
+            )
+            self.assertTrue(result["saved"])
+            self.assertTrue(self.service.bind_repair_notice_target(
+                summary_record_id=source_id, target_record_id=target_id, scope="D", require_active=True,
+            )["saved"])
+            bind.assert_called_once()
+            self.assertEqual(store.list_visible_qt_active_items()[0]["payload"]["source_record_id"], source_id)
+            self.service.verify_repair_notice_before_write(
+                {"work_type": "repair", "source_record_id": source_id, "scope": "D"}, target_id, action="end",
+            )
+
+    def test_rollback_rejects_other_source_and_unsafe_end_value_even_with_same_title(self):
+        target_id, source_id = "recRepairNotice", "recRepairProject"
+        undo = self.repair_undo(status="undone", source_record_id=source_id, job_id="end-job")
+        store = self.service._state_store
+        self.assertIsNone(self.service._applied_end_undo_for_context(
+            {"source_record_id": "recOtherSource", "target_record_id": target_id, "undo_restored_id": undo["undo_id"]},
+            work_type="repair", scope="D",
+        ))
+        store.put_document(REPAIR_END_WRITE_NAMESPACE, undo["job_id"], {
+            "source_id": source_id, "target_id": target_id, "write_accepted": True,
+            "end_field": "维修结束时间（2026）", "end_value": 1794016800000,
+        })
+        source = {"record_id": source_id, "raw_fields": {"维修结束时间（2026）": 1794016801000}}
+        with (
+            patch.object(self.service, "_read_repair_project_for_notice", return_value=(source, {})),
+            patch.object(self.service, "_read_repair_target_for_notice", return_value={
+                "record_id": target_id, "display_fields": {"检修状态": "更新"},
+            }),
+            patch.object(self.service, "_patch_record_fields") as write,
+        ):
+            with self.assertRaisesRegex(PortalError, "写入凭据"):
+                self.service.restore_notice_undo_related_remote(undo, target_record_id=target_id)
+            write.assert_not_called()
+
+    def test_repair_binding_pending_resumes_read_only_and_rejects_cross_scope(self):
+        source_id, target_id = "recRepairProject", "recRepairNotice"
+        source = {"record_id": source_id, "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+                  "raw_fields": {"设备检修关联-L": target_id}}
+        target = {"record_id": target_id, "display_fields": {"楼栋": "D楼", "检修状态": "更新"},
+                  "raw_fields": {}}
+        with (
+            patch.object(self.service, "_read_repair_project_for_notice", return_value=(source, {})),
+            patch.object(self.service, "_read_repair_target_for_notice", return_value=target),
+            patch.object(self.service, "update_repair_management_record", return_value={}) as write,
+            patch.object(self.service, "_ensure_repair_target_relation_synced", return_value={}),
+        ):
+            with self.assertRaisesRegex(PortalError, "楼栋"):
+                self.service.bind_repair_notice_target(
+                    summary_record_id=source_id, target_record_id=target_id, scope="E", require_active=True,
+                )
+            write.assert_not_called()
+            pending = self.service.bind_repair_notice_target(
+                summary_record_id=source_id, target_record_id=target_id, scope="D", require_active=True,
+            )
+            self.assertTrue(pending["binding_pending"])
+            write.assert_called_once()
+        target["raw_fields"][REPAIR_TARGET_SUMMARY_ID_FIELD_NAME] = source_id
+        store = self.service._state_store
+        operation = store.get_repair_management_operation(pending["binding_id"])
+        store.update_repair_management_operation(
+            pending["binding_id"], status="sync_pending", result={**operation["result"], "available_at": 0},
+        )
+        store.shutdown_write_worker(timeout=2)
+        self.service = self.new_service()
+        with (
+            patch.object(self.service, "_read_repair_project_for_notice", return_value=(source, {})),
+            patch.object(self.service, "_read_repair_target_for_notice", return_value=target),
+            patch.object(self.service, "_patch_record_fields") as write,
+        ):
+            self.assertEqual(self.service.process_due_repair_sync_tasks()["completed"], 1)
+            write.assert_not_called()
+
+    def test_stale_async_repair_tasks_cannot_rebind_or_reapply_end(self):
+        source_id, target_id = "recRepairProject", "recRepairNotice"
+        store = self.service._state_store
+        now = time.time()
+        store.put_document(REPAIR_END_UNDO_NAMESPACE, target_id, {"state": "restored", "started_at": now})
+        store.upsert_repair_link_task({
+            "task_key": "old-repair-link", "source_record_id": source_id, "target_record_id": target_id,
+            "source_app_token": REPAIR_SOURCE_APP_TOKEN, "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
+            "action": "end", "created_at": now - 20, "due_at": now - 1,
+        })
+        with (
+            patch.object(self.service, "_patch_record_fields") as write,
+            patch.object(self.service, "_read_repair_project_for_notice") as read,
+            patch.object(self.service, "sync_repair_management_notice_action") as sync,
+        ):
+            result = self.service.process_due_repair_link_tasks()
+            self.assertEqual(result["checked"], 1)
+            self.assertEqual(result["linked"], 0)
+            self.assertEqual(store.list_due_repair_link_tasks(now=now + 4000), [])
+            self.assertEqual(self.service._execute_repair_sync_task({
+                "operation_type": "notice_summary_sync", "summary_record_id": source_id,
+                "result": {"scheduled_at": now - 1,
+                           "task_payload": {"action": "end", "target_record_id": target_id}},
+            }), [])
+            for effect in (write, read, sync):
+                effect.assert_not_called()
+
+        source = {"raw_fields": {"设备检修关联-L": "recOtherNotice"}}
+        with (
+            patch.object(self.service, "_read_repair_project_for_notice", return_value=(source, {})),
+            patch.object(self.service, "_read_repair_target_for_notice", return_value={
+                "raw_fields": {REPAIR_TARGET_SUMMARY_ID_FIELD_NAME: source_id},
+                "display_fields": {"检修状态": "结束"},
+            }),
+        ):
+            self.assertFalse(self.service._repair_async_link_is_current(source_id, target_id, "D", action="end"))
 
     def repair_binding_snapshot(self):
         self.service._repair_snapshots_enabled = True

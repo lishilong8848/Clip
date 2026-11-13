@@ -1,0 +1,193 @@
+/* =====================================================================
+ * base.css —— 设计令牌、重置、排版、通用组件（顶栏 / 按钮 / 卡片 / 徽章）
+ * ===================================================================== */
+:root{
+  --ink:#16283c; --ink-2:#5b6b80; --ink-3:#8aa0b8;
+  --line:#dbe4ee; --line-2:#eaf0f6;
+  --bg:#f4f7fb; --card:#ffffff;
+  --acc:#087a61; --acc-d:#063a30; --acc-l:#0e9b7a; --acc-bg:#eaf6f2;
+  --s1:#1d4ed8; --s2:#0e7490; --s3:#b7791f; --s4:#6d4fc4; --s5:#7c3aed; --s6:#64748b;
+  --r-s:8px; --r-m:12px; --r-l:16px;
+  --sh-1:0 1px 2px rgba(15,40,70,.05);
+  --sh-2:0 10px 24px rgba(15,40,70,.10);
+  --sh-3:0 14px 44px rgba(10,30,60,.28);
+  --top-h:56px; --maxw:1440px;
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{
+  margin:0;background:var(--bg);color:var(--ink);
+  font-family:"Microsoft YaHei","PingFang SC","Hiragino Sans GB",sans-serif;
+  font-size:14px;line-height:1.75;overflow-x:hidden;
+}
+img{max-width:100%}
+a{color:inherit;text-decoration:none}
+button{font-family:inherit;font-size:inherit}
+h1,h2,h3,h4{line-height:1.4}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:6px}
+.wrap{max-width:var(--maxw);margin:0 auto;padding:0 24px}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+
+/* ---------- 顶栏 ---------- */
+.top{
+  position:sticky;top:0;z-index:60;height:var(--top-h);
+  background:rgba(255,255,255,.94);backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+}
+.top .wrap{display:flex;align-items:center;gap:12px;height:var(--top-h)}
+.brand{display:flex;align-items:center;gap:9px;font-weight:700;font-size:15px;white-space:nowrap}
+.brand i{
+  width:22px;height:22px;border-radius:6px;background:var(--acc);position:relative;flex:none;display:inline-block;
+}
+.brand i::after{
+  content:"";position:absolute;left:8px;top:4px;width:2px;height:9px;background:#fff;
+  border-left:3px solid #fff;border-right:3px solid #fff;
+}
+.brand small{font-weight:400;color:var(--ink-3);font-size:11.5px}
+.top-sp{flex:1}
+
+/* ---------- 按钮 ---------- */
+.btn{
+  border:1px solid var(--line);background:#fff;color:var(--ink-2);
+  border-radius:var(--r-s);padding:6px 14px;font-size:13px;cursor:pointer;
+  transition:border-color .15s,color .15s,background .15s;white-space:nowrap;
+}
+.btn:hover{border-color:var(--acc);color:var(--acc)}
+.btn.on{background:var(--acc);border-color:transparent;color:#fff}
+.btn.on:hover{color:#fff}
+.btn.pri{background:var(--acc);border-color:transparent;color:#fff}
+.btn.pri:hover{background:var(--acc-l);color:#fff}
+.btn.sm{padding:4px 10px;font-size:12px}
+.btn.ico{padding:6px 10px;font-size:14px;line-height:1}
+
+/* ---------- 分段切换 ---------- */
+.seg{display:flex;gap:4px;background:#eef3f9;border:1px solid var(--line);border-radius:10px;padding:3px}
+.seg button{
+  border:0;background:transparent;color:var(--ink-2);border-radius:7px;
+  padding:5px 14px;font-size:12.5px;cursor:pointer;transition:background .15s,color .15s;white-space:nowrap;
+}
+.seg button:hover{color:var(--acc)}
+.seg button.on{background:#fff;color:var(--acc);font-weight:600;box-shadow:var(--sh-1)}
+
+/* ---------- 徽章 / 药丸 ---------- */
+.pill{
+  display:inline-block;font-size:11px;font-weight:600;color:var(--acc);
+  background:var(--acc-bg);border-radius:999px;padding:2px 9px;vertical-align:middle;
+}
+.tag{
+  display:inline-block;font-size:11.5px;color:var(--acc);background:#f0f6f4;
+  border:1px solid rgba(8,122,97,.2);border-radius:999px;padding:3px 11px;
+}
+
+/* ---------- 通用卡片 / 区块 ---------- */
+.card{
+  border:1px solid var(--line);border-radius:var(--r-m);background:var(--card);
+  box-shadow:var(--sh-1);
+}
+.sec-h{display:flex;align-items:baseline;gap:10px;margin:0 0 12px;flex-wrap:wrap}
+.sec-h h2{margin:0;font-size:17px}
+.sec-h small{color:var(--ink-2);font-size:12.5px;font-weight:400}
+.sec-h .ln{flex:1;height:1px;background:var(--line);min-width:20px;align-self:center}
+
+/* ---------- 折叠 ---------- */
+.fold-ico{
+  display:inline-flex;align-items:center;justify-content:center;
+  width:20px;height:20px;border-radius:6px;background:#eef3f9;color:var(--ink-2);
+  font-size:14px;line-height:1;flex:none;
+}
+.foldable{display:none}
+.foldable.open{display:block}
+
+/* ---------- 画布（架构图 / 思维导图通用） ---------- */
+.canvas-bar{
+  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:10px 12px;border-bottom:1px solid var(--line-2);background:#fbfdff;
+  border-radius:var(--r-m) var(--r-m) 0 0;
+}
+.canvas-bar .hint{font-size:11.5px;color:var(--ink-3);margin-left:auto}
+.canvas{
+  position:relative;overflow:hidden;height:clamp(560px,74vh,1000px);cursor:grab;
+  background:
+    linear-gradient(90deg,rgba(219,228,238,.45) 1px,transparent 1px) 0 0/26px 26px,
+    linear-gradient(rgba(219,228,238,.45) 1px,transparent 1px) 0 0/26px 26px,
+    #fdfefe;
+  border-radius:0 0 var(--r-m) var(--r-m);
+  touch-action:none;
+}
+.canvas.grabbing{cursor:grabbing}
+.canvas > svg{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform}
+.anode{pointer-events:all}
+.anode rect{transition:fill .15s,stroke-opacity .15s}
+.anode-click{cursor:pointer}
+.anode-click:hover rect:first-of-type{stroke-opacity:1 !important;fill:#f4fbf8}
+.anode-click:focus-visible{outline:none}
+.anode-click:focus-visible rect:first-of-type{stroke:#087a61 !important;stroke-opacity:1 !important;stroke-width:2.4 !important}
+.mnode-dom{cursor:pointer}
+.mnode-mod{cursor:pointer}
+.mnode rect{transition:fill-opacity .15s,stroke-opacity .15s}
+.mnode:hover rect{stroke-opacity:.95 !important}
+.mnode-dom:hover rect{fill-opacity:.2 !important}
+.mnode:focus-visible{outline:none}
+.mnode:focus-visible rect{stroke-width:2.6 !important;stroke-opacity:1 !important}
+
+/* ---------- 节点悬浮说明 ---------- */
+#nodeTip{
+  position:fixed;z-index:90;pointer-events:none;display:none;max-width:330px;
+  background:#fff;border:1px solid var(--line);border-radius:10px;
+  padding:9px 12px;box-shadow:var(--sh-2);
+}
+#nodeTip.on{display:block}
+#nodeTip b{display:block;font-size:13px;color:var(--ink);margin-bottom:2px}
+#nodeTip p{margin:3px 0 0;font-size:11.5px;color:var(--ink-2);line-height:1.7}
+#nodeTip .tp-pill{
+  display:inline-block;margin-left:6px;font-size:10.5px;color:var(--acc);
+  background:var(--acc-bg);border-radius:999px;padding:1px 8px;vertical-align:1px;
+}
+#nodeTip .tp-go{display:block;margin-top:6px;font-size:10.5px;color:var(--acc);font-style:normal}
+
+/* ---------- 缩略图悬浮预览 ---------- */
+#hoverPrev{
+  position:fixed;z-index:95;pointer-events:none;display:none;width:520px;
+  background:#fff;border:1px solid var(--line);border-radius:12px;padding:6px;box-shadow:var(--sh-3);
+}
+#hoverPrev.on{display:block}
+#hoverPrev img{display:block;width:100%;border-radius:8px}
+
+/* ---------- 回到顶部 ---------- */
+#toTop{
+  position:fixed;right:22px;bottom:26px;z-index:70;width:42px;height:42px;
+  border-radius:50%;border:1px solid var(--line);background:#fff;color:var(--ink-2);
+  box-shadow:0 6px 18px rgba(15,40,70,.14);cursor:pointer;font-size:17px;display:none;
+}
+#toTop.show{display:block}
+#toTop:hover{color:var(--acc);border-color:var(--acc)}
+
+/* ---------- 页脚 ---------- */
+.foot{margin:22px 0 0;padding-bottom:44px;font-size:12px;color:var(--ink-2);text-align:center}
+
+/* ---------- 视图切换动画 ---------- */
+.view{display:none}
+.view.on{display:block;animation:vin .26s ease}
+@keyframes vin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+/* ---------- 响应式 ---------- */
+@media (max-width:1080px){
+  .canvas{height:520px}
+  .brand small{display:none}
+}
+@media (max-width:820px){
+  :root{--maxw:100%}
+  .wrap{padding:0 14px}
+  .canvas{height:420px}
+  .top .wrap{gap:8px}
+  .btn{padding:5px 10px;font-size:12px}
+  #hoverPrev{display:none !important}
+}
+@media (max-width:560px){
+  .top{height:auto}
+  .top .wrap{flex-wrap:wrap;height:auto;padding-top:8px;padding-bottom:8px;row-gap:8px}
+  .seg{order:5;flex:1 1 100%}
+  .seg button{flex:1;padding:6px 6px;font-size:12px}
+  .canvas{height:340px}
+  .brand{font-size:14px}
+}

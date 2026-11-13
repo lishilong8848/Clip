@@ -46,6 +46,7 @@ PREFIXES = (
     ("/api/cold-source-monitor", "daily"), ("/cold-source-monitor", "daily"),
     ("/api/learning", "learning"), ("/learning", "learning"),
     ("/api/plan-convergence", "plan_convergence"), ("/plan-convergence", "plan_convergence"),
+    ("/api/zhihang-data", "accounts"), ("/zhihang-data", "accounts"),
     ("/api/link-directory", "links"), ("/link-directory", "links"), ("/life-guide", "life_guide"),
     ("/api/handover", "handover"), ("/api/change-", "change"), ("/api/repair-refresh", "repair"),
 )

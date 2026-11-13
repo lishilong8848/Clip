@@ -227,3 +227,5 @@ def install_plan_convergence_routes(app, controller, runtime):
     async def previous_page(path: str):
         tab = 'rules' if path == 'ruleset' else 'maintenance' if path == 'maintenance' else 'review'
         return Response(status_code=302, headers={'Location': '/plan-convergence?tab=' + tab})
+
+    return lambda: get_service().browser_login

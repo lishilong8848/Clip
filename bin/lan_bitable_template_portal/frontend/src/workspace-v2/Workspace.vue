@@ -31,7 +31,7 @@
           <NResult v-else-if="denied" status="403" title="没有该功能权限" description="当前账号未获授此功能，请申请权限或联系管理员。"><template #footer><NButton type="primary" @click="navigate('/?view=permission')">申请权限</NButton></template></NResult>
           <NResult v-else-if="loggedIn && unsupportedScope" status="info" :title="scopeLabel + '尚未接入此业务'" description="原业务目前仅支持 A–E 楼，未使用其他楼栋的数据代替。"><template #footer><NButton v-if="user.role === 'admin' && ['drills','critical_guard'].includes(activeModule)" type="primary" @click="navigate(route.pathname+'?mode=admin')"><Settings :size="16" />管理员入口</NButton></template></NResult>
           <AccessRequest v-else-if="loggedIn && permissionPage" :key="String(user.open_id)" :user="user" @back="navigate('/?view=my')" @changed="loadAuth" />
-          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge','documents','eop_scenarios'].includes(activeModule) && !assignedRiskPage)"
+          <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge','documents','eop_scenarios',zhihangDataModule.id].includes(activeModule) && !assignedRiskPage)"
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/?view=my')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
@@ -87,7 +87,7 @@ import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, 
 import { Activity, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
-import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate } from './modules';
+import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, zhihangDataModule } from './modules';
 import { canViewInspectionHistory } from '../inspectionAccess';
 import { personaFor } from './persona';
 import { sidebarGroups } from './sidebarSections';
@@ -145,6 +145,7 @@ const pages: Record<string, any> = {
   signature: lazy(() => import('../components/SignaturePage.vue')),
   accounts: lazy(() => import('../components/AdminTools.vue')),
   history: lazy(() => import('../components/HistoryMemoryPage.vue')),
+  [zhihangDataModule.id]: lazy(() => import('./ZhihangDataPage.vue')),
 };
 const navigationQuery=window.matchMedia('(min-width:761px) and (hover:hover), (min-width:1025px)'),desktopNavigation=ref(navigationQuery.matches);
 const phoneQuery=window.matchMedia('(max-width:760px), (hover:none) and (max-width:1024px) and (max-height:500px)'),phoneViewport=ref(phoneQuery.matches);
@@ -186,7 +187,12 @@ const mobileActive = computed(() => route.value.pathname === '/' && (route.value
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
-const denied = computed(() => loggedIn.value && !publicLink.value && (activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='tool_management' && toolManagementAvailable.value || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !(activeModule.value==='tool_management' && user.value.tool_management_full_access===true) && !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'))));
+const zhihangDataAllowed = computed(() => canManageZhihangData(user.value));
+const denied = computed(() => {
+  if (!loggedIn.value || publicLink.value) return false;
+  if (activeModule.value === zhihangDataModule.id) return !zhihangDataAllowed.value;
+  return activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='tool_management' && toolManagementAvailable.value || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !(activeModule.value==='tool_management' && user.value.tool_management_full_access===true) && !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'));
+});
 const immersiveInspection=computed(()=>phoneViewport.value && !desktopNavigation.value && loggedIn.value && !checking.value && !denied.value && !publicLink.value && !printMode.value && !impersonationBlocked.value && user.value.role!=='guest' && activeModule.value==='daily_inspection');
 watch(immersiveInspection,value=>document.documentElement.classList.toggle('inspection-mobile-active',value),{immediate:true});
 onBeforeUnmount(()=>document.documentElement.classList.remove('inspection-mobile-active'));
@@ -225,6 +231,7 @@ const permittedModules = computed(() => {
   if (granted.value.includes('event') && !entries.some(module => module.id === 'notices')) {
     entries.push({ id: 'notices', label: '通告办理', group: '运行管理', path: '/workbench-lite?work_type=event', icon: 'notice' });
   }
+  if (zhihangDataAllowed.value) entries.push(zhihangDataModule);
   return entries;
 });
 const menuGroups = computed(() => sidebarGroups([
@@ -270,7 +277,7 @@ function selectMenu(key: string) {
 function openWorkspaceModule(target:string){
  const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);
  const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','token'].some(key=>url.searchParams.has(key));
- if(module&&!precise)url.searchParams.set('scope',scopeFor(module));
+ if(module && module !== zhihangDataModule.id && !precise)url.searchParams.set('scope',scopeFor(module));
  navigate(url);
 }
 
@@ -299,6 +306,7 @@ const componentProps = computed(() => {
   const p = route.value.searchParams, admin = user.value.role === 'admin';
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
   switch(componentName.value) {
+    case zhihangDataModule.id: return {};
     case 'work_handover': return {handoverId:p.get('id')||''};
     case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
     case 'tool_management': return {scope:p.get('scope')||''};

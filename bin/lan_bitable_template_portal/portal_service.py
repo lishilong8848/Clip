@@ -630,9 +630,13 @@ REPAIR_SYNC_OPERATION_TYPES = (
     "summary_followup_copy_sync",
     "relation_field_sync",
     "notice_summary_sync",
+    "rollback_binding_verify",
     "event_transfer_sync",
     "project_delete",
 )
+REPAIR_END_FIELDS = ("维修结束时间（2026）", "维修结束时间")
+REPAIR_END_UNDO_NAMESPACE = "repair_end_undo"
+REPAIR_END_WRITE_NAMESPACE = "repair_end_write"
 REPAIR_SYNC_MAX_ATTEMPTS = 12
 REPAIR_SYNC_FAST_RETRY_SECONDS = 60
 REPAIR_SYNC_SLOW_RETRY_SECONDS = 15 * 60
@@ -5601,7 +5605,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         return payload
 
     @classmethod
-    def _repair_management_title(cls, record: dict[str, Any]) -> str:
+    def _repair_management_title(cls, record: dict[str, Any], *, allow_metadata_fallback: bool = True) -> str:
         raw_fields = record.get("raw_fields") if isinstance(record.get("raw_fields"), dict) else {}
         display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
         fields = {**raw_fields, **display_fields}
@@ -5613,8 +5617,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             "故障维修原因",
             "故障发生现象描述",
             "设备名称",
-            "维修进展描述",
         )
+        if allow_metadata_fallback:
+            title_field_names += ("维修进展描述",)
         for key in title_field_names:
             value = cls._clean_source_text(
                 cls._repair_management_plain_text(fields.get(key))
@@ -5632,6 +5637,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 continue
             if value:
                 return value if key == "检修通告名称" else value[:80]
+        if not allow_metadata_fallback:
+            return ""
         fallback_title = cls._clean_source_text(record.get("title"))
         if fallback_title:
             return fallback_title[:80]
@@ -10344,11 +10351,19 @@ class MaintenancePortalService(RepairOperationsMixin):
             target_record_id = str(
                 task_payload.get("target_record_id") or ""
             ).strip()
-            sync = self.sync_repair_management_notice_action(
-                prepared,
-                action=action,
-                target_record_id=target_record_id,
-            )
+            with self._repair_management_record_lock(f"repair-target:{target_record_id}"):
+                if self._repair_action_precedes_undo(
+                    target_record_id, job_id=str(prepared.get("job_id") or ""),
+                    queued_at=float(task_payload.get("action_at") or result.get("scheduled_at") or 0),
+                ):
+                    return []
+                if not self._repair_async_link_is_current(
+                    summary_id, target_record_id, scope, action=action,
+                ):
+                    return []
+                sync = self.sync_repair_management_notice_action(
+                    prepared, action=action, target_record_id=target_record_id,
+                )
             warnings = [
                 str(item or "").strip()
                 for item in (sync.get("warnings") or [])
@@ -10359,6 +10374,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             if self._repair_sync_warnings_require_retry(warnings):
                 raise PortalError("；".join(warnings))
             return warnings
+        if operation_type == "rollback_binding_verify":
+            target_id = str(task_payload.get("target_record_id") or "")
+            with self._repair_management_record_lock(f"repair-target:{target_id}"):
+                self._verify_rollback_repair_binding(summary_id, target_id, scope)
+                self._touch_state_cache_version()
+            return []
         if operation_type == "event_transfer_sync":
             event_record_id = str(
                 task_payload.get("event_record_id") or ""
@@ -10481,7 +10502,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 ):
                     stats["rescheduled"] += 1
                     continue
-                if attempts >= REPAIR_SYNC_MAX_ATTEMPTS:
+                if attempts >= REPAIR_SYNC_MAX_ATTEMPTS or isinstance(exc, NoticeSourceSuperseded):
                     self._state_store.update_repair_management_operation(
                         operation_id,
                         status="failed",
@@ -12946,6 +12967,204 @@ class MaintenancePortalService(RepairOperationsMixin):
             return record
         raise PortalError("未找到维修项目，可能已被删除或当前账号无权访问。")
 
+    def _read_repair_project_for_notice(
+        self, record_id: str, scope: str
+    ) -> tuple[dict[str, Any], dict[str, FieldMeta]]:
+        _metas, metadata = self._load_table_fields(
+            app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+        )
+        records = self._load_table_records_by_ids(
+            app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            meta_by_name=metadata, work_type=WORK_TYPE_REPAIR,
+            notice_type=NOTICE_TYPE_REPAIR, record_ids=[record_id],
+        )
+        if len(records) != 1 or records[0].get("record_id") != record_id:
+            raise PortalNotFoundError("未找到指定维修项目，请重新选择。")
+        record = records[0]
+        if not self._repair_management_record_in_scope(record, scope):
+            raise PortalError("当前账号无权操作该楼栋维修项目。")
+        return record, metadata
+
+    def _read_repair_target_for_notice(self, target_id: str) -> dict[str, Any]:
+        app_token, table_id = self._repair_management_repair_source_config()
+        _metas, metadata = self._load_table_fields(app_token=app_token, table_id=table_id)
+        records = self._load_table_records_by_ids(
+            app_token=app_token, table_id=table_id, meta_by_name=metadata,
+            work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR,
+            record_ids=[target_id],
+        )
+        if len(records) != 1 or records[0].get("record_id") != target_id:
+            raise PortalNotFoundError("未找到检修目标记录，请重新选择。")
+        return records[0]
+
+    def _repair_target_owner(self, record: dict[str, Any]) -> str:
+        fields = record.get("raw_fields") or record.get("display_fields") or {}
+        return self._repair_management_plain_text(fields.get(REPAIR_TARGET_SUMMARY_ID_FIELD_NAME)).strip()
+
+    def _repair_end_values(self, record: dict[str, Any]) -> dict[str, Any]:
+        raw = record.get("raw_fields") or {}
+        display = record.get("display_fields") or {}
+        return {
+            name: raw.get(name, display.get(name))
+            for name in REPAIR_END_FIELDS
+            if self._repair_management_plain_text(raw.get(name, display.get(name))).strip()
+        }
+
+    def _repair_end_write_evidence(
+        self, undo: dict[str, Any], source_id: str, target_id: str,
+    ) -> dict[str, Any]:
+        job_id = str(undo.get("job_id") or "")
+        if not job_id:
+            return {}
+        receipt = self._state_store.get_document(REPAIR_END_WRITE_NAMESPACE, job_id) or {}
+        if (not receipt.get("write_accepted") or receipt.get("source_id") != source_id
+                or receipt.get("target_id") != target_id):
+            return {}
+        return receipt
+
+    def _verify_rollback_repair_binding(
+        self, source_id: str, target_id: str, scope: str, *, target: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        source, metadata = self._read_repair_project_for_notice(source_id, scope)
+        target = target or self._read_repair_target_for_notice(target_id)
+        buildings = self._target_record_building_codes(
+            target.get("display_fields") or {}, get_field_config(NOTICE_TYPE_REPAIR),
+        )
+        if not buildings or not self._scope_matches_buildings(scope, buildings):
+            raise NoticeSourceSuperseded("目标检修通告不属于当前楼栋。")
+        source_target = self._repair_target_record_id(source)
+        owner = self._repair_target_owner(target)
+        if source_target not in ("", target_id) or owner not in ("", source_id):
+            raise NoticeSourceSuperseded("维修项目或检修通告已关联其他记录，请重新选择。")
+        lifecycle = self._target_record_lifecycle(
+            work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+        )
+        if not lifecycle["active"] or lifecycle["finished"]:
+            raise NoticeSourceSuperseded("目标检修通告已不在进行中，请刷新后核对。")
+        if self._repair_end_values(source) or self._repair_management_workflow_text(
+            source, metadata,
+        ) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW:
+            raise NoticeSourceSuperseded("所选维修项目已结束，请核对或重新选择。")
+        if source_target != target_id or owner != source_id:
+            raise NoticeSourcePending("关联状态待核验，后台会继续读取飞书确认。")
+        self._upsert_repair_snapshot_fields(
+            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS, record_id=source_id,
+            fields={REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME: target_id,
+                    **dict.fromkeys(REPAIR_END_FIELDS),
+                    REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME: self._repair_management_workflow_text(source, metadata)},
+        )
+        return source
+
+    @staticmethod
+    def _repair_undo_source_id(undo: dict[str, Any]) -> str:
+        context = undo.get("context") or {}
+        sources = {
+            str(value).strip()
+            for value in (undo.get("source_record_id"), context.get("source_record_id"),
+                          context.get("repair_management_record_id"))
+            if str(value or "").strip().startswith("rec")
+        }
+        if len(sources) > 1 or undo.get("target_record_id") in sources:
+            raise PortalError("原回退记录的维修项目标识冲突，请核验原记录。")
+        return next(iter(sources), "")
+
+    def _repair_action_precedes_undo(
+        self, target_id: str, *, job_id: str = "", queued_at: float = 0,
+    ) -> bool:
+        barrier = self._state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+        if not barrier and queued_at:
+            legacy = self._state_store.list_notice_undo_actions(
+                status="undone", action_type="end",
+                include_expired=True, limit=200,
+            )
+            return any(row.get("work_type") == WORK_TYPE_REPAIR
+                       and row.get("target_record_id") == target_id
+                       and float(row.get("applied_at") or 0) >= queued_at for row in legacy)
+        if not barrier:
+            return False
+        job = self.get_job(job_id) or {} if job_id else {}
+        started = float(job.get("accepted_at") or queued_at or 0)
+        if (started and started <= float(barrier.get("started_at") or 0)) or (not started and queued_at):
+            return True
+        if barrier.get("state") in {"pending", "write_rejected"}:
+            raise NoticeSourcePending("检修关联状态待核验，请等待原回退完成。")
+        return False
+
+    def verify_repair_notice_before_write(
+        self, payload: dict[str, Any], target_id: str, *, action: str,
+    ) -> dict[str, Any] | None:
+        if action not in {"update", "end"} or self._item_work_type(payload) != WORK_TYPE_REPAIR or external_mock_enabled():
+            return
+        barrier = self._state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+        job_id = str(payload.get("job_id") or "")
+        if barrier and job_id and self._repair_action_precedes_undo(target_id, job_id=job_id):
+            raise PortalError("原检修任务早于已执行的回退，请刷新后重新提交。")
+        if barrier.get("state") in {"pending", "write_rejected"}:
+            raise NoticeSourcePending("检修关联状态待核验，请等待原回退完成。")
+        source_id = self._repair_undo_source_id({
+            "context": payload, "target_record_id": target_id,
+        })
+        if not barrier:
+            if not source_id:
+                return
+            operation_id = self._repair_sync_operation_id(
+                "rollback_binding_verify", source_id, target_record_id=target_id,
+            )
+            if not self._state_store.get_repair_management_operation(operation_id):
+                return
+        target = self._read_repair_target_for_notice(target_id)
+        scope = str(payload.get("scope") or "ALL")
+        buildings = self._target_record_building_codes(
+            target.get("display_fields") or {}, get_field_config(NOTICE_TYPE_REPAIR),
+        )
+        if not buildings or not self._scope_matches_buildings(scope, buildings):
+            raise PortalError("目标检修通告不属于当前楼栋。")
+        if not source_id:
+            if self._repair_target_owner(target):
+                raise PortalError("该检修已关联维修项目，请刷新后重新提交。")
+            if not self._target_record_lifecycle(
+                work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+            )["active"]:
+                raise PortalError("目标检修通告已不在进行中，请刷新后核对。")
+            return
+        return self._verify_rollback_repair_binding(source_id, target_id, scope, target=target)
+
+    def _repair_async_link_is_current(
+        self, source_id: str, target_id: str, scope: str, *, action: str,
+    ) -> bool:
+        identities = []
+        for key, value in (("source_record_id", source_id), ("target_record_id", target_id)):
+            identity = self._state_store.resolve_notice_identity(
+                work_type=WORK_TYPE_REPAIR, **{key: value},
+            ) or {}
+            if (canonical_source_record_id(identity) not in ("", source_id)
+                    or canonical_target_record_id(identity) not in ("", target_id)):
+                return False
+            identities.append(identity)
+        try:
+            source, _metadata = self._read_repair_project_for_notice(source_id, scope)
+            target = self._read_repair_target_for_notice(target_id)
+        except PortalError as exc:
+            if isinstance(exc, PortalNotFoundError) or self._repair_management_record_not_found_error(exc):
+                return False
+            raise
+        source_target = self._repair_target_record_id(source)
+        owner = self._repair_target_owner(target)
+        if source_target not in ("", target_id) or owner not in ("", source_id):
+            return False
+        # The start write can precede both cloud pointers. Only the exact
+        # current local identity on both sides can authorize that first sync.
+        if not (source_target == target_id or owner == source_id):
+            if action != "start" or not all(
+                canonical_target_record_id(row) == target_id and canonical_source_record_id(row) == source_id
+                for row in identities
+            ):
+                return False
+        lifecycle = self._target_record_lifecycle(
+            work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+        )
+        return bool(lifecycle["finished"] if action == "end" else lifecycle["active"])
+
     def repair_management_notice_prefill(
         self,
         record_id: str,
@@ -14012,6 +14231,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             return {"synced": False, "skipped": True, "warnings": []}
 
         scope = str((prepared or {}).get("scope") or "ALL").strip() or "ALL"
+        job_id = str(prepared.get("job_id") or "")
+        if self._repair_action_precedes_undo(target_record_id, job_id=job_id):
+            return {"synced": True, "superseded": True, "warnings": []}
         existing = self._ensure_repair_management_record_in_scope(
             repair_management_record_id,
             scope,
@@ -14114,12 +14336,36 @@ class MaintenancePortalService(RepairOperationsMixin):
         if not coerced:
             raise PortalError("维修项目没有可同步的检修通告字段。")
 
-        self._patch_record_fields(
-            app_token=REPAIR_SOURCE_APP_TOKEN,
-            table_id=REPAIR_MANAGEMENT_TABLE_ID,
-            record_id=repair_management_record_id,
-            fields=coerced,
-        )
+        end_field = REPAIR_END_FIELDS[0]
+        receipt = {}
+        if action == "end" and job_id and end_field in coerced:
+            # Save the exact value before the write so a lost response can be
+            # checked against the same source and target during rollback.
+            original, _metadata = self._read_repair_project_for_notice(repair_management_record_id, scope)
+            original_end = self._repair_end_values(original)
+            if original_end:
+                coerced.pop(end_field)
+                existing = original
+            else:
+                receipt = self._state_store.get_document(REPAIR_END_WRITE_NAMESPACE, job_id) or {
+                    "source_id": repair_management_record_id, "target_id": target_record_id,
+                    "end_field": end_field, "end_value": coerced[end_field],
+                }
+                if (receipt.get("source_id"), receipt.get("target_id")) != (repair_management_record_id, target_record_id):
+                    raise PortalError("原结束任务的维修项目关联已变化。")
+                coerced[end_field] = receipt["end_value"]
+                self._state_store.put_document(REPAIR_END_WRITE_NAMESPACE, job_id, receipt)
+        if coerced:
+            self._patch_record_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN,
+                table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                record_id=repair_management_record_id,
+                fields=coerced,
+            )
+        if receipt:
+            self._state_store.put_document(REPAIR_END_WRITE_NAMESPACE, job_id, {
+                **receipt, "write_accepted": True,
+            })
         self._upsert_repair_snapshot_fields(
             source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             record_id=repair_management_record_id,
@@ -14712,6 +14958,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "record_id": project_id,
                     "title": fallback_title,
                     "repair_title": self._repair_management_title(project),
+                    "notification_title": self._repair_management_title(project, allow_metadata_fallback=False),
                     "source_event_id": source_event_ids[0] if source_event_ids else "",
                     "building": self._building_label_from_codes(building_codes),
                     "building_codes": building_codes,
@@ -14720,7 +14967,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                         or project_fields.get("专业（推送消息用）")
                     ),
                     "fault_time": self._repair_management_plain_text(
-                        project_fields.get("故障发生时间")
+                        project_fields.get("故障发生时间") or project_raw_fields.get("故障发生时间")
                     ),
                     "repair_start_time": self._repair_management_plain_text(
                         project_fields.get("维修开始时间")
@@ -20509,6 +20756,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         target_record_id: str,
         scope: str = "ALL",
         active_item_id: str = "",
+        require_active: bool = False,
     ) -> dict[str, Any]:
         """Bind a repair target record to its source work order and projections."""
         summary_id = str(summary_record_id or "").strip()
@@ -20517,10 +20765,54 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError("当前检修通告缺少有效的维修单记录 ID。")
         if not target_id.startswith("rec"):
             raise PortalError("请选择有效的检修目标记录。")
-        summary_record = self._ensure_repair_management_record_in_scope(
-            summary_id,
-            scope,
-        )
+        with self._repair_management_record_lock(summary_id):
+            with self._repair_management_record_lock(f"repair-target:{target_id}"):
+                return self._bind_repair_notice_target_locked(
+                    summary_id, target_id, scope, active_item_id, require_active,
+                )
+
+    def _bind_repair_notice_target_locked(
+        self, summary_id: str, target_id: str, scope: str, active_item_id: str,
+        require_active: bool,
+    ) -> dict[str, Any]:
+        barrier = self._state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+        if barrier.get("state") in {"pending", "write_rejected"}:
+            raise NoticeSourcePending("关联状态待核验，原检修回退尚未完成。")
+        check_active = require_active
+        if check_active:
+            target = self._read_repair_target_for_notice(target_id)
+            lifecycle = self._target_record_lifecycle(
+                work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+            )
+            buildings = self._target_record_building_codes(
+                target.get("display_fields") or {}, get_field_config(NOTICE_TYPE_REPAIR),
+            )
+            if not buildings or not self._scope_matches_buildings(scope, buildings):
+                raise PortalError("目标检修通告不属于当前楼栋。")
+            if not lifecycle["active"] or lifecycle["finished"]:
+                raise PortalError("目标检修通告已不在进行中，请刷新后核对。")
+            summary_record, metadata = self._read_repair_project_for_notice(summary_id, scope)
+            if self._repair_target_record_id(summary_record) not in ("", target_id):
+                raise PortalError("所选维修项目已关联其他检修通告，请重新选择。")
+            if self._repair_target_owner(target) not in ("", summary_id):
+                raise PortalError("检修目标记录已关联其他维修单，请重新选择。")
+            if active_item_id:
+                identity = self._state_store.resolve_notice_identity(
+                    work_type=WORK_TYPE_REPAIR, active_item_id=active_item_id,
+                ) or {}
+                if canonical_target_record_id(identity) not in ("", target_id):
+                    raise PortalError("当前进行中条目已关联其他检修通告，请刷新后重新选择。")
+            if self._repair_end_values(summary_record) or self._repair_management_workflow_text(
+                summary_record, metadata,
+            ) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW:
+                summary_record = self._restore_repair_source_after_applied_end_undo(
+                    {}, summary_record, source_record_id=summary_id,
+                    target_record_id=target_id, scope=scope,
+                )
+                if self._repair_management_workflow_text(summary_record, metadata) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW or self._repair_end_values(summary_record):
+                    raise PortalError("所选维修项目已结束，缺少本次回退的源表写入凭据，请核对或重新选择。")
+        else:
+            summary_record = self._ensure_repair_management_record_in_scope(summary_id, scope)
         raw_fields = (
             summary_record.get("raw_fields")
             if isinstance(summary_record.get("raw_fields"), dict)
@@ -20535,26 +20827,48 @@ class MaintenancePortalService(RepairOperationsMixin):
             raw_fields.get("关联事件单")
             or display_fields.get("关联事件单")
         )
-        update_result = self.update_repair_management_record(
-            summary_id,
-            {},
-            operation_id="repair-bind-" + uuid.uuid4().hex,
-            source_event_id=event_ids[0] if event_ids else "",
-            source_repair_ids=[target_id],
-            replace_source_relations=False,
-            scope=scope,
-            validate_required=False,
+        already_bound = (
+            check_active and self._repair_target_record_id(summary_record) == target_id
+            and self._repair_target_owner(target) == summary_id
         )
+        if already_bound:
+            update_result = {}
+        else:
+            update_result = self.update_repair_management_record(
+                summary_id,
+                {},
+                operation_id="repair-bind-" + uuid.uuid4().hex,
+                source_event_id=event_ids[0] if event_ids else "",
+                source_repair_ids=[target_id],
+                replace_source_relations=False,
+                scope=scope,
+                validate_required=False,
+            )
         relation_sync = (
             update_result.get("relation_sync")
             if isinstance(update_result.get("relation_sync"), dict)
             else {}
         )
-        relation_sync = self._ensure_repair_target_relation_synced(
-            summary_record_id=summary_id,
-            target_record_id=target_id,
-            relation_sync=relation_sync,
-        )
+        if not already_bound:
+            relation_sync = self._ensure_repair_target_relation_synced(
+                summary_record_id=summary_id, target_record_id=target_id,
+                relation_sync=relation_sync,
+            )
+        if check_active:
+            try:
+                self._verify_rollback_repair_binding(summary_id, target_id, scope)
+            except NoticeSourceSuperseded:
+                raise
+            except Exception as exc:
+                operation_id = self._schedule_repair_sync_task_unchecked(
+                    "rollback_binding_verify", summary_record_id=summary_id, scope=scope,
+                    target_record_id=target_id, task_payload={"target_record_id": target_id},
+                    error=str(exc),
+                )
+                return {
+                    "binding_pending": True, "binding_id": operation_id,
+                    "message": "关联状态待核验，后台会继续读取飞书确认。",
+                }
         projection = (
             relation_sync.get("projection")
             if isinstance(relation_sync.get("projection"), dict)
@@ -24650,49 +24964,43 @@ class MaintenancePortalService(RepairOperationsMixin):
                 ).strip()
                 source_record_id = str(task.get("source_record_id") or "").strip()
                 target_record_id = str(task.get("target_record_id") or "").strip()
-                # Existing queued tasks may contain the retired relation name.
-                # Always resolve the current logical mirror and let the normal
-                # patch path map it to 设备检修关联-L.
-                link_field_name = REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
-                _source_metas, source_meta_by_name = self._load_table_fields(
-                    app_token=source_app_token,
-                    table_id=source_table_id,
-                )
-                link_meta = source_meta_by_name.get(link_field_name)
-                if link_meta is None:
-                    raise PortalError(
-                        f"维修项目表缺少字段“{link_field_name}”"
-                    )
-                if self._repair_management_field_is_relation(link_meta):
-                    raise PortalError(
-                        f"维修项目表“{link_field_name}”必须为文本记录 ID 字段"
-                    )
-                self._patch_record_fields(
-                    app_token=source_app_token,
-                    table_id=source_table_id,
-                    record_id=source_record_id,
-                    fields={link_field_name: target_record_id},
-                )
-                if (
-                    source_app_token == REPAIR_SOURCE_APP_TOKEN
-                    and source_table_id == REPAIR_MANAGEMENT_TABLE_ID
+                with self._repair_management_record_lock(source_record_id), self._repair_management_record_lock(
+                    f"repair-target:{target_record_id}"
                 ):
-                    self._upsert_repair_snapshot_fields(
-                        source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-                        record_id=source_record_id,
-                        fields={link_field_name: target_record_id},
+                    if (not source_record_id.startswith("rec") or not target_record_id.startswith("rec")
+                        or (source_app_token, source_table_id) != (REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID)
+                        or self._repair_action_precedes_undo(
+                        target_record_id, job_id=str(task.get("job_id") or ""),
+                        queued_at=float(task.get("created_at") or 0),
+                    ) or not self._repair_async_link_is_current(
+                        source_record_id, target_record_id, "ALL", action=str(task.get("action") or ""),
+                    )):
+                        self._state_store.update_repair_link_task(
+                            task_key, {"status": "superseded", "last_error": ""},
+                        )
+                        continue
+                    # Resolve the logical name to the current writable text mirror.
+                    link_field_name = REPAIR_MANAGEMENT_REPAIR_LINK_FIELD_NAME
+                    _source_metas, source_meta_by_name = self._load_table_fields(
+                        app_token=source_app_token, table_id=source_table_id,
                     )
-                    self._invalidate_repair_management_status_cache()
-                self._state_store.update_repair_link_task(
-                    task_key,
-                    {
-                        "status": "linked",
-                        "attempts": attempts,
-                        "sync_record_id": "",
-                        "link_mode": "text",
-                        "last_error": "",
-                    },
-                )
+                    link_meta = source_meta_by_name.get(link_field_name)
+                    if link_meta is None or self._repair_management_field_is_relation(link_meta):
+                        raise PortalError(f"维修项目表缺少可写的文本关联字段“{link_field_name}”")
+                    self._patch_record_fields(
+                        app_token=source_app_token, table_id=source_table_id,
+                        record_id=source_record_id, fields={link_field_name: target_record_id},
+                    )
+                    if (source_app_token, source_table_id) == (REPAIR_SOURCE_APP_TOKEN, REPAIR_MANAGEMENT_TABLE_ID):
+                        self._upsert_repair_snapshot_fields(
+                            source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS, record_id=source_record_id,
+                            fields={link_field_name: target_record_id},
+                        )
+                        self._invalidate_repair_management_status_cache()
+                    self._state_store.update_repair_link_task(task_key, {
+                        "status": "linked", "attempts": attempts, "sync_record_id": "",
+                        "link_mode": "text", "last_error": "",
+                    })
                 stats["linked"] += 1
             except Exception as exc:
                 next_status = "failed" if attempts >= max_attempts else "pending"
@@ -31196,7 +31504,15 @@ class MaintenancePortalService(RepairOperationsMixin):
             return ""
         context = copy.deepcopy(context) if isinstance(context, dict) else {}
         scope = self._normalize_scope(scope or context.get("scope") or "ALL")
+        repair_end = action_type == "end" and self._item_work_type(context) == WORK_TYPE_REPAIR
+        explicit_source = canonical_source_record_id(context) if repair_end else ""
         context = self._enrich_ongoing_identity_item(context, scope=scope)
+        if repair_end:
+            if explicit_source:
+                context["source_record_id"] = explicit_source
+            else:
+                context.pop("source_record_id", None)
+                context.pop("source_id", None)
         identity = self._undo_identity_from_context(context, action_type=action_type)
         if (
             identity.get("work_type") == WORK_TYPE_EVENT
@@ -31608,64 +31924,28 @@ class MaintenancePortalService(RepairOperationsMixin):
         work_type: str,
         scope: str,
     ) -> dict[str, Any] | None:
-        context = normalize_notice_identity_payload(context or {})
-
-        def needs_related_restore(undo: dict[str, Any] | None) -> bool:
-            related = (
-                undo.get("related_remote")
-                if isinstance(undo, dict)
-                and isinstance(undo.get("related_remote"), dict)
-                else {}
-            )
-            return not bool(related.get("restored"))
-
-        marker_id = str(context.get("undo_restored_id") or "").strip()
-        if marker_id:
-            marked = self._state_store.get_notice_undo_action(marker_id)
-            if (
-                isinstance(marked, dict)
-                and str(marked.get("status") or "") == "undone"
-                and str(marked.get("action_type") or "").strip().lower() == "end"
-                and str(marked.get("work_type") or "").strip() == work_type
-                and needs_related_restore(marked)
-            ):
-                return marked
-
-        context_ids = {
-            str(value or "").strip()
-            for value in (
-                context.get("active_item_id"),
-                canonical_source_record_id(context),
-                canonical_target_record_id(context),
-            )
-            if str(value or "").strip()
-        }
-        if not context_ids:
+        source_id = canonical_source_record_id(context)
+        target_id = canonical_target_record_id(context)
+        if not source_id.startswith("rec") or not target_id.startswith("rec"):
             return None
-        for undo in self._state_store.list_notice_undo_actions(
-            status="undone",
-            scope=self._normalize_scope(scope),
-            include_expired=True,
-            limit=200,
-        ):
-            if str(undo.get("action_type") or "").strip().lower() != "end":
+        barrier = self._state_store.get_document(REPAIR_END_UNDO_NAMESPACE, target_id) or {}
+        if barrier.get("undo_id"):
+            candidates = [self._state_store.get_notice_undo_action(barrier["undo_id"]) or {}]
+        else:
+            candidates = self._state_store.list_notice_undo_actions(
+                status="undone", scope="" if scope == "ALL" else self._normalize_scope(scope),
+                action_type="end", include_expired=True, limit=200,
+            )
+        for undo in candidates:
+            if (undo.get("status") != "undone" or undo.get("action_type") != "end"
+                    or undo.get("work_type") != work_type
+                    or undo.get("target_record_id") != target_id
+                    or undo.get("restored_target_record_id", target_id) != target_id):
                 continue
-            if str(undo.get("work_type") or "").strip() != work_type:
-                continue
-            if not needs_related_restore(undo):
-                continue
-            undo_ids = {
-                str(value or "").strip()
-                for value in (
-                    undo.get("active_item_id"),
-                    undo.get("source_record_id"),
-                    undo.get("target_record_id"),
-                    undo.get("restored_target_record_id"),
-                )
-                if str(value or "").strip()
-            }
-            if context_ids.intersection(undo_ids):
+            if (self._repair_undo_source_id(undo) in ("", source_id)
+                    and not (undo.get("related_remote") or {}).get("restored")):
                 return undo
+            break
         return None
 
     def restore_notice_undo_related_remote(
@@ -31673,6 +31953,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         undo: dict[str, Any],
         *,
         target_record_id: str = "",
+        repair_source_id: str = "",
     ) -> dict[str, Any]:
         """Restore source-table state changed after the target notice write."""
         if not isinstance(undo, dict):
@@ -31735,75 +32016,54 @@ class MaintenancePortalService(RepairOperationsMixin):
         if work_type != WORK_TYPE_REPAIR:
             return {"restored": False, "skipped": True, "warnings": []}
 
-        context = (
-            dict(undo.get("context") or {})
-            if isinstance(undo.get("context"), dict)
-            else {}
-        )
-        summary_id = str(
-            context.get("repair_management_record_id")
-            or undo.get("source_record_id")
-            or canonical_source_record_id(context)
-            or ""
-        ).strip()
-        if not summary_id.startswith("rec"):
-            return {"restored": False, "skipped": True, "warnings": []}
-
-        previous: dict[str, Any] = {}
-        local = undo.get("local") if isinstance(undo.get("local"), dict) else {}
-        if isinstance(local.get("daily_item"), dict):
-            previous.update(dict(local.get("daily_item") or {}))
-        for saved in local.get("work_items") or []:
-            if isinstance(saved, dict) and isinstance(saved.get("item"), dict):
-                previous.update(dict(saved.get("item") or {}))
-                break
-        qt_snapshot = local.get("qt_active")
-        if isinstance(qt_snapshot, dict) and isinstance(qt_snapshot.get("payload"), dict):
-            previous.update(dict(qt_snapshot.get("payload") or {}))
+        context = undo.get("context") or {}
+        original_source_id = self._repair_undo_source_id(undo)
+        summary_id = repair_source_id or original_source_id
+        if not summary_id:
+            return {"restored": False, "skipped": True, "reason": "no_source_at_end", "warnings": []}
+        target_record_id = target_record_id or str(undo.get("target_record_id") or "")
+        if (target_record_id != undo.get("target_record_id")
+                or original_source_id not in ("", summary_id)):
+            raise PortalError("回退记录与当前检修关联不一致。")
 
         scope = self._normalize_scope(undo.get("scope") or context.get("scope") or "ALL")
         with self._repair_management_record_lock(summary_id):
-            existing = self._ensure_repair_management_record_in_scope(summary_id, scope)
-            _metas, meta_by_name, _records = self._load_repair_management_project_records()
-            desired: dict[str, Any] = {
-                "维修结束时间（2026）": None,
-                "维修结束时间": None,
-            }
-            if "title" in previous:
-                desired["检修通告名称"] = str(previous.get("title") or "").strip() or None
-            if "progress" in previous:
-                desired["维修进展描述"] = str(previous.get("progress") or "").strip() or None
-            coerced, warnings = self._coerce_repair_management_fields(
-                desired,
-                meta_by_name,
-                excluded_field_names=REPAIR_MANAGEMENT_RETIRED_FIELD_NAMES,
-            )
-            cleared_end_names = {
-                str(meta_by_name[name].field_name or "").strip()
-                for name in ("维修结束时间（2026）", "维修结束时间")
-                if name in meta_by_name
-            }
-            if not cleared_end_names.intersection(coerced):
-                raise PortalError("维修项目表缺少可写的维修结束时间字段。")
-            self._patch_record_fields(
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_MANAGEMENT_TABLE_ID,
-                record_id=summary_id,
-                fields=coerced,
-            )
-            self._upsert_repair_snapshot_fields(
-                source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS,
-                record_id=summary_id,
-                fields={**coerced, **desired},
-            )
-            updated_record = self._repair_management_record_with_fields(
-                existing,
-                {**coerced, **desired},
-            )
+            existing, meta_by_name = self._read_repair_project_for_notice(summary_id, scope)
+            target = self._read_repair_target_for_notice(target_record_id)
+            if not self._target_record_lifecycle(
+                work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+            )["active"]:
+                raise NoticeSourcePending("目标检修仍未读回进行中状态，源表回退待核验。")
+            if (self._repair_target_record_id(existing) not in ("", target_record_id)
+                    or self._repair_target_owner(target) not in ("", summary_id)):
+                raise PortalError("维修项目或检修通告已关联其他记录，未恢复源表。")
+            receipt = self._repair_end_write_evidence(undo, summary_id, target_record_id)
+            end_values = self._repair_end_values(existing)
+            completed = self._repair_management_workflow_text(existing, meta_by_name) == REPAIR_MANAGEMENT_COMPLETED_WORKFLOW
+            end_field = receipt.get("end_field")
+            expected_ms = self._repair_management_datetime_ms(receipt.get("end_value"))
+            if (end_values or completed or repair_source_id) and (
+                end_field not in REPAIR_END_FIELDS or expected_ms is None
+                or any(name != end_field or self._repair_management_datetime_ms(value) != expected_ms
+                       for name, value in end_values.items())
+            ):
+                raise PortalError("维修项目已结束，缺少与原检修结束操作一致的写入凭据，未修改源表。")
+            if end_values:
+                meta = meta_by_name.get(end_field)
+                if meta is None or self._field_meta_is_readonly(meta):
+                    raise PortalError("维修项目表缺少可写的维修结束时间字段。")
+                self._patch_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                    record_id=summary_id, fields={meta.field_name: None},
+                )
+                existing, meta_by_name = self._read_repair_project_for_notice(summary_id, scope)
+                if self._repair_end_values(existing):
+                    raise NoticeSourcePending("维修结束时间回读待核验，后台继续确认原回退。")
             _followup_metas, _followup_meta_by_name, followups = (
                 self._load_repair_followups_for_summary(
                     summary_id,
                     limit=None,
+                    force_refresh=True,
                 )
             )
             linked_followups = [
@@ -31813,7 +32073,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             ]
             followup_sync = self._sync_repair_followups_from_summary(
                 summary_record_id=summary_id,
-                summary_record=updated_record,
+                summary_record=existing,
                 linked_followups=linked_followups,
             )
             followup_warnings = [
@@ -31830,8 +32090,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             has_followup, latest_progress = self._repair_management_latest_followup_progress(
                 linked_followups
             )
-            raw_fields = updated_record.get("raw_fields") or {}
-            display_fields = updated_record.get("display_fields") or {}
+            raw_fields = existing.get("raw_fields") or {}
+            display_fields = existing.get("display_fields") or {}
             start_value = raw_fields.get("维修开始时间")
             if start_value in (None, "", [], {}):
                 start_value = display_fields.get("维修开始时间")
@@ -31849,6 +32109,29 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
             if not workflow_synced:
                 raise PortalError("；".join(workflow_warnings) or "维修项目流程状态回退失败。")
+            verified, verify_meta = self._read_repair_project_for_notice(summary_id, scope)
+            if (self._repair_end_values(verified)
+                    or self._repair_management_workflow_text(verified, verify_meta) != workflow):
+                raise NoticeSourcePending("维修项目流程回读待核验，后台继续确认原回退。")
+            if linked_followups:
+                _, followup_meta, read_back = self._load_repair_followups_for_summary(
+                    summary_id, limit=None, force_refresh=True,
+                )
+                end_names = [name for name in ("维修结束时间", "结束时间")
+                             if name in followup_meta and not self._field_meta_is_readonly(followup_meta[name])]
+                verified_ids = {
+                    row.get("record_id") for row in read_back
+                    if summary_id in self._repair_followup_parent_ids(row)
+                    and all(not self._repair_management_plain_text(
+                        (row.get("raw_fields") or row.get("display_fields") or {}).get(name)
+                    ).strip() for name in end_names)
+                }
+                if any(row.get("record_id") not in verified_ids for row in linked_followups):
+                    raise NoticeSourcePending("维修跟进记录回读待核验，后台继续确认原回退。")
+            self._upsert_repair_snapshot_fields(
+                source_key=REPAIR_SNAPSHOT_SOURCE_PROJECTS, record_id=summary_id,
+                fields={**dict.fromkeys(REPAIR_END_FIELDS), REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME: workflow},
+            )
             self._invalidate_repair_management_status_cache()
             return {
                 "restored": True,
@@ -31857,7 +32140,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
                 "followup_count": int(followup_sync.get("synced_count") or 0),
                 "workflow": workflow,
-                "warnings": list(dict.fromkeys([*warnings, *followup_warnings, *workflow_warnings])),
+                "warnings": list(dict.fromkeys([*followup_warnings, *workflow_warnings])),
             }
 
     def _restore_repair_source_after_applied_end_undo(
@@ -31869,31 +32152,50 @@ class MaintenancePortalService(RepairOperationsMixin):
         target_record_id: str,
         scope: str,
     ) -> dict[str, Any]:
-        if not self._repair_has_ended(source_record):
+        if not self._repair_has_ended(source_record) and not self._repair_end_values(source_record):
+            return source_record
+        guard = external_real_write_guard()
+        if guard["mock_external"] or not guard["real_write_allowed"]:
             return source_record
         applied_undo = self._applied_end_undo_for_context(
-            request_payload,
+            {**request_payload, "source_record_id": source_record_id, "target_record_id": target_record_id},
             work_type=WORK_TYPE_REPAIR,
             scope=scope,
         )
-        if applied_undo is None:
+        if applied_undo is None or not self._repair_end_write_evidence(
+            applied_undo, source_record_id, target_record_id,
+        ):
             return source_record
+        target = self._read_repair_target_for_notice(target_record_id)
+        if not self._target_record_lifecycle(
+            work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR, target_record=target,
+        ).get("active"):
+            return source_record
+        target_buildings = self._target_record_building_codes(
+            target.get("display_fields") or {}, get_field_config(NOTICE_TYPE_REPAIR),
+        )
+        if not target_buildings or not self._scope_matches_buildings(scope, target_buildings):
+            raise PortalError("目标检修通告不属于当前楼栋。")
         try:
             related_remote = self.restore_notice_undo_related_remote(
                 applied_undo,
                 target_record_id=target_record_id,
+                repair_source_id=source_record_id,
             )
             if not bool(related_remote.get("restored")):
                 raise PortalError("未找到需要恢复的关联维修单。")
-            self._state_store.mark_notice_undo_action(
+            if not self._state_store.mark_notice_undo_action(
                 str(applied_undo.get("undo_id") or ""),
                 "undone",
                 payload_patch={
                     "related_remote": related_remote,
                     "related_remote_repaired_at": time.time(),
                 },
-            )
-            return self._find_record_by_id(source_record_id, WORK_TYPE_REPAIR)
+            ):
+                raise PortalError("源表已恢复，但回退凭据未保存，请核验原回退。")
+            return self._read_repair_project_for_notice(source_record_id, scope)[0]
+        except NoticeSourcePending:
+            raise
         except Exception as exc:
             raise PortalError(f"检修结束回退未完整同步：{exc}") from exc
 
@@ -32084,6 +32386,21 @@ class MaintenancePortalService(RepairOperationsMixin):
             if action_type in {"update", "end"}:
                 qt_payload["action"] = "update"
                 qt_payload["status"] = "更新"
+                if action_type == "end" and work_type == WORK_TYPE_REPAIR:
+                    source_id = self._repair_undo_source_id(undo)
+                    if source_id:
+                        qt_payload["source_record_id"] = source_id
+                        qt_payload["repair_management_record_id"] = source_id
+                    else:
+                        for field in ("source_record_id", "repair_management_record_id",
+                                      "related_repair_management_record_id", "source_app_token", "source_table_id"):
+                            qt_payload.pop(field, None)
+                    for field in ("ended_at", "completed_date"):
+                        qt_payload.pop(field, None)
+                    if resolved_target_record_id:
+                        self._state_store.upsert_notice_identity(
+                            {**qt_payload, "status": "进行中"}, origin="repair_end_undo",
+                        )
                 notice_text = str(qt_payload.get("text") or "")
                 if notice_text:
                     qt_payload["text"] = re.sub(
@@ -36503,6 +36820,16 @@ class MaintenancePortalService(RepairOperationsMixin):
         for item in items:
             if str(item.get("source_record_id") or "").strip() == source_record_id:
                 return item
+        if work_type == WORK_TYPE_REPAIR and target_record_id.startswith("rec"):
+            undo = self._applied_end_undo_for_context(
+                {"source_record_id": source_record_id, "target_record_id": target_record_id},
+                work_type=WORK_TYPE_REPAIR, scope=scope,
+            )
+            if undo and self._repair_end_write_evidence(undo, source_record_id, target_record_id):
+                # The binding write rechecks scope, lifecycle and the original
+                # source write receipt against fresh cloud data under locks.
+                self._ensure_repair_management_record_in_scope(source_record_id, scope)
+                return {"source_record_id": source_record_id, "work_type": WORK_TYPE_REPAIR}
         raise PortalError("所选事项已在右侧进行中、已结束或不属于当前楼栋，不能绑定。")
 
     def get_workbench_closed_items(
@@ -46579,14 +46906,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             work_type_label="检修通告",
             allow_scope_fallback=manual,
         )
-        if action != "start" and source_record is not None:
-            source_record = self._restore_repair_source_after_applied_end_undo(
-                request_payload,
-                source_record,
-                source_record_id=source_record_id,
-                target_record_id=target_record_id,
-                scope=scope,
+        if action != "start" and target_record_id:
+            verified_source = self.verify_repair_notice_before_write(
+                {**request_payload, "job_id": job_id}, target_record_id, action=action,
             )
+            if verified_source is not None:
+                source_record = verified_source
+        if action != "start" and source_record is not None:
             fields = source_record.get("display_fields") or {}
             if self._repair_has_ended(source_record):
                 raise PortalError("该检修当前源状态已结束，不能更新/结束。")

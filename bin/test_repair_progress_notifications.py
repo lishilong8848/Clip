@@ -62,11 +62,12 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.assertEqual([item['chat_id'] for item in self.sends], ['oc_d', 'oc_e'])
         card = self.sends[0]['card']
         self.assertEqual(self.header(card), NOTICE_TITLE)
-        self.assertIn('因**D楼**进行检修', self.body(card))
+        self.assertIn('楼栋：**D楼**', self.body(card))
+        self.assertIn('检修名称：**冷却泵检修**', self.body(card))
         self.assertIn('故障发生时间：2026-11-12 08:10', self.body(card))
         self.assertIn('维修开始时间：2026-11-12 09:00', self.body(card))
         self.assertEqual(self.button_url(card), BASE + '/repair-management?scope=D&record_id=recA')
-        self.assertEqual(self.sends[1]['card']['elements'][0]['text']['content'].splitlines()[0], '因**E楼**进行检修')
+        self.assertIn('楼栋：**E楼**', self.body(self.sends[1]['card']))
 
         self.sends.clear()
         self.scan([record(workflow='维修中', codes=('D', 'E', 'H'))], 3000.0)
@@ -83,7 +84,8 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.assertEqual(len(self.sends), 1)
         card = self.sends[0]['card']
         self.assertEqual(self.header(card), REMINDER_TITLE)
-        self.assertEqual(self.body(card), '**D楼**—**冷却泵检修**，未完成维修，请及时跟进维修！')
+        self.assertIn('**D楼**—**冷却泵检修**', self.body(card))
+        self.assertIn('维修开始时间：2026-11-12 09:00', self.body(card))
         self.assertEqual(self.button_url(card), BASE + '/repair-management?scope=D&record_id=recA')
         first_uuid = self.sends[0]['uuid']
 
@@ -93,6 +95,23 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.scan([record()], 2000.0 + 2 * REMINDER_INTERVAL_SECONDS)
         self.assertEqual(len(self.sends), 1, '下一个间隔再提醒一次')
         self.assertNotEqual(self.sends[0]['uuid'], first_uuid, '每轮提醒使用不同幂等键')
+
+    def test_waits_for_real_name_and_time_then_formats_epoch_milliseconds(self):
+        self.scan([], 1000.0)
+        row = dict(record(title='未命名维修项目'), repair_start_time='1794552360000')
+        self.assertEqual(self.scan([row], 2000.0)['noticed'], 0)
+        row.update(repair_title='1794552360000', notification_title='')
+        self.assertEqual(self.scan([row], 2500.0)['noticed'], 0)
+        row.update(repair_title='冷却泵检修', repair_start_time='待填写')
+        row.pop('notification_title')
+        self.assertEqual(self.scan([row], 3000.0)['noticed'], 0)
+        row.update(repair_start_time='1794552360000')
+        result = self.scan([row], 3000.0 + REMINDER_INTERVAL_SECONDS)
+        self.assertEqual((result['noticed'], result['reminded']), (1, 0))
+        body = self.body(self.sends[0]['card'])
+        self.assertIn('检修名称：**冷却泵检修**', body)
+        self.assertIn('维修开始时间：2026-11-13 14:46', body)
+        self.assertNotIn('1794552360000', body)
 
     def test_completed_then_reopened_re_arms_the_notice(self):
         self.scan([record(workflow='未开始')], 1000.0)

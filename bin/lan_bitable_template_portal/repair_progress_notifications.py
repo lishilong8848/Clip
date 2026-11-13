@@ -3,7 +3,8 @@
 Two cards, each routed only to the ops groups of the buildings the record belongs to:
 
 - 维修跟进通知: once per building, when the workflow first becomes 维修中. Carries the
-  building name, 故障发生时间 and 维修开始时间 plus a jump button to the record detail.
+  building and repair names, 维修开始时间 and (when available) 故障发生时间, plus a jump
+  button to the record detail.
 - 维修进度跟进: repeatedly while the record is still 维修中, at most once per
   REMINDER_INTERVAL_SECONDS per building.
 
@@ -14,8 +15,10 @@ state is absorbed by Feishu-side deduplication instead of producing a second car
 """
 from __future__ import annotations
 
+import re
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Mapping
 from urllib.parse import urlencode
 
@@ -31,6 +34,7 @@ PRUNE_SECONDS = 45 * 24 * 60 * 60
 BUTTON_LABEL = '查看维修记录'
 PRUNE_PREFIX = 'record:'
 BOOTSTRAP_KEY = 'meta:bootstrap'
+BEIJING = timezone(timedelta(hours=8))
 
 
 def building_label(code: str) -> str:
@@ -67,19 +71,48 @@ def _card(title: str, lines: Iterable[str], url: str) -> dict[str, Any]:
     }
 
 
+def _repair_name(record: Mapping[str, Any]) -> str:
+    keys = ('notification_title',) if 'notification_title' in record else ('repair_title', 'title')
+    for key in keys:
+        value = ' '.join(str(record.get(key) or '').split())
+        if (value and value not in {'-', '—', '无', '未填写', '未命名维修项目', '未命名维修单'}
+                and not re.fullmatch(r'(?:因)?(?:110站|[ABCDEH]楼)(?:进行)?(?:维修|检修)?(?:通告)?', value)):
+            return re.sub(r'([\\`*_\[\]<>])', r'\\\1', value)
+    return ''
+
+
+def _format_time(value: Any) -> str:
+    text = str(value or '').strip()
+    try:
+        if match := re.fullmatch(r'([0-9]{10}|[0-9]{13})(?:\.[0-9]+)?', text):
+            seconds = float(text) / (1000 if len(match[1]) == 13 else 1)
+            parsed = datetime.fromtimestamp(seconds, BEIJING)
+        else:
+            if len(text) < 16:
+                return ''
+            parsed = datetime.fromisoformat(text.replace('/', '-'))
+            if parsed.tzinfo is not None:
+                parsed = parsed.astimezone(BEIJING)
+        return parsed.strftime('%Y-%m-%d %H:%M')
+    except (ValueError, OverflowError, OSError):
+        return ''
+
+
 def notice_card(record: Mapping[str, Any], label: str, url: str) -> dict[str, Any]:
-    fault = str(record.get('fault_time') or '').strip() or '未填写'
-    start = str(record.get('repair_start_time') or '').strip() or '未填写'
+    fault = _format_time(record.get('fault_time'))
     return _card(NOTICE_TITLE, [
-        f'因**{label}**进行检修',
-        f'故障发生时间：{fault}',
-        f'维修开始时间：{start}',
+        f'楼栋：**{label}**',
+        f'检修名称：**{_repair_name(record)}**',
+        f'维修开始时间：{_format_time(record.get("repair_start_time"))}',
+        *([f'故障发生时间：{fault}'] if fault else []),
     ], url)
 
 
 def reminder_card(record: Mapping[str, Any], label: str, url: str) -> dict[str, Any]:
-    name = str(record.get('repair_title') or record.get('title') or '').strip() or '未命名维修项目'
-    return _card(REMINDER_TITLE, [f'**{label}**—**{name}**，未完成维修，请及时跟进维修！'], url)
+    name = _repair_name(record)
+    start = _format_time(record.get('repair_start_time'))
+    return _card(REMINDER_TITLE, [f'**{label}**—**{name}**，请及时跟进维修进度。',
+                                 f'维修开始时间：{start}'], url)
 
 
 def _deliver(kind: str, code: str, record: Mapping[str, Any], chat_ids: Mapping[str, str],
@@ -167,9 +200,10 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
         notice = state.get('notice') if isinstance(state.get('notice'), dict) else {}
         reminder = state.get('reminder') if isinstance(state.get('reminder'), dict) else {}
         fail = state.get('fail') if isinstance(state.get('fail'), dict) else {}
-        if previous != IN_PROGRESS:
-            for code in codes:
-                reminder.setdefault(code, {'count': 0, 'at': now})
+        if not _repair_name(record) or not _format_time(record.get('repair_start_time')):
+            state.update({'workflow': workflow, 'codes': list(codes)})
+            _save(store, key, state)
+            continue
         for code in codes:
             backoff_elapsed = now - float(fail.get(code) or 0) >= RETRY_BACKOFF_SECONDS
             # Absence from `notice` covers three cases at once: a fresh transition, a failed
@@ -179,7 +213,7 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
                 if ok:
                     notice[code] = now
                     fail.pop(code, None)
-                    reminder.setdefault(code, {'count': 0, 'at': now})
+                    reminder[code] = {'count': 0, 'at': now}
                     result['noticed'] += 1
                 else:
                     if not deferred:
@@ -187,7 +221,7 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
                     result['errors'].append(f'{record_id} {building_label(code)} {NOTICE_TITLE}：{message}')
             entry = reminder.get(code) if isinstance(reminder.get(code), dict) else None
             entry = entry or {'count': 0, 'at': now}
-            if (now - float(entry.get('at') or 0) >= REMINDER_INTERVAL_SECONDS
+            if (code in notice and now - float(entry.get('at') or 0) >= REMINDER_INTERVAL_SECONDS
                     and now - float(fail.get(code) or 0) >= RETRY_BACKOFF_SECONDS):
                 bucket = str(int(entry.get('count') or 0) + 1)
                 ok, message, deferred = _deliver('reminder', code, record, chat_ids, base_url, send, bucket)

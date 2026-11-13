@@ -41,7 +41,7 @@ const sections = {
   administration: { label: '系统管理', icon: Settings, branches: [
     { key: 'permissions', label: '人员权限', entries: ['settings:permissions'] },
     { key: 'configuration', label: '业务配置', entries: ['settings:handover', 'settings:mop', 'settings:feishu', 'settings:dingtalk'] },
-    { key: 'system', label: '系统运维', entries: ['settings:status', 'settings:development', 'settings:pressure'] },
+    { key: 'system', label: '系统运维', entries: ['settings:status', 'zhihang_data', 'settings:development', 'settings:pressure'] },
   ] },
 } satisfies Record<string, Section>;
 

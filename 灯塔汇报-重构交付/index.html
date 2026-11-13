@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="description" content="灯塔 · 数据中心运维管理平台 — 25 个功能模块的整体架构、业务流程与价值汇报" />
+<title>灯塔 · 数据中心运维管理平台 — 功能价值汇报</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23087a61'/%3E%3Cpath d='M16 5l7 12h-4.5v8h-5v-8H9z' fill='white'/%3E%3C/svg%3E" />
+
+<!-- 样式：主页 / 模块详情 拆分维护 -->
+<link rel="stylesheet" href="assets/css/main.css" />
+<link rel="stylesheet" href="assets/css/module.css" />
+</head>
+<body data-view="home">
+
+<!-- ===================== 顶部导航 ===================== -->
+<nav class="top" aria-label="顶部导航">
+  <div class="wrap">
+    <span class="brand">
+      <i aria-hidden="true"></i>
+      灯塔 · 功能价值汇报
+      <small>南通数据中心 · 运维数字化平台</small>
+    </span>
+    <span class="top-sp"></span>
+    <button type="button" class="tbtn" id="btnPrint" title="输出一页纸汇报摘要 PDF">打印/PDF</button>
+    <button type="button" class="tbtn" id="btnFull" title="全屏演示（Esc 退出）">全屏</button>
+    <button type="button" class="tbtn on" id="btnHome">主页</button>
+  </div>
+</nav>
+
+<!-- ===================== 视图容器 ===================== -->
+<main id="viewHome" class="view" aria-label="主页视图"></main>
+<main id="viewModule" class="view" aria-label="模块详情视图"></main>
+
+<!-- ===================== 打印一页纸摘要 ===================== -->
+<section id="printOne" aria-label="汇报摘要打印版"></section>
+
+<!-- ===================== 灯箱（效果图放大） ===================== -->
+<div class="lb" id="lb" role="dialog" aria-modal="true" aria-label="效果图放大查看">
+  <div class="lb-box">
+    <div class="lb-art" id="lbArt"></div>
+    <div class="lb-cap">
+      <h3 id="lbTitle"></h3>
+      <span class="idx" id="lbIdx"></span>
+    </div>
+    <div class="lb-bar">
+      <button type="button" id="lbPrev">← 上一张</button>
+      <button type="button" id="lbNext">下一张 →</button>
+      <button type="button" id="lbVer2">新版页面</button>
+      <button type="button" id="lbVer1">旧版页面</button>
+      <button type="button" id="lbMod" class="primary">查看模块详情 →</button>
+      <button type="button" id="lbClose">关闭 (Esc)</button>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== 悬浮预览 ===================== -->
+<div id="hoverPrev" aria-hidden="true"><img alt="" /></div>
+
+<!-- ===================== 回到顶部 ===================== -->
+<button type="button" id="toTop" aria-label="回到顶部" title="回到顶部">↑</button>
+
+<!-- ===================== 脚本：数据 → 图形 → 视图 → 灯箱 → 主入口 ===================== -->
+<script src="assets/js/data.js"></script>
+<script src="assets/js/graphics.js"></script>
+<script src="assets/js/mindmap.js"></script>
+<script src="assets/js/views.js"></script>
+<script src="assets/js/lightbox.js"></script>
+<script src="assets/js/main.js"></script>
+</body>
+</html>

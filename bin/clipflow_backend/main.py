@@ -779,7 +779,9 @@ class FastAPIPortalController:
         from lan_bitable_template_portal.cold_source_monitor import install_cold_source_monitor
         install_cold_source_monitor(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
-        install_plan_convergence_routes(app, self, PortalRuntime)
+        zhihang_login = install_plan_convergence_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.zhihang_data_routes import install_zhihang_data
+        self._zhihang_data = install_zhihang_data(app, self, PortalRuntime, zhihang_login)
         from lan_bitable_template_portal.link_directory_routes import install_link_directory_routes
         install_link_directory_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.release_journal_routes import install_release_journal_routes
@@ -7972,7 +7974,10 @@ class FastAPIPortalController:
                         target_record_id=target_record_id,
                         scope=scope,
                         active_item_id=active_item_id,
+                        require_active=not target_finished,
                     )
+                    if repair_relation.get("binding_pending"):
+                        return self._json_ok(request, session, repair_relation)
                     related_event_id = str(
                         repair_relation.get("event_record_id") or ""
                     ).strip()
@@ -13619,6 +13624,11 @@ class FastAPIPortalController:
             max_instances=1,
             coalesce=True,
         )
+        if not _mock_external_enabled():
+            scheduler.add_job(
+                self._zhihang_data.tick, "interval", minutes=1,
+                id="zhihang_data_refresh", replace_existing=True, max_instances=1, coalesce=True,
+            )
         scheduler.add_job(
             self._run_scheduled_water_consumption_refresh,
             "interval",

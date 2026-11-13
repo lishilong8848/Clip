@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from contextlib import closing
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 
@@ -11003,8 +11003,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_process_due_repair_link_task_rejects_relation_field_without_sync_table(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            source_record_id = "source-repair-1"
-            target_record_id = "target-repair-1"
+            source_record_id = "rec_source_repair_1"
+            target_record_id = "rec_target_repair_1"
             service._state_store.upsert_repair_link_task(
                 {
                     "task_key": f"repair_link:{source_record_id}:{target_record_id}",
@@ -11046,6 +11046,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._load_table_fields = (  # type: ignore[method-assign]
                 lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
             )
+            service._repair_async_link_is_current = Mock(return_value=True)
 
             stats = service.process_due_repair_link_tasks(limit=3)
 
@@ -11090,6 +11091,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._load_table_fields = (  # type: ignore[method-assign]
                 lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
             )
+            service._repair_async_link_is_current = Mock(return_value=True)
             service._request_json = (  # type: ignore[method-assign]
                 lambda *_args, **_kwargs: self.fail(
                     "text ID fields must not query the repair sync table"
@@ -11165,14 +11167,14 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
     def test_repair_link_task_reschedules_when_text_write_temporarily_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
-            source_record_id = "source-repair-1"
-            target_record_id = "target-repair-1"
+            source_record_id = "rec_source_repair_1"
+            target_record_id = "rec_target_repair_1"
             service._state_store.upsert_repair_link_task(
                 {
                     "task_key": f"repair_link:{source_record_id}:{target_record_id}",
                     "status": "pending",
-                    "source_app_token": "source-app",
-                    "source_table_id": "source-table",
+                    "source_app_token": REPAIR_SOURCE_APP_TOKEN,
+                    "source_table_id": REPAIR_MANAGEMENT_TABLE_ID,
                     "source_record_id": source_record_id,
                     "sync_app_token": "source-app",
                     "sync_table_id": "sync-table",
@@ -11199,6 +11201,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             service._load_table_fields = (  # type: ignore[method-assign]
                 lambda **_kwargs: ([link_meta], {"设备检修关联": link_meta})
             )
+            service._repair_async_link_is_current = Mock(return_value=True)
             service._request_json = (  # type: ignore[method-assign]
                 lambda *_args, **_kwargs: self.fail(
                     "text ID retries must not query a repair sync table"
@@ -27293,6 +27296,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             }
             undo = {
                 "undo_id": "undo-repair-related-remote",
+                "job_id": "job-repair-end-write",
                 "action_type": "end",
                 "scope": "A",
                 "work_type": WORK_TYPE_REPAIR,
@@ -27309,16 +27313,23 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     }
                 },
             }
+            service._state_store.put_document("repair_end_write", undo["job_id"], {
+                "source_id": summary_id, "target_id": target_id, "write_accepted": True,
+                "end_field": "维修结束时间（2026）", "end_value": "2026-08-05 18:00",
+            })
             followup = {"record_id": "rec-followup-undo"}
+            reopened = service._repair_management_record_with_fields(existing, {"维修结束时间（2026）": None})
+            verified = service._repair_management_record_with_fields(reopened, {"流程-L": "维修中"})
 
             with patch.object(
                 service,
-                "_ensure_repair_management_record_in_scope",
-                return_value=existing,
+                "_read_repair_project_for_notice",
+                side_effect=[(row, meta_by_name) for row in (existing, reopened, verified)],
             ), patch.object(
                 service,
-                "_load_repair_management_project_records",
-                return_value=([], meta_by_name, [existing]),
+                "_read_repair_target_for_notice",
+                return_value={"record_id": target_id, "raw_fields": {"维修汇总记录ID": summary_id},
+                              "display_fields": {"检修状态": "更新"}},
             ), patch.object(
                 service,
                 "_patch_record_fields",
@@ -27363,8 +27374,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(restored["workflow"], "维修中")
             patched_fields = patch_record.call_args.kwargs["fields"]
             self.assertIsNone(patched_fields["维修结束时间（2026）"])
-            self.assertEqual(patched_fields["检修通告名称"], "A楼检修回退")
-            self.assertEqual(patched_fields["维修进展描述"], "继续处理中")
+            self.assertEqual(set(patched_fields), {"维修结束时间（2026）"})
             sync_followups.assert_called_once()
             self.assertEqual(sync_workflow.call_args.kwargs["workflow"], "维修中")
 
@@ -27420,7 +27430,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 )
             )
 
-    def test_legacy_repair_end_undo_repairs_source_before_next_submit(self):
+    def test_legacy_repair_end_undo_requires_source_write_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             service = self._new_temp_service(Path(tmp))
             source_id = "rec-legacy-repair-source"
@@ -27429,11 +27439,6 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 "record_id": source_id,
                 "display_fields": {"维修结束时间（2026）": "2026-08-05 18:00"},
                 "raw_fields": {"维修结束时间（2026）": "2026-08-05 18:00"},
-            }
-            reopened = {
-                "record_id": source_id,
-                "display_fields": {"维修结束时间（2026）": None},
-                "raw_fields": {"维修结束时间（2026）": None},
             }
             undo = {
                 "undo_id": "undo-legacy-repair-source",
@@ -27451,16 +27456,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ), patch.object(
                 service,
                 "restore_notice_undo_related_remote",
-                return_value={"restored": True, "summary_record_id": source_id},
-            ) as restore_related, patch.object(
-                service,
-                "_find_record_by_id",
-                return_value=reopened,
-            ), patch.object(
-                service._state_store,
-                "mark_notice_undo_action",
-                return_value=True,
-            ) as mark_undo:
+            ) as restore_related, patch(
+                "lan_bitable_template_portal.portal_service.external_real_write_guard",
+                return_value={"mock_external": False, "real_write_allowed": True},
+            ):
                 result = service._restore_repair_source_after_applied_end_undo(
                     {
                         "active_item_id": "active-legacy-repair",
@@ -27473,14 +27472,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     scope="A",
                 )
 
-            self.assertFalse(service._repair_has_ended(result))
-            restore_related.assert_called_once_with(
-                undo,
-                target_record_id=target_id,
-            )
-            self.assertTrue(
-                mark_undo.call_args.kwargs["payload_patch"]["related_remote"]["restored"]
-            )
+            self.assertIs(result, ended)
+            restore_related.assert_not_called()
 
     def test_execute_repair_end_undo_does_not_complete_when_related_restore_fails(self):
         original_service = PortalRuntime.service
@@ -27518,6 +27511,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch(
                     "lan_bitable_template_portal.server.update_bitable_record_fields",
                     return_value=(True, "rec-target-related-failure"),
+                ), patch(
+                    "lan_bitable_template_portal.server.query_record_by_id",
+                    side_effect=[(True, {"fields": {"楼栋": "A楼", "检修状态": status}})
+                                 for status in ("结束", "更新")],
                 ), patch.object(
                     service,
                     "restore_notice_undo_related_remote",

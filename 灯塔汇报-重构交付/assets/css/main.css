@@ -1,0 +1,228 @@
+/* ==========================================================================
+   灯塔 · 数据中心运维管理平台 — 主样式（主页重设计版）
+   主页概念：交互式架构思维导图画布（中枢 → 六域 → 25 模块）
+             + 数据底座总线 + 可折叠价值带 + 移动端手风琴索引
+   ========================================================================== */
+
+/* --- 设计令牌 --- */
+:root{
+  --acc:#087a61;
+  --acc-dark:#063a30;
+  --acc-mid:#0e9b7a;
+  --acc-soft:#eaf6f2;
+  --acc-line:rgba(8,122,97,.28);
+
+  --ink:#16283c;
+  --ink-2:#5b6b80;
+  --ink-3:#8aa0b8;
+  --line:#dbe4ee;
+  --line-soft:#eef2f7;
+  --bg:#f4f7fb;
+  --bg-card:#ffffff;
+
+  --s1:#1d4ed8; --s2:#0e7490; --s3:#b7791f;
+  --s4:#6d4fc4; --s5:#7c3aed; --s6:#64748b;
+  --rel:#7c3aed;
+
+  --sh-1:0 1px 2px rgba(15,40,70,.05);
+  --sh-2:0 6px 18px rgba(15,40,70,.10);
+  --sh-3:0 10px 24px rgba(15,40,70,.14);
+  --sh-4:0 14px 44px rgba(10,30,60,.28);
+
+  --r-sm:6px; --r-md:10px; --r-lg:14px; --r-xl:18px; --r-pill:999px;
+}
+
+*,*::before,*::after{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;
+  background:var(--bg);color:var(--ink);
+  font-size:14px;line-height:1.7;
+  -webkit-font-smoothing:antialiased;
+}
+button{font-family:inherit;font-size:inherit}
+img{max-width:100%;display:block}
+:focus-visible{outline:2px solid var(--acc);outline-offset:2px;border-radius:var(--r-sm)}
+.wrap{max-width:1400px;margin:0 auto;padding:0 22px}
+
+body[data-view="home"] #viewModule,
+body[data-view="module"] #viewHome{display:none}
+.view.anim{animation:vin .28s ease}
+@keyframes vin{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+
+/* ==========================================================================
+   顶部导航
+   ========================================================================== */
+.top{position:sticky;top:0;z-index:40;background:rgba(255,255,255,.95);
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border-bottom:1px solid var(--line)}
+.top .wrap{display:flex;align-items:center;gap:14px;height:54px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;font-size:15px}
+.brand i{width:24px;height:24px;border-radius:7px;background:linear-gradient(135deg,var(--acc),var(--acc-mid));
+  display:inline-block;position:relative;box-shadow:0 2px 6px rgba(8,122,97,.28)}
+.brand i::after{content:"";position:absolute;left:9px;top:5px;border-left:3px solid #fff;border-right:3px solid #fff;width:2px;height:10px;background:#fff}
+.brand small{font-weight:400;color:var(--ink-2);font-size:12px;margin-left:4px}
+.top-sp{flex:1}
+.tbtn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:6px 14px;font-size:13px;cursor:pointer;color:var(--ink-2);
+  transition:border-color .15s,color .15s,transform .15s}
+.tbtn:hover{border-color:var(--acc);color:var(--acc);transform:translateY(-1px)}
+.tbtn.on{background:var(--acc);border-color:transparent;color:#fff;box-shadow:0 4px 12px rgba(8,122,97,.28)}
+.tbtn.on:hover{color:#fff}
+
+/* ==========================================================================
+   精简 Hero 条（左标题 / 右指标）
+   ========================================================================== */
+.hero{margin-top:18px;border-radius:var(--r-lg);color:#fff;
+  background:linear-gradient(120deg,#063a30 0%,#087a61 60%,#0e9b7a 100%);
+  padding:20px 26px;display:flex;gap:22px;align-items:center;flex-wrap:wrap;
+  box-shadow:0 10px 26px rgba(6,58,48,.20);position:relative;overflow:hidden}
+.hero::after{content:"";position:absolute;right:-60px;top:-80px;width:220px;height:220px;border-radius:50%;background:rgba(255,255,255,.07)}
+.hero-l{flex:1;min-width:280px;position:relative;z-index:1}
+.hero .kick{color:rgba(255,255,255,.72);font-size:12px;letter-spacing:.14em}
+.hero h1{font-size:24px;margin:4px 0 6px;letter-spacing:.5px}
+.hero p{margin:0;color:rgba(255,255,255,.86);font-size:12.5px;line-height:1.8;max-width:760px}
+.stats{display:flex;gap:7px;flex-wrap:wrap;position:relative;z-index:1;max-width:420px;justify-content:flex-end}
+.stats span{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22);border-radius:var(--r-pill);
+  padding:5px 12px;font-size:12px;white-space:nowrap}
+
+/* ==========================================================================
+   交互式架构思维导图画布
+   ========================================================================== */
+.mm{margin:18px 0 0;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff;
+  box-shadow:var(--sh-1);overflow:hidden}
+.mm-bar{display:flex;align-items:center;gap:12px;padding:14px 18px 0;flex-wrap:wrap}
+.mm-bar h2{margin:0;font-size:16.5px;color:#0b3f36;display:flex;align-items:center;gap:9px}
+.mm-bar h2::before{content:"";width:4px;height:16px;background:var(--acc);border-radius:2px}
+.mm-bar .sub{color:var(--ink-2);font-size:12px;margin:0;flex:1;min-width:240px}
+.mm-tools{display:flex;gap:6px}
+.mm-tools button{border:1px solid var(--line);background:#fff;border-radius:7px;min-width:32px;height:28px;
+  padding:0 10px;font-size:13px;cursor:pointer;color:var(--ink-2);transition:border-color .15s,color .15s}
+.mm-tools button:hover{border-color:var(--acc);color:var(--acc)}
+.mm-canvas{position:relative;margin:10px 14px 6px;
+  border:1px solid var(--line-soft);border-radius:var(--r-md);
+  background:
+    radial-gradient(circle at 50% 30%, rgba(8,122,97,.05), transparent 62%),
+    linear-gradient(#fbfdff,#f7fafd);
+  overflow:hidden}
+.mm-canvas svg{width:100%;height:auto;display:block;cursor:grab;user-select:none}
+.mm-canvas svg.grab{cursor:grabbing}
+.mm-legend{display:flex;gap:14px;flex-wrap:wrap;padding:4px 18px 14px;align-items:center}
+.mm-legend .lg{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--ink-2)}
+.mm-legend .lg i{width:9px;height:9px;border-radius:3px;display:inline-block}
+.mm-legend .hint{margin-left:auto;font-size:11.5px;color:var(--ink-3)}
+
+/* 思维导图节点 */
+.lnode{cursor:pointer}
+.lnode rect{transition:stroke-width .12s, filter .12s}
+.lnode:hover rect{stroke-width:2.4;filter:drop-shadow(0 3px 6px rgba(15,40,70,.18))}
+.lnode.hl rect{stroke:var(--rel);stroke-width:2.4}
+.lnode.hov rect{stroke-width:2.6}
+.dnode{cursor:pointer}
+.dnode:hover rect{filter:drop-shadow(0 3px 8px rgba(15,40,70,.22))}
+#mmRel path{pointer-events:none}
+
+/* 悬浮职责卡 */
+.mm-tip{position:fixed;z-index:65;display:none;width:300px;background:#fff;border:1px solid var(--line);
+  border-radius:var(--r-md);padding:11px 13px;box-shadow:var(--sh-3);pointer-events:none}
+.mm-tip b{display:block;font-size:13.5px;color:var(--ink);margin-bottom:3px}
+.mm-tip .tp{display:inline-block;font-size:10.5px;font-weight:600;color:var(--acc);background:var(--acc-soft);
+  border-radius:var(--r-pill);padding:2px 8px;margin-bottom:6px}
+.mm-tip p{margin:0;font-size:12px;color:var(--ink-2);line-height:1.7}
+.mm-tip .tm{margin-top:6px;color:var(--acc);font-size:11.5px;border-top:1px dashed var(--line);padding-top:6px}
+
+/* ==========================================================================
+   数据底座总线
+   ========================================================================== */
+.foundation{margin:18px 0 0;border:1px solid var(--line);border-radius:var(--r-lg);background:#fff;
+  padding:18px 22px 20px;box-shadow:var(--sh-1)}
+.foundation h2{margin:0 0 2px;font-size:16.5px;text-align:center;color:#0b3f36}
+.foundation .sub{text-align:center;color:var(--ink-2);font-size:12px;margin:0 0 6px}
+.bus{position:relative;height:26px;margin:0 6px}
+.bus::before{content:"";position:absolute;left:2%;right:2%;top:0;height:2px;
+  background:linear-gradient(90deg,transparent,var(--acc) 12%,var(--acc) 88%,transparent)}
+.bus i{position:absolute;top:0;width:2px;height:18px;background:var(--acc)}
+.bus i::after{content:"";position:absolute;left:-4px;bottom:-4px;border:5px solid transparent;border-top-color:var(--acc)}
+.bus i:nth-child(1){left:12.5%}.bus i:nth-child(2){left:37.5%}
+.bus i:nth-child(3){left:62.5%}.bus i:nth-child(4){left:87.5%}
+.fcols{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:6px}
+.fcol{border-radius:var(--r-md);background:linear-gradient(135deg,#f4f8fb,#eef4fa);border:1px solid #e2ebf3;
+  padding:13px 15px;transition:transform .18s,box-shadow .18s}
+.fcol:hover{transform:translateY(-2px);box-shadow:var(--sh-2)}
+.fcol .icon{width:30px;height:30px;border-radius:9px;background:#fff;border:1px solid var(--line);
+  display:flex;align-items:center;justify-content:center;font-size:15px;margin-bottom:7px}
+.fcol b{display:block;font-size:13px;color:#16436e;margin-bottom:5px}
+.fcol p{margin:0;font-size:11.5px;color:var(--ink-2);line-height:1.75}
+
+/* ==========================================================================
+   价值带（可折叠）
+   ========================================================================== */
+details.band{margin:18px 0 0;border-radius:var(--r-lg);background:linear-gradient(135deg,#063a30,#087a61);
+  color:#fff;box-shadow:0 10px 24px rgba(6,58,48,.20);overflow:hidden}
+details.band summary{cursor:pointer;list-style:none;padding:15px 24px;font-size:15.5px;font-weight:600;
+  display:flex;align-items:center;gap:10px}
+details.band summary::-webkit-details-marker{display:none}
+details.band summary::after{content:"展开 ▾";margin-left:auto;font-size:12px;font-weight:400;color:rgba(255,255,255,.75)}
+details.band[open] summary::after{content:"收起 ▴"}
+details.band summary:hover{background:rgba(255,255,255,.06)}
+.band .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;padding:0 24px 22px}
+.band .col{background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.18);border-radius:var(--r-md);
+  padding:13px 15px;transition:background .18s,transform .18s}
+.band .col:hover{background:rgba(255,255,255,.16);transform:translateY(-2px)}
+.band .col b{display:block;font-size:13px;margin-bottom:5px}
+.band .col p{margin:0;font-size:11.5px;line-height:1.8;color:rgba(255,255,255,.86)}
+
+/* ==========================================================================
+   移动端手风琴索引（窄屏替代画布）
+   ========================================================================== */
+.acc-wrap{display:none;margin:16px 0 0}
+.acc{border:1px solid var(--line);border-radius:var(--r-md);background:#fff;margin-bottom:10px;overflow:hidden}
+.acc-h{width:100%;display:flex;align-items:center;gap:9px;border:0;background:#fff;
+  padding:12px 14px;cursor:pointer;font-size:14px;text-align:left}
+.acc-h i{width:10px;height:10px;border-radius:3px;flex:none}
+.acc-h b{flex:1;color:var(--ink)}
+.acc-h small{color:var(--ink-2);font-size:12px}
+.acc-h .caret{width:8px;height:8px;border-right:2px solid var(--ink-3);border-bottom:2px solid var(--ink-3);
+  transform:rotate(45deg);transition:transform .2s;margin-left:4px}
+.acc.open .acc-h .caret{transform:rotate(-135deg)}
+.acc-b{display:none;gap:8px;flex-wrap:wrap;padding:0 14px 14px}
+.acc.open .acc-b{display:flex}
+.acc-b button{border:1px solid var(--line);background:#fbfdfe;border-radius:var(--r-pill);
+  padding:6px 13px;font-size:12.5px;cursor:pointer;color:#33475c}
+.acc-b button:active{border-color:var(--acc);color:var(--acc)}
+
+.foot{margin:20px 0 0;padding-bottom:44px;font-size:12px;color:var(--ink-2);text-align:center}
+
+/* ==========================================================================
+   回到顶部
+   ========================================================================== */
+#toTop{position:fixed;right:22px;bottom:26px;z-index:60;width:42px;height:42px;border-radius:50%;
+  border:1px solid var(--line);background:#fff;box-shadow:var(--sh-2);cursor:pointer;font-size:17px;color:var(--ink-2);
+  display:none;transition:transform .15s,color .15s,border-color .15s}
+#toTop:hover{color:var(--acc);border-color:var(--acc);transform:translateY(-2px)}
+#toTop.show{display:block}
+
+/* ==========================================================================
+   响应式
+   ========================================================================== */
+@media (max-width:1100px){
+  .stats{max-width:100%;justify-content:flex-start}
+  /* 中等屏隐藏画布，改用手风琴索引 */
+  .mm-canvas,.mm-legend .hint{display:none}
+  .acc-wrap{display:block}
+}
+@media (max-width:900px){
+  .hero{padding:16px 18px}
+  .hero h1{font-size:20px}
+  .wrap{padding:0 16px}
+}
+@media (max-width:600px){
+  .top .wrap{height:50px;gap:8px}
+  .brand small{display:none}
+  .tbtn{padding:5px 10px;font-size:12px}
+  .hero h1{font-size:18px}
+  .stats span{font-size:11px;padding:4px 10px}
+  .mm-bar{padding:12px 14px 0}
+  .foundation{padding:14px 14px 16px}
+  .band .cols{padding:0 14px 16px}
+  details.band summary{padding:13px 16px;font-size:14px}
+  #toTop{right:14px;bottom:16px;width:38px;height:38px}
+}

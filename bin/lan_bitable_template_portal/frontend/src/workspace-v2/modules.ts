@@ -4,6 +4,10 @@ export type ModuleEntry = { id: string; label: string; group: string; path: stri
 export const moduleIcons = { event: CircleAlert, notice: ClipboardList, wrench: Wrench, shield: ShieldCheck, task: ClipboardList, server: Server, water: Droplets, scan: ScanLine, activity: Activity, book: BookOpen, library: Library, documents: FolderOpen, link: Link, signature: Signature, assistant: Bot, settings: Settings };
 export const NOTICE_IDS = ['maintenance', 'change', 'repair', 'polling', 'adjust', 'power'];
 export const SOP_IDS = ['maintenance', 'polling', 'adjust'];
+export const zhihangDataModule: ModuleEntry = { id: 'zhihang_data', label: '智航数据拉取', group: '系统管理', path: '/zhihang-data', icon: 'server', permission: 'accounts' };
+export function canManageZhihangData(user: {role?: string; modules?: string[]; impersonation?: unknown}): boolean {
+  return user.role === 'admin' && Array.isArray(user.modules) && user.modules.includes('accounts') && !user.impersonation;
+}
 export const modules: ModuleEntry[] = [
   { id: 'event', label: '事件管理', group: '运行管理', path: '/?mode=events&detail=1', icon: 'event' },
   { id: 'cold_source', label: '冷源运行状态', group: '运行管理', path: '/cold-source-monitor', icon: 'activity', permission: 'daily' },
@@ -46,6 +50,7 @@ export function navigationModules(permitted: string[], toolManagement = false, i
   });
 }
 export function moduleForRoute(url: URL): string {
+  if (url.pathname.replace(/\/$/, '') === zhihangDataModule.path) return zhihangDataModule.id;
   if (url.pathname === '/risk-inspections' && url.searchParams.get('view') === 'tool-self-check') return 'tool_management';
   if (url.pathname === '/workbench-lite') return url.searchParams.get('work_type') || 'maintenance';
   if (url.pathname === '/') {
@@ -62,7 +67,7 @@ export function moduleForRoute(url: URL): string {
 }
 export function moduleUrl(module: ModuleEntry, scope: string): string {
   const url = new URL(module.path, window.location.origin);
-  if (!['accounts', 'assistant', 'knowledge', 'documents', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning', 'eop_scenarios'].includes(module.id) && scope) url.searchParams.set('scope', scope);
+  if (!['accounts', 'assistant', 'knowledge', 'documents', 'links', 'life_guide', 'signatures', 'handover', 'work_handover', 'learning', 'eop_scenarios', zhihangDataModule.id].includes(module.id) && scope) url.searchParams.set('scope', scope);
   return url.pathname + url.search;
 }
 export function beijingDate(): string {

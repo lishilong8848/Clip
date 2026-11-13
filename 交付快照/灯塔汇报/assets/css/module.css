@@ -1,0 +1,178 @@
+/* =====================================================================
+ * module.css —— 模块详情子页面：导航条 / 头部 / 指标 / 流程图 / 关键节点
+ *                / 场景价值 / 效果图 / 关联模块 / 上下页 / 灯箱
+ * ===================================================================== */
+
+/* ---------- 模块快速导航条 ---------- */
+.modnav{
+  position:sticky;top:var(--top-h);z-index:50;background:rgba(255,255,255,.95);
+  backdrop-filter:blur(8px);border-bottom:1px solid var(--line);
+}
+.modnav .wrap{display:flex;align-items:center;gap:8px;height:44px}
+.modnav .lbl{font-size:11.5px;color:var(--ink-3);flex:none}
+.modnav .strip{
+  display:flex;gap:6px;overflow-x:auto;flex:1;padding:4px 2px;scrollbar-width:thin;
+  -ms-overflow-style:none;
+}
+.modnav .strip::-webkit-scrollbar{height:5px}
+.modnav .strip::-webkit-scrollbar-thumb{background:var(--line);border-radius:3px}
+.modnav a{
+  flex:none;border:1px solid var(--line);background:#fff;border-radius:999px;
+  padding:3px 11px;font-size:11.5px;color:var(--ink-2);white-space:nowrap;
+  transition:border-color .15s,color .15s,background .15s;
+}
+.modnav a:hover{border-color:var(--c,#087a61);color:var(--c,#087a61)}
+.modnav a.on{background:var(--c,#087a61);border-color:transparent;color:#fff;font-weight:600}
+.modnav a i{
+  display:inline-block;width:6px;height:6px;border-radius:50%;margin-right:5px;
+  background:var(--dc,#8aa0b8);vertical-align:1px;
+}
+.modnav a.on i{background:rgba(255,255,255,.75)}
+
+/* ---------- 头部 ---------- */
+.mod{padding:24px 0 56px}
+.mod-bar{display:flex;gap:9px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+.mod-bar .cnt{margin-left:auto;font-size:12px;color:var(--ink-3);font-variant-numeric:tabular-nums}
+.crumb{font-size:12px;color:var(--ink-3);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.crumb a:hover{color:var(--acc)}
+.crumb s{text-decoration:none;color:var(--line)}
+
+.mhead{border-left:6px solid var(--mc,#087a61);padding-left:18px;margin-bottom:6px}
+.mhead .kick{font-size:12.5px;letter-spacing:.12em;color:var(--mc,#087a61);margin-bottom:6px;font-weight:600}
+.mhead h1{font-size:28px;margin:0 0 8px;display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.mhead h1 .pill{font-size:12px;padding:3px 12px}
+.mhead > p{color:var(--ink-2);max-width:1000px;margin:0;line-height:1.95;font-size:13.5px}
+
+/* ---------- 指标卡 ---------- */
+.stats-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:10px;margin-top:16px}
+.stat{
+  border:1px solid var(--line);border-left:4px solid var(--mc,#087a61);
+  border-radius:10px;background:#fff;padding:9px 13px;font-size:12.5px;color:var(--ink);
+  box-shadow:var(--sh-1);
+}
+.stat b{display:block;font-size:13px;font-weight:600}
+.stat small{color:var(--ink-3);font-size:11px}
+
+/* ---------- 小节标题 ---------- */
+.h2{margin:30px 0 11px;font-size:17px;display:flex;align-items:center;gap:9px}
+.h2 i{width:9px;height:9px;border-radius:3px;background:var(--mc,#087a61);flex:none}
+.h2 small{font-weight:400;font-size:12px;color:var(--ink-2)}
+.h2 .ln{flex:1;height:1px;background:var(--line)}
+
+/* ---------- 流程图 ---------- */
+.flowbox{
+  border:1px solid var(--line);border-radius:var(--r-m);background:#f8fbff;
+  padding:14px 12px;overflow-x:auto;box-shadow:var(--sh-1);
+}
+.flowbox svg{display:block;width:100%;height:auto;min-width:1180px}
+.flow-hint{margin:8px 2px 0;font-size:11.5px;color:var(--ink-3)}
+
+/* ---------- 关键节点拆解 ---------- */
+.keys{display:grid;grid-template-columns:repeat(auto-fit,minmax(258px,1fr));gap:10px}
+.key{
+  border:1px solid var(--line);border-radius:10px;background:#fff;padding:11px 14px;
+  box-shadow:var(--sh-1);position:relative;
+}
+.key b{display:block;font-size:12px;color:var(--mc,#087a61);margin-bottom:4px;letter-spacing:.04em}
+.key .v{font-size:13px;color:var(--ink);line-height:1.8}
+.key small{display:block;margin-top:5px;font-size:11px;color:var(--ink-3)}
+.key.branch .v{display:flex;gap:6px;flex-wrap:wrap}
+.key.branch .v span{
+  font-size:11.5px;color:#33475c;background:#f4f8fb;border:1px solid var(--line);
+  border-radius:999px;padding:2px 10px;
+}
+
+/* ---------- 业务场景与价值 ---------- */
+.scene{border:1px solid var(--line);border-radius:var(--r-m);background:#fff;padding:18px 20px 16px;box-shadow:var(--sh-1)}
+.scene .quote{
+  border-left:5px solid var(--mc,#087a61);background:#f6faf8;border-radius:8px;
+  padding:11px 15px;font-size:13.5px;color:#33475c;line-height:1.95;
+}
+.scene .quote b{color:var(--mc,#087a61);margin-right:6px}
+.scene .cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:12px;margin-top:13px}
+.scene .step{border-radius:10px;padding:12px 15px;font-size:12.5px;line-height:1.9;color:var(--ink-2)}
+.scene .step b{display:block;font-size:12.5px;margin-bottom:6px}
+.scene .step.p1{background:#fdf7ec}
+.scene .step.p1 b{color:#b7791f}
+.scene .step.p2{background:#eef4fe}
+.scene .step.p2 b{color:#1d4ed8}
+.scene .step.p3{background:#eaf6f0}
+.scene .step.p3 b{color:#18805e}
+
+/* ---------- 效果图 ---------- */
+.shots{display:flex;gap:16px;flex-wrap:wrap}
+.shotcell{display:flex;flex-direction:column;gap:6px}
+.shotcell small{font-size:12px;color:var(--ink-2);display:flex;align-items:center;gap:6px}
+.shotcell small i{width:8px;height:8px;border-radius:2px;flex:none}
+.thumb{
+  position:relative;width:392px;max-width:100%;border:1px solid var(--line);
+  border-radius:10px;overflow:hidden;cursor:zoom-in;background:#fff;box-shadow:var(--sh-1);
+}
+.thumb img{width:100%;aspect-ratio:16/9;object-fit:cover;object-position:top left;display:block}
+.thumb .noimg{
+  width:100%;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;
+  font-size:13px;color:#8aa0b8;text-align:center;padding:0 20px;
+  background:linear-gradient(135deg,#eef3fa,#e3ebf5);
+}
+.verchip{position:absolute;left:8px;top:8px;display:flex;gap:4px}
+.verchip button{
+  border:0;border-radius:6px;padding:3px 9px;font-size:11px;cursor:pointer;
+  background:rgba(255,255,255,.92);color:var(--ink-2);
+}
+.verchip button.on{background:var(--acc);color:#fff}
+
+/* ---------- 关联模块 / 上下页 ---------- */
+.rel{display:flex;gap:8px;flex-wrap:wrap}
+.rel a{
+  border:1px solid var(--line);background:#fff;border-radius:999px;padding:7px 15px;
+  font-size:12.5px;color:var(--ink-2);transition:border-color .15s,color .15s;
+}
+.rel a:hover{border-color:var(--acc);color:var(--acc)}
+.rel a i{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:6px;background:var(--dc,#8aa0b8)}
+.pn{display:flex;justify-content:space-between;gap:12px;margin-top:30px}
+.pn a{
+  flex:1;border:1px solid var(--line);background:#fff;border-radius:10px;padding:11px 16px;
+  font-size:13px;color:var(--ink-2);transition:border-color .15s,color .15s;
+}
+.pn a:hover{border-color:var(--acc);color:var(--acc)}
+.pn a:last-child{text-align:right}
+.pn a small{display:block;font-size:11px;color:var(--ink-3)}
+.tip{margin:12px 0 0;font-size:12px;color:var(--ink-3)}
+
+/* ---------- 灯箱 ---------- */
+.lb{
+  position:fixed;inset:0;z-index:100;display:none;background:rgba(10,20,34,.64);
+  align-items:center;justify-content:center;padding:26px;
+}
+.lb.on{display:flex}
+.lb-box{
+  background:#fff;border-radius:14px;max-width:1200px;width:100%;max-height:92vh;
+  overflow:auto;padding:16px 18px;
+}
+.lb-art{overflow:hidden;border-radius:8px}
+.lb-art img{
+  width:100%;border-radius:8px;display:block;transition:transform .12s ease;
+  transform-origin:center;cursor:zoom-in;
+}
+.lb-cap{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 2px 4px}
+.lb-cap h3{margin:0;font-size:16px;flex:1}
+.lb-cap .idx{font-size:12px;color:var(--ink-2)}
+.lb-bar{display:flex;gap:8px;align-items:center;margin-top:10px;flex-wrap:wrap}
+
+/* ---------- 响应式 ---------- */
+@media (max-width:1080px){
+  .mhead h1{font-size:24px}
+  .thumb{width:100%}
+}
+@media (max-width:820px){
+  .modnav{position:static}
+  .modnav .wrap{height:auto;padding-top:8px;padding-bottom:8px;flex-wrap:wrap}
+  .modnav .lbl{display:none}
+  .mod{padding:18px 0 44px}
+  .mhead{padding-left:14px}
+  .mhead h1{font-size:21px}
+  .scene{padding:14px}
+  .pn{flex-direction:column}
+  .pn a:last-child{text-align:left}
+  .lb{padding:12px}
+}

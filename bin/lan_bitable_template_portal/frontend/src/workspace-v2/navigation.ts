@@ -1,12 +1,12 @@
 import { logicalUrl, workspaceUrl, WORKSPACE_ENTRY } from './version';
-import { moduleForRoute, modules, NOTICE_IDS } from './modules';
+import { moduleForRoute, modules, NOTICE_IDS, zhihangDataModule } from './modules';
 import { currentEmbedded } from './embeddedContext';
 export type NavigateOptions = { replace?: boolean; hard?: boolean; bypassGuard?: boolean; legacy?: boolean };
 const pagePaths = new Set(['/', '/admin/settings', '/admin/history-memory', '/signature', '/signature-management',
   '/engineer/mop', '/repair-management', '/repair-status', '/learning', '/plan-convergence', '/life-guide',
   '/link-directory', '/knowledge-base', '/document-library', '/daily-tasks', '/daily-tasks/morning-meeting/print', '/daily-inspection', '/cold-source-monitor', '/water-management', '/work-handover',
   '/critical-guard', '/risk-inspections', '/cabinet-power', '/cabinet-power/batches', '/drill-management', '/drill-management/print', '/eop-scenarios',
-  '/workbench-lite', '/polling-work-order', '/polling-work-order/steps']);
+  '/workbench-lite', '/polling-work-order', '/polling-work-order/steps', zhihangDataModule.path]);
 type NavigationGuard=(target:string,proceed:()=>void)=>boolean;
 const guards=new Set<NavigationGuard>();
 const guardOwners=new Map<NavigationGuard,string>();
