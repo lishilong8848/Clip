@@ -323,18 +323,22 @@ class Snapshot:
                 'practice_questions': len(practices), 'review_count': reviews, 'updated_at': latest}
 
 
-def identity_rows(person, directory):
+def identity_rows(person, directory, *, staff_aliases=None):
     aliases = {str(person.get('id') or ''), *(person.get('aliases') or [])}
     ids = {alias.split(':', 1)[1] for alias in aliases if alias.startswith('directory:')}
+    if staff_aliases is not None:
+        # An explicit staff link must never fall back to another row's old login ID.
+        staff_ids = {alias.removeprefix('staff:') for alias in aliases if alias.startswith('staff:')}
+        ids.update(staff_aliases.get(rid, rid) for rid in staff_ids)
     rows = [(rid, row) for rid, row in directory.items() if rid in ids]
-    if not rows:
+    if not rows and (staff_aliases is None or not ids):
         login_ids = set(person.get('login_ids') or [])
         rows = [(rid, row) for rid, row in directory.items() if login_ids.intersection(row.get('login_ids') or [])]
     return rows
 
 
-def person_open_id(person, directory):
-    rows = identity_rows(person, directory)
+def person_open_id(person, directory, *, staff_aliases=None):
+    rows = identity_rows(person, directory, staff_aliases=staff_aliases)
     if len(rows) != 1:
         return ''
     candidates = {oid for oid in rows[0][1].get('login_ids') or [] if re.fullmatch(r'ou_[A-Za-z0-9]+', oid)}

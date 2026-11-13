@@ -21,8 +21,9 @@ LOGGER = logging.getLogger(__name__)
 
 
 def reviewer_open_id(directory, name, app_id):
-    rows = [(rid, row) for rid, row in directory.items() if core.text(row.get('name')).strip() == name]
-    if len(rows) != 1 or not rows[0][1].get('selectable') or rows[0][1].get('inactive'):
+    rows = [(rid, row) for rid, row in directory.items()
+            if core.text(row.get('name')).strip() == name and not row.get('inactive')]
+    if len(rows) != 1 or not rows[0][1].get('selectable'):
         return ''
     rid, row = rows[0]
     oid = (row.get('feishu_open_ids') or {}).get(app_id) or person_open_id({'id': 'directory:' + rid}, directory)

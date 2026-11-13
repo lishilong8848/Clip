@@ -204,6 +204,45 @@ class DailyReportTests(unittest.TestCase):
         self.put('person', {**person, 'id': 'duplicate', 'aliases': ['directory:p1']})
         self.assertTrue(self.report()['unverified'])
 
+    def test_staff_record_link_recovers_completed_intern_without_cached_open_id(self):
+        self.roster[0].update(record_id='p1', employee_linked=True, group='长白',
+                              duty_kind='长白', position='运维实习生')
+        self.save_roster()
+        person = self.service._get('person', 'p1')
+        self.put('person', {**person, 'aliases': ['staff:p1'], 'login_ids': []})
+        self.answer(correct=2)
+        self.assertEqual(completion.project(self.service, DATE, current=NOW)[0]['tasks'][0]['status'], '已完成')
+        report = self.report()
+        self.assertEqual([(r['person_id'], r['answered'], r['assigned']) for r in report['completed']], [('p1', 2, 2)])
+        self.assertFalse(report['unverified'])
+        self.assertFalse(report['unfinished'])
+        self.assertEqual(self.service._get('person', 'p1')['login_ids'], [])
+
+    def test_staff_migration_alias_recovers_current_account_but_rejects_conflicts(self):
+        self.roster[0].update(record_id='p1', employee_linked=True)
+        self.save_roster()
+        self.directory['p1']['login_ids'] = ['ou_current']
+        self.notice(open_id='ou_current', delivery=[{'open_id': 'ou_current', 'ok': True,
+                    'message_id': 'om_current', 'sender_app_id': 'cli_current'}])
+        person = self.service._get('person', 'p1')
+        self.put('person', {**person, 'aliases': ['staff:recOld'], 'login_ids': ['ou_old']})
+        with patch('lan_bitable_template_portal.personnel_source.signature_aliases', return_value={'recOld': 'p1'}):
+            self.assertEqual([row['person_id'] for row in self.report()['unfinished']], ['p1'])
+            self.put('person', {**person, 'id': 'duplicate', 'aliases': ['directory:p1']})
+            report = self.report()
+            self.assertFalse(report['unfinished'])
+            self.assertEqual(report['unverified'][0]['reason'], '飞书账号未匹配到唯一的有效学练档案。')
+            self.delete('person', 'duplicate')
+            self.roster[0]['person_id'] = 'unrelated'
+            self.save_roster()
+            self.assertIn('人员标识不一致', self.report()['unverified'][0]['reason'])
+            self.roster[0].pop('person_id')
+            self.save_roster()
+            self.put('person', {**person, 'aliases': ['staff:recMissing'], 'login_ids': ['ou_current']})
+            report = self.report()
+            self.assertFalse(report['unfinished'])
+            self.assertEqual(report['unverified'][0]['reason'], '飞书账号未匹配到唯一的有效学练档案。')
+
     def test_cross_shift_explicit_paper_not_reused_for_other_shift(self):
         self.roster.append({**self.roster[0], 'shift': '夜'}); self.save_roster()
         self.notice(shift='夜')
@@ -695,6 +734,12 @@ class DailyReportTests(unittest.TestCase):
                                account_profile=lambda oid: {'enabled': True, 'modules': ['learning']})
         for index, name in enumerate(issue_cards.REVIEWERS):
             self.directory[str(index)] = {'name': name, 'selectable': True, 'login_ids': [f'ou_review{index}']}
+        self.directory['retired-reviewer'] = {
+            'name': '李世龙', 'selectable': False, 'inactive': True, 'login_ids': ['ou_retired'],
+        }
+        duplicate = {'name': '李世龙', 'selectable': True, 'login_ids': ['ou_duplicate']}
+        self.assertEqual(issue_cards.reviewer_open_id(self.directory | {'duplicate': duplicate},
+                                                     '李世龙', 'cli_current'), '')
 
         def accept(oid, card, identity):
             return True, '', [{'open_id': oid, 'ok': True, 'message_id': 'om_' + oid[-1],

@@ -109,7 +109,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .learning_shift_storage import person_open_id
     from .learning_schedule import windows
     from .learning_reminders import excluded_long_day
-    from .personnel_source import observed_on_day
+    from .personnel_source import observed_on_day, signature_aliases
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
               'completed': [], 'unfinished': [], 'failed': [], 'unverified': [], **_question_summary(service, conn)}
@@ -123,7 +123,9 @@ def collect(service, date, current, conn, directory, app_id):
             result['unverified'].append({k: issue.get(k, '') for k in ('name', 'scope', 'shift')} | {
                 'reason': issue.get('reason') or '排班名单待核对'})
     people = service._all('person', conn)
-    mapped = [{**p, 'login_ids': [person_open_id(p, directory)]} for p in people]
+    staff_aliases = signature_aliases()
+    mapped = [{**p, 'login_ids': [person_open_id(p, directory, staff_aliases=staff_aliases)]}
+              for p in people if p.get('active')]
     targets = {oid: pid for pid, oid in recipients(mapped).items()}
     people_by_id = {p['id']: p for p in people}
     duties = {}
@@ -138,9 +140,20 @@ def collect(service, date, current, conn, directory, app_id):
         oid = matches[0]['open_id'] if matches and not warnings else ''
         pid = targets.get(oid)
         person = people_by_id.get(pid, {})
-        if (not app_id or not pid or raw.get('person_id') not in (None, '', pid)
-                or person.get('name', '').strip() != row['name'] or person.get('scopes') != [row['scope']]):
-            result['unverified'].append({**row, 'reason': '当前应用身份、姓名或楼栋未唯一匹配，人员名单待核对。'})
+        if not app_id:
+            reason = '当前飞书应用人员目录未就绪。'
+        elif not oid:
+            reason = '排班记录未匹配到唯一的在岗飞书账号。'
+        elif not pid:
+            reason = '飞书账号未匹配到唯一的有效学练档案。'
+        elif raw.get('person_id') not in (None, '', pid):
+            reason = '排班快照与当前学练档案的人员标识不一致。'
+        elif person.get('name', '').strip() != row['name'] or person.get('scopes') != [row['scope']]:
+            reason = '学练档案与排班快照的姓名或楼栋不一致。'
+        else:
+            reason = ''
+        if reason:
+            result['unverified'].append({**row, 'reason': reason})
             continue
         duties[pid, row['scope'], row['shift']] = {**row, 'open_id': oid, 'person_id': pid}
 
