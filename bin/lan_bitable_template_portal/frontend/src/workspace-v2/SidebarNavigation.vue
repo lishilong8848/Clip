@@ -9,21 +9,21 @@
         <button type="button" class="v2-rail-group" :data-group="group.key" :data-current="currentGroup?.key === group.key"
           :aria-label="group.label" :title="collapsed ? group.label : undefined"
           :aria-current="!group.branches && selected === group.key ? 'page' : undefined"
-          :aria-expanded="group.branches ? !collapsed && openGroup === group.key : undefined"
+          :aria-expanded="group.branches ? !collapsed && openGroups.has(group.key) : undefined"
           :aria-controls="group.branches ? 'v2-rail-submenu-' + group.key : undefined"
           @click="openSection(group, $event)">
           <component :is="group.icon" class="v2-rail-group-icon" :size="19" aria-hidden="true" />
           <span class="v2-rail-label">{{ group.label }}</span>
           <ChevronDown v-if="group.branches" class="v2-rail-label v2-rail-chevron" :size="15" aria-hidden="true" />
         </button>
-        <div v-if="group.branches" v-show="!collapsed && openGroup === group.key"
+        <div v-if="group.branches" v-show="!collapsed && openGroups.has(group.key)"
           :id="'v2-rail-submenu-' + group.key" class="v2-rail-submenu">
           <div v-for="branch in group.branches" :key="branch.key" class="v2-rail-branch">
-            <button v-if="branch.label" type="button" class="v2-rail-branch-toggle" :aria-expanded="openBranch === branch.key"
-              :aria-controls="'v2-rail-branch-' + group.key + '-' + branch.key" @click="openBranch = openBranch === branch.key ? '' : branch.key">
+            <button v-if="branch.label" type="button" class="v2-rail-branch-toggle" :aria-expanded="openBranches.has(branchKey(group.key, branch.key))"
+              :aria-controls="'v2-rail-branch-' + group.key + '-' + branch.key" @click="toggleBranch(group.key, branch.key, $event)">
               {{ branch.label }}<ChevronDown :size="14" class="v2-rail-chevron" aria-hidden="true" />
             </button>
-            <div :id="'v2-rail-branch-' + group.key + '-' + branch.key" v-show="!branch.label || openBranch === branch.key">
+            <div :id="'v2-rail-branch-' + group.key + '-' + branch.key" v-show="!branch.label || openBranches.has(branchKey(group.key, branch.key))">
               <button v-for="entry in branch.entries" :key="entry.key" type="button" class="v2-rail-entry"
                 :aria-current="selected === entry.key ? 'page' : undefined" @click="choose(entry.key)">
                 <component :is="entry.icon" v-if="entry.icon" :size="16" aria-hidden="true" />
@@ -38,13 +38,13 @@
   </aside>
 </template>
 <script setup lang="ts">
-import {computed,nextTick,onMounted,onBeforeUnmount,ref,watch} from 'vue';
+import {computed,nextTick,onMounted,onBeforeUnmount,reactive,ref,watch} from 'vue';
 import {ChevronDown,PanelLeftClose} from 'lucide-vue-next';
 import type {SidebarGroup} from './sidebarSections';
 const props=defineProps<{collapsed:boolean;groups:SidebarGroup[];selected:string;holdOpen?:boolean}>();
 const emit=defineEmits<{'update:collapsed':[value:boolean];select:[value:string];'dismiss-popovers':[]}>();
 const sidebar=ref<HTMLElement>(),menuScroll=ref<HTMLElement>();
-const openGroup=ref(''),openBranch=ref('');
+const openGroups=reactive(new Set<string>()),openBranches=reactive(new Set<string>());
 const currentGroup=computed(()=>props.groups.find(group=>group.key===props.selected ||
   group.branches?.some(branch=>branch.entries.some(entry=>entry.key===props.selected))));
 const currentBranch=computed(()=>currentGroup.value?.branches?.find(branch=>branch.entries.some(entry=>entry.key===props.selected)));
@@ -63,19 +63,26 @@ function choose(value:string){emit('select',value);if(!desktop())emit('update:co
 async function openSection(group:SidebarGroup,event:MouseEvent){
   if(!group.branches){choose(group.key);return;}
   const button=event.currentTarget as HTMLButtonElement;
-  if(!props.collapsed && openGroup.value===group.key){
-    openGroup.value='';
+  if(!props.collapsed && openGroups.has(group.key)){
+    openGroups.delete(group.key);
     await nextTick();
     keepRowVisible(button);
     return;
   }
-  openGroup.value=group.key;
-  openBranch.value=(group.key===currentGroup.value?.key ? currentBranch.value?.key : undefined) || group.branches[0]?.key || '';
+  openGroups.add(group.key);
   emit('update:collapsed',false);
   await nextTick();
   const firstItem=button.nextElementSibling?.querySelector<HTMLElement>('button');
   if(event.detail===0)firstItem?.focus({preventScroll:true});
   keepRowVisible(firstItem || button);
+}
+function branchKey(group:string,branch:string){return group+':'+branch;}
+async function toggleBranch(group:string,branch:string,event:MouseEvent){
+  const key=branchKey(group,branch),button=event.currentTarget as HTMLButtonElement;
+  if(openBranches.delete(key))return;
+  openBranches.add(key);
+  await nextTick();
+  keepRowVisible(button.nextElementSibling?.querySelector<HTMLElement>('button') || button);
 }
 function collapseRail(){
   const submenu=document.activeElement?.closest('.v2-rail-submenu');
@@ -94,13 +101,13 @@ function keepRowVisible(row?:HTMLElement | null){
   else if(bounds.bottom>viewport.bottom)scroll.scrollTop+=bounds.bottom-viewport.bottom;
 }
 function revealCurrentSection(){
-  openGroup.value=currentGroup.value?.branches ? currentGroup.value.key : '';
-  openBranch.value=currentBranch.value?.key || '';
+  const group=currentGroup.value,branch=currentBranch.value;
+  if(group?.branches)openGroups.add(group.key);
+  if(group && branch?.label)openBranches.add(branchKey(group.key,branch.key));
 }
 watch([()=>props.selected,()=>currentGroup.value?.key,()=>currentBranch.value?.key],revealCurrentSection,{immediate:true});
 watch(()=>props.collapsed,value=>{
   if(!value)return;
-  if(currentGroup.value?.branches)revealCurrentSection();
   emit('dismiss-popovers');
 });
 watch([()=>props.collapsed,()=>props.selected],async()=>{

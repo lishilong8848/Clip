@@ -23,7 +23,7 @@ NAMESPACE = 'repair_progress_notifications'
 IN_PROGRESS = '维修中'
 NOTICE_TITLE = '维修跟进通知'
 REMINDER_TITLE = '维修进度跟进'
-REMINDER_INTERVAL_SECONDS = 4 * 60 * 60
+REMINDER_INTERVAL_SECONDS = 24 * 60 * 60
 # A group that rejects cards must not be hammered every minute; environment gaps (no public
 # base url) stay on the fast path because they recover as soon as configuration returns.
 RETRY_BACKOFF_SECONDS = 15 * 60

@@ -1,4 +1,4 @@
-import { BookOpen, ClipboardList, House, Radio, Server, Settings, ShieldCheck } from 'lucide-vue-next';
+import { Activity, BookOpen, ClipboardList, House, ListChecks, Radio, Server, Settings, ShieldAlert, ShieldCheck, Wrench } from 'lucide-vue-next';
 import type { Component } from 'vue';
 import type { Persona } from './persona';
 
@@ -8,17 +8,28 @@ type Entry = { key: string; label: string; icon?: Component };
 export type SidebarGroup = Entry & { branches?: Array<{ key: string; label: string; entries: Entry[] }> };
 
 const sections = {
-  operations: { label: '运行值班', icon: Radio, branches: [
-    { key: 'shift', label: '当班作业', entries: ['daily', 'daily_inspection', 'cold_source'] },
-    { key: 'handover', label: '交接班', entries: ['handover', 'work_handover'] },
+  operations: { label: '值班与交接', icon: Radio, branches: [
+    { key: 'shift', label: '', entries: ['daily'] },
+    { key: 'handover', label: '交接事务', entries: ['handover', 'work_handover'] },
   ] },
-  notices: { label: '通告与工单', icon: ClipboardList, branches: [
-    { key: 'notice', label: '通告', entries: ['notices', 'plan_convergence'] },
-    { key: 'orders', label: '工单与签名', entries: ['repair_management', 'engineer_mop', 'signatures'] },
-    { key: 'procedures', label: '流程配置', entries: ['sops'] },
+  inspection: { label: '巡检与监测', icon: Activity, branches: [
+    { key: 'inspection', label: '', entries: ['daily_inspection', 'cold_source'] },
   ] },
-  safety: { label: '风险与应急', icon: ShieldCheck, branches: [
-    { key: 'safety', label: '', entries: ['event', 'risk_inspection', 'critical_guard', 'drills', 'eop_scenarios'] },
+  notices: { label: '通告与计划', icon: ClipboardList, branches: [
+    { key: 'notice', label: '', entries: ['notices', 'plan_convergence'] },
+  ] },
+  repairs: { label: '维修管理', icon: Wrench, branches: [
+    { key: 'repairs', label: '', entries: ['repair_management'] },
+  ] },
+  maintenance: { label: '维护与工单', icon: ListChecks, branches: [
+    { key: 'orders', label: '', entries: ['engineer_mop', 'sops', 'signatures'] },
+  ] },
+  safety: { label: '风险管控', icon: ShieldCheck, branches: [
+    { key: 'safety', label: '', entries: ['risk_inspection', 'critical_guard'] },
+  ] },
+  emergency: { label: '应急与演练', icon: ShieldAlert, branches: [
+    { key: 'event', label: '', entries: ['event'] },
+    { key: 'preparedness', label: '演练与预案', entries: ['drills', 'eop_scenarios'] },
   ] },
   resources: { label: '设备与资源', icon: Server, branches: [
     { key: 'resources', label: '', entries: ['cabinet', 'water', 'tool_management'] },
@@ -36,11 +47,11 @@ const sections = {
 
 type SectionKey = keyof typeof sections;
 const orders: Record<Persona, SectionKey[]> = {
-  duty: ['operations', 'notices', 'safety', 'resources', 'learning', 'administration'],
-  engineer: ['notices', 'resources', 'operations', 'safety', 'learning', 'administration'],
-  supervisor: ['safety', 'operations', 'resources', 'notices', 'learning', 'administration'],
-  global: ['operations', 'notices', 'safety', 'resources', 'learning', 'administration'],
-  personal: ['operations', 'learning', 'notices', 'safety', 'resources', 'administration'],
+  duty: ['operations', 'inspection', 'notices', 'emergency', 'safety', 'repairs', 'maintenance', 'resources', 'learning', 'administration'],
+  engineer: ['notices', 'repairs', 'maintenance', 'resources', 'inspection', 'operations', 'safety', 'emergency', 'learning', 'administration'],
+  supervisor: ['safety', 'operations', 'inspection', 'resources', 'repairs', 'notices', 'emergency', 'maintenance', 'learning', 'administration'],
+  global: ['operations', 'inspection', 'notices', 'repairs', 'maintenance', 'safety', 'emergency', 'resources', 'learning', 'administration'],
+  personal: ['operations', 'learning', 'inspection', 'notices', 'repairs', 'maintenance', 'safety', 'emergency', 'resources', 'administration'],
 };
 
 export function sidebarGroups(entries: Entry[], persona: Persona): SidebarGroup[] {
@@ -52,7 +63,6 @@ export function sidebarGroups(entries: Entry[], persona: Persona): SidebarGroup[
         const entry = available.get(id);
         return entry ? [entry] : [];
       });
-      if (persona === 'supervisor' && key === 'safety') items.sort((a, b) => Number(b.key === 'risk_inspection') - Number(a.key === 'risk_inspection'));
       if (persona === 'supervisor' && key === 'resources') items.sort((a, b) => Number(b.key === 'tool_management') - Number(a.key === 'tool_management'));
       return items.length ? [{ key: branch.key, label: branch.label, entries: items }] : [];
     });

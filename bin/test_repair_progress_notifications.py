@@ -73,6 +73,7 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.assertEqual(self.sends, [], '同一跃迁不重复通知')
 
     def test_reminder_repeats_only_after_interval_and_uses_distinct_uuids(self):
+        self.assertEqual(REMINDER_INTERVAL_SECONDS, 24 * 60 * 60)
         self.scan([record(workflow='未开始')], 1000.0)
         self.scan([record()], 2000.0)
         self.sends.clear()
