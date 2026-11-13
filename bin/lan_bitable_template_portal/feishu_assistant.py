@@ -1142,6 +1142,9 @@ class FeishuAssistant:
                     if weekly is None:
                         return JSONResponse({'ok': False, 'toast': '学练周报服务暂不可用，请稍后重试。'})
                     return JSONResponse(await weekly.callback(data, self.config['app_id']))
+                if isinstance(action_value, dict) and action_value.get('kind') == 'learning_question_issue':
+                    from .learning_issue_cards import callback
+                    return JSONResponse(await callback(self.runtime, data, app_id))
                 if isinstance(action_value, dict) and action_value.get('kind') == 'sharing_exercise':
                     sharing = getattr(self.runtime, 'sharing_exercises', None)
                     if sharing is None:

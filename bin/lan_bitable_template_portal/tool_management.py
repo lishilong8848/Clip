@@ -24,6 +24,8 @@ DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档
                 'scrap': '工具报废表', 'change': '异动台账'}
 MAX_REPORT = 12 * 1024 * 1024
 MAX_ORDER_DELETIONS = 200
+MANUAL_DELETE = '手动删除工单'
+PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
 
 
@@ -292,7 +294,7 @@ class ToolManagement(ToolSelfChecks):
                 if asset['scope'] not in scopes:
                     continue
                 tool_count += 1
-                for kind, due in self.planned_kinds(db, asset, today, count).items():
+                for kind, due in self.planned_kinds(db, asset, today, count, allow_reset=True).items():
                     items.append({**{key: asset.get(key) for key in ('scope', 'name', 'model', 'location')},
                                   'asset_id': asset['id'], 'kind': kind, 'due': due})
             items.sort(key=lambda item: (item['scope'], item['due'], item['name'] or '', item['asset_id'], item['kind']))
@@ -352,20 +354,27 @@ class ToolManagement(ToolSelfChecks):
                 asset = self.effective(row)
                 if asset['scope'] not in scopes:
                     raise RiskError('所选工具超出可新增工单的楼栋范围。', 403)
-                existing = {row['kind']: row['outcome'] for row in db.execute(
-                    'SELECT kind,outcome FROM tool_work_orders WHERE month=? AND asset_id=?', (month, asset_id))}
-                planned = self.planned_kinds(db, asset, today)
+                existing = {row['kind']: row for row in db.execute(
+                    'SELECT id,kind,outcome FROM tool_work_orders WHERE month=? AND asset_id=?', (month, asset_id))}
+                planned = self.planned_kinds(db, asset, today, allow_reset=True)
                 for kind in KINDS.keys() & kinds:
-                    if kind in existing and existing[kind] != 'cancelled':
+                    previous = existing.get(kind)
+                    if previous and previous['outcome'] != 'cancelled':
                         existing_count += 1
                     elif kind in planned:
-                        pending.append((asset, kind, planned[kind]))
+                        pending.append((asset, kind, planned[kind], previous))
                     else:
                         raise RiskError(f'{asset["name"]}的{KINDS[kind]}已不在可创建的本月计划中，请重新选择。', 409)
-            for asset, kind, due in pending:
-                order_id = uuid.uuid4().hex
-                self.insert_work_order(db, order_id, month, asset, kind, due)
-                self.audit(db, order_id, actor, '手动新增工单', '批量创建')
+            for asset, kind, due, previous in pending:
+                if previous:
+                    db.execute("""UPDATE tool_work_orders SET outcome='',resolution='',due=?,asset=?,supervisor=?,
+                        revision=revision+1 WHERE id=?""", (due, dumps(asset),
+                        asset.get('supervisor', '') if kind == 'external' else '', previous['id']))
+                    self.audit(db, previous['id'], actor, '重新生成工单', '保留原领取人、草稿与附件')
+                else:
+                    order_id = uuid.uuid4().hex
+                    self.insert_work_order(db, order_id, month, asset, kind, due)
+                    self.audit(db, order_id, actor, '手动新增工单', '批量创建')
             if pending:
                 db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (month,))
         return {'month': month, 'created_count': len(pending), 'existing_count': existing_count}
@@ -464,8 +473,8 @@ class ToolManagement(ToolSelfChecks):
             raise RiskError('已有台账同步记录，不能删除工单。', 409)
 
     def mark_order_deleted(self, db, actor, identity):
-        db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution='手动删除工单',revision=revision+1
-            WHERE id=?""", (identity,))
+        db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution=?,revision=revision+1
+            WHERE id=?""", (MANUAL_DELETE, identity))
         self.audit(db, identity, actor, '删除工单', '保留历史及草稿')
 
     def cancel_order(self, actor, identity, body):
@@ -496,12 +505,40 @@ class ToolManagement(ToolSelfChecks):
                 self.mark_order_deleted(db, actor, identity)
         return {'deleted_ids': list(revisions)}
 
+    def clear_month_plan(self, actor, body=None):
+        self.access(actor)
+        with self.connect(body is not None) as db:
+            month = clock().strftime('%Y-%m')
+            scopes = self.order_creation_scopes(db, actor)
+            if not scopes:
+                raise RiskError('仅本楼楼长或有权限的管理员可清理本月工单。', 403)
+            archived = db.execute('SELECT 1 FROM tool_work_archives WHERE month=? AND needs_refresh=0',
+                                  (month,)).fetchone()
+            rows = [row for row in db.execute("""SELECT id,scope,revision,outcome FROM tool_work_orders AS work
+                WHERE month=? AND submitted_at IS NULL
+                AND (outcome='' OR (outcome='cancelled' AND resolution=?))
+                AND NOT EXISTS (SELECT 1 FROM tool_work_reviews WHERE order_id=work.id AND status='pending')
+                AND NOT EXISTS (SELECT 1 FROM tool_work_sync WHERE order_id=work.id)
+                ORDER BY id""", (month, MANUAL_DELETE)) if row['scope'] in scopes and (row['outcome'] or not archived)]
+            fingerprint = digest([month, sorted(scopes), [(row['id'], row['revision']) for row in rows]])
+            if body is None:
+                return {'month': month, 'fingerprint': fingerprint,
+                        'pending_count': sum(not row['outcome'] for row in rows),
+                        'deleted_count': sum(bool(row['outcome']) for row in rows)}
+            if body.get('month') != month or body.get('fingerprint') != fingerprint:
+                raise RiskError('本月清理范围已变化，请重新预览后确认。', 409)
+            for row in rows:
+                db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution=?,revision=revision+1
+                    WHERE id=?""", (PLAN_RESET, row['id']))
+                self.audit(db, row['id'], actor, '清理月度工单', '保留原领取人、草稿与附件')
+            return {'cleared_count': len(rows)}
+
     @staticmethod
-    def planned_kinds(db, asset, today, count=lambda _: None):
+    def planned_kinds(db, asset, today, count=lambda _: None, *, allow_reset=False):
         month = today.strftime('%Y-%m')
         first_day = today.replace(day=1)
         end = month_offset(first_day, 1)
-        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty
+        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty,resolution,scope
             FROM tool_work_orders WHERE asset_id=?''', (asset['id'],)).fetchall()
         scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
         if asset.get('retired') or scrapped >= asset['quantity'] or any(
@@ -513,7 +550,8 @@ class ToolManagement(ToolSelfChecks):
             cycle = CYCLES.get(asset.get(kind + '_cycle'))
             entries = [entry for entry in history if entry['kind'] == kind]
             same_month = next((entry for entry in entries if entry['month'] == month), None)
-            if same_month:
+            if same_month and not (allow_reset and same_month['outcome'] == 'cancelled'
+                                   and same_month['resolution'] == PLAN_RESET and same_month['scope'] == asset['scope']):
                 count('deleted' if same_month['outcome'] == 'cancelled' else 'created')
                 continue
             if not cycle:

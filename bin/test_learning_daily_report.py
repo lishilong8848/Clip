@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from bin import test_learning as support
 from lan_bitable_template_portal import learning as core, learning_completion as completion
 from lan_bitable_template_portal import learning_daily_report as daily, learning_engagement as engagement
+from lan_bitable_template_portal import learning_issue_cards as issue_cards
 from lan_bitable_template_portal.learning_reminders import ROSTER_VERSION
 from lan_bitable_template_portal.pre_shift_checks import windows
 
@@ -140,9 +141,9 @@ class DailyReportTests(unittest.TestCase):
         self.assertIsNone(self.service._get('record', 'paper:p1'))
         self.run_due()
         card = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
-        self.assertIn('全部答题完成', card)
-        self.assertIn('50.0%', card)
-        self.assertIn('当班自主练习', card)
+        self.assertIn('全部已完成', card)
+        self.assertNotIn('正确率', card)
+        self.assertNotIn('当班自主练习', card)
         self.assertNotIn('<font color="red">', card)
 
     def test_next_day_autonomous_answers_complete_previous_night_only(self):
@@ -180,7 +181,7 @@ class DailyReportTests(unittest.TestCase):
                 self.assertFalse(report['unfinished'])
                 self.assertEqual(len(report[key]), 1)
                 card = json.dumps(daily.render_card(report, 'https://portal.invalid'), ensure_ascii=False)
-                self.assertNotIn('<font color=', card)
+                self.assertNotIn('<font color=\\"red\\"', card)
 
     def test_duplicate_roster_counts_once_duplicate_identity_counts_unknown(self):
         self.roster.append(copy.deepcopy(self.roster[0])); self.save_roster()
@@ -338,72 +339,21 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(self.send_mock.call_count, 1)
         self.assertEqual(self.job()['status'], 'sent')
 
-    def test_all_completed_sends_green_summary_once_with_people_and_accuracy(self):
+    def test_all_completed_sends_two_green_shift_results_once(self):
         self.member('night', '夜')
         self.answer(correct=2); self.answer('night', correct=1)
         self.run_due()
         self.assertEqual(self.job()['status'], 'sent')
         card = self.send_mock.call_args.args[0]
-        text = json.dumps(card, ensure_ascii=False)
         self.assertEqual(card['header']['template'], 'green')
-        self.assertIn('全部答题完成', text)
-        self.assertIn('答题人员 2 人', text)
-        self.assertIn('75.0%', text)
-        self.assertIn('3/4题', text)
-        self.assertNotIn('<font color="red">', text)
+        blocks = [element.get('text', {}).get('content') for element in card['elements']]
+        for shift in ('白', '夜'):
+            self.assertIn(f'**{shift}班**\n<font color="green">全部已完成</font>', blocks)
+        self.assertNotIn('正确率', str(blocks))
         self.restart(); self.run_due(NOW + dt.timedelta(hours=1))
         self.assertEqual(self.send_mock.call_count, 1)
 
-    def test_completed_with_zero_correct_is_not_missing_accuracy(self):
-        self.answer(); self.run_due()
-        self.assertEqual(self.job()['status'], 'sent')
-        self.assertIn('0.0%', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
-
-    def test_completed_subjective_questions_do_not_invent_accuracy(self):
-        paper = self.service._get('paper', 'paper:p1')
-        paper['questions'] = [self.question(n, kind='interview') for n in range(2)]
-        self.put('paper', paper); self.answer(correct=2); self.run_due()
-        text = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
-        self.assertIn('全部答题完成', text)
-        self.assertIn('暂无可统计客观题', text)
-        self.assertNotIn('100.0%', text)
-
-    def test_completed_metrics_use_first_answers_and_exclude_review_and_practice(self):
-        record = self.answer(correct=1)
-        for entry in record['entries'].values():
-            entry['practice'] = [{'correct': True, 'submitted_at': NOW.isoformat()}]
-        self.put('record', record)
-        self.put('paper', {'id': 'practice', 'person_id': 'p1', 'date': DATE, 'scope': 'A',
-                          'mode': 'practice', 'questions': [self.question(9)]})
-        self.put('record', {'id': 'practice', 'entries': {'written:9': {
-            'attempt': {'correct': True, 'submitted_at': NOW.isoformat()}}}})
-        self.run_due()
-        text = json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False)
-        self.assertIn('50.0%', text)
-        self.assertIn('1/2题', text)
-
-    def test_completed_roster_duplicates_do_not_inflate_people_or_accuracy(self):
-        self.roster.append(copy.deepcopy(self.roster[0])); self.save_roster()
-        self.answer(correct=1)
-        report = self.report()
-        report['completed'].append(copy.deepcopy(report['completed'][0]))
-        card = daily.render_card(report, 'https://portal.invalid')
-        text = json.dumps(card, ensure_ascii=False)
-        self.assertIn('答题人员 1 人', text)
-        self.assertIn('1/2题', text)
-
-    def test_accuracy_weights_question_counts_and_people_are_unique_across_shifts(self):
-        self.answer(correct=1)
-        report = self.report()
-        report['completed'].append({**report['completed'][0], 'shift': '夜',
-                                   'answered': 3, 'assigned': 3, 'correct': 3, 'objective_answered': 3})
-        card = daily.render_card(report, 'https://portal.invalid')
-        text = json.dumps(card, ensure_ascii=False)
-        self.assertIn('答题人员 1 人', text)
-        self.assertIn('完成 2 人班', text)
-        self.assertIn('80.0%（4/5题）', text)
-
-    def test_completed_people_with_unverified_or_failed_duties_never_report_all_done(self):
+    def test_completed_shift_keeps_unverified_or_failed_duties_separate(self):
         self.answer(correct=1); self.member('night', '夜')
         for status, delivery in (('pending', []), ('sent', [])):
             with self.subTest(status=status):
@@ -411,7 +361,9 @@ class DailyReportTests(unittest.TestCase):
                 report = self.report()
                 card = daily.render_card(report, 'https://portal.invalid')
                 self.assertEqual(card['header']['template'], 'orange')
-                self.assertNotIn('全部答题完成', json.dumps(card, ensure_ascii=False))
+                content = json.dumps(card, ensure_ascii=False)
+                self.assertEqual(content.count('全部已完成'), 2)
+                self.assertTrue('资料 / 名单待核对' in content or '发送失败 / 未送达' in content)
 
     def test_failure_rechecks_completed_and_never_retries_early(self):
         self.send_mock.side_effect = self.reject
@@ -420,7 +372,7 @@ class DailyReportTests(unittest.TestCase):
         self.send_mock.side_effect = self.accept
         self.answer(); self.run_due(NOW + dt.timedelta(minutes=5))
         self.assertEqual(self.job()['status'], 'sent'); self.assertEqual(self.send_mock.call_count, 2)
-        self.assertIn('全部答题完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
+        self.assertIn('全部已完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
 
     def test_definite_failure_retries_new_verified_payload_only(self):
         self.send_mock.side_effect = self.reject
@@ -606,7 +558,7 @@ class DailyReportTests(unittest.TestCase):
             self.run_due()
         self.assertEqual(len(calls), 2); self.send_mock.assert_called_once()
         self.assertEqual(self.job()['status'], 'sent')
-        self.assertIn('全部答题完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
+        self.assertIn('全部已完成', json.dumps(self.send_mock.call_args.args[0], ensure_ascii=False))
 
     def test_midnight_during_preparation_expires_original_day(self):
         def rollover():
@@ -676,7 +628,8 @@ class DailyReportTests(unittest.TestCase):
         card = daily.render_card(report, 'https://portal.invalid/')
         text = json.dumps(card, ensure_ascii=False)
         self.assertEqual(card['header']['template'], 'orange')
-        self.assertIn('2 人班 · 去重 1 人', text)
+        for removed in ('人班 · 去重', '口径：', '核实时间：', '以上仅计'):
+            self.assertNotIn(removed, text)
         self.assertIn('不代表实际进度', text)
         self.assertEqual(text.count('<font color='), 2)
         failure = next(e for e in card['elements'] if '发送失败人员' in str(e))
@@ -710,10 +663,9 @@ class DailyReportTests(unittest.TestCase):
         card = daily.render_card(report, 'https://portal.invalid')
         block = next(e['text'] for e in card['elements'] if '待处理质疑' in e.get('text', {}).get('content', ''))
         self.assertEqual(block['tag'], 'plain_text')
-        self.assertEqual(len(block['content'].splitlines()), 3)
-        self.assertIn('新的 题干｜当前答案：B. Choice 1；C. Choice 2｜质疑原因：选项存在歧义；答案 有误；补充依据', block['content'])
-        self.assertNotIn('旧题干', block['content'])
-        self.assertNotIn('内部处理备注', json.dumps(card, ensure_ascii=False))
+        self.assertEqual(block['content'], '待处理质疑 2 题')
+        self.assertNotIn('新的 题干', str(card))
+        self.assertNotIn('质疑原因', str(card))
 
     def test_question_sections_are_independently_hidden_when_empty(self):
         report = self.report()
@@ -735,6 +687,59 @@ class DailyReportTests(unittest.TestCase):
         content = json.dumps(daily.render_card(report, 'https://portal.invalid'), ensure_ascii=False)
         self.assertIn('待处理质疑', content)
         self.assertNotIn('题库待核对', content)
+
+    def test_private_issue_cards_deliver_once_and_save_question_atomically(self):
+        question = self.put('question', self.question(8))
+        self.issue(question=question, version=1, scope='A')
+        auth = SimpleNamespace(current_feishu_app_id=lambda: 'cli_current',
+                               account_profile=lambda oid: {'enabled': True, 'modules': ['learning']})
+        for index, name in enumerate(issue_cards.REVIEWERS):
+            self.directory[str(index)] = {'name': name, 'selectable': True, 'login_ids': [f'ou_review{index}']}
+
+        def accept(oid, card, identity):
+            return True, '', [{'open_id': oid, 'ok': True, 'message_id': 'om_' + oid[-1],
+                'chat_id': 'oc_' + oid[-1], 'sender_app_id': 'cli_current',
+                'message_uuid': str(issue_cards.uuid5(issue_cards.NAMESPACE_URL, identity))}]
+
+        with patch.object(issue_cards, 'current_directory', return_value=(self.directory, True, 'cli_current')), \
+             patch('lan_bitable_template_portal.learning_reminders.send_reminder', side_effect=accept) as send, \
+             patch.object(issue_cards, 'expired', return_value=False):
+            issue_cards.send_due(self.service, auth)
+            issue_cards.send_due(self.service, auth)
+            self.assertEqual(send.call_count, 2)
+            oid, card, identity = send.call_args_list[0].args
+            summary = card['body']['elements']
+            self.assertIn('质疑原因', summary[2]['text']['content'])
+            value = summary[-1]['behaviors'][0]['value']
+            payload = {'header': {'app_id': 'cli_current', 'event_type': 'card.action.trigger'},
+                       'event': {'operator': {'open_id': oid}, 'action': {'value': value},
+                                 'context': {'open_message_id': 'om_0', 'open_chat_id': 'oc_0'}}}
+            editor = issue_cards.apply(self.service, auth, payload, 'cli_current')['card']
+            controls = editor['body']['elements'][1]['elements']
+            self.assertEqual(controls[0]['default_value'], question['stem'])
+            action = payload['event']['action']
+            action['value'] = controls[-1]['behaviors'][0]['value']
+            action['form_value'] = {'remark': '修正选项', 'delete_options': ['A'], 'new_options': '正确的选项', 'correct': 'A'}
+            with self.assertRaises(core.LearningError):
+                issue_cards.apply(self.service, auth, payload, 'cli_current')
+            self.assertEqual(self.service._get('issue', 'issue1')['status'], 'pending')
+            action['form_value']['correct'] = 'N1'
+            payload['event']['operator']['open_id'] = 'ou_review1'
+            with self.assertRaises(core.LearningError):
+                issue_cards.apply(self.service, auth, payload, 'cli_current')
+            payload['event']['operator']['open_id'] = oid
+            with patch.object(self.service, '_update_issue', side_effect=core.LearningError('模拟处理失败')):
+                with self.assertRaises(core.LearningError):
+                    issue_cards.apply(self.service, auth, payload, 'cli_current')
+            self.assertEqual(self.service._get('question', question['id'])['version'], question['version'])
+            result = issue_cards.apply(self.service, auth, payload, 'cli_current')
+            self.assertIn('已保存', result['toast'])
+            revised = self.service._get('question', question['id'])
+            self.assertEqual([option['text'] for option in revised['options']], ['Choice 1', 'Choice 2', '正确的选项'])
+            self.assertEqual(revised['answer_text'], '正确的选项')
+            self.assertEqual(self.service._get('issue', 'issue1')['status'], 'resolved')
+            issue_cards.apply(self.service, auth, payload, 'cli_current')
+            self.assertEqual(len(self.service._all('audit')), 1)
 
     def test_question_only_report_sends_once_without_daily_assignments(self):
         self.roster = []; self.save_roster()

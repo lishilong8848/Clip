@@ -86,6 +86,7 @@
               <span v-else class="tool-muted">{{ board.orders.length && !pendingCount && !reviewCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
             </div>
             <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading || !!newOrderPlan" @click="openNewOrder">新增本月工单</NButton>
+            <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading" @click="previewMonthClear">清理本月工单</NButton>
             <NButton v-if="view === 'orders' && !newOrderPlan && !bulkMode && visibleOrders.some(row => row.can_delete)" :disabled="busy || loading" @click="bulkMode = true">批量删除</NButton>
             <NButton v-if="view==='orders'" :disabled="busy" @click="openNewTool">添加工具</NButton>
           </div>
@@ -102,6 +103,21 @@
           </section>
           <ToolOrderBatchCreate v-if="view === 'orders' && newOrderPlan" :plan="newOrderPlan" :busy="busy"
             @close="newOrderPlan = null" @create="createOrders" @refresh="openNewOrder" @sync="syncInventory" />
+          <NModal :show="!!monthClear" preset="dialog" title="清理本月工单"
+            :closable="!busy" :mask-closable="!busy" :close-on-esc="!busy"
+            @update:show="show => { if (!show && !busy) monthClear = null }">
+            <template v-if="monthClear">
+              <p v-if="monthClear.pending_count || monthClear.deleted_count">清理 {{ monthClear.month }} 的 {{ monthClear.pending_count }} 张未提交工单，
+                并释放 {{ monthClear.deleted_count }} 张手动删除工单占用的计划名额。符合本月周期的工具可重新勾选生成，原草稿与附件保留。</p>
+              <p v-else>{{ monthClear.month }} 暂无可清理的工单。可在「新增本月工单」查看计划或同步工具底表。</p>
+              <p v-if="error" role="alert">{{ error }}</p>
+            </template>
+            <template #action>
+              <NButton :disabled="busy" @click="monthClear = null">关闭</NButton>
+              <NButton v-if="monthClear && (monthClear.pending_count || monthClear.deleted_count)" type="error"
+                :loading="busy" :disabled="busy" @click="clearMonthOrders">确认清理</NButton>
+            </template>
+          </NModal>
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :disabled="busy" :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
               <template #prefix><Search :size="16" /></template>
@@ -365,11 +381,39 @@ const reason = ref('');
 const reviewReason = ref('');
 const quantity = ref(1);
 const newOrderPlan = ref<OrderCreationPlan | null>(null);
+interface MonthClear { month: string; fingerprint: string; pending_count: number; deleted_count: number }
+const monthClear = ref<MonthClear | null>(null);
 const addingTool=ref(false),toolFields=ref<{name:string;type:number;options:string[]}[]>([]),newTool=ref<Record<string,any>>({}),toolOperation=ref('');
 async function openNewTool(){await mutate(async()=>{const data=await requestJson(api+'/inventory/fields') as {fields:typeof toolFields.value;scopes:string[]};toolFields.value=data.fields.map(f=>f.name==='楼栋'?{...f,options:f.options.filter(o=>data.scopes.some(s=>o===s+'楼'||o==='南通'+s+'楼'))}:f);newTool.value={'一级分类':'B工具类'};toolOperation.value=crypto.randomUUID().replace(/-/g,'');addingTool.value=true;});}
 async function createTool(){await mutate(async()=>{await requestJson(api+'/inventory/new',{method:'POST',body:JSON.stringify({operation_id:toolOperation.value,fields:newTool.value})});addingTool.value=false;message.value='工具已添加，库存将在下次同步后显示。';});}
 async function readOrderPlan() {
   return await requestJson(api + '/orders/batch-create', { cache: 'no-store' }) as OrderCreationPlan;
+}
+async function readMonthClear() {
+  return await requestJson(api + '/orders/clear-month', { cache: 'no-store' }) as MonthClear;
+}
+async function previewMonthClear() {
+  await mutate(async () => { monthClear.value = await readMonthClear(); });
+}
+async function clearMonthOrders() {
+  const preview = monthClear.value;
+  if (!preview) return;
+  await mutate(async () => {
+    let result: { cleared_count: number };
+    try {
+      result = await requestJson(api + '/orders/clear-month', {
+        method: 'POST', body: JSON.stringify({ month: preview.month, fingerprint: preview.fingerprint }),
+      }) as typeof result;
+    } catch (failure) {
+      if (failure instanceof ApiError && failure.status === 409) monthClear.value = await readMonthClear();
+      throw failure;
+    }
+    monthClear.value = null;
+    exitBulkMode();
+    message.value = `已处理 ${result.cleared_count} 张工单，可重新勾选本月计划。`;
+    await loadBoard(preview.month);
+    newOrderPlan.value = await readOrderPlan();
+  });
 }
 async function openNewOrder() {
   await mutate(async () => {

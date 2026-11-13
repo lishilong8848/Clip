@@ -26,7 +26,7 @@ try{
   page.setDefaultTimeout(12000);
   const errors=[];
   page.on('pageerror',error=>errors.push(error.message));
-  const month='2026-11', base='/api/tool-self-check', uploads=[], submissions=[];
+  const month='2026-11', base='/api/tool-self-check', uploads=[], submissions=[], clears=[];
   let ready=false;
   const planItems=[
     {asset_id:'a',scope:'A',name:'电导率仪',kind:'self',due:'2026-11-10'},
@@ -41,6 +41,12 @@ try{
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'tool-fixture'}});
     if(url.pathname===base)return ok({month,orders:[],followups:[],templates:[],can_manage_templates:true,
       can_create_orders:true,can_download_month:true,archived_at:'2026-11-06',actor_name:'测试人员'});
+    if(url.pathname===base+'/orders/clear-month'){
+      if(request.method()==='GET')return ok({month,fingerprint:'fixture',pending_count:1,deleted_count:2});
+      clears.push(request.postDataJSON());
+      ready=true;
+      return ok({cleared_count:3});
+    }
     if(url.pathname===base+'/orders/batch-create'){
       if(request.method()==='GET')return ok({month,items:ready?planItems:[],archived:true,limit:200,
         inventory_at:ready?'2026-11-11':'',tool_count:2});
@@ -61,8 +67,13 @@ try{
   catch(error){console.error(await page.locator('body').innerText(),errors);throw error;}
   await page.getByText('工具底表尚未完成首次同步，稍后可重读计划。').waitFor();
   assert.equal(await page.getByText('可创建 0 项').count(),0);
-  ready=true;
-  await page.getByRole('button',{name:'重读计划'}).click();
+  await page.getByRole('button',{name:'清理本月工单'}).click();
+  await page.getByText(/1 张未提交工单/).waitFor();
+  await page.getByRole('button',{name:'关闭',exact:true}).click();
+  assert.equal(clears.length,0);
+  await page.getByRole('button',{name:'清理本月工单'}).click();
+  await page.getByRole('button',{name:'确认清理'}).click();
+  assert.deepEqual(clears,[{month,fingerprint:'fixture'}]);
   await page.getByText('可创建 3 项').waitFor();
   await page.getByLabel('筛选计划楼栋').selectOption('A');
   await page.getByRole('checkbox',{name:'全选筛选结果'}).click();
@@ -79,8 +90,17 @@ try{
   await page.getByText('已导入 1 份，跳过重复 1 份，失败 1 份。').waitFor();
   assert.deepEqual(uploads.sort(),['有效','重复','损坏'].sort());
   assert.match(await page.getByRole('listitem').filter({hasText:'损坏.xlsx'}).innerText(),/XLSX 模板无法读取/);
+
+  const v2 = new URL('/assets/workspace-v2/index.html', 'http://127.0.0.1:'+server.address().port);
+  v2.searchParams.set('__page','/risk-inspections');
+  v2.searchParams.set('view','tool-self-check');
+  await page.goto(v2.href);
+  await page.getByRole('button',{name:'清理本月工单'}).click();
+  await page.getByRole('button',{name:'确认清理'}).click();
+  await page.getByText('可创建 3 项').waitFor();
+  assert.equal(clears.length,2);
   assert.deepEqual(errors,[]);
-  console.log('工具月度批量筛选创建、空状态和文件夹导入反馈通过。');
+  console.log('工具月度清理、重新筛选创建、空状态和文件夹导入反馈通过。');
 }finally{
   await browser.close();
   await new Promise(resolve=>server.close(resolve));

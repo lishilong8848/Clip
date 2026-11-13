@@ -30,36 +30,18 @@ def render_card(report, portal_url):
     date = report['date']
     unfinished = list({(r['person_id'], r['scope'], r['shift']): r
                        for r in report.get('unfinished', [])}.values())
-    completed = list({(r['person_id'], r['scope'], r['shift']): r
-                      for r in report.get('completed', [])}.values())
-    all_completed = bool(completed) and not any(report.get(key) for key in ('unfinished', 'failed', 'unverified'))
-    people = {row['person_id'] for row in unfinished}
-    assignments = {(row['person_id'], row['shift']) for row in unfinished}
+    all_completed = bool(report.get('completed')) and not any(
+        report.get(key) for key in ('unfinished', 'failed', 'unverified'))
     card = reminder_card('', portal_url.rstrip('/') + '/learning?' + urlencode(
         {'tab': 'completion'}), button='查看学练完成情况')
     card['header'] = {'template': 'green' if all_completed else 'orange', 'title': {
-        'tag': 'plain_text', 'content': '昨日学练完成汇总' if all_completed else '昨日学练未完成汇总'}}
+        'tag': 'plain_text', 'content': '昨日学练汇总'}}
     elements = []
     if report.get('example'):
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
             'content': '虚构示例，不代表实际进度。'}})
-    summary = f"排班日：{date}\n白/夜共已核实待完成 {len(assignments)} 人班 · 去重 {len(people)} 人"
-    if all_completed:
-        correct = sum(row['correct'] for row in completed)
-        objective = sum(row['objective_answered'] for row in completed)
-        accuracy = f'{correct * 100 / objective:.1f}%（{correct}/{objective}题）' if objective else '暂无可统计客观题'
-        summary = (f"排班日：{date}\n全部答题完成 · 答题人员 {len({row['person_id'] for row in completed})} 人"
-                   f" · 完成 {len(completed)} 人班\n首次客观题正确率：{accuracy}")
-    elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': summary}})
-    if report.get('failed') or report.get('unverified'):
-        elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
-            'content': '以上仅计已核实未完成；发送失败及资料待核对单列，不计为未完成。'}})
+    elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': f'排班日：{date}'}})
     for shift in ('白', '夜'):
-        if all_completed:
-            rows = [row for row in completed if row['shift'] == shift]
-            text = f"已完成 {len({row['person_id'] for row in rows})} 人" if rows else '未安排每日题单'
-            elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': f'**{shift}班**\n{text}'}})
-            continue
         groups = defaultdict(list)
         for row in unfinished:
             if row['shift'] == shift:
@@ -71,8 +53,7 @@ def render_card(report, portal_url):
                 for row in sorted(rows, key=lambda r: (r['name'], r['person_id'])))
             lines.append(f'{html.escape(scope)}楼：{names}')
         if not groups:
-            lines.append('暂无已核实的未完成人员' if report.get('unverified') or report.get('failed')
-                         else '无未完成人员')
+            lines.append('<font color="green">全部已完成</font>')
         elements.append({'tag': 'div', 'text': {'tag': 'lark_md', 'content': '\n'.join(lines)}})
     for key, title in (('failed', '发送失败 / 未送达'), ('unverified', '资料 / 名单待核对')):
         rows = report.get(key, [])
@@ -83,17 +64,13 @@ def render_card(report, portal_url):
                     row.get('shift', '') + '班' if row.get('shift') else '', row.get('name', '')]))
                 lines.append((label + '：' if label else '') + row['reason'])
             elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}})
+    counts = []
     if report.get('question_issues'):
-        lines = [f"待处理质疑（截至发送时）· {len(report['question_issues'])} 题"]
-        for row in report['question_issues']:
-            lines.append(f"{row['stem']}｜当前答案：{row['answer']}｜质疑原因：{'；'.join(row['reasons'])}")
-        elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}})
+        counts.append(f"待处理质疑 {len(report['question_issues'])} 题")
     if report.get('question_problem_count'):
-        elements.append({'tag': 'div', 'text': {'tag': 'plain_text',
-            'content': f"题库待核对 {report['question_problem_count']} 题"}})
-    elements.append({'tag': 'note', 'elements': [{'tag': 'plain_text', 'content':
-        '口径：每日题单及当班自主练习的有效首答，复习不重复计数；夜班跨零点归排班日，截至发送时核实；含当天上班的长白运维实习生，不含其他长白、分享会及未安排。'
-        + (' 核实时间：' + report['as_of'] if report.get('as_of') else '')}]})
+        counts.append(f"题库待核对 {report['question_problem_count']} 题")
+    if counts:
+        elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': ' · '.join(counts)}})
     card['elements'] = [*elements, card['elements'][-1]]
     return card
 
@@ -101,9 +78,7 @@ def render_card(report, portal_url):
 def _question_summary(service, conn):
     questions = {q['id']: q for q in service._all('question', conn)}
     grouped = {}
-    for issue in sorted(service._all('issue', conn), key=lambda row: (row.get('updated_at', ''), row['id'])):
-        if issue.get('status') not in {'pending', 'processing', 'needs_info'}:
-            continue
+    for issue in sorted(service.open_question_issues(conn), key=lambda row: (row.get('updated_at', ''), row['id'])):
         qid = issue['question_id']
         question = questions.get(qid) or issue.get('question', {})
         answer = question.get('answer_text') or ('见参考答案附件' if any(

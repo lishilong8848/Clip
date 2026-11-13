@@ -94,6 +94,8 @@ def install_learning_routes(app, controller, runtime):
                 controller._learning = service
                 runtime.learning_service = service
                 service._weekly_card_sender = weekly_cards.send_from_worker
+                from .learning_issue_cards import send_due as send_issue_cards
+                service._issue_card_sender = lambda: send_issue_cards(service, runtime.auth_manager)
         return service
 
     from .learning_weekly_cards import WeeklyCards

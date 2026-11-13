@@ -35,6 +35,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.order_candidates, actor)
                 elif path == 'orders/batch-create':
                     result = await asyncio.to_thread(svc.planned_order_candidates, actor)
+                elif path == 'orders/clear-month':
+                    result = await asyncio.to_thread(svc.clear_month_plan, actor)
                 elif path == 'inventory/fields':
                     result = await asyncio.to_thread(svc.new_inventory_fields, actor)
                 elif path.startswith('archive/') or path.endswith('/download'):
@@ -84,6 +86,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 return response(await asyncio.to_thread(svc.create_planned_orders, actor, body))
             if path == 'orders/batch-delete':
                 return response(await asyncio.to_thread(svc.cancel_orders, actor, body))
+            if path == 'orders/clear-month':
+                return response(await asyncio.to_thread(svc.clear_month_plan, actor, body))
             if path == 'inventory/new':
                 return response(await asyncio.to_thread(svc.create_inventory, actor, body))
             if path == 'inventory/refresh':
@@ -110,7 +114,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/inventory/fields', ['GET']),
                           # Must precede the /inventory/{identity} catch-all below.
                           ('/inventory/refresh', ['POST']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']),
-                          ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']), ('/orders/{identity}', ['GET']),
+                          ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']),
+                          ('/orders/clear-month', ['GET', 'POST']), ('/orders/{identity}', ['GET']),
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),
                           ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),

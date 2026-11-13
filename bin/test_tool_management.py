@@ -367,6 +367,36 @@ class ToolManagementTest(TestCase):
             self.svc.cancel_orders(self.supervisor, {'month': self.month, 'orders': [{'id': order['id'], 'revision': order['revision']}]})
         self.assertEqual(self.svc.detail(self.leader, order['id'])['status'], 'pending')
 
+    def test_month_clear_releases_deleted_plan_and_keeps_submitted_orders(self):
+        first, second, submitted = self.orders[:3]
+        self.svc.cancel_order(self.leader, first['id'], {'revision': first['revision']})
+        with self.svc.connect(True) as db:
+            db.execute('UPDATE tool_work_orders SET submitted_at=?,actual=? WHERE id=?',
+                       (self.date, self.date, submitted['id']))
+            db.execute('UPDATE tool_work_orders SET draft=? WHERE id=?',
+                       ('{"reason":"现场记录"}', second['id']))
+        self.assertEqual(self.svc.planned_order_candidates(self.leader)['items'], [])
+        preview = self.svc.clear_month_plan(self.leader)
+        self.assertEqual(preview['deleted_count'], 1)
+        self.assertGreater(preview['pending_count'], 0)
+        with self.assertRaises(RiskError):
+            self.svc.clear_month_plan(self.supervisor, preview)
+        with self.assertRaises(RiskError):
+            self.svc.clear_month_plan(self.leader, preview | {'fingerprint': 'stale'})
+        self.assertEqual(self.svc.detail(self.leader, second['id'])['status'], 'pending')
+        self.svc.clear_month_plan(self.leader, preview)
+        self.svc.schedule()
+        self.assertEqual(self.svc.detail(self.leader, first['id'])['status'], 'cancelled')
+        self.assertEqual(self.svc.detail(self.leader, submitted['id'])['status'], 'submitted')
+        plan = self.svc.planned_order_candidates(self.leader)
+        self.assertEqual(len(plan['items']), preview['pending_count'] + preview['deleted_count'])
+        orders = [{'asset_id': item['asset_id'], 'kind': item['kind']} for item in plan['items']]
+        body = {'month': self.month, 'orders': orders}
+        self.assertEqual(self.svc.create_planned_orders(self.leader, body)['created_count'], len(orders))
+        self.assertEqual(self.svc.create_planned_orders(self.leader, body)['existing_count'], len(orders))
+        self.assertEqual(self.svc.detail(self.leader, second['id'])['draft']['reason'], '现场记录')
+        self.assertEqual(self.cloud.writes, [])
+
     def test_manual_inventory_refresh_surfaces_failure_instead_of_silent_empty_plan(self):
         from bin.lan_bitable_template_portal.risk_inspection import RiskError
 

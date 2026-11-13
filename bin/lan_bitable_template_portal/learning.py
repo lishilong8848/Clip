@@ -494,6 +494,11 @@ class LearningService:
                 from .learning_engagement import send_due
                 with self._notification_lock:
                     send_due(self, current or now())
+                    if sender := getattr(self, '_issue_card_sender', None):
+                        try:
+                            sender()
+                        except Exception:
+                            logging.getLogger(__name__).exception('学练质疑卡片处理失败')
 
     def _tick(self, current=None):
         current = current or now()
@@ -1556,32 +1561,37 @@ class LearningService:
         if not self.settings()["enabled"]:
             raise LearningError("请先在学练设置中启用题库同步")
         with self.transaction() as conn:
-            new_id = payload.get("new_id")
-            if not payload.get("id") and new_id:
-                if not isinstance(new_id, str) or not re.fullmatch(r"q_[A-Za-z0-9_-]{1,100}", new_id):
-                    raise LearningError("新增题目标识无效")
-                previous = self._get("question", new_id, conn)
-                if previous:
-                    if previous.get("create_fingerprint") != digest(payload):
-                        raise LearningError("该题已创建，当前内容与原提交不同，请读取最新题目后编辑", 409)
-                    return self.admin_question(previous)
-            old = self._question(payload["id"], conn) if payload.get("id") else None
-            if old and payload.get("version") != old["version"]:
-                raise LearningError("题目已被修改，请读取最新版本后保存", 409)
-            q = self._validated_question(payload, old)
-            if not old and new_id:
-                q["create_fingerprint"] = digest(payload)
-            equivalent = [other for other in self._all("question", conn) if other["id"] != q["id"] and canonical(other["stem"]) == canonical(q["stem"]) and other.get("status") != "deleted"]
-            if equivalent:
-                q["family_id"] = sorted(equivalent, key=lambda other: other["id"])[0]["family_id"]
-                if q["status"] == "published" and any(other["status"] == "published" for other in equivalent):
-                    raise LearningError("同题干已有发布题目，请先核对并停用重复记录")
-            reason = clean(payload.get("reason", "管理员修改题目"), 2000)
-            audit_id = uuid.uuid4().hex
-            self._put("audit", audit_id, {"id": audit_id, "question_id": q["id"], "actor": actor["id"], "at": stamp(), "reason": reason, "before": {k: v for k, v in (old or {}).items() if not k.startswith("_")}, "after": copy.deepcopy(q)}, conn)
-            if old:
-                self._correct_papers(old, q, reason, conn)
-            self._put("question", q["id"], q, conn)
+            return self._save_question(payload, actor, conn)
+
+    def _save_question(self, payload, actor, conn, *, require_valid=False):
+        new_id = payload.get("new_id")
+        if not payload.get("id") and new_id:
+            if not isinstance(new_id, str) or not re.fullmatch(r"q_[A-Za-z0-9_-]{1,100}", new_id):
+                raise LearningError("新增题目标识无效")
+            previous = self._get("question", new_id, conn)
+            if previous:
+                if previous.get("create_fingerprint") != digest(payload):
+                    raise LearningError("该题已创建，当前内容与原提交不同，请读取最新题目后编辑", 409)
+                return self.admin_question(previous)
+        old = self._question(payload["id"], conn) if payload.get("id") else None
+        if old and payload.get("version") != old["version"]:
+            raise LearningError("题目已被修改，请读取最新版本后保存", 409)
+        q = self._validated_question(payload, old)
+        if require_valid and q['problems']:
+            raise LearningError('请先完善题目：' + '；'.join(q['problems']))
+        if not old and new_id:
+            q["create_fingerprint"] = digest(payload)
+        equivalent = [other for other in self._all("question", conn) if other["id"] != q["id"] and canonical(other["stem"]) == canonical(q["stem"]) and other.get("status") != "deleted"]
+        if equivalent:
+            q["family_id"] = sorted(equivalent, key=lambda other: other["id"])[0]["family_id"]
+            if q["status"] == "published" and any(other["status"] == "published" for other in equivalent):
+                raise LearningError("同题干已有发布题目，请先核对并停用重复记录")
+        reason = clean(payload.get("reason", "管理员修改题目"), 2000)
+        audit_id = uuid.uuid4().hex
+        self._put("audit", audit_id, {"id": audit_id, "question_id": q["id"], "actor": actor["id"], "at": stamp(), "reason": reason, "before": {k: v for k, v in (old or {}).items() if not k.startswith("_")}, "after": copy.deepcopy(q)}, conn)
+        if old:
+            self._correct_papers(old, q, reason, conn)
+        self._put("question", q["id"], q, conn)
         q["_dirty"] = True
         return self.admin_question(q)
 
@@ -1700,35 +1710,46 @@ class LearningService:
 
     def update_issue(self, payload, actor):
         with self.transaction() as conn:
-            item = self.issue(payload.get("id"), actor, conn, write=True)
-            if payload.get("version") != item["version"]:
-                raise LearningError("质疑内容已更新，请重新读取", 409)
-            status = payload.get("status", item["status"])
-            if status not in ISSUE_STATES:
-                raise LearningError("无效处理状态")
-            remark = clean(payload.get("remark", payload.get("description", "")), 6000)
-            if actor.get("is_admin"):
-                if not remark:
-                    raise LearningError("请填写处理说明")
-            else:
-                self._scope(actor, item["scope"], write=True)
-                if status == "withdrawn":
-                    if item["status"] != "pending":
-                        raise LearningError("仅待处理质疑可撤回")
-                elif status != item["status"] and status != "pending":
-                    raise LearningError("只有管理员可设置处理结果", 403)
-                if status != "withdrawn" and not remark:
-                    raise LearningError("请填写补充说明")
-            item["status"] = status
-            item["version"] += 1
-            item["updated_at"] = stamp()
-            item["comments"].append({"actor": actor["id"], "name": actor.get("name", ""), "at": stamp(), "text": remark or "撤回质疑", "is_admin": bool(actor.get("is_admin"))})
-            self._put("issue", item["id"], item, conn)
-            if actor.get("is_admin"):
-                nid = f"issue:{item['id']}:{item['version']}"
-                self._put("notification", nid, {"id": nid, "kind": "issue", "date": now().date().isoformat(), "scope": item["scope"], "status": "pending", "message": f"【画像学练·质疑处理】\n题目：{item['question']['stem'][:150]}\n{remark}"}, conn)
+            return self._update_issue(payload, actor, conn)
+
+    def _update_issue(self, payload, actor, conn):
+        item = self.issue(payload.get("id"), actor, conn, write=True)
+        if payload.get("version") != item["version"]:
+            raise LearningError("质疑内容已更新，请重新读取", 409)
+        status = payload.get("status", item["status"])
+        if status not in ISSUE_STATES:
+            raise LearningError("无效处理状态")
+        remark = clean(payload.get("remark", payload.get("description", "")), 6000)
+        if actor.get("is_admin"):
+            if not remark:
+                raise LearningError("请填写处理说明")
+        else:
+            self._scope(actor, item["scope"], write=True)
+            if status == "withdrawn":
+                if item["status"] != "pending":
+                    raise LearningError("仅待处理质疑可撤回")
+            elif status != item["status"] and status != "pending":
+                raise LearningError("只有管理员可设置处理结果", 403)
+            if status != "withdrawn" and not remark:
+                raise LearningError("请填写补充说明")
+        item["status"] = status
+        item["version"] += 1
+        item["updated_at"] = stamp()
+        item["comments"].append({"actor": actor["id"], "name": actor.get("name", ""), "at": stamp(), "text": remark or "撤回质疑", "is_admin": bool(actor.get("is_admin"))})
+        self._put("issue", item["id"], item, conn)
+        if actor.get("is_admin"):
+            nid = f"issue:{item['id']}:{item['version']}"
+            self._put("notification", nid, {"id": nid, "kind": "issue", "date": now().date().isoformat(), "scope": item["scope"], "status": "pending", "message": f"【画像学练·质疑处理】\n题目：{item['question']['stem'][:150]}\n{remark}"}, conn)
         item["_dirty"] = True
         return self.public_issue(item, actor)
+
+    def open_question_issues(self, conn, question_id=None):
+        sql = ("SELECT payload FROM documents WHERE kind='issue' "
+               "AND json_extract(payload,'$.status') IN ('pending','processing','needs_info')")
+        if question_id is not None:
+            sql += " AND json_extract(payload,'$.question_id')=?"
+        return [json.loads(row[0]) for row in conn.execute(sql + " ORDER BY key",
+                () if question_id is None else (question_id,))]
 
     def list_issues(self, actor, query):
         access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
