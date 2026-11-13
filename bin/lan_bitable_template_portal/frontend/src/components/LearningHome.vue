@@ -28,7 +28,7 @@ const entries=computed(()=>props.management?[
   ...(props.isAdmin?[{id:'settings',title:'发布与提醒',description:'白夜班发布时间、发送结果与重试',icon:Settings},{id:'questions',title:'题库管理',description:'维护题目、答案与资料依据',icon:BookOpen}]:[]),
   {id:'completion',title:'完成情况',description:'按人员、日期与班次核对进度',icon:CheckCircle2},
   {id:'sharing',title:'资料练习',description:props.isAdmin?'AI出题、人工录题、导入与发布':'查看已发布的练习',icon:Users},
-  {id:'issues',title:workspaceV2?'题目反馈':'题目质疑',description:'查看反馈并跟进处理',icon:MessageSquare},
+  {id:'issues',title:workspaceV2?'题目反馈':'题目质疑',description:'查看各楼栋的反馈和处理进度',icon:MessageSquare},
   {id:'history',title:'学习记录',description:'查阅题单与作答情况',icon:History},
 ]:[
   {id:'practice',title:'自主练习',description:'继续本次练习，或开启新一轮',icon:BookOpen},
@@ -36,7 +36,7 @@ const entries=computed(()=>props.management?[
   {id:'sharing',title:'资料练习',description:'完成分配给自己的分享会练习',icon:FileText},
   {id:'history',title:'学习记录',description:'查看题单、首答与复习记录',icon:History},
   {id:'profile',title:'学习画像',description:'查看趋势与薄弱知识点',icon:ChartNoAxesCombined},
-  {id:'issues',title:'题目反馈',description:workspaceV2?'跟进已提交的题目反馈':'跟进已提交的题目质疑',icon:MessageSquare},
+  {id:'issues',title:'题目反馈',description:'查看各楼栋的反馈和处理进度',icon:MessageSquare},
 ]);
 </script>
 <style scoped>

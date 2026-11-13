@@ -685,7 +685,10 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(reply["comments"][-1]["text"], "Corrected")
         notification = self.service._get("notification", f"issue:{first['id']}:3")
         self.assertEqual((notification["scope"], notification["status"]), ("A", "pending"))
-        self.assertEqual(self.service.list_issues(H_ACTOR, {})["total"], 0)
+        visible = self.service.list_issues(H_ACTOR, {})["items"]
+        self.assertEqual([item["id"] for item in visible], [first["id"]])
+        self.assertFalse(visible[0]["can_update"])
+        self.assertEqual(visible[0]["comments"][-1]["text"], "Corrected")
         self.assertNotEqual(self.dispatch("issue.create", payload)["id"], first["id"])
 
     def test_issue_creation_does_not_leak_unrevealed_answer_or_attachment_secrets(self):

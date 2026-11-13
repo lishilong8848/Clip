@@ -113,7 +113,7 @@
   .mod-head p{color:var(--ink-2);line-height:1.9;max-width:920px;margin:0}
   .mod-sec{margin:28px 0 10px;font-size:17px}
   .mflow-box{border:1px solid var(--line);border-radius:12px;background:#f6f9fd;padding:10px;overflow-x:auto}
-  .mflow-box svg{width:100%;height:auto;display:block;min-width:960px}
+  .mflow-box svg{width:100%;height:auto;display:block;min-width:1240px}
   .val-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}
   .val-card{border:1px solid var(--line);border-radius:12px;background:#fff;padding:14px 16px}
   .val-card b{display:block;font-size:13px;margin-bottom:8px}
@@ -177,6 +177,11 @@
   .value-card p{margin:0;font-size:12px;line-height:1.8;color:rgb(255 255 255 / .82)}
   .value-cta{margin-top:16px;background:#fff;color:#087a61;border:0;border-radius:10px;padding:9px 18px;font-weight:700;font-size:13px;cursor:pointer}
   .pn-tip{margin:10px 0 0;font-size:12px;color:var(--ink-2)}
+  .scene-card{border:1px solid var(--line);border-radius:14px;background:#fff;padding:18px 20px 16px;box-shadow:0 1px 2px rgb(15 40 70 / .05)}
+  .scene-quote{border-left:5px solid var(--mc,#087a61);background:#f6faf8;border-radius:8px;padding:11px 15px;font-size:13.5px;color:#33475c;line-height:1.95}
+  .scene-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:12px;margin-top:13px}
+  .scene-step{border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.85;color:var(--ink-2)}
+  .scene-step b{display:block;font-size:12.5px;margin-bottom:6px}
   .tile-met{display:inline-block;margin-top:9px;font-size:11px;color:#087a61;background:#f0f6f4;border:1px solid rgb(8 122 97 / .2);border-radius:999px;padding:3px 10px}
   .home-foot{margin:20px 0 0;padding-bottom:44px;font-size:12px;color:var(--ink-2);text-align:center}
   .card-more{margin-top:10px;border:0;background:none;color:#087a61;font-size:12.5px;cursor:pointer;padding:0}
@@ -869,31 +874,31 @@ document.getElementById('archArt').innerHTML=frame('灯塔系统架构','#1d4ed8
 /* ============ 三视图路由：主页 / 模块详情 / 更多介绍（整页） ============ */
 const SECCOLOR={s1:'#1d4ed8',s2:'#0e7490',s3:'#b7791f',s4:'#6d4fc4',s5:'#7c3aed',s6:'#64748b'};
 const FLOWS=[
- {src:['剪贴板文本','通告计划表'],proc:['常驻监听识别七类语义','自动建档关联事件/通告','倒计时与状态推送','关键节点语音播报'],out:['桌面提醒','事件档案']},
- {src:['剪贴板/飞书/手工创建','七类 Handler 解析'],proc:['统一表单字段契约','开始—更新—结束状态推进','飞书表幂等写入','回执核验与自动重试'],out:['飞书通告卡片','通告状态台账']},
- {src:['事件状态','非事件操作请求'],proc:['检测未闭环事件','非事件进入等待队列','事件闭环后自动放行','队列状态推送'],out:['有序通告执行','队列审计记录']},
- {src:['维保通告','MOP 表格库'],proc:['通告绑定表格','模板步骤展开','照片留证与填写','签名审核上传归档'],out:['维护单 Excel','签名归档']},
- {src:['事件记录','检修联动记录'],proc:['月度快照归集','周/月/自定义区间统计','响应时效自动核算','等级与楼栋分布'],out:['事件概览','时效分析报告']},
- {src:['当日通告/水耗/检修数据'],proc:['按楼栋自动汇总','同源任务去重合并','晨会表生成','一键推送飞书'],out:['每日任务清单','晨会表']},
- {src:['测点配置','两小时桶数值'],proc:['≤5 秒变更探针','四轮巡检表生成','自动取数填写','收尾冻结归档'],out:['巡检表','冻结归档']},
- {src:['检查项配置','班次排班'],proc:['按频率排班调度','逐项填写与异常备注','照片留证','云端归档'],out:['检查记录','归档凭证']},
- {src:['重保模板','天气预警'],proc:['分楼派发任务','人员签名确认','预警自动触发戒备','结果汇总'],out:['重保检查表','戒备记录']},
- {src:['排查模板'],proc:['动态发布模板','移动端填报','审核与驳回','云端结果同步'],out:['排查结果','审核台账']},
- {src:['智航屏蔽记录','本地设备/点位规则'],proc:['探针拉取屏蔽列表','规则自动匹配','检修/变更交叉核对','输出收敛结论'],out:['收敛审查表','屏蔽台账']},
- {src:['演练定义','应急场景库'],proc:['发布演练计划','执行填写与签名','评估表生成','Excel 同步归档'],out:['演练记录','评估表']},
- {src:['机柜台账','上下电申请'],proc:['分楼台账与平面图','批量登记','待办与核实','报表归档'],out:['上电状态表','操作留痕']},
- {src:['水表读数','现场照片'],proc:['录入与照片核验','变化率阈值核查','异常标记复核','月度汇总统计'],out:['水耗台账','异常清单']},
- {src:['告警/事件源','维修工单'],proc:['维修汇总自动归集','跟进与进度管理','检修目标多源关联','本地台账快照'],out:['维修闭环单','设备台账']},
- {src:['飞书人员目录','权限申请'],proc:['四维权限投影','统一登录与冒充审计','审批与变更记录','模块可见性控制'],out:['权限矩阵','审计日志']},
- {src:['人员目录','业务引用请求'],proc:['一次性链接签名','临时人员签名','版本与失效管理','引用权限分离'],out:['签名目录','证据凭证']},
- {src:['交接发起','业务待办事项'],proc:['版本快照生成','双方确认','附件与通知回执','归档留痕'],out:['交接单','回执记录']},
- {src:['题库','答题记录'],proc:['每日题单固定配比','七天去重','首答/复习分离','画像与周回顾'],out:['学习画像','回顾卡片']},
- {src:['自然语言指令','知识库与 52 工具'],proc:['意图解析与技能匹配','工具编排调用','业务写入人工确认','结果回答与留痕'],out:['办理结果','会话轨迹']},
- {src:['文档上传','分组与权限'],proc:['本地嵌入向量化','FAISS 索引检索','版本与分组管理','敏感内容检测'],out:['检索片段','文档台账']},
- {src:['飞书长连接消息','话题与表单任务'],proc:['消息解析与路由','卡片交互与表单补录','钉钉机器人推送','送达健康选链'],out:['多渠道送达','送达回执']},
- {src:['账号身份','布局配置'],proc:['新旧版平滑路由','布局按账号×设备','GridStack 自定义 widgets','移动端适配'],out:['个人工作台','移动端视图']},
- {src:['公网请求','白名单配置'],proc:['隧道入口隔离','白名单与限流','30 秒健康探针','故障降级局域网'],out:['安全工作台','探针报告']},
- {src:['版本构建','补丁包'],proc:['飞书表分片上传','哈希回读校验','发布清单管理','客户端增量更新'],out:['发布清单','增量补丁']}];
+{r:'值班人员',tg:'复制群内消息',dc:'语义识别分流',br:['事件文本','通告文本','其他内容'],ac:'自动建档倒计时',co:'语音播报提醒',st:'本地事件档案',en:'闭环复盘',rt:'时效统计'},
+{r:'通告员',tg:'剪贴板/手工创建',dc:'通告类型分流',br:['维保/变更/检修','上下电/轮巡','事件通告'],ac:'表单填写发起',co:'飞书群通知卡片',st:'飞书通告表',en:'回执核验',rt:'状态回写'},
+{r:'各办理入口',tg:'非事件操作请求',dc:'有未结束事件?',br:['是→排队等待','否→直接执行'],ac:'队列持久化保留',co:'状态推送提醒',st:'本地等待队列',en:'自动恢复执行',rt:'队列审计'},
+{r:'执行工程师',tg:'维保通告开工',dc:'MOP 表格绑定?',br:['已绑定表格','云目录选择','本地上传'],ac:'步骤展开填写',co:'照片留证签名',st:'维护单归档',en:'签名归档',rt:'模板版本化'},
+{r:'班组长/管理员',tg:'事件记录归集',dc:'统计区间分流',br:['周/月区间','自定义区间','月度快照'],ac:'时效自动核算',co:'概览卡片推送',st:'事件快照表',en:'分析报告',rt:'达标跟踪'},
+{r:'楼长',tg:'每日定时汇总',dc:'楼栋范围分流',br:['单栋','全部授权栋'],ac:'任务自动汇总',co:'晨会表推飞书',st:'每日任务表',en:'晨会使用',rt:'去重合并'},
+{r:'值班/系统',tg:'两小时桶调度',dc:'配置变更探针',br:['配置变更','数值就绪','轮次收尾'],ac:'自动取数填写',co:'异常提醒进群',st:'巡检表冻结归档',en:'历史追溯',rt:'轮次版本'},
+{r:'班次班组',tg:'排班调度触发',dc:'检查频率分流',br:['每班','每日','每周'],ac:'逐项填写备注',co:'照片留证上传',st:'检查记录云端',en:'归档凭证',rt:'异常跟踪'},
+{r:'管理员/气象源',tg:'预警或手动触发',dc:'预警等级分流',br:['蓝色/黄色','橙色/红色'],ac:'模板分楼派发',co:'签名确认提醒',st:'重保检查表',en:'戒备归档',rt:'响应时效'},
+{r:'管理员',tg:'模板动态发布',dc:'填报端分流',br:['移动端','桌面端'],ac:'填报提交审核',co:'审核驳回通知',st:'排查结果云端',en:'审核台账',rt:'问题闭环'},
+{r:'系统探针',tg:'屏蔽列表拉取',dc:'规则匹配?',br:['命中屏蔽','本地规则','未匹配'],ac:'收敛交叉核对',co:'审查意见推送',st:'收敛审查表',en:'审查归档',rt:'遗漏跟踪'},
+{r:'演练组织者',tg:'演练计划发布',dc:'演练阶段分流',br:['执行填写','签名确认','评估生成'],ac:'记录表填写',co:'参演人员签名',st:'演练记录归档',en:'评估表',rt:'场景库沉淀'},
+{r:'资产管理员',tg:'上下电申请',dc:'操作类型分流',br:['上电','下电','批量登记'],ac:'台账更新核实',co:'待办提醒核实',st:'机柜台账表',en:'报表归档',rt:'平面图同步'},
+{r:'水表录入人',tg:'读数录入',dc:'阈值核查分流',br:['正常','异常标记'],ac:'照片核验复核',co:'异常通知进群',st:'水耗台账表',en:'月度汇总',rt:'趋势分析'},
+{r:'维修负责人',tg:'告警/工单导入',dc:'维修状态分流',br:['进行中','已完成','待跟进'],ac:'跟进进度更新',co:'多源关联通知',st:'维修台账快照',en:'闭环归档',rt:'目标关联'},
+{r:'管理员',tg:'人员同步/申请',dc:'权限审批分流',br:['批准','拒绝','变更'],ac:'四维投影更新',co:'审批通知送达',st:'权限矩阵审计',en:'变更记录',rt:'冒充审计'},
+{r:'人员/管理员',tg:'签名任务发起',dc:'人员类型分流',br:['正式人员','临时人员'],ac:'一次性链接签名',co:'链接送达提醒',st:'签名目录表',en:'证据凭证',rt:'失效管理'},
+{r:'交接双方',tg:'交接发起',dc:'事项来源分流',br:['业务添加','手工添加'],ac:'版本快照确认',co:'通知回执送达',st:'交接单归档',en:'双方确认',rt:'责任追溯'},
+{r:'学员/管理员',tg:'每日题单生成',dc:'题目类型分流',br:['首答','复习','自主'],ac:'答题与解析',co:'画像卡片推送',st:'答题记录库',en:'周回顾',rt:'薄弱点跟踪'},
+{r:'任意用户',tg:'自然语言指令',dc:'意图解析分流',br:['查询','草拟','办理'],ac:'工具编排调用',co:'人工确认门禁',st:'会话轨迹日志',en:'结果回答',rt:'技能沉淀'},
+{r:'文档所有者',tg:'文档上传',dc:'敏感检测分流',br:['通过','拦截复核'],ac:'嵌入向量化',co:'检索问答支撑',st:'向量索引库',en:'分组管理',rt:'版本追溯'},
+{r:'飞书用户',tg:'长连接消息',dc:'消息类型分流',br:['话题','表单','提及'],ac:'解析路由办理',co:'卡片交互补录',st:'送达回执日志',en:'多渠道送达',rt:'健康选链'},
+{r:'全部账号',tg:'登录访问',dc:'版本偏好分流',br:['新版','旧版'],ac:'布局加载渲染',co:'widgets 自定义',st:'布局配置表',en:'多端适配',rt:'账号×设备记忆'},
+{r:'远程人员',tg:'公网访问请求',dc:'白名单校验?',br:['白名单内','不在→拒绝'],ac:'隧道隔离转发',co:'探针健康报告',st:'访问审计日志',en:'降级保护',rt:'30 秒探针'},
+{r:'发布负责人',tg:'版本构建',dc:'分片校验?',br:['哈希一致','不一致重传'],ac:'清单发布管理',co:'客户端更新通知',st:'分片分发表',en:'增量更新',rt:'回读校验'}];
 function showView(v){
   document.body.dataset.view=v;
   document.getElementById('goHome').classList.toggle('on',v==='home');
@@ -914,17 +919,26 @@ function archMini(){
     {l:'接入',c:'#2563eb',n:['桌面剪贴板','网页工作台','飞书 / 钉钉','公网隧道']},
     {l:'治理',c:'#1d4ed8',n:['七类 Handler','事件优先排队','四维权限校验','探针补传闭环']},
     {l:'业务',c:'#0e7490',n:['事件通告中枢','日常运行安全','设备资产能耗','组织人员训练','智能能力知识','平台底座交付']},
+    {l:'底座',c:'#b7791f',n:['SQLite 本地库·16 库 139 表','飞书多维表·37 固定表','向量知识库·BGE+FAISS','文件归档·Excel/照片','外部源·全景/智航/签到']},
     {l:'输出',c:'#18805e',n:['飞书送达','Excel 冻结归档','审计证据链','多端工作台']}];
-  const W=1160,H=308;let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="平台架构一览">
-   <defs><marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8aa0b8"/></marker></defs>`;
+  const W=1160,H=486;let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="平台架构与数据底座一览">
+   <defs><marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#8aa0b8"/></marker>
+   <marker id="arw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#b7791f"/></marker></defs>`;
+  const ys=[8,88,168,248,352];
   bands.forEach((b,bi)=>{
-    const y=10+bi*76;
-    s+=`<rect x="8" y="${y}" width="86" height="56" rx="10" fill="${b.c}"/><text x="51" y="${y+34}" font-size="15" font-weight="700" fill="#fff" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
+    const y=ys[bi],hh=bi===3?88:64;
+    s+=`<rect x="8" y="${y}" width="86" height="${hh}" rx="10" fill="${b.c}"/><text x="51" y="${y+hh/2+5}" font-size="15" font-weight="700" fill="#fff" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${b.l}</text>`;
     const n=b.n.length,cw=(W-120-(n-1)*10)/n;
     b.n.forEach((t,i)=>{const x=104+i*(cw+10);
-      s+=`<rect x="${x}" y="${y}" width="${cw}" height="56" rx="10" fill="${b.c}" opacity=".08" stroke="${b.c}" stroke-opacity=".35"/>
-          <text x="${x+cw/2}" y="${y+34}" font-size="12.5" fill="${b.c}" font-weight="600" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;});
-    if(bi<3)s+=`<path d="M${W/2},${y+56} L${W/2},${y+72}" stroke="#8aa0b8" stroke-width="2" marker-end="url(#ara)"/>`;});
+      s+=`<rect x="${x}" y="${y}" width="${cw}" height="${hh}" rx="10" fill="${b.c}" opacity=".08" stroke="${b.c}" stroke-opacity=".35"/>
+          <text x="${x+cw/2}" y="${y+hh/2+4}" font-size="${bi===3?11.5:12.5}" fill="${b.c}" font-weight="600" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;});
+    if(bi===0||bi===1)s+=`<path d="M${W/2},${y+hh} L${W/2},${y+hh+16}" stroke="#8aa0b8" stroke-width="2" marker-end="url(#ara)"/>`;
+    if(bi===2){s+=`<path d="M${W/2-90},${y+hh} L${W/2-90},${y+hh+16}" stroke="#b7791f" stroke-width="2" marker-end="url(#arw)"/>
+        <text x="${W/2-82}" y="${y+hh+13}" font-size="11" fill="#b7791f" font-family="Microsoft YaHei,sans-serif">写入 / 归档</text>
+        <path d="M${W/2+90},${y+hh+16} L${W/2+90},${y+hh}" stroke="#0e7490" stroke-width="2" marker-end="url(#ara)"/>
+        <text x="${W/2+98}" y="${y+hh+13}" font-size="11" fill="#0e7490" font-family="Microsoft YaHei,sans-serif">读取 / 探针</text>`;}
+    if(bi===3)s+=`<path d="M${W/2},${y+hh} L${W/2},${ys[4]}" stroke="#8aa0b8" stroke-width="2" marker-end="url(#ara)"/>
+        <text x="${W/2+10}" y="${y+hh+13}" font-size="11" fill="#5b6b80" font-family="Microsoft YaHei,sans-serif">归档取出 · 汇总送达</text>`;});
   return s+`</svg>`;}
 function valueBand(){
   return `<div class="value-band"><h3>整体价值 · 六维一条主线</h3><div class="value-grid">`+
@@ -937,7 +951,7 @@ function renderHome(){
     <div class="home-stats"><span>25 个功能模块</span><span>7 类通告全生命周期</span><span>37 张飞书多维表</span><span>139 张本地数据表</span><span>52 个智能助手工具</span><span>桌面 · 网页 · 飞书 · 助手四端一体</span></div>
     <button type="button" class="hero-cta" id="heroAll">查看完整汇报 →</button>
     </div>
-    <div class="home-arch"><h3>平台架构一览<button type="button" id="archFull">查看完整流向图 →</button></h3>${archMini()}</div>
+    <div class="home-arch"><h3>整体架构与数据底座<button type="button" id="archFull">查看完整流向图 →</button></h3>${archMini()}</div>
     <div class="home-bar"><input id="homeSearch" class="home-search" type="search" placeholder="搜索模块名称或关键词，如：巡检 / 签名 / 知识库" aria-label="搜索功能模块"><span class="home-count" id="homeCount">共 25 个功能模块</span></div>
     <div class="demo-route"><span>推荐演示路线：</span>${[1,6,12,16,19].map(i=>`<button type="button" data-mod="${i}">${MODULES[i].name}</button>`).join('<i>→</i>')}<i>→</i><button type="button" id="demoSummary">整体价值总结</button></div>
     <div style="padding-bottom:56px">`;
@@ -949,34 +963,45 @@ function renderHome(){
     h+=`</div>`;}
   h+=valueBand()+`<p class="home-foot">截图与指标快照时间 2026-11-11 · 本页面为单文件、可双击离线演示 · 支持全屏演示、打印/PDF 导出与模块链接复制</p>`;
   document.getElementById('viewHome').innerHTML=h+`</div></div>`;}
-function mflowSVG(f){
-  const W=1240,H=470,sH=64,sG=16,pH=56,pG=26;
-  const nS=f.src.length,nP=f.proc.length,nO=f.out.length;
-  const yS=(H-(nS*sH+(nS-1)*sG))/2,yP=(H-(nP*pH+(nP-1)*pG))/2,yO=(H-(nO*sH+(nO-1)*sG))/2;
-  const head=(x,w,t,c)=>`<rect x="${x+w/2-52}" y="10" width="104" height="26" rx="13" fill="${c}" opacity=".1"/><text x="${x+w/2}" y="28" font-size="12.5" font-weight="700" fill="${c}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;
-  const box=(x,y,w,hh,t,fill,stroke,fs,tc)=>`<rect x="${x}" y="${y}" width="${w}" height="${hh}" rx="10" fill="${fill}" stroke="${stroke}"/><text x="${x+w/2}" y="${y+hh/2+5}" font-size="${fs}" fill="${tc}" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${t}</text>`;
-  let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="功能流程图">
-   <defs><marker id="mfa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/></marker>
-   <marker id="mfg" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#18805e"/></marker></defs>
+function mflowSVG(f,m){
+  const W=1560,H=560,T1='#5b7ea6',TB='#16436e',TO='#e0a458',TP='#9b7fd4',TG='#2f9e6f';
+  const tx=(x,y,t,size,fill,weight)=>`<text x="${x}" y="${y}" font-size="${size}" fill="${fill}" text-anchor="middle" font-weight="${weight||400}" font-family="Microsoft YaHei,sans-serif">${t}</text>`;
+  const mk=c=>c===TP?'p':c===TG?'g':c===TO?'o':'a';
+  const ar=(d,c,dash)=>`<path d="${d}" fill="none" stroke="${c}" stroke-width="1.8"${dash?' stroke-dasharray="6 4"':''} marker-end="url(#mf-${mk(c)})}"/>`;
+  let s=`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="${m.name} 业务流程图">
+   <defs>${[['a',T1],['o',TO],['p',TP],['g',TG]].map(([k,c])=>`<marker id="mf-${k}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="${c}"/></marker>`).join('')}</defs>
    <rect width="${W}" height="${H}" rx="12" fill="#f8fbff"/>
-   ${head(40,260,'输入 / 来源','#2563eb')}${head(430,380,'处理 / 办理','#1d4ed8')}${head(940,260,'输出 / 交付','#18805e')}`;
-  const sc=[],pc=[],oc=[];
-  for(let i=0;i<nS;i++){const y=yS+i*(sH+sG);sc.push(y+sH/2);
-    s+=box(40,y,260,sH,f.src[i],'#eef4fe','#bcd3f0',12.5,'#243447')+`<rect x="40" y="${y}" width="5" height="${sH}" rx="2.5" fill="#2563eb"/>`;}
-  for(let i=0;i<nP;i++){const y=yP+i*(pH+pG);pc.push(y+pH/2);
-    s+=box(430,y,380,pH,f.proc[i],'#fff','#9db9e8',13,'#243447')+`<circle cx="456" cy="${y+pH/2}" r="12" fill="#1d4ed8"/><text x="456" y="${y+pH/2+4.5}" font-size="12" font-weight="700" fill="#fff" text-anchor="middle" font-family="Microsoft YaHei,sans-serif">${i+1}</text>`;}
-  for(let i=0;i<nO;i++){const y=yO+i*(sH+sG);oc.push(y+sH/2);
-    s+=box(940,y,260,sH,f.out[i],'#eaf6f0','#bfe0cf',12.5,'#243447')+`<rect x="1195" y="${y}" width="5" height="${sH}" rx="2.5" fill="#18805e"/>`;}
-  const lTop=Math.min(sc[0],pc[0]),lBot=Math.max(sc[nS-1],pc[0]);
-  s+=`<path d="M360,${lTop} L360,${lBot}" fill="none" stroke="#2563eb" stroke-width="2"/>`;
-  for(const y of sc) s+=`<path d="M300,${y} L360,${y}" fill="none" stroke="#2563eb" stroke-width="2"/>`;
-  s+=`<path d="M360,${pc[0]} L424,${pc[0]}" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#mfa)"/>`;
-  for(let i=1;i<nP;i++) s+=`<path d="M620,${pc[i-1]+28} L620,${pc[i]-28}" fill="none" stroke="#2563eb" stroke-width="2" marker-end="url(#mfa)"/>`;
-  const rTop=Math.min(pc[nP-1],oc[0]),rBot=Math.max(pc[nP-1],oc[nO-1]);
-  s+=`<path d="M810,${pc[nP-1]} L900,${pc[nP-1]}" fill="none" stroke="#18805e" stroke-width="2"/>`;
-  s+=`<path d="M900,${rTop} L900,${rBot}" fill="none" stroke="#18805e" stroke-width="2"/>`;
-  for(const y of oc) s+=`<path d="M900,${y} L934,${y}" fill="none" stroke="#18805e" stroke-width="2" marker-end="url(#mfg)"/>`;
-  return s+`</svg>`;}
+   <rect x="20" y="8" width="1520" height="58" rx="10" fill="${TB}"/>
+   ${tx(W/2,32,m.name+'｜业务流程：从一线发起到闭环治理',16.5,'#fff',700)}
+   ${tx(W/2,52,m.tag,11,'rgba(255,255,255,.85)')}
+   ${[[30,'01 一线发起'],[450,'02 过程管控'],[1080,'03 数据与治理']].map(([x,t])=>`<rect x="${x}" y="80" width="150" height="30" rx="6" fill="${TB}"/>`+tx(x+75,100,t,12.5,'#fff',600)).join('')}
+   <rect x="20" y="120" width="410" height="330" rx="10" fill="#eef2f7" stroke="#d9e1ea"/>
+   <rect x="440" y="120" width="620" height="330" rx="10" fill="#eef2f7" stroke="#d9e1ea"/>
+   <rect x="1070" y="120" width="470" height="330" rx="10" fill="#eef2f7" stroke="#d9e1ea"/>
+   <ellipse cx="120" cy="265" rx="78" ry="38" fill="#fff" stroke="${T1}" stroke-width="1.6"/>${tx(120,269,f.r,12.5,'#243447',600)}
+   ${ar('M198,265 L220,265',T1)}
+   <rect x="225" y="230" width="180" height="70" rx="8" fill="#fdf3e7" stroke="${TO}" stroke-width="1.8"/>${tx(315,269,f.tg,12.5,'#7a5220',600)}
+   ${ar('M405,265 L424,265',T1)}
+   <polygon points="520,207 612,265 520,323 428,265" fill="#fff" stroke="${TO}" stroke-width="2"/>${tx(520,269,f.dc,12,'#7a5220',600)}
+   ${f.br.map((b,k)=>{const y=170+k*72;return ar(`M612,265 L630,265 L630,${y+23} L646,${y+23}`,T1)+`<rect x="650" y="${y}" width="150" height="46" rx="8" fill="#fff" stroke="${T1}" stroke-width="1.4"/>`+tx(725,y+27,b,11.5,'#243447')+`<path d="M800,${y+23} L820,${y+23} L820,265" fill="none" stroke="${T1}" stroke-width="1.6"/>`;}).join('')}
+   ${ar('M820,265 L836,265',T1)}
+   <rect x="840" y="230" width="180" height="70" rx="8" fill="#fff" stroke="${TB}" stroke-width="2"/>${tx(930,269,f.ac,12.5,'#16436e',600)}
+   <rect x="840" y="352" width="180" height="58" rx="8" fill="#f3eefc" stroke="${TP}" stroke-width="1.6"/>${tx(930,377,f.co,11.5,'#5b4a86',600)}${tx(930,395,'提醒 · 待办 · 反馈',10,'#9b7fd4')}
+   ${ar('M930,352 L930,304',TP,true)}
+   ${ar('M1020,265 L1100,265',T1)}${tx(1060,254,'写入',10.5,'#5b6b80')}
+   <path d="M1105,238 v56 a85,14 0 0 0 170,0 v-56" fill="${TB}"/>
+   <ellipse cx="1190" cy="238" rx="85" ry="14" fill="#2a5d8f"/>
+   ${tx(1190,272,f.st,11.5,'#fff',600)}
+   ${ar('M1275,265 L1318,265',T1)}${tx(1296,254,'归档',10.5,'#5b6b80')}
+   <ellipse cx="1405" cy="265" rx="82" ry="40" fill="#eaf6f0" stroke="${TG}" stroke-width="2"/>${tx(1405,269,f.en,12,'#1c6b48',600)}
+   <rect x="1105" y="352" width="170" height="48" rx="8" fill="#fff" stroke="${T1}" stroke-width="1.4"/>${tx(1190,380,f.rt,11.5,'#243447')}
+   ${ar('M1190,310 L1190,348',T1)}
+   ${ar('M1275,376 L1405,376 L1405,309',TG)}
+   <rect x="20" y="470" width="1520" height="64" rx="10" fill="#e8eef5" stroke="#c9d6e2"/>
+   ${tx(W/2,497,m.val,13,'#33475c',600)}
+   ${tx(W/2,519,'数据落点：'+f.st+'　协同：'+f.co+'　追溯：'+f.rt,10.5,'#6b7a8c')}
+   </svg>`;
+  return s;}
 const METRICS=[
  ['常驻桌面雷达','复制即识别','关键节点语音播报'],
  ['7 类通告','计划通告 39','进行中 1','飞书同步＋回执'],
@@ -1003,6 +1028,32 @@ const METRICS=[
  ['双版本共存','布局账号×设备','移动适配'],
  ['白名单隔离','30 秒健康探针','故障降级局域网'],
  ['分片 14MiB/片','哈希回读校验','增量更新']];
+const SCENES=[
+ '夜班值班员在飞书群复制一句"C楼冷却塔异响、现场有水渍"，系统需要立刻判断这是事件还是普通沟通。',
+ '月度检修窗口集中到来，通告员同一周要向多栋楼发布维保、检修、上下电等七类通告，还要逐群同步。',
+ '一起 I2 事件正在处置中，多位同事同时提交维保通告、水耗录入等非紧急操作，互相打断风险高。',
+ '110 站主变铁心监测月度维护开工，执行人需按 MOP 表格逐步作业、拍照留证并签名归档。',
+ '月度经营会前，领导要问"本月事件多少、响应时效达标吗"，过去靠人工翻群聊和表格统计半天。',
+ '每天早会前，楼长要汇总昨日通告、水耗、检修完成情况形成晨会表，人工整理费时且口径不一。',
+ 'D楼电气巡检每两小时要读一遍数十个测点电流电压，手抄转录慢、错一个数就要整表重核。',
+ '各班次班前检查项目多、频率不同，纸质记录无法追溯，异常照片更难留存归档。',
+ '气象台发布台风蓝色预警，一小时内要把重保检查任务派到各楼并组织值班人员签名确认。',
+ '冬季供暖前要对全楼电加热系统做专项排查，纸质表下发回收慢，结果汇总要几天。',
+ '检修计划排期时，可能撞上已被屏蔽保护的设备或点位，人工核对屏蔽清单容易漏。',
+ '半年度应急演练要组织多楼栋参演，记录表、签到、评估表格式繁多且需归档备查。',
+ '服务器下架迁移后，机柜是否已下电、台账是否相符靠人记忆，审计时说不清楚。',
+ '水表读数靠人工抄录，某栋夜间漏水往往到月底汇总才被发现，损失已发生。',
+ '维修信息散落在群聊、工单和口头交代中，跟进进度不透明，检修目标关联不上。',
+ '新员工入职、班组调整都要改多个系统的权限，容易漏授权或过度授权，事后难审计。',
+ '维护单与交接签名靠纸质流转，一趟签字跑几天，临时人员签名更难组织。',
+ '换班时遗留问题靠口头交代，漏交事项无人认领，出了问题责任不清。',
+ '新人培训题目随机抽取、重复练习多，薄弱知识点没人跟踪，学习效果无法量化。',
+ '值班员遇到"HVDC 某型号告警如何处置"要翻文档、问老师傅，经验留在个人脑子里。',
+ '项目文档散落在个人电脑与群文件，新人找不到、版本分不清，敏感内容外发无感知。',
+ '飞书群里的话题讨论与表单任务需要人工搬运进系统，消息漏看就漏办。',
+ '新旧系统并行期间，每个人常用功能不同、手机电脑都要用，入口混乱体验差。',
+ '值班人员在家需远程处理告警，公网直接暴露系统不安全，一刀切禁远程又影响响应。',
+ '现场客户端更新靠 U 盘或远程桌面拷贝，包是否完整、版本是否一致无法保证。'];
 const REL={0:[1,2],1:[0,2,3,5],2:[1,4],3:[1,16],4:[2,14],5:[1,6,13],6:[5,20],7:[5,16],8:[4,21],9:[16,21],10:[9,6],11:[16,20],12:[14,23],13:[5,12],14:[4,12],15:[16,22],16:[15,17],17:[16,21],18:[11,19],19:[20,21,1],20:[19],21:[19,17],22:[15,23],23:[22,24],24:[22]};
 let curMod=-1;
 function openModule(i){
@@ -1021,13 +1072,15 @@ function openModule(i){
     <header class="mod-head"><div class="kicker" style="color:${mc};font-size:12.5px;letter-spacing:.12em;margin-bottom:6px">${secTitles[m.s]}</div>
       <h1>${m.name}　<span class="pill">${m.pill}</span></h1><p>${m.tag}</p>
       <div class="met-chips"><b>数据快照</b>${(METRICS[i]||[]).map(x=>`<span>${x}</span>`).join('')}</div></header>
-    <h3 class="mod-sec">功能流程图</h3><div class="mflow-box">${mflowSVG(f)}</div>
-    <h3 class="mod-sec">价值与介绍</h3>
-    <div class="val-grid">
-      <div class="val-card"><b style="color:#2563eb"><i style="background:#2563eb"></i>介绍</b><p>${m.tag}</p></div>
-      <div class="val-card"><b style="color:#18805e"><i style="background:#18805e"></i>功能</b><p>${m.use}</p></div>
-      <div class="val-card"><b style="color:#b7791f"><i style="background:#b7791f"></i>解决的问题</b><p>${m.fix}</p></div>
-      <div class="val-card"><b style="color:#6d4fc4"><i style="background:#6d4fc4"></i>业务价值</b><p>${m.val}</p></div>
+    <h3 class="mod-sec">功能流程图</h3><div class="mflow-box">${mflowSVG(f,m)}</div>
+    <h3 class="mod-sec">业务场景与价值</h3>
+    <div class="scene-card">
+      <div class="scene-quote">场景回放　${SCENES[i]}</div>
+      <div class="scene-grid">
+        <div class="scene-step" style="background:#fdf7ec"><b style="color:#b7791f">因为 · 痛点 / 需求</b>${m.fix}</div>
+        <div class="scene-step" style="background:#eef4fe"><b style="color:#1d4ed8">所以 · 设计实现</b>${m.use}</div>
+        <div class="scene-step" style="background:#eaf6f0"><b style="color:#18805e">带来 · 业务价值</b>${m.val}</div>
+      </div>
     </div>${shots}${rel?`<h3 class="mod-sec">关联模块</h3><div class="mod-rel">${rel}</div>`:''}
     <div class="mod-pn"><button type="button" data-mod="${pv.i}">← ${pv.name}</button><button type="button" data-mod="${nx.i}">${nx.name} →</button></div>
     <p class="pn-tip">提示：键盘 ← / → 切换上一个 / 下一个模块，Esc 返回主页；效果图点击放大、滚轮缩放、双击还原。</p></div>`;
@@ -1051,6 +1104,7 @@ document.addEventListener('click',e=>{
   if(e.target.closest('#modBack')){showView('home');return;}
   const link=e.target.closest('.toc-links a');
   if(link&&document.body.dataset.view!=='all')showView('all');});
+const INIT_HASH=location.hash||'';
 renderHome();
 showView('home');
 document.addEventListener('input',e=>{
@@ -1112,7 +1166,7 @@ document.addEventListener('mouseout',e=>{
 window.addEventListener('scroll',()=>{clearTimeout(hpTimer);hp.style.display='none';},{passive:true});
 /* URL 哈希路由：#/m12 直达模块页、#/all 整页，便于分享演示链接 */
 (function(){
-  const h=location.hash||'';
+  const h=INIT_HASH;
   const mm=h.match(/^#\/m(\d+)$/);
   if(mm&&MODULES[+mm[1]])openModule(+mm[1]);
   else if(h==='#/all')showView('all');

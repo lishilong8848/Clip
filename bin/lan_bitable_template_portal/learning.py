@@ -1099,7 +1099,8 @@ class LearningService:
             delivery['delivery_status'] = report(self)
         return {"is_admin": admin, "can_answer": can_answer, "can_view_buildings": can_view_buildings,
                 "self_person": self_public, "self_scope": self_scope, "identity_issue": actor.get("identity_issue", ""),
-                "scopes": scopes, "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(include_history_issues=admin),
+                "scopes": scopes, "issue_scopes": [{"value": s, "label": f"{s}楼"} for s in SCOPES],
+                "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(include_history_issues=admin),
                 "today": now().date().isoformat(), "silent_manual_publish": True,
                 "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if admin else 0,
                 "summary": summary, **delivery}
@@ -1651,29 +1652,57 @@ class LearningService:
                                           "target_fingerprint": digest([self._question_content(q), bool(q.get("invalid")), q.get("correction")]),
                                           "status": "pending", "message": f"【画像学练·答案更正】{paper['scope']}楼\n题目：{q['stem'][:150]}\n{q['correction']}"}, conn)
 
+    @staticmethod
+    def _can_update_issue(item, actor):
+        return bool(actor.get("is_admin") or (
+            not actor.get("shared_account") and item.get("person_id")
+            and item["person_id"] == actor.get("person_id")
+        ))
+
+    def _can_read_issue_evidence(self, item, actor):
+        if self._can_update_issue(item, actor):
+            return True
+        if not actor.get("shared_account") or item.get("scope") != actor.get("scope"):
+            return False
+        if not item.get("person_id"):
+            return True
+        person = self._get("person", item["person_id"])
+        return bool(person and item["scope"] in (person.get("scopes") or []))
+
     def issue(self, issue_id, actor, conn=None, write=False):
+        if not actor.get("id"):
+            raise LearningError("登录身份不完整。", 401)
+        self._access(actor)
         item = self._get("issue", issue_id, conn)
         if not item:
             raise LearningError("质疑记录不存在", 404)
-        if actor.get('is_admin'):
-            return item
-        admin = bool(actor.get("is_admin"))
-        duty = bool(actor.get("shared_account"))
-        self_pid = actor.get("person_id") or ""
-        if not admin and not duty:
-            # Ordinary personal accounts: own issues only; legacy person-less
-            # issues are excluded.
-            if not item.get("person_id") or item.get("person_id") != self_pid:
-                raise LearningError("普通账号只能查看自己的画像与题单。", 403)
-            self._access(actor, scope=item.get("scope"), person_id=item.get("person_id"),
-                         write=write, target_person=item.get("person_id"))
-            return item
-        self._access(actor, scope=item.get("scope"), person_id=item.get("person_id"),
-                     write=write, target_person=item.get("person_id"))
+        if write and not self._can_update_issue(item, actor):
+            raise LearningError("只能补充本人提交的质疑，其他质疑由管理员处理。", 403)
         return item
 
     def public_issue(self, item, actor):
+        can_update = self._can_update_issue(item, actor)
+        if not self._can_read_issue_evidence(item, actor):
+            value = {key: item.get(key) for key in (
+                "id", "scope", "category", "description", "suggestion", "status",
+                "question_version", "created_at", "updated_at",
+            )}
+            question = item.get("question") or {}
+            value["question"] = {
+                "stem": question.get("stem", ""),
+                "options": [{"id": option.get("id"), "text": option.get("text", "")}
+                            for option in question.get("options", [])],
+            }
+            value["comments"] = [{
+                "text": comment.get("text") or comment.get("comment") or comment.get("content"),
+                "at": comment.get("at") or comment.get("created_at"),
+                "is_admin": bool(comment.get("is_admin")),
+                "status": comment.get("status"),
+            } for comment in item.get("comments", [])]
+            value["can_update"] = False
+            return value
         value = {k: copy.deepcopy(v) for k, v in item.items() if not k.startswith("_")}
+        value["can_update"] = can_update
         q = value["question"]
         if not actor.get("is_admin"):
             for key in ("correct_option_ids", "answer_text", "source_answer", "analysis", "hint", "correction_history"):
@@ -1752,9 +1781,13 @@ class LearningService:
                 () if question_id is None else (question_id,))]
 
     def list_issues(self, actor, query):
-        access = self._access(actor, scope=query.get("scope"), person_id=str(query.get("person_id") or ""))
-        scope = access["scope"]
-        identity = access["person_id"]
+        if not actor.get("id"):
+            raise LearningError("登录身份不完整。", 401)
+        self._access(actor)
+        scope = query.get("scope") or ""
+        if scope and scope not in SCOPES:
+            raise LearningError("楼栋须为 A、B、C、D、E 或 H。", 400)
+        identity = str(query.get("person_id") or "") if actor.get("is_admin") else ""
         items = self._documents("issue", scope=scope, person_id=identity)
         if query.get("status"):
             items = [i for i in items if i["status"] == query["status"]]
@@ -1773,7 +1806,9 @@ class LearningService:
         scope = access["scope"]
         self_pid = access["person_id"]
         if attachment.get("issue_id"):
-            self.issue(attachment["issue_id"], actor)
+            item = self.issue(attachment["issue_id"], actor)
+            if not self._can_read_issue_evidence(item, actor):
+                raise LearningError("无权查看该附件", 403)
             return
         for paper in self._all("paper"):
             if paper.get("deleted_at"):
@@ -1997,6 +2032,8 @@ class LearningService:
             return self.attempt_history(actor, query)
         if action == "issues.list":
             return self.list_issues(actor, query)
+        if action == "issue.get":
+            return self.public_issue(self.issue(identity, actor), actor)
         if action == "issue.create":
             return self.create_issue(payload, actor)
         if action == "issue.update":

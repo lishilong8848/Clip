@@ -21,9 +21,9 @@ export function adaptLearningPage(source) {
   code = replaceNode(code, has('page-head'), `<header v-if="!v2AnswerScene && (!isLearningHub || canViewBuildings || isAdmin)" class="page-head v2-learning-head">
     <div class="v2-learning-identity-tabs" data-v2-navigation>
       <VnetBackButton :to="undefined" :disabled="busy" @click="handleBack" />
-      <strong v-if="ready">{{learner?learner.name:scopeLabel+'学习汇总'}}</strong>
+      <strong v-if="ready && tab !== 'issues'">{{learner?learner.name:scopeLabel+'学习汇总'}}</strong>
       <NRadioGroup v-if="ready && canViewBuildings && boot.can_answer" :value="viewMode" size="small" aria-label="答题与画像" :disabled="busy" @update:value="value => value === 'practice' ? goPractice() : goOverview()"><NRadioButton value="practice">个人学习</NRadioButton><NRadioButton value="overview">学习管理</NRadioButton></NRadioGroup>
-      <NButton v-if="ready && viewMode==='overview' && canViewBuildings" size="small" text :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
+      <NButton v-if="ready && tab !== 'issues' && viewMode==='overview' && canViewBuildings" size="small" text :disabled="busy" @click="openPeople"><Search :size="15" />{{learner?'切换人员':'选择人员'}}</NButton>
     </div>
     <div class="actions" data-v2-navigation>
       <span v-if="ready && isAdmin" class="sync-label" :class="{danger: !!boot.sync?.error, pending: !!boot.sync?.pending}"><Loader2 v-if="syncActive" :size="15" class="spin" />{{syncLabel}}<template v-if="boot.sync?.pending"> · {{boot.sync.pending}} 项待同步</template></span>
@@ -31,7 +31,7 @@ export function adaptLearningPage(source) {
       <span :data-v2-layout-tools="tab==='profile'?'learning-profile':'learning-practice'" class="v2-toolbar-end"></span>
     </div>
   </header>`);
-  code = replaceNode(code, has('building-tabs'), `<div v-if="ready && tab !== 'sharing' && viewMode === 'overview' && !learner && canViewBuildings" class="v2-learning-building" data-v2-navigation>
+  code = replaceNode(code, has('building-tabs'), `<div v-if="ready && tab !== 'sharing' && tab !== 'issues' && viewMode === 'overview' && !learner && canViewBuildings" class="v2-learning-building" data-v2-navigation>
     <NRadioGroup v-if="!v2Mobile" :value="scope" aria-label="学练楼栋" :disabled="busy" @update:value="v2Building"><NRadioButton v-for="building in overviewScopes" :key="building.value" :value="building.value">{{building.label}}</NRadioButton></NRadioGroup>
     <NSelect v-else :value="scope" :options="overviewScopes" aria-label="学练楼栋" :disabled="busy" @update:value="v2Building" />
   </div>`);

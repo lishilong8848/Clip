@@ -209,7 +209,7 @@ class LearningRouteTests(unittest.TestCase):
             for path in ("papers", "history", "review", "profile", "issues", "questions", "settings"):
                 response = self.client.get("/api/learning/" + path + "?scope=")
                 self.assertEqual(response.status_code, 200, response.text)
-                self.assertEqual(response.json()["data"]["query"]["scope"], expected)
+                self.assertEqual(response.json()["data"]["query"]["scope"], "" if path == "issues" else expected)
             response = self.client.post("/api/learning/issues?scope=", json={"scope": ""})
             self.assertEqual(response.json()["data"]["payload"]["scope"], expected)
             response = self.client.post("/api/learning/attachments", files={"files": ("a.txt", b"x")}, data={"scope": ""})
@@ -228,7 +228,7 @@ class LearningRouteTests(unittest.TestCase):
             ("POST", "papers/p/notes", "paper.notes"), ("GET", "history", "history"),
             ("GET", "review", "review"), ("GET", "profile", "profile"),
             ("GET", "issues", "issues.list"), ("POST", "issues", "issue.create"),
-            ("PATCH", "issues/p", "issue.update"), ("GET", "questions", "questions.list"),
+            ("GET", "issues/p", "issue.get"), ("PATCH", "issues/p", "issue.update"), ("GET", "questions", "questions.list"),
             ("GET", "questions/p", "question.get"), ("POST", "questions", "question.save"),
             ("PUT", "questions/p", "question.save"), ("POST", "questions/p/status", "question.status"),
             ("POST", "questions/p/copy", "question.copy"), ("DELETE", "attachments/p", "attachment.delete"),
@@ -481,6 +481,7 @@ class LearningSourceContractTests(unittest.TestCase):
             issue = dispatch("issue.create", {"paper_id": "paper-H", "person_id": "person-H", "question_id": question["id"], "description": "Check this question"}, actor)
             issue = dispatch("issue.update", {"id": issue["id"], "version": issue["version"], "remark": "More detail"}, actor)
             dispatch("issues.list", who=actor, query={"scope": ""})
+            self.assertEqual(dispatch("issue.get", {"id": issue["id"]}, actor)["id"], issue["id"])
             added = service.add_attachments([("evidence.txt", b"evidence")], {"issue_id": issue["id"], "kind": "material", "version": issue["version"]}, actor)
             self.assertIsInstance(added, dict)
             attached = service.attachment(added["items"][0]["id"], actor)
@@ -533,6 +534,8 @@ class LearningWireTests(unittest.TestCase):
         cloud, sender = FakeCloud(enabled=False), FakeSender()
         sessions = {
             "floor": {"user": {"open_id": "oid-learner-A", "name": "A learner"}},
+            "other": {"user": {"open_id": "oid-learner-H", "name": "H learner"}},
+            "duty": {"user": {"open_id": "building-H", "name": "H duty"}},
             "admin": {"user": {"open_id": "administrator", "name": "Admin"}, "role": "admin"},
         }
         controller = SimpleNamespace(
@@ -559,6 +562,8 @@ class LearningWireTests(unittest.TestCase):
             with service.transaction() as connection:
                 service._put("person", "learner-A", {"id": "learner-A", "name": "人员A", "scopes": ["A"], "active": True,
                                                      "aliases": ["staff:learner-A"], "login_ids": ["staff:learner-A", "oid-learner-A"]}, connection, False)
+                service._put("person", "learner-H", {"id": "learner-H", "name": "人员H", "scopes": ["H"], "active": True,
+                                                     "aliases": ["staff:learner-H"], "login_ids": ["staff:learner-H", "oid-learner-H"]}, connection, False)
             service._restored = True
             service.publish(DAY)
             self_actor = {"id": "oid-learner-A", "scope": "", "is_admin": False, "person_id": "learner-A",
@@ -604,21 +609,57 @@ class LearningWireTests(unittest.TestCase):
                     added = request("POST", "attachments", params={"issue_id": issue["id"], "kind": "material"},
                                     data={"version": str(issue["version"])}, files={"files": ("evidence.txt", b"wire evidence")})
                     attachment_path = "attachments/" + added["items"][0]["id"]
+                    issue_path = "issues/" + issue["id"]
+                    client.cookies.set("session", "other")
+                    h_paper = request("POST", "papers/claim", json={})
+                    h_issue = request("POST", "issues", json={
+                        "paper_id": h_paper["id"], "person_id": "learner-H",
+                        "question_id": h_paper["questions"][0]["id"], "description": "Check H question",
+                    })
+                    for account in ("other", "duty"):
+                        with self.subTest(account=account):
+                            client.cookies.set("session", account)
+                            self.assertEqual({row["id"] for row in request("GET", "issues?scope=")["items"]},
+                                             {issue["id"], h_issue["id"]})
+                            cross = request("GET", "issues?scope=A&status=pending&search=verify")["items"]
+                            self.assertEqual(len(cross), 1)
+                            detail = request("GET", issue_path)
+                            self.assertEqual(cross[0], detail)
+                            self.assertFalse(detail["can_update"])
+                            self.assertEqual(detail["question"]["stem"], issue["question"]["stem"])
+                            self.assertEqual(detail["comments"][0]["text"], issue["description"])
+                            self.assertNotIn("actor", detail["comments"][0])
+                            for key in ("attempt", "person", "person_id", "paper_id", "attachments"):
+                                self.assertNotIn(key, detail)
+                            self.assertNotIn("correct_option_ids", detail["question"])
+                            self.assertEqual(client.get("/api/learning/" + attachment_path).status_code, 403)
+                            self.assertEqual(client.get("/api/learning/" + paper_path).status_code, 403)
+                            self.assertEqual(client.patch("/api/learning/" + issue_path, json={
+                                "version": added["version"], "remark": "Not the owner",
+                            }).status_code, 403)
+                            self.assertEqual(client.post("/api/learning/attachments",
+                                params={"issue_id": issue["id"], "kind": "material"},
+                                data={"version": str(added["version"])},
+                                files={"files": ("other.txt", b"cross-building evidence")}).status_code, 403)
+                    client.cookies.set("session", "floor")
+                    self.assertTrue(request("GET", issue_path)["can_update"])
+                    self.assertEqual(client.get("/api/learning/" + attachment_path).content, b"wire evidence")
                     stale_upload = client.post("/api/learning/attachments", params={"issue_id": issue["id"], "kind": "material"},
                                                data={"version": str(issue["version"])}, files={"files": ("other.txt", b"stale evidence")})
                     self.assertEqual(stale_upload.status_code, 409, stale_upload.text)
                     stale_delete = client.delete("/api/learning/" + attachment_path, params={"version": issue["version"]})
                     self.assertEqual(stale_delete.status_code, 409, stale_delete.text)
-                    current_issue = request("GET", "issues")["items"][0]
+                    current_issue = request("GET", issue_path)
                     self.assertEqual(current_issue["version"], added["version"])
                     self.assertEqual(current_issue["attachments"], added["attachments"])
                     deleted = request("DELETE", attachment_path, params={"version": current_issue["version"]})
                     self.assertIs(deleted["deleted"], True)
-                    current_issue = request("GET", "issues")["items"][0]
+                    current_issue = request("GET", issue_path)
                     self.assertEqual(current_issue["version"], deleted["version"])
                     self.assertEqual(current_issue["attachments"], [])
 
                     client.cookies.set("session", "admin")
+                    self.assertTrue(request("GET", issue_path)["can_update"])
                     request("PUT", "settings", json={"enabled": True})
                     question_path = "questions/" + question_id
                     original = request("GET", question_path)

@@ -42,7 +42,7 @@ ROUTES = {
     "profile": {"GET": "profile"},
     "completion": {"GET": "completion"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
-    "issues/{id}": {"PATCH": "issue.update"},
+    "issues/{id}": {"GET": "issue.get", "PATCH": "issue.update"},
     "questions": {"GET": "questions.list", "POST": "question.save"},
     "questions/{id}": {"GET": "question.get", "PUT": "question.save"},
     "questions/{id}/status": {"POST": "question.status"},
@@ -151,12 +151,12 @@ def install_learning_routes(app, controller, runtime):
         return session, {**base, "shared_account": False, "person_id": info["person_id"],
                          "can_answer": bool(info["person_id"]), "identity_issue": info["identity_issue"]}
 
-    def check_scope(values, actor):
+    def check_scope(values, actor, *, all_buildings=False):
         if "scope" not in values:
             return
         scope = values["scope"]
         if scope == "":
-            values["scope"] = "" if actor["is_admin"] else actor["scope"]
+            values["scope"] = "" if all_buildings or actor["is_admin"] else actor["scope"]
             return
         if not isinstance(scope, str) or scope not in SCOPES:
             raise LearningError("楼栋须为 A、B、C、D、E 或 H。", 400)
@@ -292,8 +292,8 @@ def install_learning_routes(app, controller, runtime):
             action = ROUTES[path][request.method]
             query = dict(request.query_params)
             for scope in request.query_params.getlist("scope"):
-                check_scope({"scope": scope}, actor)
-            check_scope(query, actor)
+                check_scope({"scope": scope}, actor, all_buildings=action == "issues.list")
+            check_scope(query, actor, all_buildings=action == "issues.list")
             if request.method not in {"GET", "HEAD"}:
                 await asyncio.to_thread(check_origin, request)
             payload = {}
