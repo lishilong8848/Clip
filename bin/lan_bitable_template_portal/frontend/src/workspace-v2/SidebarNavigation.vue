@@ -1,20 +1,53 @@
 <template>
-  <aside ref="sidebar" class="v2-sidebar v2-rail" :data-collapsed="collapsed" role="navigation" aria-label="功能导航" @mouseenter="enter" @mouseleave="leave" @focusin="focusIn" @focusout="focusOut" @keydown.esc="emit('update:collapsed',true)">
+  <aside ref="sidebar" class="v2-sidebar v2-rail" :data-collapsed="collapsed" role="navigation" aria-label="功能导航" @mouseenter="enter" @mouseleave="leave" @focusin="focusIn" @focusout="focusOut" @keydown.esc="collapseRail">
     <div class="v2-rail-brand">
       <button type="button" :aria-label="collapsed?'展开导航':'灯塔首页'" @click="collapsed?emit('update:collapsed',false):choose('home')"><img src="/assets/vnet-logo.png" alt="VNET" /><strong class="v2-rail-label">灯塔</strong></button>
+      <button v-if="!collapsed" type="button" class="v2-rail-collapse" aria-label="收起导航" @click="collapseRail"><PanelLeftClose :size="17" aria-hidden="true" /></button>
     </div>
     <div ref="menuScroll" class="v2-rail-scroll">
-      <NMenu :options="options" :value="selected" :indent="20" :theme-overrides="{itemHeight:'42px'}" :expanded-keys="expandedKeys" :node-props="menuNodeProps" @update:expanded-keys="expandedKeys=$event" @update:value="choose" />
+      <div v-for="group in groups" :key="group.key" class="v2-rail-section">
+        <button type="button" class="v2-rail-group" :data-group="group.key" :data-current="currentGroup?.key === group.key"
+          :aria-label="group.label" :title="collapsed ? group.label : undefined"
+          :aria-current="!group.branches && selected === group.key ? 'page' : undefined"
+          :aria-expanded="group.branches ? !collapsed && openGroup === group.key : undefined"
+          :aria-controls="group.branches ? 'v2-rail-submenu-' + group.key : undefined"
+          @click="openSection(group, $event)">
+          <component :is="group.icon" class="v2-rail-group-icon" :size="19" aria-hidden="true" />
+          <span class="v2-rail-label">{{ group.label }}</span>
+          <ChevronDown v-if="group.branches" class="v2-rail-label v2-rail-chevron" :size="15" aria-hidden="true" />
+        </button>
+        <div v-if="group.branches" v-show="!collapsed && openGroup === group.key"
+          :id="'v2-rail-submenu-' + group.key" class="v2-rail-submenu">
+          <div v-for="branch in group.branches" :key="branch.key" class="v2-rail-branch">
+            <button v-if="branch.label" type="button" class="v2-rail-branch-toggle" :aria-expanded="openBranch === branch.key"
+              :aria-controls="'v2-rail-branch-' + group.key + '-' + branch.key" @click="openBranch = openBranch === branch.key ? '' : branch.key">
+              {{ branch.label }}<ChevronDown :size="14" class="v2-rail-chevron" aria-hidden="true" />
+            </button>
+            <div :id="'v2-rail-branch-' + group.key + '-' + branch.key" v-show="!branch.label || openBranch === branch.key">
+              <button v-for="entry in branch.entries" :key="entry.key" type="button" class="v2-rail-entry"
+                :aria-current="selected === entry.key ? 'page' : undefined" @click="choose(entry.key)">
+                <component :is="entry.icon" v-if="entry.icon" :size="16" aria-hidden="true" />
+                <span>{{ entry.label }}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     <footer class="v2-rail-footer"><slot name="footer" /></footer>
   </aside>
 </template>
 <script setup lang="ts">
-import {nextTick,onMounted,onBeforeUnmount,ref,watch} from 'vue';
-import {NMenu,type MenuOption} from 'naive-ui';
-const props=defineProps<{collapsed:boolean;options:MenuOption[];selected:string;holdOpen?:boolean}>();
+import {computed,nextTick,onMounted,onBeforeUnmount,ref,watch} from 'vue';
+import {ChevronDown,PanelLeftClose} from 'lucide-vue-next';
+import type {SidebarGroup} from './sidebarSections';
+const props=defineProps<{collapsed:boolean;groups:SidebarGroup[];selected:string;holdOpen?:boolean}>();
 const emit=defineEmits<{'update:collapsed':[value:boolean];select:[value:string];'dismiss-popovers':[]}>();
-const sidebar=ref<HTMLElement>(),menuScroll=ref<HTMLElement>(),expandedKeys=ref<string[]>([]);
+const sidebar=ref<HTMLElement>(),menuScroll=ref<HTMLElement>();
+const openGroup=ref(''),openBranch=ref('');
+const currentGroup=computed(()=>props.groups.find(group=>group.key===props.selected ||
+  group.branches?.some(branch=>branch.entries.some(entry=>entry.key===props.selected))));
+const currentBranch=computed(()=>currentGroup.value?.branches?.find(branch=>branch.entries.some(entry=>entry.key===props.selected)));
 const desktop=()=>matchMedia('(min-width:761px) and (hover:hover)').matches;
 function enter(){if(desktop())emit('update:collapsed',false);}
 function leave(){if(desktop()&&!props.holdOpen)emit('update:collapsed',true);}
@@ -27,25 +60,52 @@ function focusIn(){if(keyboardNavigation&&matchMedia('(min-width:761px)').matche
 function focusOut(){void nextTick(()=>{if(!sidebar.value?.contains(document.activeElement)&&!sidebar.value?.matches(':hover'))leave();});}
 watch(()=>props.holdOpen,value=>{if(!value&&!sidebar.value?.matches(':hover'))leave();});
 function choose(value:string){emit('select',value);if(!desktop())emit('update:collapsed',true);}
+async function openSection(group:SidebarGroup,event:MouseEvent){
+  if(!group.branches){choose(group.key);return;}
+  const button=event.currentTarget as HTMLButtonElement;
+  if(!props.collapsed && openGroup.value===group.key){
+    openGroup.value='';
+    await nextTick();
+    keepRowVisible(button);
+    return;
+  }
+  openGroup.value=group.key;
+  openBranch.value=(group.key===currentGroup.value?.key ? currentBranch.value?.key : undefined) || group.branches[0]?.key || '';
+  emit('update:collapsed',false);
+  await nextTick();
+  const firstItem=button.nextElementSibling?.querySelector<HTMLElement>('button');
+  if(event.detail===0)firstItem?.focus({preventScroll:true});
+  keepRowVisible(firstItem || button);
+}
+function collapseRail(){
+  const submenu=document.activeElement?.closest('.v2-rail-submenu');
+  if(submenu){
+    (submenu.previousElementSibling as HTMLElement | null)?.focus({preventScroll:true});
+  } else if(document.activeElement?.classList.contains('v2-rail-collapse')){
+    sidebar.value?.querySelector<HTMLElement>('.v2-rail-brand button')?.focus();
+  }
+  emit('update:collapsed',true);
+}
+function keepRowVisible(row?:HTMLElement | null){
+  const scroll=menuScroll.value;
+  if(!scroll||!row?.getClientRects().length)return;
+  const viewport=scroll.getBoundingClientRect(),bounds=row.getBoundingClientRect();
+  if(bounds.top<viewport.top)scroll.scrollTop+=bounds.top-viewport.top;
+  else if(bounds.bottom>viewport.bottom)scroll.scrollTop+=bounds.bottom-viewport.bottom;
+}
+function revealCurrentSection(){
+  openGroup.value=currentGroup.value?.branches ? currentGroup.value.key : '';
+  openBranch.value=currentBranch.value?.key || '';
+}
+watch([()=>props.selected,()=>currentGroup.value?.key,()=>currentBranch.value?.key],revealCurrentSection,{immediate:true});
 watch(()=>props.collapsed,value=>{
   if(!value)return;
+  if(currentGroup.value?.branches)revealCurrentSection();
   emit('dismiss-popovers');
-  const scroll=menuScroll.value;
-  const submenu=scroll?.querySelector<HTMLElement>('.n-submenu-children');
-  const parentRow=submenu?.previousElementSibling;
-  if(!scroll||!parentRow)return;
-  // If the viewport contains only submenu text, bring its parent icon back into view.
-  const top=scroll.getBoundingClientRect().top;
-  const row=parentRow.getBoundingClientRect();
-  if(row.bottom<=top)scroll.scrollTop+=row.top-top;
 });
-function menuNodeProps(option:MenuOption){return {'aria-label':typeof option.label==='string'?option.label:undefined};}
-// Hover changes the rail width, while navigation to another module may reveal its selected row.
-watch(()=>props.selected,async()=>{
- if(props.selected.startsWith('settings:')&&!expandedKeys.value.includes('settings'))expandedKeys.value.push('settings');
- if(props.collapsed)return;
- await nextTick();const root=menuScroll.value,active=root?.querySelector<HTMLElement>('.n-menu-item-content--selected');
- if(!root||!active)return;const rect=root.getBoundingClientRect(),item=active.getBoundingClientRect();
- if(item.top<rect.top||item.bottom>rect.bottom)root.scrollTo({top:root.scrollTop+item.top-rect.top-12,behavior:'auto'});
+watch([()=>props.collapsed,()=>props.selected],async()=>{
+  if(props.collapsed)return;
+  await nextTick();
+  keepRowVisible(menuScroll.value?.querySelector<HTMLElement>('[aria-current="page"]'));
 },{immediate:true});
 </script>

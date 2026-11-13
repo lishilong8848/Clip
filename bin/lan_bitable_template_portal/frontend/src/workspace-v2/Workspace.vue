@@ -16,7 +16,7 @@
           </div>
         </header>
         <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
-        <SidebarNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" v-model:collapsed="collapsed"  :options="menuOptions" :selected="selectedMenu" :hold-open="accountMenuOpen || appearanceOpen" @dismiss-popovers="dismissAccountPopovers" @select="selectMenu">
+        <SidebarNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" v-model:collapsed="collapsed" :groups="menuGroups" :selected="selectedMenu" :hold-open="accountMenuOpen || appearanceOpen" @dismiss-popovers="dismissAccountPopovers" @select="selectMenu">
           <template #footer>
             <NDropdown trigger="click" placement="top-start" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
               <NButton data-v2-navigation quaternary class="v2-rail-user" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="v2-rail-label">{{ user.name }}</span><ChevronDown class="v2-rail-label" :size="14" /></NButton>
@@ -90,6 +90,7 @@ import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate } from './modules';
 import { canViewInspectionHistory } from '../inspectionAccess';
 import { personaFor } from './persona';
+import { sidebarGroups } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack, runNavigationAction } from './navigation';
 import { DEFAULT_NAV_COLOR,theme,nightTheme,nightMode,loadNightMode,loadPalette } from './theme';
@@ -213,15 +214,23 @@ const levelLabel = computed(() => ({ L0:'超级管理员',L1:'全楼管理员',L
 const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',engineer:'工程师',duty:'值班账号',operator:'值班员',shift_leader:'值班长' }[String(user.value.category)] || '工作空间'));
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'dingtalk',label:'钉钉推送'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
-const selectedMenu = computed(() => activeModule.value==='accounts'?'settings:'+(route.value.searchParams.get('tab')||'permissions'):NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value || view.value);
-const permittedModules = computed(() => navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(m=>
-  m.id!=='accounts' && (m.id!=='signatures'||user.value.role!=='guest') &&
-  (m.id!=='daily_inspection'||scopes.value.some(scope=>['ALL','D','E'].includes(scope.value)))));
-const menuOptions = computed(() => [
-  { label: '个人工作台', key: 'home', icon: () => h(House, {size:19}) },
-  ...[...new Set(permittedModules.value.map(m => m.group))].map(group => ({ key: group, label: group, type: 'group' as const, children: permittedModules.value.filter(m => m.group === group).map(m => ({ key: m.id, label:m.label, icon:() => h(moduleIcons[m.icon as keyof typeof moduleIcons],{size:18}) })) })),
-  ...(desktopNavigation.value&&visibleSettings.value.length?(visibleSettings.value.length===1?[{key:'settings:'+visibleSettings.value[0]!.key,label:visibleSettings.value[0]!.label,icon:()=>h(Settings,{size:18})}]:[{key:'settings',label:'系统设置',icon:()=>h(Settings,{size:18}),children:visibleSettings.value.map(item=>({key:'settings:'+item.key,label:item.label}))}]):[]),
-]);
+const selectedMenu = computed(() => activeModule.value === 'accounts'
+  ? 'settings:' + (route.value.searchParams.get('tab') || 'permissions')
+  : route.value.pathname === '/workbench-lite' ? 'notices' : activeModule.value || view.value);
+const permittedModules = computed(() => {
+  const entries = navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(module =>
+    module.id !== 'accounts' &&
+    (module.id !== 'signatures' || user.value.role !== 'guest' && !user.value.impersonation) &&
+    (module.id !== 'daily_inspection' || scopes.value.some(scope => ['ALL', 'D', 'E'].includes(scope.value))));
+  if (granted.value.includes('event') && !entries.some(module => module.id === 'notices')) {
+    entries.push({ id: 'notices', label: '通告办理', group: '运行管理', path: '/workbench-lite?work_type=event', icon: 'notice' });
+  }
+  return entries;
+});
+const menuGroups = computed(() => sidebarGroups([
+  ...permittedModules.value.map(module => ({ key: module.id, label: module.label, icon: moduleIcons[module.icon as keyof typeof moduleIcons] })),
+  ...visibleSettings.value.map(item => ({ key: 'settings:' + item.key, label: item.label })),
+], ['operator', 'shift_leader'].includes(user.value.category) ? 'duty' : personaFor(user.value)));
 const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false),appearanceOpen=ref(false),sidebarCloseKey=ref(0);
 function dismissAccountPopovers(){accountMenuOpen.value=false;appearanceOpen.value=false;sidebarCloseKey.value++;}
 const accountOptions=computed(()=>[
@@ -254,7 +263,9 @@ const dutyActive = computed(() => NOTICE_IDS.includes(activeModule.value) || act
 const showDutyTabs = computed(() => personaFor(user.value) === 'duty' && !publicLink.value && !printMode.value && ['notices','water','drills','critical_guard'].includes(dutyActive.value));
 function selectMenu(key: string) {
  if(key.startsWith('settings:')){const tab=key.slice(9);if(visibleSettings.value.some(item=>item.key===tab))navigate('/admin/settings?tab='+tab);return;}
- const module = permittedModules.value.find(m => m.id === key); navigate(module ? moduleUrl(module, scopeFor(module.id)) : '/?view=' + key);
+ if (key === 'home') { navigate('/'); return; }
+ const module = permittedModules.value.find(m => m.id === key);
+ if (module) navigate(moduleUrl(module, scopeFor(module.id)));
 }
 function openWorkspaceModule(target:string){
  const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);

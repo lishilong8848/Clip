@@ -8,7 +8,7 @@ const {defaults,sanitize,layoutKey,widget,motionTemplates,allowedKind}=module.ex
 const user={open_id:'test-alice',level:'L1',modules:['maintenance','change','event','plan_convergence','learning','water']};
 const other={...user,open_id:'test-bob'};
 const base=defaults(user);
-assert.equal(Math.max(...base.widgets.map(w=>w.y+w.h)),11,'checklist occupies five rows above the existing six-row work surface');
+assert.equal(Math.max(...base.widgets.map(w=>w.y+w.h)),6,'non-duty defaults start with the existing six-row work surface');
 const randomUUID=globalThis.crypto.randomUUID;
 globalThis.crypto.randomUUID=undefined;
 assert.match(widget('notices',user).id,/^[a-f0-9]{32}$/,'LAN HTTP must not require secure-context randomUUID');
@@ -44,7 +44,26 @@ for(const category of ['operator','shift_leader','duty']){
 }
 assert.equal(allowedKind('pre_shift',{...user,role:'guest'}),false);
 assert.equal(allowedKind('pre_shift',{...user,level:'L4',category:'engineer'}),false);
-assert.equal(sanitize(base,{...user,modules:[]},['A']).widgets.length,0,'revoked modules cannot render from saved layout');
+const savedCheck={version:1,widgets:[widget('pre_shift',user)]};
+for(const account of [
+  {...user,role:'admin',level:'L0',category:'manager',name:'李世龙'},
+  {...user,role:'admin',category:'manager'},
+  {...user,level:'L3',category:'supervisor'},
+  {...user,level:'L2',category:'engineer'},
+]){
+  assert.equal(allowedKind('pre_shift',account),false);
+  assert.equal(defaults(account).widgets.some(w=>w.kind==='pre_shift'),false);
+  assert.equal(sanitize(savedCheck,account,['A']).widgets.length,0);
+}
+const fixed={...user,role:'admin',level:'L0',category:'manager',is_fixed_superuser:true};
+assert.equal(defaults(fixed).widgets[0].kind,'pre_shift');
+assert.equal(sanitize({version:1,widgets:[]},fixed,['A']).widgets[0].kind,'pre_shift');
+assert.equal(sanitize(savedCheck,fixed,['A']).widgets.length,1);
+assert.equal(allowedKind('pre_shift',{...fixed,role:'guest'}),false);
+assert.equal(allowedKind('pre_shift',{...user,category:'duty',modules:[]}),false);
+const revoked = sanitize(base,{...user,modules:[]},['A']).widgets;
+assert.deepEqual(revoked.map(w=>w.kind),['shortcuts'],'only the shared signature collection shortcut remains available');
+assert(revoked.every(w=>w.links.every(id=>id==='signatures')),'revoked module links are removed from saved layouts');
 const personalSize={...base,widgets:base.widgets.map(w=>({...w,h:9}))};assert.equal(sanitize(personalSize,user,['A']).widgets[0].h,9,'new defaults do not resize an existing personal layout');
 assert.notEqual(layoutKey(user),layoutKey(other),'legacy migration keys are isolated');
 assert.equal(sanitize({version:1,widgets:[]},user,['A']).widgets.length,0,'an intentionally empty board survives reload');

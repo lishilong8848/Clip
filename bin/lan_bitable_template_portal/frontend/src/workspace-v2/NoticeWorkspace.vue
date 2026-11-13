@@ -140,7 +140,14 @@ import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
 const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean}>();
 const dialog=useDialog(),message=useMessage();
 const params=computed(()=>new URL(props.url,location.origin).searchParams);
-const types=computed(()=>[...((props.user.modules||[]).includes('event')?[{id:'event',label:'事件通告'}]:[]),{id:'all',label:'全部'},...modules.filter(m=>NOTICE_IDS.includes(m.id)&&(props.user.modules||[]).includes(m.id))]);
+const types=computed(()=>{
+  const granted = props.user.modules || [];
+  const allowedNotices = modules.filter(module => NOTICE_IDS.includes(module.id) && granted.includes(module.id));
+  return [
+    ...(granted.includes('event') ? [{id:'event',label:'事件通告'}] : []),
+    ...(allowedNotices.length ? [{id:'all',label:'全部'}, ...allowedNotices] : []),
+  ];
+});
 const kind=ref(params.value.get('work_type')||'all'),list=ref('planned'),month=ref(params.value.get('month')||Number(beijingDate().slice(5,7))+'月'),search=ref(params.value.get('search')||''),specialty=ref(params.value.get('specialty')||null);
 const typeNavigation=ref<HTMLElement|null>(null);
 function revealActiveType(){
