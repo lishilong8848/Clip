@@ -123,11 +123,9 @@ export function adaptRepairController(source, kind, exposedNames) {
   script = changeOnce(script, '  scope: string;', '  scope: string;\n  userId?: string;');
   if (kind === 'management') {
     script = changeOnce(script,'import { ApiError, refreshRemoteSourceAndWait, requestJson }','import { ApiError, refreshRemoteSourceAndWait, requestJson, invalidateReadCache }');
-    script = changeOnce(script,'type RecordStateFilter = "all" | "active" | "completed";','type RecordStateFilter = "all" | "active" | "completed" | "without_followup" | "in_progress" | "no_followup";');
+    script = changeOnce(script,'type RecordStateFilter = "all" | "active" | "completed" | "in_progress";','type RecordStateFilter = "all" | "active" | "completed" | "without_followup" | "in_progress" | "no_followup";');
     script = `import { useDialog, useMessage } from 'naive-ui';\nimport { registerNavigationGuard } from '../workspace-v2/navigation';\n` + script;
-    script = changeOnce(script, 'const recordState = ref<RecordStateFilter>("all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : "active");');
-    if(script.split('loadRecordDetailAndOpen(focused);').length!==4)throw new Error('Repair focus entry contract changed');
-    script = script.replaceAll('loadRecordDetailAndOpen(focused);','loadRecordDetailAndOpen(focused, new URLSearchParams(window.location.search).get("workspace_tab") === "followups" ? "followups" : "project");');
+    script = changeOnce(script, 'const recordState = ref<RecordStateFilter>(props.initialInProgress && !props.focusRecordId ? "in_progress" : "all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : props.initialInProgress ? "in_progress" : "active");');
     script = changeOnce(script, '`project:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`', '`project:${props.userId}:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`');
     script = changeOnce(script, '}, () => `project:${props.scope}`);', '});');
     script = changeOnce(script,'    && hasWritableDraft.value','    && hasWritableDraft.value\n    && !projectConflict.value\n    && (!submission.pending.value || submission.status.value === "failed")');

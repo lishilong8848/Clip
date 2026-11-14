@@ -313,7 +313,7 @@ const componentProps = computed(() => {
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':
-    case 'repair_management': return {...common, userId:String(user.value.open_id || ''), canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || ''};
+    case 'repair_management': return {...common, userId:String(user.value.open_id || ''), canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || '', focusFollowups:p.get('workspace_tab')==='followups', initialInProgress:p.get('state')==='in_progress'};
     case 'learning': return {...common, scope:p.get('scope') || '', personId:p.get('person_id') || '', userId:String(user.value.open_id || '')};
     case 'critical_guard': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:moduleAdminMode.value};
     case 'drills': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, currentUser:user.value, adminMode:moduleAdminMode.value, printMode:printMode.value};

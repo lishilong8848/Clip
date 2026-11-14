@@ -15685,11 +15685,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_only: bool = False,
     ) -> dict[str, Any]:
         normalized_state = str(state or "all").strip().lower()
-        if normalized_state in {"active", "open", "in_progress", "unfinished"}:
+        if normalized_state in {"active", "open", "unfinished"}:
             normalized_state = "active"
         elif normalized_state in {"completed", "closed", "done", "finished"}:
             normalized_state = "completed"
-        else:
+        elif normalized_state != "in_progress":
             normalized_state = "all"
 
         snapshot_schema = self._repair_management_snapshot_schema(
@@ -15896,6 +15896,10 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or (
                     normalized_state == "active"
                     and not record_is_completed(item)
+                )
+                or (
+                    normalized_state == "in_progress"
+                    and record_workflow(item) == REPAIR_MANAGEMENT_IN_PROGRESS_WORKFLOW
                 )
             )
         ]

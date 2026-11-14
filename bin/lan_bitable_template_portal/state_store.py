@@ -6995,7 +6995,7 @@ class LanPortalStateStore:
             project_source_key
         )
         normalized_state = self._text(state).lower()
-        if normalized_state not in {"all", "active", "completed"}:
+        if normalized_state not in {"all", "active", "completed", "in_progress"}:
             normalized_state = "active"
         normalized_period = self._text(period).lower()
         if normalized_period not in {"today", "week", "month", "all"}:
@@ -7011,7 +7011,10 @@ class LanPortalStateStore:
         normalized_scope = self._text(scope).upper() or "ALL"
         clauses = ["p.source_key = ?"]
         params: list[Any] = [project_source_key]
-        if normalized_state != "all":
+        if normalized_state == "in_progress":
+            clauses.append("i.state = ? AND i.workflow = ?")
+            params.extend(("active", "维修中"))
+        elif normalized_state != "all":
             clauses.append("i.state = ?")
             params.append(normalized_state)
         if normalized_state == "completed" and normalized_period != "all":

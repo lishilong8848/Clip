@@ -30,7 +30,8 @@ const server=createServer(async(req,res)=>{
       const body=Buffer.concat(chunks).toString();
       return await handleFixture({request:()=>({url:()=>origin+req.url,method:()=>req.method,postDataJSON:()=>body?JSON.parse(body):{}}),fulfill:({status=200,json,body='',headers={}})=>{res.writeHead(status,{'content-type':json?'application/json':'text/plain',...headers});res.end(json?JSON.stringify(json):body);},abort:()=>{res.writeHead(403);res.end();}},previewLayouts);
     }
-    const target=path.resolve(build,'.'+decodeURIComponent(url.pathname));
+    const pathname=url.pathname==='/repair-management'?'/index.html':url.pathname;
+    const target=path.resolve(build,'.'+decodeURIComponent(pathname));
     if(!target.startsWith(build+path.sep))throw new Error('outside static root');
     let data;try{data=await readFile(target);}catch{
       if(url.pathname==='/assets/vnet-logo.png')data=await readFile(path.join(root,'dist/assets/vnet-logo.png'));else throw new Error('missing static asset');
@@ -184,6 +185,31 @@ async function checkWorkflowActions(page){
 }
 if(previewOnly){console.log('Isolated repair preview: '+origin+entry);await new Promise(()=>{});}
 try{
+  if(process.argv.includes('--reminder-links')){
+    const page=await newPage(390,844);
+    for(const [version,base] of [
+      ['legacy','/repair-management?frontend=legacy&scope=A'],
+      ['v2',entry],
+    ]){
+      const followup=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/repair-management/followups'
+        && new URL(request.url()).searchParams.get('summary_record_id')==='project-2');
+      await page.goto(origin+base+'&record_id=project-2&workspace_tab=followups');
+      const drawer=page.locator(version==='v2'?'.v2-repair-detail':'.repair-project-drawer');
+      await drawer.waitFor();
+      await page.waitForFunction(()=>Array.from(document.querySelectorAll('[role="dialog"]'))
+        .some(el=>el.textContent.includes('跟进记录')));
+      assert(fixture.reads.some(r=>r.path==='/api/repair-management/records/project-2'));
+      await followup;
+      const [list]=await Promise.all([
+        page.waitForRequest(request=>new URL(request.url()).searchParams.get('state')==='in_progress'
+          && new URL(request.url()).pathname==='/api/repair-management/'+(version==='v2'?'status':'records')),
+        page.goto(origin+base+'&state=in_progress'),
+      ]);
+      assert.equal(new URL(list.url()).searchParams.get('scope'),'A');
+    }
+    assert.deepEqual(fixture.errors,[]);
+    console.log('维修提醒按钮在手机视口直达对应跟进页和本楼维修中列表，新旧版均通过。');
+  }else{
   for(const width of [1440,402,440]){
     const page=await newPage(width,900);
     const last=page.locator('.record-row').last();
@@ -422,6 +448,7 @@ try{
   await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-repair-overview button')).some(el=>/暂无跟进\s*0/.test(el.textContent)));
   assert.deepEqual(fixture.errors,[],'no browser runtime errors');
   console.log('Repair V2: isolated PC/mobile, permissions, draft guard, late requests, equipment pagination, original API payload and refresh checks passed.');
+  }
 }catch(error){
   console.error('Repair browser errors:',fixture.errors);console.error('Recent fixture requests:',fixture.reads.slice(-5));
   const last=ctx?.pages().at(-1);if(last){console.error((await last.locator('body').innerText()).slice(0,700));await last.screenshot({path:path.join(output,'failed-flow.png'),fullPage:true});}

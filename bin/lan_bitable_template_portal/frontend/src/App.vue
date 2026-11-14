@@ -620,6 +620,8 @@ const repairModuleProps = computed(() => (
         scopeOptions: visibleScopeOptions.value,
         canDelete: auth.user?.can_delete_business === true,
         focusRecordId: String(routeParams.value.get("record_id") || "").trim(),
+        focusFollowups: routeParams.value.get("workspace_tab") === "followups",
+        initialInProgress: routeParams.value.get("state") === "in_progress",
       }
 ));
 const normalizedVisibleScopeOptions = computed<ScopeOption[]>(() => visibleScopeOptions.value.map((item) => ({

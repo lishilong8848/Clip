@@ -1,18 +1,4 @@
-"""Feishu cards for repair records that enter, or stay in, 维修中.
-
-Two cards, each routed only to the ops groups of the buildings the record belongs to:
-
-- 维修跟进通知: once per building, when the workflow first becomes 维修中. Carries the
-  building and repair names, 维修开始时间 and (when available) 故障发生时间, plus a jump
-  button to the record detail.
-- 维修进度跟进: repeatedly while the record is still 维修中, at most once per
-  REMINDER_INTERVAL_SECONDS per building.
-
-The scanner keeps its own per-record memory in ``json_documents`` so a restart neither
-replays old transitions as fresh notices nor double-sends a reminder. Message UUIDs are
-derived from the record/building/kind/round, so a crash between sending and recording
-state is absorbed by Feishu-side deduplication instead of producing a second card.
-"""
+"""Immediate repair notices and one progress digest per building and Beijing day."""
 from __future__ import annotations
 
 import re
@@ -30,10 +16,16 @@ REMINDER_INTERVAL_SECONDS = 24 * 60 * 60
 # A group that rejects cards must not be hammered every minute; environment gaps (no public
 # base url) stay on the fast path because they recover as soon as configuration returns.
 RETRY_BACKOFF_SECONDS = 15 * 60
+# The common Feishu sender waits up to 60 seconds for a receipt. Recover a
+# pending attempt close to midnight before opening a different daily UUID.
+MIDNIGHT_RECOVERY_SECONDS = 120
+MIDNIGHT_RETRY_WINDOW_SECONDS = 45 * 60
 PRUNE_SECONDS = 45 * 24 * 60 * 60
 BUTTON_LABEL = '查看维修记录'
 PRUNE_PREFIX = 'record:'
 BOOTSTRAP_KEY = 'meta:bootstrap'
+DIGEST_PREFIX = 'digest:'
+DIGEST_LIMIT = 8
 BEIJING = timezone(timedelta(hours=8))
 
 
@@ -50,8 +42,11 @@ def _save(store, key: str, payload: dict[str, Any]) -> None:
     store.put_document(NAMESPACE, key, payload)
 
 
-def detail_url(base_url: str, code: str, record_id: str) -> str:
-    query = urlencode({'scope': code, 'record_id': record_id})
+def detail_url(base_url: str, code: str, record_id: str, *, followup: bool = False) -> str:
+    params = {'scope': code, 'record_id': record_id}
+    if followup:
+        params['workspace_tab'] = 'followups'
+    query = urlencode(params)
     return base_url.rstrip('/') + '/repair-management?' + query
 
 
@@ -108,27 +103,129 @@ def notice_card(record: Mapping[str, Any], label: str, url: str) -> dict[str, An
     ], url)
 
 
-def reminder_card(record: Mapping[str, Any], label: str, url: str) -> dict[str, Any]:
-    name = _repair_name(record)
-    start = _format_time(record.get('repair_start_time'))
-    return _card(REMINDER_TITLE, [f'**{label}**—**{name}**，请及时跟进维修进度。',
-                                 f'维修开始时间：{start}'], url)
+def reminder_card(records: list[Mapping[str, Any]], code: str, base_url: str) -> dict[str, Any]:
+    card = _card(REMINDER_TITLE, [f'**{building_label(code)} · 维修中 {len(records)} 项**'], '')
+    for record in records[:DIGEST_LIMIT]:
+        card['elements'].append({
+            'tag': 'div',
+            'text': {'tag': 'lark_md', 'content':
+                     f'**{_repair_name(record)}**\n维修开始时间：{_format_time(record.get("repair_start_time"))}'},
+            'extra': {'tag': 'button', 'type': 'default',
+                      'text': {'tag': 'plain_text', 'content': '去灯塔跟进'},
+                      'url': detail_url(base_url, code, str(record['record_id']), followup=True)},
+        })
+    if len(records) > DIGEST_LIMIT:
+        card['elements'].append({'tag': 'div', 'text': {
+            'tag': 'plain_text', 'content': f'另有 {len(records) - DIGEST_LIMIT} 项维修中',
+        }})
+    url = base_url.rstrip('/') + '/repair-management?' + urlencode({'scope': code, 'state': 'in_progress'})
+    card['elements'].append({'tag': 'action', 'actions': [{
+        'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '查看本楼全部'}, 'url': url,
+    }]})
+    return card
 
 
-def _deliver(kind: str, code: str, record: Mapping[str, Any], chat_ids: Mapping[str, str],
-             base_url: str, send: Callable[..., Any], bucket: str) -> tuple[bool, str, bool]:
-    if not base_url:
-        return False, '未配置可供手机访问的灯塔地址', True
-    record_id = str(record.get('record_id') or '')
-    identity = f'repair-progress:{record_id}:{code}:{kind}:{bucket}'
-    message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
-    card = notice_card(record, building_label(code), detail_url(base_url, code, record_id)) \
-        if kind == 'notice' else reminder_card(record, building_label(code), detail_url(base_url, code, record_id))
+def _send_card(send: Callable[..., Any], card: dict, chat_id: str, message_uuid: str) -> tuple[bool, str]:
     try:
-        ok, message = send(card, chat_ids[code], message_uuid)
+        ok, message = send(card, chat_id, message_uuid)
     except Exception as exc:  # A throwing transport must not stop the remaining buildings.
-        return False, str(exc) or '发送异常', False
-    return bool(ok), str(message or ''), False
+        return False, str(exc) or '发送异常'
+    return bool(ok), str(message or '')
+
+
+def _send_notice(code, record, chat_id, base_url, send):
+    record_id = str(record['record_id'])
+    message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL, f'repair-progress:{record_id}:{code}:notice:'))
+    return _send_card(send, notice_card(record, building_label(code), detail_url(base_url, code, record_id)),
+                      chat_id, message_uuid)
+
+
+def _legacy_reminder_days(store):
+    days = set()
+    for document in store.list_documents(NAMESPACE, key_prefix=PRUNE_PREFIX):
+        for code, entry in ((document.get('payload') or {}).get('reminder') or {}).items():
+            if isinstance(entry, dict) and entry.get('count') and entry.get('at'):
+                days.add((datetime.fromtimestamp(entry['at'], BEIJING).date(), code))
+    return days
+
+
+def _send_building_digest(store, code, records, *, due, chat_id, base_url, send, clock, legacy_days, result):
+    now = clock()
+    current = datetime.fromtimestamp(now, BEIJING)
+    day = current.date()
+    yesterday = day - timedelta(days=1)
+    key = f'{DIGEST_PREFIX}{day}:{code}'
+    previous_key = f'{DIGEST_PREFIX}{yesterday}:{code}'
+    job = _load(store, key)
+    previous = _load(store, previous_key)
+    if job.get('sent_at') is not None or (day, code) in legacy_days:
+        return
+    sent_at = previous.get('sent_at')
+    if sent_at is not None and (
+        datetime.fromtimestamp(sent_at, BEIJING).date() == day or now - sent_at < REMINDER_INTERVAL_SECONDS
+    ):
+        return
+    midnight = current.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    previous_attempt = previous.get('attempted_at')
+    if not job and sent_at is None and previous_attempt is not None and previous_attempt >= midnight - MIDNIGHT_RECOVERY_SECONDS:
+        # An older unresolved send may have landed today. Keep today's slot
+        # reserved, and let tomorrow use a fresh one after this retry window.
+        if now - midnight >= MIDNIGHT_RETRY_WINDOW_SECONDS:
+            return
+        key, job = previous_key, previous
+    if not job:
+        if not due:
+            return
+        if not base_url:
+            result['errors'].append(f'{building_label(code)} {REMINDER_TITLE}：未配置可供手机访问的灯塔地址')
+            return
+        records.sort(key=lambda row: (_format_time(row.get('repair_start_time')), str(row['record_id'])))
+        job = {
+            'card': reminder_card(records, code, base_url),
+            'chat_id': chat_id,
+            'message_uuid': str(uuid.uuid5(uuid.NAMESPACE_URL, f'repair-progress-digest:{day}:{code}')),
+        }
+    if job.get('chat_id') != chat_id:
+        result['errors'].append(f'{building_label(code)} {REMINDER_TITLE}：原投递目标已变化，保留原任务待核对')
+        return
+    if 'attempted_at' in job and now - job['attempted_at'] < RETRY_BACKOFF_SECONDS:
+        return
+    job['attempted_at'] = now
+    _save(store, key, job)
+    ok, message = _send_card(send, job['card'], chat_id, job['message_uuid'])
+    if ok:
+        sent_at = clock()
+        delivered_day = datetime.fromtimestamp(sent_at, BEIJING).date()
+        delivered_key = f'{DIGEST_PREFIX}{delivered_day}:{code}'
+        receipts = {key: {**job, 'sent_at': sent_at}}
+        if delivered_key != key:
+            receipts[delivered_key] = {'sent_at': sent_at, 'original_key': key}
+        store.put_documents(NAMESPACE, receipts)
+        result['reminded'] += 1
+    else:
+        result['errors'].append(f'{building_label(code)} {REMINDER_TITLE}：{message}')
+
+
+def _send_digests(store, by_building, due, chat_ids, base_url, send, clock, result):
+    legacy_days = _legacy_reminder_days(store)
+    for code, records in by_building.items():
+        lock_key = f'repair-progress-digest:{code}'
+        acquired, owner = store.acquire_notice_operation_lock(
+            lock_key, action='repair_progress_digest', ttl_seconds=180,
+        )
+        if not acquired:
+            continue
+        try:
+            _send_building_digest(store, code, records, due=code in due, chat_id=chat_ids[code],
+                                  base_url=base_url, send=send, clock=clock, legacy_days=legacy_days, result=result)
+        finally:
+            store.release_notice_operation_lock(lock_key, owner)
+    day = datetime.fromtimestamp(clock(), BEIJING).date()
+    cutoff = day - timedelta(days=PRUNE_SECONDS // 86400)
+    for document in store.list_documents(NAMESPACE, key_prefix=DIGEST_PREFIX):
+        key = document['key']
+        if key.split(':', 2)[1] < cutoff.isoformat():
+            store.delete_document(NAMESPACE, key)
 
 
 def _reconcile_absent(store, seen: set[str], now: float, complete: bool) -> None:
@@ -146,7 +243,7 @@ def _reconcile_absent(store, seen: set[str], now: float, complete: bool) -> None
         payload = document.get('payload')
         state = payload if isinstance(payload, dict) else {}
         if complete and str(state.get('workflow') or '') == IN_PROGRESS:
-            state.update({'workflow': '', 'notice': {}, 'reminder': {}})
+            state.update({'workflow': '', 'notice': {}})
             _save(store, key, state)
         elif now - float(state.get('seen_at') or 0) > PRUNE_SECONDS:
             store.delete_document(NAMESPACE, key)
@@ -155,9 +252,13 @@ def _reconcile_absent(store, seen: set[str], now: float, complete: bool) -> None
 def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
             send: Callable[..., Any], chat_ids: Mapping[str, str], now: float | None = None,
             complete: bool = True) -> dict[str, Any]:
-    now = time.time() if now is None else now
+    fixed_now = now
+    clock = time.time if fixed_now is None else lambda: fixed_now
+    now = clock()
     result: dict[str, Any] = {'scanned': 0, 'noticed': 0, 'reminded': 0, 'errors': []}
     seen: set[str] = set()
+    by_building: dict[str, list[Mapping[str, Any]]] = {}
+    due: set[str] = set()
     # Only the first scan ever may treat "already 维修中" as history. After it, a record first
     # seen in 维修中 really did enter that state under our watch (created or started since),
     # so it must notify instead of being silently baselined.
@@ -190,9 +291,8 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
             state['seen_at'] = now
         if workflow != IN_PROGRESS:
             if previous == IN_PROGRESS:
-                # Leaving 维修中 re-arms both cards, so a reopened record notifies again.
+                # Keep the legacy reminder receipt for upgrade-day deduplication.
                 state['notice'] = {}
-                state['reminder'] = {}
             state['workflow'] = workflow
             state['codes'] = list(codes)
             _save(store, key, state)
@@ -209,32 +309,20 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
             # Absence from `notice` covers three cases at once: a fresh transition, a failed
             # earlier attempt (retry with the same uuid), and a building added by reassignment.
             if code not in notice and backoff_elapsed:
-                ok, message, deferred = _deliver('notice', code, record, chat_ids, base_url, send, '')
+                ok, message = (_send_notice(code, record, chat_ids[code], base_url, send) if base_url
+                               else (False, '未配置可供手机访问的灯塔地址'))
                 if ok:
                     notice[code] = now
                     fail.pop(code, None)
-                    reminder[code] = {'count': 0, 'at': now}
                     result['noticed'] += 1
                 else:
-                    if not deferred:
+                    if base_url:
                         fail[code] = now
                     result['errors'].append(f'{record_id} {building_label(code)} {NOTICE_TITLE}：{message}')
-            entry = reminder.get(code) if isinstance(reminder.get(code), dict) else None
-            entry = entry or {'count': 0, 'at': now}
-            if (code in notice and now - float(entry.get('at') or 0) >= REMINDER_INTERVAL_SECONDS
-                    and now - float(fail.get(code) or 0) >= RETRY_BACKOFF_SECONDS):
-                bucket = str(int(entry.get('count') or 0) + 1)
-                ok, message, deferred = _deliver('reminder', code, record, chat_ids, base_url, send, bucket)
-                if ok:
-                    reminder[code] = {'count': int(bucket), 'at': now}
-                    fail.pop(code, None)
-                    result['reminded'] += 1
-                else:
-                    if not deferred:
-                        fail[code] = now
-                    result['errors'].append(f'{record_id} {building_label(code)} {REMINDER_TITLE}：{message}')
-            else:
-                reminder[code] = entry
+            by_building.setdefault(code, []).append(record)
+            entry = reminder.get(code) if isinstance(reminder.get(code), dict) else {}
+            if code in notice and now - max(float(notice[code]), float(entry.get('at') or 0)) >= REMINDER_INTERVAL_SECONDS:
+                due.add(code)
         state.update({'workflow': workflow, 'notice': notice, 'reminder': reminder,
                       'codes': list(codes), 'fail': fail})
         _save(store, key, state)
@@ -242,6 +330,8 @@ def process(store, *, records: Iterable[Mapping[str, Any]], base_url: str,
         # An incomplete first scan must not seal the baseline: records it never saw would
         # otherwise be treated as post-deploy transitions and notified in bulk.
         _save(store, BOOTSTRAP_KEY, {'at': now})
+    if complete:
+        _send_digests(store, by_building, due, chat_ids, base_url, send, clock, result)
     _reconcile_absent(store, seen, now, complete)
     return result
 
@@ -263,7 +353,12 @@ def run(store, service, *, now: float | None = None) -> dict[str, Any]:
             break
         page = board.get('records') or []
         records.extend(page)
-        if not board.get('has_more') or not page:
+        if not board.get('has_more'):
+            if int(board.get('total') or 0) > len({row.get('record_id') for row in records}):
+                complete = False
+            break
+        if not page:
+            complete = False
             break
         offset += len(page)
     else:

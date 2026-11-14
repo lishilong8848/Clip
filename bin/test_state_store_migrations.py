@@ -432,8 +432,22 @@ class StateStoreMigrationTests(unittest.TestCase):
                 scope="A",
                 state="active",
             )
+            in_progress_page = store.query_repair_project_status_page(
+                "repair_projects",
+                scope="A",
+                state="in_progress",
+                limit=1,
+                focus_record_id="rec_in_progress_old",
+            )
+            other_building = store.query_repair_project_status_page(
+                "repair_projects", scope="B", state="in_progress",
+            )
 
             self.assertEqual(first_page["total"], 4)
+            self.assertEqual(in_progress_page["total"], 2)
+            self.assertEqual(in_progress_page["offset"], 1)
+            self.assertEqual([item["record_id"] for item in in_progress_page["records"]], ["rec_in_progress_old"])
+            self.assertEqual(other_building["total"], 0)
             self.assertEqual(
                 [item["record_id"] for item in first_page["records"]],
                 ["rec_not_started", "rec_in_progress_new"],

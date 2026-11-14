@@ -113,7 +113,7 @@ import { logicalUrl } from './version';
 import type { ScopeOption } from '../types';
 import './repair.css';
 import {repairDisplayTime} from '../repairManagementUtils';
-const props=defineProps<{scope:string;scopeOptions:ScopeOption[];focusRecordId?:string;canDelete?:boolean;userId?:string}>();
+const props=defineProps<{scope:string;scopeOptions:ScopeOption[];focusRecordId?:string;focusFollowups?:boolean;initialInProgress?:boolean;canDelete?:boolean;userId?:string}>();
 defineOptions({inheritAttrs:false});
 const noticeAllowed=computed(()=>canUseModule('repair'));
 const statusEntry=computed(()=>logicalUrl().pathname==='/repair-status');

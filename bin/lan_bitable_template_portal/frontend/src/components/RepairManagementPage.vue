@@ -635,7 +635,7 @@ import VnetBackButton from "./VnetBackButton.vue";
 type PickerColumn = { key: string; label: string; width?: string; wrap?: boolean };
 type SourcePicker = "" | "event" | "repair";
 type WorkspaceTab = "project" | "followups";
-type RecordStateFilter = "all" | "active" | "completed";
+type RecordStateFilter = "all" | "active" | "completed" | "in_progress";
 type RecordHistoryPeriod = "all" | "month" | "week" | "today";
 type ConfirmTone = "warning" | "danger" | "primary";
 type ProjectFieldGroupKey = "basic" | "execution" | "other";
@@ -655,6 +655,7 @@ const recordDetailCache = new Map<string, { expiresAt: number; record: LooseDict
 const recordStateOptions: Array<{ value: RecordStateFilter; label: string }> = [
   { value: "all", label: "全部" },
   { value: "active", label: "未完成" },
+  { value: "in_progress", label: "维修中" },
   { value: "completed", label: "已完成" },
 ];
 const recordHistoryPeriodOptions: Array<{ value: RecordHistoryPeriod; label: string }> = [
@@ -771,6 +772,8 @@ const props = defineProps<{
   scope: string;
   scopeOptions: ScopeOption[];
   focusRecordId?: string;
+  focusFollowups?: boolean;
+  initialInProgress?: boolean;
   canDelete?: boolean;
 }>();
 
@@ -810,7 +813,8 @@ const submission = useRepairSubmission(() => `project:${props.scope}:${editingRe
 }, () => `project:${props.scope}`);
 const saving = computed({ get: () => saveBusy.value || submission.checking.value, set: (value: boolean) => { saveBusy.value = value; } });
 const searchText = ref("");
-const recordState = ref<RecordStateFilter>("all");
+const recordState = ref<RecordStateFilter>(props.initialInProgress && !props.focusRecordId ? "in_progress" : "all");
+const routeFocusTab = computed<WorkspaceTab>(() => props.focusFollowups ? "followups" : "project");
 const recordHistoryPeriod = ref<RecordHistoryPeriod>("all");
 const messageText = ref("");
 const messageTone = ref<"success" | "warning" | "failed">("success");
@@ -2502,6 +2506,7 @@ function markRepairStreamActive(cursor: unknown = 0): void {
 function repairRecordMatchesCurrentView(record: LooseDict): boolean {
   if (recordState.value === "completed" && !repairRecordIsCompleted(record)) return false;
   if (recordState.value === "active" && repairRecordIsCompleted(record)) return false;
+  if (recordState.value === "in_progress" && (repairRecordIsCompleted(record) || record.workflow !== "维修中")) return false;
   const query = searchText.value.trim().toLocaleLowerCase();
   if (query) {
     const searchable = [
@@ -3178,7 +3183,7 @@ async function loadRecords(announce = false, silent = false): Promise<void> {
           pendingRecordFocusId.value = "";
         } else {
           appliedFocusRecordId.value = focusRecordId;
-          void loadRecordDetailAndOpen(focused);
+          void loadRecordDetailAndOpen(focused, routeFocusTab.value);
         }
       } else if (pendingFocusRecordId) {
         pendingRecordFocusId.value = "";
@@ -3605,22 +3610,26 @@ watch(projectDrawerOpen, (open) => {
 });
 
 watch(
-  () => String(props.focusRecordId || "").trim(),
-  (focusRecordId) => {
-    if (!focusRecordId || appliedFocusRecordId.value === focusRecordId) return;
+  [() => String(props.focusRecordId || "").trim(), routeFocusTab],
+  ([focusRecordId, tab], [, previousTab]) => {
+    if (!focusRecordId || (appliedFocusRecordId.value === focusRecordId && tab === previousTab)) return;
     const focused = records.value.find(
       (item) => String(item.record_id || "").trim() === focusRecordId,
     );
     if (focused) {
       appliedFocusRecordId.value = focusRecordId;
       runWithUnsavedGuard(() => {
-        void loadRecordDetailAndOpen(focused);
+        void loadRecordDetailAndOpen(focused, tab);
       });
       return;
     }
     if (!loading.value) void loadRecords(false);
   },
 );
+
+watch(() => props.initialInProgress, (enabled) => {
+  if (enabled && !props.focusRecordId) changeRecordState("in_progress");
+});
 
 onActivated(() => {
   repairPageActive = true;
@@ -3635,9 +3644,9 @@ onActivated(() => {
   );
   if (focused) {
     appliedFocusRecordId.value = focusRecordId;
-    if (editingRecordId.value !== focusRecordId) {
+    if (editingRecordId.value !== focusRecordId || activeWorkspaceTab.value !== routeFocusTab.value) {
       runWithUnsavedGuard(() => {
-        void loadRecordDetailAndOpen(focused);
+        void loadRecordDetailAndOpen(focused, routeFocusTab.value);
       });
     } else {
       projectDrawerOpen.value = true;

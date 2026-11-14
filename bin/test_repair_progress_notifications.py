@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -84,9 +85,11 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.assertEqual(len(self.sends), 1)
         card = self.sends[0]['card']
         self.assertEqual(self.header(card), REMINDER_TITLE)
-        self.assertIn('**D楼**—**冷却泵检修**', self.body(card))
-        self.assertIn('维修开始时间：2026-11-12 09:00', self.body(card))
-        self.assertEqual(self.button_url(card), BASE + '/repair-management?scope=D&record_id=recA')
+        self.assertIn('**D楼 · 维修中 1 项**', self.body(card))
+        self.assertIn('**冷却泵检修**', card['elements'][1]['text']['content'])
+        self.assertIn('维修开始时间：2026-11-12 09:00', card['elements'][1]['text']['content'])
+        self.assertEqual(card['elements'][1]['extra']['url'],
+                         BASE + '/repair-management?scope=D&record_id=recA&workspace_tab=followups')
         first_uuid = self.sends[0]['uuid']
 
         self.sends.clear()
@@ -95,6 +98,149 @@ class RepairProgressNotificationTests(unittest.TestCase):
         self.scan([record()], 2000.0 + 2 * REMINDER_INTERVAL_SECONDS)
         self.assertEqual(len(self.sends), 1, '下一个间隔再提醒一次')
         self.assertNotEqual(self.sends[0]['uuid'], first_uuid, '每轮提醒使用不同幂等键')
+
+    def test_one_digest_per_building_contains_all_valid_rows_and_caps_preview(self):
+        rows = [record(rid=f'rec{i:02}', title=f'检修{i:02}') for i in range(10)]
+        rows += [record(rid='recE', codes=('E',)), record(rid='recEmpty', title='未命名维修项目')]
+        self.scan(rows, 1000.0)
+        result = self.scan(rows + [rows[0]], 1000.0 + REMINDER_INTERVAL_SECONDS)
+        self.assertEqual((result['noticed'], result['reminded']), (0, 2))
+        by_chat = {item['chat_id']: item['card'] for item in self.sends}
+        card = by_chat['oc_d']
+        self.assertIn('维修中 10 项', self.body(card))
+        self.assertEqual(sum('extra' in element for element in card['elements']), 8)
+        self.assertEqual(card['elements'][-2]['text']['content'], '另有 2 项维修中')
+        self.assertEqual(card['elements'][-1]['actions'][0]['url'],
+                         BASE + '/repair-management?scope=D&state=in_progress')
+        self.assertIn('维修中 1 项', self.body(by_chat['oc_e']))
+        self.scan(rows + [record(rid='recLate')], 1010.0 + REMINDER_INTERVAL_SECONDS)
+        self.assertEqual([self.header(item['card']) for item in self.sends],
+                         [REMINDER_TITLE, REMINDER_TITLE, NOTICE_TITLE])
+
+    def test_digest_retry_after_restart_uses_original_payload_and_isolated_group_state(self):
+        rows = [record(), record(rid='recE', codes=('E',))]
+        self.scan(rows, 1000.0)
+        due = 1000.0 + REMINDER_INTERVAL_SECONDS
+        accepted = {}
+        attempts = []
+
+        def lose_receipt(card, chat_id, message_uuid):
+            attempts.append((card, chat_id, message_uuid))
+            first = message_uuid not in accepted
+            prior = accepted.setdefault(message_uuid, card)
+            self.assertEqual(card, prior)
+            return (False, '回执丢失') if chat_id == 'oc_d' and first else (True, '')
+
+        self.send = lose_receipt
+        self.assertEqual(self.scan(rows, due)['reminded'], 1)
+        self.store = LanPortalStateStore(self.store.db_path)
+        updated = [dict(rows[0], repair_title='修改后的项目名'), rows[1]]
+        self.scan(updated, due + RETRY_BACKOFF_SECONDS - 1)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(self.scan(updated, due + RETRY_BACKOFF_SECONDS)['reminded'], 1)
+        self.scan(updated, due + RETRY_BACKOFF_SECONDS + 60)
+        self.assertEqual([item[1] for item in attempts], ['oc_d', 'oc_e', 'oc_d'])
+        self.assertEqual(attempts[0], attempts[2])
+        self.assertEqual(len(accepted), 2)
+
+    def test_legacy_reminder_on_same_day_suppresses_digest_even_after_completion(self):
+        rows = [record(), record(rid='recOld'), record(rid='recE', codes=('E',))]
+        self.scan(rows, 1000.0)
+        due = 1000.0 + REMINDER_INTERVAL_SECONDS
+        key = module.PRUNE_PREFIX + 'recOld'
+        state = self.store.get_document(module.NAMESPACE, key)
+        state['reminder']['D'] = {'count': 1, 'at': due - 60}
+        self.store.put_document(module.NAMESPACE, key, state)
+        rows[1]['workflow'] = '维修完成'
+        self.scan(rows, due)
+        self.assertEqual([item['chat_id'] for item in self.sends], ['oc_e'])
+        self.scan(rows, due + REMINDER_INTERVAL_SECONDS)
+        self.assertEqual([item['chat_id'] for item in self.sends], ['oc_e', 'oc_d', 'oc_e'])
+
+    def test_incomplete_scan_defers_digest_until_full_list_available(self):
+        rows = [record(), record(rid='recB')]
+        self.scan(rows, 1000.0)
+        due = 1000.0 + REMINDER_INTERVAL_SECONDS
+        process(self.store, records=rows[:1], base_url=BASE, send=self.send,
+                chat_ids=CHATS, now=due, complete=False)
+        self.assertFalse(self.sends)
+        self.scan(rows, due + 60)
+        self.assertIn('维修中 2 项', self.body(self.sends[0]['card']))
+
+    def test_beijing_midnight_does_not_trigger_an_extra_digest(self):
+        due = datetime(2026, 11, 14, 23, 59, tzinfo=module.BEIJING).timestamp()
+        self.scan([record()], due - REMINDER_INTERVAL_SECONDS)
+        self.assertEqual(self.scan([record()], due)['reminded'], 1)
+        self.assertEqual(self.scan([record()], due + 120)['reminded'], 0)
+        self.assertEqual(self.scan([record()], due + REMINDER_INTERVAL_SECONDS)['reminded'], 1)
+        self.assertEqual(len({item['uuid'] for item in self.sends}), 2)
+
+    def test_restart_after_midnight_recovers_pending_uuid_before_allocating_another(self):
+        due = datetime(2026, 11, 14, 23, 59, 30, tzinfo=module.BEIJING).timestamp()
+        rows = [record()]
+        self.scan(rows, due - REMINDER_INTERVAL_SECONDS)
+        attempts = []
+
+        def lost_receipt(card, chat_id, message_uuid):
+            attempts.append((card, chat_id, message_uuid))
+            return len(attempts) > 1, '模拟超时'
+
+        self.send = lost_receipt
+        self.assertEqual(self.scan(rows, due)['reminded'], 0)
+        self.store = LanPortalStateStore(self.store.db_path)
+        self.assertEqual(self.scan(rows, due + 45)['reminded'], 0)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(self.scan(rows, due + RETRY_BACKOFF_SECONDS)['reminded'], 1)
+        self.assertEqual(attempts[0], attempts[1])
+        self.assertEqual(self.scan(rows, due + REMINDER_INTERVAL_SECONDS + 60)['reminded'], 0)
+        self.assertEqual(self.scan(rows, due + RETRY_BACKOFF_SECONDS + REMINDER_INTERVAL_SECONDS)['reminded'], 1)
+
+    def test_overlapping_scan_cannot_claim_a_second_digest(self):
+        rows = [record()]
+        self.scan(rows, 1000.0)
+        due = 1000.0 + REMINDER_INTERVAL_SECONDS
+        store = LanPortalStateStore(self.store.db_path)
+        sent = self.send
+
+        def overlap(card, chat_id, message_uuid):
+            result = process(store, records=rows, base_url=BASE, send=sent, chat_ids=CHATS,
+                             now=due + RETRY_BACKOFF_SECONDS)
+            self.assertEqual(result['reminded'], 0)
+            return sent(card, chat_id, message_uuid)
+
+        self.send = overlap
+        self.assertEqual(self.scan(rows, due)['reminded'], 1)
+        self.assertEqual(len(self.sends), 1)
+
+    def test_success_after_midnight_reserves_the_date_of_delivery(self):
+        due = datetime(2026, 11, 14, 23, 59, 30, tzinfo=module.BEIJING).timestamp()
+        self.scan([record()], due - REMINDER_INTERVAL_SECONDS)
+        current_time = due
+        sent = self.send
+
+        def deliver_after_midnight(card, chat_id, message_uuid):
+            nonlocal current_time
+            current_time += 45
+            return sent(card, chat_id, message_uuid)
+
+        with patch.object(module.time, 'time', side_effect=lambda: current_time):
+            result = process(self.store, records=[record()], base_url=BASE,
+                             send=deliver_after_midnight, chat_ids=CHATS)
+        self.assertEqual(result['reminded'], 1)
+        marker = self.store.get_document(module.NAMESPACE, 'digest:2026-11-15:D')
+        self.assertEqual(marker['sent_at'], current_time)
+        self.assertEqual(self.scan([record()], due + 900)['reminded'], 0)
+
+    def test_expired_midnight_recovery_reserves_only_current_day(self):
+        due = datetime(2026, 11, 14, 23, 59, 30, tzinfo=module.BEIJING).timestamp()
+        rows = [record()]
+        self.scan(rows, due - REMINDER_INTERVAL_SECONDS)
+        send = self.send
+        self.send = lambda *args: (False, '模拟结果未知')
+        self.assertEqual(self.scan(rows, due)['reminded'], 0)
+        self.send = send
+        self.assertEqual(self.scan(rows, due + REMINDER_INTERVAL_SECONDS)['reminded'], 0)
+        self.assertEqual(self.scan(rows, due + 2 * REMINDER_INTERVAL_SECONDS)['reminded'], 1)
 
     def test_waits_for_real_name_and_time_then_formats_epoch_milliseconds(self):
         self.scan([], 1000.0)
