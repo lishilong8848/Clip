@@ -33,6 +33,7 @@ __pycache__/
 /.codex-audit/
 /.codex-review-diff*.txt
 /.playwright-cli/
+/.playwright-mcp/
 /.agents/
 /.workbuddy/
 playwright-report/
@@ -70,6 +71,7 @@ htmlcov/
 /.tmp_runtime_tests/
 /.tmp_day_metric_sources/
 /.tmp_*/
+/.tmp-sharing-v2-out/
 /.tmp_*.py
 /artifacts/
 /bin/output/
@@ -121,3 +123,9 @@ bin/upload_event_module/app_log.txt
 
 # Duplicate local copies; canonical cabinet templates stay versioned.
 /bin/lan_bitable_template_portal/templates/cabinet_power/* - 副本.xlsm
+
+# Local backups, handoff copies and working files.
+/_backup_灯塔汇报_20261113/
+/灯塔汇报-重构交付/
+/交付快照/
+/qwenwork/

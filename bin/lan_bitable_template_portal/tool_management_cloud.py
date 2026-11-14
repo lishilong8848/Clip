@@ -1,34 +1,48 @@
 """Read the existing tool inventory and write only the configured ledgers."""
 
 import datetime as dt
+import hashlib
+import json
 import logging
+import math
+from pathlib import Path
 import re
+from tempfile import TemporaryDirectory
+import threading
 import time
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 
+from upload_event_module.services.http_client import FeishuHTTPError
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 
 from .risk_inspection import RiskError
-from .tool_management import DESTINATIONS, OUTCOMES
-from .tool_self_check import BUILDINGS, TZ
+from .risk_inspection_cloud import API
+from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES
+from .tool_self_check import BUILDINGS, MAX_FILE, TZ
 
 
 BASE = 'Ix2Db9hMfaZacms9cxdcBdnJnMc'
 INVENTORY = 'tbl8pYoYy88r2OSx'
 ORGANIZATION = 'tblxLMZDeBbA6Wn2'
+TEMPLATE_TABLE = 'tbl5zn6iPyKOF3kR'
+TEMPLATE_NAME = '文本'
+TEMPLATE_FILE = '模板文件'
+TEMPLATE_HASH = '文件摘要'
+TEMPLATE_LINK = '与记录表格模板关联关系'
 TABLES = {'maintenance': 'tblutFXoTA0mPkt1', 'inspection': 'tblHtl0cVXn6zci6',
           'repair': 'tblTasmHUxgdtZQd', 'scrap': 'tbl71QoG0R0Q3esn', 'change': 'tblEwY3AbwiT021v'}
 KEY = '灯塔工具工单号'
 STATE = '灯塔处理状态'
 DETAIL = '灯塔处理说明'
 SOURCE_FIELDS = ['楼栋', '工具名称', '规格型号', '放置区域', '一级分类', '区域对应工具数量',
-                 '维护周期', '送检周期', '当前维护日期', '当前送检日期', '是否报废']
+                 '维护周期', '送检周期', '当前维护日期', '当前送检日期', '是否报废', '品牌', TEMPLATE_LINK]
 
 
 def plain(value):
     if isinstance(value, list):
         return ''.join(map(plain, value))
     if isinstance(value, dict):
-        return plain(value.get('value', value.get('text', '')))
+        return plain(value.get('value', value.get('text', value.get('name', ''))))
     return str(value or '').strip()
 
 
@@ -45,10 +59,53 @@ def epoch(day):
     return int(dt.datetime.combine(dt.date.fromisoformat(day), dt.time.min, TZ).timestamp() * 1000)
 
 
+def record_id(value):
+    return value if isinstance(value, str) and re.fullmatch(r'rec[A-Za-z0-9]+', value) else ''
+
+
+def _template_text(value):
+    if value is None:
+        return ''
+    if isinstance(value, dict):
+        return _template_text(value.get('text', value.get('value', str(value))))
+    if isinstance(value, list):
+        segments = [_template_text(part) for part in value]
+        # Two record IDs in one cell are invalid even when displayed together.
+        return ' '.join(segments) if sum(bool(record_id(part.strip())) for part in segments) > 1 else ''.join(segments)
+    return str(value)
+
+
+def _link_ids(value):
+    if isinstance(value, list):
+        return [identity for part in value for identity in _link_ids(part)]
+    if isinstance(value, dict):
+        for key in ('record_ids', 'link_record_ids', 'record_id', 'id'):
+            if key in value:
+                return _link_ids(value[key])
+        return ['']
+    return [record_id(value)]
+
+
+def _attachment_tokens(value):
+    if not isinstance(value, list):
+        return []
+    return [item.get('file_token') if isinstance(item, dict) else None for item in value]
+
+
+_WORKSPACE_FIELDS = {
+    'self': ('maintenance', '维护工具', '计划维护日期', '实际维护日期', '维护记录单'),
+    'external': ('inspection', '送检工具', '计划检测日期', '实际检测日期', '送检报告'),
+}
+_QUALIFICATION = '工具检测是否合格'
+# Keep retries within the same conservative window as the portal Bitable sync.
+WORKSPACE_CREATE_RETRY_SECONDS = 600
+
+
 class ToolCloud:
     def __init__(self, cloud):
         self.cloud = cloud
         self.fields = {}
+        self.workspace_lock = threading.RLock()
 
     def inventory_fields(self):
         allowed={'楼栋','工具名称','规格型号','放置区域','一级分类','二级分类','区域对应工具数量','品牌','计数单位','维护周期','送检周期','当前维护日期','当前送检日期','清洁情况','外观完好无破损','配件齐全','功能正常','检查结论'}
@@ -97,6 +154,7 @@ class ToolCloud:
             if not building or not name:
                 continue
             result.append({'id': identity, 'name': name, 'scope': building[1], 'model': plain(fields.get('规格型号')),
+                'brand': plain(fields.get('品牌')), 'template_id': record_id(_template_text(fields.get(TEMPLATE_LINK)).strip()),
                 'location': plain(fields.get('放置区域')), 'quantity': int(quantity) if type(quantity) in (int, float) else 0,
                 'retired': plain(fields.get('是否报废')) in {'是', '已报废', 'true', 'True'},
                 'self_cycle': plain(fields.get('维护周期')), 'external_cycle': plain(fields.get('送检周期')),
@@ -112,6 +170,130 @@ class ToolCloud:
             leaders[scope[1]] = sorted({person['id'] for person in fields.get('楼长（借用报废审批）', [])
                 if isinstance(person, dict) and re.fullmatch(r'ou_[A-Za-z0-9]+', str(person.get('id', '')))})
         return result, leaders
+
+    def _read_record(self, path, identity):
+        if not record_id(identity):
+            raise RiskError('飞书返回无效的工具记录编号，请核对原任务。', 503)
+        data = self.cloud.request('GET', path + '/records/' + identity)
+        row = data.get('record')
+        if (not isinstance(row, dict) or row.get('record_id') != identity
+                or not isinstance(row.get('fields'), dict)):
+            raise RiskError('飞书未完整返回指定工具记录，请稍后重试。', 503)
+        return row
+
+    def _inventory_template_id(self, path, asset_id):
+        value = _template_text(self._read_record(path, asset_id)['fields'].get(TEMPLATE_LINK)).strip()
+        identity = record_id(value)
+        if value and not identity:
+            raise RiskError('工具底表现有模板关联不是单个有效记录编号，请核对原值。', 409)
+        return identity
+
+    @staticmethod
+    def _template_entry(row):
+        identity = record_id(row.get('record_id'))
+        fields = row.get('fields')
+        if not identity or not isinstance(fields, dict):
+            raise RiskError('飞书模板表包含无效记录，请核对原表。', 503)
+        name = plain(fields.get(TEMPLATE_NAME))
+        files = fields.get(TEMPLATE_FILE) or []
+        if not name or not files:
+            return None
+        if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+            raise RiskError('每条工具模板记录应包含一个附件，请核对飞书模板表。', 503)
+        token = files[0].get('file_token')
+        if not isinstance(token, str) or not token.strip():
+            raise RiskError('飞书未返回有效的工具模板附件令牌。', 503)
+        size = files[0].get('size')
+        return {'id': identity, 'name': name, 'file_token': token,
+                'filename': plain(files[0].get('name')) or name, 'size': size if type(size) is int and size >= 0 else 0,
+                'digest': plain(fields.get(TEMPLATE_HASH))}
+
+    def templates(self):
+        """List complete template rows. Empty placeholders are omitted."""
+        path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+        result, seen = [], set()
+        for row in self.cloud.all(path + '/records'):
+            identity = record_id(row.get('record_id')) if isinstance(row, dict) else ''
+            if not identity or identity in seen:
+                raise RiskError('飞书模板列表包含重复或无效记录，请核对原表。', 503)
+            entry = self._template_entry(row)
+            seen.add(identity)
+            if entry:
+                result.append(entry)
+        return result
+
+    def download_template(self, template):
+        """Return at most 2 MiB of bytes from the template's current attachment."""
+        identity = record_id(template.get('id'))
+        if not identity:
+            raise RiskError('工具模板记录编号无效。')
+        path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+        row = self._read_record(path, identity)
+        current = self._template_entry(row)
+        if not current or any(current[key] != template.get(key, '') for key in ('file_token', 'digest')):
+            raise RiskError('飞书模板附件已变化，请重新选择模板。', 409)
+        if current['size'] > MAX_FILE:
+            raise RiskError('工具模板附件不得超过 2 MB。', 413)
+        metadata = next((field for field in self.cloud.all(path + '/fields')
+                         if field.get('field_name') == TEMPLATE_FILE), {})
+        field_id = metadata.get('field_id')
+        if metadata.get('type') != 17 or not field_id:
+            raise RiskError('飞书模板表缺少可读的模板文件附件字段。', 503)
+        token = current['file_token']
+        # Use the fixed Drive endpoint and grant context from the verified record.
+        attachment = row['fields'][TEMPLATE_FILE][0]
+        reported = parse_qs(urlsplit(plain(attachment.get('url'))).query).get('extra', [''])[0]
+        extra = reported or json.dumps({'bitablePerm': {'tableId': TEMPLATE_TABLE,
+                                       'attachments': {field_id: {identity: [token]}}}}, separators=(',', ':'))
+        url = API + 'drive/v1/medias/' + quote(token, safe='') + '/download?' + urlencode({'extra': extra})
+        with self.cloud.lock:
+            headers = self.cloud.headers()
+        try:
+            with TemporaryDirectory(prefix='tool-template-') as temp:
+                output = Path(temp) / 'template'
+                self.cloud.http.download_to_file(url, output, headers=headers, max_bytes=MAX_FILE)
+                content = output.read_bytes()
+        except FeishuHTTPError as exc:
+            if exc.category in {'permission', 'token'}:
+                raise RiskError('当前 Qt 飞书应用无法下载该工具模板，请核对鉴权和附件访问权限。', 503) from None
+            if exc.category == 'business':
+                raise RiskError('工具模板附件下载受限，请核对文件是否超过 2 MB。', 413) from None
+            raise RiskError('工具模板附件下载暂未完成，请稍后重试。', 503) from None
+        except OSError:
+            raise RiskError('本机无法暂存工具模板，请核对临时目录写入权限。', 503) from None
+        if not content or len(content) > MAX_FILE or current['size'] and len(content) != current['size']:
+            raise RiskError('工具模板文件为空、过大或下载不完整，请核对飞书附件。', 503)
+        if current['digest'] and hashlib.sha256(content).hexdigest() != current['digest'].lower():
+            raise RiskError('工具模板下载内容与文件摘要不符，请核对飞书附件。', 503)
+        return content
+
+    def bind_template(self, asset_id, template_id, expected_template_id):
+        """Update the text link after checking its current value; return the bound ID."""
+        if (not record_id(asset_id) or not record_id(template_id)
+                or expected_template_id != '' and not record_id(expected_template_id)):
+            raise RiskError('工具或模板记录编号无效。')
+        path = self.cloud.table_path(BASE, INVENTORY)
+        with self.workspace_lock:
+            before = self._inventory_template_id(path, asset_id)
+            if before == template_id:
+                return template_id
+            if before != expected_template_id:
+                raise RiskError('工具的关联模板已变化，请刷新后重试。', 409)
+            template_path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+            if not self._template_entry(self._read_record(template_path, template_id)):
+                raise RiskError('所选飞书模板尚未配置完整。', 409)
+            actual = self._inventory_template_id(path, asset_id)
+            if actual == template_id:
+                return template_id
+            if actual != before:
+                raise RiskError('工具的关联模板已变化，请刷新后重试。', 409)
+            self.cloud.request('PUT', path + '/records/' + asset_id, json={'fields': {TEMPLATE_LINK: template_id}})
+            actual = self._inventory_template_id(path, asset_id)
+            if actual == template_id:
+                return template_id
+            if actual != before:
+                raise RiskError('工具的关联模板已变化，请刷新后重试。', 409)
+            raise RiskError('飞书尚未读回工具模板关联，请重试原操作。', 503)
 
     def schema(self, dest, path):
         cached = self.fields.get(dest)
@@ -149,6 +331,101 @@ class ToolCloud:
         if not isinstance(token, str) or not token:
             raise RiskError('飞书未确认送检报告上传。', 503)
         return token
+
+    def write_workspace_item(self, session_id, item, report_name, report_bytes, actual,
+                             file_token='', remote_id='', *, save_file=None, attempted_at=None, save_attempt=None):
+        """Publish and verify one immutable result. Callbacks persist receipts before creation.
+
+        attempted_at is a Unix timestamp in seconds, or None/0 for the first attempt.
+        save_attempt(timestamp) stores the first attempt and must raise if persistence fails.
+        """
+        if not isinstance(session_id, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', session_id):
+            raise RiskError('工具工作台单号无效。')
+        asset_id, scope, kind = item.get('asset_id'), item.get('scope'), item.get('kind')
+        if not record_id(asset_id) or scope not in BUILDINGS or kind not in _WORKSPACE_FIELDS:
+            raise RiskError('工具记录、楼栋或工单类型无效。')
+        if remote_id and not record_id(remote_id):
+            raise RiskError('工具台账回执编号无效。')
+        qualified = item.get('qualified')
+        if kind == 'self' and type(qualified) is not bool:
+            raise RiskError('请选择工具检测是否合格。')
+        if (attempted_at is not None and (type(attempted_at) not in (int, float)
+                or not math.isfinite(attempted_at) or attempted_at < 0)):
+            raise RiskError('工具台账首次写入时间无效。')
+        try:
+            planned, completed = epoch(item.get('due')), epoch(actual)
+        except (TypeError, ValueError, OverflowError):
+            raise RiskError('计划日期或实际日期无效。') from None
+        if (not isinstance(report_name, str) or not report_name.strip() or len(report_name) > 180
+                or re.search(r'[\\/:*?"<>|\x00-\x1f]', report_name)
+                or not isinstance(report_bytes, bytes) or not 0 < len(report_bytes) <= MAX_REPORT):
+            raise RiskError('每条工具结果需要一份 12 MB 以内的有效报告。')
+        if not isinstance(file_token, str) or (file_token and not file_token.strip()):
+            raise RiskError('工具报告附件回执无效。')
+
+        dest, link, due, finish, attachment = _WORKSPACE_FIELDS[kind]
+        path = self.cloud.table_path(BASE, TABLES[dest])
+        key = f'workspace:{session_id}:{asset_id}'
+        result = ('合格' if qualified else '工具不合格') if kind == 'self' else '已提交'
+
+        with self.workspace_lock:
+            schema = {field['field_name']: field for field in self.cloud.all(path + '/fields')}
+            fields = {KEY: key, STATE: result, '楼栋': f'南通{scope}楼', link: [asset_id],
+                      due: planned, finish: completed}
+            if dest == 'maintenance':
+                selection = schema.get(_QUALIFICATION) or {}
+                options = (selection.get('property') or {}).get('options') or []
+                if selection.get('type') != 3 or result not in {
+                    option.get('name') for option in options if isinstance(option, dict)
+                }:
+                    raise RiskError(f'{DESTINATIONS[dest]}的「{_QUALIFICATION}」缺少「{result}」选项。', 503)
+                fields[_QUALIFICATION] = result
+            missing = (set(fields) | {attachment}) - schema.keys()
+            if missing:
+                raise RiskError(f'{DESTINATIONS[dest]}缺少字段：' + '、'.join(sorted(missing)) + '。', 503)
+            if any(schema[name].get('type') != 1 for name in (KEY, STATE)):
+                raise RiskError(f'{DESTINATIONS[dest]}的灯塔流水号和状态必须为文本字段。', 503)
+            link_field = schema[link]
+            if link_field.get('type') not in (18, 21) or (link_field.get('property') or {}).get('table_id') != INVENTORY:
+                raise RiskError(f'{DESTINATIONS[dest]}的「{link}」未关联工具底表。', 503)
+            if schema[attachment].get('type') != 17:
+                raise RiskError(f'{DESTINATIONS[dest]}的「{attachment}」必须为附件字段。', 503)
+
+            found = self.find(path, key)
+            if found and remote_id and found != remote_id:
+                raise RiskError('工具台账记录与保存的回执冲突，请核对原任务。', 409)
+            identity = found or remote_id
+            if identity and not file_token:
+                raise RiskError('工具台账缺少原报告附件回执，无法核验已有记录，请核对原任务。', 503)
+            if not identity:
+                if attempted_at and not 0 <= time.time() - attempted_at < WORKSPACE_CREATE_RETRY_SECONDS:
+                    raise RiskError('工具台账新增结果仍待核验，后续只回读原流水号。', 503)
+                if attempted_at and not file_token:
+                    raise RiskError('工具台账新增待核验，但缺少原报告附件回执。', 503)
+                if not attempted_at and not callable(save_attempt):
+                    raise RiskError('工具台账新增需要先保存首次写入时间。', 503)
+                if not file_token:
+                    if not callable(save_file):
+                        raise RiskError('工具台账新增需要先保存报告附件回执。', 503)
+                    file_token = self.upload(report_name, report_bytes)
+                    save_file(file_token)
+                if not attempted_at:
+                    save_attempt(time.time())
+                data = self.cloud.request('POST', path + '/records',
+                    params={'client_token': _stable_uuid4_client_token('tool-management:' + key)},
+                    json={'fields': fields | {attachment: [{'file_token': file_token}]}})
+                created = data.get('record')
+                identity = record_id(created.get('record_id')) if isinstance(created, dict) else ''
+                if not identity:
+                    raise RiskError('飞书未确认工具台账记录，请重试原任务。', 503)
+            actual_fields = self._read_record(path, identity)['fields']
+            tokens = _attachment_tokens(actual_fields.get(attachment))
+            if (len(tokens) != 1 or not isinstance(tokens[0], str) or not tokens[0]
+                    or file_token and tokens[0] != file_token
+                    or _link_ids(actual_fields.get(link)) != [asset_id]
+                    or any(plain(actual_fields.get(field)) != str(value) for field, value in fields.items() if field != link)):
+                raise RiskError('工具台账字段或附件回读未一致，请核对后重试原任务。', 503)
+            return {'remote_id': identity, 'file_token': tokens[0]}
 
     def write(self, dest, order, asset, job, person_for, save_file):
         path = self.cloud.table_path(BASE, TABLES[dest])
@@ -248,6 +525,9 @@ def run_tool_jobs(service, stop):
                 service.archive_ready()
             for _ in range(4):
                 if stop.is_set() or not service.sync_one():
+                    break
+            for _ in range(4):
+                if stop.is_set() or not service.workspace_sync_one():
                     break
         except Exception:
             logging.exception('Tool management background work deferred')

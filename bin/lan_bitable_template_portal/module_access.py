@@ -34,7 +34,7 @@ PREFIXES = (
     ("/api/auth/accounts", "accounts"), ("/api/admin", "accounts"), ("/admin", "accounts"),
     ("/api/signatures", "signatures"), ("/signature", "signatures"),
     ("/api/repair-management", "repair_management"), ("/repair-management", "repair_management"), ("/repair-status", "repair_management"),
-    ("/api/events", "event"), ("/event-management", "event"),
+    ("/api/events", "event"), ("/api/workbench-events", "event"), ("/event-management", "event"),
     ("/api/engineer", "engineer_mop"), ("/engineer", "engineer_mop"),
     ("/api/cabinet-power", "cabinet"), ("/cabinet-power", "cabinet"),
     ("/api/capacity", "water"), ("/water-management", "water"),

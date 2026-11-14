@@ -26,6 +26,44 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             month = params.get('month', '')
             identity = params.get('identity', '')
             path = request.url.path.removeprefix(base).strip('/')
+            if path == 'workspace' or path.startswith('workspace/'):
+                if request.method == 'GET':
+                    if path == 'workspace':
+                        return response(await asyncio.to_thread(svc.workspace_list, actor))
+                    if path.endswith('/download'):
+                        content = await asyncio.to_thread(svc.workspace_download, actor, identity)
+                        filename = quote(f'{identity}-工具办理归档.zip')
+                        return Response(content, media_type='application/zip', headers={
+                            'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
+                            'Cache-Control': 'no-store',
+                        })
+                    return response(await asyncio.to_thread(svc.workspace_get, actor, identity))
+                same_origin(request)
+                if path == 'workspace/refresh':
+                    return response(await asyncio.to_thread(svc.workspace_refresh, actor))
+                if path.endswith('/resume'):
+                    return response(await asyncio.to_thread(svc.workspace_resume, actor, identity))
+                if path.endswith('/report'):
+                    revision = request.query_params.get('revision', '')
+                    if not revision.isascii() or not revision.isdecimal() or len(revision) > 9:
+                        raise RiskError('办理会话版本无效。')
+                    payload = bytearray()
+                    async for part in request.stream():
+                        if len(payload) + len(part) > MAX_REPORT:
+                            raise RiskError('送检报告不能超过 12 MB。', 413)
+                        payload.extend(part)
+                    return response(await asyncio.to_thread(
+                        svc.workspace_report, actor, identity, int(revision),
+                        request.query_params.get('name', ''), bytes(payload),
+                    ))
+                body = await controller._read_json_request(request, max_bytes=12 * 1024 * 1024)
+                if not isinstance(body, dict):
+                    raise RiskError('工具办理请求格式无效。')
+                if path == 'workspace/open':
+                    return response(await asyncio.to_thread(svc.workspace_open, actor, body))
+                if path.endswith('/save'):
+                    return response(await asyncio.to_thread(svc.workspace_save, actor, identity, body))
+                return response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body))
             if request.method == 'GET':
                 if not path:
                     result = await asyncio.to_thread(svc.list, actor, request.query_params.get('month', ''))
@@ -119,5 +157,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),
                           ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),
-                          ('/templates/{identity}/delete', ['POST'])):
+                          ('/templates/{identity}/delete', ['POST']),
+                          ('/workspace', ['GET']), ('/workspace/open', ['POST']), ('/workspace/refresh', ['POST']),
+                          ('/workspace/{identity}', ['GET']), ('/workspace/{identity}/save', ['POST']),
+                          ('/workspace/{identity}/resume', ['POST']),
+                          ('/workspace/{identity}/submit', ['POST']), ('/workspace/{identity}/report', ['POST']),
+                          ('/workspace/{identity}/download', ['GET'])):
         app.add_api_route(base + path, endpoint, methods=methods)

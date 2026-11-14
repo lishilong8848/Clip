@@ -301,7 +301,7 @@ class AccountLevelTests(_TempDirTestCase):
                 self.assertEqual('data-ongoing-delete-mode="remote"' in extract_workbench_lite_fragments(page)["detail"], expected)
                 self.assertEqual(notice_delete_allowed({"modules": modules, "scope_rules": ["A"]}, kind), expected)
         self.assertFalse(notice_delete_allowed({"modules": list(NOTICE_MODULES), "scope_rules": []}, "maintenance"))
-        self.assertFalse(notice_delete_allowed(self.h.auth.account_profile(self.actor("AO")["open_id"]), "event"))
+        self.assertTrue(notice_delete_allowed(self.h.auth.account_profile(self.actor("AO")["open_id"]), "event"))
 
     def test_notice_delete_endpoint_checks_login_scope_module_and_resolved_target(self):
         import ast
@@ -368,11 +368,12 @@ class AccountLevelTests(_TempDirTestCase):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url="http://fixture") as client:
                 for who, scope, kind, target, code in (
                     ("AO", "A", "maintenance", "rec-fixture", 200),
+                    ("AO", "A", "event", "rec-event", 200),
                     ("AO", "B", "maintenance", "rec-fixture", 403),
                     ("AO", "A", "change", "rec-fixture", 403),
                     ("AO", "A", "maintenance", "rec-other-floor", 403),
                     ("AO", "A", "maintenance", "rec-other-module", 403),
-                    ("AO", "A", "maintenance", "rec-event", 403),
+                    ("AO", "A", "maintenance", "rec-event", 200),
                     ("anonymous", "A", "maintenance", "rec-fixture", 401)):
                     before = execute.call_count
                     response = await client.post("/api/ongoing-items/delete", headers={"x-fixture-user": who},

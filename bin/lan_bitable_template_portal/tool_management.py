@@ -14,6 +14,7 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .risk_inspection import RiskError, RiskInspections, can_scope as risk_can_scope, digest, text
 from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
+from .tool_workspace import ToolWorkspaceMixin
 
 
 CYCLES = {'每月': 1, '季度': 3, '半年': 6, '一年': 12, '两年': 24, '三年': 36, '四年': 48, '五年': 60}
@@ -99,7 +100,7 @@ def report_file(name, data):
     return name
 
 
-class ToolManagement(ToolSelfChecks):
+class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
     @staticmethod
     def access(actor):
         RiskInspections.check(actor)
@@ -155,6 +156,7 @@ class ToolManagement(ToolSelfChecks):
             db.execute('BEGIN IMMEDIATE')
             if not any(row['name'] == 'needs_refresh' for row in db.execute('PRAGMA table_info(tool_work_archives)')):
                 db.execute('ALTER TABLE tool_work_archives ADD COLUMN needs_refresh INTEGER NOT NULL DEFAULT 0')
+        self._init_tool_workspace()
 
     @staticmethod
     def state(db, key):

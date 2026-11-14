@@ -10182,6 +10182,15 @@ class PortalRuntime:
         target_record_id = canonical_target_record_id(payload)
         if not target_record_id or is_local_record_id(target_record_id):
             return False, "当前通告没有可删除的目标多维记录。"
+        field_config = get_field_config(str(payload.get("notice_type") or ""))
+        fields = remote_fields or {}
+        building_codes = MaintenancePortalService._building_codes_from_value(
+            fields.get(field_config.get("building") or "楼栋")
+        )
+        if building_codes and not MaintenancePortalService._scope_matches_buildings(
+            payload.get("scope"), building_codes
+        ):
+            return False, "目标通告不属于当前楼栋，未执行删除。"
         return True, ""
 
     @classmethod

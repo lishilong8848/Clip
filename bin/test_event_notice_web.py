@@ -1,7 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock,patch
 from types import SimpleNamespace
 from lan_bitable_template_portal.portal_service import MaintenancePortalService,PortalError
 from lan_bitable_template_portal.state_store import LanPortalStateStore
@@ -47,7 +47,8 @@ class WebEventTests(unittest.TestCase):
         from lan_bitable_template_portal.event_notice_web import install_event_notice_web
         from lan_bitable_template_portal.event_notice_delivery import EventNoticeDelivery
         store=self.service._state_store
-        auth=SimpleNamespace(scope_allowed=lambda session,scope:scope=='D',account_profile=lambda _: {'can_delete_business':False})
+        auth=SimpleNamespace(scope_allowed=lambda session,scope:scope=='D',
+            account_profile=lambda _: {'can_delete_business':False,'modules':['event'],'scope_rules':['D']})
         async def read_json(request,max_bytes):return await request.json()
         controller=SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'fixture-user'}},
             _authorized_scope_or_error=lambda session,scope:scope,_request_base_url=lambda _: 'http://testserver',
@@ -129,14 +130,37 @@ class WebEventTests(unittest.TestCase):
         store=service._state_store
         store.begin_notice_remote_operation(operation_id='event-web',operation_type='start',request={})
         store.mark_notice_remote_operation('event-web',status='completed',target_record_id='rec_D',result={'robot_notice_type':'事件通告','robot_payload':{'text':'【事件通告】状态：新增\n【标题】D楼事件\n【概述】原概述\n【影响】原影响\n【进展】原进展'}})
-        auth=SimpleNamespace(scope_allowed=lambda session,scope:scope=='D',account_profile=lambda _: {'can_delete_business':False})
-        controller=SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'fixture-user'}},_get_ongoing=lambda _:[],_authorized_scope_or_error=lambda session,scope:scope)
-        app=FastAPI();install_event_notice_web(app,controller,SimpleNamespace(service=service,state_store=store,auth_manager=auth))
+        from lan_bitable_template_portal.account_policy import business_delete_denial
+        auth=SimpleNamespace(scope_allowed=lambda session,scope:scope=='D',
+            account_profile=lambda _: {'can_delete_business':False,'modules':['event'],'scope_rules':['D']})
+        async def read_json(request,max_bytes):return await request.json()
+        controller=SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'fixture-user'}},
+            _get_ongoing=lambda _:[],_authorized_scope_or_error=lambda session,scope:scope,
+            _request_base_url=lambda _: 'http://testserver',_read_json_request=read_json)
+        delete=Mock(return_value={'ok':True})
+        runtime=SimpleNamespace(service=service,state_store=store,auth_manager=auth,execute_local_delete_active_item=delete)
+        app=FastAPI()
+        with patch('lan_bitable_template_portal.event_notice_delivery.dispatch'):
+            install_event_notice_web(app,controller,runtime)
+        @app.middleware('http')
+        async def guard(request,call_next):
+            denial=await business_delete_denial(request,controller,runtime)
+            return denial if denial is not None else await call_next(request)
         with TestClient(app) as client,patch('lan_bitable_template_portal.module_access.allowed_modules',return_value=['event']):
             result=client.get('/api/workbench-events?scope=D').json()
             self.assertTrue(result['ok']);self.assertEqual(len(result['data']['items']),1)
             self.assertIn('原进展',result['data']['items'][0]['text'])
-            self.assertFalse(result['data']['can_delete'])
+            self.assertTrue(result['data']['can_delete'])
+            with patch('lan_bitable_template_portal.event_notice_delivery.EventNoticeDelivery.get',
+                       return_value={'event_id':'remote_rec_E','access_scopes':['E']}):
+                denied=client.post('/api/workbench-events/delete',json={'scope':'D','event_id':'remote_rec_E'},
+                                   headers={'origin':'http://testserver'})
+            self.assertEqual(denied.status_code,409,denied.text)
+            delete.assert_not_called()
+            response=client.post('/api/workbench-events/delete',json={'scope':'D','event_id':'remote_rec_D'},
+                                 headers={'origin':'http://testserver'})
+            self.assertEqual(response.status_code,200,response.text)
+            self.assertEqual(delete.call_args.args[0]['data_dict']['target_record_id'],'rec_D')
         with TestClient(app) as client,patch('lan_bitable_template_portal.module_access.allowed_modules',return_value=[]):
             self.assertEqual(client.get('/api/workbench-events?scope=D').status_code,403)
 

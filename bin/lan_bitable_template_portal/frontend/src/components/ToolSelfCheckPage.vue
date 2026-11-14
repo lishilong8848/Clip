@@ -2,13 +2,13 @@
   <section ref="root" class="tool-check" aria-label="工具管理" data-v2-inline-feedback>
     <header class="tool-header">
       <div class="tool-title">
-        <NButton v-if="!embedded || order" quaternary :aria-label="order ? '返回工单列表' : '返回专项功能'" :disabled="busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
+        <NButton v-if="!embedded || order" quaternary :aria-label="order ? '返回工单列表' : '返回专项功能'" :disabled="busy || !!workspace?.busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
         <div>
           <p>{{ order ? `${order.scope}楼 · ${kindLabel(order)}工单` : '专项功能' }}</p>
           <h2>{{ order ? order.tool_name : '工具管理' }}</h2>
         </div>
       </div>
-      <NButton class="tool-refresh" :disabled="busy" :loading="loading" @click="refresh"><RefreshCw :size="16" />刷新</NButton>
+      <NButton class="tool-refresh" :disabled="busy || !!workspace?.busy" :loading="loading || workspace?.busy === 'read'" @click="refresh"><RefreshCw :size="16" />刷新</NButton>
     </header>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" :bordered="false" role="status">{{ message }}</NAlert>
@@ -17,13 +17,14 @@
       <template v-if="board">
         <nav class="tool-nav" aria-label="工具管理分区">
           <NButton v-for="tab in tabs" :key="tab.value" :type="view === tab.value ? 'primary' : 'default'" :bordered="false"
-            :aria-pressed="view === tab.value" :disabled="busy" @click="view = tab.value">
+            :aria-pressed="view === tab.value" :disabled="busy || !!workspace?.busy" @click="selectView(tab.value)">
             <component :is="tab.icon" :size="16" />{{ tab.label }}
             <span v-if="tab.count" class="tool-nav-count">{{ tab.count }}</span>
           </NButton>
         </nav>
         <NAlert v-if="board.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
-        <div v-if="view === 'settings'" class="tool-settings-layout">
+        <ToolWorkspace v-if="view === 'workspace'" ref="workspace" />
+        <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
             <div class="tool-panel-heading">
@@ -329,6 +330,7 @@ import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, 
 import { ApiError, downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
 import ToolOrderBatchCreate, { type OrderCreationPlan, type PlannedOrder } from './ToolOrderBatchCreate.vue';
+import ToolWorkspace from './ToolWorkspace.vue';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
 defineProps<{ scope?: string; embedded?: boolean }>();
@@ -365,7 +367,8 @@ const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', l
 const outcomeOptions = [{ value: 'normal', label: '正常' }, { value: 'repair', label: '转检修' }, { value: 'scrap', label: '报废' }];
 const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检修中', repaired: '检修完成', scrap: '待报废审批',
   scrapped: '已批准报废', rejected: '报废未通过' };
-const view = ref('orders');
+const view = ref('workspace');
+const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const kindFilter = ref('all');
 const stateFilter = ref('all');
 const search = ref('');
@@ -480,6 +483,7 @@ const reviewCount = computed(() => board.value?.orders.filter(row => row.status 
 const submittedCount = computed(() => board.value?.orders.filter(row => row.status === 'submitted').length || 0);
 const repairCount = computed(() => board.value?.followups.filter(row => row.outcome === 'repair').length || 0);
 const tabs = computed(() => [
+  { value: 'workspace', label: '工作台', icon: ClipboardList, count: 0 },
   { value: 'orders', label: '月度工单', icon: ClipboardList, count: pendingCount.value },
   { value: 'followups', label: '检修与报废', icon: Wrench, count: board.value?.followups.length || 0 },
   ...(board.value?.can_manage_templates ? [{ value: 'settings', label: '工具与模板', icon: Settings2, count: 0 }] : []),
@@ -685,8 +689,15 @@ function back() {
 }
 function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
+  else if (view.value === 'workspace' && workspace.value) void workspace.value.refresh();
   else if (newOrderPlan.value) void openNewOrder();
   else void loadBoard();
+}
+function selectView(next: string) {
+  if (next === view.value) return;
+  const proceed = () => { view.value = next; };
+  if (workspace.value) workspace.value.leave(proceed);
+  else proceed();
 }
 function addRecord() {
   const template = board.value?.templates.find(item => item.id === templateId.value && item.active);
@@ -833,12 +844,17 @@ function discard() {
   proceed?.();
 }
 const unregister = registerNavigationGuard((_target, proceed) => {
+  if (workspace.value?.busy) return false;
+  if (workspace.value?.dirty) {
+    workspace.value.leave(proceed);
+    return false;
+  }
   if (busy.value) return false;
   if (!dirty.value) return true;
   afterDiscard.value = proceed;
   return false;
 });
-function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || busy.value) { event.preventDefault(); event.returnValue = ''; } }
+function beforeUnload(event: BeforeUnloadEvent) { if (dirty.value || busy.value || workspace.value?.dirty || workspace.value?.busy) { event.preventDefault(); event.returnValue = ''; } }
 onMounted(() => { window.addEventListener('beforeunload', beforeUnload); void loadBoard(); });
 onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.removeEventListener('beforeunload', beforeUnload); });
 </script>

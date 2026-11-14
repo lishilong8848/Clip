@@ -261,7 +261,11 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
 
 def notice_delete_allowed(profile, work_type):
     from .module_access import NOTICE_MODULES
-    return work_type in NOTICE_MODULES and work_type in profile.get("modules", []) and bool(profile.get("scope_rules"))
+    return (
+        work_type in NOTICE_MODULES | {"event"}
+        and work_type in profile.get("modules", [])
+        and bool(profile.get("scope_rules"))
+    )
 
 
 def require_notice_delete(auth, session, work_type):
@@ -289,6 +293,8 @@ async def business_delete_denial(request, controller, runtime):
                 or re.fullmatch(r"/api/change-confirmations/[^/]+/screenshot", path))
     deleting = request.method == "DELETE" and path.startswith("/api/") and not personal
     deleting = deleting or (request.method == "POST" and bool(re.search(r"/(?:delete|remove)(?:/|$)", path)))
+    if request.method == "POST" and path == "/api/workbench-events/delete":
+        notice_work_type = "event"
     undo_match = re.fullmatch(r"/api/notice-undo/([^/]+)/apply", path)
     if request.method == "POST" and undo_match:
         undo = await asyncio.to_thread(runtime.state_store.get_notice_undo_action, undo_match[1]) or {}

@@ -45,8 +45,6 @@
     <slot name="start" v-if="isCurrentDate && !active" />
     <span v-if="preferencesError" class="book-error">{{ preferencesError }}<button @click="loadPreferences">重读排序</button></span>
     <div class="book-status">
-      <span v-if="currentActive?.started_by">{{ currentActive.started_by }} 开轮<template v-if="presence.length"> · {{ presence.length }} 人在看</template></span>
-      <span class="status-legend" aria-hidden="true"><i class="current-key"></i>本次巡检<i class="history-key"></i>历史巡检</span>
       <span v-if="currentActive && !readOnly" class="status-review">
         <button type="button" :disabled="!pendingRows.length" :title="pendingRows.length?'跳到本表下一个待填写单元格':'本表没有待填写项'" @click="gotoNextEmpty">待填 {{ pendingRows.length }}</button>
         <button type="button" title="核对本表待填项与上一轮差异" @click="reviewOpen=true">本表核对</button>
@@ -146,7 +144,7 @@
         </div>
         <NButton v-else-if="canGroup" size="small" @click="openGroups">查看本班专业分工</NButton>
         <div v-else-if="currentPage && frozenProfession" class="settings-section"><strong>该轮专业归属</strong><span>{{ currentPage.name.trim() }} · {{ frozenProfession }}<template v-if="shownSlot"> · {{ shownSlot }}</template></span><small v-if="frozenProfession!==currentGroup(currentPage)">本班对应归属为 {{ currentGroup(currentPage) }}。</small></div>
-        <div v-if="currentActive" class="settings-section"><strong>本轮协作</strong><span v-if="currentActive.started_by">开轮 {{ currentActive.started_by }} · {{ roundClock.format(currentActive.started || 0) }}</span><span v-for="person in presence" :key="person.actor+person.sheet">{{ person.actor }} · 正在查看 {{ basePages.find(page=>page.key===person.sheet)?.name.trim() }}</span></div>
+        <div v-if="presence.length" class="settings-section"><strong>本轮协作</strong><span v-for="person in presence" :key="person.actor+person.sheet">{{ person.actor }} · 正在查看 {{ basePages.find(page=>page.key===person.sheet)?.name.trim() }}</span></div>
       </div>
       <template #footer><NButton type="primary" block @click="settingsOpen=false">完成</NButton></template>
     </NModal>
@@ -168,6 +166,7 @@
         <button type="button" :aria-pressed="reviewFilter==='changed'" @click="reviewFilter='changed'">与上轮有差异 {{ changedRows.length }}</button>
       </div>
       <p class="settings-note">{{ previousSlot ? '上轮＝'+previousSlot+'，按测点身份比对，不受各轮所在列不同的影响。' : '本日该时点之前没有可比对的轮次，仅列出待填项。' }}</p>
+      <p v-if="previousSlot" class="settings-note">变化幅度以本轮与上轮的差值除以上轮读数的绝对值计算。</p>
       <p class="settings-note">待填表示本轮没有可用读数。归档时保留空白，可用源值会随本轮记录保存。</p>
       <div class="review-list">
         <button v-for="row in shownReviewRows" :key="row.address" type="button" class="review-row" @click="focusReviewCell(row)">
@@ -175,7 +174,7 @@
           <span class="review-values">
             <i :class="{'review-empty':row.empty}">{{ row.current || '待填写' }}</i>
             <em v-if="row.hasPrevious">{{ row.previous || '空' }}</em>
-            <b v-if="row.changed">变化</b>
+            <b v-if="row.changeLabel" :class="{'review-unchanged':!row.changed}">{{ row.changeLabel }}</b>
           </span>
         </button>
         <p v-if="!shownReviewRows.length" class="settings-note">{{ reviewFilter==='pending' ? '本表没有待填写项。' : reviewFilter==='changed' ? '与上一轮没有差异。' : '本表没有需要核对的映射单元格。' }}</p>
@@ -212,7 +211,7 @@ type Presence={actor:string;sheet:string;seen_at:number};
 type Progress={visited_sheets?:string[];presence?:Presence[]};
 type Active=InspectionVisibilityActive & Progress & {
  id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null;
- started_by?:string;started?:number;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
+ started?:number;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
  profession_confirmations?:Record<string,{actor?:string;confirmed?:number;version?:string}>;
  profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;
 };
@@ -337,7 +336,7 @@ const invalidationText=computed(()=>Object.entries(currentActive.value?.confirma
 const mobilePhase=computed(()=>{
  const slot=currentSlot.value;
  const viewing=shownSlot.value;
- if(!slot)return viewing?`历史巡检 · ${viewing}`:'历史巡检';
+ if(!slot)return viewing;
  const state=roundStates.value.find(item=>item.slot===slot);
  return viewing&&viewing!==slot?`当前 ${slot} · 查看 ${viewing}`:`${slot} · ${state?.label||'未开始'}`;
 });
@@ -435,7 +434,20 @@ const grid=computed(()=>{
  }));
 });
 type GridCell=(typeof grid.value)[number][number];
-type ReviewRow={cell:GridCell;address:string;label:string;current:string;previous:string;hasPrevious:boolean;empty:boolean;changed:boolean};
+type ReviewRow={cell:GridCell;address:string;label:string;current:string;previous:string;hasPrevious:boolean;empty:boolean;changed:boolean;changeLabel:string};
+const readingNumber=/^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*(%?)$/i;
+const changePercent=new Intl.NumberFormat('zh-CN',{style:'percent',signDisplay:'exceptZero',maximumFractionDigits:2});
+function reviewChangeLabel(current:string,previous:string):string{
+ const latestMatch=readingNumber.exec(current),baselineMatch=readingNumber.exec(previous);
+ const latest=Number(latestMatch?.[1]),baseline=Number(baselineMatch?.[1]);
+ if(latestMatch?.[2]!==baselineMatch?.[2]||!Number.isFinite(latest)||!Number.isFinite(baseline))return current!==previous?'内容变化':'';
+ if(latest===baseline)return '0%';
+ if(baseline===0)return '上轮为 0';
+ const change=(latest-baseline)/Math.abs(baseline);
+ if(!Number.isFinite(change))return '幅度超出范围';
+ if(Math.abs(change)<0.0001)return latest>baseline?'↑ <0.01%':'↓ <0.01%';
+ return changePercent.format(change);
+}
 // Except for the chiller sheet, one sheet holds all four slots in different columns, so the same
 // measurement never repeats a cell address across rounds. Compare by semantic identity, not address.
 function readingIdentity(reading:Reading):string{
@@ -468,11 +480,11 @@ const reviewRows=computed<ReviewRow[]>(()=>{
   const identity=identityByCell.get(cell.address),previousValue=identity?previousByIdentity.get(identity):undefined;
   // The sheet's own row header is what an inspector actually reads; device ids are opaque.
   const header=text(page.rows[cell.rowIndex]?.[0]).trim();
-  const current=cell.text.trim();
+  const current=cell.text.trim(),previous=(previousValue||'').trim();
+  const changeLabel=previousValue===undefined?'':reviewChangeLabel(current,previous);
   rows.push({cell,address:cell.address,current,
    label:[header,parameterByCell.get(cell.address)].filter(Boolean).join(' · ')||cell.address,
-   previous:(previousValue||'').trim(),hasPrevious:previousValue!==undefined,
-   empty:!current,changed:previousValue!==undefined&&(previousValue||'').trim()!==current});
+   previous,hasPrevious:previousValue!==undefined,empty:!current,changed:!!changeLabel&&changeLabel!=='0%',changeLabel});
  }
  return rows;
 });
@@ -931,12 +943,10 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.cl
 </script>
 <style scoped>
 .inspection-workbook{
-  display:grid;gap:8px;min-width:0}.book-tools,.book-status,.round-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.book-tools label{display:flex;gap:4px;align-items:center}button,input,select,textarea{font:inherit;color:inherit;border:1px solid var(--inspection-line);background:var(--inspection-surface);padding:6px;min-height:34px;box-sizing:border-box}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.selected{background:var(--inspection-accent);color:var(--inspection-on-accent)}p{margin:0}.book-scroll{overflow:auto;max-height:calc(100dvh - 230px);min-height:240px;border:1px solid var(--inspection-line);overscroll-behavior:contain}table{border-collapse:collapse;min-width:100%;width:max-content;table-layout:fixed}td{border:1px solid var(--inspection-line);height:30px;min-width:72px;max-width:210px;padding:4px;white-space:pre-wrap;text-align:center;overflow-wrap:anywhere}td[tabindex]{cursor:text}td:focus{outline:2px solid var(--inspection-accent);outline-offset:-2px}td input{width:100%;min-width:72px;max-width:210px;padding:2px}.current-cell,.current-key{background:color-mix(in srgb,var(--inspection-surface) 75%,#ffc83d)}.history-cell,.history-key{background:color-mix(in srgb,var(--inspection-surface) 92%,#5783a9)}.current-key,.history-key{display:inline-block;width:14px;height:14px;border:1px solid var(--inspection-line)}.empty-cell{color:var(--cf-warning)}.book-status{font-size:12px}.book-submit{display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;bottom:0;padding:8px 0 max(8px,env(safe-area-inset-bottom));background:var(--inspection-surface)}.primary{background:var(--inspection-accent);color:var(--inspection-on-accent);padding:9px 25px;margin-left:auto}.book-error{color:var(--cf-danger)}textarea{width:100%}@media(max-width:760px){.toolbar-label{display:none}input,select{font-size:16px}.book-tools{font-size:13px}.book-tools input[type=date]{width:142px}.book-scroll{max-height:calc(100dvh - 250px)}}
+  display:grid;gap:8px;min-width:0}.book-tools,.book-status,.round-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.book-tools label{display:flex;gap:4px;align-items:center}button,input,select,textarea{font:inherit;color:inherit;border:1px solid var(--inspection-line);background:var(--inspection-surface);padding:6px;min-height:34px;box-sizing:border-box}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.selected{background:var(--inspection-accent);color:var(--inspection-on-accent)}p{margin:0}.book-scroll{overflow:auto;max-height:calc(100dvh - 230px);min-height:240px;border:1px solid var(--inspection-line);overscroll-behavior:contain}table{border-collapse:collapse;min-width:100%;width:max-content;table-layout:fixed}td{border:1px solid var(--inspection-line);height:30px;min-width:72px;max-width:210px;padding:4px;white-space:pre-wrap;text-align:center;overflow-wrap:anywhere}td[tabindex]{cursor:text}td:focus{outline:2px solid var(--inspection-accent);outline-offset:-2px}td input{width:100%;min-width:72px;max-width:210px;padding:2px}.current-cell{background:color-mix(in srgb,var(--inspection-surface) 75%,#ffc83d)}.history-cell{background:color-mix(in srgb,var(--inspection-surface) 92%,#5783a9)}.empty-cell{color:var(--cf-warning)}.book-status{font-size:12px}.book-submit{display:flex;align-items:center;justify-content:space-between;gap:8px;position:sticky;bottom:0;padding:8px 0 max(8px,env(safe-area-inset-bottom));background:var(--inspection-surface)}.primary{background:var(--inspection-accent);color:var(--inspection-on-accent);padding:9px 25px;margin-left:auto}.book-error{color:var(--cf-danger)}textarea{width:100%}@media(max-width:760px){.toolbar-label{display:none}input,select{font-size:16px}.book-tools{font-size:13px}.book-tools input[type=date]{width:142px}.book-scroll{max-height:calc(100dvh - 250px)}}
 .book-settings-content{display:grid;gap:12px}.book-settings-content label{display:flex;justify-content:space-between;align-items:center;gap:8px}.book-settings-content select{font-size:16px;min-height:40px}.book-error{max-height:20dvh;overflow:auto;flex-shrink:0}.sort-list{max-height:55dvh;overflow:auto}.sort-row{display:flex;align-items:center;gap:5px;margin:5px 0}.sort-row span{flex:1}.full-height{height:var(--available-height);display:flex;flex-direction:column;overflow:hidden}.full-height>.book-tools,.full-height>.book-status,.full-height>.book-submit{flex-shrink:0}.full-height>.book-scroll{flex:1;min-height:0;max-height:none;touch-action:pan-x pan-y}.full-height .book-submit{position:static}
 @media(max-height:500px) and (hover:none){.full-height .book-status{display:none}.full-height .book-tools{gap:3px}.full-height button,.full-height input,.full-height select{min-height:30px}.full-height .book-submit{padding:3px 0}.full-height{gap:4px}}
 
-/* The colour legend and the save state are different things; they must not read as one sentence. */
-.status-legend{display:inline-flex;align-items:center;gap:5px;opacity:.78;white-space:nowrap}
 .status-save{display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;min-width:0;margin-left:auto}
 .lock-reason{color:var(--inspection-muted)}
 /* The submit footer stays visible on phones so a gated button explains itself instead of vanishing. */
@@ -969,6 +979,7 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.cl
 .review-values i.review-empty{color:var(--cf-warning)}
 .review-values em{font-style:normal;font-size:12px;color:var(--inspection-muted)}
 .review-values b{font-size:11px;font-weight:600;color:var(--cf-danger)}
+.review-values b.review-unchanged{color:var(--inspection-muted)}
 
 .book-scroll{width:100%;max-width:100%;min-width:0;box-sizing:border-box;isolation:isolate}
 .book-scroll table{min-width:0;max-width:none;table-layout:fixed}.book-scroll td{min-width:0;max-width:none;box-sizing:border-box;overflow:hidden}.book-scroll td>span{display:block;overflow:hidden;white-space:inherit;overflow-wrap:normal;line-height:normal}.book-scroll td input,.book-scroll td select{min-width:0;max-width:100%;width:100%;box-sizing:border-box}.book-scroll td:focus-within{outline:2px solid var(--inspection-accent);outline-offset:-2px}

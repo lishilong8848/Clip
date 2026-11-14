@@ -1408,6 +1408,11 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                         remote_fields,
                     )[0]
                 )
+        self.assertFalse(
+            PortalRuntime._validate_notice_delete_target(
+                {**payload, "scope": "B"}, matching_fields
+            )[0]
+        )
         self.assertTrue(
             PortalRuntime._validate_notice_delete_target(
                 {

@@ -21,15 +21,15 @@ const sections = {
   repairs: { label: '维修管理', icon: Wrench, branches: [
     { key: 'repairs', label: '', entries: ['repair_management'] },
   ] },
-  maintenance: { label: '维护与工单', icon: ListChecks, branches: [
-    { key: 'orders', label: '', entries: ['engineer_mop', 'sops', 'signatures'] },
+  maintenance: { label: '3P管理', icon: ListChecks, branches: [
+    { key: 'orders', label: '', entries: ['engineer_mop', 'sops', 'eop_scenarios'] },
   ] },
   safety: { label: '风险管控', icon: ShieldCheck, branches: [
     { key: 'safety', label: '', entries: ['risk_inspection', 'critical_guard'] },
   ] },
   emergency: { label: '应急与演练', icon: ShieldAlert, branches: [
     { key: 'event', label: '', entries: ['event'] },
-    { key: 'preparedness', label: '演练与预案', entries: ['drills', 'eop_scenarios'] },
+    { key: 'preparedness', label: '', entries: ['drills'] },
   ] },
   resources: { label: '设备与资源', icon: Server, branches: [
     { key: 'resources', label: '', entries: ['cabinet', 'water', 'tool_management'] },
@@ -39,7 +39,7 @@ const sections = {
     { key: 'library', label: '资料', entries: ['knowledge', 'documents', 'links'] },
   ] },
   administration: { label: '系统管理', icon: Settings, branches: [
-    { key: 'permissions', label: '人员权限', entries: ['settings:permissions'] },
+    { key: 'permissions', label: '人员权限', entries: ['settings:permissions', 'signatures'] },
     { key: 'configuration', label: '业务配置', entries: ['settings:handover', 'settings:mop', 'settings:feishu', 'settings:dingtalk'] },
     { key: 'system', label: '系统运维', entries: ['settings:status', 'zhihang_data', 'settings:development', 'settings:pressure'] },
   ] },

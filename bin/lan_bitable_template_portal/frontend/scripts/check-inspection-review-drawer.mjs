@@ -23,7 +23,7 @@ try{
   {id:'pt2',point_id:'p2',enabled:true,template,sheet,round_cells:{'白2':'D3'}}];
  const device={id:'dev1',scope:'D',name:'D楼配电柜',profession:'电气',sections:[],points,
    parameters:[{id:'a',name:'电压',point:'pt1',reference:220},{id:'b',name:'电流',point:'pt2',reference:''}]};
- const active={id:'Dround',duty,round:2,pending:false,draft_key:'Ddraft',reviews:{},review_version:1,
+ const active={id:'Dround',duty,round:2,pending:false,draft_key:'Ddraft',reviews:{},review_version:1,started_by:'系统自动巡检',
    batch:{batch:1,count:1,devices:[device]},professions:['电气'],worksheet_mode:true,profession_versions:{电气:'v-electric'},available_professions:['电气','暖通'],visited_sheets:[],profession_confirmations:{}};
  const state={template_version:'v1',duty,view_scope:'D',view_scopes:['D'],can_edit:true,history_scopes:['D'],
    history:[],completed_rounds:1,round_limit:2,active};
@@ -68,6 +68,7 @@ try{
  // --- §5.2 pending count lives in the status bar, on every viewport ---
  const review=book.locator('.status-review');
  await review.waitFor({timeout:5000});
+ assert.doesNotMatch(await book.locator('.book-status').innerText(),/系统自动巡检|本次巡检|历史巡检/);
  assert.equal((await review.getByRole('button',{name:/^待填/}).innerText()).trim(),'待填 1','本表待填计数');
 
  // --- §5.1 the drawer joins rounds by measurement identity, not by cell address ---
@@ -84,7 +85,7 @@ try{
  assert.match(await voltage.locator('.review-label small').innerText(),/^D2$/);
  assert.equal(await voltage.locator('.review-values i').innerText(),'220','本轮值');
  assert.equal(await voltage.locator('.review-values em').innerText(),'210','上轮值来自 C2，按测点身份配对成功');
- assert.equal(await voltage.locator('.review-values b').innerText(),'变化');
+ assert.equal(await voltage.locator('.review-values b').innerText(),'+4.76%');
  await page.screenshot({path:path.join(output,'review-all.png')});
 
  // --- filter to pending and jump straight into that cell ---
