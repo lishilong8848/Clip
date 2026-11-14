@@ -30,6 +30,17 @@ PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
 
 
+def configured_kind(asset):
+    modes = [kind for kind in KINDS if asset.get(kind + '_cycle') not in (None, '', '停用')]
+    if len(modes) > 1:
+        return '', '同时配置了维护和送检周期，请核对。'
+    if not modes:
+        return '', '尚未配置有效的维护或送检周期。'
+    if asset[modes[0] + '_cycle'] not in CYCLES:
+        return '', '工具周期不受支持，请核对。'
+    return modes[0], ''
+
+
 def full_access(actor):
     return actor.get('_tool_management_full_access') is True and not (
         actor.get('inactive') or actor.get('explicit_disabled') or actor.get('role') in {'guest','temporary'})
@@ -156,6 +167,10 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             db.execute('BEGIN IMMEDIATE')
             if not any(row['name'] == 'needs_refresh' for row in db.execute('PRAGMA table_info(tool_work_archives)')):
                 db.execute('ALTER TABLE tool_work_archives ADD COLUMN needs_refresh INTEGER NOT NULL DEFAULT 0')
+            if not any(row['name'] == 'attempted_at' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
+                db.execute('ALTER TABLE tool_work_sync ADD COLUMN attempted_at REAL NOT NULL DEFAULT 0')
+            if not any(row['name'] == 'candidate_id' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
+                db.execute("ALTER TABLE tool_work_sync ADD COLUMN candidate_id TEXT NOT NULL DEFAULT ''")
         self._init_tool_workspace()
 
     @staticmethod
@@ -254,6 +269,9 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
             if not row or row['version'] != body['revision'] or self.effective(row)['scope'] != scope:
                 raise RiskError('配置或工具归属已更新，请刷新后重试。', 409)
+            _, cycle_problem = configured_kind(json.loads(row['source']) | config)
+            if cycle_problem.startswith('同时'):
+                raise RiskError(cycle_problem, 409)
             db.execute('UPDATE tool_inventory SET config=?,version=version+1 WHERE id=?', (dumps(config), identity))
             db.execute("""UPDATE tool_work_orders SET supervisor=?,revision=revision+1
                 WHERE asset_id=? AND scope=? AND kind='external' AND submitted_at IS NULL
@@ -444,13 +462,18 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             asset=self.effective(row);scope=asset['scope']
             if not can_scope(actor,scope) or not (self.is_building_leader(db,actor,scope) or self.administrator(actor)):
                 raise RiskError('仅本楼楼长或有权限的管理员可新增工单。',403)
-            if asset.get('retired') or asset.get('quantity',0)<=0:raise RiskError('工具已报废或数量无效。')
-            if db.execute('SELECT 1 FROM tool_work_archives WHERE month=?',(month,)).fetchone():
-                raise RiskError('本月已归档，不能新增工单。',409)
-            if db.execute('SELECT 1 FROM tool_work_orders WHERE month=? AND asset_id=? AND kind=?',(month,identity,kind)).fetchone():
-                raise RiskError('本月该工具已有此类工单，请在列表中查看。',409)
+            if not self.tool_available(db, asset):
+                raise RiskError('工具在检修、报废审批中或已全部报废。', 409)
+            configured, error = configured_kind(asset)
+            if configured != kind:
+                raise RiskError(error or '所选工具的周期与办理类型不一致。', 409)
+            if db.execute("""SELECT 1 FROM tool_work_orders WHERE asset_id=? AND kind=?
+                AND (month=? OR (month<? AND submitted_at IS NULL AND outcome=''))""",
+                (identity,kind,month,month)).fetchone():
+                raise RiskError('该工具已有本月或未办结的原工单，请在列表中查看。',409)
             order_id=uuid.uuid4().hex
             self.insert_work_order(db, order_id, month, asset, kind, current.date().isoformat())
+            db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (month,))
             self.audit(db,order_id,actor,'手动新增工单')
             return self.work_info(db,actor,self._work(db,actor,order_id))
 
@@ -536,6 +559,12 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             return {'cleared_count': len(rows)}
 
     @staticmethod
+    def tool_available(db, asset):
+        state = db.execute("""SELECT COALESCE(SUM(CASE WHEN outcome='scrapped' THEN scrap_qty END),0),
+            MAX(outcome IN ('repair','scrap')) FROM tool_work_orders WHERE asset_id=?""", (asset['id'],)).fetchone()
+        return not asset.get('retired') and not state[1] and state[0] < asset['quantity']
+
+    @staticmethod
     def planned_kinds(db, asset, today, count=lambda _: None, *, allow_reset=False):
         month = today.strftime('%Y-%m')
         first_day = today.replace(day=1)
@@ -547,43 +576,40 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 entry['outcome'] in {'repair', 'scrap'} for entry in history):
             count('unavailable')
             return {}
-        planned = {}
-        for kind in KINDS:
-            cycle = CYCLES.get(asset.get(kind + '_cycle'))
-            entries = [entry for entry in history if entry['kind'] == kind]
-            same_month = next((entry for entry in entries if entry['month'] == month), None)
-            if same_month and not (allow_reset and same_month['outcome'] == 'cancelled'
-                                   and same_month['resolution'] == PLAN_RESET and same_month['scope'] == asset['scope']):
-                count('deleted' if same_month['outcome'] == 'cancelled' else 'created')
-                continue
-            if not cycle:
-                if asset.get(kind + '_cycle'):
-                    count('unscheduled')
-                continue
-            if any(not entry['submitted_at'] and entry['outcome'] != 'cancelled' for entry in entries):
-                count('unfinished')
-                continue
-            latest = max([asset.get(kind + '_last', '')] + [entry['actual'] for entry in entries if entry['submitted_at']])
-            due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
-                asset.get(kind + '_first') or first_day.isoformat())
-            if due < end:
-                planned[kind] = due.isoformat()
-            else:
-                count('later')
-        return planned
+        kind, error = configured_kind(asset)
+        if error:
+            count('cycle_conflict' if error.startswith('同时') else 'unscheduled')
+            return {}
+        cycle = CYCLES[asset[kind + '_cycle']]
+        entries = [entry for entry in history if entry['kind'] == kind]
+        same_month = next((entry for entry in entries if entry['month'] == month), None)
+        if same_month and not (allow_reset and same_month['outcome'] == 'cancelled'
+                               and same_month['resolution'] == PLAN_RESET and same_month['scope'] == asset['scope']):
+            count('deleted' if same_month['outcome'] == 'cancelled' else 'created')
+            return {}
+        if any(not entry['submitted_at'] and entry['outcome'] != 'cancelled' for entry in entries):
+            count('unfinished')
+            return {}
+        latest = max([asset.get(kind + '_last', '')] + [entry['actual'] for entry in entries if entry['submitted_at']])
+        due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
+            asset.get(kind + '_first') or first_day.isoformat())
+        if due < end:
+            return {kind: due.isoformat()}
+        count('later')
+        return {}
 
     def schedule(self, current=None):
         today = (current or clock()).astimezone(TZ).date()
         month = today.strftime('%Y-%m')
         with self.connect(True) as db:
-            if self.state(db, 'inventory_at')[:10] != today.isoformat() or db.execute(
-                    'SELECT 1 FROM tool_work_archives WHERE month=?', (month,)).fetchone():
+            if self.state(db, 'inventory_at')[:10] != today.isoformat():
                 return
             for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
                 asset = self.effective(row)
                 for kind, due in self.planned_kinds(db, asset, today).items():
                     identity = hashlib.sha256(f'{month}:{row["id"]}:{kind}'.encode()).hexdigest()[:32]
                     self.insert_work_order(db, identity, month, asset, kind, due)
+                    db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (month,))
 
     def is_building_leader(self, db, actor, scope):
         leaders = json.loads(self.state(db, 'leaders') or '{}')
@@ -607,27 +633,30 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
     def work_info(self, db, actor, row):
         eligible = self.eligible(db, actor, row)
         open_order = not row['submitted_at'] and row['outcome'] != 'cancelled'
-        review = db.execute('SELECT * FROM tool_work_reviews WHERE order_id=?', (row['id'],)).fetchone()
+        review = db.execute('SELECT status,note FROM tool_work_reviews WHERE order_id=?', (row['id'],)).fetchone()
         awaiting_review = bool(review and review['status'] == 'pending')
         mine = eligible and (row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
         result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
                                             'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty')}
         sync = [{'label': DESTINATIONS[job['dest']], 'state': 'done' if job['synced'] == job['revision'] else 'pending',
-                 'error': job['error']} for job in db.execute(
-                    'SELECT dest,revision,synced,error FROM tool_work_sync WHERE order_id=?', (row['id'],))]
+                 'error': job['error'], 'verifying': bool(job['attempted_at']) and not job['remote_id']} for job in db.execute(
+                    'SELECT dest,revision,synced,error,attempted_at,remote_id FROM tool_work_sync WHERE order_id=?', (row['id'],))]
         asset = json.loads(row['asset'])
+        workspace = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
         return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
                          'quantity': asset['quantity'], 'supervisor_assigned': bool(row['supervisor']),
                          'assigned_to_me': row['supervisor'] == actor['id'] and eligible,
                          'status': 'cancelled' if row['outcome'] == 'cancelled' else 'review_pending' if awaiting_review else 'pending' if open_order else 'submitted',
                          'review_note': review['note'] if review else '',
-                         'can_review': awaiting_review and (self.is_building_leader(db, actor, row['scope']) or full_access(actor)),
+                         'workspace_id': workspace['session_id'] if workspace else '',
+                         'asset_id': asset['id'],
+                         'can_review': awaiting_review and self.workspace_can_review(db, actor, row),
                          'can_delete': (open_order and not row['outcome'] and not awaiting_review and not sync
                                         and row['month'] == clock().strftime('%Y-%m')
                                         and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor))),
                          'can_claim': open_order and not awaiting_review and not row['owner'] and eligible,
                          'can_edit': open_order and not awaiting_review and mine,
-                         'can_release': open_order and not awaiting_review and bool(row['owner']) and self.administrator(actor),
+                         'can_release': open_order and not awaiting_review and not workspace and bool(row['owner']) and self.administrator(actor),
                          'can_repair': row['outcome'] == 'repair' and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
                          'can_approve': row['outcome'] == 'scrap' and (full_access(actor) or row['manager'] == actor['id']
                              and actor.get('category') == 'manager'), 'sync': sync}
@@ -684,6 +713,8 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
             info = self.work_info(db, actor, row)
+            if info['workspace_id']:
+                raise RiskError('该工单使用原表办理，请打开原表继续。', 409)
             if row['kind'] != 'external' or not info['can_edit']:
                 raise RiskError('仅已领取的送检工单可上传报告。', 403)
             if row['report_name'] == name and row['report'] == data:
@@ -703,6 +734,10 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
             info = self.work_info(db, actor, row)
+            if action in {'submit', 'review-approve'} and self._workspace_legacy_overlaps(db, row['asset_id'], row['kind'], row['month']):
+                raise RiskError('旧工作台批次可能已归档，请先核对原台账回执。', 409)
+            if info['workspace_id'] and action in {'draft', 'submit', 'review-approve', 'review-reject'}:
+                raise RiskError('该工单使用原表办理，请打开原表继续。', 409)
             submit_key = digest({k: v for k, v in body.items() if k != 'revision'}) if action == 'submit' else ''
             pending = db.execute('SELECT * FROM tool_work_reviews WHERE order_id=?', (identity,)).fetchone()
             if action in {'review-approve','review-reject'} and pending and pending['reviewer']==actor['id']:
@@ -837,6 +872,8 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 db.execute("UPDATE tool_work_reviews SET status='approved',reviewer=?,reviewed_at=?,note=? WHERE order_id=?", (actor['id'],now,note,identity))
                 self.audit(db, identity, actor, '通过自检审核', note)
             self.enqueue(db, identity, *dests)
+            if row['submitted_at'] or updates.get('submitted_at'):
+                db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
             return self.work_info(db, actor, self._work(db, actor, identity))
 
     def scrap_request(self, db, row, body):
@@ -856,8 +893,14 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         now = int(time.time())
         lease = uuid.uuid4().hex
         with self.connect(True) as db:
-            task = db.execute("""SELECT * FROM tool_work_sync WHERE synced<revision AND next_try<=? AND lease_until<=?
-                ORDER BY next_try,order_id,dest LIMIT 1""", (now, now)).fetchone()
+            task = db.execute("""SELECT sync.* FROM tool_work_sync sync
+                WHERE synced<revision AND next_try<=? AND lease_until<=?
+                  AND NOT EXISTS (SELECT 1 FROM tool_workspace_items own
+                    JOIN tool_workspace_items sibling ON sibling.session_id=own.session_id
+                    JOIN tool_work_sync active ON active.order_id=sibling.order_id
+                    WHERE own.order_id=sync.order_id AND sync.dest='inspection'
+                      AND active.order_id<>sync.order_id AND active.lease_until>?)
+                ORDER BY next_try,order_id,dest LIMIT 1""", (now, now, now)).fetchone()
             if not task:
                 return False
             job = dict(task)
@@ -865,6 +908,12 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             db.execute('UPDATE tool_work_sync SET lease=?,lease_until=? WHERE order_id=? AND dest=?',
                        (lease, now + 600, identity, dest))
             row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
+            linked = self._workspace_for_order(db, identity)
+            if linked:
+                job['verify_write'] = True
+                if dest == 'inspection' and not job['file_token']:
+                    job['file_token'] = db.execute('SELECT file_token FROM tool_workspace_sessions WHERE id=?',
+                                                   (linked['session_id'],)).fetchone()[0]
             job['from_repair'] = bool(db.execute(
                 "SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest='repair'", (identity,)).fetchone())
             if row and row['kind']=='self' and dest in {'maintenance','repair','scrap'}:
@@ -873,12 +922,34 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
 
         def save_file(token):
             with self.connect(True) as db:
-                db.execute('UPDATE tool_work_sync SET file_token=? WHERE order_id=? AND dest=? AND lease=?',
-                           (token, identity, dest, lease))
+                update = db.execute('UPDATE tool_work_sync SET file_token=? WHERE order_id=? AND dest=? AND lease=?',
+                                    (token, identity, dest, lease))
+                if not update.rowcount:
+                    raise RiskError('原工单同步租约已失效。', 409)
+                if linked and dest == 'inspection':
+                    db.execute('UPDATE tool_workspace_sessions SET file_token=? WHERE id=?', (token, linked['session_id']))
+
+        def save_attempt(attempt):
+            with self.connect(True) as db:
+                if not db.execute('UPDATE tool_work_sync SET attempted_at=? WHERE order_id=? AND dest=? AND lease=? AND attempted_at=0',
+                                  (attempt, identity, dest, lease)).rowcount:
+                    raise RiskError('原工单同步租约已失效。', 409)
+
+        if linked:
+            job['save_attempt'] = save_attempt
+            def save_candidate(record_id):
+                with self.connect(True) as db:
+                    if not db.execute("""UPDATE tool_work_sync SET candidate_id=?
+                        WHERE order_id=? AND dest=? AND lease=? AND candidate_id IN ('',?)""",
+                        (record_id, identity, dest, lease, record_id)).rowcount:
+                        raise RiskError('飞书写入编号与原任务不一致。', 409)
+            job['save_candidate'] = save_candidate
 
         try:
             entries=job.get('record_entries') or []
-            if entries:
+            if row['report'] and row['kind']=='self' and dest in {'maintenance','repair','scrap'}:
+                job['record_name'], job['record_content'] = row['report_name'], row['report']
+            elif entries:
                 if len(entries)==1:
                     entry,template=entries[0]
                     job['record_name']='自检记录单.xlsx'
@@ -900,8 +971,9 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                            (job['revision'], error, job['revision'], int(time.time()) + 60, identity, dest, lease))
         else:
             with self.connect(True) as db:
-                db.execute("""UPDATE tool_work_sync SET remote_id=?,synced=?,error='',next_try=0,lease='',lease_until=0
-                    WHERE order_id=? AND dest=? AND lease=?""", (remote_id, job['revision'], identity, dest, lease))
+                db.execute("""UPDATE tool_work_sync SET remote_id=?,synced=?,error='',next_try=0,lease='',lease_until=0,
+                    attempted_at=0,candidate_id='' WHERE order_id=? AND dest=? AND lease=?""",
+                    (remote_id, job['revision'], identity, dest, lease))
         return True
 
     def package_work(self, db, month, rows, output):
@@ -933,7 +1005,12 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         with self.connect() as db:
             ready = db.execute("""SELECT month FROM tool_work_orders WHERE month NOT IN(
                 SELECT month FROM tool_work_archives WHERE needs_refresh=0)
-                GROUP BY month HAVING SUM(submitted_at IS NULL AND outcome<>'cancelled')=0 ORDER BY month LIMIT 1""").fetchone()
+                GROUP BY month HAVING SUM(submitted_at IS NOT NULL)>0
+                  AND SUM(submitted_at IS NULL AND outcome<>'cancelled')=0
+                  AND NOT EXISTS (SELECT 1 FROM tool_work_orders work JOIN tool_work_sync sync ON sync.order_id=work.id
+                    JOIN tool_workspace_items item ON item.order_id=work.id
+                    WHERE work.month=tool_work_orders.month AND sync.synced<sync.revision)
+                ORDER BY month LIMIT 1""").fetchone()
             if not ready:
                 return
             month = ready[0]
@@ -947,8 +1024,11 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 self.package_work(db, month, rows, path)
             with self.connect(True) as db:
                 actual = db.execute(signature_sql, (month,)).fetchall()
-                pending = db.execute("""SELECT 1 FROM tool_work_orders WHERE month=?
-                    AND submitted_at IS NULL AND outcome<>'cancelled' LIMIT 1""", (month,)).fetchone()
+                pending = db.execute("""SELECT 1 FROM tool_work_orders work WHERE month=? AND
+                    ((submitted_at IS NULL AND outcome<>'cancelled') OR EXISTS (
+                        SELECT 1 FROM tool_work_sync sync JOIN tool_workspace_items item ON item.order_id=sync.order_id
+                        WHERE sync.order_id=work.id AND sync.synced<sync.revision
+                    )) LIMIT 1""", (month,)).fetchone()
                 if actual == signature and not pending and not db.execute(
                         'SELECT 1 FROM tool_work_archives WHERE month=? AND needs_refresh=0', (month,)).fetchone():
                     os.replace(path, self.archive_dir / f'{month}.zip')

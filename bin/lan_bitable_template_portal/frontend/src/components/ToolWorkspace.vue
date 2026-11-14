@@ -28,7 +28,15 @@
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
                   <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }}</small></td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
-                  <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small></td>
+                  <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
+                    <small v-for="receipt in asset.plan?.legacy_receipts || []" :key="receipt.session_id">
+                      {{ receipt.date }} · {{ receipt.remote_id || '飞书回执待核对' }}
+                      <NButton v-if="receipt.can_reconcile" text size="small" :disabled="!!busy"
+                        @click="reconcile(asset, receipt.session_id)">核验旧归档</NButton>
+                    </small>
+                    <NButton v-if="asset.plan?.mode === 'resume'" text size="small" @click="openSaved(asset.plan.workspace_id)">继续原表</NButton>
+                    <NButton v-else-if="asset.plan?.mode === 'original'" text size="small" @click="emit('open-order', asset.plan.order_id, asset.plan.order_month)">查看工单</NButton>
+                  </td>
                 </tr>
               </tbody>
             </table>
@@ -79,14 +87,27 @@
                   {{ entry.asset.name }} · {{ scopeLabel(entry.asset.scope) }}
                 </NButton>
               </div>
-              <NButton v-if="editable && session.items.length > 1" size="small" :disabled="!!busy" @click="openBatchReview">批量填写审核信息</NButton>
+              <NButton v-if="reviewable.length > 1" size="small" :disabled="!!busy" @click="openBatchReview">批量审核</NButton>
             </div>
             <template v-if="item">
               <div class="review-line">
-                <label>审核人 <NInput v-model:value="item.reviewer" size="small" :disabled="!editable || !!busy" :input-props="{ 'aria-label': '审核人' }" /></label>
-                <label>审核时间 <input v-model="item.reviewed_at" aria-label="审核时间" type="datetime-local" :disabled="!editable || !!busy" /></label>
-                <NButton size="small" :disabled="!editable || !!busy" @click="openSignature(false)">{{ item.signature ? '重签' : '手绘签名' }}</NButton>
+                <span>审核人 {{ item.reviewer || '待本人审核' }}</span>
+                <span v-if="item.reviewed_at">{{ item.reviewed_at.replace('T', ' ') }}</span>
+                <NButton v-if="item.can_review" size="small" :disabled="!!busy" @click="openSignature(false)">{{ reviewSignatures[item.id] ? '重签' : '手绘审核签名' }}</NButton>
                 <img v-if="isPng(item.signature)" class="signature-preview" :src="item.signature" alt="审核签名" />
+                <img v-else-if="reviewSignatures[item.id]" class="signature-preview" :src="reviewSignatures[item.id]" alt="待提交审核签名" />
+                <small v-if="item.review_note">{{ item.review_note }}</small>
+              </div>
+              <div v-if="item.can_review" class="workspace-actions">
+                <NInput v-model:value="reviewNote" size="small" placeholder="审核意见，驳回时必填" aria-label="审核意见" />
+                <NButton :disabled="!!busy || !reviewNote.trim()" @click="reviewItems([item], false)">驳回修改</NButton>
+                <NButton type="primary" :disabled="!!busy || !reviewSignatures[item.id]" @click="reviewItems([item], true)">审核通过</NButton>
+              </div>
+              <div v-if="item.binding_error" class="workspace-actions">
+                <span>{{ item.binding_error }}</span>
+                <NSelect v-model:value="replacementTemplate" size="small" :options="templates.map(row => ({label:row.label || row.name,value:row.id}))" placeholder="选择替换模板" />
+                <NButton :disabled="!!busy || !replacementTemplate" @click="resolveBinding(false)">重新关联</NButton>
+                <NButton :disabled="!!busy" @click="resolveBinding(true)">移出本批</NButton>
               </div>
               <div v-if="sheets.length > 1" class="item-tabs" aria-label="模板工作表">
                 <NButton v-for="sheet in sheets" :key="sheet.name" size="small" :aria-pressed="sheet.name === activeSheet?.name"
@@ -105,11 +126,11 @@
                       <tr v-for="row in activeSheet.rows" :key="row.index" :style="{ height: row.height + 'px' }">
                         <td v-for="cell in row.cells" :key="cell.address" :rowspan="cell.rowspan" :colspan="cell.colspan"
                           :style="cell.style" :class="{ 'fillable-cell': cell.editable || cell.check }">
-                          <select v-if="cell.check" :value="item.checks[cellKey(cell)] || ''" :disabled="!editable || !!busy" :aria-label="'检查 ' + cellKey(cell)" @change="setCheck(cell, $event)">
+                          <select v-if="cell.check" :value="item.checks[cellKey(cell)] || ''" :disabled="!item.can_edit || !!busy" :aria-label="'检查 ' + cellKey(cell)" @change="setCheck(cell, $event)">
                             <option value="">请选择</option><option value="是">是</option><option value="否">否</option>
                           </select>
                           <input v-else-if="cell.editable" :value="item.values[cellKey(cell)] ?? cell.value ?? ''"
-                            :disabled="!editable || !!busy" :aria-label="'填写 ' + cellKey(cell)" @input="setCell(cell, $event)" />
+                            :disabled="!item.can_edit || !!busy" :aria-label="'填写 ' + cellKey(cell)" @input="setCell(cell, $event)" />
                           <template v-else-if="reviewCell(cell)">
                             <span>{{ reviewText(cell) }}</span>
                             <img v-if="isSignatureCell(cell) && isPng(item.signature)" class="signature-in-cell" :src="item.signature" alt="表内审核签名" />
@@ -124,11 +145,16 @@
               </div>
               <NAlert v-else type="warning" :bordered="false">未读取到该工具的原表，请刷新记录核对。</NAlert>
               <div class="review-line">
-                <span id="tool-qualified-label">检查结果合格</span>
-                <NRadioGroup class="qualified-options" :value="item.qualified === null ? null : item.qualified ? 'yes' : 'no'" size="small"
-                  aria-labelledby="tool-qualified-label" :disabled="!editable || !!busy" @update:value="item.qualified = $event === 'yes'">
-                  <NRadioButton value="yes">是</NRadioButton><NRadioButton value="no">否</NRadioButton>
+                <span id="tool-qualified-label">工具检查结果</span>
+                <NRadioGroup class="qualified-options" :value="item.outcome || null" size="small"
+                  aria-labelledby="tool-qualified-label" :disabled="!item.can_edit || !!busy" @update:value="item.outcome = $event">
+                  <NRadioButton value="normal">正常</NRadioButton><NRadioButton value="repair">转检修</NRadioButton><NRadioButton value="scrap">报废</NRadioButton>
                 </NRadioGroup>
+                <NInput v-if="item.outcome === 'repair' || item.outcome === 'scrap'" v-model:value="item.reason"
+                  placeholder="处理原因" aria-label="处理原因" :disabled="!item.can_edit || !!busy" />
+                <label v-if="item.outcome === 'scrap'">报废数量
+                  <input v-model.number="item.quantity" type="number" min="1" :disabled="!item.can_edit || !!busy" />
+                </label>
               </div>
             </template>
           </div>
@@ -137,6 +163,7 @@
             <ul class="archive-list"><li v-for="entry in session.items" :key="entry.id">{{ entry.asset.name }} · {{ scopeLabel(entry.asset.scope) }} · {{ entry.asset.model || '—' }}</li></ul>
             <p v-if="session.report_name" role="status">已保存报告 · {{ session.report_name }}</p>
             <div v-if="editable" class="workspace-actions">
+              <label>实际检测日期 <input v-model="actualDate" aria-label="实际检测日期" type="date" /></label>
               <input ref="reportInput" type="file" accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png" hidden @change="pickReport" />
               <NButton size="small" :disabled="!!busy" @click="reportInput?.click()">{{ session.report_name ? '更换报告' : '选择报告' }}</NButton>
               <span v-if="report">{{ report.name }}</span>
@@ -152,28 +179,26 @@
             <NButton v-if="editable && session.kind === 'self'" size="small" :disabled="!!busy || !dirty" :loading="busy === 'save'" @click="saveDraft">保存草稿</NButton>
             <NPopconfirm v-if="editable" positive-text="确认提交" negative-text="取消" @positive-click="submit">
               <template #trigger><NButton size="small" type="primary" :loading="busy === 'submit'"
-                :disabled="!!busy || !!report || (session.kind === 'external' && !session.report_name)">提交归档</NButton></template>
-              将提交本批 {{ session.items.length }} 台工具归档。
+                :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !actualDate))">{{ session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
+              {{ session.kind === 'self' ? '提交待填写工具，由楼长或授权人员审核。' : '提交送检报告归档。' }}
             </NPopconfirm>
             <NButton v-if="session.status === 'archived'" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
           </footer>
     </section>
     <NModal :show="!!confirmAction" preset="card" :title="confirmAction?.title" class="tool-workspace-dialog" @update:show="closeConfirm">
-      <p>{{ confirmAction?.text }}</p>
+      <p class="confirmation-summary">{{ confirmAction?.text }}</p>
       <template #footer><div class="workspace-actions dialog-actions">
         <NButton @click="closeConfirm(false)">取消</NButton><NButton type="primary" @click="runConfirm">确认</NButton>
       </div></template>
     </NModal>
-    <NModal v-model:show="batchOpen" preset="card" title="批量填写审核信息" class="tool-workspace-dialog">
+    <NModal v-model:show="batchOpen" preset="card" title="批量审核" class="tool-workspace-dialog">
       <div class="review-line">
-        <label>批量审核人 <NInput v-model:value="batch.reviewer" size="small" :input-props="{ 'aria-label': '批量审核人' }" /></label>
-        <label>批量审核时间 <input v-model="batch.reviewed_at" aria-label="批量审核时间" type="datetime-local" /></label>
         <NButton size="small" @click="openSignature(true)">{{ batch.signature ? '重签批量签名' : '绘制批量签名' }}</NButton>
         <img v-if="isPng(batch.signature)" class="signature-preview" :src="batch.signature" alt="批量审核签名" />
       </div>
-      <p class="workspace-muted">将覆盖本批所有工具的审核人、审核时间和签名。应用后可逐台调整。</p>
+      <p class="workspace-muted">审核 {{ reviewable.length }} 台获授权工具。已单独绘制的签名优先使用。</p>
       <template #footer><div class="workspace-actions dialog-actions"><NButton @click="batchOpen = false">取消</NButton>
-        <NButton type="primary" :disabled="!batch.reviewer.trim() || !batch.reviewed_at || !batch.signature" @click="applyBatchReview">覆盖并应用全批</NButton>
+        <NButton type="primary" :disabled="!batch.signature || !!busy" @click="applyBatchReview">审核通过</NButton>
       </div></template>
     </NModal>
     <NModal v-model:show="signatureOpen" preset="card" title="手绘审核签名" class="tool-workspace-dialog" @after-enter="resetCanvas">
@@ -192,7 +217,9 @@ import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadio
 import { requestBinaryJson, requestJson } from '../api/client';
 
 type Kind = 'self' | 'external';
-type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string;
+type OrderPlan = { mode: string; order_id: string; order_month: string; workspace_id: string;
+  legacy_receipts?: { session_id: string; date: string; remote_id: string; can_reconcile?: boolean }[] };
+type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
   self_cycle?: string | number; external_cycle?: string | number; template_id?: string; eligible_kinds?: Kind[];
   disabled_reason?: string };
 type Template = { id: string; name?: string; label?: string };
@@ -203,9 +230,18 @@ type Sheet = { name: string; columns: number[]; rows: { index: number; height: n
   images?: { address: string; src: string; offsetX: number; offsetY: number; width: number; height: number }[] };
 type Review = { reviewer: string; reviewed_at: string; signature: string };
 type Item = Review & { id: string; asset_id: string; asset: Asset; template?: { sheets: Sheet[]; schema?: { sheet: string; review_row: number; result_row: number } } | null;
-  values: Record<string, string>; checks: Record<string, string>; qualified: boolean | null; archive_status?: string; archive_error?: string };
+  values: Record<string, string>; checks: Record<string, string>; qualified: boolean | null; archive_status?: string; archive_error?: string;
+  outcome?: string; reason?: string; quantity?: number; order_revision?: number; can_edit?: boolean; can_review?: boolean;
+  review_note?: string; binding_error?: string; order_status?: string };
 type Summary = { id: string; kind: Kind; status: string; items?: Item[]; created_at?: string; item_count?: number; archived_count?: number };
-type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string };
+type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean };
+const emit = defineEmits<{ 'open-order': [id: string, month: string] }>();
+const props = defineProps<{ sessionId?: string; assetId?: string }>();
+const reviewSignatures = reactive<Record<string, string>>({});
+const reviewNote = ref('');
+const actualDate = ref('');
+const replacementTemplate = ref<string | null>(null);
+const savedItems = new Map<string, string>();
 type Board = { assets: Asset[]; templates: Template[]; sessions: Summary[]; warning?: string };
 
 const api = '/api/tool-self-check/workspace';
@@ -280,7 +316,9 @@ const sheetImages = computed(() => {
   });
 });
 const editable = computed(() => session.value?.status === 'draft' && session.value.can_edit);
-const dirty = computed(() => !!report.value || !!editable.value && JSON.stringify(fields()) !== saved.value);
+const reviewable = computed(() => session.value?.items.filter(entry => entry.can_review) || []);
+const dirty = computed(() => !!report.value || Object.keys(reviewSignatures).length > 0 ||
+  !!editable.value && JSON.stringify(fields()) !== saved.value);
 watch([allAssociated, templates], () => {
   if (!templates.value.some(template => template.id === templateChoice.value)) {
     templateChoice.value = allAssociated.value ? existingTemplate : null;
@@ -293,11 +331,13 @@ function scopeLabel(value: string) {
   return /^[A-Z]$/.test(value) ? value + '楼' : value;
 }
 function onlyCycle(asset: Asset): Kind | undefined {
-  if (!!asset.self_cycle === !!asset.external_cycle) return;
-  return asset.self_cycle ? 'self' : 'external';
+  const self = !!asset.self_cycle && asset.self_cycle !== '停用';
+  const external = !!asset.external_cycle && asset.external_cycle !== '停用';
+  if (self === external) return;
+  return self ? 'self' : 'external';
 }
 function eligible(asset: Asset) {
-  return onlyCycle(asset) === kind.value && (asset.eligible_kinds?.includes(kind.value) ?? true);
+  return asset.eligible_kinds?.includes(kind.value) ?? (onlyCycle(asset) === kind.value);
 }
 function reason(asset: Asset) {
   if (asset.disabled_reason) return asset.disabled_reason;
@@ -309,10 +349,12 @@ function cycleText(asset: Asset) {
   return (kind.value === 'self' ? asset.self_cycle : asset.external_cycle) || '—';
 }
 function sessionStatus(entry: Summary) {
-  return ({ opening: '继续打开', draft: '草稿', pending: '归档处理中', archived: '已归档' } as Record<string, string>)[entry.status] || entry.status;
+  return ({ opening: '模板关联待核对', draft: '草稿', review_pending: '待审核', pending: '归档处理中',
+    cancelled: '已取消', archived: '已归档' } as Record<string, string>)[entry.status] || entry.status;
 }
 function archiveStatus(status?: string) {
-  return ({ archived: '已归档', verifying: '正在核对归档结果', retrying: '归档失败，待重试', pending: '待归档' } as Record<string, string>)[status || ''] || '待归档';
+  return ({ archived: '已归档', verifying: '正在核对归档结果', retrying: '归档失败，待重试',
+    review_pending: '待审核', cancelled: '已取消', pending: '待处理' } as Record<string, string>)[status || ''] || '待处理';
 }
 function chooseKind(value: Kind) {
   if (value === kind.value) return;
@@ -386,11 +428,12 @@ function setCheck(cell: Cell, event: Event) {
 }
 function selectItem(id: string) {
   itemId.value = id;
+  replacementTemplate.value = null;
   sheetName.value = '';
 }
 function fields() {
-  return (session.value?.items || []).map(({ id, asset_id, values, checks, reviewer, reviewed_at, signature, qualified }) =>
-    ({ id, asset_id, values, checks, reviewer, reviewed_at, signature, qualified }));
+  return (session.value?.items || []).filter(entry => entry.can_edit).map(({ id, asset_id, values, checks, outcome, reason, quantity }) =>
+    ({ id, asset_id, values, checks, outcome, reason, quantity }));
 }
 function clearSession() {
   clearTimeout(pollTimer);
@@ -398,6 +441,9 @@ function clearSession() {
   report.value = undefined;
   itemId.value = '';
   sheetName.value = '';
+  actualDate.value = '';
+  reviewNote.value = '';
+  for (const id of Object.keys(reviewSignatures)) delete reviewSignatures[id];
 }
 function returnToSelection() {
   leave(() => {
@@ -414,8 +460,11 @@ function applySession(value: Session) {
   const opened = session.value?.id !== value.id;
   if (opened) clearSession();
   session.value = value;
+  if (value.actual) actualDate.value = value.actual;
   if (!value.items.some(entry => entry.id === itemId.value)) selectItem(value.items[0]?.id || '');
   saved.value = JSON.stringify(fields());
+  savedItems.clear();
+  for (const entry of fields()) savedItems.set(entry.id, JSON.stringify(entry));
   if (board.value) board.value = { ...board.value, sessions: [value, ...board.value.sessions.filter(entry => entry.id !== value.id)] };
   if (opened) void nextTick(() => {
     const heading = document.getElementById('tool-editor-title');
@@ -466,14 +515,18 @@ function requestOpen() {
   leave(() => {
     const choice = kind.value === 'self' && templateChoice.value !== existingTemplate ? templateChoice.value : null;
     const changed = choice ? selectedAssets.value.filter(asset => asset.template_id && asset.template_id !== choice) : [];
-    const run = () => void openSelection(choice);
-    if (changed.length) ask('更换所选工具的模板', `将覆盖以下工具的原模板关联：${changed.map(asset => asset.name + '（' + scopeLabel(asset.scope) + '）').join('、')}。`, run);
-    else run();
+    const temporary = selectedAssets.value.filter(asset => asset.plan?.mode === 'temporary');
+    const run = () => void openSelection(choice, temporary.length > 0);
+    ask('确认办理工单', [
+      ...selectedAssets.value.map(asset => `${scopeLabel(asset.scope)} · ${asset.name} · ${asset.plan?.mode === 'temporary' ?
+        '新增临时工单' : asset.plan?.mode === 'planned' ? '生成到期工单' : '接续原工单'}`),
+      ...(changed.length ? [`将更换 ${changed.length} 台工具的原模板关联。`] : []),
+    ].join('\n'), run);
   });
 }
-async function openSelection(template_id: string | null) {
+async function openSelection(template_id: string | null, allow_temporary: boolean) {
   await perform('open', async () => {
-    const payload = { asset_ids: [...selectedIds.value].sort(), template_id, kind: kind.value };
+    const payload = { asset_ids: [...selectedIds.value].sort(), template_id, kind: kind.value, allow_temporary };
     const key = JSON.stringify(payload);
     if (openOperation?.key !== key) openOperation = { key, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), part => part.toString(16).padStart(2, '0')).join('') };
     let result: Session;
@@ -486,8 +539,7 @@ async function openSelection(template_id: string | null) {
     openOperation = undefined;
     report.value = undefined;
     applySession(result);
-    if (template_id && board.value) board.value = { ...board.value, assets: board.value.assets.map(asset =>
-      payload.asset_ids.includes(asset.id) ? { ...asset, template_id } : asset) };
+    await readBoard();
   });
 }
 function openSaved(id: string) {
@@ -495,7 +547,10 @@ function openSaved(id: string) {
   leave(() => void perform('read', async () => {
     const path = api + '/' + encodeURIComponent(id);
     let data = await read(path) as Session;
-    if (data.status === 'opening') {
+    if (data.legacy_draft) {
+      ask('接续旧草稿', '保留已有原表内容。若没有可接续的工单，将新建临时工单。', () =>
+        void perform('read', async () => applySession(await post(path + '/resume', {allow_temporary: true}, 120000) as Session)));
+    } else if (data.status === 'opening') {
       try {
         data = await requestJson(path + '/resume', { method: 'POST', signal: lifetime.signal, timeoutMs: 120000 }) as Session;
       } catch (cause) {
@@ -505,6 +560,7 @@ function openSaved(id: string) {
     }
     clearSession();
     applySession(data);
+    if (props.assetId && data.items.some(entry => entry.id === props.assetId)) selectItem(props.assetId);
   }));
 }
 function refresh() {
@@ -519,7 +575,8 @@ function refresh() {
 }
 async function save() {
   if (!session.value || !editable.value || !dirty.value) return;
-  applySession(await post(sessionUrl.value + '/save', { revision: session.value.revision, items: fields() }) as Session);
+  const changed = fields().filter(entry => JSON.stringify(entry) !== savedItems.get(entry.id));
+  if (changed.length) applySession(await post(sessionUrl.value + '/save', { revision: session.value.revision, items: changed }) as Session);
 }
 function saveDraft() {
   return perform('save', save);
@@ -546,32 +603,44 @@ function submit() {
   if (!editable.value || report.value) return;
   return perform('submit', async () => {
     if (session.value?.kind === 'self') {
-      for (const entry of session.value.items) {
-        const missing = !entry.reviewer.trim() || !entry.reviewed_at || !isPng(entry.signature) || entry.qualified === null;
+      for (const entry of session.value.items.filter(entry => entry.can_edit)) {
+        const missing = !entry.outcome;
         const incomplete = !entry.template?.sheets.length || entry.template.sheets.some(sheet => sheet.rows.some(row =>
           row.cells.some(cell => cell.check && !['是', '否'].includes(entry.checks[sheet.name + '!' + cell.address] || ''))));
-        const inconsistent = entry.qualified === true && Object.values(entry.checks).includes('否');
+        const inconsistent = entry.outcome === 'normal' && Object.values(entry.checks).includes('否');
         if (missing || incomplete || inconsistent) {
           selectItem(entry.id);
-          throw new Error(`「${entry.asset.name}」${missing ? '请补齐审核人、时间、签名及检测结果。' : incomplete ? '请完成原表中的所有检查项。' : '检查项存在「否」，检测结果不能选「合格」。'}`);
+          throw new Error(`「${entry.asset.name}」${missing ? '请选择检查结果。' : incomplete ? '请完成原表中的所有检查项。' : '检查项存在「否」，检测结果不能选「正常」。'}`);
         }
       }
     }
     await save();
-    if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', { revision: session.value.revision }) as Session);
+    if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', { revision: session.value.revision, actual: actualDate.value }) as Session);
   });
 }
 function schedulePoll(delay = 3000) {
   clearTimeout(pollTimer);
   const current = session.value;
-  if (!current || current.status !== 'pending' || lifetime.signal.aborted) return;
+  if (!current || lifetime.signal.aborted || (!['pending', 'review_pending'].includes(current.status)
+      && !current.items.some(entry => ['review_pending', 'verifying', 'retrying'].includes(entry.archive_status || '')
+        || entry.order_status === 'submitted' && entry.archive_status === 'pending'))) return;
   pollTimer = setTimeout(async () => {
     if (busy.value) return schedulePoll();
     try {
-      const data = await read(api + '/' + encodeURIComponent(current.id)) as Session;
+      const data = await read(api + '/' + encodeURIComponent(current.id) + '/status') as Session;
       if (session.value?.id === current.id && !lifetime.signal.aborted) {
         error.value = '';
-        applySession(data);
+        if (data.status !== current.status || data.revision !== current.revision ||
+            current.items.some(entry => data.items.find(next => next.id === entry.id)?.order_revision !== entry.order_revision)) {
+          if (!dirty.value) applySession(await read(sessionUrl.value) as Session);
+          else schedulePoll();
+        } else {
+          current.items.forEach(entry => {
+            const status = data.items.find(next => next.id === entry.id);
+            if (status) Object.assign(entry, status);
+          });
+          schedulePoll();
+        }
       }
     } catch (cause) {
       if (session.value?.id === current.id && !lifetime.signal.aborted) {
@@ -587,9 +656,41 @@ function openBatchReview() {
   batchOpen.value = true;
 }
 function applyBatchReview() {
-  if (!editable.value || !batch.reviewer.trim() || !batch.reviewed_at || !batch.signature) return;
-  session.value?.items.forEach(entry => Object.assign(entry, batch, { reviewer: batch.reviewer.trim() }));
-  batchOpen.value = false;
+  if (batch.signature) void reviewItems(reviewable.value, true, batch.signature);
+}
+async function reviewItems(entries: Item[], approve: boolean, signature = '') {
+  await perform('review', async () => {
+    const items = entries.map(entry => ({asset_id: entry.id, revision: entry.order_revision,
+      ...(approve && reviewSignatures[entry.id] ? {signature: reviewSignatures[entry.id]} : {})}));
+    applySession(await post(sessionUrl.value + '/review', {action: approve ? 'approve' : 'reject',
+      note: reviewNote.value, signature, items}, 120000) as Session);
+    for (const entry of entries) delete reviewSignatures[entry.id];
+    reviewNote.value = '';
+    batchOpen.value = false;
+  });
+}
+function resolveBinding(remove: boolean) {
+  const current = item.value;
+  if (!current || !session.value) return;
+  const run = () => void perform('binding', async () => {
+    if (!session.value) return;
+    if (!remove) await readBoard(true);
+    const result = await post(sessionUrl.value + '/binding', {asset_id: current.id, revision: session.value.revision,
+      template_id: remove ? '' : replacementTemplate.value}, 120000) as Session & {removed?: boolean};
+    if (result.removed) clearSession();
+    else applySession(result);
+    await readBoard();
+  });
+  ask(remove ? '移出本批？' : '重新关联模板？', current.asset.name, run);
+}
+function reconcile(asset: Asset, id: string) {
+  const orderId = asset.plan?.order_id;
+  if (!orderId) return;
+  ask('核验旧归档？', `「${asset.name}」核验通过后将使用原飞书回执完成月度工单。`, () =>
+    void perform('reconcile', async () => {
+      await post(api + '/' + encodeURIComponent(id) + '/reconcile', { asset_id: asset.id, order_id: orderId });
+      await readBoard();
+    }));
 }
 function isPng(value: string) {
   return /^data:image\/png;base64,/.test(value);
@@ -645,7 +746,7 @@ function applySignature() {
   const value = signed.value ? pad.value?.toDataURL('image/png') : '';
   if (!value) return;
   if (signatureForBatch.value) batch.signature = value;
-  else if (item.value && editable.value) item.value.signature = value;
+  else if (item.value?.can_review) reviewSignatures[item.value.id] = value;
   signatureOpen.value = false;
 }
 
@@ -669,7 +770,10 @@ function leave(proceed: () => void) {
   else proceed();
 }
 defineExpose({ refresh, leave, busy, dirty });
-onMounted(() => void readBoard());
+onMounted(() => {
+  if (props.sessionId) openSaved(props.sessionId);
+  void readBoard();
+});
 onBeforeUnmount(() => {
   lifetime.abort();
   boardRead?.abort();
@@ -680,6 +784,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .tool-workspace { --tool-border: var(--v2-border, #dbe3e9); --tool-muted: var(--v2-muted, #617180); min-width: 0; }
 .tool-workspace > .n-alert { margin-bottom: 10px; }
+.confirmation-summary { max-height: min(55vh, 340px); overflow: auto; white-space: pre-line; }
 .workspace-grid { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 3fr) minmax(128px, 1.4fr); gap: 12px; align-items: start; }
 .workspace-grid.is-external { grid-template-columns: minmax(0, 1fr) minmax(138px, 22%); }
 .workspace-panel { min-width: 0; padding: 11px; border: 1px solid var(--tool-border); border-radius: 8px; background: var(--v2-card, var(--cf-surface, transparent)); }

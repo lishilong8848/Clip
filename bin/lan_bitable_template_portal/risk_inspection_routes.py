@@ -124,7 +124,10 @@ def install_risk_inspection_routes(app, controller, runtime):
         if is_cabinet_guest(session):
             raise RiskError('访客不能使用风险排查。', 403)
         user = runtime.auth_manager.public_user(session)
-        return actor_for(str(user.get('open_id') or ''), str(user.get('name') or ''))
+        actor = actor_for(str(user.get('open_id') or ''), str(user.get('name') or ''))
+        if session.get('impersonation') or session.get('source') == 'admin_impersonation':
+            actor['_tool_impersonation'] = True
+        return actor
 
     def same_origin(request):
         source = request.headers.get('origin') or request.headers.get('referer')

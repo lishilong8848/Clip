@@ -37,12 +37,16 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                             'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
                             'Cache-Control': 'no-store',
                         })
-                    return response(await asyncio.to_thread(svc.workspace_get, actor, identity))
+                    reader = svc.workspace_status if path.endswith('/status') else svc.workspace_get
+                    return response(await asyncio.to_thread(reader, actor, identity))
                 same_origin(request)
                 if path == 'workspace/refresh':
                     return response(await asyncio.to_thread(svc.workspace_refresh, actor))
                 if path.endswith('/resume'):
-                    return response(await asyncio.to_thread(svc.workspace_resume, actor, identity))
+                    body = await controller._read_json_request(request, max_bytes=4096) if request.headers.get('content-type') else {}
+                    if not isinstance(body, dict):
+                        raise RiskError('工具办理请求格式无效。')
+                    return response(await asyncio.to_thread(svc.workspace_resume, actor, identity, body))
                 if path.endswith('/report'):
                     revision = request.query_params.get('revision', '')
                     if not revision.isascii() or not revision.isdecimal() or len(revision) > 9:
@@ -63,6 +67,12 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     return response(await asyncio.to_thread(svc.workspace_open, actor, body))
                 if path.endswith('/save'):
                     return response(await asyncio.to_thread(svc.workspace_save, actor, identity, body))
+                if path.endswith('/review'):
+                    return response(await asyncio.to_thread(svc.workspace_review, actor, identity, body))
+                if path.endswith('/binding'):
+                    return response(await asyncio.to_thread(svc.workspace_resolve_binding, actor, identity, body))
+                if path.endswith('/reconcile'):
+                    return response(await asyncio.to_thread(svc.workspace_reconcile, actor, identity, body))
                 return response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body))
             if request.method == 'GET':
                 if not path:
@@ -159,7 +169,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),
                           ('/templates/{identity}/delete', ['POST']),
                           ('/workspace', ['GET']), ('/workspace/open', ['POST']), ('/workspace/refresh', ['POST']),
-                          ('/workspace/{identity}', ['GET']), ('/workspace/{identity}/save', ['POST']),
+                          ('/workspace/{identity}', ['GET']), ('/workspace/{identity}/status', ['GET']),
+                          ('/workspace/{identity}/review', ['POST']), ('/workspace/{identity}/binding', ['POST']),
+                          ('/workspace/{identity}/reconcile', ['POST']),
+                          ('/workspace/{identity}/save', ['POST']),
                           ('/workspace/{identity}/resume', ['POST']),
                           ('/workspace/{identity}/submit', ['POST']), ('/workspace/{identity}/report', ['POST']),
                           ('/workspace/{identity}/download', ['GET'])):

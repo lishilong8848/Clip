@@ -15,9 +15,9 @@ from bin.lan_bitable_template_portal.tool_management_cloud import DETAIL, INVENT
 class LedgerFixture:
     def __init__(self):
         self.assets = [{'id': f'recTool{index}', 'name': f'验收工具{index}', 'scope': 'A', 'location': '工具间',
-                        'model': '测试型号', 'quantity': 2, 'retired': False, 'self_cycle': '每月',
+                        'model': '测试型号', 'quantity': 2, 'retired': False, 'self_cycle': '每月' if index else '',
                         'external_cycle': '一年' if index == 0 else '', 'self_last': '', 'external_last': ''}
-                       for index in range(3)]
+                       for index in range(4)]
         self.writes = []
         self.files = []
 
@@ -45,7 +45,7 @@ class ToolManagementTest(TestCase):
             self.assertEqual(len(board['orders']),4)
             self.assertTrue(board['can_manage_templates'])
             self.assertTrue(board['can_download_month'])
-            self.assertEqual(len(self.svc.inventory(who)['items']),3)
+            self.assertEqual(len(self.svc.inventory(who)['items']),4)
             self.assertTrue(all(row['can_claim'] for row in board['orders']))
             self.assertFalse(can_scope(who,'A'),'工具专用授权不能改变专项排查权限')
         ordinary=self.full_actor('李世龙') | {'_tool_management_full_access':False}
@@ -261,7 +261,9 @@ class ToolManagementTest(TestCase):
             self.svc.delete_template(self.admin, identity, version)
 
     def test_manual_order_creation_and_safe_soft_delete(self):
-        asset = self.cloud.assets[1]
+        asset = self.cloud.assets[0] | {'id': 'recManual'}
+        self.cloud.assets.append(asset)
+        self.svc.refresh()
         self.assertTrue(any(item['id'] == asset['id'] for item in self.svc.order_candidates(self.leader)['items']))
         order = self.svc.create_order(self.leader, {'asset_id': asset['id'], 'kind': 'external'})
         self.assertTrue(order['can_delete'])
@@ -279,16 +281,19 @@ class ToolManagementTest(TestCase):
         first_day = clock().date().replace(day=1)
         due = (first_day + timedelta(days=14)).isoformat()
         asset = self.cloud.assets[0] | {'id': 'recBatch', 'self_first': due, 'external_first': due}
+        self_asset = asset | {'id': 'recBatchSelf', 'self_cycle': '每月', 'external_cycle': ''}
+        conflict = asset | {'id': 'recConflict', 'self_cycle': '每月'}
         next_month = (first_day + timedelta(days=32)).replace(day=1).isoformat()
         future = asset | {'id': 'recFuture', 'self_first': next_month, 'external_first': next_month}
         other_scope = asset | {'id': 'recOther', 'scope': 'B'}
-        self.cloud.assets.extend([asset, future, other_scope])
+        self.cloud.assets.extend([asset, self_asset, conflict, future, other_scope])
         self.svc.refresh()
 
         plan = self.svc.planned_order_candidates(self.leader)
         self.assertEqual(plan['month'], self.month)
         self.assertEqual({(row['asset_id'], row['kind'], row['due']) for row in plan['items']},
-                         {('recBatch', 'self', due), ('recBatch', 'external', due)})
+                         {('recBatchSelf', 'self', due), ('recBatch', 'external', due)})
+        self.assertEqual(plan['excluded']['cycle_conflict'], 1)
         selection = [{'asset_id': row['asset_id'], 'kind': row['kind']} for row in plan['items']]
         body = {'month': self.month, 'orders': selection}
         for invalid in ('recFuture', 'recOther'):

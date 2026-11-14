@@ -125,6 +125,28 @@ class ToolWorkspaceCloudTests(unittest.TestCase):
         self.transport = FakeFeishu()
         self.tool = ToolCloud(self.transport)
 
+    def test_monthly_linked_write_rechecks_returned_id_when_search_is_delayed(self):
+        order = {'id': 'order1', 'outcome': 'normal', 'due': DAY, 'actual': DAY,
+                 'reason': '', 'resolution': '', 'scrap_reason': ''}
+        asset = {'id': 'recAsset', 'scope': 'D'}
+        job = {'verify_write': True, 'remote_id': '', 'file_token': '', 'attempted_at': 0,
+               'record_name': '记录.xlsx', 'record_content': WORKBOOK,
+               'save_attempt': lambda value: job.update(attempted_at=value),
+               'save_candidate': lambda value: job.update(candidate_id=value)}
+        def fail_read(*_):
+            raise RiskError('写入后暂时无法回读', 503)
+        self.transport.read_hook = fail_read
+        save_file = lambda value: job.update(file_token=value)
+        with self.assertRaisesRegex(RiskError, '写入后暂时无法回读'):
+            self.tool.write('maintenance', order, asset, job, lambda _: {}, save_file)
+        self.assertEqual(job['remote_id'], '')
+        self.assertEqual(job['candidate_id'], 'recLedger')
+        self.transport.read_hook = None
+        self.transport.hide_search = True
+        self.assertEqual(self.tool.write('maintenance', order, asset, job, lambda _: {}, save_file), 'recLedger')
+        self.assertEqual(len(self.transport.creates), 1)
+        self.assertEqual(len(self.transport.uploads), 1)
+
     def test_inventory_and_template_catalog_omit_invalid_links_and_placeholders(self):
         self.transport.records[(INVENTORY, 'recBadLink')] = {
             '楼栋': 'D楼', '工具名称': '旧工具', '一级分类': 'B工具类', TEMPLATE_LINK: 'recOne, recTwo',

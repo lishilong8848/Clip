@@ -171,10 +171,10 @@ class ToolCloud:
                 if isinstance(person, dict) and re.fullmatch(r'ou_[A-Za-z0-9]+', str(person.get('id', '')))})
         return result, leaders
 
-    def _read_record(self, path, identity):
+    def _read_record(self, path, identity, **kwargs):
         if not record_id(identity):
             raise RiskError('飞书返回无效的工具记录编号，请核对原任务。', 503)
-        data = self.cloud.request('GET', path + '/records/' + identity)
+        data = self.cloud.request('GET', path + '/records/' + identity, **kwargs)
         row = data.get('record')
         if (not isinstance(row, dict) or row.get('record_id') != identity
                 or not isinstance(row.get('fields'), dict)):
@@ -492,17 +492,58 @@ class ToolCloud:
         if missing:
             self.fields.pop(dest, None)
             raise RiskError(f'{DESTINATIONS[dest]}缺少字段：' + '、'.join(sorted(missing)) + '。', 503)
-        remote_id = job['remote_id'] or self.find(path, key)
+        found = self.find(path, key) if job.get('verify_write') or not job['remote_id'] else ''
+        remote_id = job['remote_id'] or job.get('candidate_id') or found
+        if found and remote_id != found:
+            raise RiskError('飞书工单流水号与本地回执冲突，等待核对。', 409)
+        if job.get('verify_write') and remote_id:
+            existing = self._read_record(path, remote_id, params={'user_id_type': 'open_id'})['fields']
+            if self._matches_order_fields(existing, fields, schema):
+                return remote_id
+            if not job['remote_id'] or plain(existing.get(KEY)) != key:
+                raise RiskError('原工单已存在，但字段或附件未核验一致。', 503)
         params = {'user_id_type': 'open_id'}
         if remote_id:
             result = self.cloud.request('PUT', path + '/records/' + remote_id, params=params, json={'fields': fields})
         else:
+            if job.get('verify_write'):
+                attempted_at = job['attempted_at']
+                if attempted_at and not 0 <= time.time() - attempted_at < WORKSPACE_CREATE_RETRY_SECONDS:
+                    raise RiskError('原工单写入结果待核验，后续只回读原流水号。', 503)
+                if not attempted_at:
+                    job['save_attempt'](time.time())
             params['client_token'] = _stable_uuid4_client_token('tool-management:' + key)
             result = self.cloud.request('POST', path + '/records', params=params, json={'fields': fields})
-        recorded = (result.get('record') or {}).get('record_id')
+        recorded = record_id((result.get('record') or {}).get('record_id'))
         if not recorded or remote_id and remote_id != recorded:
             raise RiskError('飞书未确认工具台账写入，保留原任务重试。', 503)
+        if job.get('verify_write'):
+            if not remote_id:
+                job['save_candidate'](recorded)
+            readback = self._read_record(path, recorded, params=params if remote_id else {'user_id_type': 'open_id'})
+            if not self._matches_order_fields(readback['fields'], fields, schema):
+                raise RiskError('飞书台账字段或附件尚未回读一致，等待核对。', 503)
         return recorded
+
+    @staticmethod
+    def _matches_order_fields(actual, expected, schema):
+        for name, value in expected.items():
+            current = actual.get(name)
+            kind = schema[name]['type']
+            if kind == 17:
+                matches = _attachment_tokens(current) == _attachment_tokens(value)
+            elif kind in (18, 21):
+                matches = sorted(_link_ids(current)) == sorted(_link_ids(value))
+            elif kind == 11:
+                matches = isinstance(current, list) and sorted(
+                    str(person.get('id') or person.get('open_id') or '') if isinstance(person, dict) else ''
+                    for person in current) == sorted(
+                    person['id'] for person in value)
+            else:
+                matches = plain(current) == plain(value)
+            if not matches:
+                return False
+        return True
 
 
 def run_tool_jobs(service, stop):

@@ -77,7 +77,7 @@ export interface OrderCreationPlan {
   inventory_at?: string;
   inventory_error?: string;
   tool_count?: number;
-  excluded?: Partial<Record<'created'|'deleted'|'unfinished'|'later'|'unscheduled'|'unavailable',number>>;
+  excluded?: Partial<Record<'created'|'deleted'|'unfinished'|'later'|'unscheduled'|'unavailable'|'cycle_conflict',number>>;
 }
 </script>
 
@@ -106,6 +106,7 @@ const exclusionReasons = computed(() => [
   { label:'上期工单未完成', count:props.plan.excluded?.unfinished, unit:'项' },
   { label:'以后月份到期', count:props.plan.excluded?.later, unit:'项' },
   { label:'未识别或已停用的周期', count:props.plan.excluded?.unscheduled, unit:'项' },
+  { label:'维护与送检周期冲突', count:props.plan.excluded?.cycle_conflict, unit:'台' },
   { label:'报废、检修中或数量无效', count:props.plan.excluded?.unavailable, unit:'台' },
 ].filter(reason=>reason.count));
 const scopeOptions = computed(() => [{ value: 'all', label: '全部楼栋' },

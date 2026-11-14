@@ -23,7 +23,8 @@
           </NButton>
         </nav>
         <NAlert v-if="board.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
-        <ToolWorkspace v-if="view === 'workspace'" ref="workspace" />
+        <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
+          :session-id="linkedSession" :asset-id="linkedAsset" @open-order="openWorkspaceOrder" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
@@ -347,6 +348,7 @@ interface Entry {
   template_values?:Record<string,string>;
 }
 interface Order {
+  workspace_id?: string; asset_id?: string;
   id: string; month: string; scope: string; revision: number; status: 'pending' | 'review_pending' | 'submitted' | 'cancelled'; owner_name: string;
   submitted_at: string | null; can_claim: boolean; can_edit: boolean; can_release: boolean;
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
@@ -369,6 +371,8 @@ const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检�
   scrapped: '已批准报废', rejected: '报废未通过' };
 const view = ref('workspace');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
+const linkedSession = ref('');
+const linkedAsset = ref('');
 const kindFilter = ref('all');
 const stateFilter = ref('all');
 const search = ref('');
@@ -657,6 +661,12 @@ async function deleteSelectedOrders() {
 }
 async function openOrder(row: Order, claim = false) {
   if (busy.value) return;
+  if (row.workspace_id && (row.status === 'pending' || row.status === 'review_pending' || view.value === 'orders')) {
+    linkedSession.value = row.workspace_id;
+    linkedAsset.value = row.asset_id || '';
+    view.value = 'workspace';
+    return;
+  }
   const opening = !order.value;
   if (opening) {
     const host = scrollHost();
@@ -673,6 +683,14 @@ async function openOrder(row: Order, claim = false) {
     }
   } catch (value) { fail(value); }
   finally { busy.value = false; }
+}
+function openWorkspaceOrder(id: string, orderMonth: string) {
+  if (!id || busy.value) return;
+  workspace.value?.leave(() => {
+    month.value = orderMonth;
+    view.value = 'orders';
+    void openOrder({id} as Order);
+  });
 }
 function closeOrder() {
   order.value = undefined;
@@ -695,7 +713,11 @@ function refresh() {
 }
 function selectView(next: string) {
   if (next === view.value) return;
-  const proceed = () => { view.value = next; };
+  const proceed = () => {
+    linkedSession.value = linkedAsset.value = '';
+    view.value = next;
+    if (next === 'orders' || next === 'followups') void loadBoard();
+  };
   if (workspace.value) workspace.value.leave(proceed);
   else proceed();
 }
