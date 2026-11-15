@@ -88,8 +88,11 @@ def archived_devices(book, scope):
                 name, order, profession, result, note):
             raise RiskError('同一设备的历史结论不一致，请先核对附件。', 409)
         value_type = '状态' if '状态测点' in str(status or '') or re.search(r'运行状态|启停状态|开关状态|设备状态|工作状态|报警状态|告警状态|有无滴漏', str(parameter or '')) else '数值'
+        mode_cell = value_type == '状态' and ('制冷模式' in str(status or '') or bool(re.fullmatch(
+            r'(?:[1-6]号板换\s*/\s*)?(?:冷机模式|预冷模式|自然冷(?:却)?模式)', str(parameter or ''))))
         device['rows'].append({'id': str(number), 'name': parameter, 'location': location, 'source': source, 'value_type': value_type,
                                'reference': reference, 'value': '' if value is None else str(value),
+                               'mode_cell': mode_cell,
                                'read_only': status in ('配置停用', '无可填参数') or not parameter})
     if not devices:
         raise RiskError('归档附件没有可核验的现场设备。', 422)
@@ -112,7 +115,9 @@ def edit_archived_devices(book, devices, changes, actor):
         if result not in ('', '正常', '异常') or not valid_cell_text(note, 1000):
             raise RiskError(f'请核对「{device["name"]}」的历史记录。', 400)
         state_rows = {row['id'] for row in device['rows'] if row.get('value_type') == '状态'}
-        if any(value.strip() not in ('', '√', '×', '△') for key, value in values.items() if key in state_rows):
+        mode_rows = {row['id'] for row in device['rows'] if row.get('mode_cell')}
+        if any(value.strip() not in ('', '√', '×', '△') and not (key in mode_rows and value.strip() == '/')
+               for key, value in values.items() if key in state_rows):
             raise RiskError(f'「{device["name"]}」的运行状态需选择 √、× 或 △。', 400)
         if any(value.strip() == '×' for key, value in values.items() if key in state_rows) and not note.strip():
             raise RiskError(f'「{device["name"]}」有异常状态，请填写备注。', 400)

@@ -8,11 +8,11 @@
     <div v-else-if="recordId && !detail.record_id" class="water-editor-loading">
       <CircleAlert :size="28" /><strong>记录读取失败</strong><p>{{ error }}</p><NButton @click="$emit('reload')">重新读取记录</NButton>
     </div>
-    <form v-else class="water-editor-form" novalidate @submit.prevent="$emit('save')">
+    <NForm v-else :model="form" :disabled="disabled" label-placement="top" :show-require-mark="true" class="water-editor-form" novalidate :on-submit="submit">
       <div class="water-editor-body">
         <p v-if="recordId && !admin" class="water-policy" :class="{locked}">{{ locked ? '本条记录仅可查看，修改次数已用完或尚未取得修改权限。' : `还可修改 ${detail.edit_policy?.remaining_edits ?? '—'} 次，保存成功后计为一次。` }}</p>
         <p v-if="uncertain" class="water-save-uncertain" aria-live="assertive">上次保存结果尚未确认。请继续原任务核验，当前填写已保留。</p>
-        <NForm :model="form" :disabled="disabled" label-placement="top" :show-require-mark="true" class="water-form-grid">
+        <div class="water-form-grid">
           <NFormItem label="统计日期" required data-water-field="statisticDate" :validation-status="errors.statisticDate ? 'error' : undefined" :feedback="errors.statisticDate">
             <label class="water-date-label"><span class="water-sr-only">统计日期</span><NDatePicker v-model:formatted-value="form.statisticDate" type="date" value-format="yyyy-MM-dd" :disabled="disabled" @update:formatted-value="changed('statisticDate')" /></label>
           </NFormItem>
@@ -28,13 +28,13 @@
           <NFormItem label="本次水表读数" required class="water-reading" data-water-field="meterValue" :validation-status="errors.meterValue ? 'error' : undefined" :feedback="errors.meterValue">
             <NInput :value="numberText.meterValue" :disabled="disabled" placeholder="填写水表读数" :input-props="{'aria-label':'本次水表读数','inputmode':'decimal'}" @update:value="value => numberChanged('meterValue', value)" />
           </NFormItem>
-        </NForm>
+        </div>
         <p v-if="recordId" class="water-reference-label">原记录参考 · 修改后的计算结果以保存后为准</p>
         <dl v-if="recordId" class="water-previous">
           <div><dt>上期日期</dt><dd>{{ detail.previous_date_text || '—' }}</dd></div>
           <div><dt>上期读数</dt><dd>{{ waterNumberText(detail.previous_value_text) }}</dd></div>
-          <div><dt>公式耗水量</dt><dd>{{ waterNumberText(detail.computed_usage) }} <small>t</small></dd></div>
-          <div><dt>同比</dt><dd>{{ ratio(detail.yoy_ratio) }}</dd></div>
+          <div><dt>公式耗水量</dt><dd>{{ hasRecordedReading ? waterNumberText(detail.computed_usage) : '—' }} <small v-if="hasRecordedReading">t</small></dd></div>
+          <div><dt>同比</dt><dd>{{ hasRecordedReading ? ratio(detail.yoy_ratio) : '—' }}</dd></div>
         </dl>
         <div class="water-correction">
           <NButton data-v2-navigation text :aria-expanded="correctionOpen" @click="correctionOpen = !correctionOpen"><ChevronDown :size="15" :class="{rotated:correctionOpen}" />{{ form.correctedUsage === null ? '修正当期耗水量（选填）' : `修正耗水量 ${waterNumberText(form.correctedUsage)} t` }}</NButton>
@@ -72,7 +72,7 @@
         <NButton v-if="uncertain" type="primary" :loading="saving" :disabled="saving" @click="$emit('retry-save')">继续原保存任务</NButton>
         <NButton v-else type="primary" attr-type="submit" :loading="saving" :disabled="saving || uploading || locked || !dirty"><Save :size="16" />{{ recordId ? '保存记录' : '新增记录' }}</NButton>
       </footer>
-    </form>
+    </NForm>
   </section>
 </template>
 <script setup lang="ts">
@@ -101,6 +101,7 @@ function numberChanged(field: NumberField, value: string) {
   changed(field);
 }
 const disabled=computed(()=>props.locked||props.saving||props.uncertain);
+const hasRecordedReading=computed(()=>waterNumber(props.detail.meter_value)!==null);
 const readyPhotoCount=computed(()=>props.retained.length+props.photos.filter(photo=>photo.uploadId).length);
 const failedPhotos=computed(()=>props.photos.some(photo=>photo.error));
 watch(()=>props.recordId,()=>correctionOpen.value=props.form.correctedUsage!==null);
@@ -110,6 +111,7 @@ const selectOptions=(values:unknown)=>Array.isArray(values)?values.map(value=>({
 const ratio=(value:unknown)=>waterNumber(value)===null?'—':waterNumberText(Number(value)*100,1)+'%';
 function imageUrl(id:string,variant:string){return '/api/capacity/water/images/'+encodeURIComponent(id)+'?'+new URLSearchParams({scope:props.scope,variant});}
 function changed(field:string){emit('change',field);}
+function submit(event:Event){event.preventDefault();if(!disabled.value&&!props.uploading&&props.dirty)emit('save');}
 function filesChanged(event:Event){const input=event.target as HTMLInputElement;emit('upload',[...input.files||[]]);input.value='';}
 function drop(event:DragEvent){dragging.value=false;if(!disabled.value&&!props.uploading)emit('upload',[...event.dataTransfer?.files||[]]);}
 function paste(event:ClipboardEvent){if(event.defaultPrevented)return;const files=[...event.clipboardData?.files||[]];if(files.length&&!disabled.value&&!props.uploading){event.preventDefault();emit('upload',files);}}

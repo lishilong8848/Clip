@@ -5,7 +5,7 @@ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from .daily_inspection_form_fields import remark_positions
 from .daily_inspection_history import (REVIEW_SHEET, archived_devices, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_SHEET, cell_excluded,
-                                        original_templates, refresh_archived_original, round_rows)
+                                        original_templates, refresh_archived_original, round_rows, with_cell_exemptions)
 from .risk_inspection import RiskError
 
 
@@ -19,11 +19,11 @@ def form_index(book):
     return {(row[1], row[2]): row[0] for row in book[ORIGINAL_INDEX_SHEET].iter_rows(min_row=2, values_only=True) if row[0]}
 
 
-def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=None):
+def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=None, exemptions=None):
     if not isinstance(edits, list) or not edits or len(edits) > 2000:
         raise RiskError('请提交有效的单元格修改。', 400)
     index = form_index(book)
-    layouts = {(t['name'], s['name']): s for t in original_templates() if t['scope'] == scope
+    layouts = {(t['name'], s['name']): s for t in with_cell_exemptions(original_templates(), exemptions) if t['scope'] == scope
                for s in t['sheets']} if enforce_exclusions or slot else {}
     layout_slots = {}
     remarks = remark_positions(scope) if enforce_exclusions or slot else ()

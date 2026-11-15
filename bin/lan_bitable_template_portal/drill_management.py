@@ -480,10 +480,21 @@ def _drawing_relationship_path(drawing_path: str) -> str:
     return posixpath.join(posixpath.dirname(drawing_path), "_rels", posixpath.basename(drawing_path) + ".rels")
 
 
+def _resolve_sheet_name(names: list[str], requested: str) -> str:
+    stripped = requested.strip()
+    matches = [name for name in names if name == requested]
+    if not matches and stripped:
+        matches = [name for name in names if name.strip() == stripped]
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise DrillError(f"工作表“{requested}”匹配到多个页签，请选择工作簿中的完整名称。")
+    raise DrillError(f"工作簿中找不到工作表“{requested or '未选择'}”，请重新选择。")
+
+
 def _parse_workbook(
     path: Path, *, include_assets_for: set[str] | None = None
 ) -> dict[str, Any]:
-    asset_sheets = {str(item) for item in (include_assets_for or set())}
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         strings = _shared_strings(archive)
@@ -491,14 +502,18 @@ def _parse_workbook(
         workbook_root = ET.fromstring(archive.read("xl/workbook.xml"))
         workbook_rels = ET.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
         workbook_relations = _relationship_map(workbook_rels)
-        sheets: list[dict[str, Any]] = []
+        sheet_refs: list[tuple[str, str]] = []
         for sheet_node in workbook_root.findall(f".//{{{_MAIN_NS}}}sheet"):
             name = str(sheet_node.attrib.get("name") or "Sheet")
             rel_id = str(sheet_node.attrib.get(f"{{{_DOC_REL_NS}}}id") or "")
             target = workbook_relations.get(rel_id, "")
             sheet_path = _resolve_zip_target("xl/workbook.xml", target)
-            if sheet_path not in names:
-                continue
+            if sheet_path in names:
+                sheet_refs.append((name, sheet_path))
+        sheet_names = [name for name, _ in sheet_refs]
+        asset_sheets = {_resolve_sheet_name(sheet_names, name) for name in (include_assets_for or ())}
+        sheets: list[dict[str, Any]] = []
+        for name, sheet_path in sheet_refs:
             root = ET.fromstring(archive.read(sheet_path))
             cells: dict[str, str] = {}
             cell_styles: dict[str, dict[str, Any]] = {}
@@ -909,20 +924,26 @@ def detect_drill_configuration(workbook: dict[str, Any]) -> dict[str, Any]:
 
 
 def _find_sheet(workbook: dict[str, Any], name: str) -> dict[str, Any]:
-    matches = [sheet for sheet in workbook.get("sheets") or [] if str(sheet.get("name") or "") == str(name or "")]
-    if len(matches) != 1:
-        raise DrillError(f"工作簿中不存在唯一的工作表“{name or '未选择'}”。")
-    return matches[0]
+    sheets = workbook.get("sheets") or []
+    resolved = _resolve_sheet_name([sheet["name"] for sheet in sheets], name)
+    return next(sheet for sheet in sheets if sheet["name"] == resolved)
+
+
+def _find_drill_sheets(workbook: dict[str, Any], configuration: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    record_name = str(configuration.get("record_sheet") or "")
+    assessment_name = str(configuration.get("assessment_sheet") or "")
+    if not record_name.strip() or not assessment_name.strip():
+        raise DrillError("演练记录表和评估表必须选择两个不同的工作表。")
+    record = _find_sheet(workbook, record_name)
+    assessment = _find_sheet(workbook, assessment_name)
+    if record is assessment or (record.get("path") and record["path"] == assessment.get("path")):
+        raise DrillError("演练记录表和评估表必须选择两个不同的工作表。")
+    return record, assessment
 
 
 def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, Any]) -> dict[str, Any]:
     config = copy.deepcopy(configuration or {})
-    record_sheet = str(config.get("record_sheet") or "").strip()
-    assessment_sheet = str(config.get("assessment_sheet") or "").strip()
-    if not record_sheet or not assessment_sheet or record_sheet == assessment_sheet:
-        raise DrillError("演练记录表和评估表必须选择两个不同的工作表。")
-    record = _find_sheet(workbook, record_sheet)
-    assessment = _find_sheet(workbook, assessment_sheet)
+    record, assessment = _find_drill_sheets(workbook, config)
     record_detection_error = ""
     try:
         detected_record = _detect_record_configuration(record)
@@ -1145,8 +1166,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
                 f"步骤预估时间合计为 {configured_minutes} 分钟，与预估总用时 {predicted_minutes} 分钟不一致。"
             )
     return {
-        "record_sheet": record_sheet,
-        "assessment_sheet": assessment_sheet,
+        "record_sheet": record["name"],
+        "assessment_sheet": assessment["name"],
         "mapping": {**mapping, "assessment": assessment_mapping},
         "steps": normalized_steps,
         "predicted_total_text": predicted_text,
@@ -2010,8 +2031,7 @@ def _patch_workbook(
 ) -> None:
     workbook = _parse_workbook(source_path)
     configuration = definition["configuration"]
-    record_sheet = _find_sheet(workbook, configuration["record_sheet"])
-    assessment_sheet = _find_sheet(workbook, configuration["assessment_sheet"])
+    record_sheet, assessment_sheet = _find_drill_sheets(workbook, configuration)
     replacements: dict[str, bytes] = {}
     additions: dict[str, bytes] = {}
     with zipfile.ZipFile(source_path) as archive:
@@ -2557,6 +2577,16 @@ class DrillManagementService:
         configuration = result.get("configuration")
         if not isinstance(configuration, dict) or not configuration.get("record_sheet") or not configuration.get("assessment_sheet"):
             return result
+        sheets = result.get("sheets") or []
+        sheet_names = {sheet["name"] for sheet in sheets}
+        if sheets and (configuration["record_sheet"] not in sheet_names or configuration["assessment_sheet"] not in sheet_names):
+            try:
+                record, assessment_sheet = _find_drill_sheets(result, configuration)
+            except DrillError:
+                pass
+            else:
+                configuration["record_sheet"] = record["name"]
+                configuration["assessment_sheet"] = assessment_sheet["name"]
         mapping = configuration.get("mapping")
         if not isinstance(mapping, dict):
             return result
@@ -2573,8 +2603,7 @@ class DrillManagementService:
             cached = {}
             try:
                 workbook = _parse_workbook(self._source_path(result))
-                record = _find_sheet(workbook, str(configuration.get("record_sheet") or ""))
-                review = _find_sheet(workbook, str(configuration.get("assessment_sheet") or ""))
+                record, review = _find_drill_sheets(workbook, configuration)
                 labels = {
                     "scenario": (record, ("模拟场景（包括故障点与故障现象）", "模拟场景", "故障点与故障现象")),
                     "reviewer_signature": (record, ("演练审核人签字", "审核人签字")),
@@ -2995,8 +3024,9 @@ class DrillManagementService:
             },
         )
         derived = _derived_values(definition, execution, allow_incomplete=not require_complete)
-        record = _sheet_preview_model(_find_sheet(workbook, definition["configuration"]["record_sheet"]), sheet_type="record", derived=derived, generated_current=current)
-        assessment = _sheet_preview_model(_find_sheet(workbook, definition["configuration"]["assessment_sheet"]), sheet_type="assessment", derived=derived, generated_current=current)
+        record_sheet, assessment_sheet = _find_drill_sheets(workbook, configuration)
+        record = _sheet_preview_model(record_sheet, sheet_type="record", derived=derived, generated_current=current)
+        assessment = _sheet_preview_model(assessment_sheet, sheet_type="assessment", derived=derived, generated_current=current)
         return definition, execution, derived, {"record": record, "assessment": assessment}
 
     def preview_model(self, drill_id: str, scope: str, sheet_type: str) -> dict[str, Any]:

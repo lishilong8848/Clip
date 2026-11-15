@@ -21,10 +21,11 @@
       <footer v-if="!groupErrors(kind)&&(hasMore(kind)||groupNotes(kind))"><span>{{groupNotes(kind)}}</span><NButton v-if="hasMore(kind)" size="small" secondary :loading="states[kind]?.loading" @click="loadGroup(kind)">加载更多</NButton></footer>
     </section>
     <NModal v-if="active" :show="true" :mask-closable="false" :close-on-esc="false" :auto-focus="false" @update:show="shown=>{if(!shown)closeHandler()}">
-      <section class="v2-todo-handler" role="dialog" aria-modal="true" :aria-label="'办理：'+active.title">
+      <!-- Naive UI detects the focus boundary using the modal's first div. -->
+      <div class="v2-todo-handler" role="dialog" aria-modal="true" :aria-label="'办理：'+active.title">
         <header><div><small>{{label(active.kind)}} · {{scopeText(active.scope)}}</small><h2>{{active.title}}</h2></div><NButton data-v2-navigation quaternary circle aria-label="关闭待办办理" @click="closeHandler"><X :size="22" /></NButton></header>
         <div class="v2-todo-handler-body"><ModuleWidget :key="active.key" :item="handlerWidget!" :user="user" :scopes="scopes" :scope="scope" :initial-url="active.url" /></div>
-      </section>
+      </div>
     </NModal>
   </section>
 </template>

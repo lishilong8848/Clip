@@ -17,7 +17,7 @@ from upload_event_module.services.feishu_service import _stable_uuid4_client_tok
 
 from .risk_inspection import RiskError
 from .risk_inspection_cloud import API
-from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES
+from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES, inspection_end
 from .tool_self_check import BUILDINGS, MAX_FILE, TZ
 
 
@@ -267,6 +267,56 @@ class ToolCloud:
             raise RiskError('工具模板下载内容与文件摘要不符，请核对飞书附件。', 503)
         return content
 
+    def publish_template(self, name, content, *, previous=None, pending=None, save_pending=None):
+        """Create a template row, or replace its single attachment without changing its ID."""
+        if not isinstance(content, bytes) or not content or len(content) > MAX_FILE:
+            raise RiskError('请选择 2 MB 以内的 XLSX 自检记录单。')
+        path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+        digest = hashlib.sha256(content).hexdigest()
+        identity = record_id(previous.get('id')) if previous else ''
+        if (previous is not None and not identity) or (not identity and not callable(save_pending)):
+            raise RiskError('模板发布缺少有效记录编号或本地发布回执。')
+
+        def unchanged():
+            current = self._template_entry(self._read_record(path, identity))
+            if not current or any(current.get(key) != previous.get(key) for key in ('name', 'file_token', 'digest')):
+                raise RiskError('飞书模板已变化，请刷新后重试。', 409)
+
+        with self.workspace_lock:
+            if identity:
+                unchanged()
+            if pending and not 0 <= time.time() - pending[1] < WORKSPACE_CREATE_RETRY_SECONDS:
+                raise RiskError('原模板发布结果未确认，请核对飞书模板表；系统不会重复创建。', 503)
+
+            fields = {field['field_name']: field.get('type') for field in self.cloud.all(path + '/fields')}
+            if any(fields.get(field) != kind for field, kind in
+                   ((TEMPLATE_NAME, 1), (TEMPLATE_FILE, 17), (TEMPLATE_HASH, 1))):
+                raise RiskError('飞书模板表缺少正确的名称、附件或摘要字段。', 503)
+
+            if pending:
+                token, _ = pending
+            else:
+                filename = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', name).strip('. ') or '工具自检'
+                token = self._upload_media(filename + '.xlsx', content, '飞书未确认模板附件上传。')
+                if not identity:
+                    save_pending(token, time.time())
+            payload = {'fields': {TEMPLATE_NAME: name, TEMPLATE_FILE: [{'file_token': token}], TEMPLATE_HASH: digest}}
+            if identity:
+                # Feishu has no compare-and-swap here. Recheck after uploading to narrow the edit window.
+                unchanged()
+                result = self.cloud.request('PUT', path + '/records/' + identity, json=payload)
+            else:
+                operation = _stable_uuid4_client_token('tool-template:' + json.dumps([name, digest]))
+                result = self.cloud.request('POST', path + '/records', params={'client_token': operation}, json=payload)
+            returned = record_id((result.get('record') or {}).get('record_id'))
+            if (identity and returned and returned != identity) or not (identity or returned):
+                raise RiskError('飞书未确认模板发布，请先刷新核对原模板。', 503)
+            current = self._template_entry(self._read_record(path, identity or returned))
+            if (not current or (current['name'], current['file_token'], current['digest']) != (name, token, digest)
+                    or current['size'] not in (0, len(content))):
+                raise RiskError('飞书模板附件尚未回读一致，请刷新核对原模板。', 503)
+            return current
+
     def bind_template(self, asset_id, template_id, expected_template_id):
         """Update the text link after checking its current value; return the bound ID."""
         if (not record_id(asset_id) or not record_id(template_id)
@@ -324,12 +374,15 @@ class ToolCloud:
         return identity
 
     def upload(self, name, report):
+        return self._upload_media(name, report, '飞书未确认送检报告上传。')
+
+    def _upload_media(self, name, content, missing_receipt):
         data = self.cloud.request('POST', 'drive/v1/medias/upload_all',
-            data={'file_name': name, 'parent_type': 'bitable_file', 'parent_node': BASE, 'size': str(len(report))},
-            files={'file': (name, report, 'application/octet-stream')})
+            data={'file_name': name, 'parent_type': 'bitable_file', 'parent_node': BASE, 'size': str(len(content))},
+            files={'file': (name, content, 'application/octet-stream')})
         token = data.get('file_token')
         if not isinstance(token, str) or not token:
-            raise RiskError('飞书未确认送检报告上传。', 503)
+            raise RiskError(missing_receipt, 503)
         return token
 
     def write_workspace_item(self, session_id, item, report_name, report_bytes, actual,
@@ -471,6 +524,14 @@ class ToolCloud:
             fields.update({'楼栋': '南通' + building, '送检工具': link('送检工具'),
                            '计划检测日期': epoch(order['due']), '实际检测日期': epoch(order['actual']),
                            '送检报告': [{'file_token': job['file_token']}]})
+            meta = json.loads(order['inspection_meta']) if 'inspection_meta' in order.keys() else {}
+            if meta.get('result') in ('qualified', 'unqualified'):
+                conclusion = '合格' if meta['result'] == 'qualified' else '不合格'
+                expiry = inspection_end(asset, order['actual'], meta)
+                details = [fields[DETAIL], f"报告编号：{meta['report_no']}", f"检测机构：{meta['institution']}", f'检测结论：{conclusion}']
+                if expiry:
+                    details.append(f'有效至：{expiry}')
+                fields[DETAIL] = '\n'.join(filter(None, details))
         elif dest == 'repair':
             fields.update({'检修工具名称': asset['name'], '楼栋': building, '转检修时间': epoch(order['submitted_at'][:10])})
         elif dest == 'scrap':
@@ -546,8 +607,8 @@ class ToolCloud:
         return True
 
 
-def run_tool_jobs(service, stop):
-    next_inventory = next_archive = 0
+def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None):
+    next_inventory = next_archive = next_reminder = 0
     while not stop.is_set():
         now = time.monotonic()
         try:
@@ -570,6 +631,11 @@ def run_tool_jobs(service, stop):
             for _ in range(4):
                 if stop.is_set() or not service.workspace_sync_one():
                     break
+            if deliver_reminder and not stop.is_set() and now >= next_reminder:
+                next_reminder = now + 60
+                result = service.send_building_reminders(deliver_reminder, link_for_scope=reminder_link)
+                if result['failed']:
+                    logging.warning('Tool reminder delivery deferred for buildings: %s', ', '.join(result['failed']))
         except Exception:
             logging.exception('Tool management background work deferred')
         stop.wait(5)

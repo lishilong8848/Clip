@@ -21,6 +21,7 @@
       </div>
     </div>
     <div class="book-options" :class="{expanded:compactMenu}">
+    <div class="book-toolbar">
     <div class="book-tools" aria-label="巡检楼栋与日期">
       <label :title="lockReason"><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
       <label :title="lockReason"><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
@@ -32,14 +33,15 @@
     <div class="book-tools" aria-label="工作表导航">
       <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部</option><option value="电气">电气</option><option value="暖通">暖通</option></select></label>
       <div v-if="!mobileSheet && report" class="sheet-picker">
-        <NSelect :value="pageKey || null" :options="sheetOptions" filterable placeholder="搜索或切换工作表" :input-props="{'aria-label':'搜索或切换工作表'}" @update:value="selectPage" />
+        <NSelect size="small" :value="pageKey || null" :options="sheetOptions" filterable placeholder="搜索或切换工作表" :input-props="{'aria-label':'搜索或切换工作表'}" @update:value="selectPage" />
       </div>
-      <NButton size="small" :disabled="!basePages.length" @click="openLookup('search')">定位单元格</NButton>
+      <NButton size="small" :disabled="!basePages.length" aria-label="定位单元格" @click="openLookup('search')">定位</NButton>
       <NButton size="small" :disabled="!viewedRound || !sheetLoaded" @click="openLookup('abnormal')">异常 {{ roundAbnormal.length }}</NButton>
+    </div>
     </div>
     <div v-if="mobileSheet" class="mobile-zoom-tools" role="group" aria-label="巡检表缩放">
       <button aria-label="缩小巡检表" :disabled="zoom<=7" @click="resizeSheet(-2)">−</button>
-      <button class="zoom-reset" aria-label="恢复巡检表原始大小" @click="resizeSheet(14-zoom)">{{ Math.round(scale*100) }}%</button>
+      <button class="zoom-reset" aria-label="恢复紧凑显示" @click="resizeSheet(compactZoom-zoom)">{{ Math.round(scale*100) }}%</button>
       <button aria-label="放大巡检表" :disabled="zoom>=28" @click="resizeSheet(2)">＋</button>
     </div>
     <slot name="start" v-if="isCurrentDate && !active" />
@@ -52,7 +54,7 @@
       <span class="status-save" role="status">
         <strong v-if="editing" class="editing-address">正在编辑 {{ editing }}</strong>
         <span v-if="lockReason" class="lock-reason">{{ lockReason }}</span>
-        <span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '单元格修改自动保存' }}</span>
+        <span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '自动保存' }}</span>
         <button v-if="dirty && !saving" @click="flush">重试保存</button><button v-if="dirty && !saving" @click="compareLatest">核对最新数据</button>
       </span>
     </div>
@@ -68,6 +70,7 @@
     <p v-if="report?.archive_warning" class="book-pending">{{ report.archive_warning }}</p>
     <p v-if="report?.rounds.some(r=>r.status==='自动确认·待上传')" class="book-pending">上轮数据已在本地保存并自动收尾，飞书上传待重试。</p>
     <p v-if="invalidationText" class="book-pending" role="status">{{ invalidationText }} <NButton v-if="sheetLoaded" size="tiny" @click="openComparison">对照上一轮</NButton></p>
+    <div v-if="exemptionPicking" class="book-pending exemption-picking" role="status">点选一个单元格取坐标 <NButton size="tiny" @click="endExemptionPick()">取消取坐标</NButton></div>
     <p v-if="error" class="book-error" role="alert">{{ error }}</p>
     <section v-if="comparison" class="book-error" aria-label="核对单元格冲突">
       <p>请核对共享数据，选择保留哪一份；未选择的修改不会自动覆盖。</p>
@@ -80,12 +83,12 @@
     <template v-if="report">
       <p v-if="currentPage && !sheetLoaded && loading" class="book-pending" role="status">正在读取当前工作表数据…</p>
       <div v-if="currentPage" ref="scrollElement" class="book-scroll" tabindex="0" aria-label="可编辑巡检表格" :key="viewKey" @touchstart="startPinch" @touchmove="movePinch" @touchend="endPinch" @touchcancel="endPinch">
-        <div class="book-canvas" :style="{width:(columnWidths.reduce((a,b)=>a+b,0)+42)+'px'}">
-        <table :style="{fontSize:zoom+'px',width:(columnWidths.reduce((a,b)=>a+b,0)+42)+'px'}"><colgroup><col style="width:42px"><col v-for="i in columnCount" :key="i" :style="{width:columnWidths[i-1]+'px'}"></colgroup><thead><tr><th class="grid-corner" aria-label="行列编号"></th><th v-for="i in columnCount" :key="i" class="column-number" scope="col">{{ address(0,i-1).replace(/\d+$/,'') }}</th></tr></thead><tbody>
+        <div class="book-canvas" :style="{width:gridWidth+'px'}">
+        <table :style="{fontSize:zoom+'px',width:gridWidth+'px'}"><colgroup><col style="width:32px"><col v-for="i in columnCount" :key="i" :style="{width:columnWidths[i-1]+'px'}"></colgroup><thead><tr><th class="grid-corner" aria-label="行列编号"></th><th v-for="i in columnCount" :key="i" class="column-number" scope="col">{{ address(0,i-1).replace(/\d+$/,'') }}</th></tr></thead><tbody>
           <tr v-for="(row,i) in grid" :key="i" :style="{height:rowHeight(i)+'px',display:rowHeight(i)===0?'none':undefined}"><th class="row-number" scope="row"><span>{{ i+1 }}</span></th><template v-for="cell in row" :key="cell.address">
-            <td v-if="!cell.hidden" :data-address="cell.address" :style="originalCellStyle(cell)" :rowspan="cell.rowspan" :colspan="cell.colspan" :class="{'current-cell':cell.current,'history-cell':cell.historical,'empty-cell':cell.mapped && !cell.text,'mobile-editing-cell':mobileSheet && editing===cell.address}"
-              :tabindex="cell.editable?0:undefined" :aria-label="cell.address+' '+cell.text" @click="beginEdit(cell)" @keydown.enter.prevent="beginEdit(cell)">
-              <select v-if="!mobileSheet && editing===cell.address && cell.stateCell" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="completeEdit" @keydown.enter.stop @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)"><option value="">{{ cell.mapped ? '待填写' : '空白' }}</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option></select>
+            <td v-if="!cell.hidden" :data-address="cell.address" :style="originalCellStyle(cell)" :rowspan="cell.rowspan" :colspan="cell.colspan" :class="{'current-cell':cell.current,'history-cell':cell.historical,'exempt-cell':cell.exempt,'empty-cell':cell.mapped && !cell.text,'mobile-editing-cell':mobileSheet && editing===cell.address}"
+              :tabindex="cell.editable || exemptionPicking ? 0 : undefined" :aria-label="cell.address+' '+(cell.exempt?'免填':cell.text)" :title="cell.exempt?'当前配置为免填':undefined" @click="activateCell(cell)" @keydown.enter.prevent="activateCell(cell)">
+              <select v-if="!mobileSheet && editing===cell.address && cell.stateCell" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="completeEdit" @keydown.enter.stop @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)"><option value="">{{ cell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ cell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="cell.modeCell" value="/">/ 非当前模式</option></select>
               <input v-else-if="!mobileSheet && editing===cell.address" v-model="editValue" v-focus :inputmode="cell.mapped ? 'decimal' : 'text'" enterkeyhint="done" @click.stop :aria-label="'编辑 '+cell.address" @blur="commit(cell)" @keydown.enter.stop.prevent="completeEdit" @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)">
               <span v-else class="cell-content" :style="cellContentStyle(cell)"><span>{{ cell.displayText || '\u00a0' }}</span></span>
               <svg v-if="cell.diagonal?.up || cell.diagonal?.down" class="cell-diagonal" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line v-if="cell.diagonal.up" x1="0" y1="100" x2="100" y2="0" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/><line v-if="cell.diagonal.down" x1="0" y1="0" x2="100" y2="100" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/></svg>
@@ -105,7 +108,7 @@
       <div v-if="editing && editCell" class="cell-editor-tools" role="group" aria-label="单元格编辑" @keydown.esc.stop="cancelEdit" @keydown.alt.up.prevent="moveEdit(-1)" @keydown.alt.down.prevent="moveEdit(1)">
         <strong>{{ editing }} · {{ slotOf(editCell.round) }}</strong>
         <template v-if="mobileSheet">
-          <select v-if="editCell.stateCell" :key="editing" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+editing" @change="completeEdit"><option value="">{{ editCell.mapped ? '待填写' : '空白' }}</option><option value="√">√ 正常</option><option value="×">× 异常</option><option value="△">△ 未运行</option></select>
+          <select v-if="editCell.stateCell" :key="editing" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+editing" @change="completeEdit"><option value="">{{ editCell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ editCell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="editCell.modeCell" value="/">/ 非当前模式</option></select>
           <input v-else :key="editing" v-model="editValue" v-focus :inputmode="editCell.mapped ? 'decimal' : 'text'" enterkeyhint="done" :aria-label="'编辑 '+editing" @keydown.enter.prevent="completeEdit">
         </template>
         <div class="cell-editor-actions">
@@ -129,10 +132,32 @@
           :title="submitReason" @click="confirmSubmit=true">{{ currentActive.pending?'重试提交归档':'确认提交' }}</NButton>
       </footer>
     </template>
-    <NModal v-model:show="settingsOpen" :to="rootElement" preset="card" title="表格设置" style="width:min(94%,460px)">
+    <NModal v-model:show="settingsOpen" :to="dialogRoot" class="inspection-theme" preset="card" title="表格设置" style="width:min(94%,520px)" :mask-closable="!exemptionSaving" :close-on-esc="!exemptionSaving" :closable="!exemptionSaving">
       <div class="book-settings-content">
         <div class="settings-section"><strong>表格字号</strong><div class="settings-choices" aria-label="表格字号"><button v-for="(label,i) in ['紧凑','标准','放大','更大']" :key="i" :aria-pressed="zoom===[12,14,18,22][i]" @click="zoom=[12,14,18,22][i]">{{ label }}</button></div></div>
-        <div v-if="!mobileSheet" class="settings-section"><strong>个人阅读顺序</strong><span>当前：{{ professionView==='ALL'?'全部专业':professionView }}，与账号同步</span><NButton block :disabled="!preferencesReady || saving || dirty" @click="openSort">调整工作表顺序</NButton></div>
+        <div v-if="!mobileSheet" class="settings-section settings-inline"><span>阅读顺序 · {{ professionView==='ALL'?'全部专业':professionView }}</span><NButton size="small" :disabled="!preferencesReady || saving || dirty" @click="openSort">调整顺序</NButton></div>
+        <div v-if="report?.can_edit_exemptions" class="settings-section">
+          <strong>免填范围</strong>
+          <div class="exemption-targets">
+            <div class="exemption-scopes" role="group" aria-label="免填楼栋">
+              <button v-for="s in scopes" :key="s" type="button" :aria-pressed="s===scope" :disabled="actionLocked || exemptionSaving" @click="changeExemptionScope(s)">{{ s }}楼</button>
+            </div>
+            <button type="button" class="exemption-sheet-choice" :aria-expanded="exemptionSheetsOpen" :disabled="exemptionSaving" aria-label="选择免填工作表" @click="exemptionSheetsOpen=!exemptionSheetsOpen">{{ exemptionPage?.name.trim() || '选择工作表' }} <span aria-hidden="true">⌄</span></button>
+          </div>
+          <div v-if="exemptionSheetsOpen" class="exemption-sheet-list" role="group" aria-label="免填工作表">
+            <button v-for="option in exemptionOptions" :key="option.value" type="button" :aria-pressed="option.value===exemptionSheet" :disabled="exemptionSaving" @click="selectExemptionSheet(option.value)">{{ option.label }}</button>
+          </div>
+          <div v-if="exemptionPage" class="exemption-summary" :title="exemptionSummary">{{ exemptionSummary }}</div>
+          <div class="exemption-entry">
+            <input v-model.trim="exemptionInput" aria-label="免填单元格或范围" maxlength="4096" placeholder="如 H7、H7:J10，可填写多段" :disabled="exemptionSaving" @keydown.enter.prevent="saveExemption('add')">
+            <NButton size="small" :disabled="actionLocked || exemptionSaving || exemptionSheet!==currentPage?.baseKey" @click="pickExemptionCell">取坐标</NButton>
+          </div>
+          <div class="group-actions">
+            <NButton size="small" :disabled="!canSaveExemption" @click="saveExemption('remove')">取消免填</NButton>
+            <NButton size="small" type="primary" :disabled="!canSaveExemption" :loading="exemptionSaving" @click="saveExemption('add')">设置免填</NButton>
+          </div>
+          <p v-if="exemptionNotice" :class="exemptionFailed?'book-error':'settings-note'" :role="exemptionFailed?'alert':'status'">{{ exemptionNotice }}</p>
+        </div>
         <div v-if="canGroup && showGroups" ref="groupPanel" class="settings-section">
           <strong>本班专业归属</strong><small>仅影响{{ scope }}楼{{ defaultShift }}班，下一班恢复默认。</small>
           <div class="group-list">
@@ -146,20 +171,20 @@
         <div v-else-if="currentPage && frozenProfession" class="settings-section"><strong>该轮专业归属</strong><span>{{ currentPage.name.trim() }} · {{ frozenProfession }}<template v-if="shownSlot"> · {{ shownSlot }}</template></span><small v-if="frozenProfession!==currentGroup(currentPage)">本班对应归属为 {{ currentGroup(currentPage) }}。</small></div>
         <div v-if="presence.length" class="settings-section"><strong>本轮协作</strong><span v-for="person in presence" :key="person.actor+person.sheet">{{ person.actor }} · 正在查看 {{ basePages.find(page=>page.key===person.sheet)?.name.trim() }}</span></div>
       </div>
-      <template #footer><NButton type="primary" block @click="settingsOpen=false">完成</NButton></template>
+      <template #footer><NButton size="small" :disabled="exemptionSaving" @click="settingsOpen=false">完成</NButton></template>
     </NModal>
-    <NModal v-model:show="sortOpen" :to="rootElement" preset="card" title="个人工作表排序" style="width:min(94%,560px)" :mask-closable="false">
+    <NModal v-model:show="sortOpen" :to="dialogRoot" class="inspection-theme" preset="card" title="个人工作表排序" style="width:min(94%,560px)" :mask-closable="false">
       <p>{{ professionView==='ALL'?'全部':professionView }}视图 · 排序同步到当前账号，手机和电脑通用</p>
       <p v-if="preferencesError" class="book-error" role="alert">{{ preferencesError }}</p>
       <div class="sort-list"><div v-for="(key,index) in sortDraft" :key="key" class="sort-row"><span>{{ basePages.find(p=>p.baseKey===key)?.name.trim() }}</span><button :disabled="index===0" @click="shiftSort(index,-1)">上移</button><button :disabled="index===sortDraft.length-1" @click="shiftSort(index,1)">下移</button></div>
       </div><button :disabled="saving" @click="saveSort">保存排序</button>
     </NModal>
-    <NModal v-model:show="confirmSubmit" :to="rootElement" preset="dialog" title="确认提交本轮巡检" content="保存已填写内容及可用源值并上传归档。没有读数的测点保留空白，上传未确认时可重试原轮次。" positive-text="确认提交" negative-text="继续查看" @positive-click="submit" />
-    <NModal :show="!!abnormal" :to="rootElement" preset="dialog" title="填写异常说明" positive-text="保存" negative-text="返回修改" @positive-click="saveAbnormal" @negative-click="abnormal=undefined" @update:show="v=>{if(!v)abnormal=undefined}"><textarea v-model="abnormalNote" placeholder="请描述该设备异常，随单元格修改保存" rows="3" /></NModal>
-    <NModal :show="!!pendingSwap" :to="rootElement" preset="dialog" type="warning" title="调整本班专业归属？"
+    <NModal v-model:show="confirmSubmit" :to="dialogRoot" class="inspection-theme" preset="dialog" title="确认提交本轮巡检" content="保存已填写内容及可用源值并上传归档。没有读数的测点保留空白，上传未确认时可重试原轮次。" positive-text="确认提交" negative-text="继续查看" @positive-click="submit" />
+    <NModal :show="!!abnormal" :to="dialogRoot" class="inspection-theme" preset="dialog" title="填写异常说明" positive-text="保存" negative-text="返回修改" @positive-click="saveAbnormal" @negative-click="abnormal=undefined" @update:show="v=>{if(!v)abnormal=undefined}"><textarea v-model="abnormalNote" placeholder="请描述该设备异常，随单元格修改保存" rows="3" /></NModal>
+    <NModal :show="!!pendingSwap" :to="dialogRoot" class="inspection-theme" preset="dialog" type="warning" title="调整本班专业归属？"
       :content="swapWarning" positive-text="仍要调整" negative-text="取消"
       @positive-click="applySwap" @update:show="v=>{if(!v)pendingSwap=false}" />
-    <NModal v-model:show="reviewOpen" :to="rootElement" preset="card" :title="'本表核对 · '+(currentPage?.name||'').trim()" style="width:min(94%,560px)" @after-leave="applyPendingFocus">
+    <NModal v-model:show="reviewOpen" :to="dialogRoot" class="inspection-theme" preset="card" :title="'本表核对 · '+(currentPage?.name||'').trim()" style="width:min(94%,560px)" @after-leave="applyPendingFocus">
       <div class="review-filters" role="group" aria-label="核对筛选">
         <button type="button" :aria-pressed="reviewFilter==='all'" @click="reviewFilter='all'">全部 {{ reviewRows.length }}</button>
         <button type="button" :aria-pressed="reviewFilter==='pending'" @click="reviewFilter='pending'">待填 {{ pendingRows.length }}</button>
@@ -180,7 +205,7 @@
         <p v-if="!shownReviewRows.length" class="settings-note">{{ reviewFilter==='pending' ? '本表没有待填写项。' : reviewFilter==='changed' ? '与上一轮没有差异。' : '本表没有需要核对的映射单元格。' }}</p>
       </div>
     </NModal>
-    <NModal :show="!!lookupMode" :to="rootElement" preset="card" :title="lookupMode==='abnormal'?'本轮异常 · '+shownSlot:'定位工作表单元格'" style="width:min(94%,560px)" @update:show="v=>{if(!v)lookupMode=''}" @after-leave="applyLookupTarget">
+    <NModal :show="!!lookupMode" :to="dialogRoot" class="inspection-theme" preset="card" :title="lookupMode==='abnormal'?'本轮异常 · '+shownSlot:'定位工作表单元格'" style="width:min(94%,560px)" @update:show="v=>{if(!v)lookupMode=''}" @after-leave="applyLookupTarget">
       <input v-if="lookupMode==='search'" v-model.trim="lookupQuery" maxlength="100" type="search" aria-label="查找表名、表内文字或格号" placeholder="搜索表名、设备、测点或格号">
       <p v-if="lookupPending" class="settings-note" role="status">正在查询本轮设备和测点…</p>
       <p v-else-if="lookupError" class="settings-note" role="status">{{ lookupError }}</p>
@@ -204,7 +229,8 @@ type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_ty
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
 type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
-type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
+type Exemptions={revision:number;sheets:Record<string,string[]>};
+type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;can_edit_exemptions?:boolean;exemptions?:Exemptions;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
 type Job={scope:string;date:string;round:RoundMeta;cells:CellEdit[];attempted?:boolean};
 type Presence={actor:string;sheet:string;seen_at:number};
@@ -238,9 +264,11 @@ function updatePhoneScreen(){phoneScreen.value=phoneMedia.matches;void nextTick(
 const scope=ref(props.defaultScope||props.scopes[0]||'');
 const day=ref(props.defaultDate||new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai',dateStyle:'short'}).format(new Date()));
 const cachedTemplates=shallowRef<Report['original_templates']>([]),layoutVersion=ref('');
-const report=shallowRef<Report>();const comparison=shallowRef<Report>();const error=ref(''),loading=ref(false),saving=ref(false),zoom=ref(14);
+const compactZoom=12;
+const report=shallowRef<Report>();const comparison=shallowRef<Report>();const error=ref(''),loading=ref(false),saving=ref(false),zoom=ref(compactZoom);
 const pageKey=ref(''),visited=ref(new Set<string>()),editing=ref(''),editValue=ref('');
 const rootElement=ref<HTMLElement>(),availableHeight=ref(600),rotatedWidth=ref(window.innerHeight);
+const dialogRoot=computed(()=>mobileSheet.value ? rootElement.value : undefined);
 const professionView=ref('ALL'),preferencesReady=ref(false),preferencesError=ref(''),preferencesRevision=ref(0);
 const orders=ref<Record<string,string[]>>({ALL:[],电气:[],暖通:[]}),sortOpen=ref(false),settingsOpen=ref(false),sortDraft=ref<string[]>([]);
 const jobs=ref<Job[]>([]);const savingCells=ref(false);const dirty=computed(()=>jobs.value.length>0);const confirmSubmit=ref(false);
@@ -317,6 +345,22 @@ const viewedRound=computed(()=>isChiller.value?roundsBySlot.value.get(chillerSlo
 const frozenProfession=computed(()=>currentPage.value && viewedRound.value
  ? viewedRound.value.sheet_groups?.[currentPage.value.baseKey] || currentPage.value.homeProfession : '');
 const actionLocked=computed(()=>saving.value||dirty.value||!!editing.value||!!abnormal.value||loading.value||props.parentBusy);
+const exemptionSheet=ref<string|null>(null),exemptionInput=ref(''),exemptionNotice=ref('');
+const exemptionSaving=ref(false),exemptionFailed=ref(false),exemptionPicking=ref(false),exemptionSheetsOpen=ref(false);
+const exemptionOptions=computed(()=>basePages.value.map(page=>({value:page.baseKey,label:page.name.trim()})));
+const exemptionPage=computed(()=>basePages.value.find(page=>page.baseKey===exemptionSheet.value) || basePages.value[0]);
+const exemptionSummary=computed(()=>{
+ const page=exemptionPage.value;
+ if(!page)return '';
+ const custom=report.value?.exemptions?.sheets[page.baseKey];
+ const cells=custom ?? page.excluded_ranges ?? [];
+ return cells.length ? (custom ? custom.length+' 格免填 · ' : '默认免填 · ')+cells.join('、') : '当前工作表无免填范围';
+});
+const canSaveExemption=computed(()=>!!report.value?.can_edit_exemptions && !!exemptionPage.value && !!exemptionInput.value && !actionLocked.value && !exemptionSaving.value);
+watch(exemptionSheet,()=>{exemptionNotice.value='';exemptionInput.value='';});
+watch(exemptionOptions,options=>{
+ if(options.length&&!options.some(option=>option.value===exemptionSheet.value))exemptionSheet.value=currentPage.value?.baseKey||options[0].value;
+});
 const currentGroup=(page:Page)=>currentGroups.value[page.key]||page.homeProfession||page.profession;
 const pagesFor=(name:string)=>requiredPages.value.filter(page=>currentGroup(page)===name);
 const hasViewed=(name:string)=>!!report.value?.draft_key && pagesFor(name).every(page=>
@@ -359,6 +403,7 @@ const columnCount=computed(()=>{
 });
 const scale=computed(()=>zoom.value/14);
 const columnWidths=computed(()=>Array.from({length:columnCount.value},(_,i)=>currentPage.value?.column_widths ? currentPage.value.column_widths[i]*scale.value : columnWidth.value));
+const gridWidth=computed(()=>columnWidths.value.reduce((sum,width)=>sum+width,32));
 function rowHeight(index:number){return (currentPage.value?.row_heights?.[index]??32)*scale.value;}
 function mergedHeight(cell:LayoutCell){let height=0;for(let i=cell.rowIndex;i<cell.rowIndex+cell.rowspan;i++)height+=rowHeight(i);return Math.max(0,height-2);}
 function originalCellStyle(cell:GridCell):Record<string,any>{const p=currentPage.value;const source=p?.styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0];if(!source)return {};
@@ -414,6 +459,9 @@ const grid=computed(()=>{
  for(const round of visibleRounds.value)for(const cell of round.extra_cells||[])overlay(round,cell);
  for(const job of jobs.value){const round=visibleById.get(job.round.round_id);if(round)for(const cell of job.cells)overlay(round,cell);}
  const remarks=new Set(p.remark_cells || []);
+ const custom=report.value?.exemptions?.sheets[p.baseKey];
+ const exemptions=custom ? new Set(custom) : null;
+ const defaultRanges=(p.excluded_ranges||[]).map(range=>{const [x,y=x]=range.split(':');return [...coords(x),...coords(y)];});
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{
   const a=cell.address,v=values.get(a),remark=remarks.has(a);
   const rowSlot=isChiller.value?chillerSlot.value:remark?undefined:p.round_rows?.[String(cell.rowIndex+1)];
@@ -426,16 +474,19 @@ const grid=computed(()=>{
    const edits=Array.from(byRound.values());override=edits[edits.length-1];
   }
   const current=!!round&&round.round_id===currentActive.value?.id;
-  const excluded=!remark&&(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});
+  const excluded=!remark&&(exemptions ? exemptions.has(a) :
+   defaultRanges.some(([r,c,rr,cc])=>cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc));
+  const exempt=excluded&&(current||!round)&&!text(cell.raw).trim();
   const editable=sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
    ? !excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
      && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))
    : report.value?.can_edit_history&&hasArchiveReceipt(round));
-  const value=collisions.has(a)?'位置冲突，请核对映射':override?override.value:v?(v.visible?v.value:''):cell.raw;
+  const value=exempt?'':collisions.has(a)?'位置冲突，请核对映射':override?override.value:v?(v.visible?v.value:''):cell.raw;
   const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
-  return {...cell,value,diagonal:style?.diagonal,text:text(value),displayText:current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format),round,
-   current:current&&!!(v?.visible||override),historical:!!(v||override)&&!current,mapped:!!v?.mapped,
-   stateCell:v?.value_type==='状态'||/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(override?override.value:v?.value)),editable:!!editable};
+  const modeCell=isChiller.value&&/^[K-P][789]$/.test(a);
+  return {...cell,value,modeCell,diagonal:style?.diagonal,text:text(value),displayText:!exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format),round,exempt,
+   current:!exempt&&current&&!!(v?.visible||override),historical:!!(v||override)&&!current,mapped:!exempt&&!!v?.mapped,
+   stateCell:modeCell||v?.value_type==='状态'||/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(override?override.value:v?.value)),editable:!!editable};
  }));
 });
 type GridCell=(typeof grid.value)[number][number];
@@ -811,10 +862,15 @@ async function submit(){if(!currentActive.value||actionLocked.value||!canSubmit.
  try{await requestJson('/api/daily-inspection/finish?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:currentActive.value.review_version,sheet_workflow:true,visited_sheets:[...visited.value]}),timeoutMs:180000});emit('changed');}
  catch(e){error.value=e instanceof Error?e.message:'提交未确认，请重试原任务。';}finally{saving.value=false;await load();}}
 async function download(){try{await downloadFile('/api/daily-inspection/day-export',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{}}),timeoutMs:180000});}catch(e){error.value=e instanceof Error?e.message:'导出失败';}}
-function changeScope(e:Event){if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;scope.value=(e.target as HTMLSelectElement).value;emit('scope',scope.value);void loadPreferences();reset();}
+function chooseScope(value:string){
+ if(value===scope.value||!props.scopes.includes(value)||storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value||exemptionSaving.value)return false;
+ scope.value=value;emit('scope',scope.value);void loadPreferences();reset();
+ return true;
+}
+function changeScope(e:Event){chooseScope((e.target as HTMLSelectElement).value);}
 function changeDay(e:Event){if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;day.value=(e.target as HTMLInputElement).value;reset();}
 function clearProgress(){progressRequest?.abort();progressRequest=undefined;syncedVisited.value=new Set();presence.value=[];}
-function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.value=false;sortOpen.value=false;lookupMode.value='';lookupTarget.value=undefined;reviewOpen.value=false;groupDraft.value={};sortTarget=undefined;controller?.abort();window.clearTimeout(timer);storageKey='';mutation++;scrollPositions.clear();editor=undefined;editing.value='';comparison.value=undefined;report.value=undefined;visited.value=new Set();clearProgress();pageKey.value='';selectedSlot.value='';chillerSelection.value='';void loadTemplates();void load();}
+function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.value=false;exemptionSheet.value=null;exemptionPicking.value=false;exemptionInput.value='';exemptionNotice.value='';sortOpen.value=false;lookupMode.value='';lookupTarget.value=undefined;reviewOpen.value=false;groupDraft.value={};sortTarget=undefined;controller?.abort();window.clearTimeout(timer);storageKey='';mutation++;scrollPositions.clear();editor=undefined;editing.value='';comparison.value=undefined;report.value=undefined;visited.value=new Set();clearProgress();pageKey.value='';selectedSlot.value='';chillerSelection.value='';void loadTemplates();void load();}
 watch(()=>props.defaultScope,v=>{if(v&&v!==scope.value&&!dirty.value&&!saving.value&&!editing.value&&!abnormal.value){scope.value=v;void loadPreferences();reset();}});
 watch(()=>currentActive.value?.id,()=>{clearProgress();restoreViewed();void nextTick(markViewed);if(!saving.value&&!dirty.value)void load();});
 watch([()=>currentActive.value?.visited_sheets,()=>currentActive.value?.presence],restoreViewed);
@@ -866,7 +922,59 @@ async function loadPreferences(){const generation=++preferenceGeneration;prefere
  try{const result=await requestJson(preferencesUrl()) as {revision:number;value:{orders:Record<string,string[]>}|null};if(disposed||generation!==preferenceGeneration)return;preferencesRevision.value=result.revision;orders.value=result.value?.orders||{ALL:[],电气:[],暖通:[]};preferencesReady.value=true;}
  catch(e){if(generation===preferenceGeneration)preferencesError.value=e instanceof Error?e.message:'个人排序读取失败';}}
 const showGroups=ref(false),groupPanel=ref<HTMLElement>();
-function openSettings(){finishEdit();if(!abnormal.value){showGroups.value=false;settingsOpen.value=true;}}
+function openSettings(){
+ finishEdit();
+ if(abnormal.value||exemptionSaving.value)return;
+ exemptionPicking.value=false;
+ exemptionSheetsOpen.value=false;
+ exemptionSheet.value=currentPage.value?.baseKey ?? basePages.value[0]?.baseKey ?? null;
+ showGroups.value=false;
+ settingsOpen.value=true;
+}
+function changeExemptionScope(value:string){
+ if(actionLocked.value||exemptionSaving.value)return;
+ if(chooseScope(value))openSettings();
+}
+function selectExemptionSheet(value:string){
+ exemptionSheet.value=value;
+ exemptionSheetsOpen.value=false;
+}
+function pickExemptionCell(){
+ if(actionLocked.value||exemptionSaving.value||exemptionSheet.value!==currentPage.value?.baseKey)return;
+ settingsOpen.value=false;
+ compactMenu.value=false;
+ exemptionPicking.value=true;
+}
+function endExemptionPick(cell?:string){
+ exemptionPicking.value=false;
+ settingsOpen.value=true;
+ if(cell)exemptionInput.value=cell;
+}
+function activateCell(cell:GridCell){
+ if(exemptionPicking.value){endExemptionPick(cell.address);return;}
+ beginEdit(cell);
+}
+async function saveExemption(operation:'add'|'remove'){
+ const page=exemptionPage.value, before=report.value;
+ if(!page||!before||!canSaveExemption.value)return;
+ const key=context(),revision=before.exemptions?.revision||0;
+ exemptionSaving.value=true;exemptionFailed.value=false;exemptionNotice.value='';
+ try{
+  const policy=await requestJson('/api/daily-inspection/exemptions',{method:'POST',body:JSON.stringify({
+   scope:scope.value,template:page.template,sheet:page.name,ranges:exemptionInput.value,revision,operation})}) as Exemptions;
+  if(disposed||key!==context()||!report.value)return;
+  report.value={...report.value,exemptions:policy};
+  exemptionNotice.value=policy.revision===revision?'所选范围已是该状态。':operation==='add'?'已设置免填。':'已取消所选范围的免填。';
+  exemptionInput.value='';
+  controller?.abort();
+  void load();
+  emit('changed');
+ }catch(e){
+  if(disposed||key!==context())return;
+  exemptionFailed.value=true;exemptionNotice.value=e instanceof Error?e.message:'免填范围保存失败';
+  void load();
+ }finally{exemptionSaving.value=false;}
+}
 function openGroups(){finishEdit();if(!abnormal.value){showGroups.value=true;settingsOpen.value=true;void nextTick(()=>groupPanel.value?.scrollIntoView({block:'nearest'}));}}
 let sortTarget:{scope:string;view:string;revision:number;orders:Record<string,string[]>}|undefined;
 function openSort(){finishEdit();if(abnormal.value||dirty.value)return;settingsOpen.value=false;sortTarget={scope:scope.value,view:professionView.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
@@ -992,7 +1100,7 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.cl
 
 .book-scroll th{height:28px;border:1px solid var(--inspection-line);background:var(--inspection-soft,var(--inspection-surface));font-size:12px;font-weight:500;text-align:center;box-sizing:border-box}.column-number{position:sticky;top:0;z-index:3}.row-number{position:sticky;left:0;z-index:2;min-width:42px}.grid-corner{position:sticky;left:0;top:0;z-index:4}.editing-address{font-weight:600;color:var(--inspection-accent)}
 .cell-editor-tools{display:flex;align-items:center;gap:7px;padding:6px 0;flex-shrink:0;background:var(--inspection-surface)}.cell-editor-tools strong{font-size:13px;margin-right:auto;white-space:nowrap}.cell-editor-actions{display:flex;gap:4px}.cell-editor-tools button{min-height:40px;padding:7px 12px;white-space:nowrap}.cell-editor-tools .primary{margin-left:0}.cell-editor-tools~.book-submit{display:none}
-.settings-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.settings-choices.two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-choices>button{appearance:none;display:flex;align-items:center;justify-content:center;position:relative;width:100%;height:40px;min-width:0;padding:6px;border:1px solid rgba(130,145,165,.4);border-radius:7px;background:transparent;color:inherit;line-height:1.4}.settings-choices>button[aria-pressed=true]{background:var(--inspection-accent);border-color:var(--inspection-accent);color:var(--inspection-on-accent)}.book-settings-content{max-height:min(70dvh,calc(var(--available-height) - 180px));overflow:auto;padding:2px}
+.settings-choices{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px}.settings-choices.two{grid-template-columns:repeat(2,minmax(0,1fr))}.settings-choices>button{appearance:none;display:flex;align-items:center;justify-content:center;position:relative;width:100%;height:40px;min-width:0;padding:6px;border:1px solid rgba(130,145,165,.4);border-radius:7px;background:transparent;color:inherit;line-height:1.4}.settings-choices>button[aria-pressed=true]{background:var(--inspection-accent);border-color:var(--inspection-accent);color:var(--inspection-on-accent)}.book-settings-content{max-height:min(70dvh,calc(var(--available-height,100dvh) - 180px));overflow:auto;padding:2px}
 .book-options{display:contents}
 .full-height{position:fixed;inset:0 0 auto;z-index:1000;box-sizing:border-box;gap:2px;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);background:var(--inspection-surface,#fff);width:100%;max-width:100vw}
 .full-height.rotate-landscape,.full-height.rotate-portrait{inset:0 auto auto 0;width:var(--rotated-width);max-width:none;transform-origin:top left}
@@ -1050,6 +1158,33 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.cl
 .row-number>span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .book-scroll td>input,.book-scroll td>select{position:absolute;inset:0;width:100%;height:100%;min-height:0;z-index:1}
 .book-canvas{position:relative;min-width:0}
-.template-art{position:absolute;left:42px;top:29px;pointer-events:none;overflow:hidden;z-index:1}
+.template-art{position:absolute;left:32px;top:23px;pointer-events:none;overflow:hidden;z-index:1}
+.inspection-workbook:not(.full-height){gap:5px}
+.book-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:4px 12px;min-width:0}
+.book-toolbar .book-tools{gap:4px;min-width:0}
+.book-toolbar label :is(input,select){min-height:28px;padding:3px 5px}
+.book-toolbar .sheet-picker{flex:1 1 190px;min-width:160px}
+.book-toolbar .book-tools:last-child{flex:1 1 290px}
+.book-toolbar button,.round-tabs button{min-height:28px;padding-block:3px}
+.book-scroll th{height:22px;font-size:11px}
+.book-scroll .row-number{min-width:32px}
+.book-scroll td.exempt-cell{background:color-mix(in srgb,var(--inspection-soft) 78%,var(--inspection-muted))!important}
+.exemption-picking{display:flex;align-items:center;gap:8px}
+.settings-inline{flex-direction:row;align-items:center;justify-content:space-between}
+.settings-section{gap:7px;padding-bottom:10px}
+.settings-choices>button{height:34px}
+.exemption-targets,.exemption-entry{display:grid;gap:6px;align-items:center}
+.exemption-targets{grid-template-columns:auto minmax(0,1fr)}
+.exemption-scopes{display:flex;gap:3px}
+.exemption-sheet-choice{display:flex;align-items:center;justify-content:space-between;text-align:left;gap:6px;min-width:0}
+.exemption-sheet-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr));gap:3px;max-height:118px;overflow:auto}
+.exemption-sheet-list button{text-align:left;overflow-wrap:anywhere}
+.exemption-scopes button[aria-pressed=true],.exemption-sheet-list button[aria-pressed=true]{color:var(--inspection-accent);border-color:var(--inspection-accent);background:var(--inspection-soft)}
+.exemption-entry{grid-template-columns:minmax(0,1fr) auto}
+.exemption-entry input{width:100%;min-width:0;min-height:34px}
+.exemption-summary{max-height:4em;overflow:auto;font-size:12px;color:var(--inspection-muted);overflow-wrap:anywhere}
+.full-height .book-toolbar{display:grid}
+.full-height .book-toolbar .book-tools{flex-basis:auto}
+.full-height .book-toolbar :is(button,input,select){min-height:36px}
 .cell-diagonal{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
 </style>

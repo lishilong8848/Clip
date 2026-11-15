@@ -38,6 +38,8 @@ class ManualStateTests(unittest.TestCase):
         report=inspection_report(self.service,'D',DAY['date'],'a','甲',include_active=True,drafts={})
         cell=next(c for c in report['rounds'][0]['original_cells'] if c.get('point_id')==self.point['point_id'])
         self.assertEqual(cell['value_type'],'状态')
+        self.assertEqual(cell['value'],'√')
+        self.assertFalse(self.service.load('D').get('manual_states'))
         self.edit('√')
         self.service.rollover_due('D',dt.datetime(2026,11,3,12,tzinfo=CN))
         self.service=DailyInspection(self.store,self.cloud)

@@ -26,7 +26,7 @@
                 <tr v-for="asset in visibleAssets" :key="asset.id" :class="{ 'is-selected': selected.has(asset.id) }">
                   <td><NCheckbox :checked="selected.has(asset.id)" :disabled="!!busy || !eligible(asset)"
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
-                  <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }}</small></td>
+                  <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small></td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
                     <small v-for="receipt in asset.plan?.legacy_receipts || []" :key="receipt.session_id">
@@ -46,7 +46,7 @@
       </section>
 
       <section v-if="kind === 'self'" class="workspace-panel" aria-labelledby="tool-templates-title">
-        <header class="panel-heading"><h3 id="tool-templates-title">飞书自检模板</h3></header>
+        <header class="panel-heading"><h3 id="tool-templates-title">自检模板库</h3></header>
         <p v-if="mixedTemplates" class="workspace-muted">所选工具的已关联模板不同，可分别沿用或选用同一模板。</p>
         <p v-else-if="selectedIds.length && !allAssociated" class="workspace-muted">部分工具还没有可用的模板关联，请选择统一模板。</p>
         <NRadioGroup v-if="templates.length" :value="templateChoice" :disabled="!!busy" aria-label="选择自检模板" @update:value="chooseTemplate">
@@ -161,15 +161,21 @@
           <div v-else class="workspace-editor">
             <p class="workspace-muted">{{ session.items.length }} 台工具共用一份送检报告。</p>
             <ul class="archive-list"><li v-for="entry in session.items" :key="entry.id">{{ entry.asset.name }} · {{ scopeLabel(entry.asset.scope) }} · {{ entry.asset.model || '—' }}</li></ul>
-            <p v-if="session.report_name" role="status">已保存报告 · {{ session.report_name }}</p>
+            <div v-if="session.report_name" class="workspace-actions">
+              <span role="status">{{ session.report_name }}</span>
+              <NButton size="small" tag="a" :href="sessionUrl + '/report-file'" target="_blank" rel="noopener">查看报告</NButton>
+            </div>
             <div v-if="editable" class="workspace-actions">
-              <label>实际检测日期 <input v-model="actualDate" aria-label="实际检测日期" type="date" /></label>
+              <label>实际检测日期 <input v-model="actualDate" aria-label="实际检测日期" type="date" :disabled="!!busy" /></label>
               <input ref="reportInput" type="file" accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png" hidden @change="pickReport" />
               <NButton size="small" :disabled="!!busy" @click="reportInput?.click()">{{ session.report_name ? '更换报告' : '选择报告' }}</NButton>
               <span v-if="report">{{ report.name }}</span>
               <NButton v-if="report" size="small" :loading="busy === 'report'" :disabled="!!busy" @click="uploadReport">上传报告</NButton>
               <NButton v-if="report" size="small" :disabled="!!busy" @click="report = undefined">取消选择报告</NButton>
             </div>
+            <p v-else-if="session.actual">实际检测日期 {{ session.actual }}</p>
+            <ToolInspectionReportFields :model="reportCheck" :asset-ids="reportAssets" :actual="actualDate"
+              :expires-on="session.inspection_expires_on" :editable="editable" :disabled="!!busy || !session.report_name || !!report" />
           </div>
           <ul v-if="session.status !== 'draft'" class="archive-list">
             <li v-for="entry in session.items" :key="entry.id">{{ entry.asset.name }} · {{ archiveStatus(entry.archive_status) }}<span v-if="entry.archive_error"> · {{ entry.archive_error }}</span></li>
@@ -179,7 +185,7 @@
             <NButton v-if="editable && session.kind === 'self'" size="small" :disabled="!!busy || !dirty" :loading="busy === 'save'" @click="saveDraft">保存草稿</NButton>
             <NPopconfirm v-if="editable" positive-text="确认提交" negative-text="取消" @positive-click="submit">
               <template #trigger><NButton size="small" type="primary" :loading="busy === 'submit'"
-                :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !actualDate))">{{ session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
+                :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !inspectionReady(reportCheck, reportAssets, actualDate)))">{{ session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
               {{ session.kind === 'self' ? '提交待填写工具，由楼长或授权人员审核。' : '提交送检报告归档。' }}
             </NPopconfirm>
             <NButton v-if="session.status === 'archived'" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
@@ -215,6 +221,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadio, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { requestBinaryJson, requestJson } from '../api/client';
+import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
 type OrderPlan = { mode: string; order_id: string; order_month: string; workspace_id: string;
@@ -234,12 +241,17 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: { 
   outcome?: string; reason?: string; quantity?: number; order_revision?: number; can_edit?: boolean; can_review?: boolean;
   review_note?: string; binding_error?: string; order_status?: string };
 type Summary = { id: string; kind: Kind; status: string; items?: Item[]; created_at?: string; item_count?: number; archived_count?: number };
-type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean };
-const emit = defineEmits<{ 'open-order': [id: string, month: string] }>();
+type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
+  inspection?: InspectionReport; inspection_expires_on?: string };
+const emit = defineEmits<{ 'open-order': [id: string, month: string]; 'asset-history': [id: string] }>();
 const props = defineProps<{ sessionId?: string; assetId?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
 const reviewNote = ref('');
 const actualDate = ref('');
+const reportCheck = ref(emptyInspectionReport());
+const reportSnapshot = computed(() => JSON.stringify([actualDate.value, reportCheck.value]));
+const savedReport = ref(reportSnapshot.value);
+const reportAssets = computed(() => session.value?.items.filter(entry => entry.can_edit).map(entry => entry.asset_id) || []);
 const replacementTemplate = ref<string | null>(null);
 const savedItems = new Map<string, string>();
 type Board = { assets: Asset[]; templates: Template[]; sessions: Summary[]; warning?: string };
@@ -318,7 +330,7 @@ const sheetImages = computed(() => {
 const editable = computed(() => session.value?.status === 'draft' && session.value.can_edit);
 const reviewable = computed(() => session.value?.items.filter(entry => entry.can_review) || []);
 const dirty = computed(() => !!report.value || Object.keys(reviewSignatures).length > 0 ||
-  !!editable.value && JSON.stringify(fields()) !== saved.value);
+  !!editable.value && (session.value?.kind === 'external' ? reportSnapshot.value !== savedReport.value : JSON.stringify(fields()) !== saved.value));
 watch([allAssociated, templates], () => {
   if (!templates.value.some(template => template.id === templateChoice.value)) {
     templateChoice.value = allAssociated.value ? existingTemplate : null;
@@ -442,6 +454,8 @@ function clearSession() {
   itemId.value = '';
   sheetName.value = '';
   actualDate.value = '';
+  reportCheck.value = emptyInspectionReport();
+  savedReport.value = reportSnapshot.value;
   reviewNote.value = '';
   for (const id of Object.keys(reviewSignatures)) delete reviewSignatures[id];
 }
@@ -456,11 +470,15 @@ function returnToSelection() {
     });
   });
 }
-function applySession(value: Session) {
+function applySession(value: Session, retainReportDraft = false) {
   const opened = session.value?.id !== value.id;
   if (opened) clearSession();
   session.value = value;
-  if (value.actual) actualDate.value = value.actual;
+  if (!retainReportDraft) {
+    actualDate.value = value.actual || '';
+    reportCheck.value = emptyInspectionReport(value.inspection);
+    savedReport.value = reportSnapshot.value;
+  }
   if (!value.items.some(entry => entry.id === itemId.value)) selectItem(value.items[0]?.id || '');
   saved.value = JSON.stringify(fields());
   savedItems.clear();
@@ -596,7 +614,8 @@ function uploadReport() {
       headers: { 'Content-Type': file.type || 'application/octet-stream' }, signal: lifetime.signal,
     }) as Session;
     report.value = undefined;
-    applySession(data);
+    reportCheck.value.confirmed_asset_ids = [];
+    applySession(data, true);
   });
 }
 function submit() {
@@ -614,8 +633,10 @@ function submit() {
         }
       }
     }
-    await save();
-    if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', { revision: session.value.revision, actual: actualDate.value }) as Session);
+    if (session.value?.kind === 'self') await save();
+    if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', {
+      revision: session.value.revision, actual: actualDate.value, inspection: reportCheck.value,
+    }) as Session);
   });
 }
 function schedulePoll(delay = 3000) {

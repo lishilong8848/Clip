@@ -7,7 +7,7 @@ import { chromium } from 'playwright';
 
 // Only this loopback HTTP server handles API traffic; no production backend is used.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, '../../../output/tool-workspace-preview');
+const output = path.resolve(root, process.env.TOOL_WORKSPACE_FIXTURE_DIR || '../../../output/tool-workspace-preview');
 const dist = path.resolve(root, process.env.TOOL_WORKSPACE_LEGACY_DIST || '../../../output/tool-workspace-build');
 const v2dist = path.resolve(root, process.env.TOOL_WORKSPACE_V2_DIST || '../../../output/tool-management-v2');
 const api = '/api/tool-self-check/workspace';
@@ -364,9 +364,14 @@ try {
     await page.getByText('模拟报告上传失败。', { exact: true }).waitFor();
     await button('上传报告').waitFor(); assert.equal(actions('report').length, 1);
     await button('上传报告').click();
-    await page.getByText('已保存报告 · 共用报告.pdf', { exact: true }).waitFor();
+    await page.getByText('共用报告.pdf', { exact: true }).waitFor();
     assert.equal(actions('report').length, 2);
     await page.getByLabel('实际检测日期').fill('2026-11-12');
+    assert.equal(await button('提交归档').isDisabled(), true);
+    await page.getByLabel('报告编号').fill('TEST-REPORT');
+    await page.getByLabel('检测机构').fill('测试检测机构');
+    await page.getByLabel('检测结论').selectOption('qualified');
+    await page.getByRole('checkbox', {name:/已核对报告/}).check();
     await submit('提交归档');
     await page.getByRole('link', { name: '下载归档', exact: true }).waitFor();
     assert.equal([...state.sessions.values()].at(-1).items.length, 2);

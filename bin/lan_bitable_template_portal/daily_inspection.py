@@ -28,8 +28,11 @@ from upload_event_module.services.http_client import FeishuHTTPError
 from .daily_inspection_form_fields import CHILLER_SHEET, form_header, remark_positions
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
+from .daily_inspection_operating import (OPERATING_SOURCE, apply_operating_marks, collect_operating_marks,
+                                         remember_pump_pressures, unbound_operating_cells)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
                                         original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
+                                        cell_exemption_selection, form_sheet_key, with_cell_exemptions,
                                         refresh_archived_original, write_original_sheet, display_templates)
 from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views, frozen_readings
 from .daily_inspection_template_art import preserve_artwork, read_artwork
@@ -65,6 +68,9 @@ ROUND_LOCATION_FIELDS = {'白1':'白1目标单元格', '白2':'白2目标单元�
                          '夜1':'夜1目标单元格', '夜2':'夜2目标单元格'}
 LOCAL_POINT_ID = re.compile(r'local_[0-9a-f]{32}')
 LOCAL_POINT_SOURCES = frozenset({'manual_status', 'fixed_status', 'fixed_value'})
+HANDOVER_MODE = 'inspection_handover_mode'
+HANDOVER_PRESSURE = 'inspection_handover_pressure'
+HANDOVER_POINT_SOURCES = frozenset({HANDOVER_MODE, HANDOVER_PRESSURE})
 
 
 def sampled_source_times(rows):
@@ -74,7 +80,8 @@ def sampled_source_times(rows):
             yield None
         elif (plain(fields.get('记录类型')) != '测点明细'
                 or not LOCAL_POINT_ID.fullmatch(plain(fields.get('测点ID')).strip())
-                or plain(fields.get('测点来源')).strip() not in LOCAL_POINT_SOURCES):
+                or plain(fields.get('测点来源')).strip() not in
+                LOCAL_POINT_SOURCES | HANDOVER_POINT_SOURCES | {OPERATING_SOURCE}):
             yield fields.get('源文件时间')
 STATE_VALUES = {'normal': '√', 'abnormal': '×', 'not_running': '△'}
 INSPECTION_BATCH_PREFIX = 'INSPECTION_BATCH_V1:'
@@ -314,6 +321,7 @@ def confirmed_chiller_cells():
             'M4075油压差':6, 'M4093实际导叶开度':8, 'M4007电机电流百分比':4,
             'M4015冷冻水进水温度':10, 'M4017冷冻水出水温度':11,
             'M4019冷却水进水温度':14, 'M4021冷却水出水温度':15, 'M4023蒸发器饱和温度':9}
+    plate_rows = {'冷却水进水温度': 14, '冷冻水出水温度': 15}
     d_rows = {'电流百分比':4, '油箱温度':5, '压缩机供油温度':5, '压缩机排气温度':7,
               '压缩机导叶运行开度':8, '饱和蒸发温度':9, '冷冻水进水温度':10,
               '冷冻水出水温度':11, '饱和冷凝温度':12, '冷却水进水温度':14, '冷却水出水温度':15}
@@ -360,6 +368,18 @@ def confirmed_chiller_cells():
             if item['cells'] != {slot:cell for slot in ('白1','白2','夜1','夜2')} or (key[0],cell) in destinations:
                 raise ValueError('冷机目标位置无效或重复')
             destinations.add((key[0],cell))
+            if shared_cell := item.get('shared_plate_cell'):
+                if key[:2] == ('E', '暖通') and match:
+                    unit, metric = int(match.group(4)), item['source_name'][5:]
+                elif key[:2] == ('D', '暖通') and d_name:
+                    unit, metric = int(d_name.group(1)), d_name.group(2)
+                else:
+                    raise ValueError('共用的板换温度来源无效')
+                shared_row = plate_rows.get(metric)
+                if (not shared_row or shared_cell != chr(ord('J') + unit) + str(shared_row)
+                        or (key[0], shared_cell) in destinations):
+                    raise ValueError('共用的板换温度格无效或重复')
+                destinations.add((key[0], shared_cell))
             result[key] = item
         return result
     except (OSError, TypeError, KeyError, ValueError, AttributeError):
@@ -510,12 +530,12 @@ def deferred_catalog_section(device, section):
 
 
 def deferred_point(device, point):
-    if all_cells_excluded(point.get('template'),point.get('sheet'),point.get('round_cells')):
-        return True
     # User-created non-baseline points are explicitly configured and may be
     # used even where the template's original placeholder is deferred.
     if point.get('enabled') is True and (point.get('baseline') is False or point.get('user_enabled') is True):
         return False
+    if all_cells_excluded(point.get('template'),point.get('sheet'),point.get('round_cells')):
+        return True
     if deferred_original_location(device.get('scope'), point.get('sheet'), point.get('round_cells')):
         return True
     sections = device.get('sections') or []
@@ -794,7 +814,7 @@ def devices_for(scope, rows, point_configs, templates):
             reading = corrected_value if corrected_value is not None else raw_value if raw_value is not None else reading
         if ambiguous_config:
             reading = ''
-        device['points'].append({
+        point = {
             'id': row['record_id'], 'point_id': point_id,
             'name': point_name,
             'location': location, 'path': plain(config.get('测点路径')) or plain(fields.get('测点路径')),
@@ -817,7 +837,10 @@ def devices_for(scope, rows, point_configs, templates):
             'template': template, 'sheet': sheet, 'cell': cell,
             'round_cells': round_cells, 'mapping_issue': mapping_issue,
             'template_known': template in templates.get((scope, profession), []),
-        })
+        }
+        if verified_mapping and mapped.get('shared_plate_cell') and template == mapped['template'] and sheet.strip() == CHILLER_SHEET:
+            point['shared_plate_cell'] = mapped['shared_plate_cell']
+        device['points'].append(point)
     # A raw point and a catalog field can represent the same verified form cell.
     # Fill only a missing frozen reference from an unambiguous nonempty point;
     # never rewrite the source table or replace an existing device value.
@@ -832,7 +855,7 @@ def devices_for(scope, rows, point_configs, templates):
                     if item:
                         target = (item['template'], item['sheet'].strip(), item['cells'].get('白1'))
                         targets.setdefault(target, []).append((device, section, field))
-        point_values = {}
+        point_values, shared_plate_values = {}, {}
         for device in devices.values():
             for point in device['points']:
                 cells = point.get('round_cells') or {}
@@ -844,12 +867,20 @@ def devices_for(scope, rows, point_configs, templates):
                 if cells and point.get('enabled') is not False and numeric:
                     target = (point['template'], point['sheet'].strip(), cells.get('白1'))
                     point_values.setdefault(target, []).append((device, point))
+                    if shared_cell := point.get('shared_plate_cell'):
+                        shared_target = (*target[:2], shared_cell)
+                        shared_plate_values.setdefault(shared_target, []).append((device, point))
         for target, sections in targets.items():
             if len(sections) != 1:
                 continue
             device, section, field = sections[0]
+            if source_text(section['values'][field]).strip():
+                continue
             readings = []
-            for source_device, point in point_values.get(target, []):
+            direct = point_values.get(target, [])
+            shared = shared_plate_values.get(target, [])
+            candidates = direct or (shared if len(shared) == 1 else [])
+            for source_device, point in candidates:
                 raw = point['value']
                 oil = re.fullmatch(r'([1-9]\d*)#油箱体积', point['name'])
                 if oil and field == '柴油液位(cm)':
@@ -859,8 +890,9 @@ def devices_for(scope, rows, point_configs, templates):
                     raw = str((Decimal(source_text(raw)) / 10).quantize(Decimal('0.01'),rounding=ROUND_HALF_UP))
                 readings.append(raw)
             if readings and all(same_reading(readings[0], value) for value in readings[1:]):
-                if not source_text(section['values'][field]).strip():
-                    section['values'][field] = readings[0]
+                section['values'][field] = readings[0]
+                if not direct:
+                    section.setdefault('shared_temperature_points', {})[field] = candidates[0][1]['point_id']
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         logging.exception('巡检原表交叉匹配未就绪，保留来源原值')
     return list(devices.values())
@@ -917,7 +949,7 @@ def configured_form_devices(scope, devices, configs):
             verified = validate_round_locations(scope, profession, template, sheet, cells)
             if sheet == '暖通冷机系统巡检表' and verified:
                 verified = dict.fromkeys(ROUND_LOCATION_FIELDS, next(iter(verified.values())))
-            if set(verified) != set(ROUND_LOCATION_FIELDS) or all_cells_excluded(template, sheet, verified):
+            if set(verified) != set(ROUND_LOCATION_FIELDS):
                 continue
         except (ValueError, TypeError, KeyError):
             continue
@@ -970,6 +1002,136 @@ def configured_form_devices(scope, devices, configs):
     return form_devices
 
 
+def apply_handover_readings(scope, batch, rows, start, slot, end, sealed, *, saved_pressures=None):
+    """Fill existing original-form points with verified, time-bounded supplementary data."""
+    candidates = {}
+    duplicate = set()
+    for row in rows:
+        fields = row['fields']
+        source = plain(fields.get('测点来源')).strip()
+        if (source not in HANDOVER_POINT_SOURCES or plain(fields.get('楼栋')) != scope + '楼'
+                or plain(fields.get('专业')) != '暖通' or plain(fields.get('记录类型')) != '测点明细'
+                or not LOCAL_POINT_ID.fullmatch(plain(fields.get('测点ID')).strip())):
+            continue
+        timestamp = fields.get('采样时间')
+        if type(timestamp) is not int or not (slot if source == HANDOVER_PRESSURE else start) <= timestamp < end or timestamp > sealed:
+            continue
+        template, sheet, cell = (plain(fields.get(name)).strip() for name in LOCATION_FIELDS)
+        if sheet != CHILLER_SHEET or any(plain(fields.get(field)).strip() != cell for field in ROUND_LOCATION_FIELDS.values()):
+            continue
+        value = plain(fields.get('测点值')).strip()
+        if source == HANDOVER_MODE:
+            if not re.fullmatch(r'[K-P][789]', cell) or value not in ('√', '△', '/'):
+                continue
+        else:
+            if not re.fullmatch(r'(?:[B-G](?:17|19|24|25)|[K-P](?:24|25))', cell):
+                continue
+            try:
+                if len(value) > 24 or not re.fullmatch(r'[+-]?\d+(?:\.\d+)?', value) or not Decimal(value).is_finite():
+                    continue
+            except InvalidOperation:
+                continue
+        key = (template, cell)
+        if key in candidates:
+            duplicate.add(key)
+        candidates[key] = (source, timestamp, value, plain(fields.get('测点备注')).strip())
+    for key in duplicate:
+        candidates.pop(key, None)
+    # A unit mode is one observation. Never show a partial set of mode marks.
+    towers = {}
+    for (template, cell), (source, stamp, _, _) in list(candidates.items()):
+        if source != HANDOVER_MODE:
+            continue
+        keys = [(template, cell[0] + row) for row in '789']
+        group = [candidates.get(key) for key in keys]
+        if (any(item is None or item[:2] != (source, stamp) for item in group)
+                or sorted(item[2] for item in group) not in (['/', '/', '√'], ['/', '/', '/'], ['△', '△', '△'])):
+            for key in keys:
+                candidates.pop(key, None)
+        elif all(item[2] == '△' for item in group):
+            for key, item in zip(keys, group):
+                candidates[key] = (item[0], item[1], '/', item[3])
+            towers[(template, cell[0] + '4')] = (stamp, '△')
+        else:
+            towers[(template, cell[0] + '4')] = (stamp, '√' if any(item[2] == '√' for item in group) else '△')
+    if not candidates:
+        return False
+    owners = {}
+    occupied = {(point.get('template'), point.get('cell'))
+                for device in batch.get('devices', []) for point in device['points']
+                if str(point.get('sheet', '')).strip() == CHILLER_SHEET and point.get('round_cells')}
+    locations = catalog_locations()
+    for device in batch.get('devices', []):
+        if device.get('scope') != scope or device.get('profession') != '暖通':
+            continue
+        for section in device['sections']:
+            for name, value in section['values'].items():
+                target = locations.get((scope + '楼', device['name'], '暖通', section['location'],
+                                        section['form'].strip(), name))
+                if not target or target['sheet'].strip() != CHILLER_SHEET:
+                    continue
+                key = (target['template'], target['cells'].get('白1'))
+                settings = section.get('form_point_settings', {}).get(name, {})
+                eligible = (value in ('', None) and settings.get('enabled') is not False
+                            and settings.get('source_kind') not in ('fixed_value', 'fixed_status'))
+                owners.setdefault(key, []).append((section, name) if eligible else None)
+    changed = False
+    for key, match in candidates.items():
+        owner = owners.get(key, [])
+        if key in occupied or len(owner) != 1 or not owner[0]:
+            continue
+        section, name = owner[0]
+        source, timestamp, value, note = match
+        readings = section.setdefault('handover_readings', {})
+        if (readings.get(name, {}).get('sampled') or 0) >= timestamp:
+            continue
+        readings[name] = {'source': source, 'sampled': timestamp, 'value': value, 'note': note}
+        changed = True
+    for device in batch.get('form_devices', []):
+        if device.get('scope') != scope or device.get('profession') != '暖通':
+            continue
+        for point in device['points']:
+            if (str(point.get('sheet', '')).strip() != CHILLER_SHEET or point.get('enabled') is False
+                    or point.get('source_kind') in ('fixed_value', 'fixed_status') or point.get('value') not in ('', None)):
+                continue
+            key = (point.get('template'), point.get('cell'))
+            match = candidates.get(key) if key not in owners and key not in occupied else None
+            if not match:
+                continue
+            source, timestamp, value, note = match
+            if (source == HANDOVER_MODE) != (point.get('value_type') == '状态'):
+                continue
+            if (point.get('sampled') or 0) >= timestamp:
+                continue
+            point.update(handover_source=source, handover_value=value, sampled=timestamp, note=note)
+            changed = True
+    if towers:
+        template = next((item['name'] for item in original_templates()
+                         if item['scope'] == scope and item['profession'] == '暖通'), '')
+        marks = dict(batch.get('operating_marks') or {})
+        samples = dict(batch.get('handover_tower_samples') or {})
+        updated = False
+        for (book, cell), (stamp, value) in towers.items():
+            if (template and book == template and stamp > samples.get(cell, 0)
+                    and (cell in samples or not marks.get(cell))):
+                samples[cell] = stamp
+                marks[cell] = value
+                # Temperature is valid in all three running modes. Mask it only
+                # when the same unit is confirmed stopped.
+                for row in (14, 15):
+                    temperature = cell[0] + str(row)
+                    if value == '△':
+                        marks[temperature] = '/'
+                    else:
+                        marks.pop(temperature, None)
+                updated = True
+        if updated:
+            batch['handover_tower_samples'] = samples
+            apply_operating_marks(scope, batch, marks, template=template, saved_pressures=saved_pressures)
+            changed = True
+    return changed
+
+
 def state_parameter(name, value_type=''):
     if value_type in ('数值', '直接填充'):
         return False
@@ -985,6 +1147,8 @@ def state_reference(value, point=None):
         if raw == 'Δ':
             return '△'
     if point is not None:
+        if point.get('handover_source') == HANDOVER_MODE:
+            return point.get('handover_value', '')
         if point.get('source_kind') in ('fixed_status', 'manual_status'):
             fixed = point.get('fixed_value')
             return fixed if point['source_kind'] == 'fixed_status' and fixed in STATE_VALUES.values() else ''
@@ -1043,7 +1207,12 @@ def parameters(device):
             if settings and not settings.get('enabled'):
                 continue
             is_state = state_parameter(name, (settings or {}).get('value_type', ''))
-            reference = state_reference(value, settings) if is_state else (
+            mode_cell = bool(mapping and mapping['sheet'].strip() == CHILLER_SHEET
+                             and re.fullmatch(r'[K-P][789]', mapping['cells'].get('白1') or ''))
+            is_state = is_state or mode_cell
+            handover = section.get('handover_readings', {}).get(name)
+            operating = section.get('operating_values', {})
+            reference = handover['value'] if handover else state_reference(value, settings) if is_state else (
                 settings['fixed_value'] if settings else value)
             if is_state and not reference and not settings:
                 # A device field and a configured point may refer to the same
@@ -1061,17 +1230,24 @@ def parameters(device):
                 except (OSError, TypeError, KeyError, ValueError, AttributeError):
                     pass
             rows.append({'id': f's:{index}:{name}', 'name': name,
-                         'reference': reference,
-                         'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值', 'section': index})
+                         'reference': operating.get(name, reference), 'operating': name in operating,
+                         'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值',
+                         'section': index, 'mode_cell': mode_cell, 'handover': handover})
     for point in device['points']:
         if deferred_point(device, point):
             continue
         is_state = state_parameter(point['name'], point.get('value_type', ''))
+        mode_cell = (str(point.get('sheet', '')).strip() == CHILLER_SHEET
+                     and bool(re.fullmatch(r'[K-P][789]', point.get('cell') or '')))
+        reference = state_reference(point['value'], point) if is_state else point.get('handover_value', point['value'])
         rows.append({'id': 'p:' + point['id'], 'name': point['name'],
-                     'reference': state_reference(point['value'], point) if is_state else point['value'],
+                     'reference': point.get('operating_value', reference), 'operating': 'operating_value' in point,
                      'source_reference': (point.get('raw_value') if point.get('raw_value') is not None else point['value']) if is_state else None,
                      'value_type': '状态' if is_state else '数值',
-                     'point': point['id'], 'read_only': point.get('enabled') is False})
+                     'point': point['id'], 'read_only': point.get('enabled') is False, 'mode_cell': mode_cell})
+    for parameter in rows:
+        if manual_state_binding(device, parameter):
+            parameter.update(reference='√', default_state=True)
     return rows
 
 
@@ -1151,9 +1327,10 @@ def display_device(device):
 
 def manual_state_binding(device, parameter):
     """A manual state belongs to one device/parameter and its complete four-round mapping."""
-    if parameter.get('value_type')!='状态' or parameter.get('read_only'):
+    if (parameter.get('value_type') != '状态' or parameter.get('read_only')
+            or parameter.get('mode_cell') or parameter.get('operating')):
         return None
-    if parameter.get('reference') not in ('',None):
+    if parameter.get('reference') not in ('',None) and not parameter.get('default_state'):
         return None
     if 'point' in parameter:
         point=next((p for p in device['points'] if p['id']==parameter['point']),None)
@@ -1177,6 +1354,8 @@ def manual_state_binding(device, parameter):
         identity=['section',section['location'],section['form'],parameter['name']]
         target=[item['template'],item['sheet'].strip(),item['cells']]
     if not all(target):return None
+    if target[1] == CHILLER_SHEET and any(re.fullmatch(r'[K-P]4', str(cell or '')) for cell in target[2].values()):
+        return None
     key = hashlib.sha256(json.dumps([device['scope'],device['id'],identity,target],
                                     ensure_ascii=False,sort_keys=True).encode()).hexdigest()
     return key, target
@@ -1188,7 +1367,7 @@ def manual_state_key(device, parameter):
 
 
 def state_has_automatic_input(point):
-    if point.get('source_kind') == 'fixed_status':
+    if point.get('source_kind') == 'fixed_status' or point.get('handover_source') == HANDOVER_MODE:
         return True
     for field in ('status_normal', 'status_abnormal', 'status_stopped', 'status_intervals'):
         try:
@@ -1332,7 +1511,7 @@ def sheet_group_key(duty):
 
 
 def default_sheet_groups(scope):
-    return {json.dumps([item['name'], sheet['name']], ensure_ascii=False, separators=(',', ':')): item['profession']
+    return {form_sheet_key(item['name'], sheet['name']): item['profession']
             for item in original_templates() if item['scope'] == scope
             for sheet in item['sheets'] if sheet['name'].strip() != '封面'}
 
@@ -1354,6 +1533,7 @@ def invalidate_professions(active, reason, scope=None):
 
 def worksheet_parameters(active, scope, sheets):
     targets = {(template, sheet.strip()): sheet for template, sheet in map(json.loads, sheets)}
+    layouts = active_form_layouts(active, scope)
     slot = active['duty']['shift'] + str(active['round'])
     catalogue = catalog_locations()
     for device in review_devices(active, scope):
@@ -1370,7 +1550,7 @@ def worksheet_parameters(active, scope, sheets):
                 point = points.get(row.get('point'), {})
                 location = (point.get('round_cells') or {}).get(slot)
             key = (point.get('template'), str(point.get('sheet') or '').strip())
-            if not location or key not in targets:
+            if not location or key not in targets or cell_excluded(layouts.get((key[0], targets[key]), {}), location):
                 continue
             yield device['id'], row, key[0], targets[key], location
 
@@ -1385,9 +1565,13 @@ def worksheet_review_versions(active, scope, profession):
         value = review.get('values', {}).get(row['id'], source_text(row['reference']))
         payload.append([template, sheet, location, identity, row['name'],
                         value, review.get('note', '') if value == '×' else ''])
-    overrides = [entry for entry in active.get('sheet_overrides', [])
+    overrides = [entry for entry in visible_sheet_overrides(active, active_form_layouts(active, scope))
                  if (entry['template'], entry['sheet']) in targets]
-    return [sorted(sheets), sorted(payload), overrides]
+    version = [sorted(sheets), sorted(payload), overrides]
+    policy = {key: cells for key, cells in active.get('cell_exemptions', {}).items() if key in sheets}
+    if policy:
+        version.append(policy)
+    return version
 
 
 def profession_version(active, scope, profession):
@@ -1462,7 +1646,7 @@ def merge_reviews(active, devices, submitted, actor):
             for key, value in values.items()))
         if (not isinstance(values, dict) or hidden_changed
                 or any(not valid_cell_text(value, 160) for value in values.values())
-                or any(fields[key].get('value_type') == '状态' and value.strip() not in ('', '√', '×', '△') for key, value in values.items() if key in fields)
+                or any(not valid_review_state(fields[key], value) for key, value in values.items() if key in fields)
                 or result not in ('', '正常', '异常') or not valid_cell_text(note, 1000)):
             raise RiskError(f'「{device["name"]}」的现场填写无效，请核对后重试。', 400)
         preserved = {key: value for key, value in old_values.items() if key not in fields}
@@ -1480,6 +1664,11 @@ def merge_reviews(active, devices, submitted, actor):
     return reviews, active.get('review_version', 0) + int(changed)
 
 
+def valid_review_state(parameter, value):
+    return (parameter.get('value_type') != '状态' or value.strip() in ('', '√', '×', '△')
+            or parameter.get('mode_cell') and value.strip() == '/')
+
+
 def finalize_reviews(devices, reviews, actor, confirmations=None, worksheet_scope=None):
     if not devices:
         raise RiskError('没有可归档的巡检设备。', 409)
@@ -1492,17 +1681,20 @@ def finalize_reviews(devices, reviews, actor, confirmations=None, worksheet_scop
             raise RiskError(f'「{device["name"]}」的读数或备注含无效字符，请重新填写。', 400)
         rows = [item for item in parameters(device) if not item.get('read_only')]
         values = dict(review['values'])
+        default_states = []
         for item in rows:
             if item['id'] not in values:
                 value = source_text(item['reference'])
                 if not valid_cell_text(value, 32767):
                     raise RiskError(f'「{device["name"]}」的源数据含无效字符，请先核对。', 409)
                 values[item['id']] = value
+                if item.get('default_state'):
+                    default_states.append(item['id'])
         complete = bool(rows) and all(values.get(item['id'], '').strip() for item in rows)
         applicable = rows if worksheet_scope is None else [item for item in rows
                      if (device['id'], item['id']) in worksheet_scope]
         states = [values.get(item['id'], '').strip() for item in applicable if item.get('value_type') == '状态']
-        if any(value not in ('', '√', '×', '△') for value in states):
+        if any(not valid_review_state(item, values.get(item['id'], '')) for item in applicable):
             raise RiskError(f'「{device["name"]}」的运行状态需选择 √、× 或 △。', 400)
         if '×' in states and not review['note'].strip():
             raise RiskError(f'「{device["name"]}」有异常状态，请填写备注。', 400)
@@ -1515,7 +1707,22 @@ def finalize_reviews(devices, reviews, actor, confirmations=None, worksheet_scop
             'result': '异常' if '×' in states else review['result'] or ('正常' if complete and len(applicable) == len(rows) else ''),
             'note': review['note'],
             'actor': previous.get('actor') or confirmed_by}
+        if default_states:
+            finalized[device['id']]['default_states'] = default_states
     return finalized
+
+
+def active_form_layouts(active, scope):
+    return {(template['name'], sheet['name']): sheet
+            for template in with_cell_exemptions(original_templates(), active.get('cell_exemptions'))
+            if template['scope'] == scope for sheet in template['sheets']}
+
+
+def visible_sheet_overrides(active, layouts):
+    remarks = remark_positions(active['duty']['scope'])
+    return [entry for entry in active.get('sheet_overrides', [])
+            if (entry['template'], entry['sheet'], entry['cell']) in remarks
+            or not cell_excluded(layouts.get((entry['template'], entry['sheet']), {}), entry['cell'])]
 
 
 class DailyInspection:
@@ -1542,7 +1749,8 @@ class DailyInspection:
             if cached and cached[0] == key:
                 return cached[1]
             content = workbook(active, {scope: []}, strict_original=False, presentation=False)
-            data = archived_report_content.__wrapped__(content, scope, active['id'], active['duty']['shift'], active['round'], False)
+            data = archived_report_content.__wrapped__(content, scope, active['id'], active['duty']['shift'],
+                active['round'], False, active.get('cell_exemptions'))
             self.active_reports[scope] = (key, data)
             return data
 
@@ -1619,6 +1827,10 @@ class DailyInspection:
             table, _view = SOURCES[scope][1]
             rows = self.records(table, {}, cloud=self.source_clouds.get(scope, self.cloud))
         dump = json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
+        shared = sorted((item['point_id'], item['shared_plate_cell']) for item in confirmed_chiller_cells().values()
+                        if item['scope'] == scope and item.get('shared_plate_cell'))
+        if shared:
+            dump += json.dumps(shared)
         return hashlib.sha256(f'{template_version()}:{dump}'.encode('utf-8')).hexdigest()
 
     def source_batch_probe(self, scope):
@@ -1743,9 +1955,16 @@ class DailyInspection:
             fp = {'batch': live.get('batch'), 'config_fp': live.get('config_fp')}
             if stored.get('batch') == fp['batch'] and stored.get('config_fp') == fp['config_fp']:
                 return state
-            if not self.live_batch_belongs_to_round(active, live):
-                return state
             old_batch = active['batches'].get(scope) or {}
+            if not self.live_batch_belongs_to_round(active, live):
+                if old_batch and fp['batch'] and fp['batch'] != active.get('handover_checked_batch'):
+                    active['handover_checked_batch'] = fp['batch']
+                    if self.fill_handover_points(scope, active, old_batch, live):
+                        inherit_manual_states(state, active, scope)
+                        active['review_version'] = active.get('review_version', 0) + 1
+                        invalidate_professions(active, '本轮压力或制冷模式已更新，请重新核对。', scope)
+                    self.store.put_document(NS, 'building:' + scope, state)
+                return state
             if (old_batch.get('batch') == fp['batch']
                     and old_batch.get('config_fp') == fp['config_fp']):
                 active['live_fp'] = fp
@@ -1761,6 +1980,7 @@ class DailyInspection:
                 active.pop('review_orphan_identities', None)
             active['batches'][scope] = {key: live[key] for key in
                                         ('batch', 'rows', 'devices', 'config_fp', 'form_devices') if key in live}
+            self.fill_handover_points(scope, active, active['batches'][scope], live, state.get('pump_pressures'))
             adopt_manual_state_overrides(state, active, scope)
             inherit_manual_states(state, active, scope)
             active['live_fp'] = fp
@@ -1802,6 +2022,49 @@ class DailyInspection:
 
     def load(self, scope):
         return self.store.get_document(NS, 'building:' + scope) or {'active': None, 'history': []}
+
+    def change_cell_exemptions(self, scope, payload):
+        template, sheet, operation = (payload.get(key) for key in ('template', 'sheet', 'operation'))
+        if not isinstance(template, str) or not isinstance(sheet, str) or operation not in ('add', 'remove'):
+            raise RiskError('请选择工作表和免填操作。', 400)
+        layout = active_form_layouts({}, scope).get((template, sheet))
+        if not layout or sheet.strip() == '封面':
+            raise RiskError('没有可设置的工作表。', 404)
+        raw = payload.get('ranges')
+        if not isinstance(raw, str) or len(raw) > 4096:
+            raise RiskError('免填范围格式无效。', 400)
+        spans = re.findall(r'[^\s,，;；、]+', raw.upper())
+        try:
+            selection = cell_exemption_selection(layout, spans)
+            defaults = cell_exemption_selection(layout, layout.get('excluded_ranges', []))
+        except ValueError as error:
+            raise RiskError(str(error), 400) from error
+        if not selection:
+            raise RiskError('范围内没有可设置免填的数据格。', 400)
+        key = form_sheet_key(template, sheet)
+        with self.locks[scope]:
+            state = self.load(scope)
+            policy = state.get('exemptions', {'revision': 0, 'sheets': {}})
+            if type(payload.get('revision')) is not int or payload['revision'] != policy['revision']:
+                raise RiskError('免填范围已有更新，请刷新后重试。', 409)
+            sheets = dict(policy['sheets'])
+            before = set(sheets[key]) if key in sheets else defaults
+            after = before | selection if operation == 'add' else before - selection
+            if after == before:
+                return policy
+            if after == defaults:
+                sheets.pop(key, None)
+            else:
+                sheets[key] = sorted(after)
+            policy = {'revision': policy['revision'] + 1, 'sheets': sheets}
+            state['exemptions'] = policy
+            active = state.get('active')
+            if active and 'completed' not in active:
+                active['cell_exemptions'] = sheets
+                active['review_version'] = active.get('review_version', 0) + 1
+                invalidate_professions(active, '免填范围已调整，请重新核对。', scope)
+            self.store.put_document(NS, 'building:' + scope, state)
+            return policy
 
     def order(self, owner, scope, view='ALL'):
         if view != 'ALL':
@@ -1976,16 +2239,51 @@ class DailyInspection:
             return slot_time(day, '夜', 1)
         return slot_time((dt.date.fromisoformat(day) + dt.timedelta(days=1)).isoformat(), '白', 1)
 
+    def fill_handover_points(self, scope, active, destination, source, saved_pressures=None):
+        from .daily_inspection_reminders import shift_bounds, slot_time
+
+        if not source.get('rows') or not source.get('batch'):
+            return False
+        duty, number = active['duty'], active['round']
+        when = slot_time(duty['date'], duty['shift'], number)
+        start = when.replace(hour=when.hour - when.hour % 2, minute=0, second=0, microsecond=0)
+        end = min(self.round_cutoff(duty, number).timestamp(), shift_bounds(duty['date'], duty['shift'])[1])
+        sealed = source.get('batch') or 0
+        if not int(start.timestamp() * 1000) <= sealed <= int(dt.datetime.now(CN).timestamp() * 1000):
+            return False
+        fixed_remote_control = False
+        if sealed == destination.get('batch'):
+            template = next((item['name'] for item in original_templates()
+                             if item['scope'] == scope and item['profession'] == '暖通'), '')
+            marks = collect_operating_marks(scope, source, template, int(start.timestamp() * 1000),
+                                            int(end * 1000), sealed, plain)
+            if marks:
+                destination.pop('handover_tower_samples', None)
+                if destination.get('operating_marks') == marks and destination.get('operating_template') == template:
+                    return False
+                apply_operating_marks(scope, destination, marks, template=template, saved_pressures=saved_pressures)
+                return True
+            if template and not destination.get('operating_marks'):
+                apply_operating_marks(scope, destination, {f'{column}5': '√' for column in 'KLMNOP'}, template=template)
+                fixed_remote_control = True
+        changed = apply_handover_readings(scope, destination, source.get('rows', []),
+                                          int(start.timestamp() * 1000), int(when.timestamp() * 1000),
+                                          int(end * 1000), sealed, saved_pressures=saved_pressures)
+        return fixed_remote_control or changed
+
     def new_round(self, state, duty, number, batches, actor, started, professions=None):
         scope, day, shift = duty['scope'], duty['date'], duty['shift']
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                   'started': int(started.timestamp() * 1000), 'duty': duty, 'round': number,
-                  'batches': batches, 'manual_sheet_cells': []}
+                  'batches': batches, 'manual_sheet_cells': [],
+                  'cell_exemptions': state.get('exemptions', {}).get('sheets', {})}
         if state.get('form_remarks'):
             active['sheet_overrides'] = copy.deepcopy(list(state['form_remarks'].values()))
         active['sheet_groups'] = (self.store.get_document(NS, sheet_group_key(duty)) or {}).get('groups', {})
         if professions is not None:
             active.update(professions=professions, profession_confirmations={})
+        if scope in batches:
+            self.fill_handover_points(scope, active, batches[scope], batches[scope], state.get('pump_pressures'))
         inherit_manual_states(state, active, scope)
         return active
 
@@ -2217,7 +2515,8 @@ class DailyInspection:
                                     raise RiskError('请先把该工作表的专业加入本轮巡检。', 409)
                             with archived_workbook(workbook(active, {scope: []}, strict_original=False, presentation=False), active['id'], scope) as book:
                                 edits = apply_cells(book, scope, data['sheet_cells'], actor, enforce_exclusions=True,
-                                                    slot=active['duty']['shift'] + str(active['round']))
+                                                    slot=active['duty']['shift'] + str(active['round']),
+                                                    exemptions=active.get('cell_exemptions'))
                                 submitted = {}
                                 for device in devices:
                                     change = edits.get(device['id'])
@@ -2314,6 +2613,8 @@ class DailyInspection:
                         if action == 'finish' and isinstance(chosen, list) and not all(item in confirmations for item in chosen):
                             raise RiskError('已确认的专业数据发生变化，请重新确认。', 409)
                         active.update(reviews=reviews, review_version=version)
+                        if data.get('sheet_cells'):
+                            remember_pump_pressures(state, active, data['sheet_cells'])
                         remember_manual_states(state,active,devices,before,reviews,data.get('reviews',{}),actor)
                         if action == 'confirm-profession':
                             confirmed_version = profession_version(active, scope, profession)
@@ -2659,7 +2960,7 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
             for point in device['points']:
                 cells = point.get('round_cells') or {}
                 readings.append((scope + '楼', order, device['name'], device['profession'], point['point_id'],
-                                 point['name'], point['value'], formatted_time(point['sampled']), point['path'],
+                                 point['name'], point.get('handover_value', point['value']), formatted_time(point['sampled']), point['path'],
                                  point['template'], point['sheet'], point['cell'], point['integrity'], point['note'],
                                  *(cells.get(slot, '') for slot in ('白1', '白2', '夜1', '夜2'))))
             review = active.get('reviews', {}).get(device['id']) or {'values': {}, 'result': '', 'note': ''}
@@ -2678,21 +2979,34 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                           and not str(current_value or '').strip() else '')
                 if item.get('value_type') == '状态' and not item.get('read_only'):
                     status = '状态测点' + ('；' + status if status else '')
+                    if item.get('mode_cell'):
+                        status += '；制冷模式'
+                if item.get('default_state') and (item['id'] not in review['values']
+                                                 or item['id'] in review.get('default_states', ())):
+                    status = '；'.join(filter(None, (status, '系统默认√')))
+                if section and (shared_point := section.get('shared_temperature_points', {}).get(item['name'])):
+                    status = '；'.join(filter(None, (status, f'共用冷机测点 {shared_point}')))
+                if item.get('handover'):
+                    sample = item['handover']
+                    status = '；'.join(filter(None, (status, '容量运行模式' if sample['source'] == HANDOVER_MODE
+                                                    else '交接审核实测', formatted_time(sample['sampled']), sample['note'])))
                 reviews.append((*prefix, location, source, item['name'], item['reference'],
                                 review['values'].get(item['id'], source_text(item['reference'])) or None, status, *outcome))
             if not rows:
                 reviews.append((*prefix, '', '', '', '', '', '无可填参数', *outcome))
     duty = active.get('duty', {})
+    try:
+        catalogue = with_cell_exemptions(original_templates(), active.get('cell_exemptions'))
+    except (OSError, ValueError, TypeError, KeyError, IndexError) as error:
+        raise RiskError('巡检原表布局无法读取，本轮未归档。', 409) from error
     point_columns = ('楼栋','顺序','设备','专业','测点ID','测点名称','读数','采样时间','测点路径','模板','页签','单元格','数据完整性','备注','白班1单元格','白班2单元格','夜班1单元格','夜班2单元格')
     if strict_original:
         try:
-            catalogue = original_templates()
             for scope in active['batches']:
                 selected_professions = active.get('professions')
                 required = required_sheets(active, scope, selected_professions)
                 templates = [{**item, 'sheets': [sheet for sheet in item['sheets']
-                             if json.dumps([item['name'], sheet['name']], ensure_ascii=False,
-                                           separators=(',', ':')) in required]}
+                             if form_sheet_key(item['name'], sheet['name']) in required]}
                              for item in catalogue if item.get('scope') == scope]
                 source_sheets = [{'name':'测点读数','rows':[point_columns, *readings]},
                                  {'name':REVIEW_SHEET,'rows':[REVIEW_COLUMNS, *reviews]}]
@@ -2734,7 +3048,6 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
     mappings, form_index, titles = [], [], set(book.sheetnames)
     artworks={}
     try:
-        catalogue = original_templates()
         for scope in active['batches']:
             professions = active.get('professions')
             templates = [item for item in catalogue if item.get('scope') == scope and
@@ -2748,9 +3061,15 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
             views = original_views(templates, [{'shift':duty.get('shift'), 'round':active.get('round'),
                                                 'original_cells':entries}])
             layouts = {(item['name'], sheet['name']): sheet for item in templates for sheet in item['sheets']}
+            batch = active['batches'][scope]
+            marks = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {})}
             for view in views:
                 inspector, inspected = '', None
                 if view['sheet'].strip() == CHILLER_SHEET:
+                    occupied = {entry['cell'] for entry in entries
+                                if (entry['template'], entry['sheet']) == (view['template'], view['sheet'])}
+                    overlay_views([view], unbound_operating_cells(
+                        marks, view['template'], layouts[view['template'], view['sheet']], occupied))
                     inspector, stamp = chiller_inspection_details(active, view['template'], view['sheet'])
                     if stamp:
                         inspected = dt.datetime.fromtimestamp(stamp / 1000, CN)
@@ -2759,7 +3078,7 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                 for address, value in header.items():
                     col, row = coordinate_from_string(address)
                     view['rows'][row - 1][column_index_from_string(col) - 1] = value
-            overlay_views(views, active.get('sheet_overrides', []))
+            overlay_views(views, visible_sheet_overrides(active, layouts))
             names = {}
             for source in views:
                 base = re.sub(r'[\\/*?:\[\]]', '_', source['name'])[:27]
@@ -2792,7 +3111,7 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
 
 
 @lru_cache(maxsize=8)
-def archived_report_content(content, scope, identity, shift, number, frozen):
+def archived_report_content(content, scope, identity, shift, number, frozen, exemptions=None):
     """Reuse parsed immutable attachments across sheet changes and status refreshes."""
     templates = [item for item in original_templates() if item.get('scope') == scope]
     with archived_workbook(content, identity, scope) as book:
@@ -2814,7 +3133,7 @@ def archived_report_content(content, scope, identity, shift, number, frozen):
         if frozen and ORIGINAL_MAPPING_SHEET in book and ORIGINAL_INDEX_SHEET in book:
             entries = frozen_readings(book, scope)
         else:
-            entries = original_cells(sheets, templates, shift, number)
+            entries = original_cells(sheets, with_cell_exemptions(templates, exemptions), shift, number)
         extras = form_extras(book, templates, entries) if ORIGINAL_INDEX_SHEET in book else []
         devices = {row[2]: (row[3], row[12]) for row in book[REVIEW_SHEET].iter_rows(
                    min_row=2, max_col=len(REVIEW_COLUMNS), values_only=True) if row[2]}
@@ -2883,18 +3202,20 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
         templates = []
     result = {'scope': scope, 'date': day, 'captured': int(time.time() * 1000), 'rounds': [],
               'original_templates': templates, 'archive_warning':archive_warning,
-              'sheet_filter': list(view_sheet) if view_sheet else None, 'summary_only': summary_only}
+              'sheet_filter': list(view_sheet) if view_sheet else None, 'summary_only': summary_only,
+              'exemptions': state.get('exemptions', {'revision': 0, 'sheets': {}})}
     cells = 0
 
-    def collect(summary, content=None, parsed=None):
+    def collect(summary, content=None, parsed=None, exemptions=None):
         nonlocal cells
         if summary_only:
             result['rounds'].append({**summary, 'original_cells': [], 'extra_cells': []})
             return
-        frozen = summary['status'] == '已归档'
+        frozen = summary['status'] in ('已归档', '待归档核验')
         if parsed is None:
             reader = archived_report_content if frozen and len(content) <= 2 * 1024 * 1024 else archived_report_content.__wrapped__
-            parsed = reader(content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
+            args = (content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
+            parsed = reader(*args, exemptions) if exemptions else reader(*args)
         count, data = parsed
         cells += count
         if cells > 1000000:
@@ -2948,7 +3269,8 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                      'round':saved['round'],'version':saved.get('review_version',0),'status':'自动确认·待上传',
                      'auto_closed':bool(saved.get('auto_closed')),'local_draft':False,
                      'source_time': source_query_time(saved['batches'][scope])},
-                    None if summary_only else workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False,presentation=False))
+                    None if summary_only else workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False,presentation=False),
+                    exemptions=saved.get('cell_exemptions'))
     if (active and active.get('duty', {}).get('date') == day
             and (not lookup or not lookup_round or active['id'] == lookup_round)):
         if active['id'] in archived_ids:
@@ -2964,10 +3286,12 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                 if not drafts:
                     collect(summary, parsed=service.active_report_content(active, scope))
                 else:
-                    collect(summary, workbook(active, {scope: order}, strict_original=False, presentation=False))
+                    collect(summary, workbook(active, {scope: order}, strict_original=False, presentation=False),
+                            exemptions=active.get('cell_exemptions'))
             else:
                 collect(summary, None if summary_only else workbook(
-                    active, {scope: active.get('archive_order', order)}, strict_original=False, presentation=False))
+                    active, {scope: active.get('archive_order', order)}, strict_original=False, presentation=False),
+                    exemptions=active.get('cell_exemptions'))
     result['rounds'].sort(key=lambda item: (0 if item.get('shift') == '白' else 1,
                                             item.get('round') or 0, item['round_id']))
     from .daily_inspection_reminders import slot_time
@@ -3101,6 +3425,7 @@ def install_daily_inspection(app, controller, runtime):
             if not can_manage and not history_scopes:
                 raise RiskError('没有可查看的巡检记录。', 403)
             local_write = bool(home_scopes and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
+            impersonating = session.get('impersonation') or session.get('source') == 'admin_impersonation'
             selected_scope = request.query_params.get('view_scope', '')
             if selected_scope and not ((viewer and selected_scope in scopes) or selected_scope in home_scopes
                                        or (can_manage and selected_scope in scopes)):
@@ -3145,11 +3470,18 @@ def install_daily_inspection(app, controller, runtime):
                         request, max_bytes=4 * 1024 * 1024 if action in {'draft', 'finish', 'history-edit', 'day-sheet', 'day-export'} else 128 * 1024)
                 except ValueError as error:
                     raise RiskError('巡检资料格式无效或超过提交大小限制。', 400) from error
-                if not isinstance(payload, dict) or (action != 'start' and not report_action and not isinstance(payload.get('id'), str)):
+                if not isinstance(payload, dict) or (action not in {'start', 'exemptions'} and
+                        not report_action and not isinstance(payload.get('id'), str)):
                     raise RiskError('巡检请求格式无效。', 400)
                 if action in {'sheet-group', 'view-sheet', 'append-profession', 'confirm-profession'} and (
                         session.get('impersonation') or session.get('source') == 'admin_impersonation'):
                     raise RiskError('代登录仅可查看巡检。', 403)
+                if action == 'exemptions':
+                    scope = payload.get('scope')
+                    if scope not in scopes or impersonating or not await asyncio.to_thread(auth.is_admin, session):
+                        raise RiskError('需要该楼栋的管理员权限才能设置免填范围。', 403)
+                    policy = await asyncio.to_thread(svc.change_cell_exemptions, scope, payload)
+                    return JSONResponse({'ok': True, 'data': policy}, headers={'Cache-Control': 'private, no-store'})
             if report_action:
                 if request.method != 'POST':
                     raise RiskError('巡检操作不存在。', 404)
@@ -3201,6 +3533,9 @@ def install_daily_inspection(app, controller, runtime):
                     report['original_templates']=display_templates(scope)
                 report['template_version']=template_version()
                 report['can_edit_history'] = bool((viewer or can_manage or (local_write and scope in home_scopes)) and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
+                if action == 'day-sheet':
+                    report['can_edit_exemptions'] = bool(can_manage and not impersonating
+                        and await asyncio.to_thread(auth.is_admin, session))
                 report['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{report["date"]}'.encode()).hexdigest()
                 if action == 'day-export':
                     if not report['rounds']:

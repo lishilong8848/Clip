@@ -7,7 +7,7 @@ import json
 import logging
 import re
 from pathlib import Path
-from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
+from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile, ZipInfo
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
@@ -171,6 +171,10 @@ class ToolSelfChecks:
                     content BLOB NOT NULL, schema TEXT NOT NULL, PRIMARY KEY(id,version));
                 CREATE TABLE IF NOT EXISTS tool_check_template_deletions(
                     id TEXT NOT NULL PRIMARY KEY, deleted_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS tool_check_template_catalog(
+                    id TEXT PRIMARY KEY, version INTEGER NOT NULL, entry TEXT NOT NULL, present INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS tool_check_template_publications(
+                    fingerprint TEXT PRIMARY KEY, file_token TEXT NOT NULL, attempted_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS tool_check_orders(
                     month TEXT NOT NULL, scope TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 0,
                     owner TEXT NOT NULL DEFAULT '', owner_name TEXT NOT NULL DEFAULT '', records TEXT NOT NULL DEFAULT '[]',
@@ -267,6 +271,12 @@ class ToolSelfChecks:
         return {'id': row['id'], 'version': row['version'], 'name': row['name'], 'active': bool(row['active']),
                 'schema': json.loads(row['schema'])}
 
+    def _select_template(self, db, identity, version):
+        template = self._template(db, identity)
+        if not template['active'] or template['version'] != version:
+            raise RiskError('新选模板已更新或停用，请刷新模板后重新选用。', 409)
+        return template
+
     def list_templates(self, db, administrator):
         templates = [self.template_info(row) for row in db.execute('''SELECT t.id,t.version,t.name,t.active,t.schema
             FROM tool_check_templates t WHERE version=(SELECT MAX(version) FROM tool_check_templates WHERE id=t.id)
@@ -325,7 +335,11 @@ class ToolSelfChecks:
         with self.connect() as db:
             self._template(db, identity)
             source = self._template(db, identity, version)
-            content, schema = source['content'], json.loads(source['schema'])
+        return self.save_template(actor, name, self._clone_template_content(source, body))
+
+    @staticmethod
+    def _clone_template_content(source, body, *, stable=False):
+        content, schema = source['content'], json.loads(source['schema'])
         checks = body.get('checks')
         if not isinstance(checks, list) or len(checks) != len(schema['checks']):
             raise RiskError('请保留原模板的检查项数量，并填写每项内容。')
@@ -346,10 +360,23 @@ class ToolSelfChecks:
                         continue
                     sheet[f'{column}{old["row"]}'] = text(new.get(key), maximum, True)
             out = io.BytesIO()
-            book.save(out)
+            if stable:
+                # The same clone must produce the same checksum when a publish is retried.
+                from openpyxl.writer.excel import ExcelWriter
+
+                book.properties.created = book.properties.modified = dt.datetime(1980, 1, 1)
+                ExcelWriter(book, ZipFile(out, 'w', ZIP_DEFLATED)).save()
+            else:
+                book.save(out)
         finally:
             book.close()
-        return self.save_template(actor, name, out.getvalue())
+        if stable:
+            normalized = io.BytesIO()
+            with ZipFile(out) as source_zip, ZipFile(normalized, 'w', ZIP_DEFLATED) as target:
+                for part in source_zip.namelist():
+                    target.writestr(ZipInfo(part), source_zip.read(part), compress_type=ZIP_DEFLATED)
+            return normalized.getvalue()
+        return out.getvalue()
 
     def availability(self, actor, identity, body):
         self.access(actor)
@@ -440,9 +467,8 @@ class ToolSelfChecks:
                 raise RiskError('请选择有效的模板版本。')
             old = previous.get(entry_id, {})
             pinned = (old.get('template_id'), old.get('version')) == (identity, version)
-            template = self._template(db, identity, version if pinned else None)
-            if not pinned and (not template['active'] or template['version'] != version):
-                raise RiskError('新选模板已更新或停用，请刷新模板后重新选用。', 409)
+            template = (self._template(db, identity, version) if pinned
+                        else self._select_template(db, identity, version))
             schema = json.loads(template['schema'])
             checks = entry.get('checks')
             if (not isinstance(checks, list) or len(checks) != len(schema['checks'])

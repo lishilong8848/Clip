@@ -19,7 +19,7 @@ from lan_bitable_template_portal.daily_inspection import (
 )
 from lan_bitable_template_portal.module_access import module_denial
 from lan_bitable_template_portal.daily_inspection_original import (catalog_locations, original_cells,
-                                                                    original_templates, original_views)
+    original_templates, original_views, cell_exemption_selection, form_sheet_key)
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from lan_bitable_template_portal.portal_service import LI_SHILONG_OPEN_ID
 from lan_bitable_template_portal.state_store import LanPortalStateStore
@@ -309,6 +309,52 @@ class InspectionReportTests(unittest.TestCase):
         finally:
             book.close()
 
+    def test_exemptions_override_defaults_preserve_drafts_and_freeze_archive(self):
+        merged = {'name': '巡检表', 'rows': [['项目', None, '说明'], [None, None, None]], 'merges': ['A1:B1', 'A2:B2']}
+        self.assertEqual(cell_exemption_selection(merged, ['B1:B2']), {'A2'})
+        layouts = {}
+        for template in original_templates():
+            for sheet in template['sheets']:
+                if sheet['name'] == 'SVG巡检表':
+                    self.assertEqual(len(cell_exemption_selection(sheet, sheet['excluded_ranges'])), 144)
+                    layouts[template['scope']] = template['name']
+        active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        location = {'template': layouts['D'], 'sheet': 'SVG巡检表'}
+        options = {**location, 'ranges': 'H7:H8', 'operation': 'remove', 'revision': 0}
+        policy = self.service.change_cell_exemptions('D', options)
+        key = form_sheet_key(*location.values())
+        self.assertEqual(len(policy['sheets'][key]), 142)
+        self.assertNotIn('exemptions', self.service.load('E'))
+        self.assertEqual(self.service.load('D')['active']['review_version'], 1)
+        with self.assertRaisesRegex(RiskError, '已有更新'):
+            self.service.change_cell_exemptions('D', options)
+        with self.assertRaisesRegex(RiskError, '超出原表边界'):
+            self.service.change_cell_exemptions('D', {**options, 'ranges': 'XFD104857', 'revision': 1})
+        restarted = DailyInspection(self.store, self.cloud)
+        self.assertEqual(restarted.load('D')['exemptions'], policy)
+        edit = {**location, 'cell': 'H7', 'value': '17'}
+        saved = restarted.change('a', '甲', DAY, 'draft',
+            {'id': active['id'], 'review_version': 1, 'sheet_cells': [edit]})['active']
+        blocked = restarted.change_cell_exemptions('D', {**options, 'operation': 'add', 'revision': 1})
+        self.assertEqual(blocked['sheets'], {})
+        with self.assertRaisesRegex(RiskError, '无需填写'):
+            restarted.change('a', '甲', DAY, 'draft',
+                {'id': active['id'], 'review_version': saved['review_version'] + 1, 'sheet_cells': [edit]})
+        hidden = restarted.active_report_content(restarted.load('D')['active'], 'D')[1]
+        self.assertFalse(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] for c in hidden['extra_cells']))
+        restarted.change_cell_exemptions('D', {**options, 'revision': 2})
+        restored = restarted.load('D')['active']
+        visible = restarted.active_report_content(restored, 'D')[1]
+        self.assertTrue(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] and c['value'] == '17'
+                            for c in visible['extra_cells']))
+        restarted.change('a', '甲', DAY, 'finish',
+                         {'id': restored['id'], 'review_version': restored['review_version'], 'reviews': {}})
+        self.service.change_cell_exemptions('D', {**options, 'operation': 'add', 'revision': 3})
+        archive = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', drafts={})
+        self.assertEqual(archive['rounds'][0]['status'], '已归档')
+        self.assertTrue(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] and c['value'] == '17'
+                            for c in archive['rounds'][0]['extra_cells']))
+
     def test_concurrent_original_form_edits_do_not_silently_overwrite_each_other(self):
         active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
         form=next(item for item in active['batch']['form_devices'] if len(item['points'])>=2)
@@ -535,6 +581,7 @@ class InspectionAccessTests(unittest.TestCase):
         class Auth:
             def account_profile(self, _owner): return {'enabled': True, 'home_scope': owner.home}
             def session_scopes(self, _session): return owner.scopes
+            def is_admin(self, session): return session.get('source') == 'test-admin'
 
         class Controller:
             def _current_session(self, _request): return owner.session
@@ -576,6 +623,21 @@ class InspectionAccessTests(unittest.TestCase):
         self.assertTrue(data['rounds'][0]['original_cells'])
         self.assertNotIn('sheets',data['rounds'][0])
         self.assertEqual(self.post('day-sheet',{**body,'scope':'E'}).status_code,403)
+
+    def test_only_admin_with_building_scope_can_update_exemptions(self):
+        template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '电气')
+        body = {'scope': 'D', 'template': template['name'], 'sheet': 'SVG巡检表', 'ranges': 'H7',
+                'operation': 'remove', 'revision': 0}
+        self.modules = {'daily'}
+        self.assertEqual(self.post('exemptions', body).status_code, 403)
+        self.session['source'] = 'test-admin'
+        self.assertEqual(self.post('exemptions', {**body, 'scope': 'E'}).status_code, 403)
+        self.session['impersonation'] = True
+        self.assertEqual(self.post('exemptions', body).status_code, 403)
+        self.session.pop('impersonation')
+        response = self.post('exemptions', body)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()['data']['revision'], 1)
 
     def test_template_and_status_reads_do_not_wait_for_live_roster(self):
         with patch('lan_bitable_template_portal.personnel_source.daily_roster',side_effect=AssertionError('no roster network on read')) as roster:

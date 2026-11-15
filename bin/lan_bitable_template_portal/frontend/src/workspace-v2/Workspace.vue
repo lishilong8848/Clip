@@ -309,7 +309,7 @@ const componentProps = computed(() => {
     case zhihangDataModule.id: return {};
     case 'work_handover': return {handoverId:p.get('id')||''};
     case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
-    case 'tool_management': return {scope:p.get('scope')||''};
+    case 'tool_management': return {scope:p.get('scope')||'',toolView:p.get('tool_view')||''};
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':

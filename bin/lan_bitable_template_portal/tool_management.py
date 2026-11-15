@@ -13,7 +13,9 @@ import uuid
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .risk_inspection import RiskError, RiskInspections, can_scope as risk_can_scope, digest, text
+from .tool_management_lifecycle import ToolManagementLifecycle
 from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
+from .tool_template_library import ToolTemplateLibrary
 from .tool_workspace import ToolWorkspaceMixin
 
 
@@ -28,6 +30,39 @@ MAX_ORDER_DELETIONS = 200
 MANUAL_DELETE = '手动删除工单'
 PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
+
+
+def inspection_meta(body, assets, actual, *, required=True):
+    """Record the operator's comparison of the certificate with the selected tools."""
+    raw = body.get('inspection')
+    if raw is None and not required:
+        return {}
+    if not isinstance(raw, dict):
+        raise RiskError('请核对送检报告并填写报告编号、检测机构和检测结论。')
+    report_no = text(raw.get('report_no'), 120, True)
+    institution = text(raw.get('institution'), 160, True)
+    result = raw.get('result')
+    if result not in ('qualified', 'unqualified'):
+        raise RiskError('请选择报告上的检测结论。')
+    checked = raw.get('confirmed_asset_ids')
+    expected = {asset['id'] for asset in assets}
+    if (not isinstance(checked, list) or len(checked) != len(expected)
+            or not all(isinstance(item, str) for item in checked) or set(checked) != expected):
+        raise RiskError('请核对报告覆盖本次选择的全部工具。')
+    expires_on = date_value(raw.get('expires_on'))
+    if expires_on and (expires_on < actual or result != 'qualified'):
+        raise RiskError('有效期须晚于或等于检测日期，仅合格报告可填写有效期。')
+    return {'report_no': report_no, 'institution': institution, 'result': result,
+            'expires_on': expires_on, 'confirmed_asset_ids': sorted(expected)}
+
+
+def inspection_end(asset, actual, meta):
+    if not actual or meta.get('result') != 'qualified':
+        return ''
+    if meta.get('expires_on'):
+        return meta['expires_on']
+    cycle = CYCLES.get(asset.get('external_cycle'))
+    return month_offset(dt.date.fromisoformat(actual), cycle).isoformat() if cycle else ''
 
 
 def configured_kind(asset):
@@ -111,7 +146,7 @@ def report_file(name, data):
     return name
 
 
-class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
+class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspaceMixin, ToolSelfChecks):
     @staticmethod
     def access(actor):
         RiskInspections.check(actor)
@@ -171,6 +206,8 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 db.execute('ALTER TABLE tool_work_sync ADD COLUMN attempted_at REAL NOT NULL DEFAULT 0')
             if not any(row['name'] == 'candidate_id' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
                 db.execute("ALTER TABLE tool_work_sync ADD COLUMN candidate_id TEXT NOT NULL DEFAULT ''")
+            if not any(row['name'] == 'inspection_meta' for row in db.execute('PRAGMA table_info(tool_work_orders)')):
+                db.execute("ALTER TABLE tool_work_orders ADD COLUMN inspection_meta TEXT NOT NULL DEFAULT '{}'")
         self._init_tool_workspace()
 
     @staticmethod
@@ -467,9 +504,9 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             configured, error = configured_kind(asset)
             if configured != kind:
                 raise RiskError(error or '所选工具的周期与办理类型不一致。', 409)
-            if db.execute("""SELECT 1 FROM tool_work_orders WHERE asset_id=? AND kind=?
-                AND (month=? OR (month<? AND submitted_at IS NULL AND outcome=''))""",
-                (identity,kind,month,month)).fetchone():
+            if db.execute("""SELECT 1 FROM tool_work_orders WHERE asset_id=?
+                AND ((kind=? AND month=?) OR (submitted_at IS NULL AND outcome=''))""",
+                (identity,kind,month)).fetchone():
                 raise RiskError('该工具已有本月或未办结的原工单，请在列表中查看。',409)
             order_id=uuid.uuid4().hex
             self.insert_work_order(db, order_id, month, asset, kind, current.date().isoformat())
@@ -507,6 +544,37 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             self.check_order_deletion(db, actor, identity, body.get('revision'), clock().strftime('%Y-%m'))
             self.mark_order_deleted(db, actor, identity)
             return self.work_info(db, actor, self._work(db, actor, identity))
+
+    def restore_order(self, actor, identity, body):
+        with self.connect(True) as db:
+            row = self._work(db, actor, identity)
+            if not (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)):
+                raise RiskError('仅本楼楼长或有权限的管理员可恢复工单。', 403)
+            if (type(body.get('revision')) is int and row['revision'] == body['revision'] + 1
+                    and not row['outcome'] and not row['submitted_at']
+                    and db.execute("""SELECT 1 FROM tool_work_audit WHERE id=(
+                        SELECT MAX(id) FROM tool_work_audit WHERE order_id=?) AND action='恢复工单'""", (identity,)).fetchone()):
+                return self.work_info(db, actor, row)
+            self.check_revision(row, body.get('revision'))
+            if not self.can_restore_order(row):
+                raise RiskError('仅可恢复本月手动取消且未提交的工单。', 409)
+            current = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (row['asset_id'],)).fetchone()
+            asset = self.effective(current) if current else {}
+            if (asset.get('scope') != row['scope'] or configured_kind(asset)[0] != row['kind']
+                    or not self.tool_available(db, asset)):
+                raise RiskError('工具归属、状态或周期已变化，请先核对底表。', 409)
+            if db.execute("""SELECT 1 FROM tool_work_orders WHERE asset_id=? AND id<>?
+                AND submitted_at IS NULL AND outcome=''""", (row['asset_id'], identity)).fetchone():
+                raise RiskError('该工具已有其他未办结工单，请继续办理原单。', 409)
+            db.execute("UPDATE tool_work_orders SET outcome='',resolution='',revision=revision+1 WHERE id=?", (identity,))
+            db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
+            self.audit(db, identity, actor, '恢复工单', '接续原工单')
+            return self.work_info(db, actor, self._work(db, actor, identity))
+
+    @staticmethod
+    def can_restore_order(row):
+        return (row['month'] == clock().strftime('%Y-%m') and not row['submitted_at']
+                and row['outcome'] == 'cancelled' and row['resolution'] in (MANUAL_DELETE, PLAN_RESET))
 
     def cancel_orders(self, actor, body):
         entries = body.get('orders')
@@ -569,7 +637,7 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         month = today.strftime('%Y-%m')
         first_day = today.replace(day=1)
         end = month_offset(first_day, 1)
-        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty,resolution,scope
+        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty,resolution,scope,inspection_meta
             FROM tool_work_orders WHERE asset_id=?''', (asset['id'],)).fetchall()
         scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
         if asset.get('retired') or scrapped >= asset['quantity'] or any(
@@ -587,12 +655,21 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                                and same_month['resolution'] == PLAN_RESET and same_month['scope'] == asset['scope']):
             count('deleted' if same_month['outcome'] == 'cancelled' else 'created')
             return {}
-        if any(not entry['submitted_at'] and entry['outcome'] != 'cancelled' for entry in entries):
+        if any(not entry['submitted_at'] and entry['outcome'] != 'cancelled' for entry in history):
             count('unfinished')
             return {}
         latest = max([asset.get(kind + '_last', '')] + [entry['actual'] for entry in entries if entry['submitted_at']])
         due = month_offset(dt.date.fromisoformat(latest), cycle) if latest else dt.date.fromisoformat(
             asset.get(kind + '_first') or first_day.isoformat())
+        if kind == 'external':
+            recent = max((entry for entry in entries if entry['submitted_at'] and entry['actual']),
+                         key=lambda entry: (entry['actual'], entry['submitted_at']), default=None)
+            if recent and recent['actual'] == latest:
+                meta = json.loads(recent['inspection_meta'])
+                if meta.get('result') == 'unqualified':
+                    due = dt.date.fromisoformat(recent['actual'])
+                elif meta.get('expires_on'):
+                    due = dt.date.fromisoformat(meta['expires_on'])
         if due < end:
             return {kind: due.isoformat()}
         count('later')
@@ -642,11 +719,17 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                  'error': job['error'], 'verifying': bool(job['attempted_at']) and not job['remote_id']} for job in db.execute(
                     'SELECT dest,revision,synced,error,attempted_at,remote_id FROM tool_work_sync WHERE order_id=?', (row['id'],))]
         asset = json.loads(row['asset'])
+        meta = json.loads(row['inspection_meta'])
+        if 'confirmed_asset_ids' in meta:
+            meta['confirmed_asset_ids'] = [asset['id']]
+        admin = self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)
         workspace = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
         return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
                          'quantity': asset['quantity'], 'supervisor_assigned': bool(row['supervisor']),
                          'assigned_to_me': row['supervisor'] == actor['id'] and eligible,
                          'status': 'cancelled' if row['outcome'] == 'cancelled' else 'review_pending' if awaiting_review else 'pending' if open_order else 'submitted',
+                         'can_restore': admin and self.can_restore_order(row), 'inspection': meta,
+                         'inspection_expires_on': inspection_end(asset, row['actual'], meta) if row['kind'] == 'external' else '',
                          'review_note': review['note'] if review else '',
                          'workspace_id': workspace['session_id'] if workspace else '',
                          'asset_id': asset['id'],
@@ -669,14 +752,31 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
         month = month_key(month or current)
         with self.connect() as db:
             rows = db.execute("""SELECT id,month,scope,kind,due,asset,supervisor,owner,owner_name,revision,actual,outcome,
-                submitted_at,manager,scrap_qty,reason,resolution,report_name FROM tool_work_orders
-                WHERE month=? OR outcome IN('repair','scrap') ORDER BY month DESC,scope,due,kind""", (month,)).fetchall()
+                submitted_at,manager,scrap_qty,reason,resolution,report_name,inspection_meta FROM tool_work_orders
+                WHERE month=? OR outcome IN('repair','scrap') OR
+                    (?=? AND month<? AND submitted_at IS NULL AND outcome='')
+                ORDER BY month DESC,scope,due,kind""", (month, month, current, current)).fetchall()
             visible = [self.work_info(db, actor, row) for row in rows if self.visible(db, actor, row)]
             admin = self.administrator(actor)
             all_scopes = admin and all(can_scope(actor, scope) for scope in BUILDINGS)
             archive = db.execute('SELECT created_at,needs_refresh FROM tool_work_archives WHERE month=?', (month,)).fetchone()
             templates = self.list_templates(db, admin)
-            return {'month': month, 'orders': [row for row in visible if row['month'] == month],
+            month_orders = [row for row in visible if row['month'] == month]
+            carryovers = [row for row in visible if row['month'] < month and row['status'] in ('pending','review_pending')]
+            waiting_sync = sum(any(job['state'] != 'done' for job in row['sync']) for row in month_orders)
+            waiting_work = sum(row['status'] in ('pending', 'review_pending') for row in month_orders)
+            archive_status = 'none'
+            plan_count = None
+            if archive and all_scopes:
+                archive_status = 'snapshot'
+                if (month == current and not carryovers and not waiting_sync and not waiting_work and not archive['needs_refresh']
+                        and self.state(db, 'inventory_at') and not self.state(db, 'inventory_error')):
+                    plan_count = sum(len(self.planned_kinds(db, self.effective(raw), clock().date(), allow_reset=True))
+                                     for raw in db.execute('SELECT * FROM tool_inventory WHERE active=1'))
+                    if plan_count == 0:
+                        archive_status = 'settled'
+            return {'month': month, 'orders': month_orders, 'carryovers': carryovers,
+                    'plan_count': plan_count, 'waiting_sync': waiting_sync, 'archive_status': archive_status,
                     'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap'}],
                     'can_create_orders': bool(self.order_creation_scopes(db, actor)),
                     'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
@@ -725,12 +825,19 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
             self.audit(db, identity, actor, '上传送检报告', name)
             return self.work_info(db, actor, self._work(db, actor, identity))
 
+    def report_attachment(self, actor, identity):
+        with self.connect() as db:
+            row = self._work(db, actor, identity)
+            if row['kind'] != 'external' or not row['report']:
+                raise RiskError('没有可查看的送检报告。', 404)
+            return row['report_name'], row['report']
+
     @staticmethod
     def check_revision(row, revision):
         if type(revision) is not int or revision != row['revision']:
             raise RiskError('工单已变化，请重新打开核对后再操作。', 409)
 
-    def action(self, actor, identity, action, body):
+    def action(self, actor, identity, action, body, *, require_report_check=False):
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
             info = self.work_info(db, actor, row)
@@ -815,6 +922,10 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                         if not row['report']:
                             raise RiskError('请先上传送检报告。')
                         updates['actual'] = date_value(body.get('actual'), required=True)
+                        if updates['actual'] > now[:10]:
+                            raise RiskError('实际检测日期不能晚于今天。')
+                        updates['inspection_meta'] = dumps(inspection_meta(body, [json.loads(row['asset'])],
+                            updates['actual'], required=require_report_check))
                         dests = ('inspection',)
                     else:
                         outcome = body.get('outcome')
@@ -909,8 +1020,9 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                        (lease, now + 600, identity, dest))
             row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
             linked = self._workspace_for_order(db, identity)
-            if linked:
+            if linked or dest == 'inspection' and row and row['inspection_meta'] != '{}':
                 job['verify_write'] = True
+            if linked:
                 if dest == 'inspection' and not job['file_token']:
                     job['file_token'] = db.execute('SELECT file_token FROM tool_workspace_sessions WHERE id=?',
                                                    (linked['session_id'],)).fetchone()[0]
@@ -935,7 +1047,7 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                                   (attempt, identity, dest, lease)).rowcount:
                     raise RiskError('原工单同步租约已失效。', 409)
 
-        if linked:
+        if job.get('verify_write'):
             job['save_attempt'] = save_attempt
             def save_candidate(record_id):
                 with self.connect(True) as db:
@@ -997,7 +1109,8 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 manifest.append({'id': row['id'], 'tool': json.loads(row['asset'])['name'], 'scope': row['scope'],
                     'type': KINDS[row['kind']], 'due': row['due'], 'actual': row['actual'],
                     'outcome': OUTCOMES.get(row['outcome'], '已提交' if row['submitted_at'] else '已取消'),
-                    'submitted_at': row['submitted_at'], 'submitted_by': row['owner_name'], 'files': files})
+                    'submitted_at': row['submitted_at'], 'submitted_by': row['owner_name'], 'files': files,
+                    **({'inspection': json.loads(row['inspection_meta'])} if row['kind'] == 'external' else {})})
             archive.writestr('归档清单.json', dumps({'month': month, 'orders': manifest}).encode())
 
     def archive_ready(self):
@@ -1008,7 +1121,6 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 GROUP BY month HAVING SUM(submitted_at IS NOT NULL)>0
                   AND SUM(submitted_at IS NULL AND outcome<>'cancelled')=0
                   AND NOT EXISTS (SELECT 1 FROM tool_work_orders work JOIN tool_work_sync sync ON sync.order_id=work.id
-                    JOIN tool_workspace_items item ON item.order_id=work.id
                     WHERE work.month=tool_work_orders.month AND sync.synced<sync.revision)
                 ORDER BY month LIMIT 1""").fetchone()
             if not ready:
@@ -1026,7 +1138,7 @@ class ToolManagement(ToolWorkspaceMixin, ToolSelfChecks):
                 actual = db.execute(signature_sql, (month,)).fetchall()
                 pending = db.execute("""SELECT 1 FROM tool_work_orders work WHERE month=? AND
                     ((submitted_at IS NULL AND outcome<>'cancelled') OR EXISTS (
-                        SELECT 1 FROM tool_work_sync sync JOIN tool_workspace_items item ON item.order_id=sync.order_id
+                        SELECT 1 FROM tool_work_sync sync
                         WHERE sync.order_id=work.id AND sync.synced<sync.revision
                     )) LIMIT 1""", (month,)).fetchone()
                 if actual == signature and not pending and not db.execute(

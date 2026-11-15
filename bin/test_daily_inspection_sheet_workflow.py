@@ -178,7 +178,7 @@ class SheetWorkflowTests(unittest.TestCase):
         d=self.svc.change('a','甲',DAY,'draft',{'id':self.active['id'],'review_version':0,'sheet_cells':[d_edit]})['active']
         self.assertEqual(self.svc.load('E'),before_e)
         e_report=inspection_report(self.svc,'E',DAY['date'],'b','乙',include_active=True,drafts={})
-        e_target=next(c for c in e_report['rounds'][0]['original_cells'] if not c['read_only'] and '状态' not in c['parameter'])
+        e_target=next(c for c in e_report['rounds'][0]['original_cells'] if not c['read_only'] and c.get('value_type')=='数值')
         e_edit={k:e_target[k] for k in ('template','sheet','cell')};e_edit['value']='235'
         self.svc.change('b','乙',e_duty,'draft',{'id':e['id'],'review_version':0,'sheet_cells':[e_edit]})
         self.finish(d['review_version'])
@@ -209,7 +209,7 @@ class SheetWorkflowTests(unittest.TestCase):
         self.cloud.lose_receipt=False
         self.assertIn('completed',self.svc.load('D')['active'])
         e_report=inspection_report(self.svc,'E',DAY['date'],'b','乙',include_active=True,drafts={})
-        c=next(c for c in e_report['rounds'][0]['original_cells'] if not c['read_only'] and '状态' not in c['parameter'])
+        c=next(c for c in e_report['rounds'][0]['original_cells'] if not c['read_only'] and c.get('value_type')=='数值')
         edit={k:c[k] for k in ('template','sheet','cell')};edit['value']='7'
         updated=self.svc.change('b','乙',e_duty,'draft',{'id':e['id'],'review_version':0,'sheet_cells':[edit]})
         self.assertGreater(updated['active']['review_version'],0)

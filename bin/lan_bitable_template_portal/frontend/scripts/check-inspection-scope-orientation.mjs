@@ -93,7 +93,7 @@ try{
   await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:centerX-55,y:centerY,id:1},{x:centerX+55,y:centerY,id:2}]});
   await page.waitForTimeout(150);await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});await cdp.detach();
   assert((await book.locator('table').evaluate(el=>el.offsetWidth))>originalWidth,'横屏双指放大');
-  await book.getByRole('button',{name:'恢复巡检表原始大小'}).click();
+  await book.getByRole('button',{name:'恢复紧凑显示'}).click();
   await book.getByRole('cell',{name:'B2 380',exact:true}).click();await book.getByRole('textbox',{name:'编辑 B2'}).fill('381');
   await book.getByRole('textbox',{name:'编辑 B2'}).press('Enter');await page.waitForFunction(()=>!localStorage.getItem('inspection-sheet-edits:E-owner-date'));
   assert.equal(values.E,'381');assert.equal(values.D,'220');assert.equal(writes.length,1);

@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import mimetypes
 from urllib.parse import quote
 
 from fastapi import Request
@@ -10,6 +11,17 @@ from fastapi.responses import FileResponse, Response
 from .risk_inspection import RiskError
 from .tool_management import MAX_REPORT, ToolManagement
 from .tool_self_check import MAX_FILE
+
+
+def report_response(attachment):
+    name, content = attachment
+    mime = mimetypes.guess_type(name)[0] or 'application/octet-stream'
+    disposition = 'inline' if mime in {'application/pdf', 'image/png', 'image/jpeg'} else 'attachment'
+    return Response(content, media_type=mime, headers={
+        'Content-Disposition': f"{disposition}; filename*=UTF-8''{quote(name)}",
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': 'sandbox',
+    })
 
 
 def install_tool_self_check_routes(app, controller, service, read_actor, same_origin, response):
@@ -30,6 +42,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 if request.method == 'GET':
                     if path == 'workspace':
                         return response(await asyncio.to_thread(svc.workspace_list, actor))
+                    if path.endswith('/report-file'):
+                        return report_response(await asyncio.to_thread(svc.workspace_report_attachment, actor, identity))
                     if path.endswith('/download'):
                         content = await asyncio.to_thread(svc.workspace_download, actor, identity)
                         filename = quote(f'{identity}-工具办理归档.zip')
@@ -73,7 +87,7 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     return response(await asyncio.to_thread(svc.workspace_resolve_binding, actor, identity, body))
                 if path.endswith('/reconcile'):
                     return response(await asyncio.to_thread(svc.workspace_reconcile, actor, identity, body))
-                return response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body))
+                return response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body, require_report_check=True))
             if request.method == 'GET':
                 if not path:
                     result = await asyncio.to_thread(svc.list, actor, request.query_params.get('month', ''))
@@ -87,6 +101,12 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.clear_month_plan, actor)
                 elif path == 'inventory/fields':
                     result = await asyncio.to_thread(svc.new_inventory_fields, actor)
+                elif path == 'templates':
+                    result = await asyncio.to_thread(svc.template_library, actor)
+                elif path.startswith('inventory/') and path.endswith('/history'):
+                    result = await asyncio.to_thread(svc.tool_history, actor, identity)
+                elif path.endswith('/report-file'):
+                    return report_response(await asyncio.to_thread(svc.report_attachment, actor, identity))
                 elif path.startswith('archive/') or path.endswith('/download'):
                     content = await asyncio.to_thread(svc.download, actor, month, identity)
                     filename = quote(f'{month or identity}-工具管理归档.zip')
@@ -122,8 +142,11 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 version = request.query_params.get('version', '')
                 if version and (not version.isascii() or not version.isdecimal() or len(version) > 9):
                     raise RiskError('模板版本无效。')
-                result = await asyncio.to_thread(svc.save_template, actor, request.query_params.get('name', ''),
-                    bytes(payload), request.query_params.get('id', ''), int(version) if version else None)
+                template_id = request.query_params.get('id', '')
+                legacy = bool(template_id and not template_id.startswith('rec'))
+                save_template = svc.save_template if legacy else svc.save_library_template
+                result = await asyncio.to_thread(save_template, actor, request.query_params.get('name', ''),
+                    bytes(payload), template_id, int(version) if version else None)
                 return response(result)
             body = await controller._read_json_request(request, max_bytes=512 * 1024)
             if not isinstance(body, dict):
@@ -142,16 +165,21 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 return response(await asyncio.to_thread(svc.refresh_inventory, actor))
             if path.endswith('/delete') and path.startswith('orders/'):
                 return response(await asyncio.to_thread(svc.cancel_order, actor, identity, body))
+            if path.endswith('/restore') and path.startswith('orders/'):
+                return response(await asyncio.to_thread(svc.restore_order, actor, identity, body))
             if path.endswith('/clone') and path.startswith('templates/'):
-                return response(await asyncio.to_thread(svc.clone_template, actor, params['identity'], body))
+                return response(await asyncio.to_thread(svc.clone_library_template, actor, identity, body))
             if path.endswith('/delete') and path.startswith('templates/'):
-                return response(await asyncio.to_thread(svc.delete_template, actor, identity, body))
+                delete_template = svc.delete_library_template if identity.startswith('rec') else svc.delete_template
+                return response(await asyncio.to_thread(delete_template, actor, identity, body))
             if path.startswith('templates/'):
+                if identity.startswith('rec'):
+                    return response(await asyncio.to_thread(svc.library_template_availability, actor, identity, body))
                 await asyncio.to_thread(svc.availability, actor, params['identity'], body)
                 return response({'saved': True})
             if path.startswith('inventory/'):
                 return response(await asyncio.to_thread(svc.configure, actor, identity, body))
-            return response(await asyncio.to_thread(svc.action, actor, identity, params['action'], body))
+            return response(await asyncio.to_thread(svc.action, actor, identity, params['action'], body, require_report_check=True))
         except RiskError as exc:
             return response(error=exc)
         except Exception:
@@ -165,7 +193,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']),
                           ('/orders/clear-month', ['GET', 'POST']), ('/orders/{identity}', ['GET']),
                           ('/orders/{identity}/download', ['GET']), ('/orders/{identity}/report', ['POST']),
-                          ('/orders/{identity}/{action}', ['POST']), ('/templates', ['POST']),
+                          ('/orders/{identity}/report-file', ['GET']),
+                          ('/orders/{identity}/{action}', ['POST']), ('/templates', ['GET', 'POST']),
                           ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),
                           ('/templates/{identity}/delete', ['POST']),
                           ('/workspace', ['GET']), ('/workspace/open', ['POST']), ('/workspace/refresh', ['POST']),
@@ -175,5 +204,6 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/workspace/{identity}/save', ['POST']),
                           ('/workspace/{identity}/resume', ['POST']),
                           ('/workspace/{identity}/submit', ['POST']), ('/workspace/{identity}/report', ['POST']),
-                          ('/workspace/{identity}/download', ['GET'])):
+                          ('/workspace/{identity}/download', ['GET']), ('/workspace/{identity}/report-file', ['GET']),
+                          ('/inventory/{identity}/history', ['GET'])):
         app.add_api_route(base + path, endpoint, methods=methods)

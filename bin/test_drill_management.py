@@ -312,6 +312,39 @@ class DrillManagementTests(unittest.TestCase):
                 "record_sheet": "本月记录", "assessment_sheet": "评估表",
             })
 
+    def test_sheet_tab_with_trailing_space_saves_publishes_and_previews(self) -> None:
+        source = _replace_zip_part(
+            _fixture_xlsx(), "xl/workbook.xml",
+            lambda content: content.replace('name="本月记录"'.encode(), 'name="大火 "'.encode()),
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            service = DrillManagementService(store, data_root=Path(temporary) / "drills")
+            definition = service.create_definition(
+                name="电池间火灾应急演练", year=2026, month=11,
+                file_name="fire.xlsx", source=source,
+            )
+            config = definition["configuration"]
+            drill_id = definition["drill_id"]
+            self.assertEqual(config["record_sheet"], "大火 ")
+            config["record_sheet"] = "大火"
+            store.put_document(DRILL_DEFINITION_NAMESPACE, drill_id, definition)
+            self.assertEqual(service.get_definition(drill_id)["configuration"]["record_sheet"], "大火 ")
+            saved = service.save_configuration(drill_id, config, expected_version=definition["version"])
+            self.assertEqual(saved["configuration"]["record_sheet"], "大火 ")
+            published = service.publish(drill_id, expected_version=saved["version"])
+            self.assertEqual(published["configuration"]["record_sheet"], "大火 ")
+            self.assertTrue(service.preview_model(drill_id, "A", "record")["images"])
+
+            path = Path(published["source"]["path"])
+            workbook = _parse_workbook(path, include_assets_for={"大火"})
+            with self.assertRaisesRegex(DrillError, "两个不同的工作表"):
+                _validate_configuration(workbook, {"record_sheet": "大火", "assessment_sheet": "大火 "})
+            workbook["sheets"].append({**workbook["sheets"][0], "name": " 大火"})
+            with self.assertRaisesRegex(DrillError, "匹配到多个页签"):
+                _validate_configuration(workbook, config)
+            self.assertEqual(_validate_configuration(workbook, saved["configuration"])["record_sheet"], "大火 ")
+
     def test_invalid_step_ranges_are_rejected_without_overwriting_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             service = DrillManagementService(

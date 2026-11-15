@@ -149,7 +149,10 @@ try{
   const ink=await canvas.evaluate(c=>{const data=c.getContext('2d').getImageData(0,0,c.width,c.height).data;let minX=c.width,maxX=0,minY=c.height,maxY=0;for(let y=0;y<c.height;y++)for(let x=0;x<c.width;x++)if(data[(y*c.width+x)*4+3]>100){minX=Math.min(minX,x);maxX=Math.max(maxX,x);minY=Math.min(minY,y);maxY=Math.max(maxY,y);}return {width:maxX-minX,height:maxY-minY};});assert(ink.width>100&&ink.height<70,'embedded portrait signature follows the pointer without 90-degree conversion');
   await close(page);await page.getByText('签名尚未保存',{exact:true}).waitFor();await page.getByRole('button',{name:'继续签名',exact:true}).click();await page.screenshot({path:path.join(shots,'signature-handler-mobile.png')});await close(page);await page.getByRole('button',{name:'放弃并离开',exact:true}).click();
   await group(page,'水耗填写').getByRole('button',{name:/A楼水表待填写/}).click();await page.getByLabel('本次水表读数',{exact:true}).waitFor();
-  await page.getByLabel('本次水表读数',{exact:true}).fill('123');await page.getByRole('button',{name:'关闭水耗编辑',exact:true}).click();await page.getByText('放弃未保存的水耗填写？',{exact:true}).waitFor();await page.getByRole('button',{name:'继续填写',exact:true}).click();
+  const waterReading=page.getByLabel('本次水表读数',{exact:true});
+  await waterReading.pressSequentially('123');
+  assert.equal(await waterReading.inputValue(),'123','keyboard input stays focused inside the business task dialog');
+  await page.getByRole('button',{name:'关闭水耗编辑',exact:true}).click();await page.getByText('放弃未保存的水耗填写？',{exact:true}).waitFor();await page.getByRole('button',{name:'继续填写',exact:true}).click();
   await page.screenshot({path:path.join(shots,'water-handler-mobile.png')});
   await page.getByRole('button',{name:'保存记录',exact:true}).click();await page.getByRole('button',{name:'关闭水耗编辑',exact:true}).waitFor({state:'hidden'});await close(page);
   await page.waitForFunction(()=>!Array.from(document.querySelectorAll('.v2-todo-row')).some(el=>el.textContent.includes('A楼水表待填写')));

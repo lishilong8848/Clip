@@ -380,6 +380,70 @@ class DailyInspectionTests(unittest.TestCase):
         self.assertEqual(set(points['70_27_0_31_1_17_0']['round_cells'].values()),{'C5'})
         self.assertEqual(set(points['70_3_0_14_1_11_0']['round_cells'].values()),{'L10'})
 
+    def test_e_plate_temperatures_reuse_chiller_points_without_moving_the_original(self):
+        from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_chiller_cells
+
+        def row(record_id, **fields):
+            return {'record_id': record_id, 'fields': fields}
+
+        inlet = '冷却水进水温度(℃)'
+        outlet = '冷冻水出水温度(℃)'
+        rows = [
+            row('plate', 记录类型='设备巡检', 设备编号='1号板换', 专业='暖通', 位置='冷冻站',
+                巡检表单='暖通冷机系统巡检表', 缺少源数据=f'{inlet}、{outlet}'),
+            row('inlet', 记录类型='测点明细', 设备编号='E-150-101-MOXA_150-CH1', 专业='暖通',
+                测点ID='55_40_0_228_1_7_0', 测点名称='M4019冷却水进水温度', 测点值='19.80'),
+            row('outlet', 记录类型='测点明细', 设备编号='E-150-101-MOXA_150-CH1', 专业='暖通',
+                测点ID='55_40_0_228_1_6_0', 测点名称='M4017冷冻水出水温度', 测点值='16.20'),
+        ]
+
+        def plate(devices):
+            return next(item for item in devices if item['name']=='1号板换')['sections'][0]
+
+        self.assertEqual({item['shared_plate_cell'] for item in confirmed_chiller_cells().values()
+                          if item.get('shared_plate_cell')},
+                         {f'{column}{line}' for column in 'KLMNOP' for line in (14, 15)})
+        devices = devices_for('E', rows, [], {})
+        self.assertEqual(plate(devices)['values'], {inlet: '19.80', outlet: '16.20'})
+        self.assertEqual(plate(devices)['shared_temperature_points'][inlet], '55_40_0_228_1_7_0')
+        self.assertEqual({point['cell'] for device in devices for point in device['points']}, {'B11', 'B14'})
+        self.assertEqual(plate(devices_for('D', rows, [], {}))['values'], {inlet: '', outlet: ''})
+
+        rows[0]['fields'][inlet] = '19.17'
+        rows[2]['fields']['设备编号'] = 'E-150-102-MOXA_150-CH2'
+        failed = devices_for('E', rows, [], {})
+        self.assertEqual(plate(failed)['values'], {inlet: '19.17', outlet: ''})
+        self.assertNotIn('shared_temperature_points', plate(failed))
+
+    def test_d_plate_temperatures_are_filled_in_each_running_mode(self):
+        from lan_bitable_template_portal.daily_inspection import apply_operating_marks, devices_for, parameters
+
+        def row(record_id, **fields):
+            return {'record_id': record_id, 'fields': fields}
+
+        inlet, outlet = '冷却水进水温度(℃)', '冷冻水出水温度(℃)'
+        rows = [
+            row('plate', 记录类型='设备巡检', 设备编号='1号板换', 专业='暖通', 位置='冷冻站',
+                巡检表单='暖通冷机系统巡检表', 缺少源数据=f'{inlet}、{outlet}'),
+            row('inlet', 记录类型='测点明细', 设备编号='一层D-150-GW-101网络控制器', 专业='暖通',
+                测点ID='70_33_0_30_1_46_0', 测点名称='1#冷机冷却水进水温度', 测点值='20.15'),
+            row('outlet', 记录类型='测点明细', 设备编号='一层D-150-GW-101网络控制器', 专业='暖通',
+                测点ID='70_33_0_30_1_45_0', 测点名称='1#冷机冷冻水出水温度', 测点值='17.82'),
+        ]
+        devices = devices_for('D', rows, [], {})
+        plate = next(device for device in devices if device['name']=='1号板换')
+        template = next(point['template'] for device in devices for point in device['points'])
+        batch = {'devices': devices}
+        self.assertEqual({p['cell'] for d in devices for p in d['points']}, {'B11', 'B14'})
+        for mode in ('K7', 'K8', 'K9'):
+            with self.subTest(mode=mode):
+                marks = {k: '√' if k==mode else '/' for k in ('K7', 'K8', 'K9')}
+                apply_operating_marks('D', batch, {'K4': '√', **marks}, template=template)
+                self.assertEqual({p['name']: p['reference'] for p in parameters(plate)},
+                                 {inlet: '20.15', outlet: '17.82'})
+        apply_operating_marks('D', batch, {'K4':'△','K14':'/','K15':'/'}, template=template)
+        self.assertEqual({p['reference'] for p in parameters(plate)}, {'/'})
+
     def test_e_plate_and_svg_mapping_require_exact_source_and_scope(self):
         from lan_bitable_template_portal.daily_inspection import devices_for, confirmed_svg_cells
         self.assertEqual(len(confirmed_svg_cells()),8)

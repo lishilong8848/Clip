@@ -280,12 +280,15 @@ try {
   const unversioned = await fixture({ recordVersion: '', admin: false, allowEdit: true });
   await openFirst(unversioned.page);
   assert.equal(await unversioned.page.getByRole('button',{name:'自定义布局',exact:true}).count(),0,'water records have no custom layout');
-  await unversioned.page.getByLabel('本次水表读数', { exact: true }).fill('1300');
+  const unversionedInput = unversioned.page.getByLabel('本次水表读数', { exact: true });
+  await unversionedInput.fill('');
+  await unversionedInput.pressSequentially('1300');
   await unversioned.page.getByLabel('添加水表照片', { exact: true }).setInputFiles({ name: 'fixture.png', mimeType: 'image/png', buffer: png });
   await unversioned.page.getByText('待保存', { exact: true }).waitFor();
-  await unversioned.page.getByRole('button', { name: '保存记录', exact: true }).click();
+  await unversionedInput.press('Enter');
   await unversioned.page.locator('.water-notice').filter({ hasText: '已保存' }).waitFor();
   assert.equal(unversioned.state.posts[0].expected_version, '', 'an unavailable upstream version is preserved, never invented');
+  assert.equal(unversioned.state.posts[0].meter_value, 1300, 'Enter submits the typed reading from the editor');
   assert.deepEqual(unversioned.state.posts[0].retained_image_ids, ['water-photo-1']);
   assert.deepEqual(unversioned.state.posts[0].upload_ids, ['water-upload-1']);
   await unversioned.ctx.close();

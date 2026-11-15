@@ -21,6 +21,26 @@
         <option value="external">送检</option>
       </select>
     </div>
+    <div v-if="plan.items.length" class="batch-summary" role="status">
+      <span>自检 {{ kindCounts.self }} 项 · 送检 {{ kindCounts.external }} 项</span>
+      <span v-if="hasFilters">当前筛选匹配 {{ filtered.length }} 项</span>
+      <NButton v-if="hasFilters && filtered.length" size="tiny" :disabled="busy" @click="clearFilters">清空筛选</NButton>
+    </div>
+    <div v-if="plan.items.length && !filtered.length" class="batch-none" role="status">
+      <p>没有符合筛选条件的计划。
+        <NButton size="tiny" :disabled="busy" @click="clearFilters">清空筛选</NButton>
+        <NButton v-for="option in kindShortcuts" :key="option.value" size="tiny" :disabled="busy"
+          @click="quickKind(option.value)">看{{ option.label }}（{{ option.hint }}）</NButton>
+      </p>
+    </div>
+    <details v-if="plan.items.length && plan.inventory_at" class="batch-excluded">
+      <summary>排除统计{{ exclusionReasons.length ? `：${exclusionTotal} 项 · ${exclusionReasons.length} 类原因` : '：暂无' }}</summary>
+      <div class="batch-selection" aria-label="排除统计">
+        <span>可管理工具 {{ plan.tool_count ?? 0 }} 台</span>
+        <span v-for="reason in exclusionReasons" :key="reason.label">{{ reason.label }} {{ reason.count }}{{ reason.unit }}</span>
+        <span v-if="!exclusionReasons.length">当前清单未被排除任何工具。</span>
+      </div>
+    </details>
     <template v-if="filtered.length">
       <div class="batch-selection">
         <NCheckbox :checked="allVisibleSelected" :indeterminate="someVisibleSelected && !allVisibleSelected"
@@ -44,7 +64,7 @@
       <NPagination v-if="filtered.length > pageSize" v-model:page="page" :item-count="filtered.length"
         :page-size="pageSize" :disabled="busy" simple />
     </template>
-    <p v-else class="batch-empty">{{ emptyText }}</p>
+    <p v-if="!plan.items.length" class="batch-empty">{{ emptyText }}</p>
     <div v-if="!plan.items.length && plan.inventory_at" class="batch-selection" aria-label="计划排查结果">
       <span>可管理工具 {{ plan.tool_count ?? 0 }} 台</span>
       <span v-for="reason in exclusionReasons" :key="reason.label">{{ reason.label }} {{ reason.count }}{{ reason.unit }}</span>
@@ -95,7 +115,6 @@ const pageSize = 12;
 const selected = ref(new Set<string>());
 const kindLabels = { self: '自检', external: '送检' };
 const emptyText = computed(() => {
-  if (props.plan.items.length) return '没有符合筛选条件的计划。';
   if (!props.plan.inventory_at) return '工具底表尚未完成首次同步，稍后可重读计划。';
   if (!props.plan.tool_count) return '当前可管理的楼栋暂无工具记录。';
   return '本月没有待创建的自检或送检计划。';
@@ -109,6 +128,15 @@ const exclusionReasons = computed(() => [
   { label:'维护与送检周期冲突', count:props.plan.excluded?.cycle_conflict, unit:'台' },
   { label:'报废、检修中或数量无效', count:props.plan.excluded?.unavailable, unit:'台' },
 ].filter(reason=>reason.count));
+const exclusionTotal = computed(() => exclusionReasons.value.reduce((sum, reason) => sum + (reason.count || 0), 0));
+const kindCounts = computed(() => props.plan.items.reduce((acc, item) => {
+  acc[item.kind] += 1;
+  return acc;
+}, { self: 0, external: 0 } as Record<'self' | 'external', number>));
+const hasFilters = computed(() => Boolean(search.value.trim()) || scope.value !== 'all' || kind.value !== 'all');
+const kindShortcuts = computed(() => (['self', 'external'] as const)
+  .filter(value => value !== kind.value && kindCounts.value[value] > 0)
+  .map(value => ({ value, label: kindLabels[value], hint: kindCounts.value[value] })));
 const scopeOptions = computed(() => [{ value: 'all', label: '全部楼栋' },
   ...Array.from(new Set(props.plan.items.map(item => item.scope)), value => ({ value, label: `${value}楼` }))]);
 const key = (item: PlannedOrder) => `${item.asset_id}:${item.kind}`;
@@ -135,6 +163,16 @@ function toggle(items: PlannedOrder[], checked: boolean) {
   }
 }
 
+function clearFilters() {
+  search.value = '';
+  scope.value = 'all';
+  kind.value = 'all';
+}
+
+function quickKind(value: 'self' | 'external') {
+  kind.value = value;
+}
+
 watch([search, scope, kind], () => { page.value = 1; });
 watch(() => props.plan, (plan, previous) => {
   selected.value = new Set(plan.month === previous.month ? selectedItems.value.map(key) : []);
@@ -150,6 +188,14 @@ header span,footer span,.batch-selection span,.batch-empty,small { color:var(--t
 footer span { margin-inline-end:auto; }
 .batch-filters { display:grid; grid-template-columns:minmax(0,1fr) repeat(2,minmax(0,132px)); gap:8px; }
 .batch-filters select { min-width:0; min-height:34px; padding:4px 8px; border:1px solid var(--tool-line); border-radius:6px; background:var(--tool-surface); color:inherit; font:inherit; }
+.batch-summary { display:flex; flex-wrap:wrap; align-items:center; gap:4px 8px; font-size:13px; color:var(--tool-muted); }
+.batch-summary > :first-child { margin-inline-end:auto; }
+.batch-none p { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:0; font-size:13px; color:var(--tool-muted); }
+.batch-excluded { font-size:13px; color:var(--tool-muted); }
+.batch-excluded > summary { cursor:pointer; padding:2px 0; list-style-position:inside; }
+.batch-excluded > summary:focus-visible { outline:2px solid currentColor; outline-offset:2px; }
+.batch-excluded[open] > summary { color:inherit; }
+.batch-excluded > .batch-selection { padding:4px 0 2px 14px; }
 .batch-items { border-block:1px solid var(--tool-line); }
 .batch-item { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; padding:6px 8px; }
 .batch-item :deep(.n-checkbox__label) { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; align-items:center; min-width:0; }

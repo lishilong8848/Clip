@@ -3,13 +3,14 @@
 import hashlib
 import json
 import copy
+import datetime as dt
 import re
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, range_boundaries
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter, range_boundaries
 from openpyxl.cell.cell import MergedCell
 
 ORIGINAL_MAPPING_SHEET = '原表映射'
@@ -96,10 +97,64 @@ def catalog_locations():
 
 
 def cell_excluded(sheet, address):
+    if '_exempt_cells' in sheet:
+        return address in sheet['_exempt_cells']
+    if not sheet.get('excluded_ranges'):
+        return False
     col, row = coordinate_from_string(address)
     col = column_index_from_string(col)
     return any(a<=col<=c and b<=row<=d for a,b,c,d in
                (range_boundaries(value) for value in sheet.get('excluded_ranges', [])))
+
+
+def form_sheet_key(template, sheet):
+    return json.dumps([template, sheet], ensure_ascii=False, separators=(',', ':'))
+
+
+def with_cell_exemptions(templates, exemptions):
+    if not exemptions:
+        return templates
+    effective = []
+    for template in templates:
+        sheets = []
+        for sheet in template['sheets']:
+            cells = exemptions.get(form_sheet_key(template['name'], sheet['name']))
+            sheets.append(sheet if cells is None else {**sheet, '_exempt_cells': frozenset(cells)})
+        effective.append({**template, 'sheets': sheets})
+    return effective
+
+
+def cell_exemption_selection(sheet, selection):
+    """Expand Excel ranges to the editable anchors in the original layout."""
+    from .daily_inspection_form_fields import form_header, remark_cells
+
+    rows = sheet['rows']
+    max_col = max(map(len, rows), default=0)
+    inside_merge = {}
+    for merged in sheet.get('merges', []):
+        left, top, right, bottom = range_boundaries(merged)
+        inside_merge.update({(row, col): (top, left) for row in range(top, bottom + 1)
+                             for col in range(left, right + 1)})
+    header = form_header(sheet, {'date': '2000-01-01', 'shift': '白'},
+                         inspector='巡检人员', started=dt.datetime(2000, 1, 1))
+    reserved = set(remark_cells(sheet)) | header.keys()
+    result = set()
+    for span in selection:
+        if not re.fullmatch(r'[A-Z]{1,3}[1-9]\d{0,5}(?::[A-Z]{1,3}[1-9]\d{0,5})?', span):
+            raise ValueError('请输入有效的单元格或范围，例如 H7 或 H7:J10。')
+        left, top, right, bottom = range_boundaries(span)
+        if not (left <= right <= max_col and top <= bottom <= len(rows)):
+            raise ValueError('单元格范围超出原表边界，请核对行列。')
+        for row in range(top, bottom + 1):
+            for col in range(left, right + 1):
+                anchor_row, anchor_col = inside_merge.get((row, col), (row, col))
+                address = f'{get_column_letter(anchor_col)}{anchor_row}'
+                if anchor_col > len(rows[anchor_row - 1]) or address in reserved:
+                    continue
+                value = rows[anchor_row - 1][anchor_col - 1]
+                if value is None or isinstance(value, str) and not value.strip():
+                    result.add(address)
+    return result
 
 
 @lru_cache(maxsize=1)

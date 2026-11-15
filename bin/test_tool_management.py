@@ -471,7 +471,7 @@ class ToolManagementTest(TestCase):
                 if method == 'POST':
                     self.record = {'record_id': 'recRemote', 'fields': kwargs['json']['fields']}
                     raise RiskError('连接中断，新增结果待确认。')
-                self_case.assertEqual(method, 'PUT')
+                self_case.assertEqual(method, 'GET')
                 self_case.assertTrue(path.endswith('/recRemote'))
                 return {'record': self.record}
 
@@ -481,13 +481,18 @@ class ToolManagementTest(TestCase):
         external = next(row for row in self.orders if row['kind'] == 'external')
         claim = self.svc.action(self.leader, external['id'], 'claim', {'revision': external['revision']})
         attached = self.svc.attach(self.leader, external['id'], claim['revision'], '报告.pdf', b'%PDF-1.7\nfixture')
-        self.svc.action(self.leader, external['id'], 'submit', {'revision': attached['revision'], 'actual': self.date})
+        self.svc.action(self.leader, external['id'], 'submit', {
+            'revision': attached['revision'], 'actual': self.date,
+            'inspection': {'report_no': 'R-2026', 'institution': '测试检测机构',
+                           'result': 'qualified', 'confirmed_asset_ids': [external['asset_id']]},
+        }, require_report_check=True)
         self.svc.cloud = cloud
         self.svc.sync_one()
         with self.svc.connect(True) as db:
             db.execute('UPDATE tool_work_sync SET next_try=0')
         self.svc.sync_one()
         self.assertEqual(transport.uploads, 1)
+        self.assertIn('报告编号：R-2026', transport.record['fields'][DETAIL])
         self.assertEqual(self.svc.detail(self.leader, external['id'])['sync'][0]['state'], 'done')
 
     def test_self_check_attachment_uses_existing_maintenance_field(self):

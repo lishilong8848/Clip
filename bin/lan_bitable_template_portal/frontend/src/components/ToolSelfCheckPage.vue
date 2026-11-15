@@ -24,25 +24,25 @@
         </nav>
         <NAlert v-if="board.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
-          :session-id="linkedSession" :asset-id="linkedAsset" @open-order="openWorkspaceOrder" />
+          :session-id="linkedSession" :asset-id="linkedAsset" @open-order="openWorkspaceOrder" @asset-history="historyAsset = $event" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
             <div class="tool-panel-heading">
-              <div><h3>自检模板</h3><span>{{ board.templates.length }} 份 · XLSX</span></div>
+              <div><h3>自检模板库</h3><span>{{ library?.templates.length ?? 0 }} 份 · XLSX</span></div>
               <div class="tool-bar">
                 <NButton :disabled="busy" @click="chooseImport()"><Upload :size="16" />导入模板</NButton>
                 <NButton :disabled="busy" @click="folderInput?.click()"><Upload :size="16" />导入文件夹</NButton>
               </div>
             </div>
-            <p class="tool-muted">支持带封面的电气和暖通 XLSX 自检记录单。</p>
+            <p v-if="library?.warning" class="tool-muted" role="status">{{ library.warning }}</p>
             <p v-if="folderProgress" class="tool-muted" role="status">{{ folderProgress }}</p>
             <details v-if="folderFailures.length" open>
               <summary>{{ folderFailures.length }} 份模板未导入</summary>
               <ul><li v-for="(item,index) in folderFailures" :key="index">{{ item.file }} · {{ item.reason }}</li></ul>
             </details>
-            <article v-for="template in board.templates" :key="template.id" class="tool-template">
-              <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.schema.checks.length }} 项 · {{ template.active ? '已启用' : '已停用' }}</small></div>
+            <article v-for="template in library?.templates || []" :key="template.id" class="tool-template">
+              <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.schema.checks.length }} 项 · {{ template.active ? '已启用' : '已停用' }} · {{ template.linked_tools_count || 0 }} 台已关联</small></div>
               <div class="tool-bar">
                 <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">基于此模板新建</NButton>
                 <NButton size="small" :disabled="busy" @click="chooseImport(template)">导入新版</NButton>
@@ -54,6 +54,13 @@
                 </NPopconfirm>
               </div>
             </article>
+            <details v-if="library?.legacy_templates.length" class="tool-context">
+              <summary>原有本地模板（{{ library.legacy_templates.length }} 份）</summary>
+              <article v-for="template in library.legacy_templates" :key="template.id" class="tool-template">
+                <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.open_usage || 0 }} 张未提交工单引用</small></div>
+                <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">另存到模板库</NButton>
+              </article>
+            </details>
             <section v-if="templateClone" class="tool-edit-panel" aria-label="新建自检模板">
               <h3>新建自检模板</h3>
               <label>模板名称 <input v-model="templateClone.name" maxlength="100" /></label>
@@ -77,6 +84,8 @@
                 <span><strong>{{ pendingCount }}</strong> 待填写</span>
                 <span><strong>{{ reviewCount }}</strong> 待审核</span>
                 <span><strong>{{ submittedCount }}</strong> 已提交</span>
+                <NButton v-if="board.carryovers?.length" size="tiny" :type="stateFilter === 'carryover' ? 'primary' : 'default'"
+                  :disabled="busy || loading" @click="stateFilter = stateFilter === 'carryover' ? 'all' : 'carryover'">跨月待办 {{ board.carryovers.length }}</NButton>
               </template>
               <template v-else>
                 <span><strong>{{ repairCount }}</strong> 检修中</span>
@@ -84,8 +93,8 @@
               </template>
             </div>
             <div v-if="view === 'orders' && board.can_download_month" class="tool-archive">
-              <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />{{ board.archive_updating?'下载上次归档':'下载月度归档' }}</NButton>
-              <span v-else class="tool-muted">{{ board.orders.length && !pendingCount && !reviewCount ? '正在生成月度归档' : '当月工单办结后自动归档' }}</span>
+              <span class="tool-muted" role="status">{{ archiveLabel }}</span>
+              <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />{{ board.archive_status === 'snapshot' ? '下载已有快照' : '下载月度归档' }}</NButton>
             </div>
             <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading || !!newOrderPlan" @click="openNewOrder">新增本月工单</NButton>
             <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading" @click="previewMonthClear">清理本月工单</NButton>
@@ -153,17 +162,22 @@
                 <div>
                   <strong>{{ row.tool_name }}</strong>
                   <small v-if="row.model || row.location">{{ [row.model, row.location].filter(Boolean).join(' · ') }}</small>
+                  <NButton v-if="row.asset_id" text size="tiny" :disabled="busy" @click="historyAsset = row.asset_id || ''">履历</NButton>
                 </div>
               </div>
               <div class="tool-order-kind" role="cell"><strong>{{ row.scope }}楼</strong><small>{{ kindLabel(row) }}工单</small></div>
               <div class="tool-order-meta" role="cell">
                 <span>计划 {{ row.due }}</span><small>{{ assignment(row) }}</small>
+                <small v-if="row.month !== month">接续 {{ row.month }} 原单</small>
                 <small v-if="row.submitted_at">提交 {{ row.submitted_at.slice(0,10) }}</small>
               </div>
               <div class="tool-order-state" role="cell">
                 <NTag :class="{ 'tool-status-closed': row.status !== 'pending' && view === 'orders' }" :type="view === 'followups' ? 'warning' : row.status === 'pending' ? 'success' : 'default'" :bordered="false">{{ view === 'followups' ? outcomeLabels[row.outcome] : status(row) }}</NTag>
                 <small v-if="row.outcome && view === 'orders'">{{ outcomeLabels[row.outcome] }}</small>
-                <small v-if="row.sync.some(item => item.state !== 'done')" class="tool-pending">飞书待同步</small>
+                <small v-if="row.sync.length" :class="{ 'tool-pending': row.sync.some(item => item.state !== 'done') }">
+                  {{ row.sync.some(item => item.verifying) ? '飞书待核验' : row.sync.some(item => item.error) ? '同步失败 · 自动重试'
+                    : row.sync.some(item => item.state !== 'done') ? '飞书待同步' : '飞书已同步' }}
+                </small>
               </div>
               <div class="tool-order-actions" role="cell">
                 <NButton size="small" :type="row.can_claim || row.can_edit || row.can_approve || row.can_repair ? 'primary' : 'default'"
@@ -171,6 +185,10 @@
                 <NPopconfirm v-if="row.can_release" @positive-click="release(row)">
                   <template #trigger><NButton size="small" :disabled="busy">释放领取</NButton></template>
                   草稿将保留，工单可重新领取。
+                </NPopconfirm>
+                <NPopconfirm v-if="row.can_restore" positive-text="确认恢复" negative-text="取消" @positive-click="restoreOrder(row)">
+                  <template #trigger><NButton size="small" :disabled="busy || loading">恢复原单</NButton></template>
+                  恢复这张工单及原草稿？
                 </NPopconfirm>
                 <NPopconfirm v-if="row.can_delete && !bulkMode" positive-text="确认删除" negative-text="取消"
                   :positive-button-props="{ type: 'error' }" @positive-click="deleteOrder(row)">
@@ -218,10 +236,15 @@
               <div class="tool-report-file">
                 <FileText :size="19" />
                 <div><strong>{{ order.report_name || '尚未上传送检报告' }}</strong><small v-if="order.can_edit && !order.report_name">支持 PDF、Word、Excel 或 JPG／PNG，最多 12 MB</small></div>
-                <NButton v-if="order.can_edit" type="primary" secondary :disabled="busy" @click="reportInput?.click()"><Upload :size="16" />{{ order.report_name ? '更换报告' : '上传送检报告' }}</NButton>
+                <div v-if="order.report_name || order.can_edit" class="tool-bar tool-report-actions">
+                  <NButton v-if="order.report_name" tag="a" :href="api + orderPath(order) + '/report-file'" target="_blank" rel="noopener" size="small">查看报告</NButton>
+                  <NButton v-if="order.can_edit" size="small" type="primary" secondary :disabled="busy" @click="reportInput?.click()"><Upload :size="16" />{{ order.report_name ? '更换报告' : '上传送检报告' }}</NButton>
+                </div>
                 <input ref="reportInput" type="file" accept=".pdf,.docx,.xlsx,.jpg,.jpeg,.png" hidden @change="uploadReport" />
               </div>
             </div>
+            <ToolInspectionReportFields :model="reportCheck" :asset-ids="reportAssets" :actual="actual"
+              :expires-on="order.inspection_expires_on" :editable="order.can_edit" :disabled="busy || !order.report_name" />
           </template>
           <div v-else class="tool-panel-heading"><h3>自检记录</h3><span v-if="records.length">{{ records.length }} 份 · 已填 {{ answered }}/{{ checkCount }} 项</span></div>
           <div v-if="order.can_edit && order.kind === 'self'" class="tool-bar tool-template-picker">
@@ -315,11 +338,12 @@
         <span v-else>{{ order.report_name ? '送检报告已保存' : '上传报告后可提交' }}</span>
         <NButton v-if="order.kind === 'self'" :disabled="busy || !dirty" @click="save('draft')">保存草稿</NButton>
         <NPopconfirm @positive-click="save('submit')">
-          <template #trigger><NButton type="primary" :disabled="busy || (order.kind === 'self' ? !records.length : !order.report_name || !actual)">提交工单</NButton></template>
+          <template #trigger><NButton type="primary" :disabled="busy || (order.kind === 'self' ? !records.length : !order.report_name || !inspectionReady(reportCheck, reportAssets, actual))">提交工单</NButton></template>
           提交后锁定工单并纳入本月归档。
         </NPopconfirm>
       </footer>
     </div>
+    <ToolAssetHistory :asset-id="historyAsset" @close="historyAsset = ''" @open-order="openWorkspaceOrder" @open-workspace="openHistoryWorkspace" />
     <NModal :show="!!afterDiscard" preset="dialog" title="尚未保存" content="离开后，本次未保存的填写将丢失。" positive-text="放弃填写" negative-text="继续填写" :mask-closable="false" @positive-click="discard" @negative-click="afterDiscard = null" @update:show="show => { if (!show) afterDiscard = null; }" />
   </section>
 </template>
@@ -331,13 +355,15 @@ import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, 
 import { ApiError, downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
 import ToolOrderBatchCreate, { type OrderCreationPlan, type PlannedOrder } from './ToolOrderBatchCreate.vue';
+import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
+import ToolAssetHistory from './ToolAssetHistory.vue';
 import ToolWorkspace from './ToolWorkspace.vue';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
-defineProps<{ scope?: string; embedded?: boolean }>();
+const props = defineProps<{ scope?: string; embedded?: boolean; toolView?: string }>();
 const api = '/api/tool-self-check';
 interface Template {
-  id: string; version: number; name: string; active: boolean; open_usage?: number;
+  id: string; version: number; name: string; active: boolean; open_usage?: number; linked_tools_count?: number;
   schema: { specialty: string; cycle: string; applicable: string; precautions: string;
     checks: { row: number; name: string; method: string; standard: string; group_row?:number }[];
     layout?:'hvac'; fields?:Record<string,string>; calibration?:{row:number;label:string;fields:Record<string,string>}[] };
@@ -354,7 +380,8 @@ interface Order {
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
   supervisor_assigned: boolean; assigned_to_me: boolean; can_approve: boolean; can_repair: boolean; can_review: boolean; can_delete:boolean;
   actual: string; outcome: string; reason: string; resolution: string; report_name: string;
-  sync: { label: string; state: string; error: string }[];
+  can_restore?: boolean; inspection?: InspectionReport; inspection_expires_on?: string;
+  sync: { label: string; state: string; error: string; verifying?: boolean }[];
 }
 interface Detail extends Order {
   records: Entry[]; actor_name: string; history: { action: string; at: string; name: string; detail: string }[];
@@ -364,18 +391,22 @@ interface Board {
   month: string; orders: Order[]; followups: Order[]; templates: Template[]; can_manage_templates: boolean;
   can_download_month: boolean; archived_at: string | null; archive_updating?: boolean; actor_name: string; can_create_orders: boolean;
   inventory_at: string; inventory_error: string;
+  carryovers?: Order[]; plan_count?: number | null; waiting_sync?: number; archive_status?: 'none' | 'snapshot' | 'settled';
 }
 const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', label: '自检工单' }, { value: 'external', label: '送检工单' }];
 const outcomeOptions = [{ value: 'normal', label: '正常' }, { value: 'repair', label: '转检修' }, { value: 'scrap', label: '报废' }];
 const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检修中', repaired: '检修完成', scrap: '待报废审批',
   scrapped: '已批准报废', rejected: '报废未通过' };
-const view = ref('workspace');
+const view = ref(props.toolView === 'orders' ? 'orders' : 'workspace');
+const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref('');
 const linkedAsset = ref('');
 const kindFilter = ref('all');
 const stateFilter = ref('all');
-const search = ref('');
+const reportCheck = ref(emptyInspectionReport());
+const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
+const search = ref(props.toolView === 'orders' && props.scope && props.scope !== 'ALL' ? props.scope + '楼' : '');
 const page = ref(1);
 const pageSize = 20;
 const maxBulkDelete = 200;
@@ -462,6 +493,7 @@ async function createOrders(items: PlannedOrder[]) {
 const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
+const library = ref<{ templates: Template[]; legacy_templates: Template[]; warning?: string }>();
 const order = ref<Detail>();
 const records = ref<Entry[]>([]);
 const selected = ref('');
@@ -494,14 +526,27 @@ const tabs = computed(() => [
 ]);
 const stateOptions = computed(() => [{ value: 'all', label: view.value === 'orders' ? '有效工单' : '全部状态' }, ...(view.value === 'followups'
   ? [{ value: 'repair', label: '检修中' }, { value: 'scrap', label: '待报废审批' }]
-  : [{ value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' }])]);
+  : [{ value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' },
+    ...((board.value?.carryovers?.length || stateFilter.value === 'carryover') ? [{ value:'carryover', label:'跨月待办' }] : [])])]);
+const archiveLabel = computed(() => {
+  const data = board.value;
+  if (!data) return '';
+  if (data.waiting_sync) return `待同步 ${data.waiting_sync} 张`;
+  if (data.archive_updating) return '归档更新中';
+  if (data.archive_status === 'settled') return '本月已结清';
+  if (data.archived_at) return '已有归档快照';
+  return '工单办结并同步后自动归档';
+});
 const visibleOrders = computed(() => {
   const followups = view.value === 'followups';
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return (followups ? board.value?.followups || [] : board.value?.orders || []).filter(row => {
+  const carryovers = board.value?.carryovers || [];
+  const rows = followups ? board.value?.followups || [] : stateFilter.value === 'carryover'
+    ? carryovers : [...carryovers, ...(board.value?.orders || []).filter(row => !carryovers.some(prior => prior.id === row.id))];
+  return rows.filter(row => {
     if (!followups && kindFilter.value !== 'all' && row.kind !== kindFilter.value) return false;
     if (!followups && stateFilter.value === 'all' && row.status === 'cancelled') return false;
-    if (stateFilter.value !== 'all' && (followups ? row.outcome : row.status) !== stateFilter.value) return false;
+    if (!['all', 'carryover'].includes(stateFilter.value) && (followups ? row.outcome : row.status) !== stateFilter.value) return false;
     const searchable = [row.tool_name, row.location, row.model, row.scope + '楼', row.owner_name].join(' ').toLowerCase();
     return terms.every(term => searchable.includes(term));
   });
@@ -536,7 +581,11 @@ const emptyDescription = computed(() => {
   if (view.value === 'followups') return '暂无待处理的检修或报废审批';
   return board.value?.inventory_at ? '本月暂无工单' : '正在等待工具底表首次同步';
 });
-watch(view, () => { stateFilter.value = 'all'; newOrderPlan.value = null; });
+watch(view, () => {
+  stateFilter.value = 'all';
+  newOrderPlan.value = null;
+  if (view.value === 'settings') void loadLibrary().catch(fail);
+});
 watch([view, month], exitBulkMode);
 watch([view, search, stateFilter, kindFilter, month], () => {
   page.value = 1;
@@ -546,16 +595,17 @@ watch(() => visibleOrders.value.length, count => { page.value = Math.min(page.va
 const transitions = computed<{ action: string; label: string; type: 'primary' | 'warning' }[]>(() => order.value?.can_repair
   ? [{ action: 'repaired', label: '检修完成', type: 'primary' }, { action: 'repair-scrap', label: '检修转报废', type: 'warning' }]
   : [{ action: 'approve', label: '批准报废', type: 'primary' }, { action: 'reject', label: '驳回报废', type: 'warning' }]);
-const templateOptions = computed(() => (board.value?.templates || []).filter(template => template.active)
+const availableTemplates = computed(() => library.value?.templates ?? board.value?.templates ?? []);
+const templateOptions = computed(() => availableTemplates.value.filter(template => template.active)
   .map(template => ({ value: template.id, label: template.name })));
 const templateClone=ref<{id:string;version:number;name:string;hvac:boolean;checks:{name:string;method:string;standard:string;sharedName:boolean}[]}|null>(null);
 function startTemplateClone(template:Template){
   templateClone.value={id:template.id,version:template.version,name:template.name+'（新模板）',hvac:template.schema.layout==='hvac',
     checks:template.schema.checks.map(item=>({name:item.name,method:item.method,standard:item.standard,sharedName:!!item.group_row&&item.group_row!==item.row}))};
 }
-async function saveTemplateClone(){const value=templateClone.value;if(!value)return;await mutate(async()=>{await requestJson(`${api}/templates/${value.id}/clone`,{method:'POST',body:JSON.stringify(value)});templateClone.value=null;await loadBoard();message.value='新模板已保存，原模板保持不变。';});}
+async function saveTemplateClone(){const value=templateClone.value;if(!value)return;await mutate(async()=>{await requestJson(`${api}/templates/${value.id}/clone`,{method:'POST',body:JSON.stringify(value)});templateClone.value=null;await loadLibrary();message.value='新模板已保存。';});}
 const payload = computed(() => records.value.map(({ template: _template, ...record }) => record));
-const form = computed(() => order.value?.kind === 'external' ? { actual: actual.value } :
+const form = computed(() => order.value?.kind === 'external' ? { actual: actual.value, inspection: reportCheck.value } :
   { records: payload.value, outcome: outcome.value, reason: reason.value, quantity: quantity.value });
 const dirty = computed(() => !!order.value?.can_edit && JSON.stringify(form.value) !== saved.value);
 const checkCount = computed(() => records.value.reduce((sum, record) => sum + record.checks.length, 0));
@@ -593,6 +643,10 @@ async function changePage(next: number) {
 }
 
 function fail(value: unknown) { error.value = value instanceof Error ? value.message : '操作暂未确认，请刷新核对。'; }
+async function loadLibrary() {
+  const data = await requestJson(api + '/templates', { cache: 'no-store' }) as NonNullable<typeof library.value>;
+  if (!disposed) library.value = data;
+}
 async function loadBoard(target = month.value) {
   reader?.abort();
   const request = reader = new AbortController();
@@ -619,6 +673,7 @@ function applyOrder(data: Detail) {
   records.value = data.records.map(record => ({ ...record, checks: [...record.checks],
     ...(record.template.schema.layout==='hvac' ? {template_values:{...record.template_values}} : {}) }));
   actual.value = data.actual;
+  reportCheck.value = emptyInspectionReport(data.inspection);
   outcome.value = data.draft?.outcome || '';
   reason.value = data.draft?.reason || '';
   quantity.value = data.draft?.quantity || 1;
@@ -643,6 +698,14 @@ async function deleteOrder(row: Order) {
   await mutate(async () => {
     await action(row, 'delete');
     await finishDeletion([row.id]);
+  });
+}
+async function restoreOrder(row: Order) {
+  await mutate(async () => {
+    await action(row, 'restore');
+    stateFilter.value = 'all';
+    await loadBoard();
+    message.value = '已恢复原工单，可继续填写。';
   });
 }
 async function deleteSelectedOrders() {
@@ -678,7 +741,15 @@ async function openOrder(row: Order, claim = false) {
     if (claim) await action(row, 'claim');
     const data = await requestJson(api + orderPath(row), { cache: 'no-store' }) as Detail;
     if (!disposed) {
+      if (data.workspace_id && (data.status === 'pending' || data.status === 'review_pending' || view.value === 'orders')) {
+        order.value = undefined;
+        linkedSession.value = data.workspace_id;
+        linkedAsset.value = data.asset_id || '';
+        view.value = 'workspace';
+        return;
+      }
       applyOrder(data);
+      if (data.kind === 'self' && data.can_edit) void loadLibrary().catch(fail);
       if (opening) void scrollAfterRender(0);
     }
   } catch (value) { fail(value); }
@@ -686,11 +757,26 @@ async function openOrder(row: Order, claim = false) {
 }
 function openWorkspaceOrder(id: string, orderMonth: string) {
   if (!id || busy.value) return;
-  workspace.value?.leave(() => {
+  historyAsset.value = '';
+  const proceed = () => {
     month.value = orderMonth;
     view.value = 'orders';
     void openOrder({id} as Order);
-  });
+  };
+  if (workspace.value) workspace.value.leave(proceed);
+  else leave(proceed);
+}
+function openHistoryWorkspace(id: string) {
+  const asset = historyAsset.value;
+  historyAsset.value = '';
+  const proceed = () => {
+    order.value = undefined;
+    linkedSession.value = id;
+    linkedAsset.value = asset;
+    view.value = 'workspace';
+  };
+  if (workspace.value) workspace.value.leave(proceed);
+  else leave(proceed);
 }
 function closeOrder() {
   order.value = undefined;
@@ -708,6 +794,7 @@ function back() {
 function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
   else if (view.value === 'workspace' && workspace.value) void workspace.value.refresh();
+  else if (view.value === 'settings') void mutate(loadLibrary);
   else if (newOrderPlan.value) void openNewOrder();
   else void loadBoard();
 }
@@ -722,7 +809,7 @@ function selectView(next: string) {
   else proceed();
 }
 function addRecord() {
-  const template = board.value?.templates.find(item => item.id === templateId.value && item.active);
+  const template = availableTemplates.value.find(item => item.id === templateId.value && item.active);
   if (!template || !order.value?.can_edit || records.value.length >= 20) return;
   const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
   records.value.push({ entry_id: id, template_id: template.id, version: template.version, template,
@@ -764,7 +851,10 @@ async function uploadReport(event: Event) {
   const params = new URLSearchParams({ name: file.name, revision: String(row.revision) });
   await mutate(async () => {
     const receipt = await requestBinaryJson(api + orderPath(row) + '/report?' + params, file) as Order;
-    if (!disposed) order.value = { ...row, ...receipt };
+    if (!disposed) {
+      order.value = { ...row, ...receipt };
+      reportCheck.value.confirmed_asset_ids = [];
+    }
     message.value = '送检报告已保存。';
   });
 }
@@ -805,7 +895,7 @@ async function importTemplate(event: Event) {
   if (previous) { params.set('id', previous.id); params.set('version', String(previous.version)); }
   await mutate(async () => {
     await requestBinaryJson(api + '/templates?' + params, file);
-    await loadBoard();
+    await loadLibrary();
     message.value = '模板已保存。';
   });
 }
@@ -822,8 +912,9 @@ async function importTemplateFolder(event:Event){
       folderProgress.value=`正在导入 ${processed+1}/${files.length} · ${file.name}`;
       try{
         const params=new URLSearchParams({name:file.name.replace(/\.xlsx$/i,'')});
-        await requestBinaryJson(api+'/templates?'+params,file);
-        imported++;
+        const receipt = await requestBinaryJson(api+'/templates?'+params,file) as { existing?: boolean };
+        if (receipt.existing) skipped++;
+        else imported++;
       }catch(failure){
         if(failure instanceof ApiError && failure.status===409 && failure.message.includes('相同模板已导入'))skipped++;
         else folderFailures.value.push({file:file.webkitRelativePath || file.name,reason:failure instanceof Error?failure.message:'上传未确认'});
@@ -831,7 +922,7 @@ async function importTemplateFolder(event:Event){
       processed++;
     }
     if(disposed)return;
-    await loadBoard();
+    await loadLibrary();
     folderProgress.value=`已导入 ${imported} 份，跳过重复 ${skipped} 份，失败 ${folderFailures.value.length} 份。`;
   });
 }
@@ -839,7 +930,7 @@ async function toggleTemplate(template: Template) {
   await mutate(async () => {
     await requestJson(`${api}/templates/${template.id}/availability`, { method: 'POST',
       body: JSON.stringify({ version: template.version, active: !template.active }) });
-    await loadBoard();
+    await loadLibrary();
   });
 }
 async function deleteTemplate(template: Template) {
@@ -850,7 +941,7 @@ async function deleteTemplate(template: Template) {
     if (board.value) board.value.templates = board.value.templates.filter(item => item.id !== template.id);
     if (templateClone.value?.id === template.id) templateClone.value = null;
     if (templateId.value === template.id) templateId.value = null;
-    await loadBoard();
+    await loadLibrary();
     message.value = '模板已删除。';
   });
 }
@@ -1040,7 +1131,7 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
   .tool-time { grid-column:1/-1; }
   .tool-report-layout { grid-template-columns:minmax(0,1fr); }
   .tool-report-file { grid-template-columns:auto minmax(0,1fr); }
-  .tool-report-file .n-button { grid-column:2; justify-self:start; }
+  .tool-report-actions { grid-column:1/-1; justify-self:start; }
   .tool-grid-head { display:none; }
   .tool-grid-row { grid-template-columns:minmax(0,1fr) auto; gap:6px 8px; }
   .tool-grid-row:nth-child(2) { border-top:0; }

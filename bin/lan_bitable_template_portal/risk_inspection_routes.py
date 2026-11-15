@@ -398,10 +398,24 @@ def install_risk_inspection_routes(app, controller, runtime):
             stop.wait(.25 if job else 5)
 
     def run_tools():
+        from .tool_management_lifecycle import building_reminder_uuid
+        from .portal_service import BUILDING_CHAT_ID_MAP
+        from upload_event_module.services.robot_webhook import send_interactive_to_chat_id
+
+        def deliver(scope, day, card):
+            chat_id = BUILDING_CHAT_ID_MAP.get(scope)
+            if not chat_id or stop.is_set():
+                return False
+            return send_interactive_to_chat_id(card, chat_id, message_uuid=building_reminder_uuid(scope, day))
+
+        def reminder_link(scope):
+            base = runtime.service._critical_guard_public_base_url()
+            return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&tool_view=orders&scope={scope}" if base else ''
+
         while not stop.is_set():
             try:
                 if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
-                    run_tool_jobs(get_tool_checks(), stop)
+                    run_tool_jobs(get_tool_checks(), stop, deliver_reminder=deliver, reminder_link=reminder_link)
                     return
             except Exception:
                 logging.exception('Tool management initialization deferred')

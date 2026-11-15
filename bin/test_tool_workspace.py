@@ -321,6 +321,23 @@ class WorkspaceTests(unittest.TestCase):
                                 headers=headers, content=b'%PDF-1.7 report').json()
             self.assertTrue(saved['ok'], saved)
             self.assertEqual(saved['data']['report_name'], 'report.pdf')
+            route = base + '/' + opened['id']
+            preview = client.get(route + '/report-file', headers=headers)
+            self.assertEqual(preview.content, b'%PDF-1.7 report')
+            self.assertTrue(preview.headers['content-disposition'].startswith('inline'))
+            self.assertEqual(client.get(route + '/report-file').status_code, 401)
+            body = {'revision': saved['data']['revision'], 'actual': '2025-10-31'}
+            self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 400)
+            body['inspection'] = {'report_no': 'REC-12', 'institution': '测试计量院', 'result': 'qualified',
+                                  'expires_on': '2026-11-30', 'confirmed_asset_ids': []}
+            self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 400)
+            body['inspection']['confirmed_asset_ids'] = ['recTool2']
+            submitted = client.post(route + '/submit', headers=headers, json=body)
+            self.assertEqual(submitted.status_code, 200, submitted.text)
+            self.assertEqual(submitted.json()['data']['inspection_expires_on'], '2026-11-30')
+            self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 200)
+            body['inspection']['report_no'] = 'OTHER'
+            self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 409)
 
     def test_background_loop_runs_workspace_when_monthly_queue_is_empty(self):
         from bin.lan_bitable_template_portal.tool_management_cloud import run_tool_jobs
