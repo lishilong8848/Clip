@@ -6149,7 +6149,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             finally:
                 PortalRuntime.state_store = old_store
 
-    def test_qt_event_update_uses_local_history_without_remote_get_and_manual_retry(self):
+    def test_qt_event_update_reads_target_once_per_attempt_and_reuses_response_time(self):
         from upload_event_module.services.feishu_service import BitableWriteUncertainError
 
         old_store = PortalRuntime.state_store
@@ -6195,7 +6195,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "screenshot_upload_id": upload_id,
                 }
             try:
-                with patch.object(portal_server_module, "query_record_by_id", side_effect=AssertionError("unexpected remote GET")), patch.object(
+                with patch.object(
+                    portal_server_module, "query_record_by_id",
+                    return_value=(True, {"record_id": target, "fields": baseline}),
+                ) as query, patch.object(
                     portal_server_module, "update_bitable_record_by_payload", side_effect=fake_update
                 ), patch.object(
                     portal_server_module, "upload_media_to_feishu", side_effect=[(True, "new-token-1"), (True, "new-token-2")]
@@ -6210,6 +6213,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     retry_request["response_time"] = "2026-09-17 09:05"
                     second = PortalRuntime.execute_local_notice_upload(retry_request)
                     self.assertTrue(second["ok"], second)
+                    self.assertEqual(query.call_count, 2)
                     robot_send.assert_called_once()
                 fields = store.get_document("event_notice_local_fields", target)["fields"]
                 self.assertEqual(fields["进展更新时间"].count("2026/09/17 09:00"), 1)
@@ -6359,7 +6363,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(ended["real_record_id"], "rec-event-1")
         self.assertEqual([call[0] for call in update_calls], ["rec-event-1", "rec-event-1"])
         create_record.assert_called_once()
-        self.assertEqual(query_record.call_count, 1)
+        self.assertEqual(query_record.call_count, 2)
 
     def test_local_event_end_requires_screenshot_before_remote_update(self):
         request_payload = {

@@ -1199,10 +1199,14 @@ class EventRemoteAtomicityTests(unittest.TestCase):
         }
         PortalRuntime._save_event_local_fields(record_id, remote["fields"], "baseline")
         sequence = []
-        query_count = 0
 
         def query(current_record_id, _notice_type):
-            raise AssertionError("事件本地直写不应查询飞书记录")
+            sequence.append("read")
+            acquired, _owner = PortalRuntime.state_store.acquire_notice_operation_lock(
+                f"event:target:{current_record_id}", action="competing-end"
+            )
+            self.assertFalse(acquired)
+            return self._query(remote)(current_record_id, _notice_type)
 
         def update(current_record_id, notice_type, notice_payload):
             sequence.append("write")
@@ -1256,8 +1260,68 @@ class EventRemoteAtomicityTests(unittest.TestCase):
             result = PortalRuntime.execute_local_notice_upload(request)
 
         self.assertTrue(result["ok"], result)
+        self.assertEqual(sequence.count("read"), 1)
+        self.assertLess(sequence.index("read"), sequence.index("write"))
         self.assertLess(sequence.index("write"), sequence.index("projection"))
         self.assertLess(sequence.index("projection"), sequence.index("release"))
+
+    def test_event_followup_rejects_ended_or_different_occurrence_before_upload(self):
+        handler = EventNoticeHandler("事件通告")
+        active = handler.build_create_fields(NoticePayload(
+            text=_event_text("开始"), level="I3", buildings=["A楼"],
+            event_source="BMS动环系统告警", occurrence_date="2026-08-31 10:00",
+            response_time="2026-08-31 10:01",
+        ))
+        record_id = "rec-same-title"
+        PortalRuntime._save_event_local_fields(record_id, active, "stale-open")
+        remote = {"fields": dict(active)}
+        with patch.object(server_module, "query_record_by_id", side_effect=self._query(remote)), \
+             patch.object(server_module, "update_bitable_record_by_payload") as update, \
+             patch.object(server_module, "upload_media_to_feishu") as upload, \
+             patch.object(server_module, "send_robot_message_by_payload") as send:
+            for action in ("update", "end"):
+                request = _request(action, operation_id=f"stale-{action}", record_id=record_id)
+                request["screenshot_base64"] = "dGVzdA=="
+                remote["fields"]["事件结束时间"] = active["事件发生时间"] + 60_000
+                with self.assertRaisesRegex(PortalError, "目标事件已结束"):
+                    PortalRuntime.execute_local_notice_upload(request)
+                remote["fields"].pop("事件结束时间")
+                remote["fields"]["事件发生时间"] = active["事件发生时间"] + 3_600_000
+                with self.assertRaisesRegex(PortalError, "发生时间与目标事件不一致"):
+                    PortalRuntime.execute_local_notice_upload(request)
+            update.assert_not_called()
+            upload.assert_not_called()
+            send.assert_not_called()
+
+    def test_event_update_timeout_retry_does_not_append_a_confirmed_update_twice(self):
+        target = "rec-confirmed-update"
+        request = _request("update", operation_id="event-update-timeout", record_id=target)
+        attachment = PortalRuntime.state_store.put_notice_upload_attachment(
+            open_id="qt-local", file_name="update.png", mime_type="image/png", content=b"update",
+        )
+        request["screenshot_upload_id"] = attachment["upload_id"]
+        remote = {"fields": EventNoticeHandler("事件通告").build_create_fields(NoticePayload(
+            text=_event_text("开始"), buildings=["A楼"], level="I3",
+            event_source="BMS动环系统告警", occurrence_date="2026-08-31 10:00",
+            response_time="2026-08-31 10:01",
+        ))}
+
+        def applied_then_timed_out(record_id, notice_type, payload):
+            self._fake_update(remote)(record_id, notice_type, payload)
+            raise feishu_service.BitableWriteUncertainError("write timed out")
+
+        with patch.object(server_module, "query_record_by_id", side_effect=self._query(remote)), \
+             patch.object(server_module, "update_bitable_record_by_payload", side_effect=applied_then_timed_out) as update, \
+             patch.object(server_module, "upload_media_to_feishu", return_value=(True, "update-token")), \
+             patch.object(server_module, "send_robot_message_by_payload", return_value={"robot_sent": True}) as send:
+            first = PortalRuntime.execute_local_notice_upload(request)
+            self.assertTrue(first["retry_same_operation"], first)
+            send.assert_not_called()
+            second = PortalRuntime.execute_local_notice_upload(request)
+            self.assertTrue(second["ok"], second)
+            update.assert_called_once()
+            send.assert_called_once()
+        self.assertEqual(remote["fields"]["进展更新时间"].count("2026/08/31 10:05"), 1)
 
     def test_event_lock_is_released_when_remote_update_raises(self):
         record_id = "rec-event-lock-exception"

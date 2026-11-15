@@ -25293,7 +25293,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         snapshot = self.get_event_monthly_snapshot(scope=scope, month=month)
         tasks: list[dict[str, Any]] = []
         tasks_by_remote_id: dict[str, dict[str, Any]] = {}
-        tasks_by_signature: dict[tuple[str, str], dict[str, Any]] = {}
+        tasks_by_signature: dict[tuple[str, str, str], list[tuple[dict[str, Any], bool]]] = {}
         for record in snapshot.get("records") or []:
             if not isinstance(record, dict):
                 continue
@@ -25363,9 +25363,11 @@ class MaintenancePortalService(RepairOperationsMixin):
             event_time = self._format_source_datetime(
                 record.get("occurrence_time")
             )
-            tasks_by_signature[
-                (re.sub(r"\s+", "", title), event_time)
-            ] = task
+            if event_time and task["building"]:
+                signature = (re.sub(r"\s+", "", title), event_time, task["building"])
+                tasks_by_signature.setdefault(signature, []).append(
+                    (task, bool(record.get("source_record_id") or record.get("record_id")))
+                )
 
         action_labels = {
             "start": "新增",
@@ -25419,7 +25421,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or item.get("fault_time")
                 or item.get("started_at")
             )
-            signature = (re.sub(r"\s+", "", title), event_time)
+            building = self._daily_task_building_label(
+                item.get("building"),
+                item.get("building_codes") or item.get("codes") or [],
+            )
+            signature = (re.sub(r"\s+", "", title), event_time, building)
             task = next(
                 (
                     tasks_by_remote_id[remote_id]
@@ -25428,8 +25434,14 @@ class MaintenancePortalService(RepairOperationsMixin):
                 ),
                 None,
             )
-            if task is None:
-                task = tasks_by_signature.get(signature)
+            if task is None and event_time and building:
+                matches = tasks_by_signature.get(signature) or []
+                if len(matches) == 1 and (not remote_ids or not matches[0][1]):
+                    task = matches[0][0]
+                    if remote_ids:
+                        for remote_id in remote_ids:
+                            tasks_by_remote_id[remote_id] = task
+                        matches[0] = (task, True)
 
             sort_time = self._daily_task_sort_time(
                 *[
@@ -25481,10 +25493,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "time": self._daily_task_time_text(sort_time),
                 "sort_time": sort_time,
                 "action_summary": self._daily_action_summary(labels),
-                "building": self._daily_task_building_label(
-                    item.get("building"),
-                    item.get("building_codes") or item.get("codes") or [],
-                ),
+                "building": building,
                 "specialty": str(item.get("specialty") or "").strip(),
                 "level": str(
                     item.get("level") or item.get("event_level") or ""
@@ -25495,7 +25504,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             tasks.append(task)
             for remote_id in remote_ids:
                 tasks_by_remote_id[remote_id] = task
-            tasks_by_signature[signature] = task
+            if event_time and building:
+                tasks_by_signature.setdefault(signature, []).append((task, bool(remote_ids)))
 
         for task in tasks:
             task.pop("_daily_actions", None)
@@ -26722,19 +26732,21 @@ class MaintenancePortalService(RepairOperationsMixin):
                 str(existing.get("action") or "") == action
                 and existing_time == response_time
             ):
+                if precision == "second":
+                    existing["precision"] = precision
                 return
             if (
                 str(existing.get("action") or "") == action
-                and str(existing.get("precision") or "") == "minute"
-                and precision == "second"
+                and {existing.get("precision"), precision} == {"minute", "second"}
                 and existing_time.replace(second=0, microsecond=0)
                 == response_time.replace(second=0, microsecond=0)
             ):
-                actions[index] = {
-                    "action": action,
-                    "response_dt": response_time,
-                    "precision": precision,
-                }
+                if precision == "second":
+                    actions[index] = {
+                        "action": action,
+                        "response_dt": response_time,
+                        "precision": precision,
+                    }
                 return
         actions.append(
             {
@@ -26753,11 +26765,24 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         index_by_identity: dict[str, dict[str, Any]] = {}
+        ambiguous_aliases: set[str] = set()
 
         def event_for(raw: dict[str, Any]) -> dict[str, Any]:
-            for identity_key in self._daily_report_event_keys(raw):
-                if identity_key in index_by_identity:
-                    return index_by_identity[identity_key]
+            keys = self._daily_report_event_keys(raw)
+            remote_id = str(raw.get("target_record_id") or raw.get("record_id") or "").strip()
+            for identity_key in keys:
+                if identity_key in ambiguous_aliases and identity_key != remote_id:
+                    continue
+                existing = index_by_identity.get(identity_key)
+                if existing and (
+                    not remote_id or not existing["remote_id"] or remote_id == existing["remote_id"]
+                ):
+                    existing["remote_id"] = remote_id or existing["remote_id"]
+                    for key in keys:
+                        index_by_identity.setdefault(key, existing)
+                        if index_by_identity[key] is existing and key not in existing["identity_keys"]:
+                            existing["identity_keys"].append(key)
+                    return existing
             occurrence_values = self._daily_report_datetimes(
                 raw.get("occurrence_time")
                 or raw.get("event_time")
@@ -26767,7 +26792,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 occurrence_values[0] if occurrence_values else (None, "")
             )
             event_key = next(
-                iter(self._daily_report_event_keys(raw)),
+                iter(keys),
                 self._daily_task_id(
                     "event-sla",
                     "|".join(
@@ -26780,7 +26805,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
             event = {
                 "event_key": event_key,
-                "identity_keys": self._daily_report_event_keys(raw),
+                "identity_keys": keys,
+                "remote_id": remote_id,
                 "title": self._daily_task_public_title(
                     raw.get("alarm_desc") or raw.get("title"),
                     "未命名事件",
@@ -26807,8 +26833,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "actions": [],
             }
             events.append(event)
-            for identity_key in event["identity_keys"]:
-                index_by_identity[identity_key] = event
+            for identity_key in keys:
+                if identity_key == remote_id:
+                    index_by_identity[identity_key] = event
+                elif identity_key in index_by_identity:
+                    ambiguous_aliases.add(identity_key)
+                else:
+                    index_by_identity[identity_key] = event
             return event
 
         months = list(
@@ -26902,7 +26933,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if isinstance(item, dict)
                 and isinstance(item.get("response_dt"), dt.datetime)
             ]
-            actions.sort(key=lambda item: item["response_dt"])
+            actions.sort(key=lambda item: (item["response_dt"], item.get("action") == "end"))
             event["actions"] = actions
             occurrence_dt = event.get("occurrence_dt")
             activity_in_window = bool(
@@ -26965,11 +26996,24 @@ class MaintenancePortalService(RepairOperationsMixin):
             is_i3 = normalized_level == "I3"
             actions = list(event.get("actions") or [])
             starts = [item for item in actions if item.get("action") == "start"]
-            following = [
-                item
-                for item in actions
-                if item.get("action") in {"update", "end"}
-            ]
+            following = []
+            updates_after_end = []
+            end = None
+            for item in actions:
+                action = item.get("action")
+                if action == "end" and end is None:
+                    end = item
+                    following.append(item)
+                elif action == "update":
+                    response_dt = item["response_dt"]
+                    if end is None or response_dt <= end["response_dt"]:
+                        following.append(item)
+                    elif end.get("precision") == "minute" and (
+                        response_dt.replace(second=0, microsecond=0) == end["response_dt"]
+                    ):
+                        following.insert(-1, item)
+                    else:
+                        updates_after_end.append(response_dt.strftime("%Y-%m-%d %H:%M:%S"))
             numbered: list[tuple[int, dict[str, Any]]] = []
             if starts:
                 numbered.append((1, starts[0]))
@@ -27049,6 +27093,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             result_events.append(
                 {
                     "event_key": str(event.get("event_key") or ""),
+                    "task_ids": [self._daily_task_id("event", identity)
+                                 for identity in event.get("identity_keys") or []],
                     "title": str(event.get("title") or "未命名事件"),
                     "building": str(event.get("building") or ""),
                     "building_codes": list(event.get("building_codes") or []),
@@ -27065,6 +27111,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "rows": rows,
                     "pending": pending,
                     "recoveries": recoveries,
+                    "updates_after_end": updates_after_end,
                     "historical_minute_precision": (
                         str(event.get("occurrence_precision") or "") == "minute"
                         or any(row.get("precision") == "minute" for row in rows)
@@ -27460,7 +27507,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         ) -> None:
             nonlocal has_error
             prefix = f"【{section_label}】" if section_label else ""
-            focused_event_titles: set[str] = set()
+            focused_event_tasks: set[str] = set()
+            legacy_event_titles: set[str] = set()
             for event in events:
                 title = self._daily_report_markdown(
                     event.get("title") or "未命名事件"
@@ -27471,11 +27519,13 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if isinstance(row, dict) and row.get("state") == "late"
                 ]
                 pending = event.get("pending")
-                if not late_rows and not isinstance(pending, dict):
+                updates_after_end = event.get("updates_after_end") or []
+                if not late_rows and not isinstance(pending, dict) and not updates_after_end:
                     continue
-                focused_event_titles.add(
-                    self._morning_meeting_normalized_title(title)
-                )
+                if "task_ids" in event:
+                    focused_event_tasks.update(event["task_ids"])
+                else:
+                    legacy_event_titles.add(self._morning_meeting_normalized_title(title))
                 details = []
                 level = self._daily_report_markdown(event.get("level"), limit=30)
                 if level:
@@ -27486,8 +27536,20 @@ class MaintenancePortalService(RepairOperationsMixin):
                 details.extend(
                     f"第{int(row.get('number') or 0)}条通告超时"
                     f"{row.get('late_text') or '0分0秒'}"
+                    + (
+                        f"（截止 {row['deadline'][11:19]}，"
+                        f"记录时间 {row['response_time'][11:19]}）"
+                        if row.get("deadline") and row.get("response_time")
+                        else ""
+                    )
                     for row in late_rows
                 )
+                if updates_after_end:
+                    latest = str(updates_after_end[-1])
+                    details.append(
+                        f"结束后有 {len(updates_after_end)} 条更新时间待核对"
+                        f"（最近 {latest[5:16]}），未计入通告超时"
+                    )
                 if isinstance(pending, dict):
                     deadline = str(pending.get("deadline") or "")
                     details.append(
@@ -27509,8 +27571,9 @@ class MaintenancePortalService(RepairOperationsMixin):
                 title = self._daily_report_markdown(task.get("title"))
                 if (
                     category == "event"
-                    and self._morning_meeting_normalized_title(title)
-                    in focused_event_titles
+                    and (str(task.get("task_id") or "") in focused_event_tasks
+                         or (legacy_event_titles and self._morning_meeting_normalized_title(title)
+                             in legacy_event_titles))
                 ):
                     continue
                 if tone in {"warning", "error"}:

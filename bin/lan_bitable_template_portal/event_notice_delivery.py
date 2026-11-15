@@ -57,6 +57,17 @@ class EventNoticeDelivery:
 
     def get(self,event_id):return self.store.get_document(NS,event_id)
 
+    def _closed_for_delivery(self, row, operation=None):
+        from .event_priority import NAMESPACE
+
+        if (operation and operation['intent']['action']=='end'
+                and row.get('state')=='ended'
+                and operation['sequence']==row.get('lifecycle_sequence')):
+            return False
+        target=row.get('target_record_id')
+        lifecycle=self.store.get_document(NAMESPACE,target) if target else None
+        return row.get('state') in ('ended','deleted') or (lifecycle or {}).get('state')=='ended'
+
     def preference(self,open_id):return self.store.get_document(PREFS,open_id) or {'robot_ids':[],'revision':0}
 
     def save_preference(self,open_id,ids,expected_revision):
@@ -126,8 +137,15 @@ class EventNoticeDelivery:
             if set(row['access_scopes'])-set(scopes) or row.get('created_by') not in ('',actor) and not row.get('operations') and not row.get('target_record_id'):
                 raise PortalError('无权发送该事件。')
             if row['state']=='deleted':raise PortalError('事件已删除。')
+            if self._closed_for_delivery(row):
+                raise PortalError('目标事件已结束，请刷新并核对事件记录。')
             if action=='start' and row['operations']:raise PortalError('本事件已有新增任务，请重试原任务或发送更新。')
             if action!='start' and not (row['operations'] or row.get('target_record_id')):raise PortalError('请先发送本事件的新增通告。')
+            if row['operations']:
+                latest=self.store.get_document(OPS,row['operations'][-1]) or {}
+                if (latest.get('intent',{}).get('action')=='end'
+                        and latest.get('state')=='pending'):
+                    raise PortalError('结束通告正在发送，请查看或重试原任务。')
             targets=[]
             selected=self.preference(actor)['robot_ids']
             if not selected:raise PortalError('请至少选择一个默认钉钉机器人后发送。')
@@ -164,7 +182,8 @@ class EventNoticeDelivery:
             current=self.store.get_document(OPS,identity);row=self.get(event_id)
             current['receipts'][key]=receipt
             documents={(OPS,identity):current}
-            if receipt.get('state')=='sent':
+            apply_receipt=receipt.get('state')=='sent' and not self._closed_for_delivery(row,op)
+            if apply_receipt:
                 before=self.system_fields(row)
                 stamp=receipt.get('sent_at') or time.time()
                 row['first_delivery_at']=min(row.get('first_delivery_at') or stamp,stamp)
@@ -183,7 +202,7 @@ class EventNoticeDelivery:
                 documents[(NS,event_id)]=row
             from .event_priority import STATE_LOCK
             with STATE_LOCK:
-                if receipt.get('state')=='sent':documents.update(self._priority_documents(row,op['created_at']))
+                if apply_receipt:documents.update(self._priority_documents(row,op['created_at']))
                 self.store.put_documents_atomic(documents)
 
     def _priority(self,row):
@@ -255,7 +274,7 @@ class EventNoticeDelivery:
                 row=self.get(op['intent']['event_id']) or {}
                 if row.get('state')=='deleted':
                     self.store.mark_outbox_event(task['id'],'done',count_attempt=False);return
-                if op['sequence']<row.get('sequence',0):
+                if op['sequence']<row.get('sequence',0) or self._closed_for_delivery(row,op):
                     with self.lock('event:'+op['intent']['event_id']):
                         current=self.store.get_document(OPS,op['operation_id']);current['state']='superseded';self.store.put_document(OPS,op['operation_id'],current)
                     self.store.mark_outbox_event(task['id'],'done',count_attempt=False);return
@@ -288,6 +307,8 @@ class EventNoticeDelivery:
             if not row or not op or op['intent']['event_id']!=event_id:raise PortalError('原发送任务不存在。')
             if row['state']=='deleted':raise PortalError('事件已删除，未重发。')
             if op['sequence']<row.get('sequence',0):raise PortalError('已有后续事件消息，不重发旧通告。')
+            if self._closed_for_delivery(row,op):
+                raise PortalError('目标事件已结束，旧消息不能再发送。')
             actual=[target for target in op['targets'] if target['channel']=='dingtalk']
             if op.get('dingtalk_selection') is not None and not self.ding.selection_matches({'request':{'dingtalk_robot_ids':op['dingtalk_selection']},'result':{'dingtalk_targets':actual}}):
                 raise PortalError('原任务的钉钉目标与默认选择不一致，请核对设置。')

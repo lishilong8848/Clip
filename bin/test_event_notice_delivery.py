@@ -10,7 +10,7 @@ from lan_bitable_template_portal.event_notice_delivery import EventNoticeDeliver
 from lan_bitable_template_portal.dingtalk_notices import DingTalkNotices
 from lan_bitable_template_portal.portal_service import MaintenancePortalService,PortalError
 from lan_bitable_template_portal.state_store import LanPortalStateStore
-from lan_bitable_template_portal.event_priority import blockers
+from lan_bitable_template_portal.event_priority import NAMESPACE,blockers
 
 
 class EventDeliveryTests(unittest.TestCase):
@@ -99,6 +99,32 @@ class EventDeliveryTests(unittest.TestCase):
         manager=EventNoticeDelivery(self.runtime);manager.ding.transport=self.manager.ding.transport
         manager.process_messages();self.assertEqual(len(self.calls),2)
         with self.assertRaises(PortalError):self.accept(text='不同原文')
+
+    def test_closed_event_blocks_new_sends_and_allows_original_end_replay(self):
+        self.accept();self.process()
+        for robot in self.robots:
+            self.store.put_document('dingtalk_notices','rate:'+robot['id'],{'next_at':0})
+        self.accept('end');self.process()
+        self.assertEqual(self.accept('end')['state'],'ended')
+        for action in ('update','end'):
+            with self.assertRaisesRegex(PortalError,'目标事件已结束'):
+                self.accept(action,operation='4'*32)
+        self.assertEqual(len(self.calls),4)
+
+    def test_qt_end_supersedes_pending_web_update_only_for_that_record(self):
+        row=self.manager.new(self.event,'user',['D'])
+        row.update(state='active',target_record_id='rec_closed_elsewhere')
+        self.store.put_document(NS,self.event,row)
+        self.accept('update')
+        self.store.put_document(NAMESPACE,'rec_closed_elsewhere',{'state':'ended'})
+        self.process()
+        self.assertEqual(self.store.get_document(OPS,'2'*32)['state'],'superseded')
+        with self.assertRaisesRegex(PortalError,'目标事件已结束'):
+            self.accept('end')
+        other='web_'+'b'*32
+        self.manager.accept(other,'4'*32,'user',['D'],'start','【标题】D楼I2测试')
+        self.process()
+        self.assertEqual(len(self.calls),2)
 
     def test_metadata_half_filled_and_post_end_updates_only_table(self):
         self.accept();self.process()

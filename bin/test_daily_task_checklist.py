@@ -370,6 +370,18 @@ class DailyTaskChecklistTests(unittest.TestCase):
         self.assertIn("更新", event_tasks[0]["action_summary"])
         self.assertEqual(event_tasks[0]["time"], "09:10")
 
+    def test_same_title_and_minute_do_not_merge_distinct_event_ids(self) -> None:
+        service = self._service()
+        service.get_daily_summary = lambda **_kwargs: {"items": [{
+            "work_type": "event", "target_record_id": "rec_second",
+            "title": "E楼UPS告警", "building": "E楼",
+            "occurrence_time": f"{TEST_DATE} 08:30",
+            "actions": [{"action": "end", "time": f"{TEST_DATE} 08:35"}],
+        }]}
+        tasks = service._daily_event_tasks(scope="E", date=TEST_DATE)
+        self.assertEqual(len(tasks), 2)
+        self.assertEqual({task["status"] for task in tasks}, {"处理中", "已结束"})
+
     def test_event_sla_excludes_recovery_and_uses_previous_response_after_fourth(self) -> None:
         service = self._service()
         occurrence = dt.datetime(2026, 7, 28, 10, 0, 0)
@@ -406,6 +418,62 @@ class DailyTaskChecklistTests(unittest.TestCase):
         self.assertEqual(event["rows"][4]["deadline"], "2026-07-28 10:59:00")
         self.assertEqual(event["rows"][4]["late_text"], "1分5秒")
         self.assertIsNone(event["pending"])
+
+    def test_event_report_flags_updates_after_end_and_keeps_same_named_records_separate(self) -> None:
+        service = self._service()
+        a_event = {
+            "record_id": "rec_a", "title": "A楼支路断开", "building": "A楼", "level": "I2",
+            "occurrence_time": f"{TEST_DATE} 07:02", "response_time": f"{TEST_DATE} 07:04",
+            "progress_update": [f"{TEST_DATE} {value}" for value in ("07:07", "07:12", "07:14", "17:17")],
+            "end_time": f"{TEST_DATE} 07:26",
+        }
+        d_event = {
+            "record_id": "rec_d", "active_item_id": "legacy-key",
+            "title": "D楼UPS同名告警", "building": "D楼", "level": "I3",
+            "occurrence_time": f"{TEST_DATE} 04:15", "response_time": f"{TEST_DATE} 04:15",
+            "progress_update": [f"{TEST_DATE} 04:18", f"{TEST_DATE} 04:29"],
+            "end_time": f"{TEST_DATE} 04:29",
+        }
+        previous_d_event = {
+            **d_event, "record_id": "rec_previous_d",
+            "occurrence_time": f"{TEST_DATE} 03:00", "response_time": f"{TEST_DATE} 03:01",
+            "progress_update": [], "end_time": f"{TEST_DATE} 03:04",
+        }
+        service.get_event_monthly_snapshot = lambda **_kwargs: {
+            "records": [a_event, previous_d_event, d_event],
+        }
+        service._state_store.put_document("daily_event_timeline", "rec_d", {
+            "target_record_id": "rec_d", "building_codes": ["D"], "actions": [
+                {"action": "update", "response_time": f"{TEST_DATE} 04:18:07", "precision": "second"},
+            ],
+        })
+        sla = service._daily_report_event_sla(
+            scope="ALL",
+            window_start=dt.datetime.fromisoformat(TEST_DATE),
+            window_end=dt.datetime.fromisoformat(f"{TEST_DATE} 18:00"),
+        )
+        events = {event["event_key"]: event for event in sla["events"]}
+        self.assertEqual(set(events), {"rec_a", "rec_d", "rec_previous_d"})
+        a = events["rec_a"]
+        self.assertEqual(a["updates_after_end"], [f"{TEST_DATE} 17:17:00"])
+        self.assertEqual([row["number"] for row in a["rows"]], [1, 2, 3, 4, 5])
+        self.assertTrue(all(row["state"] == "on_time" for row in a["rows"]))
+        d = events["rec_d"]
+        self.assertEqual(d["rows"][1]["response_time"], f"{TEST_DATE} 04:18:07")
+        self.assertEqual(d["rows"][2]["late_text"], "4分0秒")
+        tasks = [{
+            "task_id": service._daily_task_id("event", record_id), "category": "event",
+            "title": "D楼UPS同名告警", "status_tone": "completed", "status": "已结束",
+        } for record_id in ("rec_d", "rec_previous_d")]
+        card = service.build_daily_work_report_card(
+            {"scope": "ALL", "categories": [{"tasks": tasks}], "event_sla": sla},
+            scope_label="全楼", link_scope="ALL", public_base="",
+        )
+        content = self._card_text(card)
+        self.assertIn("结束后有 1 条更新时间待核对", content)
+        self.assertIn("截止 04:25:00，记录时间 04:29:00", content)
+        self.assertNotIn("576分", content)
+        self.assertEqual(content.count("D楼UPS同名告警"), 2)
 
     def test_non_i3_pending_is_marked_without_overdue_duration(self) -> None:
         service = self._service()

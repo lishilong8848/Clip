@@ -1,11 +1,13 @@
 import copy
 import datetime as dt
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 from lan_bitable_template_portal.daily_inspection import (CN,DailyInspection,RiskError,inspection_report,
-    parameters,review_devices,manual_state_key,inherit_manual_states)
+    ROUND_LOCATION_FIELDS, configured_form_devices, parameters, review_devices,
+    manual_state_key, inherit_manual_states, adopt_manual_state_overrides, state_reference)
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_daily_inspection import InspectionCloud,DAY,NIGHT
 
@@ -77,6 +79,62 @@ class ManualStateTests(unittest.TestCase):
         self.assertNotEqual(manual_state_key(device,param),self.key)
         device['scope']='E'
         self.assertNotEqual(manual_state_key(device,param),self.key)
+
+    def test_configured_status_uses_fixed_default_and_preserves_manual_history(self):
+        identity='local_'+'1'*32
+        point=self.point
+        fields={'测点ID':identity,'测点名称':'自检状态','专业':self.device['profession'],
+                '测点来源':'manual_status','启用':True,'目标巡检表':point['template'],'目标工作表':point['sheet'],
+                **{field:point['round_cells'][slot] for slot,field in ROUND_LOCATION_FIELDS.items()}}
+        batch=self.service.load('D')['active']['batches']['D']
+        devices=copy.deepcopy(batch['devices'])
+        cfg=[{'record_id':'recConfigState','fields':fields}]
+        forms=configured_form_devices('D',devices,cfg)
+        selected=next(p for d in forms for p in d['points'] if p.get('configured_point_id')==identity)
+        self.assertEqual(selected['point_id'],point['point_id'])
+        self.assertEqual(selected['source_kind'],'manual_status')
+        fixed=configured_form_devices('D',devices,[{'fields':fields | {'测点来源':'fixed_status','固定值':'△'}}])
+        matched=next((d,p) for d in fixed for p in parameters(d)
+                     if any(row.get('configured_point_id')==identity and row['id']==p.get('point') for row in d['points']))
+        self.assertEqual(matched[1]['reference'],'△')
+        self.assertIsNone(manual_state_key(*matched))
+
+    def test_range_status_uses_corrected_number_and_rejects_nonmatch(self):
+        rules=[{'min':'-2','max':'0','status':'not_running'}, {'min':'1','max':'10','status':'normal'}]
+        point={'status_intervals':json.dumps(rules), 'raw_value':'9', 'corrected_value':'0'}
+        self.assertEqual(state_reference('',point),'△')
+        point['corrected_value']='1e1'
+        self.assertEqual(state_reference('',point),'√')
+        point['corrected_value']='0.5'
+        self.assertEqual(state_reference('',point),'')
+        point.update(raw_value=None, corrected_value=None)
+        self.assertEqual(state_reference('',point),'')
+        point['raw_value']='0'
+        point['status_intervals']=json.dumps(rules+[{'min':'0','max':'3','status':'abnormal'}])
+        self.assertEqual(state_reference('',point),'')
+
+    def test_edit_on_newly_mapped_state_becomes_the_default_on_later_rounds(self):
+        state=self.service.load('D')
+        active=state['active']
+        active['sheet_overrides']=[{'template':self.point['template'],'sheet':self.point['sheet'],
+            'cell':self.point['round_cells']['白1'],'value':'×','note':'待更换','actor':'甲','at':5}]
+        adopt_manual_state_overrides(state,active,'D')
+        self.assertFalse(active['sheet_overrides'])
+        self.assertEqual(active['reviews'][self.device['id']]['values'][self.param['id']],'×')
+        self.assertEqual(state['manual_states'][self.key]['note'],'待更换')
+        later={**active,'round':2,'reviews':{}}
+        inherit_manual_states(state,later,'D')
+        self.assertEqual(later['reviews'][self.device['id']]['values'][self.param['id']],'×')
+        self.assertEqual(later['reviews'][self.device['id']]['note'],'待更换')
+        automatic=copy.deepcopy(later)
+        point=next(p for d in automatic['batches']['D']['form_devices'] if d['id']==self.device['id']
+                   for p in d['points'] if p['id']==self.point['id'])
+        point['source_kind']='fixed_status'
+        point['fixed_value']='√'
+        inherit_manual_states(state,automatic,'D')
+        review=automatic['reviews'][self.device['id']]
+        self.assertNotIn(self.param['id'],review['values'])
+        self.assertEqual((review['note'],review['result']),('',''))
 
 
 if __name__=='__main__':unittest.main()

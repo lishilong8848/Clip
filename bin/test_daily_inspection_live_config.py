@@ -173,6 +173,25 @@ class DailyInspectionLiveConfigTests(unittest.TestCase):
         self.assertFalse(service.live_batch_belongs_to_round(
             {'duty': duty, 'round': 1}, outside))
 
+    def test_local_manual_and_fixed_rows_do_not_change_a_batch_source_window(self):
+        from lan_bitable_template_portal.daily_inspection_reminders import slot_time
+        service = DailyInspection(self.store, self.cloud, scheduled=True)
+        duty = {'scope': 'D', 'date': '2026-11-03', 'shift': '白'}
+        slot = slot_time(duty['date'], duty['shift'], 1)
+        stamp = int(slot.timestamp() * 1000) - 60000
+        measures = [{'fields': {'记录类型': '设备巡检', '源文件时间': stamp}}]
+        local = [{'fields': {'记录类型': '测点明细', '测点ID': 'local_' + identity * 32,
+                             '测点来源': source}}
+                 for identity, source in zip('abc', ('manual_status', 'fixed_status', 'fixed_value'))]
+        batch = {'batch': stamp + 30000, 'rows': measures + local}
+        active = {'duty': duty, 'round': 1}
+        self.assertTrue(service.matches_scheduled_batch(batch, duty, 1, slot))
+        self.assertTrue(service.live_batch_belongs_to_round(active, batch))
+        batch['rows'].append({'fields': {'记录类型': '测点明细', '测点ID': '13_0_1_0'}})
+        self.assertFalse(service.matches_scheduled_batch(batch, duty, 1, slot))
+        self.assertFalse(service.live_batch_belongs_to_round(active, batch))
+        self.assertFalse(service.matches_scheduled_batch({**batch, 'rows': local}, duty, 1, slot))
+
     def test_probe_uses_single_bounded_request(self):
         self.service.capture(['D'])
         calls = []

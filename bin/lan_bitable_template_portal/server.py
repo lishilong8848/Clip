@@ -10140,6 +10140,36 @@ class PortalRuntime:
             return ""
 
     @classmethod
+    def _event_followup_target_error(
+        cls, data: dict, record_id: str, fields: dict, *, allow_finished: bool = False
+    ) -> str:
+        from .event_priority import NAMESPACE
+
+        lifecycle = cls.service._target_record_lifecycle(
+            work_type=WORK_TYPE_EVENT,
+            notice_type="事件通告",
+            target_record={"record_id": record_id, "display_fields": fields},
+        )
+        local_lifecycle = cls.state_store.get_document(NAMESPACE, record_id) or {}
+        if not allow_finished and (
+            lifecycle["finished"]
+            or fields.get(EVENT_NOTICE_FIELDS["end_time"])
+            or (local_lifecycle.get("state") == "ended" and local_lifecycle.get("web_event_id"))
+        ):
+            return "目标事件已结束，不能再上传更新或结束。请刷新并核对事件记录。"
+        incoming_time = cls._event_notice_time_key(data)
+        remote_time = cls._remote_event_time_key_from_fields(fields)
+        if incoming_time and remote_time and incoming_time != remote_time:
+            return "通告发生时间与目标事件不一致，请核对发生时间和所选记录。"
+        incoming_building = cls._event_notice_building_key(data)
+        remote_building = cls._event_notice_building_key(
+            {"building": fields.get(EVENT_NOTICE_FIELDS["building"])}
+        )
+        if incoming_building and remote_building and incoming_building != remote_building:
+            return "通告楼栋与目标事件不一致，请重新选择对应事件。"
+        return ""
+
+    @classmethod
     def _validate_event_delete_target(
         cls, payload: dict, remote_fields: dict | None
     ) -> tuple[bool, str]:
@@ -12459,7 +12489,8 @@ class PortalRuntime:
         if not record_id:
             return False, "缺少目标多维 record_id。", ""
         ok_query, query_result = query_record_by_id(record_id, notice_type)
-        if not ok_query and cls._remote_record_not_found(query_result):
+        if (not ok_query and notice_type != "事件通告"
+                and cls._remote_record_not_found(query_result)):
             rebound_record_id, rebound_error = cls._rebind_missing_target_record(
                 prepared,
                 stale_record_id=record_id,
@@ -12493,6 +12524,10 @@ class PortalRuntime:
             current_record_version or expected_record_version,
         )
         fields = query_result.get("fields", {}) if isinstance(query_result, dict) else {}
+        if notice_type == "事件通告" and action in {"update", "end"}:
+            event_error = cls._event_followup_target_error(prepared, record_id, fields)
+            if event_error:
+                return False, event_error, record_id
         # Hidden maintenance mirrors may have remote photos but no local projection.
         existing_tokens, existing_extra_tokens, existing_response_time = (
             cls._existing_tokens_for_notice_type(notice_type, fields)
@@ -13462,6 +13497,8 @@ class PortalRuntime:
                 == "事件通告"
                 and resume_target
             ):
+                if target_record_id and target_record_id != resume_target:
+                    raise PortalError("原待核验任务与当前目标事件不一致，请刷新后核对。")
                 resume_remote_written = True
                 target_record_id = resume_target
                 record_id = resume_target
@@ -13492,6 +13529,7 @@ class PortalRuntime:
                 )
             )
         )
+        previous_attempt = {}
         if direct_event_update and request_operation_id:
             previous_attempt = cls._get_notice_remote_operation(request_operation_id) or {}
             if (
@@ -13539,10 +13577,7 @@ class PortalRuntime:
                         "message": lock_error, "record_id": record_id, "real_record_id": ""}
         if action_type in {"update", "end"} and not target_record_id:
             if record_id and not is_local_record_id(record_id):
-                ok_query, query_result = (
-                    (True, {}) if direct_event_update
-                    else query_record_by_id(record_id, notice_type)
-                )
+                ok_query, query_result = query_record_by_id(record_id, notice_type)
                 action_name = "结束" if action_type == "end" else "更新"
                 if ok_query:
                     target_record_id = record_id
@@ -13560,17 +13595,11 @@ class PortalRuntime:
             if not target_record_id:
                 raise PortalError("Qt 更新/结束缺少目标多维 target_record_id。")
 
-        if direct_event_update:
-            prequery_result = {
-                "record_id": target_record_id,
-                "fields": cls._event_local_fields(target_record_id, data),
-            }
-
         query_record_id_for_action = str(target_record_id or record_id or "").strip()
         has_remote_record_for_action = bool(
             query_record_id_for_action and not is_local_record_id(query_record_id_for_action)
         )
-        if not direct_event_update and has_remote_record_for_action and action_type in {
+        if has_remote_record_for_action and action_type in {
             "update",
             "end",
             "upload_replace",
@@ -13581,7 +13610,8 @@ class PortalRuntime:
                 if not ok_query:
                     action_name = "结束" if action_type == "end" else "更新" if action_type == "update" else "归档"
                     remote_not_found = cls._remote_record_not_found(query_result)
-                    if remote_not_found and coerced_upload_to_update and requested_action_type == "upload":
+                    if (remote_not_found and coerced_upload_to_update
+                            and requested_action_type == "upload" and notice_type != "事件通告"):
                         action_type = "upload"
                         target_record_id = ""
                         record_id = original_record_id or record_id
@@ -13607,6 +13637,22 @@ class PortalRuntime:
                         }
                 if action_type != "upload":
                     prequery_result = query_result if isinstance(query_result, dict) else {}
+        if notice_type == "事件通告" and action_type in {"update", "end", "upload_replace"}:
+            fields = (prequery_result or {}).get("fields")
+            if not isinstance(fields, dict):
+                raise PortalError("目标事件状态暂未核实，请刷新后重试。")
+            prior = (cls._get_notice_remote_operation(request_operation_id) or {}
+                     if request_operation_id and action_type == "end" else {})
+            same_end = (
+                prior.get("operation_type") == "end"
+                and prior.get("target_record_id") == target_record_id
+                and prior.get("status") in {"executing", "remote_written", "completed"}
+            )
+            event_error = cls._event_followup_target_error(
+                data, target_record_id, fields, allow_finished=same_end
+            )
+            if event_error:
+                raise PortalError(event_error)
         if (
             action_type in {"update", "end", "upload_replace"}
             and not direct_event_update
@@ -14565,6 +14611,7 @@ class PortalRuntime:
         robot_result: dict = {}
         remote_write_unverified = False
         verified_event_query: dict = {}
+        already_applied = False
         if operation_status in {"remote_written", "completed"}:
             success, result = True, str(
                 (operation.get("result") or {}).get("message")
@@ -14608,22 +14655,36 @@ class PortalRuntime:
                     or "远端写入结果暂时无法确认，已停止重复提交。"
                 )
             else:
-                already_applied = False
                 if (
                     notice_type == "事件通告"
                     and isinstance(prequery_result, dict)
                     and prequery_result
                 ):
+                    previous_fields = (
+                        (previous_attempt.get("result") or {}).get("uncertain_written_fields")
+                        if previous_attempt.get("status") == "failed" else None
+                    )
                     already_applied, _already_error = (
                         cls._event_remote_fields_match_payload(
                             notice_payload,
                             prequery_result,
                             action="end" if action_type == "end" else "update",
+                            expected_fields=previous_fields,
                         )
                     )
                 if already_applied:
+                    if previous_fields:
+                        notice_payload._clipflow_written_fields = previous_fields
                     success, result = True, "已核对目标记录，本次不重复写入。"
                 else:
+                    if notice_type == "事件通告":
+                        event_error = cls._event_followup_target_error(
+                            data, target_record_id, (prequery_result or {}).get("fields") or {}
+                        )
+                        if event_error:
+                            cls._release_event_operation_lock(event_lock_key, event_lock_owner)
+                            return {"ok": False, "name": action_name, "message": event_error,
+                                    "record_id": target_record_id, "real_record_id": ""}
                     try:
                         cls._mark_notice_remote_operation(
                             operation_id,
@@ -14655,7 +14716,13 @@ class PortalRuntime:
                             operation_id,
                             status="failed",
                             target_record_id=target_record_id,
-                            result={"retry_same_operation": bool(direct_event_update)},
+                            result={
+                                "retry_same_operation": bool(direct_event_update),
+                                "uncertain_written_fields": (
+                                    getattr(notice_payload, "_clipflow_written_fields", {})
+                                    if direct_event_update else {}
+                                ),
+                            },
                             error=str(exc),
                         )
                         cls._release_event_operation_lock(event_lock_key, event_lock_owner)
@@ -14697,7 +14764,8 @@ class PortalRuntime:
                 ) or {})
                 if not written_fields:
                     written_fields = get_notice_handler(notice_type).build_update_fields(notice_payload)
-                remote_fields_for_action = {**remote_fields_for_action, **written_fields}
+                if not already_applied:
+                    remote_fields_for_action = {**remote_fields_for_action, **written_fields}
                 cls._mark_notice_remote_operation(
                     operation_id,
                     status="remote_written",

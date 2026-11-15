@@ -62,6 +62,20 @@ SYSTEM_ROLLOVER_ACTOR = '系统自动收尾（未人工确认）'
 LOCATION_FIELDS = ('目标巡检表', '目标工作表', '目标单元格')
 ROUND_LOCATION_FIELDS = {'白1':'白1目标单元格', '白2':'白2目标单元格',
                          '夜1':'夜1目标单元格', '夜2':'夜2目标单元格'}
+LOCAL_POINT_ID = re.compile(r'local_[0-9a-f]{32}')
+LOCAL_POINT_SOURCES = frozenset({'manual_status', 'fixed_status', 'fixed_value'})
+
+
+def sampled_source_times(rows):
+    for row in rows:
+        fields = row.get('fields') if isinstance(row, dict) else None
+        if not isinstance(fields, dict):
+            yield None
+        elif (plain(fields.get('记录类型')) != '测点明细'
+                or not LOCAL_POINT_ID.fullmatch(plain(fields.get('测点ID')).strip())
+                or plain(fields.get('测点来源')).strip() not in LOCAL_POINT_SOURCES):
+            yield fields.get('源文件时间')
+STATE_VALUES = {'normal': '√', 'abnormal': '×', 'not_running': '△'}
 INSPECTION_BATCH_PREFIX = 'INSPECTION_BATCH_V1:'
 DEVICE_METADATA = {
     '文本', '设备编号', '楼栋', '专业', '位置', '巡检表单', '上传日期', '源文件时间', '源文件',
@@ -513,7 +527,8 @@ def omit_occupied_form_cells(form_devices, devices):
     for device in form_devices:
         points = []
         for point in device['points']:
-            if deferred_original_location(device['scope'], point.get('sheet'), point.get('round_cells')):
+            if (deferred_original_location(device['scope'], point.get('sheet'), point.get('round_cells'))
+                    and not (point.get('configured_point_id') and point.get('enabled') is True)):
                 continue
             remaining = {slot:address for slot,address in point['round_cells'].items()
                          if (point['template'], point['sheet'].strip(), slot, address) not in occupied}
@@ -691,6 +706,9 @@ def devices_for(scope, rows, point_configs, templates):
         point_id = plain(fields.get('测点ID')).strip()
         if not name or not point_id:
             raise RiskError('测点记录缺少设备编号或测点 ID。', 503)
+        if LOCAL_POINT_ID.fullmatch(point_id):
+            # Configuration is authoritative for values with no collection source.
+            continue
         exact = (profession, key_name(scope, name))
         aliases = {key_name(scope, value) for value in (name.split('_', 1)[0], location.rsplit('/', 1)[-1])}
         candidates = {(profession, value) for value in aliases} & primary
@@ -742,7 +760,7 @@ def devices_for(scope, rows, point_configs, templates):
         corrected_value = plain(fields.get('测点修正值')) or None
         value_type = plain(config.get('测点类型') or fields.get('测点类型'))
         if value_type == '直接填充':
-            reading = corrected_value if corrected_value is not None else (raw_value or '')
+            reading = corrected_value if corrected_value is not None else raw_value if raw_value is not None else reading
         if ambiguous_config:
             reading = ''
         device['points'].append({
@@ -760,9 +778,11 @@ def devices_for(scope, rows, point_configs, templates):
             'user_enabled': config.get('用户主动启用') is True,
             'note': plain(config.get('测点备注')) or plain(fields.get('测点备注')),
             'value_type': value_type,
-            'status_normal': '' if ambiguous_config else plain(config.get('状态正常值') or fields.get('状态正常值')),
-            'status_abnormal': '' if ambiguous_config else plain(config.get('状态异常值') or fields.get('状态异常值')),
-            'status_stopped': '' if ambiguous_config else plain(config.get('状态未运行值') or fields.get('状态未运行值')),
+            'status_normal': '' if ambiguous_config else plain(target_source.get('状态正常值')),
+            'status_abnormal': '' if ambiguous_config else plain(target_source.get('状态异常值')),
+            'status_stopped': '' if ambiguous_config else plain(target_source.get('状态未运行值')),
+            'status_intervals': '' if ambiguous_config else plain(
+                target_source.get('状态区间规则')),
             'template': template, 'sheet': sheet, 'cell': cell,
             'round_cells': round_cells, 'mapping_issue': mapping_issue,
             'template_known': template in templates.get((scope, profession), []),
@@ -815,8 +835,115 @@ def devices_for(scope, rows, point_configs, templates):
     return list(devices.values())
 
 
+def configured_form_devices(scope, devices, configs):
+    """Adopt source-less configuration without duplicating existing workbook cells."""
+    form_devices = omit_occupied_form_cells(copy.deepcopy(supplemental_form_devices(scope)), devices)
+    catalogue = catalog_locations()
+    owners = {}
+
+    def key(item, cells):
+        return item['template'], item['sheet'].strip(), tuple(sorted(cells.items()))
+
+    occupied = {(point['template'], point['sheet'].strip(), address)
+                for device in devices for point in device['points']
+                for address in (point.get('round_cells') or {}).values()}
+    for device in devices:
+        for section in device['sections']:
+            if deferred_catalog_section(device, section):
+                continue
+            for name, value in section['values'].items():
+                target = catalogue.get((scope + '楼', device['name'], device['profession'], section['location'],
+                                        section['form'].strip(), name))
+                if target is None:
+                    continue
+                identity = key(target, target['cells'])
+                if identity not in owners and value in ('', None):
+                    owners[identity] = (section, name)
+                else:
+                    owners[identity] = None
+    for device in form_devices:
+        for point in device['points']:
+            identity = key(point, point['round_cells'])
+            owners[identity] = (point, None) if identity not in owners else None
+    seen = Counter(plain(row['fields'].get('测点ID')).strip() for row in configs)
+    pending = {}
+    conflicts = set()
+    for row in configs:
+        fields = row['fields']
+        point_id = plain(fields.get('测点ID')).strip()
+        if not LOCAL_POINT_ID.fullmatch(point_id) or seen[point_id] != 1:
+            continue
+        building = plain(fields.get('楼栋')).strip()
+        if building and building not in (scope, scope + '楼'):
+            continue
+        profession = plain(fields.get('专业')).strip()
+        template, sheet, _ = [plain(fields.get(name)).strip() for name in LOCATION_FIELDS]
+        cells = {slot: plain(fields.get(field)) for slot, field in ROUND_LOCATION_FIELDS.items()}
+        source = plain(fields.get('测点来源'))
+        if source not in LOCAL_POINT_SOURCES:
+            continue
+        try:
+            verified = validate_round_locations(scope, profession, template, sheet, cells)
+            if sheet == '暖通冷机系统巡检表' and verified:
+                verified = dict.fromkeys(ROUND_LOCATION_FIELDS, next(iter(verified.values())))
+            if set(verified) != set(ROUND_LOCATION_FIELDS) or all_cells_excluded(template, sheet, verified):
+                continue
+        except (ValueError, TypeError, KeyError):
+            continue
+        target = {'template': template, 'sheet': sheet}
+        identity = key(target, verified)
+        coords = {(template, sheet, address) for address in verified.values()}
+        if identity in pending:
+            conflicts.add(identity)
+        pending[identity] = (row, point_id, profession, source, target, verified, coords)
+    unique_locations = Counter(cell for identity, entry in pending.items() if identity not in conflicts
+                               for cell in entry[-1])
+    owner_locations = Counter((template, sheet, address) for template, sheet, cells in owners
+                              for address in {address for _, address in cells})
+    for identity, (row, point_id, profession, source, target, cells, coords) in pending.items():
+        if (identity in conflicts or any(unique_locations[cell] > 1 for cell in coords)
+                or any(owner_locations[cell] > int(identity in owners) for cell in coords)
+                or coords & occupied or identity in owners and owners[identity] is None):
+            continue
+        fields = row['fields']
+        enabled = fields.get('启用') is True
+        fixed = plain(fields.get('固定值'))
+        if source == 'fixed_value':
+            try:
+                if not fixed or not Decimal(fixed).is_finite():
+                    continue
+            except InvalidOperation:
+                continue
+        if source == 'fixed_status' and fixed not in STATE_VALUES.values():
+            continue
+        settings = {'source_kind': source, 'fixed_value': fixed, 'value_type': '数值' if source == 'fixed_value' else '状态',
+                    'enabled': enabled, 'configured_point_id': point_id}
+        if identity in owners:
+            record, parameter = owners[identity]
+            if parameter is None:
+                record.update(settings, value=fixed if source == 'fixed_value' else '')
+            else:
+                record.setdefault('form_point_settings', {})[parameter] = settings
+            continue
+        if not enabled:
+            continue
+        name = plain(fields.get('测点名称') or fields.get('测点备注')).strip()
+        if not name:
+            continue
+        point = {**settings, **target, 'id': point_id, 'point_id': point_id, 'name': name, 'location': '',
+                 'path': '', 'value': fixed if source == 'fixed_value' else '', 'sampled': None, 'integrity': '',
+                 'baseline': False, 'user_enabled': fields.get('用户主动启用') is True, 'note': '',
+                 'cell': cells['白1'], 'round_cells': cells, 'template_known': True}
+        form_devices.append({'id': f'{scope}:{profession}:{point_id}', 'name': name, 'scope': scope,
+                             'profession': profession, 'form_only': True, 'sections': [], 'points': [point]})
+    return form_devices
+
+
 def state_parameter(name, value_type=''):
-    return value_type == '状态' or bool(re.search(r'运行状态|启停状态|开关状态|设备状态|工作状态|报警状态|告警状态|有无滴漏', name))
+    if value_type in ('数值', '直接填充'):
+        return False
+    return value_type == '状态' or bool(re.search(
+        r'运行状态|启停状态|开关状态|设备状态|工作状态|报警状态|告警状态|有无(?:滴漏|异常|存油)', name))
 
 
 def state_reference(value, point=None):
@@ -827,6 +954,9 @@ def state_reference(value, point=None):
         if raw == 'Δ':
             return '△'
     if point is not None:
+        if point.get('source_kind') in ('fixed_status', 'manual_status'):
+            fixed = point.get('fixed_value')
+            return fixed if point['source_kind'] == 'fixed_status' and fixed in STATE_VALUES.values() else ''
         # Formatted measurements are not a reliable substitute for the exact
         # raw value used by a configured state rule.
         original = point.get('corrected_value')
@@ -843,7 +973,23 @@ def state_reference(value, point=None):
                 matches.append(symbol)
         except (TypeError, ValueError):
             pass
-    return matches[0] if len(matches) == 1 else ''
+    try:
+        intervals = json.loads((point or {}).get('status_intervals') or '[]')
+        number_text = raw.strip()
+        if re.fullmatch(r'[+-]?\d{1,3}(?:,\d{3})+(?:\.\d+)?', number_text):
+            number_text = number_text.replace(',', '')
+        if intervals and len(number_text) <= 48 and re.fullmatch(
+                r'[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]{1,3})?', number_text):
+            number = Decimal(number_text)
+            parsed = [(Decimal(item['min']), Decimal(item['max']), STATE_VALUES[item['status']]) for item in intervals]
+            parsed.sort()
+            if (all(lo.is_finite() and hi.is_finite() and lo <= hi for lo, hi, _ in parsed)
+                    and all(a[1] < b[0] for a, b in zip(parsed, parsed[1:]))):
+                matches.extend(symbol for lo, hi, symbol in parsed if lo <= number <= hi)
+    except (AttributeError, KeyError, TypeError, ValueError, InvalidOperation):
+        return ''
+    matches = set(matches)
+    return next(iter(matches)) if len(matches) == 1 else ''
 
 
 def parameters(device):
@@ -862,9 +1008,13 @@ def parameters(device):
             mapping=catalog_locations().get((device.get('scope','')+'楼',device['name'],device['profession'],section['location'],section['form'].strip(),name))
             if mapping and all_cells_excluded(mapping['template'],mapping['sheet'],mapping['cells']):
                 continue
-            is_state = state_parameter(name)
-            reference = state_reference(value) if is_state else value
-            if is_state and not reference:
+            settings = section.get('form_point_settings', {}).get(name)
+            if settings and not settings.get('enabled'):
+                continue
+            is_state = state_parameter(name, (settings or {}).get('value_type', ''))
+            reference = state_reference(value, settings) if is_state else (
+                settings['fixed_value'] if settings else value)
+            if is_state and not reference and not settings:
                 # A device field and a configured point may refer to the same
                 # original cells. Only reuse a uniquely verified state mapping.
                 try:
@@ -935,6 +1085,7 @@ def remap_review_values(old_devices, new_devices, reviews, orphan_identities=Non
                        (ledger.get(device_id) or {}).items()})
         targets = new_ids.get(device_id, {})
         carried = dict(review.get('values') or {})
+        inherited = dict(review.get('inherited_states') or {})
         device_orphans = dict(ledger.get(device_id) or {})
         for row_id, value in list(carried.items()):
             target = targets.get(source.get(row_id))
@@ -944,6 +1095,8 @@ def remap_review_values(old_devices, new_devices, reviews, orphan_identities=Non
             if target:
                 carried.pop(row_id, None)
                 carried[target] = value
+                if row_id in inherited:
+                    inherited[target] = inherited.pop(row_id)
                 device_orphans.pop(row_id, None)
                 continue
             identity = source.get(row_id)
@@ -954,6 +1107,8 @@ def remap_review_values(old_devices, new_devices, reviews, orphan_identities=Non
         else:
             ledger.pop(device_id, None)
         remapped[device_id] = {**review, 'values': carried}
+        if 'inherited_states' in review:
+            remapped[device_id]['inherited_states'] = inherited
     return remapped, ledger
 
 
@@ -963,7 +1118,7 @@ def display_device(device):
                                   if deferred_catalog_section(device, section)]}
 
 
-def manual_state_key(device, parameter):
+def manual_state_binding(device, parameter):
     """A manual state belongs to one device/parameter and its complete four-round mapping."""
     if parameter.get('value_type')!='状态' or parameter.get('read_only'):
         return None
@@ -972,48 +1127,123 @@ def manual_state_key(device, parameter):
     if 'point' in parameter:
         point=next((p for p in device['points'] if p['id']==parameter['point']),None)
         if not point or point.get('enabled') is False:return None
-        for field in ('status_normal','status_abnormal','status_stopped'):
-            try:
-                rule=json.loads(point.get(field) or '[]')
-                if not isinstance(rule,list) or rule:return None
-            except (ValueError,TypeError):return None
+        if state_has_automatic_input(point):
+            return None
         identity=['point',point.get('point_id'),point.get('name')]
         target=[point.get('template'),str(point.get('sheet') or '').strip(),point.get('round_cells')]
     else:
         section=device['sections'][parameter['section']]
         item=catalog_locations().get((device['scope']+'楼',device['name'],device['profession'],section['location'],section['form'].strip(),parameter['name']))
         if not item:return None
+        if state_has_automatic_input(section.get('form_point_settings', {}).get(parameter['name'], {})):
+            return None
         # A catalogue field backed by a real state rule keeps its live source.
         for point in device['points']:
-            if point.get('template')==item['template'] and str(point.get('sheet') or '').strip()==item['sheet'].strip() and point.get('round_cells')==item['cells']:
-                for field in ('status_normal','status_abnormal','status_stopped'):
-                    try:
-                        rule=json.loads(point.get(field) or '[]')
-                        if not isinstance(rule,list) or rule:return None
-                    except (ValueError,TypeError):return None
+            if (point.get('enabled') is not False and point.get('template') == item['template']
+                    and str(point.get('sheet') or '').strip() == item['sheet'].strip()
+                    and point.get('round_cells') == item['cells'] and state_has_automatic_input(point)):
+                return None
         identity=['section',section['location'],section['form'],parameter['name']]
         target=[item['template'],item['sheet'].strip(),item['cells']]
     if not all(target):return None
-    return hashlib.sha256(json.dumps([device['scope'],device['id'],identity,target],ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+    key = hashlib.sha256(json.dumps([device['scope'],device['id'],identity,target],
+                                    ensure_ascii=False,sort_keys=True).encode()).hexdigest()
+    return key, target
+
+
+def manual_state_key(device, parameter):
+    binding = manual_state_binding(device, parameter)
+    return binding[0] if binding else None
+
+
+def state_has_automatic_input(point):
+    if point.get('source_kind') == 'fixed_status':
+        return True
+    for field in ('status_normal', 'status_abnormal', 'status_stopped', 'status_intervals'):
+        try:
+            rule = json.loads(point.get(field) or '[]')
+            if not isinstance(rule, list) or rule:
+                return True
+        except (TypeError, ValueError):
+            return True
+    return False
 
 
 def inherit_manual_states(state, active, scope):
     saved=state.get('manual_states',{})
     if not saved:return
-    reviews={}
+    reviews=copy.deepcopy(active.get('reviews') or {})
     for device in review_devices(active,scope):
-        values={};inherited={}
+        prior = reviews.get(device['id'], {})
+        values = dict(prior.get('values') or {})
+        inherited = dict(prior.get('inherited_states') or {})
         for param in parameters(device):
             key=manual_state_key(device,param)
             remembered=saved.get(key,{}) if key else {}
-            if param.get('reference') not in ('',None) or remembered.get('value') not in ('√','×','△'):continue
-            values[param['id']]=remembered['value'];inherited[param['id']]=remembered
-        if values:
+            pid = param['id']
+            previous = inherited.get(pid)
+            if previous and (not key or not remembered or previous.get('state_key', key) != key):
+                inherited.pop(pid)
+                values.pop(pid, None)
+            if pid in values or remembered.get('value') not in STATE_VALUES.values():
+                continue
+            values[pid]=remembered['value'];inherited[pid]={**remembered, 'state_key': key}
+        if values or prior:
             latest_note=max((item for item in inherited.values() if item['value']=='×' and item.get('note')),
                             key=lambda item:item.get('at',0),default={}).get('note','')
-            reviews[device['id']]={'values':values,'result':'异常' if '×' in values.values() else '',
-                                    'note':latest_note,'revision':0,'actor':'','inherited_states':inherited}
+            review={'revision':0,'actor':'', **prior, 'values':values,'inherited_states':inherited}
+            if not review['actor']:
+                review.update(result='异常' if '×' in values.values() else '', note=latest_note)
+            reviews[device['id']]=review
     if reviews:active['reviews']=reviews
+
+
+def adopt_manual_state_overrides(state, active, scope):
+    """Promote an active round's direct edits when its cells acquire a manual point."""
+    if not active.get('sheet_overrides'):
+        return
+    slot = active['duty']['shift'] + str(active['round'])
+    overrides = {(item['template'], item['sheet'].strip(), item['cell']): item
+                 for item in active['sheet_overrides']}
+    candidates = {}
+    for device in review_devices(active, scope):
+        for param in parameters(device):
+            binding = manual_state_binding(device, param)
+            if not binding:
+                continue
+            key, (template, sheet, cells) = binding
+            coordinate = (template, sheet, cells.get(slot))
+            if coordinate in overrides:
+                candidates.setdefault(coordinate, []).append((device['id'], param['id'], key))
+    for coordinate, owners in candidates.items():
+        if len(owners) != 1:
+            continue
+        item = overrides[coordinate]
+        value = item.get('value')
+        if value not in ('', *STATE_VALUES.values()):
+            continue
+        device_id, parameter_id, key = owners[0]
+        reviews = active.setdefault('reviews', {})
+        review = reviews.setdefault(device_id, {'values': {}, 'revision': 0, 'result': '', 'note': '', 'actor': ''})
+        if parameter_id in review['values']:
+            continue
+        actor = item.get('actor', '')
+        note = item.get('note', '') if value == '×' else ''
+        if not valid_cell_text(note, 1000):
+            note = ''
+        review['values'][parameter_id] = value
+        review['actor'] = actor
+        review['revision'] += 1
+        if value == '×':
+            review.update(result='异常', note=note)
+        saved = state.setdefault('manual_states', {})
+        if value:
+            saved[key] = {'value': value, 'actor': actor, 'at': item.get('at', 0),
+                          'round_id': active['id'], 'note': note}
+        else:
+            saved.pop(key, None)
+        overrides.pop(coordinate)
+    active['sheet_overrides'] = list(overrides.values())
 
 
 def remember_manual_states(state, active, devices, before, reviews, submitted, actor):
@@ -1212,7 +1442,9 @@ def merge_reviews(active, devices, submitted, actor):
         revision = previous.get('revision', 0)
         if revision != review['revision']:
             raise RiskError(f'「{device["name"]}」已被其他页面更新，请刷新并核对。', 409)
-        reviews[identity] = {**normalized, 'revision': revision + 1, 'actor': actor}
+        inherited = {key: item for key, item in (previous.get('inherited_states') or {}).items()
+                     if normalized['values'].get(key) == old_values.get(key)}
+        reviews[identity] = {**normalized, 'revision': revision + 1, 'actor': actor, 'inherited_states': inherited}
         changed = True
     return reviews, active.get('review_version', 0) + int(changed)
 
@@ -1327,8 +1559,8 @@ class DailyInspection:
                 if plain(fields.get('楼栋')).removesuffix('楼') == scope:
                     names = [item['name'] for item in (fields.get('附件') or []) if isinstance(item, dict) and item.get('name')]
                     templates.setdefault((scope, plain(fields.get('专业'))), []).extend(names)
-            (table, _view), (point_table, point_view) = SOURCES[scope]
-            points = self.records(point_table, {'view_id': point_view}, cloud=cloud)
+            (table, _view), (point_table, _point_view) = SOURCES[scope]
+            points = self.records(point_table, {}, cloud=cloud)
             # The producer seals the *whole table*, not a potentially filtered view.
             rows = self.records(table, {}, cloud=cloud)
             marker = validate_source_batch(scope, rows)
@@ -1339,7 +1571,7 @@ class DailyInspection:
                     or json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
                     != json.dumps(sorted(check, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)):
                 raise RiskError(f'{scope}楼读取期间数据发生变化，请稍后重试。', 409)
-            point_check = self.records(point_table, {'view_id': point_view}, cloud=cloud)
+            point_check = self.records(point_table, {}, cloud=cloud)
             if (json.dumps(sorted(points, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
                     != json.dumps(sorted(point_check, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)):
                 raise RiskError(f'{scope}楼测点配置在读取期间发生变化，请稍后重试。', 409)
@@ -1347,14 +1579,14 @@ class DailyInspection:
             devices = devices_for(scope, rows, points, templates)
             batches[scope] = {'batch': batch, 'rows': rows, 'devices': devices,
                               'config_fp': self.config_fingerprint(scope, points),
-                              'form_devices': omit_occupied_form_cells(copy.deepcopy(supplemental_form_devices(scope)), devices)}
+                              'form_devices': configured_form_devices(scope, devices, points)}
         return batches
 
     def config_fingerprint(self, scope, rows=None):
         """Stable digest of the point-configuration table contents."""
         if rows is None:
-            table, view = SOURCES[scope][1]
-            rows = self.records(table, {'view_id': view}, cloud=self.source_clouds.get(scope, self.cloud))
+            table, _view = SOURCES[scope][1]
+            rows = self.records(table, {}, cloud=self.source_clouds.get(scope, self.cloud))
         dump = json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(dump.encode('utf-8')).hexdigest()
 
@@ -1489,7 +1721,8 @@ class DailyInspection:
                 self.store.put_document(NS, 'building:' + scope, state)
                 return state
             active['reviews'], orphan_ledger = remap_review_values(
-                old_batch.get('devices') or [], live.get('devices') or [],
+                [*(old_batch.get('devices') or []), *(old_batch.get('form_devices') or [])],
+                [*(live.get('devices') or []), *(live.get('form_devices') or [])],
                 active.get('reviews') or {}, active.get('review_orphan_identities'))
             if orphan_ledger:
                 active['review_orphan_identities'] = orphan_ledger
@@ -1497,6 +1730,8 @@ class DailyInspection:
                 active.pop('review_orphan_identities', None)
             active['batches'][scope] = {key: live[key] for key in
                                         ('batch', 'rows', 'devices', 'config_fp', 'form_devices') if key in live}
+            adopt_manual_state_overrides(state, active, scope)
+            inherit_manual_states(state, active, scope)
             active['live_fp'] = fp
             active['review_version'] = active.get('review_version', 0) + 1
             active['live_synced_at'] = int(time.time() * 1000)
@@ -1524,8 +1759,7 @@ class DailyInspection:
             slot = slot_time(duty.get('date'), duty.get('shift'), round_number)
             start = slot.replace(hour=slot.hour - slot.hour % 2, minute=0, second=0, microsecond=0)
             start_ms, end_ms = start.timestamp() * 1000, (start + dt.timedelta(hours=2)).timestamp() * 1000
-            stamps = [row['fields'].get('源文件时间') for row in live.get('rows') or []
-                      if isinstance(row, dict) and isinstance(row.get('fields'), dict)]
+            stamps = list(sampled_source_times(live.get('rows') or []))
             return bool(stamps) and all(type(stamp) is int and start_ms <= stamp < end_ms for stamp in stamps) \
                 and upload >= start_ms
         from .daily_inspection_reminders import shift_bounds
@@ -1733,9 +1967,9 @@ class DailyInspection:
         upload_time = batch['batch']
         if not source_start <= upload_time <= now.timestamp() * 1000:
             return False
-        source_times = (row['fields'].get('源文件时间') for row in batch['rows'])
-        return all(type(stamp) is int and source_start <= stamp < source_end and stamp <= upload_time
-                   for stamp in source_times)
+        source_times = list(sampled_source_times(batch['rows']))
+        return bool(source_times) and all(type(stamp) is int and source_start <= stamp < source_end and stamp <= upload_time
+                                          for stamp in source_times)
 
     def open_scheduled_round(self, scope, roster, now=None):
         """Keep one local snapshot for the latest due slot, even with no visitors."""
@@ -1964,7 +2198,8 @@ class DailyInspection:
                             overrides = {(item['template'], item['sheet'], item['cell']): item for item in active.get('sheet_overrides', [])}
                             mapped_cells = {(row[0], row[1]) for row in book[ORIGINAL_MAPPING_SHEET].iter_rows(min_row=2, values_only=True)}
                             form_names = {(row[1], row[2]): row[0] for row in book[ORIGINAL_INDEX_SHEET].iter_rows(min_row=2, values_only=True)}
-                            overrides.update({(item['template'], item['sheet'], item['cell']): item for item in data['sheet_cells']
+                            overrides.update({(item['template'], item['sheet'], item['cell']):
+                                {**item, 'actor': actor, 'at': int(time.time()*1000)} for item in data['sheet_cells']
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells})
                             active['sheet_overrides'] = [item for item in overrides.values()
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells]
