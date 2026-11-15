@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse, Response
 
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 from upload_event_module.services.http_client import FeishuHTTPError
+from .daily_inspection_form_fields import CHILLER_SHEET, form_header, remark_positions
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
@@ -104,6 +105,25 @@ def duty_key(duty):
     return {key: duty[key] for key in ('scope', 'date', 'shift')}
 
 
+def add_duty_roster_details(duty, people):
+    from .portal_service import BUILDING_OPEN_ID_MAP
+
+    building_accounts = set(BUILDING_OPEN_ID_MAP.values())
+    assigned = [person for person in people
+                if person.get('scope') == duty['scope'] and person.get('duty_kind') != '长白']
+    groups = sorted({person['group'] for person in assigned
+                     if person.get('shift') == duty['shift'] and person.get('group')})
+    if groups:
+        duty['group'] = '、'.join(groups)
+    names = {shift: list(dict.fromkeys(person['name'] for person in assigned
+                                      if person.get('shift') == shift and person.get('name')
+                                      and person.get('open_id') not in building_accounts))
+             for shift in ('白', '夜')}
+    if any(names.values()):
+        duty['shift_names'] = names
+    return duty
+
+
 def inspection_history_scopes(auth, session):
     from .cabinet_guest import is_cabinet_guest
 
@@ -145,13 +165,7 @@ def resolve_duty(roster, user, scopes, current=None):
         scope = person.get('scope') if person.get('shift') == shift and person.get('duty_kind') != '长白' else ''
     if scope not in scopes:
         return None
-    duty = {'scope': scope, 'date': date, 'shift': shift}
-    groups = sorted({person['group'] for person in people
-                     if person.get('scope') == scope and person.get('shift') == shift
-                     and person.get('duty_kind') != '长白' and person.get('group')})
-    if groups:
-        duty['group'] = '、'.join(groups)
-    return duty
+    return add_duty_roster_details({'scope': scope, 'date': date, 'shift': shift}, people)
 
 
 def building_duty(roster, scope, current=None):
@@ -160,11 +174,7 @@ def building_duty(roster, scope, current=None):
     try:
         snapshot = roster(date)
         if snapshot.get('date') == date and snapshot.get('complete') is True:
-            groups = sorted({person['group'] for person in snapshot.get('people', [])
-                             if person.get('scope') == scope and person.get('shift') == shift
-                             and person.get('duty_kind') != '长白' and person.get('group')})
-            if groups:
-                duty['group'] = '、'.join(groups)
+            add_duty_roster_details(duty, snapshot.get('people', []))
     except Exception:
         pass  # The shift clock is authoritative; do not guess an unavailable roster group.
     return duty
@@ -607,6 +617,11 @@ def supplemental_form_devices(scope):
 def original_cell_is_status(layout, address):
     """Recognize a status header only when it explicitly covers this column."""
     column, row = coordinate_from_string(address)
+    if (layout['name'].strip() == CHILLER_SHEET and column in ('K', 'L')
+            and 17 <= row <= 21 and len(layout['rows']) >= row):
+        label = str(layout['rows'][row - 1][9] or '').strip()
+        if label in ('运行状态', '远程控制', '自动运行', '自动补水'):
+            return True
     column = column_index_from_string(column)
     headers = []
     for previous in range(max(1, row - 5), row):
@@ -1583,12 +1598,12 @@ class DailyInspection:
         return batches
 
     def config_fingerprint(self, scope, rows=None):
-        """Stable digest of the point-configuration table contents."""
+        """Detect both deployed form changes and changes in the point configuration."""
         if rows is None:
             table, _view = SOURCES[scope][1]
             rows = self.records(table, {}, cloud=self.source_clouds.get(scope, self.cloud))
         dump = json.dumps(sorted(rows, key=lambda item: item['record_id']), ensure_ascii=False, sort_keys=True)
-        return hashlib.sha256(dump.encode('utf-8')).hexdigest()
+        return hashlib.sha256(f'{template_version()}:{dump}'.encode('utf-8')).hexdigest()
 
     def source_batch_probe(self, scope):
         """Cheap single-row probe of the sealed source batch marker.
@@ -1950,6 +1965,8 @@ class DailyInspection:
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                   'started': int(started.timestamp() * 1000), 'duty': duty, 'round': number,
                   'batches': batches, 'manual_sheet_cells': []}
+        if state.get('form_remarks'):
+            active['sheet_overrides'] = copy.deepcopy(list(state['form_remarks'].values()))
         active['sheet_groups'] = (self.store.get_document(NS, sheet_group_key(duty)) or {}).get('groups', {})
         if professions is not None:
             active.update(professions=professions, profession_confirmations={})
@@ -1980,13 +1997,29 @@ class DailyInspection:
         duty = {'scope': scope, 'date': day, 'shift': shift}
         with self.locks[scope]:
             state = self.load(scope)
-            if state['active'] or self.next_round(state, duty, current) > number:
+            active = state['active']
+            if active and ('completed' in active or active['duty'].get('shift_names')
+                           or duty_key(active['duty']) != duty):
                 return
-            key = f'scheduled-attempt:{scope}:{day}'
-            attempts = self.store.get_document(NS, key) or {}
-            if shift + str(number) not in attempts:
-                attempts[shift + str(number)] = int(current.timestamp() * 1000)
-                self.store.put_document(NS, key, attempts)
+            if not active:
+                if self.next_round(state, duty, current) > number:
+                    return
+                key = f'scheduled-attempt:{scope}:{day}'
+                attempts = self.store.get_document(NS, key) or {}
+                if shift + str(number) not in attempts:
+                    attempts[shift + str(number)] = int(current.timestamp() * 1000)
+                    self.store.put_document(NS, key, attempts)
+        if active:
+            names = building_duty(roster, scope, scheduled_at).get('shift_names')
+            if names:
+                with self.locks[scope]:
+                    state = self.load(scope)
+                    saved = state['active']
+                    if saved and saved['id'] == active['id'] and 'completed' not in saved and not saved['duty'].get('shift_names'):
+                        saved['duty']['shift_names'] = names
+                        saved['review_version'] = saved.get('review_version', 0) + 1
+                        self.store.put_document(NS, 'building:' + scope, state)
+            return
         batches = self.capture([scope])
         if not self.matches_scheduled_batch(batches[scope], duty, number, now or dt.datetime.now(CN)):
             return
@@ -2203,6 +2236,14 @@ class DailyInspection:
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells})
                             active['sheet_overrides'] = [item for item in overrides.values()
                                 if (form_names.get((item['template'], item['sheet'])), item['cell']) not in mapped_cells]
+                            remarks = remark_positions(scope)
+                            for item in data['sheet_cells']:
+                                position = (item['template'], item['sheet'], item['cell'])
+                                if position in remarks:
+                                    state.setdefault('form_remarks', {})[json.dumps(position, ensure_ascii=False)] = (
+                                        overrides[position].copy())
+                                elif item['sheet'].strip() == CHILLER_SHEET:
+                                    active['chiller_editor'] = {'actor': actor, 'at': int(time.time() * 1000)}
                             # Track explicit sheet edits separately from source values that
                             # finalize_reviews may populate when the round is submitted.
                             if 'manual_sheet_cells' not in active:
@@ -2547,6 +2588,22 @@ class DailyInspection:
         state['active'] = None
 
 
+def chiller_inspection_details(active, template, sheet):
+    """Use the assigned profession's confirmation or a recorded sheet edit."""
+    key = json.dumps([template, sheet], ensure_ascii=False, separators=(',', ':'))
+    profession = active.get('sheet_groups', {}).get(key, '暖通')
+    confirmed = active.get('profession_confirmations', {}).get(profession) or {}
+    edited = active.get('chiller_editor') or {}
+    recorded_at = active.get('started')
+    for name, timestamp in ((confirmed.get('actor'), confirmed.get('confirmed')),
+                            (edited.get('actor'), edited.get('at')),
+                            (active.get('started_by') if active.get('professions') == [profession] else '', recorded_at)):
+        if (name and name not in (SYSTEM_INSPECTION_ACTOR, SYSTEM_ROLLOVER_ACTOR)
+                and not name.startswith(('ou_', 'person:', '南通基地-'))):
+            return name, timestamp or recorded_at
+    return '', recorded_at
+
+
 def workbook(active, orders, *, strict_original=True, presentation=True):
     from openpyxl import Workbook
     from openpyxl.cell import WriteOnlyCell
@@ -2674,6 +2731,18 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                 entries = [entry for entry in entries if not entry.get('conflict')]
             views = original_views(templates, [{'shift':duty.get('shift'), 'round':active.get('round'),
                                                 'original_cells':entries}])
+            layouts = {(item['name'], sheet['name']): sheet for item in templates for sheet in item['sheets']}
+            for view in views:
+                inspector, inspected = '', None
+                if view['sheet'].strip() == CHILLER_SHEET:
+                    inspector, stamp = chiller_inspection_details(active, view['template'], view['sheet'])
+                    if stamp:
+                        inspected = dt.datetime.fromtimestamp(stamp / 1000, CN)
+                header = form_header(layouts[view['template'], view['sheet']], duty,
+                                     inspector=inspector, started=inspected)
+                for address, value in header.items():
+                    col, row = coordinate_from_string(address)
+                    view['rows'][row - 1][column_index_from_string(col) - 1] = value
             overlay_views(views, active.get('sheet_overrides', []))
             names = {}
             for source in views:

@@ -1,5 +1,6 @@
 import copy
 import concurrent.futures
+import datetime as dt
 import io
 import tempfile
 import unittest
@@ -13,7 +14,8 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from lan_bitable_template_portal.daily_inspection import (
-    DailyInspection, RiskError, inspection_report, inspection_report_workbook, install_daily_inspection,
+    CN, DailyInspection, RiskError, SYSTEM_INSPECTION_ACTOR, inspection_report, inspection_report_workbook,
+    install_daily_inspection, workbook,
 )
 from lan_bitable_template_portal.module_access import module_denial
 from lan_bitable_template_portal.daily_inspection_original import (catalog_locations, original_cells,
@@ -33,6 +35,40 @@ class InspectionReportTests(unittest.TestCase):
         self.cloud = InspectionCloud()
         self.service = DailyInspection(self.store, self.cloud)
         self.service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
+
+    def test_form_headers_use_shift_roster_and_cold_round_inspector(self):
+        stamp = dt.datetime(2026, 11, 4, 0, 8, tzinfo=CN)
+        duty = {**NIGHT, 'shift_names': {'白': ['白班甲', '白班乙'], '夜': ['夜班甲']}}
+        active = self.service.new_round({}, duty, 2, {'D': {'devices': [], 'rows': [], 'batch': 1}},
+                                        SYSTEM_INSPECTION_ACTOR, stamp)
+        active['profession_confirmations'] = {'暖通': {'actor': '实际巡检人', 'confirmed': int(stamp.timestamp()*1000)}}
+        book = load_workbook(io.BytesIO(workbook(active, {'D': []}, strict_original=False, presentation=False)))
+        try:
+            ordinary = book['原-电-电气系统西区']
+            self.assertIn('白班甲、白班乙', ordinary['H2'].value)
+            self.assertIn('夜班甲', ordinary['O2'].value)
+            self.assertIn('2026-11-03', ordinary['Y2'].value)
+            chiller = book['原-暖-夜2-暖通冷机系统巡检表']
+            self.assertEqual([chiller[cell].value for cell in ('D2', 'F2', 'H2', 'N2', 'O2', 'P2')],
+                             ['夜班', '00:08', '实际巡检人', '2026年', '11月', '4日'])
+        finally:
+            book.close()
+
+    def test_form_remark_can_be_saved_in_second_round_and_reused_only_in_same_building(self):
+        started = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        state = self.service.load('D')
+        state['active']['round'] = 2
+        self.store.put_document('daily_de_inspection', 'building:D', state)
+        template = next(t['name'] for t in original_templates() if t['scope'] == 'D' and t['profession'] == '电气')
+        edit = {'template': template, 'sheet': '电气系统西区', 'cell': 'AA5', 'value': '本楼共用备注'}
+        self.service.change('a', '甲', DAY, 'draft',
+                            {'id': started['id'], 'review_version': 0, 'sheet_cells': [edit]})
+        state = self.service.load('D')
+        now = dt.datetime(2026, 11, 3, 20, tzinfo=CN)
+        next_round = self.service.new_round(state, NIGHT, 1, state['active']['batches'], '乙', now)
+        self.assertEqual(next_round['sheet_overrides'][0]['value'], '本楼共用备注')
+        other = self.service.new_round(self.service.load('E'), {**NIGHT, 'scope': 'E'}, 1, {}, '丙', now)
+        self.assertFalse(other.get('sheet_overrides'))
 
     def test_original_form_uses_exact_identity_and_four_distinct_rounds(self):
         templates = [{'name':'原表.xlsx','scope':'D','profession':'电气','sheets':[

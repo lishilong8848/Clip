@@ -2,6 +2,7 @@
 import datetime as dt
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
+from .daily_inspection_form_fields import remark_positions
 from .daily_inspection_history import (REVIEW_SHEET, archived_devices, edit_archived_devices, valid_cell_text)
 from .daily_inspection_original import (ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_SHEET, cell_excluded,
                                         original_templates, refresh_archived_original, round_rows)
@@ -25,6 +26,7 @@ def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=Non
     layouts = {(t['name'], s['name']): s for t in original_templates() if t['scope'] == scope
                for s in t['sheets']} if enforce_exclusions or slot else {}
     layout_slots = {}
+    remarks = remark_positions(scope) if enforce_exclusions or slot else ()
     mappings = {}
     for row in book[ORIGINAL_MAPPING_SHEET].iter_rows(min_row=2, values_only=True):
         mappings.setdefault((row[0], row[1]), []).append(row)
@@ -51,9 +53,10 @@ def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=Non
             raise RiskError('单元格坐标无效或重复。', 400) from None
         sheet_key = (edit.get('template'), edit.get('sheet'))
         layout = layouts.get(sheet_key)
-        if layout and enforce_exclusions and cell_excluded(layout, address):
+        is_remark = (*sheet_key, address) in remarks
+        if layout and not is_remark and enforce_exclusions and cell_excluded(layout, address):
             raise RiskError('该区域已设为本次无需填写，原有历史记录保留。',409)
-        if layout and slot and (name, address) not in mappings:
+        if layout and not is_remark and slot and (name, address) not in mappings:
             if sheet_key not in layout_slots:
                 layout_slots[sheet_key] = round_rows(layout)
             if layout_slots[sheet_key].get(row, slot) != slot:

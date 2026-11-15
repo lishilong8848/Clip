@@ -202,7 +202,7 @@ import {configuredInspectionPositions,manuallyFilledInspectionPositions,inspecti
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
 type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
-type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
+type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
 type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
@@ -413,15 +413,20 @@ const grid=computed(()=>{
  }
  for(const round of visibleRounds.value)for(const cell of round.extra_cells||[])overlay(round,cell);
  for(const job of jobs.value){const round=visibleById.get(job.round.round_id);if(round)for(const cell of job.cells)overlay(round,cell);}
+ const remarks=new Set(p.remark_cells || []);
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{
-  const a=cell.address,v=values.get(a),rowSlot=isChiller.value?chillerSlot.value:p.round_rows?.[String(cell.rowIndex+1)];
+  const a=cell.address,v=values.get(a),remark=remarks.has(a);
+  const rowSlot=isChiller.value?chillerSlot.value:remark?undefined:p.round_rows?.[String(cell.rowIndex+1)];
   // Existing mappings keep their owner. An assigned row never inherits a different round.
   const round=v?.round||(rowSlot?roundsBySlot.value.get(rowSlot):freeRound.value);
   const byRound=overrides.get(a);
   let override=round?byRound?.get(round.round_id):undefined;
-  if(!round&&!rowSlot&&!selectedSlot.value&&!currentActive.value&&byRound?.size===1)override=byRound.values().next().value;
+  if(!round&&!rowSlot&&!selectedSlot.value&&!currentActive.value&&byRound
+     &&(byRound.size===1||remark||cell.rowIndex===1)){
+   const edits=Array.from(byRound.values());override=edits[edits.length-1];
+  }
   const current=!!round&&round.round_id===currentActive.value?.id;
-  const excluded=(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});
+  const excluded=!remark&&(p.excluded_ranges||[]).some(range=>{const [x,y=x]=range.split(':');const [r,c]=coords(x),[rr,cc]=coords(y);return cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc;});
   const editable=sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
    ? !excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
      && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))

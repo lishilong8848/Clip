@@ -36,7 +36,7 @@ def same_reading(left, right):
 @lru_cache(maxsize=1)
 def template_version():
     path = Path(__file__).resolve().parents[1] / 'resources' / 'daily_inspection_templates.json'
-    return hashlib.sha256(b'round-rows-v1:' + path.read_bytes()).hexdigest()[:20]
+    return hashlib.sha256(b'round-rows-v2:' + path.read_bytes()).hexdigest()[:20]
 
 
 @lru_cache(maxsize=1)
@@ -51,9 +51,12 @@ def original_templates():
 @lru_cache(maxsize=2)
 def display_templates(scope):
     # Export-only XML stays on the server; do not exhaust the browser's layout cache.
+    from .daily_inspection_form_fields import remark_cells
+
     return [{**template,'sheets':[
         {**{key:value for key,value in sheet.items() if key not in ('excel_settings','artwork','excel_styles')},
          'round_rows': round_rows(sheet),
+         'remark_cells': remark_cells(sheet),
          'excel_styles':[{key:style[key] for key in ('number_format','alignment','diagonal') if key in style} for style in sheet.get('excel_styles',[])]}
         for sheet in template['sheets']]} for template in original_templates() if template['scope']==scope]
 
