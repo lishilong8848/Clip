@@ -543,6 +543,14 @@ def omit_occupied_form_cells(form_devices, devices):
             remaining = {slot:address for slot,address in point['round_cells'].items()
                          if (point['template'], point['sheet'].strip(), slot, address) not in occupied}
             if remaining:
+                if (point['sheet'].strip() == CHILLER_SHEET and point.get('value_type') != '状态'
+                        and not point.get('configured_point_id')):
+                    # Open rounds can still carry the prior template's point metadata.
+                    # Refresh the editor type on the exact saved binding, without fetching a later batch.
+                    candidates = supplemental_chiller_status_bindings(device['scope'])
+                    if all((device['id'], point['id'], point['template'], point['sheet'], slot, address) in candidates
+                           for slot, address in remaining.items()):
+                        point = {**point, 'value_type': '状态'}
                 points.append({**point,'round_cells':remaining,'cell':next(iter(remaining.values()))})
         if points:
             result.append({**device,'points':points})
@@ -612,6 +620,14 @@ def supplemental_form_devices(scope):
     except (OSError, TypeError, KeyError, ValueError, AttributeError):
         logging.exception('原表补填目录未就绪')
         return []
+
+
+@lru_cache(maxsize=2)
+def supplemental_chiller_status_bindings(scope):
+    return frozenset((device['id'], point['id'], point['template'], point['sheet'], slot, address)
+                     for device in supplemental_form_devices(scope) for point in device['points']
+                     if point['sheet'].strip() == CHILLER_SHEET and point.get('value_type') == '状态'
+                     for slot, address in point['round_cells'].items())
 
 
 def original_cell_is_status(layout, address):

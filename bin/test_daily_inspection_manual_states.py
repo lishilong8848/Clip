@@ -55,6 +55,32 @@ class ManualStateTests(unittest.TestCase):
         self.assertFalse(self.service.load('E').get('manual_states'))
         self.assertFalse(self.service.load('E')['active'].get('reviews'))
 
+    def test_open_chiller_round_updates_old_manual_type_without_replacing_its_batch(self):
+        state = self.service.load('D')
+        active = state['active']
+        batch = active['batches']['D']
+        device, point = next((device, point) for device in batch['form_devices'] for point in device['points']
+                             if point['sheet'].strip() == '暖通冷机系统巡检表' and point['cell'] == 'K17')
+        point['value_type'] = ''  # Snapshot created before K17 was declared a status cell.
+        self.store.put_document('daily_de_inspection', 'building:D', state)
+        report = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', include_active=True, drafts={})
+        cell = next(item for item in report['rounds'][0]['original_cells']
+                    if item['sheet'] == point['sheet'] and item['cell'] == 'K17')
+        self.assertEqual(cell['value_type'], '状态')
+
+        self.point = point
+        with patch.object(self.service, 'live_batch_belongs_to_round', return_value=False):
+            with self.assertRaises(RiskError):
+                self.edit('42')
+            self.edit('√')
+        saved = self.service.load('D')
+        self.assertEqual(saved['active']['batches']['D']['batch'], batch['batch'])
+        self.assertEqual(saved['active']['batches']['D']['form_devices'], batch['form_devices'])
+        next_round = self.service.new_round(saved, DAY, 2, saved['active']['batches'], '乙',
+                                            dt.datetime(2026, 11, 3, 12, tzinfo=CN))
+        self.assertEqual(next_round['reviews'][device['id']]['values']['p:' + point['id']], '√')
+        self.assertFalse(self.service.load('E').get('manual_states'))
+
     def test_clear_invalid_and_failed_save_do_not_leave_wrong_defaults(self):
         self.edit('×','接头异常')
         saved=copy.deepcopy(self.service.load('D')['manual_states'])
