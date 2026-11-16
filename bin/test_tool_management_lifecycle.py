@@ -103,7 +103,7 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertEqual(visible['notes'], ['visible note'])
         self.assertEqual(visible['members'], ['visible owner', 'A 楼长', 'visible inspector'])
         self.assertEqual(visible['status'], 'submitted')
-        self.assertEqual(visible['sync'], [{'label': '正常维护台账', 'state': 'pending'}])
+        self.assertEqual(visible['sync'], [{'label': '工具办理台账', 'state': 'pending'}])
         self.assertEqual(len(visible['history']), AUDIT_LIMIT)
         self.assertEqual(visible['history'][-1]['detail'], '')
         self.assertNotRegex(json.dumps(result), 'PRIVATE|hidden location|internal-id')

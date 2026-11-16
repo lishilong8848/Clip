@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from bin.lan_bitable_template_portal.risk_inspection import RiskError
 from bin.lan_bitable_template_portal.tool_management_cloud import (
-    BASE, DETAIL, INVENTORY, KEY, ORGANIZATION, STATE, TABLES, TEMPLATE_FILE, TEMPLATE_HASH,
+    BASE, DETAIL, INVENTORY, KEY, LEDGER_FIELDS, LEDGER_SELECTS, ORGANIZATION, STATE, TABLES, TEMPLATE_FILE, TEMPLATE_HASH,
     TEMPLATE_LINK, TEMPLATE_NAME, TEMPLATE_TABLE, WORKSPACE_CREATE_RETRY_SECONDS, ToolCloud,
 )
 from upload_event_module.services.http_client import FeishuHTTPError
@@ -146,6 +146,34 @@ class ToolWorkspaceCloudTests(unittest.TestCase):
         self.assertEqual(self.tool.write('maintenance', order, asset, job, lambda _: {}, save_file), 'recLedger')
         self.assertEqual(len(self.transport.creates), 1)
         self.assertEqual(len(self.transport.uploads), 1)
+
+    def test_unified_repair_result_updates_the_verified_origin_without_reuploading(self):
+        path = self.transport.table_path(BASE, TABLES['maintenance'])
+        schema = {field['field_name']: field for field in self.transport.all(path + '/fields')}
+        schema.update({name: {'type': kind} for name, kind in LEDGER_FIELDS.items()})
+        schema.update({name: {'type': 3} for name in LEDGER_SELECTS})
+        schema.update({'转检修时间': {'type': 5}, '报废时间': {'type': 5}})
+        order = {'id': 'order1', 'kind': 'self', 'outcome': 'repair', 'due': DAY, 'actual': DAY,
+                 'repair_started_at': DAY, 'resolution': '', 'resolved_at': '', 'reason': '断裂', 'scrap_reason': ''}
+        job = {'verify_write': True, 'unified_ledger': True, 'remote_id': '', 'file_token': '', 'attempted_at': 0,
+               'record_name': '记录.xlsx', 'record_content': WORKBOOK,
+               'save_attempt': lambda value: job.update(attempted_at=value), 'save_candidate': lambda _: None}
+        asset = {'id': 'recAsset', 'scope': 'D'}
+        save_file = lambda token: job.update(file_token=token)
+        with patch.object(self.tool, 'ledger_schema', return_value=schema):
+            job['remote_id'] = self.tool.write('maintenance', order, asset, job, lambda _: {}, save_file)
+            def lose_response():
+                raise RiskError('已写入但未收到回执', 503)
+            self.transport.updated_hook = lose_response
+            resolved = order | {'outcome': 'repaired', 'resolved_at': DAY, 'resolution': '复检合格'}
+            with self.assertRaisesRegex(RiskError, '未收到回执'):
+                self.tool.write('maintenance', resolved, asset, job, lambda _: {}, save_file)
+            self.assertEqual(self.tool.write('maintenance', resolved, asset, job, lambda _: {}, save_file), job['remote_id'])
+        self.assertEqual(len(self.transport.creates), 1)
+        self.assertEqual(len(self.transport.updates), 1)
+        self.assertEqual(len(self.transport.uploads), 1)
+        fields = self.transport.records[TABLES['maintenance'], job['remote_id']]
+        self.assertEqual((fields['检测结论'], fields['工具状态']), ('合格', '检修后合格'))
 
     def test_inventory_and_template_catalog_omit_invalid_links_and_placeholders(self):
         self.transport.records[(INVENTORY, 'recBadLink')] = {

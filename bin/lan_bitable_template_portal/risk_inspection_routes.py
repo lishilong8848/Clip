@@ -80,7 +80,7 @@ def install_risk_inspection_routes(app, controller, runtime):
         profile = auth.account_profile(open_id)
         actor = {**profile, 'id': person.get('id') or 'account:' + open_id,
                  'open_id': open_id, 'name': person.get('name') or name or '当前人员',
-                 'position': person.get('position') or ''}
+                 'position': person.get('position') or '', 'employee_no': person.get('employee_no') or ''}
         RiskInspections.check(actor)
         from .tool_management import trusted_full_access
         actor['_tool_management_full_access']=trusted_full_access(auth,open_id,person)
@@ -426,11 +426,16 @@ def install_risk_inspection_routes(app, controller, runtime):
             url = reminder_link(scope)
             return url + '&' + urlencode({'tool_session': session_id, 'tool_asset': asset_id}) if url else ''
 
+        def scrap_review_link(scope, order_id):
+            url = reminder_link(scope)
+            return url + '&' + urlencode({'tool_view': 'followups', **({'tool_order': order_id} if order_id else {})}) if url else ''
+
         while not stop.is_set():
             try:
                 if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
                     run_tool_jobs(get_tool_checks(), stop, deliver_reminder=deliver, reminder_link=reminder_link,
-                                  deliver_review=deliver_review, review_link=review_link, resolve_leader=actor_for)
+                                  deliver_review=deliver_review, review_link=review_link, resolve_leader=actor_for,
+                                  scrap_review_link=scrap_review_link)
                     return
             except Exception:
                 logging.exception('Tool management initialization deferred')

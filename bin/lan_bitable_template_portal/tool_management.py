@@ -23,13 +23,14 @@ CYCLES = {'每月': 1, '季度': 3, '半年': 6, '一年': 12, '两年': 24, '�
 KINDS = {'self': '自检', 'external': '送检'}
 OUTCOMES = {'normal': '正常', 'repair': '检修中', 'repaired': '检修完成',
             'scrap': '待报废审批', 'scrapped': '已批准报废', 'rejected': '报废未通过'}
-DESTINATIONS = {'maintenance': '正常维护台账', 'inspection': '送检存档表', 'repair': '检修跟踪表',
+DESTINATIONS = {'maintenance': '工具办理台账', 'inspection': '送检存档表', 'repair': '检修跟踪表',
                 'scrap': '工具报废表', 'change': '异动台账'}
 MAX_REPORT = 12 * 1024 * 1024
 MAX_ORDER_DELETIONS = 200
 MANUAL_DELETE = '手动删除工单'
 PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
+SCRAP_APPROVERS = {'14258': '梅冰冰', '18871': '马进宇'}
 WORK_ORDER_SCHEMA = """
     CREATE TABLE IF NOT EXISTS tool_work_orders(
         id TEXT PRIMARY KEY, month TEXT NOT NULL, asset_id TEXT NOT NULL, scope TEXT NOT NULL,
@@ -41,8 +42,21 @@ WORK_ORDER_SCHEMA = """
         submitted_at TEXT, manager TEXT NOT NULL DEFAULT '', scrap_qty INTEGER NOT NULL DEFAULT 0,
         reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
         scrap_reason TEXT NOT NULL DEFAULT '', scrap_status TEXT NOT NULL DEFAULT '', resolved_at TEXT NOT NULL DEFAULT '',
-        inspection_meta TEXT NOT NULL DEFAULT '{}', workspace_direct INTEGER NOT NULL DEFAULT 0)
+        inspection_meta TEXT NOT NULL DEFAULT '{}', workspace_direct INTEGER NOT NULL DEFAULT 0,
+        repair_started_at TEXT NOT NULL DEFAULT '', scrap_photos TEXT NOT NULL DEFAULT '[]')
 """
+
+def tool_ledger_status(order):
+    outcome = order['outcome']
+    if order['kind'] == 'external':
+        result = json.loads(order['inspection_meta']).get('result')
+        return {'qualified': ('合格', '送检合格'), 'unqualified': ('不合格', '送检不合格')}.get(result, ('', '已送检'))
+    return {
+        'normal': ('合格', '合格'), 'repair': ('不合格', '检修中'),
+        'repaired': ('合格', '检修后合格'), 'scrap': ('不合格', '待报废审批'),
+        'scrapped': ('不合格', '检修后报废' if order['repair_started_at'] else '报废'),
+        'rejected': ('不合格', '报废未通过'),
+    }.get(outcome, ('', ''))
 
 
 def inspection_meta(body, assets, actual, *, required=True):
@@ -163,7 +177,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     @staticmethod
     def access(actor):
         RiskInspections.check(actor)
-        if not full_access(actor):ToolSelfChecks.access(actor)
+        if not full_access(actor) and not ToolManagement.scrap_approver(actor):
+            ToolSelfChecks.access(actor)
 
     @staticmethod
     def administrator(actor):
@@ -197,6 +212,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     order_id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL,
                     submitted_by TEXT NOT NULL, submitted_at TEXT NOT NULL,
                     reviewer TEXT NOT NULL DEFAULT '', reviewed_at TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '');
+                CREATE TABLE IF NOT EXISTS tool_scrap_votes(
+                    order_id TEXT NOT NULL, request_revision INTEGER NOT NULL, employee_no TEXT NOT NULL,
+                    decision TEXT NOT NULL DEFAULT '', at TEXT NOT NULL DEFAULT '', note TEXT NOT NULL DEFAULT '',
+                    sent INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL DEFAULT 0, card TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY(order_id,request_revision,employee_no));
                 CREATE TABLE IF NOT EXISTS tool_inventory_creation(
                     operation TEXT PRIMARY KEY, actor TEXT NOT NULL, fingerprint TEXT NOT NULL,
                     status TEXT NOT NULL, record_id TEXT NOT NULL DEFAULT '');
@@ -208,6 +228,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute('ALTER TABLE tool_work_sync ADD COLUMN attempted_at REAL NOT NULL DEFAULT 0')
             if not any(row['name'] == 'candidate_id' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
                 db.execute("ALTER TABLE tool_work_sync ADD COLUMN candidate_id TEXT NOT NULL DEFAULT ''")
+            if not any(row['name'] == 'card' for row in db.execute('PRAGMA table_info(tool_scrap_votes)')):
+                db.execute("ALTER TABLE tool_scrap_votes ADD COLUMN card TEXT NOT NULL DEFAULT ''")
             columns = [row['name'] for row in db.execute('PRAGMA table_info(tool_work_orders)')]
             old_month_constraint = any(
                 {column['name'] for column in db.execute('SELECT name FROM pragma_index_info(?)', (index['name'],))}
@@ -224,11 +246,36 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute('DROP TABLE tool_work_orders_before_workspace')
             else:
                 db.execute(WORK_ORDER_SCHEMA)
+            current = {column['name'] for column in db.execute('PRAGMA table_info(tool_work_orders)')}
+            for name, default in (('repair_started_at', ''), ('scrap_photos', '[]')):
+                if name not in current:
+                    db.execute(f"ALTER TABLE tool_work_orders ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
+            if not self.state(db, 'unified_ledger_v1'):
+                self._migrate_tool_ledger(db)
+            for order in db.execute("SELECT id,revision FROM tool_work_orders WHERE outcome='scrap' AND scrap_status='pending'").fetchall():
+                self._queue_scrap_votes(db, order['id'], order['revision'])
+            db.execute("UPDATE tool_work_orders SET scrap_status='pending_pair' WHERE outcome='scrap' AND scrap_status='pending'")
             db.execute('CREATE INDEX IF NOT EXISTS tool_work_orders_month ON tool_work_orders(month,scope)')
             db.execute('CREATE INDEX IF NOT EXISTS tool_work_orders_asset ON tool_work_orders(asset_id,kind)')
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS tool_work_orders_legacy_month
                 ON tool_work_orders(month,asset_id,kind) WHERE workspace_direct=0''')
         self._init_tool_workspace()
+
+    def _migrate_tool_ledger(self, db):
+        db.execute("""UPDATE tool_work_orders SET repair_started_at=COALESCE(submitted_at,'')
+            WHERE repair_started_at='' AND (outcome IN ('repair','repaired') OR EXISTS (
+                SELECT 1 FROM tool_work_sync WHERE order_id=tool_work_orders.id AND dest='repair'))""")
+        db.execute("""CREATE TABLE IF NOT EXISTS tool_work_sync_legacy AS
+            SELECT * FROM tool_work_sync WHERE 0""")
+        db.execute("INSERT INTO tool_work_sync_legacy SELECT * FROM tool_work_sync WHERE dest<>'maintenance'")
+        db.execute("""INSERT INTO tool_work_sync(order_id,dest,file_token)
+            SELECT work.id,'maintenance',COALESCE((SELECT file_token FROM tool_work_sync
+                WHERE order_id=work.id AND file_token<>'' ORDER BY dest LIMIT 1),'')
+            FROM tool_work_orders work WHERE work.submitted_at IS NOT NULL
+              AND work.outcome<>'cancelled'
+            ON CONFLICT(order_id,dest) DO UPDATE SET revision=revision+1,next_try=0""")
+        db.execute("DELETE FROM tool_work_sync WHERE dest<>'maintenance'")
+        db.execute("INSERT INTO tool_management_state(key,value) VALUES('unified_ledger_v1','1')")
 
     @staticmethod
     def state(db, key):
@@ -266,9 +313,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 assets.append(source | config | {'revision': row['version'],
                     **{f'source_{kind}_cycle': source.get(f'{kind}_cycle', '') for kind in KINDS},
                     **{f'override_{kind}_cycle': config.get(f'{kind}_cycle', '') for kind in KINDS}})
-            all_scopes = all(can_scope(actor, s) for s in BUILDINGS)
             return {'items': [item for item in assets if can_scope(actor, item['scope'])],
-                    'can_set_manager': all_scopes, 'manager_id': self.state(db, 'manager_id') if all_scopes else ''}
+                    'scrap_approvers': list(SCRAP_APPROVERS.values())}
 
     @classmethod
     def supervisor(cls, actor, scope):
@@ -279,7 +325,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             self.access(actor)
         except RiskError:
             return False
-        return any(can_scope(actor, scope) for scope in BUILDINGS)
+        return bool(self.scrap_approver(actor)) or any(can_scope(actor, scope) for scope in BUILDINGS)
 
     def configure(self, actor, identity, body):
         self.access(actor)
@@ -296,7 +342,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute("UPDATE tool_work_orders SET manager=?,revision=revision+1 WHERE outcome='scrap' AND manager<>?",
                            (person['id'], person['id']))
                 db.execute("""UPDATE tool_work_sync SET revision=revision+1,next_try=0
-                    WHERE dest='scrap' AND order_id IN(SELECT id FROM tool_work_orders WHERE outcome='scrap')""")
+                    WHERE dest='maintenance' AND order_id IN(SELECT id FROM tool_work_orders WHERE outcome='scrap')""")
             return {'saved': True}
         with self.connect(True) as db:
             row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
@@ -721,6 +767,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             row['kind'] == 'external' and actor['id'] == row['supervisor'] and self.supervisor(actor, row['scope']))
 
     def visible(self, db, actor, row, *, leaders=None):
+        if self.scrap_approver(actor) and row['outcome'] in {'scrap','scrapped','rejected'} and self._scrap_votes(db, row['id']):
+            return True
         return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row, leaders=leaders)
                  or self.owns_workspace_item(actor, row)
                  or actor['id'] == row['manager'] and actor.get('category') == 'manager')
@@ -729,6 +777,24 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def owns_workspace_item(actor, row):
         return ('workspace_direct' in row.keys() and row['workspace_direct'] and row['owner'] == actor['id']
                 and can_scope(actor, row['scope']))
+
+    @staticmethod
+    def scrap_approver(actor):
+        number = str(actor.get('employee_no') or '')
+        return number if (SCRAP_APPROVERS.get(number) == actor.get('name') and number
+                          and not actor.get('inactive') and not actor.get('explicit_disabled')
+                          and not actor.get('_tool_impersonation')) else ''
+
+    @staticmethod
+    def _queue_scrap_votes(db, order_id, revision):
+        db.executemany('INSERT OR IGNORE INTO tool_scrap_votes(order_id,request_revision,employee_no) VALUES(?,?,?)',
+                       [(order_id, revision, number) for number in SCRAP_APPROVERS])
+
+    @staticmethod
+    def _scrap_votes(db, order_id):
+        return db.execute('''SELECT * FROM tool_scrap_votes WHERE order_id=? AND request_revision=(
+            SELECT MAX(request_revision) FROM tool_scrap_votes WHERE order_id=?) ORDER BY employee_no''',
+            (order_id, order_id)).fetchall()
 
     def _work(self, db, actor, identity):
         self.access(actor)
@@ -745,7 +811,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         mine = self.owns_workspace_item(actor, row) or eligible and (
             row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
         result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
-                                            'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty')}
+                                            'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty',
+                                            'repair_started_at', 'resolved_at')}
+        result_label, tool_status_label = tool_ledger_status(row)
+        votes = self._scrap_votes(db, row['id']) if row['outcome'] in {'scrap', 'scrapped', 'rejected'} else []
+        voter = self.scrap_approver(actor)
         sync = [{'label': DESTINATIONS[job['dest']], 'state': 'done' if job['synced'] == job['revision'] else 'pending',
                  'error': job['error'], 'verifying': bool(job['attempted_at']) and not job['remote_id']} for job in db.execute(
                     'SELECT dest,revision,synced,error,attempted_at,remote_id FROM tool_work_sync WHERE order_id=?', (row['id'],))]
@@ -756,6 +826,10 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         admin = self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)
         workspace = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
         return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
+                         'result_label': result_label, 'tool_status_label': tool_status_label,
+                         'from_repair': bool(row['repair_started_at']),
+                         'scrap_approvals': [{'name': SCRAP_APPROVERS[vote['employee_no']], 'decision': vote['decision'],
+                                             'at': vote['at'], 'note': vote['note']} for vote in votes],
                          'quantity': asset['quantity'], 'supervisor_assigned': bool(row['supervisor']),
                          'assigned_to_me': row['supervisor'] == actor['id'] and eligible,
                          'status': 'cancelled' if row['outcome'] == 'cancelled' else 'review_pending' if awaiting_review else 'pending' if open_order else 'submitted',
@@ -772,8 +846,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                          'can_edit': open_order and not awaiting_review and mine,
                          'can_release': open_order and not awaiting_review and not workspace and bool(row['owner']) and self.administrator(actor),
                          'can_repair': row['outcome'] == 'repair' and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
-                         'can_approve': row['outcome'] == 'scrap' and (full_access(actor) or row['manager'] == actor['id']
-                             and actor.get('category') == 'manager'), 'sync': sync}
+                         'can_approve': row['outcome'] == 'scrap' and any(
+                             vote['employee_no'] == voter and not vote['decision'] for vote in votes), 'sync': sync}
 
     def list(self, actor, month=''):
         self.access(actor)
@@ -783,8 +857,9 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         month = month_key(month or current)
         with self.connect() as db:
             rows = db.execute("""SELECT id,month,scope,kind,due,asset,supervisor,owner,owner_name,revision,actual,outcome,
-                submitted_at,manager,scrap_qty,reason,resolution,report_name,inspection_meta FROM tool_work_orders
-                WHERE month=? OR outcome IN('repair','scrap') OR
+                submitted_at,manager,scrap_qty,reason,resolution,report_name,inspection_meta,
+                repair_started_at,resolved_at,workspace_direct FROM tool_work_orders
+                WHERE month=? OR outcome IN('repair','scrap','scrapped','rejected') OR repair_started_at<>'' OR
                     (?=? AND month<? AND submitted_at IS NULL AND outcome='')
                 ORDER BY month DESC,scope,due,kind""", (month, month, current, current)).fetchall()
             visible = [self.work_info(db, actor, row) for row in rows if self.visible(db, actor, row)]
@@ -808,7 +883,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                         archive_status = 'settled'
             return {'month': month, 'orders': month_orders, 'carryovers': carryovers,
                     'plan_count': plan_count, 'waiting_sync': waiting_sync, 'archive_status': archive_status,
-                    'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap'}],
+                    'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap', 'scrapped', 'rejected'} or row['from_repair']],
                     'can_create_orders': bool(self.order_creation_scopes(db, actor)),
                     'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
                     'archived_at': archive[0] if archive and all_scopes else None,
@@ -835,9 +910,9 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
 
     @staticmethod
     def enqueue(db, identity, *destinations):
-        db.executemany("""INSERT INTO tool_work_sync(order_id,dest) VALUES(?,?)
-            ON CONFLICT(order_id,dest) DO UPDATE SET revision=revision+1,error='',next_try=0""",
-                       [(identity, dest) for dest in destinations])
+        if destinations:
+            db.execute("""INSERT INTO tool_work_sync(order_id,dest) VALUES(?,'maintenance')
+                ON CONFLICT(order_id,dest) DO UPDATE SET revision=revision+1,error='',next_try=0""", (identity,))
 
     def attach(self, actor, identity, revision, name, data):
         name = report_file(name, data)
@@ -873,6 +948,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def action(self, actor, identity, action, body, *, require_report_check=False):
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
+            if action in {'approve', 'reject'}:
+                return self._decide_scrap(db, row, actor, action, body)
             info = self.work_info(db, actor, row)
             if action in {'submit', 'review-approve'} and self._workspace_legacy_overlaps(db, row['asset_id'], row['kind'], row['month']):
                 raise RiskError('旧工作台批次可能已归档，请先核对原台账回执。', 409)
@@ -972,6 +1049,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                             dests = ('scrap', 'change')
                         elif outcome == 'repair':
                             updates['reason'] = text(body.get('reason'), 1000, True)
+                            updates['repair_started_at'] = now
                             dests = ('repair', 'change')
                         else:
                             dests = ('maintenance',)
@@ -979,31 +1057,13 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     raise RiskError('送检报告已单独保存，请直接提交。')
             elif action in {'repaired', 'repair-scrap'} and info['can_repair']:
                 note = text(body.get('reason'), 1000, True)
-                updates = {'resolution': note, 'outcome': 'repaired' if action == 'repaired' else 'scrap'}
-                label = '检修完成' if action == 'repaired' else '检修转报废'
+                updates = {'resolution': note, 'outcome': 'repaired' if action == 'repaired' else 'scrap',
+                           'resolved_at': now, 'repair_started_at': row['repair_started_at'] or row['submitted_at']}
+                label = '检修后合格' if action == 'repaired' else '检修后报废'
                 dests = ('repair', 'change')
                 if action == 'repair-scrap':
                     updates |= self.scrap_request(db, row, body)
                     dests += ('scrap',)
-            elif action in {'approve', 'reject'} and info['can_approve']:
-                note = text(body.get('reason', ''), 1000, action == 'reject')
-                label = '通过报废审批' if action == 'approve' else '驳回报废审批'
-                repair = db.execute("SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest='repair'", (identity,)).fetchone()
-                outcome = 'scrapped' if action == 'approve' else 'repair' if repair else 'rejected'
-                updates = {'outcome': outcome, 'resolved_at': now,
-                           'scrap_status': 'approved' if action == 'approve' else 'rejected',
-                           'resolution': '\n'.join(filter(None, (row['resolution'], note)))}
-                dests = ('scrap', 'change', 'repair') if repair else ('scrap', 'change')
-                if outcome == 'scrapped':
-                    prior = db.execute("SELECT COALESCE(SUM(scrap_qty),0) FROM tool_work_orders WHERE asset_id=? AND outcome='scrapped'",
-                                       (row['asset_id'],)).fetchone()[0]
-                    if prior + row['scrap_qty'] >= json.loads(row['asset'])['quantity']:
-                        cancelled = db.execute("""SELECT id FROM tool_work_orders WHERE asset_id=?
-                            AND submitted_at IS NULL AND outcome=''""", (row['asset_id'],)).fetchall()
-                        for sibling in cancelled:
-                            db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution='工具已全部报废',
-                                revision=revision+1 WHERE id=?""", (sibling['id'],))
-                            self.audit(db, sibling['id'], actor, '取消工单', '工具已全部报废')
             else:
                 raise RiskError('当前工单状态或账号权限不允许此操作。', 409)
             if updates.get('actual', '') > now[:10]:
@@ -1011,6 +1071,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             sql = ','.join(f'{field}=?' for field in updates)
             db.execute(f'UPDATE tool_work_orders SET {sql},revision=revision+1 WHERE id=?',
                        (*updates.values(), identity))
+            if updates.get('outcome') == 'scrap':
+                self._queue_scrap_votes(db, identity, row['revision'] + 1)
             self.audit(db, identity, actor, label, note or updates.get('reason') or updates.get('scrap_reason', ''))
             if reviewing:
                 db.execute("UPDATE tool_work_reviews SET status='approved',reviewer=?,reviewed_at=?,note=? WHERE order_id=?", (actor['id'],now,note,identity))
@@ -1020,29 +1082,106 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
             return self.work_info(db, actor, self._work(db, actor, identity))
 
+    def cancel_scrapped_siblings(self, db, row, actor):
+        quantity = db.execute("""SELECT COALESCE(SUM(scrap_qty),0) FROM tool_work_orders
+            WHERE asset_id=? AND outcome='scrapped'""", (row['asset_id'],)).fetchone()[0]
+        if quantity < json.loads(row['asset'])['quantity']:
+            return
+        for sibling in db.execute("""SELECT * FROM tool_work_orders WHERE asset_id=?
+            AND submitted_at IS NULL AND outcome=''""", (row['asset_id'],)).fetchall():
+            workspace = self._workspace_for_order(db, sibling['id'])
+            if workspace:
+                self._workspace_release_order(db, actor, sibling, workspace['session_id'], '工具已全部报废')
+            else:
+                db.execute("""UPDATE tool_work_orders SET outcome='cancelled',resolution='工具已全部报废',
+                    revision=revision+1 WHERE id=?""", (sibling['id'],))
+                db.execute("UPDATE tool_work_reviews SET status='cancelled' WHERE order_id=? AND status='pending'", (sibling['id'],))
+                self.audit(db, sibling['id'], actor, '取消工单', '工具已全部报废')
+
     def scrap_request(self, db, row, body):
-        manager_id = self.state(db, 'manager_id')
-        if not manager_id:
-            raise RiskError('请管理员先配置园区经理，再提交报废。', 409)
+        from .tool_review_cards import validated_photos
+
         prior = db.execute("""SELECT COALESCE(SUM(scrap_qty),0) FROM tool_work_orders
             WHERE asset_id=? AND outcome='scrapped'""", (row['asset_id'],)).fetchone()[0]
         quantity = body.get('quantity')
         if type(quantity) is not int or not 1 <= quantity <= json.loads(row['asset'])['quantity'] - prior:
             raise RiskError('报废数量不能超过该工具的剩余数量。')
         reason = text(body.get('reason'), 1000, True)
-        return {'manager': manager_id, 'scrap_qty': quantity, 'scrap_reason': reason,
-                'scrap_status': 'pending', 'resolved_at': ''}
+        photos = validated_photos(body.get('scrap_photos', []))
+        return {'outcome': 'scrap', 'scrap_qty': quantity, 'scrap_reason': reason, 'scrap_photos': dumps(photos),
+                'scrap_status': 'pending_pair', 'resolved_at': ''}
+
+    def _decide_scrap(self, db, row, actor, action, body):
+        votes = self._scrap_votes(db, row['id'])
+        vote = next((item for item in votes if item['employee_no'] == self.scrap_approver(actor)), None)
+        if vote is None:
+            raise RiskError('只有指定的两位经理可处理报废审批。', 403)
+        request_revision = body.get('approval_round')
+        if request_revision is not None and request_revision != vote['request_revision']:
+            raise RiskError('报废审批请求已更新，请使用最新卡片。', 409)
+        if vote['decision'] == action:
+            return self.work_info(db, actor, row)
+        if row['outcome'] != 'scrap' or vote['decision']:
+            raise RiskError('本轮报废审批已处理，请查看当前记录。', 409)
+        if request_revision is None:
+            self.check_revision(row, body.get('revision'))
+        note = text(body.get('reason', ''), 1000, action == 'reject')
+        now = clock().isoformat(timespec='seconds')
+        db.execute('''UPDATE tool_scrap_votes SET decision=?,at=?,note=?
+            WHERE order_id=? AND request_revision=? AND employee_no=?''',
+            (action, now, note, row['id'], vote['request_revision'], vote['employee_no']))
+        both = action == 'approve' and all(item['decision'] == 'approve' or item['employee_no'] == vote['employee_no'] for item in votes)
+        if both:
+            self.scrap_request(db, row, {'quantity': row['scrap_qty'], 'reason': row['scrap_reason'],
+                                         'scrap_photos': json.loads(row['scrap_photos'])})
+        if action == 'reject':
+            outcome, status = ('repair' if row['repair_started_at'] else 'rejected'), 'rejected'
+        elif both:
+            outcome, status = 'scrapped', 'approved'
+        else:
+            outcome, status = 'scrap', 'pending_pair'
+        db.execute('UPDATE tool_work_orders SET outcome=?,scrap_status=?,resolved_at=?,revision=revision+1 WHERE id=?',
+                   (outcome, status, '' if outcome == 'scrap' else now, row['id']))
+        if both:
+            self.cancel_scrapped_siblings(db, row, actor)
+        self.audit(db, row['id'], actor, '通过报废审批' if action == 'approve' else '驳回报废审批', note)
+        self.enqueue(db, row['id'], 'maintenance')
+        db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
+        updated = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (row['id'],)).fetchone()
+        return self.work_info(db, actor, updated)
+
+    def scrap_review_batch(self, actor, entries, action, note):
+        self.access(actor)
+        approver = self.scrap_approver(actor)
+        if not approver:
+            raise RiskError('只有指定的两位经理可处理报废审批。', 403)
+        results = []
+        with self.connect(True) as db:
+            for entry in entries:
+                row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (entry['order'],)).fetchone()
+                if not row or not self.visible(db, actor, row):
+                    continue
+                vote = next((vote for vote in self._scrap_votes(db, row['id'])
+                             if vote['employee_no'] == approver), None)
+                if not vote or vote['request_revision'] != entry['revision']:
+                    continue
+                if vote['decision'] != action and (row['outcome'] != 'scrap' or vote['decision']):
+                    continue
+                results.append(self._decide_scrap(db, row, actor, action,
+                                                 {'approval_round': entry['revision'], 'reason': note}))
+        return results
 
     def sync_one(self):
         now = int(time.time())
         lease = uuid.uuid4().hex
         with self.connect(True) as db:
             task = db.execute("""SELECT sync.* FROM tool_work_sync sync
-                WHERE synced<revision AND next_try<=? AND lease_until<=?
+                WHERE dest='maintenance' AND synced<revision AND next_try<=? AND lease_until<=?
                   AND NOT EXISTS (SELECT 1 FROM tool_workspace_items own
                     JOIN tool_workspace_items sibling ON sibling.session_id=own.session_id
                     JOIN tool_work_sync active ON active.order_id=sibling.order_id
-                    WHERE own.order_id=sync.order_id AND sync.dest='inspection'
+                    JOIN tool_work_orders work ON work.id=own.order_id
+                    WHERE own.order_id=sync.order_id AND work.kind='external'
                       AND active.order_id<>sync.order_id AND active.lease_until>?)
                 ORDER BY next_try,order_id,dest LIMIT 1""", (now, now, now)).fetchone()
             if not task:
@@ -1053,18 +1192,17 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                        (lease, now + 600, identity, dest))
             row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
             linked = self._workspace_for_order(db, identity)
-            if row and linked and dest == 'inspection':
+            external = row and row['kind'] == 'external'
+            if linked and external:
                 _, report_name, report = self._workspace_order_report(db, row)
                 row = dict(row) | {'report_name': report_name, 'report': report}
-            if linked or dest == 'inspection' and row and row['inspection_meta'] != '{}':
-                job['verify_write'] = True
-            if linked:
-                if dest == 'inspection' and not job['file_token']:
-                    job['file_token'] = db.execute('SELECT file_token FROM tool_workspace_sessions WHERE id=?',
-                                                   (linked['session_id'],)).fetchone()[0]
-            job['from_repair'] = bool(db.execute(
-                "SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest='repair'", (identity,)).fetchone())
-            if row and row['kind']=='self' and dest in {'maintenance','repair','scrap'}:
+            job.update(verify_write=True, unified_ledger=True)
+            if row and row['outcome'] in {'scrap', 'scrapped', 'rejected', 'repair'}:
+                job['scrap_votes'] = [dict(vote) for vote in self._scrap_votes(db, identity)]
+            if linked and external and not job['file_token']:
+                job['file_token'] = db.execute('SELECT file_token FROM tool_workspace_sessions WHERE id=?',
+                                               (linked['session_id'],)).fetchone()[0]
+            if row and row['kind']=='self':
                 records=json.loads(row['records'])
                 job['record_entries']=[(entry,dict(self._template(db,entry['template_id'],entry['version']))) for entry in records]
 
@@ -1074,7 +1212,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                                     (token, identity, dest, lease))
                 if not update.rowcount:
                     raise RiskError('原工单同步租约已失效。', 409)
-                if linked and dest == 'inspection':
+                if linked and external:
                     db.execute('UPDATE tool_workspace_sessions SET file_token=? WHERE id=?', (token, linked['session_id']))
 
         def save_attempt(attempt):
@@ -1095,7 +1233,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
 
         try:
             entries=job.get('record_entries') or []
-            if row['report'] and row['kind']=='self' and dest in {'maintenance','repair','scrap'}:
+            if row['report'] and row['kind']=='self':
                 job['record_name'], job['record_content'] = row['report_name'], row['report']
             elif entries:
                 if len(entries)==1:

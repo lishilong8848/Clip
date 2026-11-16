@@ -276,7 +276,7 @@ function selectMenu(key: string) {
 }
 function openWorkspaceModule(target:string){
  const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);
- const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','token','tool_session'].some(key=>url.searchParams.has(key));
+ const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','token','tool_session','tool_order','tool_view'].some(key=>url.searchParams.has(key));
  if(module && module !== zhihangDataModule.id && !precise)url.searchParams.set('scope',scopeFor(module));
  navigate(url);
 }
@@ -302,7 +302,7 @@ watch(()=>route.value.pathname+':'+(componentName.value||view.value),()=>{
     requestAnimationFrame(()=>document.querySelector('.v2-main')?.animate([{opacity:.4},{opacity:1}],{duration:200,easing:'ease-out'}));
 },{flush:'post'});
 const componentKey = computed(() => identityKey.value + ':' + route.value.pathname + ':' + (['learning','work_handover'].includes(activeModule.value) ? route.value.search : currentScope.value) + (['drills','critical_guard'].includes(activeModule.value)?':'+moduleAdminMode.value:'') + (componentName.value === 'cabinet_batch' ? ':' + (route.value.searchParams.get('mode') || '') + ':' + (route.value.searchParams.get('batch_id') || '') : '') +
-  (componentName.value === 'tool_management' ? ':' + [route.value.searchParams.get('tool_session'), route.value.searchParams.get('tool_asset')].join(':') : ''));
+  (componentName.value === 'tool_management' ? ':' + ['tool_session','tool_asset','tool_order','tool_view'].map(key => route.value.searchParams.get(key)).join(':') : ''));
 const componentProps = computed(() => {
   const p = route.value.searchParams, admin = user.value.role === 'admin';
   const common = { scope:currentScope.value, scopeOptions:scopes.value, isAdmin:admin, checking:false, loggedIn:loggedIn.value, loginUrl:loginUrl.value };
@@ -311,7 +311,7 @@ const componentProps = computed(() => {
     case 'work_handover': return {handoverId:p.get('id')||''};
     case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
     case 'tool_management': return {scope:p.get('scope')||'',toolView:p.get('tool_view')||'',
-      toolSession:p.get('tool_session')||'',toolAsset:p.get('tool_asset')||''};
+      toolSession:p.get('tool_session')||'',toolAsset:p.get('tool_asset')||'',toolOrder:p.get('tool_order')||''};
     case 'event': return {...common, refreshNonce:0};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':

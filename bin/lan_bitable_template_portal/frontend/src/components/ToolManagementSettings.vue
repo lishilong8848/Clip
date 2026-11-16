@@ -20,10 +20,9 @@
         <NButton type="primary" :loading="saving" @click="saveTool">保存专业主管</NButton>
       </div>
     </template>
-    <div v-if="data?.can_set_manager" class="settings-line settings-approval">
-      <label>园区报废审批人 <NSelect v-model:value="managerId" :options="managerOptions" filterable placeholder="选择园区经理" :disabled="saving" /></label>
-      <NButton :disabled="saving || !managerId || managerId === data.manager_id" @click="saveManager">保存审批人</NButton>
-    </div>
+    <p v-if="data?.scrap_approvers?.length" class="settings-line settings-approval">
+      报废审批人 {{ data.scrap_approvers.join('、') }}（均通过后生效）
+    </p>
   </section>
 </template>
 
@@ -37,12 +36,11 @@ interface Asset {
   revision: number; supervisor?: string;
   source_self_cycle: string; source_external_cycle: string;
 }
-interface Inventory { items: Asset[]; manager_id: string; can_set_manager: boolean }
+interface Inventory { items: Asset[]; scrap_approvers: string[] }
 interface Person { id: string; name: string; category: string; position?: string; final_scopes: string[] }
 const data = ref<Inventory>();
 const people = ref<Person[]>([]);
 const selection = ref<string | null>(null);
-const managerId = ref<string | null>(null);
 const form = ref<{ supervisor: string | null }>();
 const loading = ref(false);
 const saving = ref(false);
@@ -52,8 +50,6 @@ let read: AbortController | undefined;
 const asset = computed(() => data.value?.items.find(row => row.id === selection.value));
 const assetOptions = computed(() => (data.value?.items || []).map(row => ({ value: row.id,
   label: [row.scope + '楼', row.name, row.model, row.location].filter(Boolean).join(' · ') })));
-const managerOptions = computed(() => people.value.filter(person => person.category === 'manager' &&
-  ['A', 'B', 'C', 'D', 'E', 'H'].every(scope => person.final_scopes.includes(scope))).map(person => ({value: person.id, label: person.name})));
 const supervisorOptions = computed(() => people.value.filter(person => asset.value && person.final_scopes.includes(asset.value.scope) &&
   (person.category === 'supervisor' || person.position?.includes('主管'))).map(person => ({value: person.id, label: person.name})));
 const showError = (value: unknown) => { error.value = value instanceof Error ? value.message : '配置操作未完成，请重试。'; };
@@ -74,7 +70,6 @@ async function load() {
     ]);
     if (controller.signal.aborted) return;
     data.value = inventory as Inventory;
-    managerId.value = data.value.manager_id || null;
     people.value = directory.items as Person[];
   } catch (value) { if (!controller.signal.aborted) showError(value); }
   finally { if (read === controller) loading.value = false; }
@@ -89,7 +84,6 @@ async function save(id: string, body: object) {
   } catch (value) { showError(value); }
   finally { saving.value = false; }
 }
-function saveManager() { if (managerId.value) void save('park-manager', { manager_id: managerId.value }); }
 function saveTool() {
   if (asset.value && form.value) void save(asset.value.id, {
     supervisor: form.value.supervisor || '', revision: asset.value.revision });

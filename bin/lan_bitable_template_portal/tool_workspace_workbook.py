@@ -260,8 +260,13 @@ def describe(content):
         theme = _theme_colors(package)
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
-        editable, checks, assets = _layout(book[schema['sheet']], schema)
+        form = book[schema['sheet']]
+        editable, checks, assets = _layout(form, schema)
         inspector, checked_at = ('G6', 'G11') if schema.get('layout') == 'hvac' else ('G4', 'G8')
+        saved_inspector = form[inspector].value
+        inspector_default = (saved_inspector.strip() if isinstance(saved_inspector, str)
+                             and not saved_inspector.lstrip().startswith('=') and not _BAD_TEXT.search(saved_inspector)
+                             and 0 < len(saved_inspector.strip()) <= 120 else '')
         sheets = []
         for sheet in book.worksheets:
             if sheet.title == schema['sheet']:
@@ -269,7 +274,8 @@ def describe(content):
             elif sheet.sheet_state == 'visible':
                 sheets.append(_describe_sheet(sheet, set(), set(), theme))
         return {'sheets': sheets, 'schema': schema, 'template_sha256': digest,
-                'prefill_fields': {'assets': assets, 'inspector': inspector, 'checked_at': checked_at}}
+                'prefill_fields': {'assets': assets, 'inspector': inspector, 'checked_at': checked_at,
+                                   'inspector_default': inspector_default}}
     finally:
         book.close()
 
@@ -305,7 +311,7 @@ def prefill(content, asset):
 def initial_values(layout, asset, inspector, checked_at):
     fields = layout['prefill_fields']
     values = _asset_values(asset, fields['assets'])
-    values[fields['inspector']] = _literal(inspector, 120)
+    values[fields['inspector']] = _literal(fields.get('inspector_default') or inspector, 120)
     values[fields['checked_at']] = checked_at
     return {layout['schema']['sheet'] + '!' + address: value for address, value in values.items()}
 

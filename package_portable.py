@@ -453,6 +453,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.zhihang_data_sources",
     "lan_bitable_template_portal.zhihang_data_cards",
     "lan_bitable_template_portal.tool_workspace",
+    "lan_bitable_template_portal.tool_review_cards",
     "lan_bitable_template_portal.tool_workspace_workbook",
     "lan_bitable_template_portal.tool_self_check_routes",
     "lan_bitable_template_portal.change_screenshot_cards",
@@ -1594,6 +1595,9 @@ def _is_runtime_data_path(path: Path, root: Path | None = None, *, relative_path
         return True
 
     lowered_parts = tuple(str(part).lower() for part in parts)
+
+    if "tool_management_archives" in lowered_parts[:-1]:
+        return True
 
     for index, part in enumerate(lowered_parts[:-1]):
 

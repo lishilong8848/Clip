@@ -173,7 +173,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 result = await asyncio.to_thread(save_template, actor, request.query_params.get('name', ''),
                     bytes(payload), template_id, int(version) if version else None)
                 return response(result)
-            body = await controller._read_json_request(request, max_bytes=512 * 1024)
+            body = await controller._read_json_request(request,
+                max_bytes=5 * 1024 * 1024 if path.endswith('/repair-scrap') else 512 * 1024)
             if not isinstance(body, dict):
                 raise RiskError('工具自检请求格式无效。')
             if path == 'inventory/new':

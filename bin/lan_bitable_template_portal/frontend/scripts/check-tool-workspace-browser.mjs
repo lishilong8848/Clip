@@ -297,6 +297,16 @@ try {
     await chooseAssets('温湿度仪');
     await chooseRadio('选用模板 暖通原表模板');
     await page.getByText('本次 2 台', { exact: true }).waitFor();
+    const review = page.getByRole('list', { name: '本次工具和模板', exact: true });
+    assert(await review.getByRole('listitem').filter({ hasText: '电能质量分析仪' }).getByText('电气原表模板').isVisible());
+    assert(await review.getByRole('listitem').filter({ hasText: '温湿度仪' }).getByText('暖通原表模板').isVisible());
+    for (const name of ['电能质量分析仪', '温湿度仪']) {
+      const checkbox = page.getByRole('checkbox', { name: '选择工具 ' + name, exact: true });
+      assert.match(await checkbox.getAttribute('class') || '', /checkbox--disabled/);
+      await page.locator('.assets tr').filter({ hasText: name }).getByText(name, { exact: true }).click();
+      assert.equal(await checkbox.getAttribute('aria-checked'), 'true');
+    }
+    assert.equal(await review.getByRole('listitem').count(), 2);
     await noOverflow();
     await page.screenshot({ path: path.join(output, 'desktop-selection.png'), fullPage: true });
   });
@@ -518,6 +528,31 @@ try {
     await button('温湿度仪 · B楼').click();
     await button('电能质量分析仪 · A楼').click();
     assert.equal(await note.inputValue(), '手机草稿内容');
+    await chooseRadio('不合格 · 报废');
+    const photo = await page.evaluate(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 600;
+      canvas.height = 400;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#246';
+      context.fillRect(0, 0, canvas.width, canvas.height);
+      return canvas.toDataURL('image/png').split(',')[1];
+    });
+    await page.locator('.scrap-photos input[type=file]').setInputFiles({
+      name: '隔离测试现场照片.png', mimeType: 'image/png', buffer: Buffer.from(photo, 'base64'),
+    });
+    const thumbnail = page.getByRole('button', { name: '查看报废现场照片 1', exact: true });
+    await thumbnail.click();
+    const enlarged = page.locator('.photo-preview');
+    await enlarged.waitFor();
+    await enlarged.evaluate(image => image.decode());
+    const dimensions = await enlarged.boundingBox();
+    assert(dimensions.width > (await thumbnail.boundingBox()).width);
+    assert(dimensions.x >= 0 && dimensions.x + dimensions.width <= 390);
+    await page.screenshot({ path: path.join(output, 'mobile-scrap-photo.png') });
+    await page.keyboard.press('Escape');
+    await enlarged.waitFor({ state: 'hidden' });
+    await chooseRadio('合格');
     await button('保存草稿').click(); await page.getByText('草稿已保存', { exact: true }).waitFor();
   });
   await check('200 tool tabs stay in one scrollable row on mobile and desktop', async () => {

@@ -18,9 +18,9 @@ from .tool_self_check import TZ, dumps, timestamp
 MAX_ASSETS = 200
 ARCHIVE_RETRY_SECONDS = 60
 ARCHIVE_LEASE_SECONDS = 600
-EDIT_FIELDS = ("values", "checks", "completion", "reviewer_id", "outcome", "reason", "quantity", "actual")
+EDIT_FIELDS = ("values", "checks", "completion", "reviewer_id", "outcome", "reason", "quantity", "actual", "scrap_photos")
 ORDER_STATUS_FIELDS = """id,month,scope,kind,due,revision,owner,owner_name,submitted_at,outcome,
-    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct"""
+    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct,repair_started_at"""
 WORKSPACE_SESSION_SUMMARY_FIELDS = "id,revision,kind,status,owner,owner_name,created_at,updated_at,submitted_at,report_name"
 WORKSPACE_ITEM_STATUS_FIELDS = "asset_id,asset,template_key,order_id,binding_error,binding_pending,remote_id,attempted_at,archive_error,deleted_at"
 CHECKED_AT = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?)?')
@@ -78,7 +78,7 @@ class ToolWorkspaceMixin:
             """)
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(tool_workspace_items)")}
-            for name in ("order_id", "binding_error", "deleted_at"):
+            for name in ("order_id", "binding_error", "deleted_at", "ledger_table"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE tool_workspace_items ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
             if 'binding_pending' not in columns:
@@ -250,7 +250,7 @@ class ToolWorkspaceMixin:
         payload = json.loads(item["asset"]) | {"asset_id": asset_id, "kind": row["kind"],
             "qualified": draft.get("qualified"), "due": row["created_at"][:10]}
         verified = self.cloud.write_workspace_item(identity, payload, report["report_name"], report["report"], actual,
-            file_token=report["file_token"], remote_id=item["remote_id"])
+            file_token=report["file_token"], remote_id=item["remote_id"], unified=item['ledger_table'] == 'unified')
         if verified["remote_id"] != item["remote_id"]:
             raise RiskError("飞书回读与原回执不一致。", 409)
         with self.connect(True) as db:
@@ -259,14 +259,18 @@ class ToolWorkspaceMixin:
                 return {"order_id": order_id}
             if current["revision"] != order["revision"] or legacy != row or expected != item:
                 raise RiskError("核验期间工单已变化，请刷新后重试。", 409)
-            dest = "inspection" if external else "maintenance"
+            dest = "maintenance"
             db.execute("""UPDATE tool_work_orders SET submitted_at=?,actual=?,outcome=?,owner=?,owner_name=?,
                 report_name=?,report=?,revision=revision+1 WHERE id=?""",
                 (row["submitted_at"], actual, "" if external else "normal", row["owner"], row["owner_name"],
                  report["report_name"], report["report"], order_id))
             self.enqueue(db, order_id, dest)
-            db.execute("""UPDATE tool_work_sync SET synced=revision,remote_id=?,file_token=?,error='',next_try=0
-                WHERE order_id=? AND dest=?""", (item["remote_id"], verified["file_token"], order_id, dest))
+            if external and item['ledger_table'] != 'unified':
+                db.execute("""UPDATE tool_work_sync SET file_token=?
+                    WHERE order_id=? AND dest=?""", (verified["file_token"], order_id, dest))
+            else:
+                db.execute("""UPDATE tool_work_sync SET synced=revision,remote_id=?,file_token=?,error='',next_try=0
+                    WHERE order_id=? AND dest=?""", (item["remote_id"], verified["file_token"], order_id, dest))
             db.execute("UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?", (order["month"],))
             self.audit(db, order_id, actor, "核验并接续旧工作台归档", f"{identity} / {item['remote_id']}")
         return {"order_id": order_id}
@@ -433,7 +437,7 @@ class ToolWorkspaceMixin:
 
     def _workspace_detail(self, db, row, items, actor, *, status_only=False):
         from collections import defaultdict
-        from .tool_management import full_access
+        from .tool_management import full_access, tool_ledger_status
 
         layouts = {}
         result = []
@@ -476,6 +480,8 @@ class ToolWorkspaceMixin:
                       "order_revision": order['revision'] if order else None, "order_status": order_status,
                       "binding_error": item["binding_error"], 'binding_pending': bool(item['binding_pending']),
                       "archive_status": archive_status, "archive_error": archive_error}
+            if order and order['submitted_at']:
+                status['result_label'], status['tool_status_label'] = tool_ledger_status(order)
             eligible = bool(order and self.eligible(db, actor, order, leaders=leaders))
             owner = bool(order and (self.owns_workspace_item(actor, order) or eligible and order['owner'] == actor['id']))
             mine = owner or bool(eligible and full_access(actor) and order['owner'])
@@ -572,7 +578,7 @@ class ToolWorkspaceMixin:
             row = db.execute("SELECT * FROM tool_workspace_templates WHERE cache_key=?", (cache_key,)).fetchone()
         if row:
             layout = json.loads(row["layout"])
-            if layout.get("prefill_fields"):
+            if 'inspector_default' in layout.get('prefill_fields', {}):
                 return cache_key, row["content"], layout
             content = row["content"]
         else:
@@ -862,6 +868,7 @@ class ToolWorkspaceMixin:
             raise RiskError("此批次已提交，表格与报告已锁定。", 409)
 
     def workspace_save(self, actor, identity, body):
+        from .tool_review_cards import validated_photos
         from .tool_workspace_workbook import validate_inputs
 
         self._workspace_access(actor)
@@ -892,6 +899,8 @@ class ToolWorkspaceMixin:
                 label = f"「{json.loads(order['asset'])['name']}」"
                 previous_reviewer = draft.get("reviewer_id", "")
                 draft.update({name: patch[name] for name in EDIT_FIELDS if name in patch})
+                if 'scrap_photos' in patch:
+                    validated_photos(patch['scrap_photos'])
                 if draft.get("completion", "") not in ("", "completed", "incomplete"):
                     raise RiskError("请选择有效的完成情况。")
                 if "reviewer_id" in patch:
@@ -936,7 +945,8 @@ class ToolWorkspaceMixin:
                    (order["id"], order["revision"] + 1))
 
     def workspace_review_notice_one(self, deliver, link_for, resolve_leader):
-        """Send a private review card for one currently pending tool record."""
+        from .tool_review_cards import batch_card, delivery_groups, plain, remember_delivery
+
         now, lease = time.time(), uuid.uuid4().hex
         pending = """FROM tool_work_orders w JOIN tool_work_reviews r ON r.order_id=w.id
             WHERE w.id=n.order_id AND w.revision=n.revision AND w.kind='self'
@@ -944,86 +954,105 @@ class ToolWorkspaceMixin:
         with self.connect(True) as db:
             db.execute(f"""DELETE FROM tool_workspace_review_notices AS n
                 WHERE n.lease_until<=? AND NOT EXISTS (SELECT 1 {pending})""", (now,))
-            job = db.execute("""SELECT n.*, w.scope, w.asset, w.owner_name, i.session_id, i.asset_id,
-                      r.payload, r.submitted_at
-                FROM tool_workspace_review_notices n JOIN tool_work_orders w ON w.id=n.order_id
+            rows_join = f"""FROM tool_workspace_review_notices n JOIN tool_work_orders w ON w.id=n.order_id
                 JOIN tool_workspace_items i ON i.order_id=w.id JOIN tool_work_reviews r ON r.order_id=w.id
-                WHERE n.next_try<=? AND n.lease_until<=? ORDER BY n.next_try,n.order_id LIMIT 1""",
-                (now, now)).fetchone()
-            if not job:
+                WHERE n.next_try<=? AND n.lease_until<=? AND EXISTS (SELECT 1 {pending})"""
+            seed = db.execute(f"SELECT i.session_id {rows_join} ORDER BY n.next_try,n.order_id LIMIT 1",
+                              (now, now)).fetchone()
+            if not seed:
                 return False
-            params = (job['order_id'], job['revision'], lease)
-            db.execute("""UPDATE tool_workspace_review_notices SET lease_until=?,lease=?
+            session = seed['session_id']
+            jobs = db.execute(f"""SELECT n.*,w.scope,w.asset,w.owner_name,i.asset_id,r.payload,r.submitted_at
+                {rows_join} AND i.session_id=? ORDER BY n.order_id""", (now, now, session)).fetchall()
+            db.executemany("""UPDATE tool_workspace_review_notices SET lease_until=?,lease=?
                 WHERE order_id=? AND revision=?""",
-                (now+ARCHIVE_LEASE_SECONDS, lease, *params[:2]))
-        sent = set(json.loads(job['sent_to']))
-        retry = False
-        try:
+                [(now + ARCHIVE_LEASE_SECONDS, lease, job['order_id'], job['revision']) for job in jobs])
+            leaders = json.loads(self.state(db, 'leaders') or '{}')
+
+        by_recipient, resolved, expected = {}, {}, {}
+        sent = {job['order_id']: set(json.loads(job['sent_to'])) for job in jobs}
+        for job in jobs:
             scope = job['scope']
             with self.connect() as db:
-                self._workspace_check_scopes(db, [job])
-                leaders = json.loads(self.state(db, 'leaders') or '{}')
-            reviewer_id = json.loads(job['payload']).get('reviewer_id')
-            targets = (reviewer_id,) if reviewer_id else tuple(dict.fromkeys(leaders.get(scope, ())))
-            retry = not targets
-            card = json.loads(job['card']) if job['card'] else None
+                try:
+                    self._workspace_check_scopes(db, [job])
+                except RiskError:
+                    continue
+            picked = json.loads(job['payload']).get('reviewer_id')
+            targets = (picked,) if picked else tuple(dict.fromkeys(leaders.get(scope, ())))
+            expected[job['order_id']] = len(targets) or 1
             for target in targets:
                 try:
-                    person = self.person_for(target) if reviewer_id else resolve_leader(target)
-                    open_id = person.get('open_id', '')
-                    wanted_identity = person.get('id') if reviewer_id else open_id
+                    key = (bool(picked), target)
+                    if key not in resolved:
+                        resolved[key] = self.person_for(target) if picked else resolve_leader(target)
+                    actor = resolved[key]
+                    open_id = actor.get('open_id', '')
                     with self.connect() as db:
-                        if (wanted_identity != target or not re.fullmatch(r'ou_[A-Za-z0-9]+', open_id)
-                                or person.get('inactive') or not self.workspace_can_review(
-                                    db, person, {'scope': scope}, leaders=leaders)):
-                            retry = True
+                        if (target != (actor.get('id') if picked else open_id)
+                                or not re.fullmatch(r'ou_[A-Za-z0-9]+', open_id)
+                                or not self.workspace_can_review(db, actor, {'scope': scope}, leaders=leaders)):
                             continue
-                        if not db.execute(f"""SELECT 1 FROM tool_workspace_review_notices n
-                                WHERE n.order_id=? AND n.revision=? AND n.lease=?
-                                AND EXISTS (SELECT 1 {pending})""", params).fetchone():
-                            break
-                    if open_id in sent:
-                        continue
-                    if card is None:
-                        url = link_for(scope, job['session_id'], job['asset_id'])
-                        if not url:
-                            retry = True
-                            break
-                        asset = json.loads(job['asset'])
-                        tool = ' '.join(str(asset.get('name') or '工具').split())[:120]
-                        inspector = ' '.join(str(job['owner_name'] or '').split())[:80]
-                        date = job['submitted_at'][:16].replace('T', ' ')
-                        card = {'schema': '2.0', 'header': {'template': 'blue',
-                            'title': {'tag': 'plain_text', 'content': '工具自检待审核'}},
-                            'body': {'elements': [
-                                {'tag': 'div', 'text': {'tag': 'plain_text',
-                                    'content': f'{scope}楼 · {tool}\n办理人：{inspector}\n提交时间：{date}'}},
-                                {'tag': 'button', 'type': 'primary', 'text': {'tag': 'plain_text', 'content': '打开自检记录审核'},
-                                 'behaviors': [{'type': 'open_url', 'default_url': url}]}]}}
-                        with self.connect(True) as db:
-                            db.execute("""UPDATE tool_workspace_review_notices SET card=?
-                                WHERE order_id=? AND revision=? AND lease=?""", (dumps(card), *params))
-                    message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL,
-                        f"clipflow:tool-review:{job['order_id']}:{job['revision']}:{open_id}"))
-                    if deliver(open_id, card, message_uuid) is True:
-                        sent.add(open_id)
-                        with self.connect(True) as db:
-                            db.execute("""UPDATE tool_workspace_review_notices SET sent_to=?
-                                WHERE order_id=? AND revision=? AND lease=?""", (dumps(sorted(sent)), *params))
-                    else:
-                        retry = True
+                    if open_id not in sent[job['order_id']]:
+                        by_recipient.setdefault(open_id, []).append(job)
                 except RiskError:
-                    retry = True
-        except Exception:
-            retry = True
-            logging.exception('Tool self-check review reminder deferred')
+                    continue
+
+        groups = ((open_id, delivery, members) for open_id, rows in by_recipient.items()
+                  for delivery, members in delivery_groups(rows, open_id))
+        for open_id, delivery, group in groups:
+            try:
+                with self.connect() as db:
+                    group = [job for job in group if db.execute(f"""SELECT 1
+                        FROM tool_workspace_review_notices n WHERE n.order_id=? AND n.revision=? AND n.lease=?
+                        AND EXISTS (SELECT 1 {pending})""", (job['order_id'], job['revision'], lease)).fetchone()]
+                if not group:
+                    continue
+                if delivery:
+                    identifier, card = delivery['id'], delivery['card']
+                else:
+                    entries = [{'order': job['order_id'], 'asset': job['asset_id'], 'revision': job['revision']} for job in group]
+                    identifier = str(uuid.uuid5(uuid.NAMESPACE_URL, f'clipflow:tool-review:{session}:{entries}:{open_id}'))
+                    card = next((saved for job in group
+                                 if (saved := json.loads(job['card'] or '{}').get(identifier))), None)
+                    if card is None:
+                        elements = [{'tag': 'div', 'text': plain(f'{len(group)} 台工具待审核。通过时使用你的已登记签名。')}]
+                        for job in group[:12]:
+                            draft, asset = json.loads(job['payload']), json.loads(job['asset'])
+                            inspector = draft.get('inspector_name') or job['owner_name']
+                            result = {'normal': '合格', 'repair': '不合格·转检修', 'scrap': '不合格·申请报废'}.get(draft.get('outcome'), '—')
+                            elements.append({'tag': 'div', 'text': plain(
+                                f"{job['scope']}楼 · {asset['name']} · {asset.get('model') or '—'}\n检查人：{inspector}\n检查结论：{result}")})
+                        first = group[0]
+                        link = link_for(first['scope'], session, first['asset_id'])
+                        card = batch_card('工具自检待审核', 'blue', elements,
+                                          {'review': 'self', 'session': session, 'items': entries}, link, open_id)
+                    with self.connect(True) as db:
+                        for job in group:
+                            params = (job['order_id'], job['revision'], lease)
+                            stored = db.execute("""SELECT card FROM tool_workspace_review_notices
+                                WHERE order_id=? AND revision=? AND lease=?""", params).fetchone()
+                            if stored:
+                                db.execute("""UPDATE tool_workspace_review_notices SET card=?
+                                    WHERE order_id=? AND revision=? AND lease=?""",
+                                    (remember_delivery(stored['card'], open_id, identifier, card), *params))
+                if deliver(open_id, card, identifier) is True:
+                    with self.connect(True) as db:
+                        for job in group:
+                            sent[job['order_id']].add(open_id)
+                            db.execute("""UPDATE tool_workspace_review_notices SET sent_to=?
+                                WHERE order_id=? AND revision=? AND lease=?""",
+                                (dumps(sorted(sent[job['order_id']])), job['order_id'], job['revision'], lease))
+            except Exception:
+                logging.exception('Tool self-check review reminder deferred')
         with self.connect(True) as db:
-            if retry:
-                db.execute("""UPDATE tool_workspace_review_notices SET next_try=?,lease='',lease_until=0
-                    WHERE order_id=? AND revision=? AND lease=?""", (time.time()+ARCHIVE_RETRY_SECONDS, *params))
-            else:
-                db.execute("""DELETE FROM tool_workspace_review_notices
-                    WHERE order_id=? AND revision=? AND lease=?""", params)
+            for job in jobs:
+                params = (job['order_id'], job['revision'], lease)
+                if len(sent[job['order_id']]) < expected.get(job['order_id'], 1):
+                    db.execute("""UPDATE tool_workspace_review_notices SET next_try=?,lease='',lease_until=0
+                        WHERE order_id=? AND revision=? AND lease=?""", (time.time()+ARCHIVE_RETRY_SECONDS, *params))
+                else:
+                    db.execute("DELETE FROM tool_workspace_review_notices WHERE order_id=? AND revision=? AND lease=?", params)
         return True
 
     def workspace_report(self, actor, identity, revision, name, data):
@@ -1169,10 +1198,13 @@ class ToolWorkspaceMixin:
                                          required=outcome in {"repair", "scrap"})
         if outcome == "scrap":
             self.scrap_request(db, order, draft)
+        inspector = workbook.get('prefill_fields', {}).get('inspector') or ('G6' if schema.get('layout') == 'hvac' else 'G4')
+        inspector_name = draft['values'].get(schema['sheet'] + '!' + inspector, '').strip()
         return draft | {"actual": actual.date().isoformat(), "qualified": outcome == "normal",
+                        'inspector_name': inspector_name, 'checked_at_text': value,
                         "reviewer": "", "reviewed_at": "", "signature": ""}
 
-    def workspace_review(self, actor, identity, body):
+    def workspace_review(self, actor, identity, body, *, from_card=False):
         from .tool_management import MAX_REPORT, clock
         from .tool_workspace_workbook import fill, validate_signature
 
@@ -1201,15 +1233,24 @@ class ToolWorkspaceMixin:
             row, items = self._workspace_session(db, actor, identity)
             by_id = {item["asset_id"]: item for item in items}
             seen = set()
+            reviewed = 0
             for entry in selected:
                 if not isinstance(entry, dict):
                     raise RiskError("审核项目格式无效。")
                 asset_id = text(entry.get("asset_id"), 120, True)
-                if asset_id not in by_id or asset_id in seen:
+                if asset_id in seen or (asset_id not in by_id and not from_card):
                     raise RiskError("审核项目无权访问或重复。", 403)
                 seen.add(asset_id)
-                item = by_id[asset_id]
+                item = by_id.get(asset_id)
+                if item is None:
+                    continue
                 order = self._workspace_order(db, item)
+                if entry.get('order_id') and (not order or entry['order_id'] != order['id']):
+                    if from_card:
+                        continue
+                    raise RiskError('卡片对应的原工单已变化，请打开最新记录。', 409)
+                if from_card and entry["revision"] != order["revision"]:
+                    continue
                 if not order or not self.workspace_can_review(db, actor, order):
                     raise RiskError("仅本楼楼长或获授权的代审人可审核。", 403)
                 review = db.execute("SELECT * FROM tool_work_reviews WHERE order_id=?", (order["id"],)).fetchone()
@@ -1248,11 +1289,14 @@ class ToolWorkspaceMixin:
                                "report_name": "自检记录单.xlsx", "report": report, "reason": draft.get("reason", "")}
                     if outcome == "scrap":
                         updates.update(self.scrap_request(db, order, draft))
-                    self.enqueue(db, order["id"], *{"normal": ("maintenance",), "repair": ("repair", "change"),
-                                                   "scrap": ("scrap", "change")}[outcome])
+                    if outcome == "repair":
+                        updates['repair_started_at'] = now.isoformat()
+                    self.enqueue(db, order["id"], "maintenance")
                     fields = ",".join(f"{name}=?" for name in updates)
                     db.execute(f"UPDATE tool_work_orders SET {fields},revision=revision+1 WHERE id=?",
                                (*updates.values(), order["id"]))
+                    if updates['outcome'] == 'scrap':
+                        self._queue_scrap_votes(db, order['id'], order['revision'] + 1)
                     db.execute("UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?", (order["month"],))
                     db.execute("UPDATE tool_workspace_items SET draft=? WHERE session_id=? AND asset_id=?",
                                (dumps(draft), identity, asset_id))
@@ -1262,7 +1306,11 @@ class ToolWorkspaceMixin:
                            (state, actor["id"], now.isoformat(), note, order["id"]))
                 label = ("通过" if approval else "驳回") + ("（楼长）" if self.is_building_leader(db, actor, order["scope"]) else "（代审）")
                 self.audit(db, order["id"], actor, label, note)
-            self._workspace_bump(db, identity)
+                reviewed += 1
+            if reviewed or not from_card:
+                self._workspace_bump(db, identity)
+            if from_card:
+                return {'card_review_count': reviewed}
             return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
     def workspace_can_review(self, db, actor, order, *, leaders=None):
@@ -1471,6 +1519,12 @@ class ToolWorkspaceMixin:
             row = db.execute("SELECT * FROM tool_workspace_sessions WHERE id=?", (identity,)).fetchone()
             db.execute("UPDATE tool_workspace_sessions SET lease=?,lease_until=? WHERE id=?",
                        (lease, now + ARCHIVE_LEASE_SECONDS, identity))
+            if item['ledger_table'] != 'unified':
+                db.execute("""UPDATE tool_workspace_items SET ledger_table='unified',
+                    attempted_at=CASE WHEN ?='external' THEN 0 ELSE attempted_at END
+                    WHERE session_id=? AND asset_id=?""", (row['kind'], identity, item['asset_id']))
+                item = db.execute("SELECT * FROM tool_workspace_items WHERE session_id=? AND asset_id=?",
+                                  (identity, item['asset_id'])).fetchone()
         asset, draft = json.loads(item["asset"]), json.loads(item["draft"])
         actual = draft["reviewed_at"][:10] if row["kind"] == "self" else row["submitted_at"][:10]
         payload = {**asset, "asset_id": item["asset_id"], "kind": row["kind"],
@@ -1499,7 +1553,7 @@ class ToolWorkspaceMixin:
             result = self.cloud.write_workspace_item(
                 identity, payload, report["report_name"], report["report"], actual,
                 file_token=report["file_token"], save_file=save_file,
-                attempted_at=item["attempted_at"], save_attempt=save_attempt,
+                attempted_at=item["attempted_at"], save_attempt=save_attempt, unified=True,
             )
             remote_id = result.get("remote_id") if isinstance(result, dict) else None
             file_token = result.get("file_token") if isinstance(result, dict) else None

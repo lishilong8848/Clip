@@ -1,14 +1,16 @@
+import asyncio
 import base64
 import copy
 import datetime as dt
 import io
+import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from zipfile import ZipFile
 
 from PIL import Image, ImageDraw
@@ -184,15 +186,14 @@ class WorkspaceTests(unittest.TestCase):
             deliveries.append((open_id, copy.deepcopy(card), message_uuid))
             return open_id != selected['open_id']
 
-        for _ in range(2):
-            self.assertTrue(self.service.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
+        self.assertTrue(self.service.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
         self.assertFalse(self.service.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
         by_recipient = {item[0]: item for item in deliveries}
         self.assertEqual(set(by_recipient), {self.leader['open_id'], selected['open_id']})
         for recipient, scope, asset in ((self.leader['open_id'], 'A', 'recTool0'), (selected['open_id'], 'B', 'recTool1')):
             content = by_recipient[recipient][1]['body']['elements']
-            self.assertIn(scope + '楼', content[0]['text']['content'])
-            self.assertEqual(content[1]['behaviors'][0]['default_url'], link(scope, draft['id'], asset))
+            self.assertIn(scope + '楼', content[1]['text']['content'])
+            self.assertEqual(content[-1]['behaviors'][0]['default_url'], link(scope, draft['id'], asset))
         with self.service.connect(True) as db:
             db.execute('UPDATE tool_workspace_review_notices SET next_try=0')
         restarted = self.restart()
@@ -220,6 +221,140 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(notify())
         self.assertFalse(notify())
         self.assertEqual(calls, [selected['open_id']])
+
+    def test_two_tool_cards_are_batched_and_scrap_requires_two_distinct_managers(self):
+        from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant
+        from bin.lan_bitable_template_portal.tool_review_cards import send_scrap_review_one
+
+        first = actor(identity='mei') | {'name': '梅冰冰', 'employee_no': '14258'}
+        second = actor(identity='ma') | {'name': '马进宇', 'employee_no': '18871'}
+        people = [self.leader, first, second]
+        self.service.person_for = {person['id']: person for person in people}.__getitem__
+        self.service.workspace_directory = lambda: [
+            dict(record_id=person['id'], selectable=True, **person) for person in (first, second)]
+        self.service.workspace_signature = lambda _: base64.b64decode(self.signature().split(',')[1])
+        self.cloud.review_photo = Mock(return_value='img_fixture')
+        self.runtime = SimpleNamespace(tool_management=lambda: self.service,
+            risk_inspection_actor={person['open_id']: person for person in people}.__getitem__,
+            auth_manager=SimpleNamespace(current_feishu_app_id=lambda: 'test_app'))
+        channel = FeishuAssistant.__new__(FeishuAssistant)
+        channel.inbox, channel.config, channel.runtime, channel.secret = object(), {'app_id': 'test_app'}, self.runtime, 'fixture'
+        channel._configuration_current = AsyncMock(return_value=True)
+
+        draft = self.complete(self.open(), ('scrap', 'scrap'))
+        item = draft['items'][0] | {'scrap_photos': [self.signature()]}
+        draft = self.service.workspace_save(self.filler, draft['id'], {'revision': draft['revision'], 'items': [item]})
+        pending = self.service.workspace_submit(self.filler, draft['id'], {'revision': draft['revision']})
+        out = []
+        send = lambda *args: out.append(args) or True
+        self.assertTrue(self.service.workspace_review_notice_one(send, lambda *_: 'https://fixture.test', lambda _: self.leader))
+        self.assertEqual(len(out), 1)
+
+        def approve(delivery, sender=None):
+            recipient, card, _ = delivery
+            values = [behavior['value'] for element in card['body']['elements']
+                      for behavior in element.get('behaviors', []) if behavior.get('type') == 'callback']
+            value = next(value for value in values if value['decision'] == 'approve')
+            self.assertEqual(len(value['items']), 2)
+            async def stream():
+                yield json.dumps({'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
+                    'event': {'action': {'value': value}, 'operator': {'open_id': sender or recipient}}}).encode()
+            request = SimpleNamespace(headers={'authorization': 'Bearer fixture'},
+                                      client=SimpleNamespace(host='127.0.0.1'), stream=stream)
+            return json.loads(asyncio.run(channel.receive(request)).body)
+
+        self.assertTrue(approve(out[0])['ok'])
+        out.clear()
+        for _ in range(2):
+            self.assertTrue(send_scrap_review_one(self.service, send, lambda *_: 'https://fixture.test'))
+        self.assertFalse(send_scrap_review_one(self.service, send, lambda *_: 'https://fixture.test'))
+        self.assertEqual({entry[0] for entry in out}, {first['open_id'], second['open_id']})
+        elements = out[0][1]['body']['elements']
+        self.assertTrue(any(element.get('img_key') == 'img_fixture' and element.get('preview') is True
+                            for element in elements))
+        self.assertTrue(any('检查时间' in element.get('text', {}).get('content', '') for element in elements))
+        ids = [entry['order_id'] for entry in pending['items']]
+        self.assertFalse(approve(out[0], self.leader['open_id'])['ok'])
+        self.assertIn('2 项等待', approve(out[0])['toast'])
+        self.assertEqual([self.service.detail(self.filler, identity)['outcome'] for identity in ids], ['scrap', 'scrap'])
+        self.assertIn('2 项等待', approve(out[0])['toast'])
+        self.assertIn('2 项已批准', approve(out[1])['toast'])
+        self.assertEqual([self.service.detail(self.filler, identity)['tool_status_label'] for identity in ids], ['报废', '报废'])
+
+    def test_lost_card_receipt_after_partial_web_review_replays_original_card(self):
+        from bin.lan_bitable_template_portal.tool_review_cards import apply, send_scrap_review_one
+
+        mei = actor(identity='mei') | {'name': '梅冰冰', 'employee_no': '14258'}
+        ma = actor(identity='ma') | {'name': '马进宇', 'employee_no': '18871'}
+        people = (self.leader, mei, ma)
+        self.cloud.review_photo = Mock(return_value='img_fixture')
+
+        def configure(service):
+            service.person_for = {person['id']: person for person in people}.__getitem__
+            service.workspace_directory = lambda: [
+                dict(record_id=person['id'], selectable=True, **person) for person in (mei, ma)]
+            service.workspace_signature = lambda _: base64.b64decode(self.signature().split(',')[1])
+            return service
+
+        configure(self.service)
+        runtime = SimpleNamespace(tool_management=lambda: self.service,
+            risk_inspection_actor={person['open_id']: person for person in people}.__getitem__,
+            auth_manager=SimpleNamespace(current_feishu_app_id=lambda: 'test_app'))
+        receipts, attempts = {}, []
+        lost = {self.leader['open_id'], mei['open_id']}
+
+        def deliver(recipient, card, identifier):
+            attempts.append(identifier)
+            self.assertEqual(receipts.setdefault(identifier, (recipient, card)), (recipient, card))
+            if recipient in lost:
+                lost.remove(recipient)
+                return False
+            return True
+
+        def click(identifier):
+            recipient, card = receipts[identifier]
+            value = next(behavior['value'] for element in card['body']['elements']
+                         for behavior in element.get('behaviors', [])
+                         if behavior['type'] == 'callback' and behavior['value']['decision'] == 'approve')
+            return apply(runtime, {'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
+                'event': {'action': {'value': value}, 'operator': {'open_id': recipient}}}, 'test_app')['toast']
+
+        link = lambda *_: 'https://fixture.test/original'
+        draft = self.complete(self.open(), ('scrap', 'scrap'))
+        first = draft['items'][0] | {'scrap_photos': [self.signature()]}
+        draft = self.service.workspace_save(self.filler, draft['id'], {'revision': draft['revision'], 'items': [first]})
+        pending = self.service.workspace_submit(self.filler, draft['id'], {'revision': draft['revision']})
+        first, second = pending['items']
+        self.assertTrue(self.service.workspace_review_notice_one(deliver, link, lambda _: self.leader))
+        self.approve(pending | {'items': [first]})
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_workspace_review_notices SET next_try=0')
+        self.service = configure(self.restart())
+        self.assertTrue(self.service.workspace_review_notice_one(deliver, lambda *_: '', lambda _: self.leader))
+        self.assertEqual(attempts, [attempts[0]] * 2)
+        self.assertIn('1 项自检审核通过', click(attempts[0]))
+        self.assertIn('2 项已处理', click(attempts[0]))
+
+        # The first manager received the two-item card, then the other manager rejects one in the web UI.
+        for _ in range(2):
+            self.assertTrue(send_scrap_review_one(self.service, deliver, link))
+        manager_cards = {recipient: identifier for identifier, (recipient, _) in receipts.items()}
+        mei_card = manager_cards[mei['open_id']]
+        before = self.service.detail(ma, first['order_id'])
+        self.service.action(ma, first['order_id'], 'reject', {'revision': before['revision'], 'reason': '单台驳回'})
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_scrap_votes SET next_try=0')
+        self.service = configure(self.restart())
+        self.assertTrue(send_scrap_review_one(self.service, deliver, lambda *_: ''))
+        self.assertFalse(send_scrap_review_one(self.service, deliver, link))
+        self.assertEqual(attempts.count(mei_card), 2)
+        self.assertEqual(len(receipts), 3)
+        self.assertEqual(self.cloud.review_photo.call_count, 2)
+        self.assertIn('1 项等待', click(mei_card))
+        self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrap')
+        self.assertIn('1 项已批准报废', click(manager_cards[ma['open_id']]))
+        self.assertEqual(self.service.detail(self.filler, first['order_id'])['outcome'], 'rejected')
+        self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrapped')
 
     def test_template_relation_and_open_retry_are_scoped_and_persistent(self):
         first = self.open()
@@ -408,10 +543,7 @@ class WorkspaceTests(unittest.TestCase):
         self.approve(pending)
         while self.service.sync_one():
             pass
-        self.assertEqual(set(self.cloud.writes), {
-            (current['recTool0'], 'repair'), (current['recTool0'], 'change'),
-            (current['recTool1'], 'scrap'), (current['recTool1'], 'change'),
-        })
+        self.assertEqual(set(self.cloud.writes), {(current['recTool0'], 'maintenance'), (current['recTool1'], 'maintenance')})
         self.assertEqual({item['reviewer'] for item in approved['items']}, {self.leader['name']})
 
     def test_workspace_can_open_before_planned_date_and_reuses_active_batch(self):
@@ -470,8 +602,7 @@ class WorkspaceTests(unittest.TestCase):
         from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
 
         first = self.open()
-        schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0',
-            'workspace_direct INTEGER NOT NULL DEFAULT 0, UNIQUE(month,asset_id,kind)')
+        schema = WORK_ORDER_SCHEMA.rstrip().removesuffix(')') + ',UNIQUE(month,asset_id,kind))'
         with self.service.connect(True) as db:
             db.execute('ALTER TABLE tool_work_orders RENAME TO old_tool_orders')
             db.execute(schema)
@@ -543,8 +674,8 @@ class WorkspaceTests(unittest.TestCase):
         from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
 
         active = self.open()
-        old_schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0',
-                                               'UNIQUE(month,asset_id,kind)')
+        old_schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0,', '')
+        old_schema = old_schema.rstrip().removesuffix(')') + ',UNIQUE(month,asset_id,kind))'
         with self.service.connect(True) as db:
             db.execute('ALTER TABLE tool_work_orders RENAME TO upgrade_fixture')
             db.execute(old_schema)

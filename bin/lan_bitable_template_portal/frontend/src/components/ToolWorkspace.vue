@@ -5,7 +5,8 @@
     <div v-if="!session && !recordsOpen" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
-          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>已选 {{ selectedIds.length }} 台<span v-if="kind === 'self'"> · 已配模板 {{ assignedCount }} 台</span></small>
+          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3>
+          <small>{{ kind === 'self' ? '本组勾选' : '已勾选' }} {{ selectedIds.length }} 台<span v-if="kind === 'self' && assignedCount"> · 已配模板 {{ assignedCount }} 台</span></small>
         </header>
         <NRadioGroup :value="kind" size="small" aria-label="办理类型" :disabled="!!busy" @update:value="chooseKind">
           <NRadioButton value="self">维护</NRadioButton><NRadioButton value="external">送检</NRadioButton>
@@ -24,9 +25,10 @@
               </tr></thead>
               <tbody>
                 <tr v-for="asset in visibleAssets" :key="asset.id"
-                  :class="{ 'is-selected': selected.has(asset.id), 'is-selectable': !busy && eligible(asset) }"
+                  :class="{ 'is-selected': selected.has(asset.id) || assigned[asset.id],
+                    'is-selectable': !busy && selectable(asset) }"
                   @click="chooseAssetRow(asset, $event)">
-                  <td><NCheckbox :checked="selected.has(asset.id)" :disabled="!!busy || !eligible(asset)"
+                  <td><NCheckbox :checked="selected.has(asset.id) || !!assigned[asset.id]" :disabled="!!busy || !selectable(asset)"
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
                   <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small>
                     <small v-if="kind === 'self' && assigned[asset.id]">
@@ -35,8 +37,10 @@
                   </td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
-                    <NButton text size="small" :disabled="!!busy" @click="showRecords(asset)">办理记录</NButton>
-                    <NButton v-if="asset.plan?.mode === 'transfer'" size="small" :disabled="!!busy" @click="transferAsset(asset)">接收移交</NButton>
+                    <small class="workspace-actions asset-actions">
+                      <NButton text size="tiny" :disabled="!!busy" @click="showRecords(asset)">办理记录</NButton>
+                      <NButton v-if="asset.plan?.mode === 'transfer'" size="tiny" :disabled="!!busy" @click="transferAsset(asset)">接收移交</NButton>
+                    </small>
                   </td>
                 </tr>
               </tbody>
@@ -65,10 +69,22 @@
       </section>
 
       <aside class="workspace-panel opening-panel" aria-label="办理操作">
+        <header class="panel-heading"><h3>本次办理</h3></header>
         <NButton type="primary" :disabled="!!busy || !canOpen" :loading="busy === 'open'" @click="requestOpen">{{ kind === 'self' ? '打开填写' : '打开送检' }}</NButton>
-        <NButton :disabled="!!busy" @click="showRecords()">查看办理记录</NButton>
         <span v-if="kind === 'self' && pendingIds.length" class="workspace-muted">本次 {{ pendingIds.length }} 台<span v-if="unassignedCount"> · {{ unassignedCount }} 台待选模板</span></span>
+        <p v-if="!pendingAssets.length" class="workspace-muted">先在左侧勾选工具。</p>
+        <ul v-else class="selection-review" aria-label="本次工具和模板">
+          <li v-for="asset in pendingAssets" :key="asset.id">
+            <div>
+              <strong>{{ asset.name }}</strong><small>{{ [scopeLabel(asset.scope), asset.model].filter(Boolean).join(' · ') }}</small>
+              <small v-if="kind === 'self'">{{ templateAssignments[asset.id] ? templateName(templateAssignments[asset.id]) : '待选模板' }}</small>
+              <small v-else>共用本批送检报告</small>
+            </div>
+            <NButton text size="tiny" :disabled="!!busy" :aria-label="'移出本次 ' + asset.name" @click="removeSelection(asset.id)">移出</NButton>
+          </li>
+        </ul>
         <span v-if="mixedReportBuildings" class="workspace-muted" role="status">送检报告请按楼栋分批上传。</span>
+        <NButton :disabled="!!busy" @click="showRecords()">查看办理记录</NButton>
         <label v-if="sessionOptions.length">办理记录
           <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="id => openSaved(id)" />
         </label>
@@ -98,7 +114,9 @@
             </div>
             <ul class="record-tools">
               <li v-for="tool in batch.history_items" :key="tool.id">
-                <div><strong>{{ tool.asset_name }}</strong><small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small></div>
+                <div><strong>{{ tool.asset_name }}</strong><small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small>
+                  <small v-if="tool.tool_status_label" class="workspace-muted">{{ tool.result_label }} · {{ tool.tool_status_label }}</small>
+                </div>
                 <div class="workspace-actions record-actions">
                   <NButton size="small" :disabled="!!busy" @click="openSaved(batch.id, tool.id)">查看记录</NButton>
                   <NButton v-if="tool.can_release" size="small" :disabled="!!busy" @click="manageRecord(batch, tool, 'release')">取消办理</NButton>
@@ -234,6 +252,25 @@
                   <input v-model.number="item.quantity" type="number" min="1" :disabled="!item.can_edit || !!busy" />
                 </label>
               </div>
+              <div v-if="item.outcome === 'scrap'" class="review-line scrap-photos" role="group" aria-labelledby="tool-scrap-photos-label">
+                <span id="tool-scrap-photos-label">报废现场照片</span>
+                <template v-if="item.can_edit">
+                  <input ref="photoInput" type="file" accept="image/jpeg,image/png" multiple hidden
+                    :disabled="!!busy || !canAddScrapPhoto" @change="pickScrapPhotos(item, $event)" />
+                  <NButton size="small" :disabled="!!busy || !canAddScrapPhoto" @click="photoInput?.click()">选择照片</NButton>
+                  <small class="workspace-muted">JPEG 或 PNG，最多 {{ scrapPhotoLimit }} 张，每张不超过 1MB</small>
+                </template>
+                <small v-else class="workspace-muted">审核前不可修改</small>
+                <ul v-if="item.scrap_photos?.length" class="photo-strip">
+                  <li v-for="(photo, index) in item.scrap_photos" :key="index" class="photo-item">
+                    <button type="button" class="photo-button" :aria-label="'查看报废现场照片 ' + (index + 1)" @click="photoPreview = photo">
+                      <img :src="photo" :alt="'报废现场照片 ' + (index + 1)" loading="lazy" />
+                    </button>
+                    <NButton v-if="item.can_edit" text size="tiny" :disabled="!!busy" @click="removeScrapPhoto(item, index)">删除</NButton>
+                  </li>
+                </ul>
+              </div>
+              <p v-if="item.outcome === 'scrap'" class="workspace-muted scrap-approval-note">自检审核后提交报废申请，梅冰冰和马进宇均同意后才标记报废。</p>
             </template>
           </div>
           <div v-else class="workspace-editor">
@@ -272,6 +309,9 @@
             <NButton v-if="session.status === 'archived' && session.report_available !== false" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
           </footer>
     </section>
+    <NModal :show="!!photoPreview" preset="card" title="报废现场照片" class="tool-workspace-dialog" @update:show="show => { if (!show) photoPreview = '' }">
+      <img class="photo-preview" :src="photoPreview" alt="报废现场照片" />
+    </NModal>
     <NModal :show="!!confirmAction" preset="card" :title="confirmAction?.title" class="tool-workspace-dialog" @update:show="closeConfirm">
       <p class="confirmation-summary">{{ confirmAction?.text }}</p>
       <template #footer><div class="workspace-actions dialog-actions">
@@ -330,11 +370,11 @@ type Layout = { sheets: Sheet[]; schema?: { sheet: string; layout?: string; revi
   prefill_fields?: { inspector: string; checked_at: string } };
 type Item = Review & { id: string; asset_id: string; asset: Asset; template?: Layout | null; layout_key?: string;
   values: Record<string, string>; checks: Record<string, string>; qualified: boolean | null; archive_status?: string; archive_error?: string;
-  outcome?: string; reason?: string; quantity?: number; order_revision?: number; can_edit?: boolean; can_review?: boolean;
+  outcome?: string; reason?: string; quantity?: number; scrap_photos?: string[]; order_revision?: number; can_edit?: boolean; can_review?: boolean;
   can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean;
   review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
 type HistoryItem = { id: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
-  binding_pending?: boolean; binding_error?: string;
+  binding_pending?: boolean; binding_error?: string; result_label?: string; tool_status_label?: string;
   order_revision?: number; can_release?: boolean; can_delete?: boolean };
 type Summary = { id: string; kind: Kind; status: string; revision?: number; items?: Item[]; history_items?: HistoryItem[];
   created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
@@ -398,6 +438,10 @@ const recordsOpen = ref(false);
 const recordAsset = ref<Asset>();
 const recordSessions = shallowRef<Summary[]>([]);
 const recordCursor = shallowRef<HistoryPage['history_cursor']>();
+const scrapPhotoLimit = 3;
+const scrapPhotoMaxBytes = 1024 * 1024;
+const photoInput = ref<HTMLInputElement>();
+const photoPreview = ref('');
 
 const assets = computed(() => board.value?.assets || []);
 const templates = computed(() => board.value?.templates || []);
@@ -409,7 +453,7 @@ const visibleAssets = computed(() => {
     && (!onlyCycle(asset) || onlyCycle(asset) === kind.value)
     && terms.every(term => [asset.name, asset.model, asset.brand, asset.location, scopeLabel(asset.scope)].join(' ').toLowerCase().includes(term)));
 });
-const visibleEligible = computed(() => visibleAssets.value.filter(eligible));
+const visibleEligible = computed(() => visibleAssets.value.filter(selectable));
 const allVisibleSelected = computed(() => !!visibleEligible.value.length && visibleEligible.value.every(asset => selected.value.has(asset.id)));
 const someVisibleSelected = computed(() => visibleEligible.value.some(asset => selected.value.has(asset.id)));
 const selectedAssets = computed(() => assets.value.filter(asset => selected.value.has(asset.id)));
@@ -418,6 +462,10 @@ const allAssociated = computed(() => selectedAssets.value.length > 0 &&
   selectedAssets.value.every(asset => templatesById.value.has(asset.template_id || '')));
 const assignedCount = computed(() => Object.keys(assigned).length);
 const pendingIds = computed(() => [...new Set([...Object.keys(assigned), ...selectedIds.value])]);
+const pendingAssets = computed(() => {
+  const byId = new Map(assets.value.map(asset => [asset.id, asset]));
+  return pendingIds.value.flatMap(id => byId.get(id) || []);
+});
 const templateAssignments = computed(() => {
   const result: Record<string, string> = { ...assigned };
   for (const asset of selectedAssets.value) if (!result[asset.id] && asset.template_id) result[asset.id] = asset.template_id;
@@ -433,6 +481,7 @@ const sessionUrl = computed(() => api + '/' + encodeURIComponent(session.value?.
 const item = computed(() => session.value?.items.find(entry => entry.id === itemId.value));
 const reviewerOptions = computed(() => reviewers.value?.[item.value?.asset.scope || ''] || []);
 const sheets = computed(() => item.value?.template?.sheets || []);
+const canAddScrapPhoto = computed(() => (item.value?.scrap_photos?.length || 0) < scrapPhotoLimit);
 const activeSheet = computed(() => {
   return sheets.value.find(sheet => sheet.name === sheetName.value) || sheets.value.find(sheet => sheet.rows.some(row => row.cells.some(cell => cell.check || cell.editable))) || sheets.value[0];
 });
@@ -467,6 +516,9 @@ function onlyCycle(asset: Asset): Kind | undefined {
 }
 function eligible(asset: Asset) {
   return asset.eligible_kinds?.includes(kind.value) ?? (onlyCycle(asset) === kind.value);
+}
+function selectable(asset: Asset) {
+  return eligible(asset) && !assigned[asset.id];
 }
 function reason(asset: Asset) {
   if (asset.disabled_reason) return asset.disabled_reason;
@@ -510,6 +562,7 @@ function templateName(id: string) {
   return template?.label || template?.name || '模板待核对';
 }
 function toggleAsset(id: string, checked: boolean) {
+  if (assigned[id]) return;
   if (selected.value.has(id) === checked) return;
   if (checked && !assigned[id] && pendingIds.value.length >= 200) {
     error.value = '每批最多选择 200 台工具，请分批办理。';
@@ -517,8 +570,12 @@ function toggleAsset(id: string, checked: boolean) {
   }
   selectedIds.value = checked ? [...selectedIds.value, id] : selectedIds.value.filter(value => value !== id);
 }
+function removeSelection(id: string) {
+  delete assigned[id];
+  toggleAsset(id, false);
+}
 function chooseAssetRow(asset: Asset, event: MouseEvent) {
-  if (busy.value || !eligible(asset) ||
+  if (busy.value || !selectable(asset) ||
       (event.target instanceof Element && event.target.closest('button,a,input,[role="checkbox"]'))) return;
   toggleAsset(asset.id, !selected.value.has(asset.id));
 }
@@ -631,14 +688,47 @@ function setCheck(cell: Cell, event: Event) {
   if (value) item.value.checks[cellKey(cell)] = value;
   else delete item.value.checks[cellKey(cell)];
 }
+function readPhoto(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('照片读取失败'));
+    reader.onerror = () => reject(reader.error || new Error('照片读取失败'));
+    reader.readAsDataURL(file);
+  });
+}
+async function pickScrapPhotos(entry: Item, event: Event) {
+  const input = event.target as HTMLInputElement;
+  const files = Array.from(input.files || []);
+  input.value = '';
+  if (!files.length || !entry.can_edit || busy.value) return;
+  const photos = entry.scrap_photos = entry.scrap_photos || [];
+  const room = scrapPhotoLimit - photos.length;
+  if (room <= 0) {
+    error.value = `报废现场照片最多 ${scrapPhotoLimit} 张。`;
+    return;
+  }
+  const accepted: string[] = [];
+  for (const file of files.slice(0, room)) {
+    if (!['image/jpeg', 'image/png'].includes(file.type)) { error.value = `「${file.name}」不是 JPEG 或 PNG 图片。`; continue; }
+    if (file.size > scrapPhotoMaxBytes) { error.value = `「${file.name}」超过 1MB。`; continue; }
+    try { accepted.push(await readPhoto(file)); }
+    catch (cause) { error.value = `「${file.name}」${message(cause)}。`; }
+  }
+  if (files.length > room) error.value = `报废现场照片最多 ${scrapPhotoLimit} 张，已加入前 ${room} 张。`;
+  if (accepted.length && session.value?.items.includes(entry)) entry.scrap_photos = [...photos, ...accepted];
+}
+function removeScrapPhoto(entry: Item, index: number) {
+  if (!entry.can_edit || busy.value) return;
+  entry.scrap_photos = (entry.scrap_photos || []).filter((photo, position) => position !== index);
+}
 function selectItem(id: string) {
   itemId.value = id;
   replacementTemplate.value = null;
   sheetName.value = '';
 }
 function fields() {
-  return (session.value?.items || []).filter(entry => entry.can_edit).map(({ id, asset_id, values, checks, outcome, reason, quantity, completion, reviewer_id }) =>
-    ({ id, asset_id, values, checks, outcome, reason, quantity, completion, reviewer_id }));
+  return (session.value?.items || []).filter(entry => entry.can_edit).map(({ id, asset_id, values, checks, outcome, reason, quantity, scrap_photos, completion, reviewer_id }) =>
+    ({ id, asset_id, values, checks, outcome, reason, quantity, scrap_photos, completion, reviewer_id }));
 }
 function clearSession() {
   clearTimeout(pollTimer);
@@ -1143,7 +1233,18 @@ onBeforeUnmount(() => {
 .review-line label .n-input { max-width: 142px; }
 .review-line input[type=datetime-local] { border: 1px solid var(--tool-border, #dbe3e9); color: inherit; color-scheme: inherit; background: transparent; border-radius: 4px; min-height: 28px; max-width: 100%; font: inherit; }
 .signature-preview { width: 90px; height: 36px; object-fit: contain; background: #fff; border: 1px solid #dbe3e9; }
+.scrap-photos { align-items: flex-start; }
+.photo-strip { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.photo-item { display: grid; justify-items: center; gap: 2px; }
+.photo-button { padding: 0; background: transparent; border: 0; cursor: zoom-in; }
+.photo-preview { display: block; max-width: 100%; max-height: 75vh; margin: auto; }
+.photo-item img { display: block; width: 72px; height: 72px; object-fit: cover; background: #fff; border: 1px solid var(--tool-border); border-radius: 4px; }
+.scrap-approval-note { margin: 0; }
 .opening-panel { display: grid; gap: 10px; }
+.selection-review { max-height: 42vh; overflow: auto; list-style: none; margin: 0; padding: 0; }
+.selection-review li { display: flex; justify-content: space-between; align-items: start; gap: 6px; padding: 7px 0; border-bottom: 1px solid var(--tool-border); }
+.selection-review li div { min-width: 0; overflow-wrap: anywhere; }
+.selection-review small { display: block; color: var(--tool-muted); margin-top: 2px; }
 .opening-panel label { display: grid; gap: 4px; font-size: 12px; }
 .records-panel,.record-list { display: grid; gap: 10px; }
 .record-batch { border: 1px solid var(--tool-border); padding: 10px 12px; border-radius: 6px; }

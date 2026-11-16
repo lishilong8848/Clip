@@ -9,7 +9,7 @@ from zipfile import ZipFile
 from bin.test_tool_self_check import actor
 from bin.lan_bitable_template_portal.risk_inspection import RiskError, RiskInspections
 from bin.lan_bitable_template_portal.tool_management import ToolManagement, clock
-from bin.lan_bitable_template_portal.tool_management_cloud import DETAIL, INVENTORY, KEY, STATE, TABLES, ToolCloud
+from bin.lan_bitable_template_portal.tool_management_cloud import DETAIL, INVENTORY, KEY, LEDGER_FIELDS, LEDGER_SELECTS, STATE, TABLES, ToolCloud
 
 
 class LedgerFixture:
@@ -51,7 +51,7 @@ class ToolManagementTest(TestCase):
         ordinary=self.full_actor('李世龙') | {'_tool_management_full_access':False}
         with self.assertRaises(RiskError):self.svc.list(ordinary)
 
-    def test_designated_people_can_handle_claimed_report_and_approve_scrap(self):
+    def test_designated_people_can_handle_claimed_report_but_scrap_requires_both_managers(self):
         li=self.full_actor('李世龙');liu=self.full_actor('刘小杏')
         external=next(row for row in self.orders if row['kind']=='external')
         claimed=self.svc.action(self.leader,external['id'],'claim',{'revision':external['revision']})
@@ -63,10 +63,15 @@ class ToolManagementTest(TestCase):
         self.assertEqual(self.svc.action(liu,external['id'],'submit',body),submitted)
         self.assertEqual(self.svc.detail(li,external['id'])['history'][-1]['name'],'刘小杏')
         scrap=self.submit_self(next(row for row in self.orders if row['kind']=='self'),'scrap')
-        self.assertTrue(self.svc.detail(li,scrap['id'])['can_approve'])
-        self.assertTrue(self.svc.detail(liu,scrap['id'])['can_approve'])
+        self.assertFalse(self.svc.detail(li,scrap['id'])['can_approve'])
+        self.assertFalse(self.svc.detail(liu,scrap['id'])['can_approve'])
         self.assertFalse(self.svc.detail(self.admin,scrap['id'])['can_approve'])
-        approved=self.svc.action(liu,scrap['id'],'approve',{'revision':scrap['revision'],'reason':'核对报废'})
+        with self.assertRaises(RiskError):
+            self.svc.action(liu,scrap['id'],'approve',{'revision':scrap['revision']})
+        first = self.svc.action(self.park, scrap['id'], 'approve', {'revision': scrap['revision']})
+        self.assertEqual(first['outcome'], 'scrap')
+        self.assertEqual(self.svc.action(self.park, scrap['id'], 'approve', {'revision': scrap['revision']}), first)
+        approved = self.svc.action(self.second_manager, scrap['id'], 'approve', {'revision': first['revision']})
         self.assertEqual(approved['outcome'],'scrapped')
 
     def test_full_access_requires_current_unique_directory_identity(self):
@@ -110,7 +115,10 @@ class ToolManagementTest(TestCase):
         self.admin = actor(identity='admin', admin=True)
         self.leader = actor() | {'category': 'supervisor', 'position': '楼长'}
         self.supervisor = actor(identity='professional') | {'category': 'supervisor', 'position': '专业主管'}
-        self.park = actor(identity='manager', admin=True) | {'level': 'L2', 'category': 'manager'}
+        self.park = actor(identity='manager', admin=True) | {
+            'level': 'L2', 'category': 'manager', 'name': '梅冰冰', 'employee_no': '14258'}
+        self.second_manager = actor(identity='secondmanager', admin=True) | {
+            'level': 'L2', 'category': 'manager', 'name': '马进宇', 'employee_no': '18871'}
         self.people = {person['id']: person for person in (self.admin, self.leader, self.supervisor, self.park)}
         self.cloud = LedgerFixture()
         self.svc = ToolManagement(RiskInspections(Path(temp.name) / 'tool.db', self.people.__getitem__), self.cloud)
@@ -140,7 +148,7 @@ class ToolManagementTest(TestCase):
             self.svc.action(self.supervisor, order['id'], 'review-approve', {'revision': result['revision']})
         return self.svc.action(self.leader, order['id'], 'review-approve', {'revision': result['revision']})
 
-    def test_routes_to_all_ledgers_and_archives_both_types(self):
+    def test_routes_to_unified_ledger_and_archives_both_types(self):
         self.assertEqual(len(self.orders), 4)
         external = next(row for row in self.orders if row['kind'] == 'external')
         self.assertTrue(external['can_claim'])
@@ -160,8 +168,8 @@ class ToolManagementTest(TestCase):
         while self.svc.sync_one():
             pass
         self.assertEqual(sorted(dest for dest, _, _ in self.cloud.writes),
-                         ['change', 'change', 'inspection', 'maintenance', 'repair', 'scrap'])
-        self.assertEqual(sorted(dest for dest,_,_ in self.cloud.files),['maintenance','repair','scrap'])
+                         ['maintenance'] * 4)
+        self.assertEqual(sorted(dest for dest,_,_ in self.cloud.files), ['maintenance'] * 3)
         for _,name,content in self.cloud.files:
             self.assertTrue(name.endswith('.xlsx'))
             with ZipFile(__import__('io').BytesIO(content)) as record:
@@ -174,14 +182,17 @@ class ToolManagementTest(TestCase):
         self.assertTrue(self.svc.detail(self.leader, repair['id'])['can_repair'])
         repair = self.svc.action(self.leader, repair['id'], 'repair-scrap',
                                  {'revision': returned['revision'], 'reason': '复核无法修复', 'quantity': 1})
-        approved = self.svc.action(self.park, repair['id'], 'approve', {'revision': repair['revision'], 'reason': ''})
+        waiting = self.svc.action(self.park, repair['id'], 'approve', {'revision': repair['revision']})
+        self.assertEqual(waiting['outcome'], 'scrap')
+        approved = self.svc.action(self.second_manager, repair['id'], 'approve', {'revision': waiting['revision']})
         self.assertEqual(approved['outcome'], 'scrapped')
+        self.assertEqual(approved['tool_status_label'], '检修后报废')
         rejected = self.svc.action(self.park, scrap['id'], 'reject', {'revision': scrap['revision'], 'reason': '继续使用'})
         self.assertEqual(rejected['outcome'], 'rejected')
         while self.svc.sync_one():
             pass
-        self.assertIn(('repair', 'scrapped', 'recrepair'), self.cloud.writes)
-        self.assertIn(('scrap', 'rejected', 'recscrap'), self.cloud.writes)
+        self.assertIn(('maintenance', 'scrapped', 'recmaintenance'), self.cloud.writes)
+        self.assertIn(('maintenance', 'rejected', 'recmaintenance'), self.cloud.writes)
         self.svc.archive_ready()
         with ZipFile(self.svc.download(self.admin, self.month)) as package:
             self.assertIsNone(package.testzip())
@@ -456,11 +467,14 @@ class ToolManagementTest(TestCase):
                 return f'{base}/{table}'
 
             def all(self, path):
-                self_case.assertIn(TABLES['inspection'], path)
+                self_case.assertIn(TABLES['maintenance'], path)
                 return [{'field_name': name, 'type': kind, 'property': props} for name, kind, props in
                         [(KEY, 1, {}), (STATE, 1, {}), (DETAIL, 1, {}), ('楼栋', 3, {}),
-                         ('送检工具', 21, {'table_id': INVENTORY}), ('计划检测日期', 5, {}),
-                         ('实际检测日期', 5, {}), ('送检报告', 17, {})]]
+                         ('维护工具', 21, {'table_id': INVENTORY}), ('计划维护日期', 5, {}),
+                         ('实际维护日期', 5, {}),
+                         *((name, kind, {}) for name, kind in LEDGER_FIELDS.items()),
+                         *((name, 3, {'options': [{'name': option} for option in options]})
+                           for name, options in LEDGER_SELECTS.items())]]
 
             def request(self, method, path, **kwargs):
                 if path.endswith('/upload_all'):
@@ -492,7 +506,7 @@ class ToolManagementTest(TestCase):
             db.execute('UPDATE tool_work_sync SET next_try=0')
         self.svc.sync_one()
         self.assertEqual(transport.uploads, 1)
-        self.assertIn('报告编号：R-2026', transport.record['fields'][DETAIL])
+        self.assertEqual(transport.record['fields']['送检报告编号'], 'R-2026')
         self.assertEqual(self.svc.detail(self.leader, external['id'])['sync'][0]['state'], 'done')
 
     def test_self_check_attachment_uses_existing_maintenance_field(self):

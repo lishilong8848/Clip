@@ -641,6 +641,8 @@ class PatchUpdateMixin:
             return True
         if len(parts) >= 2 and parts[0] == "bin" and parts[1] == "data":
             return True
+        if "tool_management_archives" in parts[:-1]:
+            return True
         return rel.name.lower().endswith(RUNTIME_PATCH_DATA_SUFFIXES)
 
     def _collect_patch_files(self, patch_dir: Path) -> list[Path]:

@@ -17,7 +17,7 @@ from upload_event_module.services.feishu_service import _stable_uuid4_client_tok
 
 from .risk_inspection import RiskError
 from .risk_inspection_cloud import API
-from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES, inspection_end
+from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES, SCRAP_APPROVERS, inspection_end, tool_ledger_status
 from .tool_self_check import BUILDINGS, MAX_FILE, TZ
 
 
@@ -97,6 +97,14 @@ _WORKSPACE_FIELDS = {
     'external': ('inspection', '送检工具', '计划检测日期', '实际检测日期', '送检报告'),
 }
 _QUALIFICATION = '工具检测是否合格'
+LEDGER_SELECTS = {
+    '办理类型': ('自检维护', '工具送检'),
+    '检测结论': ('合格', '不合格'),
+    '工具状态': ('合格', '报废', '检修中', '检修后合格', '检修后报废', '待报废审批', '报废未通过',
+                 '已送检', '送检合格', '送检不合格', '不合格待处置'),
+}
+LEDGER_FIELDS = {'送检报告': 17, '送检报告编号': 1, '检测机构': 1, '送检有效期至': 5,
+                 '检修结论日期': 5, '报废数量': 2, '报废审批记录': 1}
 # Keep retries within the same conservative window as the portal Bitable sync.
 WORKSPACE_CREATE_RETRY_SECONDS = 600
 
@@ -388,8 +396,80 @@ class ToolCloud:
             raise RiskError('飞书返回的工具工单流水号不匹配。', 503)
         return identity
 
+    def ledger_schema(self, path):
+        with self.workspace_lock:
+            schema = dict(self.schema('maintenance', path))
+            expected = {**LEDGER_FIELDS, **dict.fromkeys(LEDGER_SELECTS, 3)}
+            for name, kind in expected.items():
+                metadata = schema.get(name)
+                options = [{'name': option} for option in LEDGER_SELECTS.get(name, ())]
+                if metadata is None:
+                    payload = {'field_name': name, 'type': kind}
+                    if options:
+                        payload['property'] = {'options': options}
+                    try:
+                        created = self.cloud.request('POST', path + '/fields', json=payload)
+                        metadata = created.get('field') or {}
+                    finally:
+                        self.fields.pop('maintenance', None)
+                    if metadata.get('type') != kind:
+                        raise RiskError(f'工具办理台账字段「{name}」待回读核验。', 503)
+                    schema[name] = metadata
+                if metadata.get('type') != kind:
+                    raise RiskError(f'工具办理台账字段「{name}」的类型与配置不符。', 503)
+                values = {option.get('name') for option in (metadata.get('property') or {}).get('options', [])}
+                if options and any(option['name'] not in values for option in options):
+                    raise RiskError(f'工具办理台账单选字段「{name}」缺少所需选项。', 503)
+            self.fields['maintenance'] = (time.monotonic() + 300, schema)
+            return schema
+
+    def _ledger_fields(self, order, asset, job, save_file, link):
+        result, status = tool_ledger_status(order)
+        external = order['kind'] == 'external'
+        fields = {'办理类型': '工具送检' if external else '自检维护', '工具状态': status,
+                  '楼栋': f"南通{asset['scope']}楼", '维护工具': link('维护工具'),
+                  '计划维护日期': epoch(order['due']), '实际维护日期': epoch(order['actual']), STATE: status}
+        if result:
+            fields['检测结论'] = result
+        if votes := job.get('scrap_votes'):
+            labels = {'approve': '已同意', 'reject': '已驳回', '': '待审批'}
+            fields['报废审批记录'] = '\n'.join(
+                f"{SCRAP_APPROVERS[vote['employee_no']]} · {labels[vote['decision']]} {vote['at']} {vote['note']}".strip()
+                for vote in votes)
+        if external:
+            if not job['file_token']:
+                job['file_token'] = self.upload(order['report_name'], order['report'])
+                save_file(job['file_token'])
+            meta = json.loads(order['inspection_meta'])
+            fields['送检报告'] = [{'file_token': job['file_token']}]
+            if expiry := inspection_end(asset, order['actual'], meta):
+                fields['送检有效期至'] = epoch(expiry)
+            for key, name in (('report_no', '送检报告编号'), ('institution', '检测机构')):
+                if meta.get(key):
+                    fields[name] = meta[key]
+        else:
+            outcome, repaired = order['outcome'], bool(order['repair_started_at'])
+            fields[_QUALIFICATION] = ('不合格-转检修' if repaired else
+                '不合格-报废' if outcome in {'scrap', 'scrapped', 'rejected'} else '合格')
+            if repaired:
+                fields['转检修时间'] = epoch(order['repair_started_at'][:10])
+                if outcome in {'repaired', 'scrapped'} and order['resolved_at']:
+                    fields['检修结论日期'] = epoch(order['resolved_at'][:10])
+            if outcome == 'scrapped':
+                fields['报废时间'] = epoch(order['resolved_at'][:10] or order['submitted_at'][:10])
+                fields['报废数量'] = order['scrap_qty']
+        return fields
+
     def upload(self, name, report):
         return self._upload_media(name, report, '飞书未确认送检报告上传。')
+
+    def review_photo(self, content, mime):
+        data = self.cloud.request('POST', 'im/v1/images', data={'image_type': 'message'},
+                                  files={'image': ('现场照片.' + ('png' if mime == 'image/png' else 'jpg'), content, mime)})
+        key = data.get('image_key')
+        if not re.fullmatch(r'img_[A-Za-z0-9_-]+', str(key or '')):
+            raise RiskError('飞书尚未确认报废照片上传，将重试原审批卡片。', 503)
+        return key
 
     def _upload_media(self, name, content, missing_receipt):
         data = self.cloud.request('POST', 'drive/v1/medias/upload_all',
@@ -401,7 +481,7 @@ class ToolCloud:
         return token
 
     def write_workspace_item(self, session_id, item, report_name, report_bytes, actual,
-                             file_token='', remote_id='', *, save_file=None, attempted_at=None, save_attempt=None):
+                             file_token='', remote_id='', *, save_file=None, attempted_at=None, save_attempt=None, unified=False):
         """Publish and verify one immutable result. Callbacks persist receipts before creation.
 
         attempted_at is a Unix timestamp in seconds, or None/0 for the first attempt.
@@ -432,22 +512,32 @@ class ToolCloud:
             raise RiskError('工具报告附件回执无效。')
 
         dest, link, due, finish, attachment = _WORKSPACE_FIELDS[kind]
+        if unified and kind == 'external':
+            dest, link, due, finish = _WORKSPACE_FIELDS['self'][:4]
         path = self.cloud.table_path(BASE, TABLES[dest])
         key = f'workspace:{session_id}:{asset_id}'
         result = ('合格' if qualified else '工具不合格') if kind == 'self' else '已提交'
 
         with self.workspace_lock:
-            schema = {field['field_name']: field for field in self.cloud.all(path + '/fields')}
+            schema = self.ledger_schema(path) if unified else {
+                field['field_name']: field for field in self.cloud.all(path + '/fields')}
             fields = {KEY: key, STATE: result, '楼栋': f'南通{scope}楼', link: [asset_id],
                       due: planned, finish: completed}
-            if dest == 'maintenance':
+            if kind == 'self':
+                selected = '不合格-转检修' if unified and not qualified else result
                 selection = schema.get(_QUALIFICATION) or {}
                 options = (selection.get('property') or {}).get('options') or []
-                if selection.get('type') != 3 or result not in {
+                if selection.get('type') != 3 or selected not in {
                     option.get('name') for option in options if isinstance(option, dict)
                 }:
-                    raise RiskError(f'{DESTINATIONS[dest]}的「{_QUALIFICATION}」缺少「{result}」选项。', 503)
-                fields[_QUALIFICATION] = result
+                    raise RiskError(f'{DESTINATIONS[dest]}的「{_QUALIFICATION}」缺少「{selected}」选项。', 503)
+                if not unified or qualified:
+                    fields[_QUALIFICATION] = selected
+            if unified:
+                fields['办理类型'] = '工具送检' if kind == 'external' else '自检维护'
+                fields['工具状态'] = '已送检' if kind == 'external' else '合格' if qualified else '不合格待处置'
+                if kind == 'self':
+                    fields['检测结论'] = '合格' if qualified else '不合格'
             missing = (set(fields) | {attachment}) - schema.keys()
             if missing:
                 raise RiskError(f'{DESTINATIONS[dest]}缺少字段：' + '、'.join(sorted(missing)) + '。', 503)
@@ -480,7 +570,8 @@ class ToolCloud:
                 if not attempted_at:
                     save_attempt(time.time())
                 data = self.cloud.request('POST', path + '/records',
-                    params={'client_token': _stable_uuid4_client_token('tool-management:' + key)},
+                    params={'client_token': _stable_uuid4_client_token(
+                        ('tool-unified:' if unified and kind == 'external' else 'tool-management:') + key)},
                     json={'fields': fields | {attachment: [{'file_token': file_token}]}})
                 created = data.get('record')
                 identity = record_id(created.get('record_id')) if isinstance(created, dict) else ''
@@ -488,6 +579,12 @@ class ToolCloud:
                     raise RiskError('飞书未确认工具台账记录，请重试原任务。', 503)
             actual_fields = self._read_record(path, identity)['fields']
             tokens = _attachment_tokens(actual_fields.get(attachment))
+            if (unified and kind == 'self' and found and tokens == [file_token]
+                    and _link_ids(actual_fields.get(link)) == [asset_id] and plain(actual_fields.get(KEY)) == key
+                    and any(not plain(actual_fields.get(field)) for field in ('办理类型', '工具状态', '检测结论'))):
+                self.cloud.request('PUT', path + '/records/' + identity, json={'fields': {
+                    field: fields[field] for field in ('办理类型', '工具状态', '检测结论')}})
+                actual_fields = self._read_record(path, identity)['fields']
             if (len(tokens) != 1 or not isinstance(tokens[0], str) or not tokens[0]
                     or file_token and tokens[0] != file_token
                     or _link_ids(actual_fields.get(link)) != [asset_id]
@@ -497,7 +594,8 @@ class ToolCloud:
 
     def write(self, dest, order, asset, job, person_for, save_file):
         path = self.cloud.table_path(BASE, TABLES[dest])
-        schema = self.schema(dest, path)
+        unified = bool(job.get('unified_ledger'))
+        schema = self.ledger_schema(path) if unified else self.schema(dest, path)
         if job.get('record_content') and dest in ('maintenance','repair','scrap'):
             name='维护记录单' if dest=='maintenance' else '自检记录单'
             if name not in schema:
@@ -528,7 +626,9 @@ class ToolCloud:
                 raise RiskError(f'{DESTINATIONS[dest]}的「{field}」未关联工具底表。', 503)
             return [asset['id']]
 
-        if dest == 'maintenance':
+        if unified:
+            fields.update(self._ledger_fields(order, asset, job, save_file, link))
+        elif dest == 'maintenance':
             fields.update({'楼栋': '南通' + building, '维护工具': link('维护工具'),
                            '计划维护日期': epoch(order['due']), '实际维护日期': epoch(order['actual']),
                            '工具检测是否合格': '合格'})
@@ -576,7 +676,7 @@ class ToolCloud:
             existing = self._read_record(path, remote_id, params={'user_id_type': 'open_id'})['fields']
             if self._matches_order_fields(existing, fields, schema):
                 return remote_id
-            if not job['remote_id'] or plain(existing.get(KEY)) != key:
+            if (not unified and not job['remote_id']) or plain(existing.get(KEY)) != key:
                 raise RiskError('原工单已存在，但字段或附件未核验一致。', 503)
         params = {'user_id_type': 'open_id'}
         if remote_id:
@@ -623,7 +723,8 @@ class ToolCloud:
 
 
 def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None,
-                  deliver_review=None, review_link=None, resolve_leader=None):
+                  deliver_review=None, review_link=None, resolve_leader=None, scrap_review_link=None):
+    from .tool_review_cards import send_scrap_review_one
     next_inventory = next_reminder = 0
     while not stop.is_set():
         now = time.monotonic()
@@ -631,6 +732,10 @@ def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None,
             if deliver_review and review_link and resolve_leader:
                 for _ in range(4):
                     if stop.is_set() or not service.workspace_review_notice_one(deliver_review, review_link, resolve_leader):
+                        break
+            if deliver_review and scrap_review_link:
+                for _ in range(4):
+                    if stop.is_set() or not send_scrap_review_one(service, deliver_review, scrap_review_link):
                         break
             if now >= next_inventory:
                 next_inventory = now + 300

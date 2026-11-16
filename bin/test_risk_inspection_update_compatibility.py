@@ -252,6 +252,76 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
             self.assertEqual((self.client / relative).read_bytes(), content)
         self.assertFalse((self.client / PORTAL / 'risk_inspection_imports.py').exists())
 
+    def test_tool_review_patch_reopens_existing_draft_and_archived_report(self):
+        from bin.test_tool_workspace import WorkspaceTests
+
+        workflow = WorkspaceTests()
+        self.addCleanup(workflow.doCleanups)
+        workflow.setUp()
+        workflow.path = self.client / 'bin/data/state.sqlite3'
+        workflow.service = workflow.restart()
+        workflow.service.refresh()
+        old = workflow.complete(workflow.open(operation='original-archive'))
+        workflow.approve(workflow.service.workspace_submit(workflow.filler, old['id'], {'revision': old['revision']}))
+        while workflow.service.sync_one():
+            pass
+        workflow.service.archive_ready()
+        original_archive, = workflow.service.archive_dir.glob('*.zip')
+        archive_rel = original_archive.relative_to(self.client)
+        archive_bytes = original_archive.read_bytes()
+        original_report = workflow.service.workspace_download(workflow.filler, old['id'])
+        draft = workflow.complete(workflow.open(operation='original-draft'))
+        self.assertEqual(draft['status'], 'draft')
+        draft_values = {item['id']: item['values'] for item in draft['items']}
+        old_write_count = len(workflow.cloud.writes)
+
+        tool_sources = set((ROOT / PORTAL).glob('tool_*.py')) | {
+            ROOT / PORTAL / 'drill_management.py', ROOT / PORTAL / 'signature_print.py',
+        }
+        for source in tool_sources:
+            shutil.copy2(source, self.source / PORTAL / source.name)
+        alternate_archive = Path('custom-site-data/tool_management_archives/old.zip')
+        for relative in (archive_rel, alternate_archive):
+            candidate = self.source / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_bytes(b'must-not-ship')
+        alternate = self.client / alternate_archive
+        alternate.parent.mkdir(parents=True)
+        alternate.write_bytes(archive_bytes)
+
+        payload = self.build()
+        self.assertTrue((payload / PORTAL / 'tool_review_cards.py').is_file())
+        for relative in (archive_rel, alternate_archive):
+            self.assertFalse((payload / relative).exists())
+            # Older packers can still send such files. The updater protects local copies as well.
+            candidate = payload / relative
+            candidate.parent.mkdir(parents=True, exist_ok=True)
+            candidate.write_bytes(b'must-not-install')
+        payload = self.remote_payload(payload)
+        updater = self.updater(payload)
+        updater._apply_patch_worker(payload)
+        self.assertTrue(updater.results[-1][0], updater.results)
+        self.assertTrue(updater._last_patch_requires_restart)
+        self.assertEqual(original_archive.read_bytes(), archive_bytes)
+        self.assertEqual(alternate.read_bytes(), archive_bytes)
+
+        installed, package_name = self.installed_portal()
+        management = importlib.import_module(package_name + '.tool_management')
+        review = importlib.import_module(package_name + '.tool_review_cards')
+        self.assertTrue(callable(review.callback))
+        reopened = management.ToolManagement(installed.RiskInspections(workflow.path, lambda _: workflow.admin),
+                                             workflow.cloud)
+        result = reopened.workspace_get(workflow.filler, draft['id'])
+        self.assertEqual(result['status'], 'draft')
+        self.assertEqual({item['id']: item['values'] for item in result['items']}, draft_values)
+        self.assertEqual(reopened.workspace_get(workflow.filler, old['id'])['status'], 'archived')
+        with ZipFile(io.BytesIO(original_report)) as before, ZipFile(io.BytesIO(
+                reopened.workspace_download(workflow.filler, old['id']))) as after:
+            self.assertEqual({name: before.read(name) for name in before.namelist()},
+                             {name: after.read(name) for name in after.namelist()})
+        self.assertFalse(reopened.sync_one())
+        self.assertEqual(len(workflow.cloud.writes), old_write_count)
+
     def test_remote_transport_corruption_is_rejected_before_extract(self):
         payload = self.build()
         with self.assertRaises(ValueError):

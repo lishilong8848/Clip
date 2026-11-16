@@ -17,6 +17,7 @@ from lan_bitable_template_portal.tool_self_check import TEMPLATES, parse_templat
 from lan_bitable_template_portal.tool_workspace_workbook import (
     describe,
     fill,
+    initial_values,
     prefill,
     validate_inputs,
     validate_signature,
@@ -64,6 +65,20 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
         description = describe(content)
         return fill(content, {} if values is None else values, '审核人甲', '2026-11-13T15:30', self.signature,
                     answers(description) if checks is None else checks, ASSET, **kwargs)
+
+    def test_inspector_defaults_to_the_text_in_the_original_workbook(self):
+        before = describe(self.electrical)
+        sheet = before['schema']['sheet']
+        address = before['prefill_fields']['inspector']
+        output = io.BytesIO()
+        with self.subTest(address=address):
+            book = load(self.electrical)
+            book[sheet][address] = '原文件检查人'
+            book.save(output)
+            book.close()
+            after = describe(output.getvalue())
+            values = initial_values(after, ASSET, '登录人员', '2026-11-16')
+            self.assertEqual(values[f'{sheet}!{address}'], '原文件检查人')
 
     def test_all_original_samples_describe_and_fill(self):
         samples = sorted(SAMPLES.glob('*/*.xlsx'))

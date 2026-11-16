@@ -1137,6 +1137,9 @@ class FeishuAssistant:
                 if isinstance(action_value, dict) and action_value.get('kind') == 'signature_usage':
                     from .signature_usage_cards import callback
                     return JSONResponse(await callback(self.runtime, data, self.config['app_id']))
+                if isinstance(action_value, dict) and action_value.get('kind') == 'tool_review':
+                    from .tool_review_cards import callback
+                    return JSONResponse(await callback(self.runtime, data, app_id))
                 if isinstance(action_value, dict) and action_value.get('kind') == 'learning_weekly':
                     weekly = getattr(self.runtime, 'learning_weekly_cards', None)
                     if weekly is None:

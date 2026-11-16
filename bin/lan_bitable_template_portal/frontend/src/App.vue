@@ -229,10 +229,10 @@
 
     <PreShiftChecklistPage v-else-if="isPreShiftPage" :user="auth.user" />
     <RiskInspectionPage v-else-if="routePath === '/risk-inspections'"
-      :key="[auth.user?.open_id, routeParams.get('scope'), routeParams.get('tool_session'), routeParams.get('tool_asset')].join(':')"
+      :key="[auth.user?.open_id, routeParams.get('scope'), routeParams.get('tool_session'), routeParams.get('tool_asset'), routeParams.get('tool_order'), routeParams.get('tool_view')].join(':')"
       :release-id="routeParams.get('id') || ''" :view="routeParams.get('view') || ''" :scope="routeParams.get('scope') || ''"
       :tool-view="routeParams.get('tool_view') || ''" :tool-session="routeParams.get('tool_session') || ''"
-      :tool-asset="routeParams.get('tool_asset') || ''" />
+      :tool-asset="routeParams.get('tool_asset') || ''" :tool-order="routeParams.get('tool_order') || ''" />
     <WorkHandoverPage v-else-if="routePath === '/work-handover'" :key="String(auth.user?.open_id)+':'+(routeParams.get('id')||'')" :handover-id="routeParams.get('id') || ''" />
 
     <ScopeHome
