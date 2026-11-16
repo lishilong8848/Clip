@@ -124,6 +124,40 @@ class WorkspaceTests(unittest.TestCase):
             'signature': self.signature(), 'action': 'approve',
             'items': [{'asset_id': item['id'], 'revision': item['order_revision']} for item in session['items']]})
 
+    def test_submit_existing_multi_tool_draft_with_seconds_and_unassigned_reviewer(self):
+        draft = self.complete(self.open())
+        first, second = copy.deepcopy(draft['items'])
+        second['reviewer_id'] = None
+        layout = second['template']
+        checked_at = layout['schema']['sheet'] + '!' + layout['prefill_fields']['checked_at']
+        second['values'][checked_at] += ' 08:30:45'
+        saved = self.service.workspace_save(self.filler, draft['id'], {
+            'revision': draft['revision'], 'items': [second]})
+        self.assertEqual(saved['items'][1]['reviewer_id'], '')
+        self.assertEqual(saved['items'][0]['values'], first['values'])
+        restarted = self.restart()
+        request = {'revision': saved['revision']}
+        submitted = restarted.workspace_submit(self.filler, draft['id'], request)
+        self.assertEqual(submitted['status'], 'review_pending')
+        self.assertEqual(submitted['items'][1]['actual'], second['values'][checked_at][:10])
+        self.assertEqual(restarted.workspace_submit(self.filler, draft['id'], request), submitted)
+        reviewed = restarted.workspace_get(self.leader, draft['id'])
+        self.assertTrue(all(item['can_review'] for item in reviewed['items']))
+
+    def test_submit_invalid_check_date_names_tool_and_keeps_all_drafts(self):
+        draft = self.complete(self.open())
+        second = copy.deepcopy(draft['items'][1])
+        checked_at = second['template']['schema']['sheet'] + '!' + second['template']['prefill_fields']['checked_at']
+        second['values'][checked_at] = '2026-02-30 08:30:45'
+        saved = self.service.workspace_save(self.filler, draft['id'], {
+            'revision': draft['revision'], 'items': [second]})
+        with self.assertRaisesRegex(RiskError, r'「工具1」检查日期.*无效'):
+            self.service.workspace_submit(self.filler, draft['id'], {'revision': saved['revision']})
+        reopened = self.service.workspace_get(self.filler, draft['id'])
+        self.assertEqual(reopened['status'], 'draft')
+        self.assertEqual([item['order_status'] for item in reopened['items']], ['pending', 'pending'])
+        self.assertEqual(reopened['items'][1]['values'][checked_at], second['values'][checked_at])
+
     def test_template_relation_and_open_retry_are_scoped_and_persistent(self):
         first = self.open()
         self.assertEqual(self.open()['id'], first['id'])

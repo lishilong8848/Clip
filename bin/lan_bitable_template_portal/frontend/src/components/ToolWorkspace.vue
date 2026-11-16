@@ -192,7 +192,7 @@
                   <NRadioButton value="normal">合格</NRadioButton><NRadioButton value="repair">不合格 · 转检修</NRadioButton><NRadioButton value="scrap">不合格 · 报废</NRadioButton>
                 </NRadioGroup>
                 <NInput v-if="item.outcome === 'repair' || item.outcome === 'scrap'" v-model:value="item.reason"
-                  placeholder="处理原因" aria-label="处理原因" :disabled="!item.can_edit || !!busy" />
+                  placeholder="处理原因" aria-label="处理原因" :maxlength="1000" show-count :disabled="!item.can_edit || !!busy" />
                 <label v-if="item.outcome === 'scrap'">报废数量
                   <input v-model.number="item.quantity" type="number" min="1" :disabled="!item.can_edit || !!busy" />
                 </label>

@@ -22,6 +22,20 @@ ORDER_STATUS_FIELDS = """id,month,scope,kind,due,revision,owner,owner_name,submi
     report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct"""
 WORKSPACE_SESSION_SUMMARY_FIELDS = "id,revision,kind,status,owner,owner_name,created_at,updated_at,submitted_at,report_name"
 WORKSPACE_ITEM_STATUS_FIELDS = "asset_id,asset,template_key,order_id,binding_error,binding_pending,remote_id,attempted_at,archive_error"
+CHECKED_AT = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?)?')
+
+
+def workspace_text(value, label, limit, *, required=False):
+    if value is None:
+        value = ""
+    if not isinstance(value, str) or "\x00" in value:
+        raise RiskError(f"{label}格式不正确。")
+    if len(value) > limit:
+        raise RiskError(f"{label}不能超过 {limit} 字。")
+    value = value.strip()
+    if required and not value:
+        raise RiskError(f"请填写{label}。")
+    return value
 
 
 class ToolWorkspaceMixin:
@@ -463,7 +477,7 @@ class ToolWorkspaceMixin:
                 "template_id": item["template_id"], "template_version": item["template_version"],
                 "template": layouts.get(key), **{name: value for name, value in draft.items() if name != "legacy_review"},
                 "can_edit": can_edit and not item['binding_pending'] and not item['binding_error'],
-                "can_review": bool(can_manage and pending_review and draft.get('reviewer_id', '') in ('', actor['id'])),
+                "can_review": bool(can_manage and pending_review and draft.get('reviewer_id') in (None, '', actor['id'])),
                 'can_reassign': bool(can_manage and pending_review),
                 'can_withdraw': bool(order and not order['outcome'] and pending_review
                                      and (can_manage or self.owns_workspace_item(actor, order)
@@ -835,7 +849,7 @@ class ToolWorkspaceMixin:
             for patch in patches:
                 if not isinstance(patch, dict):
                     raise RiskError("工具填写内容格式无效。")
-                asset_id = text(patch.get("asset_id") or patch.get("id"), 120, True)
+                asset_id = workspace_text(patch.get("asset_id") or patch.get("id"), "工具记录编号", 120, required=True)
                 if asset_id not in by_id or asset_id in updates or patch.get("id", asset_id) != asset_id:
                     raise RiskError("工具填写记录不存在、重复或标识冲突。")
                 item = by_id[asset_id]
@@ -845,19 +859,22 @@ class ToolWorkspaceMixin:
                 if not order or not self.work_info(db, actor, order)["can_edit"]:
                     raise RiskError("仅已领取且待填写的工单可保存。", 403)
                 draft = json.loads(item["draft"])
+                label = f"「{json.loads(order['asset'])['name']}」"
                 previous_reviewer = draft.get("reviewer_id", "")
                 draft.update({name: patch[name] for name in EDIT_FIELDS if name in patch})
                 if draft.get("completion", "") not in ("", "completed", "incomplete"):
                     raise RiskError("请选择有效的完成情况。")
-                if "reviewer_id" in patch and previous_reviewer != patch["reviewer_id"]:
-                    reviewer_id = text(patch["reviewer_id"], 130)
-                    if reviewer_id:
+                if "reviewer_id" in patch:
+                    reviewer_id = workspace_text(patch["reviewer_id"], label + "审核人", 130)
+                    if reviewer_id and reviewer_id != previous_reviewer:
                         reviewer = actor if reviewer_id == actor["id"] else self.person_for(reviewer_id)
                         if not self.workspace_can_review(db, reviewer, order):
                             raise RiskError("只能选择本楼楼长或获授权的审核人。", 403)
+                        draft["reviewer_name"] = reviewer["name"]
+                    if not reviewer_id:
+                        draft["reviewer_name"] = ""
                     draft["reviewer_id"] = reviewer_id
-                    draft["reviewer_name"] = reviewer["name"] if reviewer_id else ""
-                draft["reason"] = text(draft.get("reason") or "", 1000)
+                draft["reason"] = workspace_text(draft.get("reason"), label + "处理原因", 1000)
                 key = item["template_key"]
                 if key not in contents:
                     contents[key] = db.execute(
@@ -1001,24 +1018,31 @@ class ToolWorkspaceMixin:
             return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
     def _workspace_check_result(self, db, order, draft, layout, now):
-        schema = json.loads(layout)["schema"]
-        address = "G11" if schema.get("layout") == "hvac" else "G8"
-        value = draft["values"].get(schema["sheet"] + "!" + address, "").strip().replace(" ", "T", 1)
-        if len(value) == 10:
-            value += "T00:00"
-        actual = timestamp(value)
-        if not actual or dt.datetime.fromisoformat(actual).replace(tzinfo=TZ) > now:
-            raise RiskError("请在原表填写有效检查日期或时间，不能晚于当前时间。")
+        workbook = json.loads(layout)
+        schema = workbook["schema"]
+        address = workbook.get("prefill_fields", {}).get("checked_at") or ("G11" if schema.get("layout") == "hvac" else "G8")
+        label = f"「{json.loads(order['asset'])['name']}」"
+        cell = schema["sheet"] + "!" + address
+        value = draft["values"].get(cell, "").strip()
+        date_label = f"{label}检查日期（{cell}）"
+        try:
+            if not CHECKED_AT.fullmatch(value):
+                raise ValueError
+            actual = dt.datetime.fromisoformat(value).replace(tzinfo=TZ)
+        except ValueError:
+            raise RiskError(f"{date_label}无效，请填写正确日期。") from None
+        if actual > now:
+            raise RiskError(f"{date_label}不能晚于当前时间。")
         outcome = draft.get("outcome")
         if outcome not in {"normal", "repair", "scrap"}:
             raise RiskError("请选择逐台检查结果。")
         if outcome == "normal" and "否" in draft["checks"].values():
             raise RiskError("检查项存在「否」，检测结果不能选「正常」。")
-        if outcome == "repair":
-            text(draft.get("reason") or "", 1000, True)
-        elif outcome == "scrap":
+        draft["reason"] = workspace_text(draft.get("reason"), label + "处理原因", 1000,
+                                         required=outcome in {"repair", "scrap"})
+        if outcome == "scrap":
             self.scrap_request(db, order, draft)
-        return draft | {"actual": actual[:10], "qualified": outcome == "normal",
+        return draft | {"actual": actual.date().isoformat(), "qualified": outcome == "normal",
                         "reviewer": "", "reviewed_at": "", "signature": ""}
 
     def workspace_review(self, actor, identity, body):
@@ -1070,7 +1094,7 @@ class ToolWorkspaceMixin:
                 if not review or review["status"] != "pending" or order["submitted_at"] or order["outcome"]:
                     raise RiskError("原工单已变化，请刷新后审核。", 409)
                 draft = json.loads(review["payload"])
-                if draft.get("reviewer_id", "") not in ("", actor["id"]):
+                if draft.get("reviewer_id") not in (None, "", actor["id"]):
                     raise RiskError("请选择该记录指定的审核人账号登录确认。", 403)
                 self._workspace_check_scopes(db, [item])
                 if approval:
