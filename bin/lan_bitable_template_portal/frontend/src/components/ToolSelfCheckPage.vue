@@ -2,16 +2,31 @@
   <section ref="root" class="tool-check" aria-label="工具管理" data-v2-inline-feedback>
     <header class="tool-header">
       <div class="tool-title">
-        <NButton v-if="!embedded || order" quaternary :aria-label="order ? '返回工单列表' : '返回专项功能'" :disabled="busy || !!workspace?.busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
+        <NButton v-if="!embedded || order" quaternary :aria-label="order ? '返回工具管理' : '返回专项功能'" :disabled="busy || !!workspace?.busy" @click="order ? leave(closeOrder) : back()"><ArrowLeft :size="19" /></NButton>
         <div>
           <p>{{ order ? `${order.scope}楼 · ${kindLabel(order)}工单` : '专项功能' }}</p>
           <h2>{{ order ? order.tool_name : '工具管理' }}</h2>
         </div>
       </div>
-      <NButton class="tool-refresh" :disabled="busy || !!workspace?.busy" :loading="loading || workspace?.busy === 'read'" @click="refresh"><RefreshCw :size="16" />刷新</NButton>
+      <div class="tool-bar">
+        <NButton v-if="board && !order && !workspace?.busy" :disabled="busy || addingTool" @click="openNewTool">添加工具</NButton>
+        <NButton class="tool-refresh" :disabled="busy || !!workspace?.busy" :loading="loading || workspace?.busy === 'read'" @click="refresh"><RefreshCw :size="16" />刷新</NButton>
+      </div>
     </header>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" :bordered="false" role="status">{{ message }}</NAlert>
+
+    <section v-if="addingTool" class="tool-library" aria-label="添加工具">
+      <h3>添加工具到底表</h3><p>仅填写需要的字段；结果未确认时请先核对底表，避免重复添加。</p>
+      <div class="tool-fields"><label v-for="field in toolFields" :key="field.name">{{field.name}}
+        <select v-if="field.type===3" v-model="newTool[field.name]"><option value="">请选择</option><option v-for="choice in field.options" :key="choice" :value="choice">{{choice}}</option></select>
+        <input v-else-if="field.type===7" v-model="newTool[field.name]" type="checkbox" />
+        <input v-else-if="field.type===2" v-model.number="newTool[field.name]" type="number" min="0" />
+        <input v-else-if="field.type===5" v-model="newTool[field.name]" type="date" />
+        <input v-else v-model="newTool[field.name]" maxlength="500" />
+      </label></div>
+      <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
+    </section>
 
     <NSpin v-if="!order" :show="loading">
       <template v-if="board">
@@ -24,7 +39,7 @@
         </nav>
         <NAlert v-if="board.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
-          :session-id="linkedSession" :asset-id="linkedAsset" @open-order="openWorkspaceOrder" @asset-history="historyAsset = $event" />
+          :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
@@ -80,85 +95,23 @@
         <div v-else class="tool-worklist">
           <div class="tool-list-head">
             <div class="tool-counts">
-              <template v-if="view === 'orders'">
-                <span><strong>{{ pendingCount }}</strong> 待填写</span>
-                <span><strong>{{ reviewCount }}</strong> 待审核</span>
-                <span><strong>{{ submittedCount }}</strong> 已提交</span>
-                <NButton v-if="board.carryovers?.length" size="tiny" :type="stateFilter === 'carryover' ? 'primary' : 'default'"
-                  :disabled="busy || loading" @click="stateFilter = stateFilter === 'carryover' ? 'all' : 'carryover'">跨月待办 {{ board.carryovers.length }}</NButton>
-              </template>
-              <template v-else>
-                <span><strong>{{ repairCount }}</strong> 检修中</span>
-                <span><strong>{{ board.followups.length - repairCount }}</strong> 待报废审批</span>
-              </template>
+              <span><strong>{{ repairCount }}</strong> 检修中</span>
+              <span><strong>{{ board.followups.length - repairCount }}</strong> 待报废审批</span>
             </div>
-            <div v-if="view === 'orders' && board.can_download_month" class="tool-archive">
-              <span class="tool-muted" role="status">{{ archiveLabel }}</span>
-              <NButton v-if="board.archived_at" :disabled="busy" @click="download(`/archive/${month}`)"><Download :size="16" />{{ board.archive_status === 'snapshot' ? '下载已有快照' : '下载月度归档' }}</NButton>
-            </div>
-            <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading || !!newOrderPlan" @click="openNewOrder">新增本月工单</NButton>
-            <NButton v-if="view === 'orders' && board.can_create_orders" :disabled="busy || loading" @click="previewMonthClear">清理本月工单</NButton>
-            <NButton v-if="view === 'orders' && !newOrderPlan && !bulkMode && visibleOrders.some(row => row.can_delete)" :disabled="busy || loading" @click="bulkMode = true">批量删除</NButton>
-            <NButton v-if="view==='orders'" :disabled="busy" @click="openNewTool">添加工具</NButton>
           </div>
-          <section v-if="addingTool" class="tool-library" aria-label="添加工具">
-            <h3>添加工具到底表</h3><p>仅填写需要的字段；结果未确认时请先核对底表，避免重复添加。</p>
-            <div class="tool-fields"><label v-for="field in toolFields" :key="field.name">{{field.name}}
-              <select v-if="field.type===3" v-model="newTool[field.name]"><option value="">请选择</option><option v-for="choice in field.options" :key="choice" :value="choice">{{choice}}</option></select>
-              <input v-else-if="field.type===7" v-model="newTool[field.name]" type="checkbox" />
-              <input v-else-if="field.type===2" v-model.number="newTool[field.name]" type="number" min="0" />
-              <input v-else-if="field.type===5" v-model="newTool[field.name]" type="date" />
-              <input v-else v-model="newTool[field.name]" maxlength="500" />
-            </label></div>
-            <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
-          </section>
-          <ToolOrderBatchCreate v-if="view === 'orders' && newOrderPlan" :plan="newOrderPlan" :busy="busy"
-            @close="newOrderPlan = null" @create="createOrders" @refresh="openNewOrder" @sync="syncInventory" />
-          <NModal :show="!!monthClear" preset="dialog" title="清理本月工单"
-            :closable="!busy" :mask-closable="!busy" :close-on-esc="!busy"
-            @update:show="show => { if (!show && !busy) monthClear = null }">
-            <template v-if="monthClear">
-              <p v-if="monthClear.pending_count || monthClear.deleted_count">清理 {{ monthClear.month }} 的 {{ monthClear.pending_count }} 张未提交工单，
-                并释放 {{ monthClear.deleted_count }} 张手动删除工单占用的计划名额。符合本月周期的工具可重新勾选生成，原草稿与附件保留。</p>
-              <p v-else>{{ monthClear.month }} 暂无可清理的工单。可在「新增本月工单」查看计划或同步工具底表。</p>
-              <p v-if="error" role="alert">{{ error }}</p>
-            </template>
-            <template #action>
-              <NButton :disabled="busy" @click="monthClear = null">关闭</NButton>
-              <NButton v-if="monthClear && (monthClear.pending_count || monthClear.deleted_count)" type="error"
-                :loading="busy" :disabled="busy" @click="clearMonthOrders">确认清理</NButton>
-            </template>
-          </NModal>
           <div class="tool-filters" aria-label="筛选工单">
             <NInput v-model:value="search" class="tool-search" clearable :disabled="busy" :input-props="{ 'aria-label': '搜索工具、楼栋、位置或领取人' }" placeholder="搜索工具或楼栋">
               <template #prefix><Search :size="16" /></template>
             </NInput>
-            <input v-if="view === 'orders'" class="tool-month" type="month" aria-label="工单月份" :value="month" :disabled="busy" @change="changeMonth" />
-            <NSelect v-if="view === 'orders'" v-model:value="kindFilter" aria-label="工单类型" :options="kindOptions" :disabled="busy" />
             <NSelect v-model:value="stateFilter" aria-label="工单状态" :options="stateOptions" :disabled="busy" />
           </div>
-          <div v-if="view === 'orders' && bulkMode" class="tool-bulk-bar" aria-label="批量删除工单">
-            <NCheckbox :checked="pageAllSelected" :indeterminate="pageSomeSelected && !pageAllSelected"
-              :disabled="busy || loading || !selectablePage.length" @update:checked="checked => toggleSelection(selectablePage, checked)">选择本页</NCheckbox>
-            <NCheckbox :checked="allSelected" :indeterminate="allSomeSelected && !allSelected"
-              :disabled="busy || loading || !selectableAll.length" @update:checked="checked => toggleSelection(selectableAll, checked)">勾选全部</NCheckbox>
-            <span class="tool-muted" aria-live="polite">已选 {{ selectedRows.length }} 张<span v-if="allSelected">（当前筛选下全部可删工单）</span></span>
-            <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }" @positive-click="deleteSelectedOrders">
-              <template #trigger><NButton size="small" type="error" :loading="busy" :disabled="loading || !selectedRows.length">删除所选</NButton></template>
-              确认删除 {{ month }} 的 {{ selectedRows.length }} 张工单？操作记录和草稿将保留。
-            </NPopconfirm>
-            <NButton size="small" :disabled="busy || loading" @click="exitBulkMode">退出批量</NButton>
-          </div>
-          <div v-if="visibleOrders.length" class="tool-orders" role="table" aria-label="工单列表">
+          <div v-if="visibleOrders.length" class="tool-orders" role="table" aria-label="检修和报废记录">
             <div class="tool-column-labels" role="row">
               <span role="columnheader">工具与位置</span><span role="columnheader">楼栋与类型</span>
-              <span role="columnheader">计划与人员</span><span role="columnheader">状态</span><span role="columnheader">操作</span>
+              <span role="columnheader">办理人员</span><span role="columnheader">状态</span><span role="columnheader">操作</span>
             </div>
             <article v-for="row in pagedOrders" :key="row.id" class="tool-order" role="row">
               <div class="tool-order-name" role="cell">
-                <NCheckbox v-if="bulkMode && row.can_delete" class="tool-row-checkbox" :checked="selectedIds.has(row.id)"
-                  :aria-label="`选择 ${row.scope}楼 ${row.tool_name} ${kindLabel(row)}工单`" :disabled="busy || loading"
-                  @update:checked="checked => toggleSelection([row], checked)" />
                 <div>
                   <strong>{{ row.tool_name }}</strong>
                   <small v-if="row.model || row.location">{{ [row.model, row.location].filter(Boolean).join(' · ') }}</small>
@@ -167,13 +120,11 @@
               </div>
               <div class="tool-order-kind" role="cell"><strong>{{ row.scope }}楼</strong><small>{{ kindLabel(row) }}工单</small></div>
               <div class="tool-order-meta" role="cell">
-                <span>计划 {{ row.due }}</span><small>{{ assignment(row) }}</small>
-                <small v-if="row.month !== month">接续 {{ row.month }} 原单</small>
+                <small>{{ assignment(row) }}</small>
                 <small v-if="row.submitted_at">提交 {{ row.submitted_at.slice(0,10) }}</small>
               </div>
               <div class="tool-order-state" role="cell">
-                <NTag :class="{ 'tool-status-closed': row.status !== 'pending' && view === 'orders' }" :type="view === 'followups' ? 'warning' : row.status === 'pending' ? 'success' : 'default'" :bordered="false">{{ view === 'followups' ? outcomeLabels[row.outcome] : status(row) }}</NTag>
-                <small v-if="row.outcome && view === 'orders'">{{ outcomeLabels[row.outcome] }}</small>
+                <NTag type="warning" :bordered="false">{{ outcomeLabels[row.outcome] }}</NTag>
                 <small v-if="row.sync.length" :class="{ 'tool-pending': row.sync.some(item => item.state !== 'done') }">
                   {{ row.sync.some(item => item.verifying) ? '飞书待核验' : row.sync.some(item => item.error) ? '同步失败 · 自动重试'
                     : row.sync.some(item => item.state !== 'done') ? '飞书待同步' : '飞书已同步' }}
@@ -185,15 +136,6 @@
                 <NPopconfirm v-if="row.can_release" @positive-click="release(row)">
                   <template #trigger><NButton size="small" :disabled="busy">释放领取</NButton></template>
                   草稿将保留，工单可重新领取。
-                </NPopconfirm>
-                <NPopconfirm v-if="row.can_restore" positive-text="确认恢复" negative-text="取消" @positive-click="restoreOrder(row)">
-                  <template #trigger><NButton size="small" :disabled="busy || loading">恢复原单</NButton></template>
-                  恢复这张工单及原草稿？
-                </NPopconfirm>
-                <NPopconfirm v-if="row.can_delete && !bulkMode" positive-text="确认删除" negative-text="取消"
-                  :positive-button-props="{ type: 'error' }" @positive-click="deleteOrder(row)">
-                  <template #trigger><NButton size="small" :disabled="busy || loading">删除</NButton></template>
-                  删除本月未提交工单？操作记录和草稿将保留。
                 </NPopconfirm>
               </div>
             </article>
@@ -350,11 +292,10 @@
 
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
-import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
+import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, Settings2, Trash2, Upload, Wrench } from 'lucide-vue-next';
 import { ApiError, downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
-import ToolOrderBatchCreate, { type OrderCreationPlan, type PlannedOrder } from './ToolOrderBatchCreate.vue';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 import ToolAssetHistory from './ToolAssetHistory.vue';
 import ToolWorkspace from './ToolWorkspace.vue';
@@ -388,109 +329,32 @@ interface Detail extends Order {
   draft: { outcome?: string; reason?: string; quantity?: number };
 }
 interface Board {
-  month: string; orders: Order[]; followups: Order[]; templates: Template[]; can_manage_templates: boolean;
-  can_download_month: boolean; archived_at: string | null; archive_updating?: boolean; actor_name: string; can_create_orders: boolean;
-  inventory_at: string; inventory_error: string;
-  carryovers?: Order[]; plan_count?: number | null; waiting_sync?: number; archive_status?: 'none' | 'snapshot' | 'settled';
+  month: string; followups: Order[]; templates: Template[]; can_manage_templates: boolean;
+  inventory_error: string;
 }
-const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', label: '自检工单' }, { value: 'external', label: '送检工单' }];
 const outcomeOptions = [{ value: 'normal', label: '正常' }, { value: 'repair', label: '转检修' }, { value: 'scrap', label: '报废' }];
 const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检修中', repaired: '检修完成', scrap: '待报废审批',
   scrapped: '已批准报废', rejected: '报废未通过' };
-const reminderView = props.toolView === 'reminder';
-const view = ref(props.toolView === 'orders' || reminderView ? 'orders' : 'workspace');
+const view = ref('workspace');
 const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref('');
 const linkedAsset = ref('');
-const kindFilter = ref('all');
-const stateFilter = ref(reminderView ? 'unfinished' : 'all');
+const stateFilter = ref('all');
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
-const search = ref(view.value === 'orders' && props.scope && props.scope !== 'ALL' ? props.scope + '楼' : '');
+const search = ref('');
 const page = ref(1);
 const pageSize = 20;
-const maxBulkDelete = 200;
-const bulkMode = ref(false);
-const selectedIds = ref(new Set<string>());
 const root = ref<HTMLElement>();
 const actual = ref('');
 const outcome = ref('');
 const reason = ref('');
 const reviewReason = ref('');
 const quantity = ref(1);
-const newOrderPlan = ref<OrderCreationPlan | null>(null);
-interface MonthClear { month: string; fingerprint: string; pending_count: number; deleted_count: number }
-const monthClear = ref<MonthClear | null>(null);
 const addingTool=ref(false),toolFields=ref<{name:string;type:number;options:string[]}[]>([]),newTool=ref<Record<string,any>>({}),toolOperation=ref('');
 async function openNewTool(){await mutate(async()=>{const data=await requestJson(api+'/inventory/fields') as {fields:typeof toolFields.value;scopes:string[]};toolFields.value=data.fields.map(f=>f.name==='楼栋'?{...f,options:f.options.filter(o=>data.scopes.some(s=>o===s+'楼'||o==='南通'+s+'楼'))}:f);newTool.value={'一级分类':'B工具类'};toolOperation.value=crypto.randomUUID().replace(/-/g,'');addingTool.value=true;});}
 async function createTool(){await mutate(async()=>{await requestJson(api+'/inventory/new',{method:'POST',body:JSON.stringify({operation_id:toolOperation.value,fields:newTool.value})});addingTool.value=false;message.value='工具已添加，库存将在下次同步后显示。';});}
-async function readOrderPlan() {
-  return await requestJson(api + '/orders/batch-create', { cache: 'no-store' }) as OrderCreationPlan;
-}
-async function readMonthClear() {
-  return await requestJson(api + '/orders/clear-month', { cache: 'no-store' }) as MonthClear;
-}
-async function previewMonthClear() {
-  await mutate(async () => { monthClear.value = await readMonthClear(); });
-}
-async function clearMonthOrders() {
-  const preview = monthClear.value;
-  if (!preview) return;
-  await mutate(async () => {
-    let result: { cleared_count: number };
-    try {
-      result = await requestJson(api + '/orders/clear-month', {
-        method: 'POST', body: JSON.stringify({ month: preview.month, fingerprint: preview.fingerprint }),
-      }) as typeof result;
-    } catch (failure) {
-      if (failure instanceof ApiError && failure.status === 409) monthClear.value = await readMonthClear();
-      throw failure;
-    }
-    monthClear.value = null;
-    exitBulkMode();
-    message.value = `已处理 ${result.cleared_count} 张工单，可重新勾选本月计划。`;
-    await loadBoard(preview.month);
-    newOrderPlan.value = await readOrderPlan();
-  });
-}
-async function openNewOrder() {
-  await mutate(async () => {
-    newOrderPlan.value = await readOrderPlan();
-    addingTool.value = false;
-    exitBulkMode();
-  });
-}
-async function syncInventory() {
-  await mutate(async () => {
-    // 「重读计划」 only re-reads the local mirror; this forces the cloud sync the plan depends on.
-    newOrderPlan.value = await requestJson(api + '/inventory/refresh', {
-      method: 'POST', body: JSON.stringify({}), cache: 'no-store',
-    }) as OrderCreationPlan;
-    message.value = '工具底表已同步，本月清单已重新生成。';
-  });
-}
-async function createOrders(items: PlannedOrder[]) {
-  const plan = newOrderPlan.value;
-  if (!plan || !items.length) return;
-  await mutate(async () => {
-    const orders = items.map(({ asset_id, kind }) => ({ asset_id, kind }));
-    let result: { month: string; created_count: number; existing_count: number };
-    try {
-      result = await requestJson(api + '/orders/batch-create', {
-        method: 'POST', body: JSON.stringify({ month: plan.month, orders }),
-      }) as typeof result;
-    } catch (failure) {
-      if (failure instanceof ApiError && failure.status === 409) {
-        try { newOrderPlan.value = await readOrderPlan(); } catch { /* Show the original conflict. */ }
-      }
-      throw failure;
-    }
-    newOrderPlan.value = null;
-    await loadBoard(result.month);
-    message.value = `已创建 ${result.created_count} 张工单${result.existing_count ? `，已有 ${result.existing_count} 张` : ''}。`;
-  });
-}
 const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
@@ -515,85 +379,29 @@ let disposed = false;
 let listPosition = 0;
 
 const active = computed(() => records.value.find(record => record.entry_id === selected.value));
-const pendingCount = computed(() => board.value?.orders.filter(row => row.status === 'pending').length || 0);
-const reviewCount = computed(() => board.value?.orders.filter(row => row.status === 'review_pending').length || 0);
-const submittedCount = computed(() => board.value?.orders.filter(row => row.status === 'submitted').length || 0);
 const repairCount = computed(() => board.value?.followups.filter(row => row.outcome === 'repair').length || 0);
 const tabs = computed(() => [
   { value: 'workspace', label: '工作台', icon: ClipboardList, count: 0 },
-  { value: 'orders', label: '月度工单', icon: ClipboardList, count: pendingCount.value },
   { value: 'followups', label: '检修与报废', icon: Wrench, count: board.value?.followups.length || 0 },
   ...(board.value?.can_manage_templates ? [{ value: 'settings', label: '工具与模板', icon: Settings2, count: 0 }] : []),
 ]);
-const stateOptions = computed(() => [{ value: 'all', label: view.value === 'orders' ? '有效工单' : '全部状态' }, ...(view.value === 'followups'
-  ? [{ value: 'repair', label: '检修中' }, { value: 'scrap', label: '待报废审批' }]
-  : [{ value: 'unfinished', label: '待办工单' }, { value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' },
-    ...((board.value?.carryovers?.length || stateFilter.value === 'carryover') ? [{ value:'carryover', label:'跨月待办' }] : [])])]);
-const archiveLabel = computed(() => {
-  const data = board.value;
-  if (!data) return '';
-  if (data.waiting_sync) return `待同步 ${data.waiting_sync} 张`;
-  if (data.archive_updating) return '归档更新中';
-  if (data.archive_status === 'settled') return '本月已结清';
-  if (data.archived_at) return '已有归档快照';
-  return '工单办结并同步后自动归档';
-});
+const stateOptions = [{ value: 'all', label: '全部状态' }, { value: 'repair', label: '检修中' },
+  { value: 'scrap', label: '待报废审批' }];
 const visibleOrders = computed(() => {
-  const followups = view.value === 'followups';
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const carryovers = board.value?.carryovers || [];
-  const rows = followups ? board.value?.followups || [] : stateFilter.value === 'carryover'
-    ? carryovers : [...carryovers, ...(board.value?.orders || []).filter(row => !carryovers.some(prior => prior.id === row.id))];
-  return rows.filter(row => {
-    if (reminderView && props.scope && props.scope !== 'ALL' && row.scope !== props.scope) return false;
-    if (!followups && kindFilter.value !== 'all' && row.kind !== kindFilter.value) return false;
-    if (!followups && stateFilter.value === 'all' && row.status === 'cancelled') return false;
-    if (stateFilter.value === 'unfinished' && !['pending', 'review_pending'].includes(row.status)) return false;
-    if (!['all', 'carryover', 'unfinished'].includes(stateFilter.value) && (followups ? row.outcome : row.status) !== stateFilter.value) return false;
-    const searchable = [row.tool_name, row.location, row.model, row.scope + '楼', row.owner_name].join(' ').toLowerCase();
-    return terms.every(term => searchable.includes(term));
-  });
+  return (board.value?.followups || []).filter(row =>
+    (stateFilter.value === 'all' || row.outcome === stateFilter.value) &&
+    terms.every(term => [row.tool_name, row.model, row.location, row.scope + '楼', row.owner_name]
+      .join(' ').toLowerCase().includes(term)));
 });
 const pagedOrders = computed(() => visibleOrders.value.slice((page.value - 1) * pageSize, page.value * pageSize));
-const selectablePage = computed(() => pagedOrders.value.filter(row => row.can_delete));
-const selectedRows = computed(() => visibleOrders.value.filter(row => row.can_delete && selectedIds.value.has(row.id)));
-const pageAllSelected = computed(() => !!selectablePage.value.length && selectablePage.value.every(row => selectedIds.value.has(row.id)));
-const pageSomeSelected = computed(() => selectablePage.value.some(row => selectedIds.value.has(row.id)));
-const selectableAll = computed(() => visibleOrders.value.filter(row => row.can_delete));
-const allSelected = computed(() => !!selectableAll.value.length && selectableAll.value.every(row => selectedIds.value.has(row.id)));
-const allSomeSelected = computed(() => selectableAll.value.some(row => selectedIds.value.has(row.id)));
-function exitBulkMode() {
-  bulkMode.value = false;
-  selectedIds.value.clear();
-}
-function toggleSelection(rows: Order[], checked: boolean) {
-  const next = new Set(selectedIds.value);
-  for (const row of rows) {
-    if (checked) next.add(row.id);
-    else next.delete(row.id);
-  }
-  if (next.size > maxBulkDelete) {
-    error.value = `每次最多选择 ${maxBulkDelete} 张工单。`;
-    return;
-  }
-  error.value = '';
-  selectedIds.value = next;
-}
-const emptyDescription = computed(() => {
-  if (search.value.trim() || stateFilter.value !== 'all' || view.value === 'orders' && kindFilter.value !== 'all') return '没有符合筛选条件的工单';
-  if (view.value === 'followups') return '暂无待处理的检修或报废审批';
-  return board.value?.inventory_at ? '本月暂无工单' : '正在等待工具底表首次同步';
-});
+const emptyDescription = computed(() => search.value.trim() || stateFilter.value !== 'all'
+  ? '没有符合筛选条件的记录' : '暂无待处理的检修或报废审批');
 watch(view, () => {
   stateFilter.value = 'all';
-  newOrderPlan.value = null;
   if (view.value === 'settings') void loadLibrary().catch(fail);
 });
-watch([view, month], exitBulkMode);
-watch([view, search, stateFilter, kindFilter, month], () => {
-  page.value = 1;
-  selectedIds.value.clear();
-});
+watch([view, search, stateFilter], () => { page.value = 1; });
 watch(() => visibleOrders.value.length, count => { page.value = Math.min(page.value, Math.max(1, Math.ceil(count / pageSize))); });
 const transitions = computed<{ action: string; label: string; type: 'primary' | 'warning' }[]>(() => order.value?.can_repair
   ? [{ action: 'repaired', label: '检修完成', type: 'primary' }, { action: 'repair-scrap', label: '检修转报废', type: 'warning' }]
@@ -660,16 +468,9 @@ async function loadBoard(target = month.value) {
     if (!request.signal.aborted && !disposed) {
       board.value = data;
       month.value = data.month;
-      selectedIds.value.clear();
     }
   } catch (value) { if (!request.signal.aborted) fail(value); }
   finally { if (reader === request) loading.value = false; }
-}
-function changeMonth(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const target = input.value;
-  input.value = month.value;
-  if (target && target !== month.value) { message.value = ''; void loadBoard(target); }
 }
 function applyOrder(data: Detail) {
   order.value = data;
@@ -686,48 +487,9 @@ function applyOrder(data: Detail) {
 async function action(row: Order, kind: string, data: object = {}) {
   return requestJson(api + orderPath(row) + '/' + kind, { method: 'POST', body: JSON.stringify({ revision: row.revision, ...data }) });
 }
-async function finishDeletion(ids: string[]) {
-  if (board.value) {
-    board.value.orders = board.value.orders.map(row => ids.includes(row.id) ? {
-      ...row, revision: row.revision + 1, status: 'cancelled', outcome: 'cancelled',
-      can_delete: false, can_claim: false, can_edit: false, can_release: false,
-    } : row);
-  }
-  exitBulkMode();
-  await loadBoard();
-  message.value = `已删除 ${ids.length} 张工单，操作记录和草稿已保留。`;
-}
-async function deleteOrder(row: Order) {
-  await mutate(async () => {
-    await action(row, 'delete');
-    await finishDeletion([row.id]);
-  });
-}
-async function restoreOrder(row: Order) {
-  await mutate(async () => {
-    await action(row, 'restore');
-    stateFilter.value = 'all';
-    await loadBoard();
-    message.value = '已恢复原工单，可继续填写。';
-  });
-}
-async function deleteSelectedOrders() {
-  const orders = selectedRows.value.map(({ id, revision }) => ({ id, revision }));
-  if (!orders.length || loading.value) return;
-  await mutate(async () => {
-    const receipt = await requestJson(`${api}/orders/batch-delete`, {
-      method: 'POST', body: JSON.stringify({ month: month.value, orders }),
-    }) as { deleted_ids?: string[] };
-    const ids = receipt?.deleted_ids;
-    if (!Array.isArray(ids) || ids.length !== orders.length || !orders.every(row => ids.includes(row.id))) {
-      throw new Error('批量删除结果暂未确认，请刷新工单列表核对。');
-    }
-    await finishDeletion(ids);
-  });
-}
 async function openOrder(row: Order, claim = false) {
   if (busy.value) return;
-  if (row.workspace_id && (row.status === 'pending' || row.status === 'review_pending' || view.value === 'orders')) {
+  if (row.workspace_id && (row.status === 'pending' || row.status === 'review_pending' || view.value !== 'followups')) {
     linkedSession.value = row.workspace_id;
     linkedAsset.value = row.asset_id || '';
     view.value = 'workspace';
@@ -744,7 +506,7 @@ async function openOrder(row: Order, claim = false) {
     if (claim) await action(row, 'claim');
     const data = await requestJson(api + orderPath(row), { cache: 'no-store' }) as Detail;
     if (!disposed) {
-      if (data.workspace_id && (data.status === 'pending' || data.status === 'review_pending' || view.value === 'orders')) {
+      if (data.workspace_id && (data.status === 'pending' || data.status === 'review_pending' || view.value !== 'followups')) {
         order.value = undefined;
         linkedSession.value = data.workspace_id;
         linkedAsset.value = data.asset_id || '';
@@ -763,7 +525,6 @@ function openWorkspaceOrder(id: string, orderMonth: string) {
   historyAsset.value = '';
   const proceed = () => {
     month.value = orderMonth;
-    view.value = 'orders';
     void openOrder({id} as Order);
   };
   if (workspace.value) workspace.value.leave(proceed);
@@ -798,7 +559,6 @@ function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
   else if (view.value === 'workspace' && workspace.value) void workspace.value.refresh();
   else if (view.value === 'settings') void mutate(loadLibrary);
-  else if (newOrderPlan.value) void openNewOrder();
   else void loadBoard();
 }
 function selectView(next: string) {
@@ -806,8 +566,7 @@ function selectView(next: string) {
   const proceed = () => {
     linkedSession.value = linkedAsset.value = '';
     view.value = next;
-    if (next === 'followups' && stateFilter.value === 'unfinished') stateFilter.value = 'all';
-    if (next === 'orders' || next === 'followups') void loadBoard();
+    if (next === 'followups') void loadBoard();
   };
   if (workspace.value) workspace.value.leave(proceed);
   else proceed();
@@ -1011,22 +770,18 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
 .tool-nav-count::before { content:'·'; margin-right:4px; }
 .tool-source-error { margin-bottom:12px; }
 .tool-worklist { overflow:hidden; }
-.tool-list-head,.tool-filters,.tool-list-foot,.tool-bulk-bar { padding:10px 14px; }
+.tool-list-head,.tool-filters,.tool-list-foot { padding:10px 14px; }
 .tool-list-head,.tool-list-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
-.tool-bulk-bar { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; border-top:1px solid var(--tool-line); font-size:13px; }
-.tool-bulk-bar :deep(.n-checkbox) { align-items:center; min-height:32px; }
 .tool-list-foot { color:var(--tool-muted); font-size:13px; border-top:1px solid var(--tool-line); }
 .tool-counts { display:flex; gap:8px; flex-wrap:wrap; }
 .tool-counts span { display:inline-flex; gap:6px; align-items:baseline; padding:4px 8px; border-radius:6px; background:var(--tool-soft); font-size:13px; }
 .tool-counts strong { font-size:17px; font-variant-numeric:tabular-nums; }
 .tool-counts span:first-child { background:var(--tool-tint); }
-.tool-archive { font-size:13px; }
 .tool-filters {
-  display:grid; grid-template-columns:minmax(200px,1fr) repeat(3,minmax(0,132px)); gap:8px; align-items:stretch;
+  display:grid; grid-template-columns:minmax(200px,1fr) minmax(0,155px); gap:8px; align-items:stretch;
   border-top:1px solid var(--tool-line);
 }
-.tool-filters:not(:has(.tool-month)) { grid-template-columns:minmax(200px,1fr) minmax(0,155px); }
-.tool-month,input,.tool-fields textarea,.tool-result textarea {
+input,.tool-fields textarea,.tool-result textarea {
   box-sizing:border-box; min-width:0; max-width:100%; min-height:34px; padding:7px 9px;
   border:1px solid var(--tool-line); border-radius:6px; background:var(--tool-surface); color:inherit; font:inherit;
 }
@@ -1041,7 +796,6 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
 .tool-order-name { display:flex; align-items:center; gap:8px; }
 .tool-order-name>div { min-width:0; }
 .tool-order-name strong { font-size:14px; }
-.tool-row-checkbox { flex:none; justify-content:center; min-width:28px; min-height:32px; align-items:center; }
 .tool-order-actions { display:flex; gap:5px; flex-wrap:wrap; }
 .tool-order-state small.tool-pending,.tool-pending { color:var(--v2-warning,#855509); }
 .tool-muted { color:var(--tool-muted); }
@@ -1115,9 +869,8 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
 @container (max-width:680px) {
   .tool-nav>.n-button { flex:1 1 0; padding-inline:4px; }
   .tool-nav-count { display:none; }
-  .tool-list-head,.tool-filters,.tool-list-foot,.tool-bulk-bar { padding:8px 10px; }
-  .tool-filters { grid-template-columns:minmax(0,1fr) minmax(0,140px); }
-  .tool-filters:not(:has(.tool-month)) { grid-template-columns:minmax(0,1fr) minmax(0,124px); }
+  .tool-list-head,.tool-filters,.tool-list-foot { padding:8px 10px; }
+  .tool-filters { grid-template-columns:minmax(0,1fr) minmax(0,124px); }
   .tool-column-labels { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); }
   .tool-orders { display:grid; gap:7px; padding:0 8px 8px; }
   .tool-order {

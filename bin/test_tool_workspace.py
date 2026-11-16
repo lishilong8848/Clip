@@ -193,13 +193,18 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(all(data == report for _, _, data, _, _ in self.cloud.writes.values()))
         self.assertTrue(all(date == actual for _, _, _, date, _ in self.cloud.writes.values()))
 
-    def test_existing_monthly_order_is_shared_and_review_results_route_per_tool(self):
+    def test_cancelled_monthly_orders_do_not_block_workspace_and_review_routes_per_tool(self):
         self.service.configure(self.admin, 'park-manager', {'manager_id': self.admin['id']})
         self.service.schedule()
         before = {order['asset_id']: order for order in self.service.list(self.leader)['orders']}
+        for order in before.values():
+            self.service.cancel_order(self.leader, order['id'], {'revision': order['revision']})
+        self.assertTrue(all(asset['selectable'] for asset in self.service.workspace_list(self.filler)['assets']))
         draft = self.complete(self.open(), ('repair', 'scrap'))
+        current = {item['id']: item['order_id'] for item in draft['items']}
         for item in draft['items']:
-            self.assertEqual(item['order_id'], before[item['id']]['id'])
+            self.assertNotEqual(item['order_id'], before[item['id']]['id'])
+            self.assertEqual(self.service.detail(self.leader, before[item['id']]['id'])['status'], 'cancelled')
             info = self.service.detail(self.leader, item['order_id'])
             self.assertEqual(info['workspace_id'], draft['id'])
             with self.assertRaisesRegex(RiskError, '原表办理'):
@@ -210,23 +215,60 @@ class WorkspaceTests(unittest.TestCase):
         while self.service.sync_one():
             pass
         self.assertEqual(set(self.cloud.writes), {
-            (before['recTool0']['id'], 'repair'), (before['recTool0']['id'], 'change'),
-            (before['recTool1']['id'], 'scrap'), (before['recTool1']['id'], 'change'),
+            (current['recTool0'], 'repair'), (current['recTool0'], 'change'),
+            (current['recTool1'], 'scrap'), (current['recTool1'], 'change'),
         })
         self.assertEqual({item['reviewer'] for item in approved['items']}, {self.leader['name']})
 
-    def test_temporary_order_requires_explicit_consent(self):
+    def test_workspace_can_open_before_planned_date_and_reuses_active_batch(self):
         asset = self.cloud.assets[0]
         asset['self_first'] = '2099-01-01'
         self.service.refresh()
+        with self.service.connect(True) as db:
+            db.execute("UPDATE tool_inventory SET config=? WHERE id=?",
+                       ('{"self_cycle":"停用","external_cycle":"一年"}', asset['id']))
+        shown = next(row for row in self.service.workspace_list(self.filler)['assets'] if row['id'] == asset['id'])
+        self.assertEqual((shown['self_cycle'], shown['external_cycle'], shown['eligible_kinds']), ('每月', '', ['self']))
         body = dict(kind='self', asset_ids=[asset['id']], template_id='recTemplate', operation_id='temporary')
-        with self.assertRaisesRegex(RiskError, '确认新增临时'):
-            self.service.workspace_open(self.filler, body)
-        self.assertEqual(self.cloud.bindings, [])
-        session = self.service.workspace_open(self.filler, body | {'allow_temporary': True})
-        self.service.schedule()
+        session = self.service.workspace_open(self.filler, body)
+        self.service = self.restart()
+        reopened = self.service.workspace_open(self.filler, body | {'operation_id': 'continue'})
+        self.assertEqual(reopened['id'], session['id'])
         orders = [row for row in self.service.list(self.filler)['orders'] if row['asset_id'] == asset['id']]
         self.assertEqual([row['id'] for row in orders], [session['items'][0]['order_id']])
+
+    def test_view_only_admin_cannot_reserve_assets(self):
+        self.assertTrue(self.service.workspace_list(self.admin)['assets'])
+        self.assertFalse(any(asset['selectable'] for asset in self.service.workspace_list(self.admin)['assets']))
+        with self.assertRaisesRegex(RiskError, '获授权人员可办理'):
+            self.service.workspace_open(self.admin, {
+                'kind': 'external', 'asset_ids': ['recTool2'], 'operation_id': 'view-only',
+            })
+        self.assertEqual(self.service.workspace_list(self.filler)['sessions'], [])
+
+    def test_upgrade_keeps_old_batches_and_can_open_same_month_after_archive(self):
+        from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
+
+        active = self.open()
+        old_schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0',
+                                               'UNIQUE(month,asset_id,kind)')
+        with self.service.connect(True) as db:
+            db.execute('ALTER TABLE tool_work_orders RENAME TO upgrade_fixture')
+            db.execute(old_schema)
+            columns = ','.join(row['name'] for row in db.execute('PRAGMA table_info(tool_work_orders)'))
+            db.execute(f'INSERT INTO tool_work_orders({columns}) SELECT {columns} FROM upgrade_fixture')
+            db.execute('DROP TABLE upgrade_fixture')
+        self.service = self.restart()
+        self.assertEqual(self.service.workspace_get(self.filler, active['id'])['items'], active['items'])
+        ready = self.complete(active)
+        pending = self.service.workspace_submit(self.filler, ready['id'], {'revision': ready['revision']})
+        self.approve(pending)
+        while self.service.sync_one():
+            pass
+        self.assertEqual(self.service.workspace_get(self.filler, active['id'])['status'], 'archived')
+        new_batch = self.open(operation='another-inspection')
+        self.assertNotEqual(new_batch['id'], active['id'])
+        self.assertEqual(len(self.cloud.writes), 2)
 
     def test_upgrade_reuses_verified_legacy_receipt_without_republishing(self):
         draft = self.complete(self.open())
@@ -313,6 +355,8 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(client.get(base).status_code, 401)
             headers = {'actor': 'admin'}
             self.assertEqual(client.get(base, headers=headers).status_code, 200)
+            self.assertEqual(client.post('/api/tool-self-check/orders/batch-create', headers=headers, json={}).status_code, 410)
+            self.assertEqual(client.post('/api/tool-self-check/orders/clear-month', headers=headers, json={}).status_code, 410)
             self.assertEqual(client.post(base + '/refresh', headers={**headers, 'origin': 'https://wrong.invalid'}).status_code, 403)
             opened = client.post(base + '/open', headers=headers, json={
                 'kind': 'external', 'asset_ids': ['recTool2'], 'operation_id': 'api-report',
@@ -347,8 +391,7 @@ class WorkspaceTests(unittest.TestCase):
             calls.append('workspace')
             stop.set()
             return True
-        service = SimpleNamespace(refresh=lambda: None, schedule=lambda: None, archive_ready=lambda: None,
-                                  sync_one=lambda: False, workspace_sync_one=archive)
+        service = SimpleNamespace(refresh=lambda: None, sync_one=lambda: False, workspace_sync_one=archive)
         run_tool_jobs(service, stop)
         self.assertEqual(calls, ['workspace'])
 

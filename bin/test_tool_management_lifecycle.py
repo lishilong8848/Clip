@@ -39,11 +39,15 @@ class ToolManagementLifecycleTest(TestCase):
             db.execute('INSERT OR REPLACE INTO tool_inventory(id,source,active) VALUES(?,?,1)', (name, dumps(asset)))
         return asset
 
-    def order(self, asset, identity, month, due, *, kind='self', **fields):
+    def order(self, asset, identity, month, due, *, kind='self', workspace=False, **fields):
         with self.service.connect(True) as db:
             self.service.insert_work_order(db, identity, month, asset, kind, due)
             for field, value in fields.items():
                 db.execute(f'UPDATE tool_work_orders SET {field}=? WHERE id=?', (value, identity))
+            if workspace:
+                db.execute('''INSERT INTO tool_workspace_items(session_id,asset_id,position,asset,order_id,
+                    template_id,template_version,template_key,previous_template,draft)
+                    VALUES(?,?,0,?,?,'','','','','{}')''', ('batch-' + identity, asset['id'], dumps(asset), identity))
 
     def test_carryover_uses_original_order_even_after_cycle_changes(self):
         asset = self.asset('recCarryover', self_cycle='', external_cycle='一年')
@@ -54,7 +58,7 @@ class ToolManagementLifecycleTest(TestCase):
         with self.assertRaises(RiskError):
             self.service.create_order(self.a, {'asset_id': asset['id'], 'kind': 'external'})
         with self.service.connect() as db:
-            self.assertEqual(self.service._workspace_order_plan(db, self.a, asset, 'external')['mode'], 'original')
+            self.assertEqual(self.service._workspace_asset_state(db, self.a, asset, 'external')['mode'], 'direct')
         self.service.schedule(NOW)
         claimed = self.service.action(self.a, 'original', 'claim', {'revision': 0})
         self.assertEqual((claimed['id'], claimed['month'], claimed['kind']), ('original', '2026-10', 'self'))
@@ -141,14 +145,15 @@ class ToolManagementLifecycleTest(TestCase):
         carryover = self.asset('carryover-A')
         waiting = self.asset('waiting-B', 'B')
         cancelled = self.asset('cancelled-A')
-        self.order(carryover, 'late', '2026-08', '2026-08-29')
-        self.order(waiting, 'review', '2026-11', '2026-11-15')
-        self.order(cancelled, 'no', '2026-09', '2026-09-01', outcome='cancelled')
+        self.order(carryover, 'late', '2026-08', '2026-08-29', workspace=True)
+        self.order(waiting, 'review', '2026-11', '2026-11-15', workspace=True)
+        self.order(cancelled, 'no', '2026-09', '2026-09-01', workspace=True, outcome='cancelled')
+        self.order(self.asset('legacy-only'), 'legacy', '2026-11', '2026-11-01')
         with self.service.connect(True) as db:
             db.execute('''INSERT INTO tool_work_reviews(order_id,status,payload,submitted_by,submitted_at)
                 VALUES ('review','pending','{}','person','2026-11-15T08:00:00+08:00')''')
         due = self.asset('due-seven-B', 'B', self_cycle='', external_cycle='一年', external_first='2026-11-22')
-        self.order(due, 'due', '2026-11', '2026-11-22', kind='external')
+        self.order(due, 'due', '2026-11', '2026-11-22', kind='external', workspace=True)
         self.asset('due-eight-E', 'E', self_cycle='', external_cycle='一年', external_first='2026-11-23')
         self.asset('expired-A', self_cycle='', external_cycle='一年', external_last='2025-10-03')
         self.asset('retired-H', 'H', self_cycle='', external_cycle='一年', retired=True)
@@ -166,6 +171,7 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertIn('carryover-A', calls['A'][1])
         self.assertNotIn('expired-A', calls['A'][1])
         self.assertNotIn('cancelled-A', calls['A'][1])
+        self.assertNotIn('legacy-only', calls['A'][1])
         self.assertIn('waiting-B', calls['B'][1])
         self.assertIn('due-seven-B', calls['B'][1])
         self.assertEqual(self.service.send_building_reminders(deliver, utc)['sent'], [])
@@ -175,7 +181,7 @@ class ToolManagementLifecycleTest(TestCase):
 
     def test_failed_delivery_retries_same_payload_and_uuid_with_active_lease(self):
         asset = self.asset('late-original')
-        self.order(asset, 'late', '2026-10', '2026-10-31')
+        self.order(asset, 'late', '2026-10', '2026-10-31', workspace=True)
         attempted, overlaps = [], []
 
         def fail(scope, day, card):
@@ -204,13 +210,13 @@ class ToolManagementLifecycleTest(TestCase):
         submitted = self.asset('submitted', 'D', self_cycle='', external_cycle='一年')
         self.asset('inventory-only', 'D', self_cycle='', external_cycle='一年')
         self.order(submitted, 'done', '2026-11', '2026-11-01', kind='external',
-                   submitted_at='2026-11-02T09:00:00+08:00', actual='2026-11-02')
+                   workspace=True, submitted_at='2026-11-02T09:00:00+08:00', actual='2026-11-02')
         calls = []
         deliver = lambda scope, _, card: calls.append((scope, card)) or True
         self.assertEqual(self.service.send_building_reminders(deliver, NOW)['sent'], [])
         pending = self.asset('pending-E', 'E', self_cycle='', external_cycle='一年')
-        self.order(pending, 'pending', '2026-11', '2026-11-01', kind='external')
-        link = 'https://portal.example/risk-inspections?view=tool-self-check&tool_view=reminder&scope=E'
+        self.order(pending, 'pending', '2026-11', '2026-11-01', kind='external', workspace=True)
+        link = 'https://portal.example/risk-inspections?view=tool-self-check&scope=E'
         self.assertEqual(self.service.send_building_reminders(deliver, NOW, link_for_scope=lambda _: link)['sent'], ['E'])
         scope, card = calls[0]
         self.assertEqual((scope, card['schema']), ('E', '2.0'))
@@ -219,7 +225,7 @@ class ToolManagementLifecycleTest(TestCase):
 
     def test_failed_card_is_not_replayed_after_all_orders_close(self):
         asset = self.asset('pending-retry')
-        self.order(asset, 'retry', '2026-10', '2026-10-31')
+        self.order(asset, 'retry', '2026-10', '2026-10-31', workspace=True)
         first = self.service.send_building_reminders(lambda *_: False, NOW)
         self.assertEqual(first['failed'], ['A'])
         with self.service.connect(True) as db:

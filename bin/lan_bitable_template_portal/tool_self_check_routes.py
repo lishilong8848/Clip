@@ -38,6 +38,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             month = params.get('month', '')
             identity = params.get('identity', '')
             path = request.url.path.removeprefix(base).strip('/')
+            if path in {'order-candidates', 'orders', 'orders/batch-create', 'orders/batch-delete', 'orders/clear-month'} or (
+                path.startswith('orders/') and path.endswith(('/delete', '/restore'))
+            ):
+                raise RiskError('月度工单已停用，请在工具工作台办理。', 410)
             if path == 'workspace' or path.startswith('workspace/'):
                 if request.method == 'GET':
                     if path == 'workspace':
@@ -93,12 +97,6 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.list, actor, request.query_params.get('month', ''))
                 elif path == 'inventory':
                     result = await asyncio.to_thread(svc.inventory, actor)
-                elif path == 'order-candidates':
-                    result = await asyncio.to_thread(svc.order_candidates, actor)
-                elif path == 'orders/batch-create':
-                    result = await asyncio.to_thread(svc.planned_order_candidates, actor)
-                elif path == 'orders/clear-month':
-                    result = await asyncio.to_thread(svc.clear_month_plan, actor)
                 elif path == 'inventory/fields':
                     result = await asyncio.to_thread(svc.new_inventory_fields, actor)
                 elif path == 'templates':
@@ -151,22 +149,10 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             body = await controller._read_json_request(request, max_bytes=512 * 1024)
             if not isinstance(body, dict):
                 raise RiskError('工具自检请求格式无效。')
-            if path == 'orders':
-                return response(await asyncio.to_thread(svc.create_order, actor, body))
-            if path == 'orders/batch-create':
-                return response(await asyncio.to_thread(svc.create_planned_orders, actor, body))
-            if path == 'orders/batch-delete':
-                return response(await asyncio.to_thread(svc.cancel_orders, actor, body))
-            if path == 'orders/clear-month':
-                return response(await asyncio.to_thread(svc.clear_month_plan, actor, body))
             if path == 'inventory/new':
                 return response(await asyncio.to_thread(svc.create_inventory, actor, body))
             if path == 'inventory/refresh':
                 return response(await asyncio.to_thread(svc.refresh_inventory, actor))
-            if path.endswith('/delete') and path.startswith('orders/'):
-                return response(await asyncio.to_thread(svc.cancel_order, actor, identity, body))
-            if path.endswith('/restore') and path.startswith('orders/'):
-                return response(await asyncio.to_thread(svc.restore_order, actor, identity, body))
             if path.endswith('/clone') and path.startswith('templates/'):
                 return response(await asyncio.to_thread(svc.clone_library_template, actor, identity, body))
             if path.endswith('/delete') and path.startswith('templates/'):

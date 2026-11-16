@@ -177,7 +177,7 @@ class ToolManagementLifecycle:
         with self.connect() as db:
             db.execute('BEGIN')
             inventory = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (asset_id,)).fetchone()
-            asset = self.effective(inventory) if inventory else None
+            asset = self._workspace_inventory_asset(inventory) if inventory else None
             if asset and not can_scope(actor, asset['scope']):
                 raise missing
             visible = [row for row in db.execute('''SELECT work.id,work.month,work.scope,work.kind,work.due,work.asset,
@@ -214,6 +214,7 @@ class ToolManagementLifecycle:
         for row in db.execute('''SELECT work.scope,work.kind,work.due,work.asset,review.status AS review_status
             FROM tool_work_orders work LEFT JOIN tool_work_reviews review ON review.order_id=work.id
             WHERE work.submitted_at IS NULL AND work.outcome=''
+            AND EXISTS (SELECT 1 FROM tool_workspace_items item WHERE item.order_id=work.id)
             AND (review.status='pending' OR (work.due<>'' AND
                 (work.due<? OR (work.kind='external' AND work.due<=?))))''', (day, limit)):
             if row['scope'] not in BUILDINGS:

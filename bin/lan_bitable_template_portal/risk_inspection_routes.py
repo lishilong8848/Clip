@@ -415,7 +415,7 @@ def install_risk_inspection_routes(app, controller, runtime):
             configured = deployment()
             base = (configured[1] if configured and local_host(configured[0])
                     else runtime.service._critical_guard_public_base_url())
-            return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&tool_view=reminder&scope={scope}" if base else ''
+            return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&scope={scope}" if base else ''
 
         while not stop.is_set():
             try:

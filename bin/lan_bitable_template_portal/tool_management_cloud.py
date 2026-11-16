@@ -608,7 +608,7 @@ class ToolCloud:
 
 
 def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None):
-    next_inventory = next_archive = next_reminder = 0
+    next_inventory = next_reminder = 0
     while not stop.is_set():
         now = time.monotonic()
         try:
@@ -621,10 +621,6 @@ def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None):
                     with service.connect(True) as db:
                         service.set_state(db, 'inventory_error', str(exc) if isinstance(exc, RiskError)
                                           else '工具底表读取失败，保留上次库存并自动重试。')
-            if now >= next_archive:
-                next_archive = now + 30
-                service.schedule()
-                service.archive_ready()
             for _ in range(4):
                 if stop.is_set() or not service.sync_one():
                     break

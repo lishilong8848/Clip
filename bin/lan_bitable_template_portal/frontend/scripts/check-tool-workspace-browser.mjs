@@ -231,9 +231,13 @@ async function noOverflow() {
   return metrics;
 }
 async function submit(label = '提交审核') { await button(label).click(); await clickTwice(button('确认提交')); }
-async function openWithConfirmation(label = '打开填写') {
-  await button(label).click();
-  await clickTwice(button('确认'));
+async function openWorkspace(label = '打开填写', replaceTemplate = false) {
+  if (replaceTemplate) {
+    await button(label).click();
+    await clickTwice(button('确认'));
+  } else {
+    await clickTwice(button(label));
+  }
 }
 try {
   await mkdir(output, { recursive: true });
@@ -259,7 +263,9 @@ try {
   await check('left multi-select, template table, retained explicit choice, scope/model/brand/cycle', async () => {
     const unavailable = page.getByRole('checkbox', { name: '选择工具 周期冲突工具', exact: true });
     assert.equal(await unavailable.getAttribute('aria-checked'), 'false');
-    await chooseAssets('电能质量分析仪');
+    assert.equal(await button('月度工单').count(), 0);
+    await page.getByText('电能质量分析仪', { exact: true }).click();
+    assert(await page.getByRole('checkbox', { name: '选择工具 电能质量分析仪', exact: true }).isChecked());
     await chooseRadio('选用模板 电气原表模板');
     await chooseAssets('温湿度仪');
     assert(await radio('选用模板 电气原表模板').isChecked());
@@ -269,12 +275,12 @@ try {
   });
   await check('repeat open is guarded; partial opening survives reload; resume is bodyless and retryable', async () => {
     state.failOpen = true;
-    await openWithConfirmation();
+    await openWorkspace();
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
     assert.equal(count('/open'), 1); assert.equal(state.sessions.size, 1);
     const operation = actions('open')[0].body.operation_id;
     state.failOpen = true;
-    await openWithConfirmation();
+    await openWorkspace();
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
     assert.equal(actions('open')[1].body.operation_id, operation); assert.equal(state.sessions.size, 1);
     await page.reload();
@@ -320,13 +326,13 @@ try {
   });
   await check('complete both original worksheets without entering reviewer data', async () => {
     await fillChecks();
-    await chooseRadio('正常');
+    await chooseRadio('合格');
     await checkWorksheetLayout();
     assert.equal(await page.getByLabel('审核人', { exact: true }).count(), 0);
     await page.screenshot({ path: path.join(output, 'desktop-electrical-review.png'), fullPage: true });
     await button('温湿度仪 · B楼').click();
     assert.equal(await page.locator('.sheet-scroll').evaluate(element => element.scrollTop), 0, 'Changing tools resets only worksheet scroll');
-    await fillChecks(); await chooseRadio('正常');
+    await fillChecks(); await chooseRadio('合格');
     await page.getByLabel('填写 ' + layouts.hvac.schema.sheet + '!E20', { exact: true }).fill('23.5');
     await page.locator('.sheet-table tr').last().scrollIntoViewIfNeeded();
     await page.screenshot({ path: path.join(output, 'desktop-hvac-review.png'), fullPage: true });
@@ -356,7 +362,7 @@ try {
     await button('返回选择').click();
     await chooseRadio('送检');
     await chooseAssets('送检压力表', '送检绝缘表');
-    await openWithConfirmation('打开送检');
+    await openWorkspace('打开送检');
     await page.getByText('2 台工具共用一份送检报告。', { exact: true }).waitFor();
     await work().locator('input[type=file]').setInputFiles({ name: '共用报告.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4\nfixture only') });
     state.failReport = true;
@@ -381,9 +387,9 @@ try {
     await chooseAssets('电能质量分析仪', '温湿度仪');
     await chooseRadio('选用模板 暖通原表模板');
     await button('打开填写').click();
-    await page.getByText('确认办理工单', { exact: true }).waitFor();
+    await page.getByText('更换已关联模板？', { exact: true }).waitFor();
     await button('取消').click(); assert.equal(count('/open'), 0);
-    await openWithConfirmation();
+    await openWorkspace('打开填写', true);
     await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
     assert.equal(count('/open'), 1);
     assert.equal(actions('open')[0].body.template_id, 'hvac');
@@ -398,7 +404,7 @@ try {
     await noOverflow();
     await page.screenshot({ path: path.join(output, 'mobile-selection.png'), fullPage: true });
     await chooseAssets('电能质量分析仪', '温湿度仪');
-    await openWithConfirmation();
+    await openWorkspace();
     await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
     const note = page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', { exact: true });
     await note.fill('手机草稿内容');
@@ -415,7 +421,7 @@ try {
     state.assets = Array.from({ length: 200 }, (_, index) => ({ ...clone(initialAssets[0]), id: 'bulk-' + index, name: '批量工具' + (index + 1) }));
     await page.goto(v2);
     await page.getByRole('checkbox', { name: '选择筛选后的工具', exact: true }).click();
-    await openWithConfirmation();
+    await openWorkspace();
     await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor({ timeout: 30000 });
     assert.equal(await page.locator('.tool-tabs button').count(), 200);
     for (const width of [390, 1440]) {

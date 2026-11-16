@@ -30,6 +30,19 @@ MAX_ORDER_DELETIONS = 200
 MANUAL_DELETE = '手动删除工单'
 PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
+WORK_ORDER_SCHEMA = """
+    CREATE TABLE IF NOT EXISTS tool_work_orders(
+        id TEXT PRIMARY KEY, month TEXT NOT NULL, asset_id TEXT NOT NULL, scope TEXT NOT NULL,
+        kind TEXT NOT NULL, due TEXT NOT NULL, asset TEXT NOT NULL, supervisor TEXT NOT NULL DEFAULT '',
+        owner TEXT NOT NULL DEFAULT '', owner_name TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0,
+        records TEXT NOT NULL DEFAULT '[]', draft TEXT NOT NULL DEFAULT '{}',
+        submit_key TEXT NOT NULL DEFAULT '', report_name TEXT NOT NULL DEFAULT '', report BLOB,
+        actual TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '',
+        submitted_at TEXT, manager TEXT NOT NULL DEFAULT '', scrap_qty INTEGER NOT NULL DEFAULT 0,
+        reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
+        scrap_reason TEXT NOT NULL DEFAULT '', scrap_status TEXT NOT NULL DEFAULT '', resolved_at TEXT NOT NULL DEFAULT '',
+        inspection_meta TEXT NOT NULL DEFAULT '{}', workspace_direct INTEGER NOT NULL DEFAULT 0)
+"""
 
 
 def inspection_meta(body, assets, actual, *, required=True):
@@ -167,19 +180,6 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     id TEXT PRIMARY KEY, source TEXT NOT NULL, active INTEGER NOT NULL,
                     config TEXT NOT NULL DEFAULT '{}', version INTEGER NOT NULL DEFAULT 0);
                 CREATE TABLE IF NOT EXISTS tool_management_state(key TEXT PRIMARY KEY, value TEXT NOT NULL);
-                CREATE TABLE IF NOT EXISTS tool_work_orders(
-                    id TEXT PRIMARY KEY, month TEXT NOT NULL, asset_id TEXT NOT NULL, scope TEXT NOT NULL,
-                    kind TEXT NOT NULL, due TEXT NOT NULL, asset TEXT NOT NULL, supervisor TEXT NOT NULL DEFAULT '',
-                    owner TEXT NOT NULL DEFAULT '', owner_name TEXT NOT NULL DEFAULT '', revision INTEGER NOT NULL DEFAULT 0,
-                    records TEXT NOT NULL DEFAULT '[]', draft TEXT NOT NULL DEFAULT '{}',
-                    submit_key TEXT NOT NULL DEFAULT '', report_name TEXT NOT NULL DEFAULT '', report BLOB,
-                    actual TEXT NOT NULL DEFAULT '', outcome TEXT NOT NULL DEFAULT '',
-                    submitted_at TEXT, manager TEXT NOT NULL DEFAULT '', scrap_qty INTEGER NOT NULL DEFAULT 0,
-                    reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
-                    scrap_reason TEXT NOT NULL DEFAULT '', scrap_status TEXT NOT NULL DEFAULT '', resolved_at TEXT NOT NULL DEFAULT '',
-                    UNIQUE(month,asset_id,kind));
-                CREATE INDEX IF NOT EXISTS tool_work_orders_month ON tool_work_orders(month,scope);
-                CREATE INDEX IF NOT EXISTS tool_work_orders_asset ON tool_work_orders(asset_id,kind);
                 CREATE TABLE IF NOT EXISTS tool_work_audit(
                     id INTEGER PRIMARY KEY, order_id TEXT NOT NULL, action TEXT NOT NULL,
                     actor TEXT NOT NULL, name TEXT NOT NULL, at TEXT NOT NULL, detail TEXT NOT NULL);
@@ -206,8 +206,21 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute('ALTER TABLE tool_work_sync ADD COLUMN attempted_at REAL NOT NULL DEFAULT 0')
             if not any(row['name'] == 'candidate_id' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
                 db.execute("ALTER TABLE tool_work_sync ADD COLUMN candidate_id TEXT NOT NULL DEFAULT ''")
-            if not any(row['name'] == 'inspection_meta' for row in db.execute('PRAGMA table_info(tool_work_orders)')):
-                db.execute("ALTER TABLE tool_work_orders ADD COLUMN inspection_meta TEXT NOT NULL DEFAULT '{}'")
+            columns = [row['name'] for row in db.execute('PRAGMA table_info(tool_work_orders)')]
+            if columns and 'workspace_direct' not in columns:
+                # SQLite cannot drop the old table-level UNIQUE constraint. Keep
+                # IDs intact so drafts, attachments, audits and receipts still link.
+                db.execute('ALTER TABLE tool_work_orders RENAME TO tool_work_orders_before_workspace')
+                db.execute(WORK_ORDER_SCHEMA)
+                names = ','.join('"' + name.replace('"', '""') + '"' for name in columns)
+                db.execute(f'INSERT INTO tool_work_orders({names}) SELECT {names} FROM tool_work_orders_before_workspace')
+                db.execute('DROP TABLE tool_work_orders_before_workspace')
+            else:
+                db.execute(WORK_ORDER_SCHEMA)
+            db.execute('CREATE INDEX IF NOT EXISTS tool_work_orders_month ON tool_work_orders(month,scope)')
+            db.execute('CREATE INDEX IF NOT EXISTS tool_work_orders_asset ON tool_work_orders(asset_id,kind)')
+            db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS tool_work_orders_legacy_month
+                ON tool_work_orders(month,asset_id,kind) WHERE workspace_direct=0''')
         self._init_tool_workspace()
 
     @staticmethod
@@ -238,7 +251,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def inventory(self, actor):
         self.access(actor)
         if not self.administrator(actor):
-            raise RiskError('仅管理员可配置工具排期。', 403)
+            raise RiskError('仅管理员可维护工具配置。', 403)
         with self.connect() as db:
             assets = []
             for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
@@ -266,7 +279,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def configure(self, actor, identity, body):
         self.access(actor)
         if not self.administrator(actor):
-            raise RiskError('仅管理员可配置工具排期。', 403)
+            raise RiskError('仅管理员可维护工具配置。', 403)
         if identity == 'park-manager':
             if not all(can_scope(actor, s) for s in BUILDINGS):
                 raise RiskError('仅全楼管理员可配置园区经理。', 403)
@@ -287,27 +300,31 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             scope = self.effective(row)['scope']
             if body.get('revision') != row['version']:
                 raise RiskError('配置已更新，请刷新后重试。', 409)
-        config = {}
-        for kind in KINDS:
-            cycle = text(body.get(kind + '_cycle', ''), 10)
-            if cycle and cycle not in CYCLES and cycle != '停用':
-                raise RiskError('请选择有效周期。')
-            if cycle:
-                config[kind + '_cycle'] = cycle
-            first = date_value(body.get(kind + '_first', ''))
-            if first:
-                config[kind + '_first'] = first
+        updates_cycle = any(kind + suffix in body for kind in KINDS for suffix in ('_cycle', '_first'))
+        config = {} if updates_cycle else json.loads(row['config'])
+        if updates_cycle:
+            for kind in KINDS:
+                cycle = text(body.get(kind + '_cycle', ''), 10)
+                if cycle and cycle not in CYCLES and cycle != '停用':
+                    raise RiskError('请选择有效周期。')
+                if cycle:
+                    config[kind + '_cycle'] = cycle
+                first = date_value(body.get(kind + '_first', ''))
+                if first:
+                    config[kind + '_first'] = first
         supervisor = text(body.get('supervisor', ''), 120)
         if supervisor:
             if not self.supervisor(self.person_for(supervisor), scope):
                 raise RiskError('请选择对该楼栋有权限的在岗专业主管。')
             config['supervisor'] = supervisor
+        else:
+            config.pop('supervisor', None)
         with self.connect(True) as db:
             row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
             if not row or row['version'] != body['revision'] or self.effective(row)['scope'] != scope:
                 raise RiskError('配置或工具归属已更新，请刷新后重试。', 409)
             _, cycle_problem = configured_kind(json.loads(row['source']) | config)
-            if cycle_problem.startswith('同时'):
+            if updates_cycle and cycle_problem.startswith('同时'):
                 raise RiskError(cycle_problem, 409)
             db.execute('UPDATE tool_inventory SET config=?,version=version+1 WHERE id=?', (dumps(config), identity))
             db.execute("""UPDATE tool_work_orders SET supervisor=?,revision=revision+1
@@ -515,10 +532,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             return self.work_info(db,actor,self._work(db,actor,order_id))
 
     @staticmethod
-    def insert_work_order(db, identity, month, asset, kind, due):
-        db.execute('''INSERT INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor)
-            VALUES(?,?,?,?,?,?,?,?)''', (identity, month, asset['id'], asset['scope'], kind, due,
-                                         dumps(asset), asset.get('supervisor', '') if kind == 'external' else ''))
+    def insert_work_order(db, identity, month, asset, kind, due, *, workspace_direct=False):
+        db.execute('''INSERT INTO tool_work_orders(id,month,asset_id,scope,kind,due,asset,supervisor,workspace_direct)
+            VALUES(?,?,?,?,?,?,?,?,?)''', (identity, month, asset['id'], asset['scope'], kind, due,
+                                           dumps(asset), asset.get('supervisor', '') if kind == 'external' else '',
+                                           workspace_direct))
 
     def check_order_deletion(self, db, actor, identity, revision, month):
         row = self._work(db, actor, identity)

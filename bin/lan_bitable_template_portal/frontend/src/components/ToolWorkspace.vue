@@ -5,7 +5,7 @@
     <div v-if="!session" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
-          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>已选 {{ selectedIds.length }} 台</small>
+          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>可选 {{ visibleEligible.length }} 台 · 已选 {{ selectedIds.length }} 台</small>
         </header>
         <NRadioGroup :value="kind" size="small" aria-label="办理类型" :disabled="!!busy" @update:value="chooseKind">
           <NRadioButton value="self">维护</NRadioButton><NRadioButton value="external">送检</NRadioButton>
@@ -23,19 +23,15 @@
                 <th scope="col">工具 / 楼栋</th><th scope="col">型号 / 品牌</th><th scope="col">周期</th>
               </tr></thead>
               <tbody>
-                <tr v-for="asset in visibleAssets" :key="asset.id" :class="{ 'is-selected': selected.has(asset.id) }">
+                <tr v-for="asset in visibleAssets" :key="asset.id"
+                  :class="{ 'is-selected': selected.has(asset.id), 'is-selectable': !busy && eligible(asset) }"
+                  @click="chooseAssetRow(asset, $event)">
                   <td><NCheckbox :checked="selected.has(asset.id)" :disabled="!!busy || !eligible(asset)"
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
                   <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small></td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
-                    <small v-for="receipt in asset.plan?.legacy_receipts || []" :key="receipt.session_id">
-                      {{ receipt.date }} · {{ receipt.remote_id || '飞书回执待核对' }}
-                      <NButton v-if="receipt.can_reconcile" text size="small" :disabled="!!busy"
-                        @click="reconcile(asset, receipt.session_id)">核验旧归档</NButton>
-                    </small>
-                    <NButton v-if="asset.plan?.mode === 'resume'" text size="small" @click="openSaved(asset.plan.workspace_id)">继续原表</NButton>
-                    <NButton v-else-if="asset.plan?.mode === 'original'" text size="small" @click="emit('open-order', asset.plan.order_id, asset.plan.order_month)">查看工单</NButton>
+                    <NButton v-if="asset.plan?.mode === 'resume'" text size="small" @click="openSaved(asset.plan.workspace_id)">打开原记录</NButton>
                   </td>
                 </tr>
               </tbody>
@@ -51,7 +47,7 @@
         <p v-else-if="selectedIds.length && !allAssociated" class="workspace-muted">部分工具还没有可用的模板关联，请选择统一模板。</p>
         <NRadioGroup v-if="templates.length" :value="templateChoice" :disabled="!!busy" aria-label="选择自检模板" @update:value="chooseTemplate">
           <div class="template-list">
-            <NRadio v-if="allAssociated" :value="existingTemplate">使用各工具已关联模板</NRadio>
+            <NRadio v-if="allAssociated" :value="existingTemplate">{{ associatedLabel }}</NRadio>
             <table class="templates" aria-label="自检模板记录">
               <thead><tr><th scope="col">选择</th><th scope="col">模板名称</th></tr></thead>
               <tbody><tr v-for="template in templates" :key="template.id" :class="{ 'is-selected': templateChoice === template.id }">
@@ -66,8 +62,8 @@
 
       <aside class="workspace-panel opening-panel" aria-label="办理操作">
         <NButton type="primary" :disabled="!!busy || !canOpen" :loading="busy === 'open'" @click="requestOpen">{{ kind === 'self' ? '打开填写' : '打开送检' }}</NButton>
-        <label v-if="sessionOptions.length">继续已有记录
-          <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="继续已有记录" :disabled="!!busy" @update:value="openSaved" />
+        <label v-if="sessionOptions.length">办理记录
+          <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="openSaved" />
         </label>
       </aside>
     </div>
@@ -127,7 +123,7 @@
                         <td v-for="cell in row.cells" :key="cell.address" :rowspan="cell.rowspan" :colspan="cell.colspan"
                           :style="cell.style" :class="{ 'fillable-cell': cell.editable || cell.check }">
                           <select v-if="cell.check" :value="item.checks[cellKey(cell)] || ''" :disabled="!item.can_edit || !!busy" :aria-label="'检查 ' + cellKey(cell)" @change="setCheck(cell, $event)">
-                            <option value="">请选择</option><option value="是">是</option><option value="否">否</option>
+                            <option value="">请选择</option><option value="是">√ 是</option><option value="否">× 否</option>
                           </select>
                           <input v-else-if="cell.editable" :value="item.values[cellKey(cell)] ?? cell.value ?? ''"
                             :disabled="!item.can_edit || !!busy" :aria-label="'填写 ' + cellKey(cell)" @input="setCell(cell, $event)" />
@@ -145,10 +141,10 @@
               </div>
               <NAlert v-else type="warning" :bordered="false">未读取到该工具的原表，请刷新记录核对。</NAlert>
               <div class="review-line">
-                <span id="tool-qualified-label">工具检查结果</span>
+                <span id="tool-qualified-label">工具检测是否合格</span>
                 <NRadioGroup class="qualified-options" :value="item.outcome || null" size="small"
                   aria-labelledby="tool-qualified-label" :disabled="!item.can_edit || !!busy" @update:value="item.outcome = $event">
-                  <NRadioButton value="normal">正常</NRadioButton><NRadioButton value="repair">转检修</NRadioButton><NRadioButton value="scrap">报废</NRadioButton>
+                  <NRadioButton value="normal">合格</NRadioButton><NRadioButton value="repair">不合格 · 转检修</NRadioButton><NRadioButton value="scrap">不合格 · 报废</NRadioButton>
                 </NRadioGroup>
                 <NInput v-if="item.outcome === 'repair' || item.outcome === 'scrap'" v-model:value="item.reason"
                   placeholder="处理原因" aria-label="处理原因" :disabled="!item.can_edit || !!busy" />
@@ -224,8 +220,7 @@ import { requestBinaryJson, requestJson } from '../api/client';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
-type OrderPlan = { mode: string; order_id: string; order_month: string; workspace_id: string;
-  legacy_receipts?: { session_id: string; date: string; remote_id: string; can_reconcile?: boolean }[] };
+type OrderPlan = { mode: string; workspace_id: string };
 type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
   self_cycle?: string | number; external_cycle?: string | number; template_id?: string; eligible_kinds?: Kind[];
   disabled_reason?: string };
@@ -243,8 +238,8 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: { 
 type Summary = { id: string; kind: Kind; status: string; items?: Item[]; created_at?: string; item_count?: number; archived_count?: number };
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
   inspection?: InspectionReport; inspection_expires_on?: string };
-const emit = defineEmits<{ 'open-order': [id: string, month: string]; 'asset-history': [id: string] }>();
-const props = defineProps<{ sessionId?: string; assetId?: string }>();
+const emit = defineEmits<{ 'asset-history': [id: string] }>();
+const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
 const reviewNote = ref('');
 const actualDate = ref('');
@@ -261,7 +256,7 @@ const existingTemplate = '__associated__';
 const board = shallowRef<Board>();
 const session = ref<Session>();
 const kind = ref<Kind>('self');
-const scope = ref('');
+const scope = ref(props.scope && props.scope !== 'ALL' ? props.scope : '');
 const search = ref('');
 const selectedIds = ref<string[]>([]);
 const selected = computed(() => new Set(selectedIds.value));
@@ -305,6 +300,11 @@ const selectedAssets = computed(() => assets.value.filter(asset => selected.valu
 const associations = computed(() => [...new Set(selectedAssets.value.map(asset => asset.template_id || ''))]);
 const allAssociated = computed(() => selectedAssets.value.length > 0 && associations.value.every(id => templates.value.some(template => template.id === id)));
 const mixedTemplates = computed(() => allAssociated.value && associations.value.length > 1);
+const associatedLabel = computed(() => {
+  if (mixedTemplates.value) return '使用各工具已关联模板';
+  const template = templates.value.find(row => row.id === associations.value[0]);
+  return '使用已关联模板 · ' + (template?.label || template?.name || '');
+});
 const canOpen = computed(() => selectedIds.value.length > 0 && (kind.value === 'external' ||
   (templateChoice.value === existingTemplate ? allAssociated.value : templates.value.some(template => template.id === templateChoice.value))));
 const sessionOptions = computed(() => (board.value?.sessions || []).filter(entry => entry.kind === kind.value)
@@ -381,11 +381,17 @@ function chooseTemplate(value: string) {
   templateChoice.value = value;
 }
 function toggleAsset(id: string, checked: boolean) {
+  if (selected.value.has(id) === checked) return;
   if (checked && !selected.value.has(id) && selectedIds.value.length >= 200) {
     error.value = '每批最多选择 200 台工具，请分批办理。';
     return;
   }
   selectedIds.value = checked ? [...selectedIds.value, id] : selectedIds.value.filter(value => value !== id);
+}
+function chooseAssetRow(asset: Asset, event: MouseEvent) {
+  if (busy.value || !eligible(asset) ||
+      (event.target instanceof Element && event.target.closest('button,a,input,[role="checkbox"]'))) return;
+  toggleAsset(asset.id, !selected.value.has(asset.id));
 }
 function toggleVisible(checked: boolean) {
   const ids = new Set(visibleEligible.value.map(asset => asset.id));
@@ -533,18 +539,14 @@ function requestOpen() {
   leave(() => {
     const choice = kind.value === 'self' && templateChoice.value !== existingTemplate ? templateChoice.value : null;
     const changed = choice ? selectedAssets.value.filter(asset => asset.template_id && asset.template_id !== choice) : [];
-    const temporary = selectedAssets.value.filter(asset => asset.plan?.mode === 'temporary');
-    const run = () => void openSelection(choice, temporary.length > 0);
-    ask('确认办理工单', [
-      ...selectedAssets.value.map(asset => `${scopeLabel(asset.scope)} · ${asset.name} · ${asset.plan?.mode === 'temporary' ?
-        '新增临时工单' : asset.plan?.mode === 'planned' ? '生成到期工单' : '接续原工单'}`),
-      ...(changed.length ? [`将更换 ${changed.length} 台工具的原模板关联。`] : []),
-    ].join('\n'), run);
+    const run = () => void openSelection(choice);
+    if (changed.length) ask('更换已关联模板？', `将更新 ${changed.length} 台工具与原模板的关联。`, run);
+    else run();
   });
 }
-async function openSelection(template_id: string | null, allow_temporary: boolean) {
+async function openSelection(template_id: string | null) {
   await perform('open', async () => {
-    const payload = { asset_ids: [...selectedIds.value].sort(), template_id, kind: kind.value, allow_temporary };
+    const payload = { asset_ids: [...selectedIds.value].sort(), template_id, kind: kind.value };
     const key = JSON.stringify(payload);
     if (openOperation?.key !== key) openOperation = { key, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), part => part.toString(16).padStart(2, '0')).join('') };
     let result: Session;
@@ -566,8 +568,8 @@ function openSaved(id: string) {
     const path = api + '/' + encodeURIComponent(id);
     let data = await read(path) as Session;
     if (data.legacy_draft) {
-      ask('接续旧草稿', '保留已有原表内容。若没有可接续的工单，将新建临时工单。', () =>
-        void perform('read', async () => applySession(await post(path + '/resume', {allow_temporary: true}, 120000) as Session)));
+      ask('接续旧草稿', '保留原表填写内容，审核签名由审核人确认。', () =>
+        void perform('read', async () => applySession(await post(path + '/resume', {}, 120000) as Session)));
     } else if (data.status === 'opening') {
       try {
         data = await requestJson(path + '/resume', { method: 'POST', signal: lifetime.signal, timeoutMs: 120000 }) as Session;
@@ -704,15 +706,6 @@ function resolveBinding(remove: boolean) {
   });
   ask(remove ? '移出本批？' : '重新关联模板？', current.asset.name, run);
 }
-function reconcile(asset: Asset, id: string) {
-  const orderId = asset.plan?.order_id;
-  if (!orderId) return;
-  ask('核验旧归档？', `「${asset.name}」核验通过后将使用原飞书回执完成月度工单。`, () =>
-    void perform('reconcile', async () => {
-      await post(api + '/' + encodeURIComponent(id) + '/reconcile', { asset_id: asset.id, order_id: orderId });
-      await readBoard();
-    }));
-}
 function isPng(value: string) {
   return /^data:image\/png;base64,/.test(value);
 }
@@ -823,6 +816,7 @@ onBeforeUnmount(() => {
 .assets th:first-child, .assets td:first-child { width: 22px; }
 .assets small { display: block; margin-top: 3px; }
 .assets tr.is-selected, .templates tr.is-selected { background: color-mix(in srgb, var(--v2-blue, #2364d2) 9%, transparent); }
+.assets tr.is-selectable { cursor: pointer; }
 .asset-reason { font-weight: 500; }
 .template-list { display: grid; gap: 8px; max-height: max(280px, calc(100dvh - 280px)); overflow: auto; padding-block: 6px; }
 .template-list :deep(.n-radio__label) { white-space: normal; overflow-wrap: anywhere; }
