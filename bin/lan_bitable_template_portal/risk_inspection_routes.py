@@ -409,8 +409,13 @@ def install_risk_inspection_routes(app, controller, runtime):
             return send_interactive_to_chat_id(card, chat_id, message_uuid=building_reminder_uuid(scope, day))
 
         def reminder_link(scope):
-            base = runtime.service._critical_guard_public_base_url()
-            return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&tool_view=orders&scope={scope}" if base else ''
+            from public_access.links import deployment
+            from public_access.provisioning import local_host
+
+            configured = deployment()
+            base = (configured[1] if configured and local_host(configured[0])
+                    else runtime.service._critical_guard_public_base_url())
+            return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&tool_view=reminder&scope={scope}" if base else ''
 
         while not stop.is_set():
             try:

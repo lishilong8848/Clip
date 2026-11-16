@@ -3,7 +3,7 @@
 import datetime as dt
 import json
 import uuid
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 from .risk_inspection import RiskError, text
 from .tool_self_check import BUILDINGS, TZ, dumps
@@ -147,21 +147,23 @@ def _legacy_workspace_history(service, db, actor, asset_id):
 
 
 def _reminder_card(scope, day, sections):
-    labels = {'review': '待审核', 'late': '逾期未办结（含往月）', 'external': '送检到期（7 天内或已逾期）'}
+    labels = {'review': '待审核', 'late': '逾期未办结（含往月）', 'external': '待办理送检工单（7 天内到期或已逾期）'}
     elements = []
     for kind, label in labels.items():
         rows = sections[kind]
         if not rows:
             continue
-        lines = [f'{label} · {len(rows)} 项']
-        for due, name in sorted(rows)[:CARD_LIMIT]:
+        lines = [f'{label} · {len(rows)} 张']
+        grouped = Counter(rows)
+        for (due, name), count in sorted(grouped.items())[:CARD_LIMIT]:
             clean_name = ' '.join(name.split())[:100] or '未命名工具'
-            lines.append(f'• {clean_name}' + (f'（{due}）' if due else ''))
-        if len(rows) > CARD_LIMIT:
-            lines.append(f'另有 {len(rows) - CARD_LIMIT} 项，请在工具管理查看。')
+            lines.append(f'• {clean_name}' + (f'（{due}）' if due else '') + (f' × {count} 张' if count > 1 else ''))
+        omitted = sum(count for _, count in sorted(grouped.items())[CARD_LIMIT:])
+        if omitted:
+            lines.append(f'另有 {omitted} 张，请在工具管理查看。')
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': '\n'.join(lines)}})
-    return {'header': {'title': {'tag': 'plain_text', 'content': f'{scope}楼工具管理提醒 · {day}'},
-                       'template': 'blue'}, 'elements': elements}
+    return {'schema': '2.0', 'header': {'title': {'tag': 'plain_text', 'content': f'{scope}楼工具管理提醒 · {day}'},
+                       'template': 'blue'}, 'body': {'elements': elements}}
 
 
 class ToolManagementLifecycle:
@@ -208,37 +210,24 @@ class ToolManagementLifecycle:
     def _building_reminder_cards(self, db, today):
         pending = defaultdict(lambda: {'review': [], 'late': [], 'external': []})
         day = today.isoformat()
-        for row in db.execute('''SELECT work.scope,work.due,work.asset,review.status AS review_status
+        limit = (today + dt.timedelta(days=7)).isoformat()
+        for row in db.execute('''SELECT work.scope,work.kind,work.due,work.asset,review.status AS review_status
             FROM tool_work_orders work LEFT JOIN tool_work_reviews review ON review.order_id=work.id
             WHERE work.submitted_at IS NULL AND work.outcome=''
-            AND (review.status='pending' OR (work.due<>'' AND work.due<?))''', (day,)):
+            AND (review.status='pending' OR (work.due<>'' AND
+                (work.due<? OR (work.kind='external' AND work.due<=?))))''', (day, limit)):
             if row['scope'] not in BUILDINGS:
                 continue
-            group = 'review' if row['review_status'] == 'pending' else 'late'
+            group = ('review' if row['review_status'] == 'pending' else
+                     'external' if row['kind'] == 'external' else 'late')
             pending[row['scope']][group].append((row['due'], json.loads(row['asset']).get('name') or ''))
-
-        by_asset = defaultdict(list)
-        for row in db.execute('''SELECT work.id,work.asset_id,work.scope,work.kind,work.outcome,work.due,
-                work.actual,work.submitted_at,work.inspection_meta FROM tool_work_orders work
-                JOIN tool_inventory inventory ON inventory.id=work.asset_id AND inventory.active=1
-                WHERE work.kind='external' AND work.outcome<>'cancelled' '''):
-            by_asset[row['asset_id'], row['scope']].append(row)
-        limit = (today + dt.timedelta(days=7)).isoformat()
-        for raw in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
-            asset = self.effective(raw)
-            scope = asset['scope']
-            if scope not in BUILDINGS:
-                continue
-            due = _external_lifecycle(asset, by_asset[raw['id'], scope], today)['next_external_due']
-            if due and due <= limit and self.tool_available(db, asset):
-                pending[scope]['external'].append((due, asset.get('name') or ''))
         return {scope: _reminder_card(scope, day, groups) for scope, groups in pending.items()}
 
     def send_building_reminders(self, deliver, current=None, *, link_for_scope=None):
         """Call deliver(scope, Beijing ISO day, Feishu card); bool or (bool, message) receipt.
 
         Use building_reminder_uuid in the delivery adapter. An unconfirmed attempt
-        retries the same card and UUID within its scheduled day. Claim and receipt
+        retries with the same UUID while the building still has actionable orders. Claim and receipt
         writes are local and the callback runs outside any database transaction.
         """
         from .tool_management import clock
@@ -254,20 +243,21 @@ class ToolManagementLifecycle:
         with self.connect() as db:
             db.execute('BEGIN')
             states = {scope: json.loads(self.state(db, key) or '{}') for scope, key in keys.items()}
-            cards = self._building_reminder_cards(db, current.date()) if any(not state for state in states.values()) else {}
+            cards = self._building_reminder_cards(db, current.date()) if any(not state.get('sent') for state in states.values()) else {}
         if link_for_scope:
             for scope, card in list(cards.items()):
-                if states[scope]:
+                if states[scope].get('sent'):
                     continue
                 url = link_for_scope(scope)
                 if not url:
                     del cards[scope]
                     continue
-                card['elements'].append({'tag': 'action', 'actions': [
-                    {'tag': 'button', 'text': {'tag': 'plain_text', 'content': '去灯塔办理'}, 'type': 'primary', 'url': url},
-                ]})
+                card['body']['elements'].append({
+                    'tag': 'button', 'text': {'tag': 'plain_text', 'content': '去灯塔办理'}, 'type': 'primary',
+                    'behaviors': [{'type': 'open_url', 'default_url': url}],
+                })
         for scope, key in keys.items():
-            if not states[scope] and scope not in cards:
+            if scope not in cards or states[scope].get('sent'):
                 continue
             attempt = clock() if live_clock else current
             if attempt.date() != current.date():
@@ -278,7 +268,7 @@ class ToolManagementLifecycle:
                 state = json.loads(self.state(db, key) or '{}')
                 if state.get('sent') or max(state.get('lease_until', 0), state.get('retry_at', 0)) > now:
                     continue
-                card = state.get('card') or cards.get(scope)
+                card = cards.get(scope)
                 if not card:
                     continue
                 self.set_state(db, key, dumps({'card': card, 'lease': lease, 'lease_until': now + LEASE_SECONDS}))

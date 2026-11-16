@@ -397,16 +397,17 @@ const kindOptions = [{ value: 'all', label: '全部工单' }, { value: 'self', l
 const outcomeOptions = [{ value: 'normal', label: '正常' }, { value: 'repair', label: '转检修' }, { value: 'scrap', label: '报废' }];
 const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检修中', repaired: '检修完成', scrap: '待报废审批',
   scrapped: '已批准报废', rejected: '报废未通过' };
-const view = ref(props.toolView === 'orders' ? 'orders' : 'workspace');
+const reminderView = props.toolView === 'reminder';
+const view = ref(props.toolView === 'orders' || reminderView ? 'orders' : 'workspace');
 const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref('');
 const linkedAsset = ref('');
 const kindFilter = ref('all');
-const stateFilter = ref('all');
+const stateFilter = ref(reminderView ? 'unfinished' : 'all');
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
-const search = ref(props.toolView === 'orders' && props.scope && props.scope !== 'ALL' ? props.scope + '楼' : '');
+const search = ref(view.value === 'orders' && props.scope && props.scope !== 'ALL' ? props.scope + '楼' : '');
 const page = ref(1);
 const pageSize = 20;
 const maxBulkDelete = 200;
@@ -526,7 +527,7 @@ const tabs = computed(() => [
 ]);
 const stateOptions = computed(() => [{ value: 'all', label: view.value === 'orders' ? '有效工单' : '全部状态' }, ...(view.value === 'followups'
   ? [{ value: 'repair', label: '检修中' }, { value: 'scrap', label: '待报废审批' }]
-  : [{ value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' },
+  : [{ value: 'unfinished', label: '待办工单' }, { value: 'pending', label: '待填写' }, { value: 'review_pending', label: '待楼长审核' }, { value: 'submitted', label: '已提交' }, { value: 'cancelled', label: '已取消' },
     ...((board.value?.carryovers?.length || stateFilter.value === 'carryover') ? [{ value:'carryover', label:'跨月待办' }] : [])])]);
 const archiveLabel = computed(() => {
   const data = board.value;
@@ -544,9 +545,11 @@ const visibleOrders = computed(() => {
   const rows = followups ? board.value?.followups || [] : stateFilter.value === 'carryover'
     ? carryovers : [...carryovers, ...(board.value?.orders || []).filter(row => !carryovers.some(prior => prior.id === row.id))];
   return rows.filter(row => {
+    if (reminderView && props.scope && props.scope !== 'ALL' && row.scope !== props.scope) return false;
     if (!followups && kindFilter.value !== 'all' && row.kind !== kindFilter.value) return false;
     if (!followups && stateFilter.value === 'all' && row.status === 'cancelled') return false;
-    if (!['all', 'carryover'].includes(stateFilter.value) && (followups ? row.outcome : row.status) !== stateFilter.value) return false;
+    if (stateFilter.value === 'unfinished' && !['pending', 'review_pending'].includes(row.status)) return false;
+    if (!['all', 'carryover', 'unfinished'].includes(stateFilter.value) && (followups ? row.outcome : row.status) !== stateFilter.value) return false;
     const searchable = [row.tool_name, row.location, row.model, row.scope + '楼', row.owner_name].join(' ').toLowerCase();
     return terms.every(term => searchable.includes(term));
   });
@@ -803,6 +806,7 @@ function selectView(next: string) {
   const proceed = () => {
     linkedSession.value = linkedAsset.value = '';
     view.value = next;
+    if (next === 'followups' && stateFilter.value === 'unfinished') stateFilter.value = 'all';
     if (next === 'orders' || next === 'followups') void loadBoard();
   };
   if (workspace.value) workspace.value.leave(proceed);

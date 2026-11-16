@@ -147,7 +147,8 @@ class ToolManagementLifecycleTest(TestCase):
         with self.service.connect(True) as db:
             db.execute('''INSERT INTO tool_work_reviews(order_id,status,payload,submitted_by,submitted_at)
                 VALUES ('review','pending','{}','person','2026-11-15T08:00:00+08:00')''')
-        self.asset('due-seven-B', 'B', self_cycle='', external_cycle='一年', external_first='2026-11-22')
+        due = self.asset('due-seven-B', 'B', self_cycle='', external_cycle='一年', external_first='2026-11-22')
+        self.order(due, 'due', '2026-11', '2026-11-22', kind='external')
         self.asset('due-eight-E', 'E', self_cycle='', external_cycle='一年', external_first='2026-11-23')
         self.asset('expired-A', self_cycle='', external_cycle='一年', external_last='2025-10-03')
         self.asset('retired-H', 'H', self_cycle='', external_cycle='一年', retired=True)
@@ -155,7 +156,7 @@ class ToolManagementLifecycleTest(TestCase):
 
         def deliver(scope, day, card):
             self.assertNotIn(scope, calls)
-            calls[scope] = (day, '\n'.join(item['text']['content'] for item in card['elements']))
+            calls[scope] = (day, '\n'.join(item['text']['content'] for item in card['body']['elements']))
             return True, 'confirmed'
 
         utc = NOW.astimezone(dt.timezone.utc)
@@ -163,7 +164,7 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertEqual(self.service.send_building_reminders(deliver, utc)['sent'], ['A', 'B'])
         self.assertEqual(calls['A'][0], '2026-11-15')
         self.assertIn('carryover-A', calls['A'][1])
-        self.assertIn('expired-A', calls['A'][1])
+        self.assertNotIn('expired-A', calls['A'][1])
         self.assertNotIn('cancelled-A', calls['A'][1])
         self.assertIn('waiting-B', calls['B'][1])
         self.assertIn('due-seven-B', calls['B'][1])
@@ -184,8 +185,6 @@ class ToolManagementLifecycleTest(TestCase):
 
         self.assertEqual(self.service.send_building_reminders(fail, NOW), {'sent': [], 'failed': ['A']})
         self.assertEqual(overlaps, [{'sent': [], 'failed': []}])
-        with self.service.connect(True) as db:
-            db.execute("UPDATE tool_work_orders SET outcome='cancelled' WHERE id='late'")
         retry = NOW + dt.timedelta(seconds=60)
         restarted = ToolManagement(self.inspection, None)
         self.assertEqual(restarted.send_building_reminders(fail, retry - dt.timedelta(seconds=1))['failed'], [])
@@ -200,3 +199,31 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertNotEqual(building_reminder_uuid('A', '2026-11-15'), building_reminder_uuid('A', '2026-11-16'))
         self.assertNotEqual(building_reminder_uuid('A', '2026-11-15'), building_reminder_uuid('B', '2026-11-15'))
         self.assertEqual(restarted.send_building_reminders(succeed, retry)['sent'], [])
+
+    def test_submitted_or_missing_orders_are_silent_and_pending_link_is_card_v2(self):
+        submitted = self.asset('submitted', 'D', self_cycle='', external_cycle='一年')
+        self.asset('inventory-only', 'D', self_cycle='', external_cycle='一年')
+        self.order(submitted, 'done', '2026-11', '2026-11-01', kind='external',
+                   submitted_at='2026-11-02T09:00:00+08:00', actual='2026-11-02')
+        calls = []
+        deliver = lambda scope, _, card: calls.append((scope, card)) or True
+        self.assertEqual(self.service.send_building_reminders(deliver, NOW)['sent'], [])
+        pending = self.asset('pending-E', 'E', self_cycle='', external_cycle='一年')
+        self.order(pending, 'pending', '2026-11', '2026-11-01', kind='external')
+        link = 'https://portal.example/risk-inspections?view=tool-self-check&tool_view=reminder&scope=E'
+        self.assertEqual(self.service.send_building_reminders(deliver, NOW, link_for_scope=lambda _: link)['sent'], ['E'])
+        scope, card = calls[0]
+        self.assertEqual((scope, card['schema']), ('E', '2.0'))
+        self.assertEqual(card['body']['elements'][-1]['behaviors'], [{'type': 'open_url', 'default_url': link}])
+        self.assertNotIn('inventory-only', dumps(card))
+
+    def test_failed_card_is_not_replayed_after_all_orders_close(self):
+        asset = self.asset('pending-retry')
+        self.order(asset, 'retry', '2026-10', '2026-10-31')
+        first = self.service.send_building_reminders(lambda *_: False, NOW)
+        self.assertEqual(first['failed'], ['A'])
+        with self.service.connect(True) as db:
+            db.execute("UPDATE tool_work_orders SET outcome='cancelled' WHERE id='retry'")
+        retry = NOW + dt.timedelta(seconds=60)
+        self.assertEqual(self.service.send_building_reminders(lambda *_: self.fail('sent closed order'), retry),
+                         {'sent': [], 'failed': []})
