@@ -209,7 +209,12 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             if not any(row['name'] == 'candidate_id' for row in db.execute('PRAGMA table_info(tool_work_sync)')):
                 db.execute("ALTER TABLE tool_work_sync ADD COLUMN candidate_id TEXT NOT NULL DEFAULT ''")
             columns = [row['name'] for row in db.execute('PRAGMA table_info(tool_work_orders)')]
-            if columns and 'workspace_direct' not in columns:
+            old_month_constraint = any(
+                {column['name'] for column in db.execute('SELECT name FROM pragma_index_info(?)', (index['name'],))}
+                == {'month', 'asset_id', 'kind'}
+                for index in db.execute('PRAGMA index_list(tool_work_orders)') if index['unique'] and not index['partial']
+            )
+            if columns and ('workspace_direct' not in columns or old_month_constraint):
                 # SQLite cannot drop the old table-level UNIQUE constraint. Keep
                 # IDs intact so drafts, attachments, audits and receipts still link.
                 db.execute('ALTER TABLE tool_work_orders RENAME TO tool_work_orders_before_workspace')

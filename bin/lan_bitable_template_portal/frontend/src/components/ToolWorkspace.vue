@@ -2,7 +2,7 @@
   <section class="tool-workspace" aria-label="工具工作台" data-v2-inline-feedback>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-if="board?.warning" type="warning" :bordered="false" role="status">{{ board.warning }}</NAlert>
-    <div v-if="!session" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
+    <div v-if="!session && !recordsOpen" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
           <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>已选 {{ selectedIds.length }} 台<span v-if="kind === 'self'"> · 已配模板 {{ assignedCount }} 台</span></small>
@@ -35,7 +35,7 @@
                   </td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
-                    <NButton v-if="asset.plan?.mode === 'resume'" text size="small" @click="openSaved(asset.plan.workspace_id)">打开原记录</NButton>
+                    <NButton text size="small" :disabled="!!busy" @click="showRecords(asset)">办理记录</NButton>
                     <NButton v-if="asset.plan?.mode === 'transfer'" size="small" :disabled="!!busy" @click="transferAsset(asset)">接收移交</NButton>
                   </td>
                 </tr>
@@ -66,15 +66,52 @@
 
       <aside class="workspace-panel opening-panel" aria-label="办理操作">
         <NButton type="primary" :disabled="!!busy || !canOpen" :loading="busy === 'open'" @click="requestOpen">{{ kind === 'self' ? '打开填写' : '打开送检' }}</NButton>
+        <NButton :disabled="!!busy" @click="showRecords()">查看办理记录</NButton>
         <span v-if="kind === 'self' && pendingIds.length" class="workspace-muted">本次 {{ pendingIds.length }} 台<span v-if="unassignedCount"> · {{ unassignedCount }} 台待选模板</span></span>
         <span v-if="mixedReportBuildings" class="workspace-muted" role="status">送检报告请按楼栋分批上传。</span>
         <label v-if="sessionOptions.length">办理记录
-          <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="openSaved" />
+          <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="id => openSaved(id)" />
         </label>
         <NButton v-if="board?.history_cursor" size="small" :loading="busy === 'history'" :disabled="!!busy" @click="loadMoreHistory">加载更早的办理记录</NButton>
         <span v-if="busy === 'read'" class="workspace-muted" role="status">正在打开办理记录…</span>
       </aside>
     </div>
+    <section v-else-if="!session" class="workspace-panel records-panel" aria-labelledby="tool-records-title">
+      <header class="panel-heading">
+        <div class="workspace-actions">
+          <NButton size="small" :disabled="!!busy" @click="recordsOpen = false">返回选择</NButton>
+          <h3 id="tool-records-title" tabindex="-1">办理记录</h3>
+        </div>
+        <div class="workspace-actions">
+          <NButton v-if="recordAsset" size="small" :disabled="!!busy" @click="showRecords()">查看全部</NButton>
+          <NButton size="small" :disabled="!!busy" :loading="busy === 'records'" @click="loadRecords()">刷新记录</NButton>
+        </div>
+      </header>
+      <p v-if="recordAsset" class="workspace-muted">{{ recordAsset.name }} · {{ scopeLabel(recordAsset.scope) }}</p>
+      <NSpin :show="busy === 'records'">
+        <div v-if="recordSessions.length" class="record-list">
+          <article v-for="batch in recordSessions" :key="batch.id" class="record-batch">
+            <div class="record-heading">
+              <strong>{{ batch.kind === 'self' ? '维护' : '送检' }} · {{ batch.created_at?.slice(0, 16).replace('T', ' ') }}</strong>
+              <NTag size="small">{{ sessionStatus(batch) }}</NTag>
+              <span v-if="batch.owner_name" class="workspace-muted">{{ batch.owner_name }}</span>
+            </div>
+            <ul class="record-tools">
+              <li v-for="tool in batch.history_items" :key="tool.id">
+                <div><strong>{{ tool.asset_name }}</strong><small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small></div>
+                <div class="workspace-actions record-actions">
+                  <NButton size="small" :disabled="!!busy" @click="openSaved(batch.id, tool.id)">查看记录</NButton>
+                  <NButton v-if="tool.can_release" size="small" :disabled="!!busy" @click="manageRecord(batch, tool, 'release')">取消办理</NButton>
+                  <NButton v-if="tool.can_delete" size="small" type="error" secondary :disabled="!!busy" @click="manageRecord(batch, tool, 'delete')">删除记录</NButton>
+                </div>
+              </li>
+            </ul>
+          </article>
+        </div>
+        <NEmpty v-else-if="busy !== 'records'" description="暂无办理记录" />
+      </NSpin>
+      <NButton v-if="recordCursor" size="small" :disabled="!!busy" @click="loadRecords(true)">加载更早的记录</NButton>
+    </section>
     <section v-else class="workspace-panel editor-panel" aria-labelledby="tool-editor-title">
         <header class="panel-heading">
           <div class="workspace-actions">
@@ -278,7 +315,7 @@ import { requestBinaryJson, requestJson } from '../api/client';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
-type OrderPlan = { mode: string; workspace_id: string; revision?: number };
+type OrderPlan = { mode: string; workspace_id: string; order_id?: string; revision?: number };
 type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
   self_cycle?: string | number; external_cycle?: string | number; template_id?: string; eligible_kinds?: Kind[];
   disabled_reason?: string };
@@ -296,7 +333,11 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: La
   outcome?: string; reason?: string; quantity?: number; order_revision?: number; can_edit?: boolean; can_review?: boolean;
   can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean;
   review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
-type Summary = { id: string; kind: Kind; status: string; items?: Item[]; created_at?: string; item_count?: number; archived_count?: number };
+type HistoryItem = { id: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
+  binding_pending?: boolean; binding_error?: string;
+  order_revision?: number; can_release?: boolean; can_delete?: boolean };
+type Summary = { id: string; kind: Kind; status: string; revision?: number; items?: Item[]; history_items?: HistoryItem[];
+  created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
   inspection?: InspectionReport; inspection_expires_on?: string; layouts?: Record<string, Layout>; report_available?: boolean; binding_pending?: boolean };
 const emit = defineEmits<{ 'asset-history': [id: string] }>();
@@ -353,6 +394,10 @@ let pollVersion = '';
 let boardRead: AbortController | undefined;
 let openOperation: { key: string; id: string } | undefined;
 let strokeId: number | undefined;
+const recordsOpen = ref(false);
+const recordAsset = ref<Asset>();
+const recordSessions = shallowRef<Summary[]>([]);
+const recordCursor = shallowRef<HistoryPage['history_cursor']>();
 
 const assets = computed(() => board.value?.assets || []);
 const templates = computed(() => board.value?.templates || []);
@@ -440,6 +485,11 @@ function archiveStatus(status?: string) {
   return ({ archived: '已归档', verifying: '正在核对归档结果', retrying: '归档失败，待重试',
     review_pending: '待审核', cancelled: '已取消', pending: '待处理' } as Record<string, string>)[status || ''] || '待处理';
 }
+function recordStatus(tool: HistoryItem) {
+  if (tool.order_status === 'pending') return tool.binding_pending || tool.binding_error ? '模板关联待核对' : '待填写';
+  if (tool.order_status === 'submitted' && tool.archive_status === 'pending') return '待归档';
+  return archiveStatus(tool.archive_status || tool.order_status);
+}
 function chooseKind(value: Kind) {
   if (value === kind.value) return;
   leave(() => {
@@ -475,7 +525,8 @@ function chooseAssetRow(asset: Asset, event: MouseEvent) {
 function transferAsset(asset: Asset) {
   ask('接收工具移交？', `「${asset.name}」的原楼栋办理会结束，已保存草稿保留在原记录。接收后可在本楼重新填写。`,
     () => void perform('transfer', async () => {
-      await post(api + '/transfer', { asset_id: asset.id, scope: asset.scope, revision: asset.plan?.revision });
+      await post(api + '/transfer', { asset_id: asset.id, scope: asset.scope,
+        order_id: asset.plan?.order_id, revision: asset.plan?.revision });
       await readBoard();
     }));
 }
@@ -610,8 +661,9 @@ function returnToSelection() {
   leave(() => {
     clearSession();
     error.value = '';
+    if (recordsOpen.value) void loadRecords();
     void nextTick(() => {
-      const heading = document.getElementById('tool-assets-title');
+      const heading = document.getElementById(recordsOpen.value ? 'tool-records-title' : 'tool-assets-title');
       heading?.focus({ preventScroll: true });
       heading?.scrollIntoView({ block: 'nearest' });
     });
@@ -698,6 +750,42 @@ function loadMoreHistory() {
       sessions: [...board.value.sessions, ...page.sessions.filter(entry => !known.has(entry.id))] };
   });
 }
+async function fetchRecords(more = false) {
+  const cursor = more ? recordCursor.value : null;
+  if (more && !cursor) return;
+  const query = new URLSearchParams(cursor || {});
+  if (recordAsset.value) query.set('asset_id', recordAsset.value.id);
+  const page = await read(api + '/history?' + query) as HistoryPage;
+  const known = new Set(recordSessions.value.map(batch => batch.id));
+  recordSessions.value = more ? [...recordSessions.value, ...page.sessions.filter(batch => !known.has(batch.id))] : page.sessions;
+  recordCursor.value = page.history_cursor;
+}
+function loadRecords(more = false) {
+  return perform('records', () => fetchRecords(more));
+}
+function showRecords(asset?: Asset) {
+  recordAsset.value = asset;
+  recordSessions.value = [];
+  recordCursor.value = null;
+  recordsOpen.value = true;
+  void loadRecords();
+  void nextTick(() => document.getElementById('tool-records-title')?.focus());
+}
+function manageRecord(batch: Summary, tool: HistoryItem, action: 'release' | 'delete') {
+  const removing = action === 'delete';
+  const description = !removing ? '取消办理后仍可查看原草稿。' :
+    tool.archive_status === 'archived' ? '将从办理列表移除，已同步的飞书台账和归档文件会保留。' :
+      '将取消这笔办理并从列表移除，原草稿会保留。';
+  ask(removing ? '删除这笔办理记录？' : '取消本台工具办理？', `「${tool.asset_name}」${description}`,
+    () => void perform('manage', async () => {
+      const updated = await post(api + '/' + encodeURIComponent(batch.id) + '/manage', { action, asset_id: tool.id,
+        revision: tool.order_revision ?? batch.revision, note: '工作台取消本台办理，保留原草稿。' }) as
+        { status?: string; batch_hidden?: boolean };
+      if ((updated.status === 'cancelled' || updated.batch_hidden) && openOperation?.id === batch.operation_id) openOperation = undefined;
+      await fetchRecords();
+      void readBoard();
+    }));
+}
 function requestOpen() {
   if (!canOpen.value) return;
   leave(() => {
@@ -710,7 +798,7 @@ function requestOpen() {
 }
 async function openSelection(template_ids: Record<string, string>) {
   await perform('open', async () => {
-    const payload = { asset_ids: [...pendingIds.value], template_ids, kind: kind.value, defer_bindings: true };
+    const payload = { asset_ids: [...pendingIds.value], template_ids, kind: kind.value, defer_bindings: true, new_record: true };
     const key = JSON.stringify(payload);
     if (openOperation?.key !== key) openOperation = { key, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), part => part.toString(16).padStart(2, '0')).join('') };
     let result: Session;
@@ -728,12 +816,12 @@ async function openSelection(template_ids: Record<string, string>) {
     void readBoard();
   });
 }
-function openSaved(id: string) {
+function openSaved(id: string, assetId = '') {
   if (!id || id === session.value?.id) return;
   leave(() => void perform('read', async () => {
     const path = api + '/' + encodeURIComponent(id);
     let data = await read(path) as Session;
-    const targetAsset = id === props.sessionId ? props.assetId : '';
+    const targetAsset = assetId || (id === props.sessionId ? props.assetId : '');
     if (targetAsset && !data.items.some(entry => entry.id === targetAsset))
       throw new Error('当前账号无法查看链接里的自检记录，或该记录已移出原批次。');
     if (data.legacy_draft) {
@@ -1057,6 +1145,13 @@ onBeforeUnmount(() => {
 .signature-preview { width: 90px; height: 36px; object-fit: contain; background: #fff; border: 1px solid #dbe3e9; }
 .opening-panel { display: grid; gap: 10px; }
 .opening-panel label { display: grid; gap: 4px; font-size: 12px; }
+.records-panel,.record-list { display: grid; gap: 10px; }
+.record-batch { border: 1px solid var(--tool-border); padding: 10px 12px; border-radius: 6px; }
+.record-heading,.record-tools li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
+.record-tools { list-style: none; padding: 0; margin: 8px 0 0; }
+.record-tools li { border-top: 1px solid var(--tool-border); justify-content: space-between; padding: 8px 0 2px; }
+.record-tools small { display: block; margin-top: 2px; }
+.record-actions { margin-left: auto; }
 .editor-footer { justify-content: flex-end; margin-top: 12px; }
 .sheet-scroll { overflow: auto; max-height: min(60vh, 620px); max-width: 100%; }
 .sheet-tools { justify-content: flex-end; }

@@ -65,7 +65,7 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     if path == 'workspace/history':
                         query = request.query_params
                         return response(await asyncio.to_thread(svc.workspace_history, actor, query.get('before', ''),
-                                                               query.get('id', ''), query.get('kind', '')))
+                                                               query.get('id', ''), query.get('kind', ''), query.get('asset_id', '')))
                     if path.endswith('/report-file'):
                         return report_response(await asyncio.to_thread(svc.workspace_report_attachment, actor, identity))
                     if path.endswith('/people'):
@@ -199,6 +199,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             return response(error=exc)
         except Exception:
             logging.exception('Tool self-check request failed')
+            if request.url.path.startswith(base + '/workspace'):
+                return response(error=RiskError('操作结果暂未确认，请打开「办理记录」核对已保存内容。', 503))
             return response(error=RiskError('操作结果暂未确认，请刷新工单核对已保存内容。', 503))
 
     for path, methods in (('', ['GET']), ('/archive/{month}', ['GET']), ('/inventory', ['GET']),

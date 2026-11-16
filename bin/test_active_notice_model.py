@@ -3000,10 +3000,57 @@ class QtEventQueueRecoveryTests(unittest.TestCase):
 
     def test_same_record_screenshot_still_waits(self):
         self.h.current_screenshot_record_id = self.data["record_id"]
+        self.h.screenshot_dialog.isVisible = lambda: True
         self.h._try_process_pending_update_after_upload()
         self.assertFalse(self.sent)
         self.assertTrue(self.h.pending_update_after_upload)
         self.assertTrue(self.scheduled)
+
+    def test_closed_screenshot_does_not_hold_confirmed_end(self):
+        self.h.current_screenshot_record_id = self.data["record_id"]
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual([args[2] for args, _ in self.sent], ["end"])
+        self.assertFalse(self.h.pending_update_after_upload)
+
+    def test_pending_end_checks_predecessor_before_placeholder_is_rebound(self):
+        self.item.setData(Qt.ItemDataRole.UserRole, {
+            **self.data, "_is_placeholder_record": True, "_upload_operation_id": "qt_notice:previous",
+        })
+        seen = []
+        self.h._probe_event_upload = lambda data: seen.append(data["_upload_operation_id"])
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual(seen, ["qt_notice:previous"])
+        self.assertEqual(self.sent, [])
+        self.item.setData(Qt.ItemDataRole.UserRole, self.data)
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual([args[2] for args, _ in self.sent], ["end"])
+
+    def test_one_preparation_failure_does_not_hold_another_confirmed_end(self):
+        self.h.pending_update_after_upload = {"rec-other": {}, **self.h.pending_update_after_upload}
+        dispatch = self.h._dispatch_pending_update
+
+        def prepare(key, screenshot):
+            if key == "rec-other":
+                raise RuntimeError("temporary preparation failure")
+            dispatch(key, screenshot)
+
+        self.h._dispatch_pending_update = prepare
+        self.h._try_process_pending_update_after_upload()
+        self.assertEqual([args[2] for args, _ in self.sent], ["end"])
+        self.assertEqual(list(self.h.pending_update_after_upload), ["rec-other"])
+
+    def test_timeout_waiting_for_predecessor_preserves_confirmed_end(self):
+        data = {**self.data, "_upload_operation_id": "qt_notice:previous",
+                "_upload_started_monotonic": time.monotonic() - 3601}
+        self.item.setData(Qt.ItemDataRole.UserRole, data)
+        seen = []
+        self.h._probe_event_upload = lambda current: seen.append(current["_upload_operation_id"])
+        self.h._recover_stale_upload_states()
+        self.assertEqual(seen, ["qt_notice:previous"])
+        self.assertIs(self.h.pending_update_after_upload[self.data["record_id"]], self.request)
+        data = self.item.data(Qt.ItemDataRole.UserRole)
+        self.assertEqual(ActiveNoticeModel.action_label_for_record(data), "待核验")
+        self.assertFalse(self.sent)
 
     def test_repeated_click_before_dispatch_keeps_original_confirmed_end(self):
         self.h._dialog_block_reason = lambda *_: ""

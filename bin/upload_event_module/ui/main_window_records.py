@@ -362,9 +362,14 @@ class MainWindowRecordsMixin:
             if data.get("_event_wait_job_id"):
                 continue
             is_event = str(data.get("notice_type") or "") == "事件通告"
+            queued = False
+            queued_end = False
             if is_event and data.get("_queued_upload_requested"):
                 candidate_ids = self._upload_completion_record_id_candidates(data.get("record_id"))
-                queued = any(key in self.pending_update_after_upload for key in candidate_ids)
+                request = next((self.pending_update_after_upload[key] for key in candidate_ids
+                                if key in self.pending_update_after_upload), None)
+                queued = request is not None
+                queued_end = queued and request.get("action_type") == "end"
                 if queued:
                     self._schedule_pending_update_after_upload()
                     if (
@@ -422,6 +427,18 @@ class MainWindowRecordsMixin:
                     continue
                 age = now - started_at if started_at else 0.0
                 if not started_at or 0.0 <= age < hard_timeout:
+                    continue
+                if queued_end and self._upload_operation_for_record(data):
+                    # Keep the confirmed end while verifying its predecessor.
+                    current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+                    if current.get("_queued_upload_requested") and not current.get("_upload_verification_pending"):
+                        current["_upload_verification_pending"] = True
+                        current["_upload_in_progress"] = False
+                        item.setData(Qt.ItemDataRole.UserRole, current)
+                        self._rebuild_active_item_widget(list_widget, item, current,
+                            upload_in_progress=False,
+                            pending_upload_hash=current.get("_pending_upload_hash"),
+                            has_unuploaded_changes=current.get("_has_unuploaded_changes"))
                     continue
                 data = self._rollback_queued_event_for_retry(data)
                 data.pop("_upload_verification_pending", None)

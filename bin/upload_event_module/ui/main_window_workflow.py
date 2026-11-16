@@ -1480,174 +1480,188 @@ class MainWindowWorkflowMixin:
                 self._schedule_pending_update_after_upload(retry_delay)
 
     def _dispatch_ready_pending_updates(self):
-        screenshot_dialog = getattr(self, "screenshot_dialog", None)
-        screenshot_record_id = str(getattr(self, "current_screenshot_record_id", None) or "")
-        if not screenshot_record_id and screenshot_dialog and screenshot_dialog.isVisible():
-            screenshot_record_id = str((getattr(screenshot_dialog, "data_dict", None) or {}).get("record_id") or "")
-        for pending_key in list(self.pending_update_after_upload.keys()):
-            target_record_id = pending_key
-            list_widget, item = self._find_active_item_by_record_id(target_record_id)
-            if not item or not self._is_valid_list_item(item):
-                alias = self._payload_alias.get(target_record_id)
-                if alias and alias != target_record_id:
-                    list_widget, item = self._find_active_item_by_record_id(alias)
-                    if item and self._is_valid_list_item(item):
-                        target_record_id = alias
-                if not item or not self._is_valid_list_item(item):
-                    continue
-            data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if self._is_placeholder_record(data):
-                continue
-            candidate_ids = set(
-                self._upload_completion_record_id_candidates(pending_key)
-            )
-            candidate_ids.update(
-                self._upload_completion_record_id_candidates(target_record_id)
-            )
-            if screenshot_record_id in candidate_ids:
-                continue
-            pending_ids = set(
-                getattr(self, "pending_action_record_ids", set()) or set()
-            )
-            if (
-                data.get("_upload_in_progress")
-                or candidate_ids.intersection(pending_ids)
-                or data.get("_upload_verification_pending")
-                or (data.get("_queued_after_upload") and self._upload_operation_for_record(data))
-            ):
-                if str(data.get("notice_type") or "") == "事件通告":
-                    self._probe_event_upload(data)
-                continue
-            request = self.pending_update_after_upload.get(pending_key)
-            if not request:
-                continue
-            payload_data = request.get("data") or data
-            if isinstance(payload_data, dict):
-                payload_data = dict(payload_data)
-                for key in (
-                    "_upload_operation_id",
-                    "_queued_after_upload",
-                    "_queued_action",
-                    "_queued_upload_requested",
-                    "_event_inflight_retry_snapshot",
-                    "_upload_verification_pending",
-                ):
-                    payload_data.pop(key, None)
-                payload_data["_is_placeholder_record"] = False
-                current_target_id = str(
-                    data.get("target_record_id")
-                    or data.get("record_id")
-                    or target_record_id
-                    or ""
-                ).strip()
-                if current_target_id:
-                    payload_data["record_id"] = current_target_id
-                    payload_data["target_record_id"] = current_target_id
-            notice_type = (
-                payload_data.get("notice_type", "")
-                if isinstance(payload_data, dict)
-                else ""
-            )
-            dialog_level = ""
-            if notice_type == "事件通告":
-                dialog_level = str(request.get("event_level") or "").strip()
-            elif notice_type == "变更通告":
-                dialog_level = self._normalize_change_upload_level(
-                    payload_data if isinstance(payload_data, dict) else {},
-                    str(request.get("change_level") or "").strip(),
-                )
-            resolved = self._resolve_upload_fields_from_cache(
-                payload_data if isinstance(payload_data, dict) else {},
-                {
-                    "buildings": request.get("buildings"),
-                    "specialty": request.get("specialty"),
-                    "level": dialog_level,
-                    "event_source": request.get("event_source"),
-                    **(
-                        {
-                            "transfer_to_overhaul": payload_data.get(
-                                "transfer_to_overhaul"
-                            )
-                        }
-                        if isinstance(payload_data, dict)
-                        and "transfer_to_overhaul" in payload_data
-                        else {}
-                    ),
-                    **(
-                        {
-                            "_transfer_to_overhaul_explicit": payload_data.get(
-                                "_transfer_to_overhaul_explicit"
-                            )
-                        }
-                        if isinstance(payload_data, dict)
-                        and "_transfer_to_overhaul_explicit" in payload_data
-                        else {}
-                    ),
-                },
-            )
-            resolved_level = str(resolved.get("level") or "").strip()
-            pending_change_level = (
-                self._normalize_change_upload_level(
-                    payload_data if isinstance(payload_data, dict) else {},
-                    resolved_level or dialog_level,
-                )
-                if notice_type == "变更通告"
-                else ""
-            )
-            pending_event_level = resolved_level if notice_type == "事件通告" else ""
-            action_type = request.get("action_type", "update")
-            # Preserve the same operation if dispatch raises after submission.
-            operation_id = request.setdefault("dispatch_operation_id", f"qt_notice:{uuid.uuid4().hex}")
-            payload_data["_upload_operation_id"] = operation_id
-            log_info(
-                "PendingUpdate: dispatch "
-                f"record_id={payload_data.get('record_id', target_record_id)} "
-                f"action={action_type} "
-                f"has_screenshot={bool(request.get('screenshot_bytes'))} "
-                f"extra_images={len(request.get('extra_images') or [])} "
-                f"response_time={'Y' if request.get('response_time') else 'N'}"
-            )
-            current_data = item.data(Qt.ItemDataRole.UserRole) or {}
-            if isinstance(current_data, dict):
-                current_data = dict(current_data)
-                for key in (
-                    "_queued_after_upload",
-                    "_queued_action",
-                    "_queued_upload_requested",
-                    "_upload_operation_id",
-                ):
-                    current_data.pop(key, None)
-                item.setData(Qt.ItemDataRole.UserRole, current_data)
-                self._upsert_active_notice_model_item(
-                    list_widget,
-                    item,
-                    current_data,
-                )
+        screenshot_record_id = ""
+        dialog = getattr(self, "screenshot_dialog", None)
+        if dialog is not None:
             try:
-                self.do_feishu_upload(
-                    payload_data,
-                    request.get("screenshot_bytes"),
-                    action_type,
-                    response_time=request.get("response_time", ""),
-                    buildings=resolved.get("buildings"),
-                    extra_images=request.get("extra_images"),
-                    specialty=resolved.get("specialty"),
-                    change_level=pending_change_level,
-                    event_level=pending_event_level,
-                    event_source=resolved.get("event_source"),
-                    recover_selected=bool(request.get("recover_selected", False)),
-                    robot_group_choice=str(request.get("robot_group_choice") or "auto").strip() or "auto",
-                )
-            except Exception:
-                current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
-                if not current.get("_upload_in_progress"):
-                    current.update(_queued_after_upload=True, _queued_action=action_type,
-                                   _queued_upload_requested=True, _has_unuploaded_changes=True)
-                    item.setData(Qt.ItemDataRole.UserRole, current)
-                    self._rebuild_active_item_widget(list_widget, item, current)
-                raise
-            if self.pending_update_after_upload.get(pending_key) is request:
-                self.pending_update_after_upload.pop(pending_key, None)
+                if dialog.isVisible():
+                    screenshot_record_id = str(getattr(self, "current_screenshot_record_id", None)
+                        or (getattr(dialog, "data_dict", None) or {}).get("record_id") or "")
+            except RuntimeError:
+                pass  # Qt may already have destroyed the confirmation dialog.
+        first_error = None
+        for pending_key in list(self.pending_update_after_upload):
+            try:
+                self._dispatch_pending_update(pending_key, screenshot_record_id)
+            except Exception as exc:
+                if first_error is None:
+                    first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    def _dispatch_pending_update(self, pending_key: str, screenshot_record_id: str):
+        target_record_id = pending_key
+        list_widget, item = self._find_active_item_by_record_id(target_record_id)
+        if not item or not self._is_valid_list_item(item):
+            alias = self._payload_alias.get(target_record_id)
+            if alias and alias != target_record_id:
+                list_widget, item = self._find_active_item_by_record_id(alias)
+                if item and self._is_valid_list_item(item):
+                    target_record_id = alias
+            if not item or not self._is_valid_list_item(item):
+                return
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        candidate_ids = set(
+            self._upload_completion_record_id_candidates(pending_key)
+        )
+        candidate_ids.update(
+            self._upload_completion_record_id_candidates(target_record_id)
+        )
+        if screenshot_record_id in candidate_ids:
+            return
+        pending_ids = set(
+            getattr(self, "pending_action_record_ids", set()) or set()
+        )
+        if (
+            self._is_placeholder_record(data)
+            or data.get("_upload_in_progress")
+            or candidate_ids.intersection(pending_ids)
+            or data.get("_upload_verification_pending")
+            or (data.get("_queued_after_upload") and self._upload_operation_for_record(data))
+        ):
+            if str(data.get("notice_type") or "") == "事件通告":
+                self._probe_event_upload(data)
+            return
+        request = self.pending_update_after_upload.get(pending_key)
+        if not request:
+            return
+        payload_data = request.get("data") or data
+        if isinstance(payload_data, dict):
+            payload_data = dict(payload_data)
+            for key in (
+                "_upload_operation_id",
+                "_queued_after_upload",
+                "_queued_action",
+                "_queued_upload_requested",
+                "_event_inflight_retry_snapshot",
+                "_upload_verification_pending",
+            ):
+                payload_data.pop(key, None)
+            payload_data["_is_placeholder_record"] = False
+            current_target_id = str(
+                data.get("target_record_id")
+                or data.get("record_id")
+                or target_record_id
+                or ""
+            ).strip()
+            if current_target_id:
+                payload_data["record_id"] = current_target_id
+                payload_data["target_record_id"] = current_target_id
+        notice_type = (
+            payload_data.get("notice_type", "")
+            if isinstance(payload_data, dict)
+            else ""
+        )
+        dialog_level = ""
+        if notice_type == "事件通告":
+            dialog_level = str(request.get("event_level") or "").strip()
+        elif notice_type == "变更通告":
+            dialog_level = self._normalize_change_upload_level(
+                payload_data if isinstance(payload_data, dict) else {},
+                str(request.get("change_level") or "").strip(),
+            )
+        resolved = self._resolve_upload_fields_from_cache(
+            payload_data if isinstance(payload_data, dict) else {},
+            {
+                "buildings": request.get("buildings"),
+                "specialty": request.get("specialty"),
+                "level": dialog_level,
+                "event_source": request.get("event_source"),
+                **(
+                    {
+                        "transfer_to_overhaul": payload_data.get(
+                            "transfer_to_overhaul"
+                        )
+                    }
+                    if isinstance(payload_data, dict)
+                    and "transfer_to_overhaul" in payload_data
+                    else {}
+                ),
+                **(
+                    {
+                        "_transfer_to_overhaul_explicit": payload_data.get(
+                            "_transfer_to_overhaul_explicit"
+                        )
+                    }
+                    if isinstance(payload_data, dict)
+                    and "_transfer_to_overhaul_explicit" in payload_data
+                    else {}
+                ),
+            },
+        )
+        resolved_level = str(resolved.get("level") or "").strip()
+        pending_change_level = (
+            self._normalize_change_upload_level(
+                payload_data if isinstance(payload_data, dict) else {},
+                resolved_level or dialog_level,
+            )
+            if notice_type == "变更通告"
+            else ""
+        )
+        pending_event_level = resolved_level if notice_type == "事件通告" else ""
+        action_type = request.get("action_type", "update")
+        # Preserve the same operation if dispatch raises after submission.
+        operation_id = request.setdefault("dispatch_operation_id", f"qt_notice:{uuid.uuid4().hex}")
+        payload_data["_upload_operation_id"] = operation_id
+        log_info(
+            "PendingUpdate: dispatch "
+            f"record_id={payload_data.get('record_id', target_record_id)} "
+            f"action={action_type} "
+            f"has_screenshot={bool(request.get('screenshot_bytes'))} "
+            f"extra_images={len(request.get('extra_images') or [])} "
+            f"response_time={'Y' if request.get('response_time') else 'N'}"
+        )
+        current_data = item.data(Qt.ItemDataRole.UserRole) or {}
+        if isinstance(current_data, dict):
+            current_data = dict(current_data)
+            for key in (
+                "_queued_after_upload",
+                "_queued_action",
+                "_queued_upload_requested",
+                "_upload_operation_id",
+            ):
+                current_data.pop(key, None)
+            item.setData(Qt.ItemDataRole.UserRole, current_data)
+            self._upsert_active_notice_model_item(
+                list_widget,
+                item,
+                current_data,
+            )
+        try:
+            self.do_feishu_upload(
+                payload_data,
+                request.get("screenshot_bytes"),
+                action_type,
+                response_time=request.get("response_time", ""),
+                buildings=resolved.get("buildings"),
+                extra_images=request.get("extra_images"),
+                specialty=resolved.get("specialty"),
+                change_level=pending_change_level,
+                event_level=pending_event_level,
+                event_source=resolved.get("event_source"),
+                recover_selected=bool(request.get("recover_selected", False)),
+                robot_group_choice=str(request.get("robot_group_choice") or "auto").strip() or "auto",
+            )
+        except Exception:
+            current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
+            if not current.get("_upload_in_progress"):
+                current.update(_queued_after_upload=True, _queued_action=action_type,
+                               _queued_upload_requested=True, _has_unuploaded_changes=True)
+                item.setData(Qt.ItemDataRole.UserRole, current)
+                self._rebuild_active_item_widget(list_widget, item, current)
+            raise
+        if self.pending_update_after_upload.get(pending_key) is request:
+            self.pending_update_after_upload.pop(pending_key, None)
 
     def _manual_update_has_target(self, content: str) -> bool:
         info = extract_event_info(content)

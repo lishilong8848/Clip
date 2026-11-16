@@ -2,6 +2,7 @@ import base64
 import copy
 import datetime as dt
 import io
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -429,6 +430,98 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(reopened['id'], session['id'])
         orders = [row for row in self.service.list(self.filler)['orders'] if row['asset_id'] == asset['id']]
         self.assertEqual([row['id'] for row in orders], [session['items'][0]['order_id']])
+
+    def test_workbench_creates_independent_records_and_cancels_only_selected_record(self):
+        worker = actor(identity='operator')
+        payload = dict(kind='self', asset_ids=['recTool0'], template_id='recTemplate', new_record=True)
+        first = self.service.workspace_open(worker, payload | {'operation_id': 'new-first'})
+        first = self.service.workspace_save(worker, first['id'], {'revision': first['revision'],
+            'items': [{'asset_id': 'recTool0', 'completion': 'completed'}]})
+        self.assertIn('self', self.service.workspace_list(worker)['assets'][0]['eligible_kinds'])
+        second_body = payload | {'operation_id': 'new-second'}
+        second = self.service.workspace_open(worker, second_body)
+        self.assertNotEqual(first['id'], second['id'])
+        self.assertNotEqual(first['items'][0]['order_id'], second['items'][0]['order_id'])
+        self.assertEqual(self.service.workspace_open(worker, second_body)['id'], second['id'])
+        self.assertFalse(second['items'][0].get('completion'))
+        history = self.service.workspace_history(worker, kind='self', asset_id='recTool0')
+        self.assertEqual({row['id'] for row in history['sessions']}, {first['id'], second['id']})
+        item = next(row['history_items'][0] for row in history['sessions'] if row['id'] == first['id'])
+        self.assertEqual((item['asset_name'], item['scope'], item['can_release']), ('工具0', 'A', True))
+        with self.assertRaisesRegex(RiskError, '不存在或无权'):
+            self.service.workspace_manage_item(actor('B', 'other'), first['id'], {
+                'asset_id': item['id'], 'revision': item['order_revision'], 'action': 'release', 'note': '测试取消'})
+        self.service.workspace_manage_item(worker, first['id'], {
+            'asset_id': item['id'], 'revision': item['order_revision'], 'action': 'release', 'note': '测试取消'})
+        self.service = self.restart()
+        cancelled = self.service.workspace_get(worker, first['id'])
+        self.assertEqual(cancelled['status'], 'cancelled')
+        self.assertEqual(cancelled['items'][0]['completion'], 'completed')
+        self.assertEqual(self.service.workspace_get(worker, second['id'])['status'], 'draft')
+        self.assertFalse(self.service.workspace_history(actor('B', 'other'), asset_id='recTool0')['sessions'])
+        remove = {'action': 'delete', 'asset_id': 'recTool0', 'revision': cancelled['items'][0]['order_revision']}
+        self.assertTrue(self.service.workspace_manage_item(worker, first['id'], remove)['batch_hidden'])
+        self.assertTrue(self.service.workspace_manage_item(worker, first['id'], remove)['batch_hidden'])
+        self.service = self.restart()
+        self.assertEqual([row['id'] for row in self.service.workspace_history(worker)['sessions']], [second['id']])
+        self.assertEqual(self.service.workspace_get(worker, first['id'])['items'][0]['completion'], 'completed')
+
+    def test_migration_removes_full_month_constraint_when_direct_column_exists(self):
+        from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
+
+        first = self.open()
+        schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0',
+            'workspace_direct INTEGER NOT NULL DEFAULT 0, UNIQUE(month,asset_id,kind)')
+        with self.service.connect(True) as db:
+            db.execute('ALTER TABLE tool_work_orders RENAME TO old_tool_orders')
+            db.execute(schema)
+            db.execute('INSERT INTO tool_work_orders SELECT * FROM old_tool_orders')
+            db.execute('DROP TABLE old_tool_orders')
+        request = {'kind': 'self', 'asset_ids': ['recTool0'], 'template_id': 'recTemplate',
+                   'operation_id': 'after-unique-cleanup', 'new_record': True}
+        with self.assertRaisesRegex(sqlite3.IntegrityError, 'UNIQUE constraint failed'):
+            self.service.workspace_open(self.filler, request)
+        self.service = self.restart()
+        self.assertEqual(self.service.workspace_get(self.filler, first['id'])['items'], first['items'])
+        additional = self.service.workspace_open(self.filler, request)
+        self.assertNotEqual(additional['items'][0]['order_id'], first['items'][0]['order_id'])
+
+    def test_transfer_with_two_old_records_releases_the_selected_one(self):
+        payload = dict(kind='self', asset_ids=['recTool0'], template_id='recTemplate', new_record=True)
+        sessions = [self.service.workspace_open(self.filler, payload | {'operation_id': operation})
+                    for operation in ('before-move-one', 'before-move-two')]
+        self.cloud.assets[0]['scope'] = 'B'
+        self.service.refresh()
+        receiver = actor(scope='B', identity='other')
+        moved, = self.service.workspace_list(receiver)['assets']
+        order_id = moved['plan']['order_id']
+        self.service.workspace_transfer(receiver, {'asset_id': moved['id'], 'scope': 'B',
+            'order_id': order_id, 'revision': moved['plan']['revision']})
+        for original in sessions:
+            item, = self.service.workspace_get(self.filler, original['id'])['items']
+            self.assertEqual(item['order_status'], 'cancelled' if item['order_id'] == order_id else 'pending')
+
+    def test_two_records_for_same_tool_approve_and_archive_separately(self):
+        request = {'kind': 'self', 'asset_ids': ['recTool0'], 'template_id': 'recTemplate', 'new_record': True}
+        pending = []
+        for operation in ('first-check', 'second-check'):
+            ready = self.complete(self.service.workspace_open(self.filler, request | {'operation_id': operation}))
+            pending.append(self.service.workspace_submit(self.filler, ready['id'], {'revision': ready['revision']}))
+        for session in pending:
+            self.approve(session)
+        first = self.service.workspace_get(self.filler, pending[0]['id'])
+        remove = {'action': 'delete', 'asset_id': 'recTool0', 'revision': first['items'][0]['order_revision']}
+        with self.assertRaisesRegex(RiskError, '归档'):
+            self.service.workspace_manage_item(self.filler, first['id'], remove)
+        while self.service.sync_one():
+            pass
+        self.assertEqual(set(self.cloud.writes), {
+            (session['items'][0]['order_id'], 'maintenance') for session in pending})
+        first = self.service.workspace_get(self.filler, first['id'])
+        self.service.workspace_manage_item(self.filler, first['id'], remove | {'revision': first['items'][0]['order_revision']})
+        self.assertEqual([row['id'] for row in self.service.workspace_history(self.filler)['sessions']], [pending[1]['id']])
+        self.assertTrue(self.service.workspace_download(self.filler, first['id']))
+        self.assertEqual(len(self.cloud.writes), 2)
 
     def test_module_holder_can_fill_and_select_completion_without_review_permission(self):
         worker = actor(identity='operator')
