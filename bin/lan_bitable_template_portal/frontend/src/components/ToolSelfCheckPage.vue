@@ -28,8 +28,8 @@
       <div class="tool-bar"><NButton :disabled="busy" @click="addingTool=false">取消</NButton><NButton type="primary" :disabled="busy" @click="createTool">保存工具</NButton></div>
     </section>
 
-    <NSpin v-if="!order" :show="loading">
-      <template v-if="board">
+    <NSpin v-if="!order" :show="loading && !linkedSession">
+      <template v-if="board || linkedSession">
         <nav class="tool-nav" aria-label="工具管理分区">
           <NButton v-for="tab in tabs" :key="tab.value" :type="view === tab.value ? 'primary' : 'default'" :bordered="false"
             :aria-pressed="view === tab.value" :disabled="busy || !!workspace?.busy" @click="selectView(tab.value)">
@@ -37,7 +37,7 @@
             <span v-if="tab.count" class="tool-nav-count">{{ tab.count }}</span>
           </NButton>
         </nav>
-        <NAlert v-if="board.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
+        <NAlert v-if="board?.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
           :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
@@ -109,7 +109,7 @@
           <div class="tool-list-head">
             <div class="tool-counts">
               <span><strong>{{ repairCount }}</strong> 检修中</span>
-              <span><strong>{{ board.followups.length - repairCount }}</strong> 待报废审批</span>
+              <span><strong>{{ (board?.followups.length ?? 0) - repairCount }}</strong> 待报废审批</span>
             </div>
           </div>
           <div class="tool-filters" aria-label="筛选工单">
@@ -314,7 +314,7 @@ import ToolAssetHistory from './ToolAssetHistory.vue';
 import ToolWorkspace from './ToolWorkspace.vue';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
-const props = defineProps<{ scope?: string; embedded?: boolean; toolView?: string }>();
+const props = defineProps<{ scope?: string; embedded?: boolean; toolView?: string; toolSession?: string; toolAsset?: string }>();
 const api = '/api/tool-self-check';
 interface Template {
   id: string; version: number; name: string; active: boolean; open_usage?: number; linked_tools_count?: number;
@@ -351,8 +351,9 @@ const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检�
 const view = ref('workspace');
 const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
-const linkedSession = ref('');
-const linkedAsset = ref('');
+const linkedSession = ref(/^[a-f0-9]{32}$/.test(props.toolSession || '') && /^rec[A-Za-z0-9]{1,119}$/.test(props.toolAsset || '')
+  ? props.toolSession! : '');
+const linkedAsset = ref(linkedSession.value ? props.toolAsset! : '');
 const stateFilter = ref('all');
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);

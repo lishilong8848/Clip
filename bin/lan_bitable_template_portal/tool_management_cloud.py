@@ -622,11 +622,16 @@ class ToolCloud:
         return True
 
 
-def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None):
+def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None,
+                  deliver_review=None, review_link=None, resolve_leader=None):
     next_inventory = next_reminder = 0
     while not stop.is_set():
         now = time.monotonic()
         try:
+            if deliver_review and review_link and resolve_leader:
+                for _ in range(4):
+                    if stop.is_set() or not service.workspace_review_notice_one(deliver_review, review_link, resolve_leader):
+                        break
             if now >= next_inventory:
                 next_inventory = now + 300
                 try:

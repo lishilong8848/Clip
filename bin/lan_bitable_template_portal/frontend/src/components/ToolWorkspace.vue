@@ -733,6 +733,9 @@ function openSaved(id: string) {
   leave(() => void perform('read', async () => {
     const path = api + '/' + encodeURIComponent(id);
     let data = await read(path) as Session;
+    const targetAsset = id === props.sessionId ? props.assetId : '';
+    if (targetAsset && !data.items.some(entry => entry.id === targetAsset))
+      throw new Error('当前账号无法查看链接里的自检记录，或该记录已移出原批次。');
     if (data.legacy_draft) {
       ask('接续旧草稿', '保留原表填写内容，审核签名由审核人确认。', () =>
         void perform('read', async () => applySession(await post(path + '/resume', {}, 120000) as Session)));
@@ -746,7 +749,7 @@ function openSaved(id: string) {
     }
     clearSession();
     applySession(data);
-    if (props.assetId && data.items.some(entry => entry.id === props.assetId)) selectItem(props.assetId);
+    if (targetAsset) selectItem(targetAsset);
   }));
 }
 function refresh() {

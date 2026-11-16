@@ -157,6 +157,68 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(reopened['status'], 'draft')
         self.assertEqual([item['order_status'] for item in reopened['items']], ['pending', 'pending'])
         self.assertEqual(reopened['items'][1]['values'][checked_at], second['values'][checked_at])
+        with self.service.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM tool_workspace_review_notices').fetchone()[0], 0)
+
+    def test_review_cards_target_building_leader_or_selected_person_and_retry_same_card(self):
+        self.cloud.assets[1]['scope'] = 'B'
+        self.service.refresh()
+        selected = actor('B', 'selected') | {'_tool_management_full_access': True}
+        other = actor('B', 'other')
+        self.service.person_for = {selected['id']: selected}.__getitem__
+        default_leaders = {self.leader['open_id']: self.leader, other['open_id']: other}
+        draft = self.complete(self.open())
+        second = dict(draft['items'][1], reviewer_id=selected['id'])
+        saved = self.service.workspace_save(self.filler, draft['id'], {
+            'revision': draft['revision'], 'items': [second]})
+        body = {'revision': saved['revision']}
+        self.service.workspace_submit(self.filler, draft['id'], body)
+        self.service.workspace_submit(self.filler, draft['id'], body)
+        deliveries = []
+
+        def link(scope, session, asset):
+            return f'https://fixture.test/risk-inspections?view=tool-self-check&scope={scope}&tool_session={session}&tool_asset={asset}'
+
+        def deliver(open_id, card, message_uuid):
+            deliveries.append((open_id, copy.deepcopy(card), message_uuid))
+            return open_id != selected['open_id']
+
+        for _ in range(2):
+            self.assertTrue(self.service.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
+        self.assertFalse(self.service.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
+        by_recipient = {item[0]: item for item in deliveries}
+        self.assertEqual(set(by_recipient), {self.leader['open_id'], selected['open_id']})
+        for recipient, scope, asset in ((self.leader['open_id'], 'A', 'recTool0'), (selected['open_id'], 'B', 'recTool1')):
+            content = by_recipient[recipient][1]['body']['elements']
+            self.assertIn(scope + '楼', content[0]['text']['content'])
+            self.assertEqual(content[1]['behaviors'][0]['default_url'], link(scope, draft['id'], asset))
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_workspace_review_notices SET next_try=0')
+        restarted = self.restart()
+        restarted.person_for = self.service.person_for
+        retry = []
+        self.assertTrue(restarted.workspace_review_notice_one(
+            lambda *args: retry.append(args) or True, lambda *_: '', default_leaders.__getitem__))
+        self.assertEqual(retry, [by_recipient[selected['open_id']]])
+        self.assertFalse(restarted.workspace_review_notice_one(deliver, link, default_leaders.__getitem__))
+
+    def test_review_cards_follow_reassignment_and_skip_withdrawn_items(self):
+        draft = self.complete(self.open())
+        submitted = self.service.workspace_submit(self.filler, draft['id'], {'revision': draft['revision']})
+        selected = actor('A', 'selected') | {'_tool_management_full_access': True}
+        self.service.person_for = {selected['id']: selected}.__getitem__
+        first, second = submitted['items']
+        self.service.workspace_manage_item(self.leader, draft['id'], {
+            'asset_id': first['id'], 'revision': first['order_revision'], 'action': 'reassign', 'reviewer_id': selected['id']})
+        self.service.workspace_manage_item(self.leader, draft['id'], {
+            'asset_id': second['id'], 'revision': second['order_revision'], 'action': 'withdraw'})
+        calls = []
+        notify = lambda: self.service.workspace_review_notice_one(
+            lambda open_id, *_: calls.append(open_id) or True, lambda *_: 'https://fixture.test/record',
+            lambda _: self.leader)
+        self.assertTrue(notify())
+        self.assertFalse(notify())
+        self.assertEqual(calls, [selected['open_id']])
 
     def test_template_relation_and_open_retry_are_scoped_and_persistent(self):
         first = self.open()

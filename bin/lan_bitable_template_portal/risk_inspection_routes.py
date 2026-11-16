@@ -6,7 +6,7 @@ from pathlib import Path
 import threading
 import time
 from types import SimpleNamespace
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 import uuid
 
 from fastapi import Request
@@ -401,7 +401,7 @@ def install_risk_inspection_routes(app, controller, runtime):
     def run_tools():
         from .tool_management_lifecycle import building_reminder_uuid
         from .portal_service import BUILDING_CHAT_ID_MAP
-        from upload_event_module.services.robot_webhook import send_interactive_to_chat_id
+        from upload_event_module.services.robot_webhook import send_interactive_to_chat_id, send_interactive_to_open_ids
 
         def deliver(scope, day, card):
             chat_id = BUILDING_CHAT_ID_MAP.get(scope)
@@ -418,10 +418,19 @@ def install_risk_inspection_routes(app, controller, runtime):
                     else runtime.service._critical_guard_public_base_url())
             return f"{base.rstrip('/')}/risk-inspections?view=tool-self-check&scope={scope}" if base else ''
 
+        def deliver_review(open_id, card, message_uuid):
+            return not stop.is_set() and send_interactive_to_open_ids(
+                card, [open_id], message_uuid=message_uuid)[0]
+
+        def review_link(scope, session_id, asset_id):
+            url = reminder_link(scope)
+            return url + '&' + urlencode({'tool_session': session_id, 'tool_asset': asset_id}) if url else ''
+
         while not stop.is_set():
             try:
                 if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
-                    run_tool_jobs(get_tool_checks(), stop, deliver_reminder=deliver, reminder_link=reminder_link)
+                    run_tool_jobs(get_tool_checks(), stop, deliver_reminder=deliver, reminder_link=reminder_link,
+                                  deliver_review=deliver_review, review_link=review_link, resolve_leader=actor_for)
                     return
             except Exception:
                 logging.exception('Tool management initialization deferred')
