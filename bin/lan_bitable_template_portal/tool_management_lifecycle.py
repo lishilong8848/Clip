@@ -147,10 +147,11 @@ def _legacy_workspace_history(service, db, actor, asset_id):
 
 
 def _reminder_card(scope, day, sections):
-    labels = {'review': '待审核', 'late': '逾期未办结（含往月）', 'external': '待办理送检工单（7 天内到期或已逾期）'}
+    labels = {'review': '待审核', 'late': '逾期未办结（含往月）', 'self_draft': '自检待填写', 'external': '送检待填写',
+              'certificate': '送检证书到期（7 天内或已逾期）', 'retest': '检测不合格，待复检'}
     elements = []
     for kind, label in labels.items():
-        rows = sections[kind]
+        rows = sections.get(kind, [])
         if not rows:
             continue
         lines = [f'{label} · {len(rows)} 张']
@@ -181,7 +182,7 @@ class ToolManagementLifecycle:
             if asset and not can_scope(actor, asset['scope']):
                 raise missing
             visible = [row for row in db.execute('''SELECT work.id,work.month,work.scope,work.kind,work.due,work.asset,
-                work.supervisor,work.manager,work.actual,work.submitted_at,work.outcome,work.owner_name,work.records,
+                work.supervisor,work.manager,work.actual,work.submitted_at,work.outcome,work.owner_name,work.owner,work.workspace_direct,work.records,
                 work.reason,work.resolution,work.scrap_reason,work.scrap_status,work.report_name,work.inspection_meta,
                 review.status AS review_status,review.note AS review_note
                 FROM tool_work_orders work LEFT JOIN tool_work_reviews review ON review.order_id=work.id
@@ -208,10 +209,12 @@ class ToolManagementLifecycle:
                     'orders': orders[:HISTORY_LIMIT], 'has_more': len(visible) + len(legacy) > HISTORY_LIMIT, **lifecycle}
 
     def _building_reminder_cards(self, db, today):
-        pending = defaultdict(lambda: {'review': [], 'late': [], 'external': []})
+        from .tool_management import configured_kind
+
+        pending = defaultdict(lambda: defaultdict(list))
         day = today.isoformat()
         limit = (today + dt.timedelta(days=7)).isoformat()
-        for row in db.execute('''SELECT work.scope,work.kind,work.due,work.asset,review.status AS review_status
+        for row in db.execute('''SELECT work.scope,work.kind,work.due,work.asset,work.workspace_direct,review.status AS review_status
             FROM tool_work_orders work LEFT JOIN tool_work_reviews review ON review.order_id=work.id
             WHERE work.submitted_at IS NULL AND work.outcome=''
             AND EXISTS (SELECT 1 FROM tool_workspace_items item WHERE item.order_id=work.id)
@@ -220,8 +223,33 @@ class ToolManagementLifecycle:
             if row['scope'] not in BUILDINGS:
                 continue
             group = ('review' if row['review_status'] == 'pending' else
-                     'external' if row['kind'] == 'external' else 'late')
+                     'external' if row['kind'] == 'external' else 'self_draft' if row['workspace_direct'] else 'late')
             pending[row['scope']][group].append((row['due'], json.loads(row['asset']).get('name') or ''))
+        history, scrapped, blocked = defaultdict(list), defaultdict(int), set()
+        for row in db.execute('''SELECT id,asset_id,scope,kind,due,actual,submitted_at,outcome,scrap_qty,inspection_meta
+                FROM tool_work_orders WHERE submitted_at IS NOT NULL OR outcome IN ('repair','scrap','scrapped')'''):
+            if row['outcome'] in ('repair', 'scrap'):
+                blocked.add(row['asset_id'])
+            elif row['outcome'] == 'scrapped':
+                scrapped[row['asset_id']] += row['scrap_qty']
+            if row['kind'] == 'external' and row['submitted_at'] and row['outcome'] != 'cancelled':
+                history[(row['scope'], row['asset_id'])].append(row)
+        for row in db.execute('SELECT source,config FROM tool_inventory WHERE active=1'):
+            asset = self._workspace_inventory_asset(row)
+            scope, asset_id = asset.get('scope'), asset['id']
+            if (scope not in BUILDINGS or asset.get('retired') or configured_kind(asset)[0] != 'external'
+                    or asset_id in blocked or scrapped[asset_id] >= (asset.get('quantity') or 0)):
+                continue
+            records = history[(scope, asset_id)]
+            if not (_date(asset.get('external_last')) or _date(asset.get('external_first'))
+                    or any(_date(record['actual']) for record in records)):
+                continue
+            lifecycle = _external_lifecycle(asset, records, today)
+            certificate = lifecycle['certificate'] or {}
+            due = lifecycle['next_external_due']
+            if due and due <= limit:
+                group = 'retest' if certificate.get('validity') == 'unqualified' else 'certificate'
+                pending[scope][group].append((due, asset['name']))
         return {scope: _reminder_card(scope, day, groups) for scope, groups in pending.items()}
 
     def send_building_reminders(self, deliver, current=None, *, link_for_scope=None):

@@ -15,6 +15,7 @@ import re
 from collections.abc import Mapping
 from copy import copy, deepcopy
 from datetime import date, datetime, time
+from functools import lru_cache
 from unicodedata import east_asian_width
 from zipfile import ZipFile
 
@@ -46,13 +47,18 @@ _ASSET_LABELS = {
 }
 
 
+@lru_cache(maxsize=16)
+def _parsed_schema(content):
+    return parse_template(content)
+
+
 def _snapshot_schema(content, expected_sha256):
     if not isinstance(content, bytes):
         raise RiskError('请使用原始 XLSX 模板字节。')
     digest = hashlib.sha256(content).hexdigest()
     if expected_sha256 is not None and expected_sha256 != digest:
         raise RiskError('自检模板与工单保存的快照不一致。', 409)
-    return deepcopy(parse_template(content)), digest
+    return deepcopy(_parsed_schema(content)), digest
 
 
 def _key(sheet, address):
@@ -254,14 +260,16 @@ def describe(content):
         theme = _theme_colors(package)
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
-        editable, checks, _ = _layout(book[schema['sheet']], schema)
+        editable, checks, assets = _layout(book[schema['sheet']], schema)
+        inspector, checked_at = ('G6', 'G11') if schema.get('layout') == 'hvac' else ('G4', 'G8')
         sheets = []
         for sheet in book.worksheets:
             if sheet.title == schema['sheet']:
                 sheets.append(_describe_sheet(sheet, editable, checks, theme) | {'review': _review_addresses(schema)})
             elif sheet.sheet_state == 'visible':
                 sheets.append(_describe_sheet(sheet, set(), set(), theme))
-        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest}
+        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest,
+                'prefill_fields': {'assets': assets, 'inspector': inspector, 'checked_at': checked_at}}
     finally:
         book.close()
 
@@ -294,6 +302,14 @@ def prefill(content, asset):
         book.close()
 
 
+def initial_values(layout, asset, inspector, checked_at):
+    fields = layout['prefill_fields']
+    values = _asset_values(asset, fields['assets'])
+    values[fields['inspector']] = _literal(inspector, 120)
+    values[fields['checked_at']] = checked_at
+    return {layout['schema']['sheet'] + '!' + address: value for address, value in values.items()}
+
+
 def _literal(value, limit):
     if not isinstance(value, str) or _BAD_TEXT.search(value) or value.lstrip().startswith('='):
         raise RiskError('自检单元格只接受普通文字，不能填写公式或控制字符。')
@@ -302,13 +318,13 @@ def _literal(value, limit):
     return value
 
 
-def _validated_map(sheet, allowed, entries, *, is_check):
+def _validated_map(sheet_title, allowed, entries, *, is_check):
     if not isinstance(entries, Mapping) or len(entries) > len(allowed):
         raise RiskError('自检填写项目格式或数量不正确。')
     result = {}
     for key, value in entries.items():
         title, separator, address = key.rpartition('!') if isinstance(key, str) else ('', '', '')
-        if not separator or title != sheet.title or not _ADDRESS.fullmatch(address) or address not in allowed:
+        if not separator or title != sheet_title or not _ADDRESS.fullmatch(address) or address not in allowed:
             raise RiskError('自检数据中包含无效或不可编辑的单元格。')
         if is_check:
             if value == '':
@@ -323,21 +339,33 @@ def _validated_map(sheet, allowed, entries, *, is_check):
 
 def _validate_sheet(sheet, schema, values, checks, complete):
     editable, check_cells, asset_fields = _layout(sheet, schema)
-    values = _validated_map(sheet, editable, values, is_check=False)
-    answers = _validated_map(sheet, check_cells, checks, is_check=True)
+    values = _validated_map(sheet.title, editable, values, is_check=False)
+    answers = _validated_map(sheet.title, check_cells, checks, is_check=True)
     if complete and answers.keys() != check_cells:
         raise RiskError('请完成表格中的所有“是／否”自检项目。')
     return values, answers, asset_fields
 
 
-def validate_inputs(content, values, checks, *, complete=False, expected_sha256=None):
-    """Validate draft cells, optionally requiring every original check cell."""
+@lru_cache(maxsize=16)
+def _input_layout(content, expected_sha256):
     schema, _ = _snapshot_schema(content, expected_sha256)
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
-        _validate_sheet(book[schema['sheet']], schema, values, checks, complete)
+        editable, check_cells, _ = _layout(book[schema['sheet']], schema)
+        return schema['sheet'], frozenset(editable), frozenset(check_cells)
     finally:
         book.close()
+
+
+def validate_inputs(content, values, checks, *, complete=False, expected_sha256=None):
+    """Reuse the editable cells of each immutable template snapshot."""
+    if not isinstance(content, bytes):
+        raise RiskError('请使用原始 XLSX 模板字节。')
+    title, editable, check_cells = _input_layout(content, expected_sha256)
+    _validated_map(title, editable, values, is_check=False)
+    answers = _validated_map(title, check_cells, checks, is_check=True)
+    if complete and answers.keys() != check_cells:
+        raise RiskError('请完成表格中的所有“是／否”自检项目。')
 
 
 def _signature(signature):
@@ -425,7 +453,7 @@ def _embed_signature(sheet, cell, signature):
     sheet.add_image(image)
 
 
-def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, expected_sha256=None):
+def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, expected_sha256=None, completion=''):
     """Fill the exact template snapshot and return a signed XLSX file as bytes."""
     schema, _ = _snapshot_schema(content, expected_sha256)
     reviewer = text(_literal(reviewer, 120), 120, required=True)
@@ -444,7 +472,7 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
         fields = _asset_values(asset, asset_fields) | values
         for address, answer in answers.items():
             fields[address] = '是[√]  否[ ]' if answer == '是' else '是[ ]  否[√]'
-        completed = all(answer == '是' for answer in answers.values())
+        completed = completion == 'completed' if completion else all(answer == '是' for answer in answers.values())
         fields[f'E{schema["result_row"]}'] = '已完成[√]            未完成[ ]' if completed else '已完成[ ]            未完成[√]'
         review = _review_addresses(schema)
         fields[review['reviewer_address']] = reviewer

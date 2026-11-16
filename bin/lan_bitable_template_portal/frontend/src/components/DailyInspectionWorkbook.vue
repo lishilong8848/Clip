@@ -25,8 +25,8 @@
     <div class="book-tools" aria-label="巡检楼栋与日期">
       <label :title="lockReason"><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
       <label :title="lockReason"><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
-      <NButton size="small" :disabled="loading || saving || dirty || !!editing" :title="lockReason" @click="load">刷新</NButton>
-      <NButton size="small" :disabled="loading || saving || dirty || !!editing || !report?.rounds.length" :title="!report?.rounds.length ? '本楼本日尚无巡检记录' : lockReason" @click="download">导出</NButton>
+      <NButton size="small" :disabled="loading || saving || dirty || !!editing" :title="lockReason" @click="load(true)">刷新</NButton>
+      <NButton size="small" :loading="exporting" :disabled="exporting || saving || dirty || !!editing || !report?.rounds.length" :title="!report?.rounds.length ? '本楼本日尚无巡检记录' : lockReason" @click="download">{{ exporting ? '正在导出' : '导出' }}</NButton>
       <NButton size="small" class="book-settings" @click="openSettings">表格设置</NButton>
       <NButton v-if="canGroup" size="small" @click="openGroups">专业分工<template v-if="Object.keys(currentGroups).length"> · {{ Object.keys(currentGroups).length }} 已调整</template></NButton>
     </div>
@@ -44,7 +44,7 @@
       <button class="zoom-reset" aria-label="恢复紧凑显示" @click="resizeSheet(compactZoom-zoom)">{{ Math.round(scale*100) }}%</button>
       <button aria-label="放大巡检表" :disabled="zoom>=28" @click="resizeSheet(2)">＋</button>
     </div>
-    <slot name="start" v-if="isCurrentDate && !active" />
+    <slot name="start" v-if="isCurrentDate && (!active || awaitingStart)" />
     <span v-if="preferencesError" class="book-error">{{ preferencesError }}<button @click="loadPreferences">重读排序</button></span>
     <div class="book-status">
       <span v-if="currentActive && !readOnly" class="status-review">
@@ -66,7 +66,7 @@
     </div>
     </div>
     <div v-if="mobileSheet && !compactMenu && dirty && !saving" class="mobile-save-recovery"><span>修改尚未保存</span><button @click="flush">重试保存</button><button @click="compareLatest">核对最新数据</button></div>
-    <div v-if="mobileSheet && !compactMenu && isCurrentDate && !active" class="mobile-start"><slot name="start" /></div>
+    <div v-if="mobileSheet && !compactMenu && isCurrentDate && (!active || awaitingStart)" class="mobile-start"><slot name="start" /></div>
     <p v-if="report?.archive_warning" class="book-pending">{{ report.archive_warning }}</p>
     <p v-if="report?.rounds.some(r=>r.status==='自动确认·待上传')" class="book-pending">上轮数据已在本地保存并自动收尾，飞书上传待重试。</p>
     <p v-if="invalidationText" class="book-pending" role="status">{{ invalidationText }} <NButton v-if="sheetLoaded" size="tiny" @click="openComparison">对照上一轮</NButton></p>
@@ -90,7 +90,7 @@
               :tabindex="cell.editable || exemptionPicking ? 0 : undefined" :aria-label="cell.address+' '+(cell.exempt?'免填':cell.text)" :title="cell.exempt?'当前配置为免填':undefined" @click="activateCell(cell)" @keydown.enter.prevent="activateCell(cell)">
               <select v-if="!mobileSheet && editing===cell.address && cell.stateCell" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="completeEdit" @keydown.enter.stop @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)"><option value="">{{ cell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ cell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="cell.modeCell" value="/">/ 非当前模式</option></select>
               <input v-else-if="!mobileSheet && editing===cell.address" v-model="editValue" v-focus :inputmode="cell.mapped ? 'decimal' : 'text'" enterkeyhint="done" @click.stop :aria-label="'编辑 '+cell.address" @blur="commit(cell)" @keydown.enter.stop.prevent="completeEdit" @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)">
-              <span v-else class="cell-content" :style="cellContentStyle(cell)"><span>{{ cell.displayText || '\u00a0' }}</span></span>
+              <span v-else class="cell-content" :class="{'filled-value':cell.filled}" :style="cellContentStyle(cell)"><span :style="filledTextStyle(cell)">{{ cell.displayText || '\u00a0' }}</span></span>
               <svg v-if="cell.diagonal?.up || cell.diagonal?.down" class="cell-diagonal" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line v-if="cell.diagonal.up" x1="0" y1="100" x2="100" y2="0" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/><line v-if="cell.diagonal.down" x1="0" y1="0" x2="100" y2="100" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/></svg>
             </td>
           </template></tr>
@@ -117,7 +117,7 @@
           <button type="button" class="primary" @mousedown.prevent @click="completeEdit">完成</button>
         </div>
       </div>
-      <footer v-if="currentActive && !readOnly" class="book-submit">
+      <footer v-if="currentActive && currentActive.source_locked!==false && !readOnly" class="book-submit">
         <div v-if="!currentActive.pending" class="book-signoffs" aria-label="专业确认">
           <template v-for="name in selectedProfessions" :key="name">
             <span v-if="confirmedProfessions.includes(name)" :title="confirmationLabel(name)">{{ name }} · {{ confirmationLabel(name) }}</span>
@@ -225,19 +225,19 @@ import {registerNavigationGuard} from '../navigation';
 import {inspectionCellText} from './inspectionCellFormat';
 import {configuredInspectionPositions,manuallyFilledInspectionPositions,inspectionPosition,type InspectionVisibilityActive} from './inspectionCellVisibility';
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
-type Reading=CellEdit & {value:any;read_only?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
+type Reading=CellEdit & {value:any;read_only?:boolean;verified_operating?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
 type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
 type Exemptions={revision:number;sheets:Record<string,string[]>};
-type Report={template_version?:string;archive_warning?:string;draft_key:string;can_edit_history:boolean;can_edit_exemptions?:boolean;exemptions?:Exemptions;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
+type Report={template_version?:string;archive_warning?:string;archive_incomplete?:boolean;draft_key:string;can_edit_history:boolean;can_edit_exemptions?:boolean;exemptions?:Exemptions;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
 type RoundMeta=Pick<Round,'id'|'round_id'|'shift'|'round'|'version'|'status'>;
 type Job={scope:string;date:string;round:RoundMeta;cells:CellEdit[];attempted?:boolean};
 type Presence={actor:string;sheet:string;seen_at:number};
 type Progress={visited_sheets?:string[];presence?:Presence[]};
 type Active=InspectionVisibilityActive & Progress & {
  id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null;
- started?:number;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
+ started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
  profession_confirmations?:Record<string,{actor?:string;confirmed?:number;version?:string}>;
  profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;
 };
@@ -283,6 +283,7 @@ const selectedSlot=ref(''),chillerSelection=ref('');
 const slotOf=(round?:Pick<Round,'shift'|'round'>)=>round?round.shift+round.round:'';
 const isCurrentDate=computed(()=>scope.value===props.defaultScope && day.value===props.defaultDate);
 const currentActive=computed(()=>props.active?.duty.scope===scope.value && props.active?.duty.date===day.value?props.active:undefined);
+const awaitingStart=computed(()=>currentActive.value?.source_locked===false);
 const activeSlot=computed(()=>currentActive.value?currentActive.value.duty.shift+currentActive.value.round:'');
 const currentSlot=computed(()=>activeSlot.value||(isCurrentDate.value&&props.defaultShift?props.defaultShift+Math.min(props.nextRound||1,2):''));
 const activeRound=computed(()=>report.value?.rounds.find(r=>r.round_id===currentActive.value?.id));
@@ -369,7 +370,7 @@ function progressLabel(name:string){
  const pages=pagesFor(name),count=pages.filter(page=>visited.value.has(page.key)).length;
  return hasViewed(name) ? '可确认' : count===pages.length ? '进度待同步' : `已查看 ${count}/${pages.length}`;
 }
-const canSubmit=computed(()=>!!currentActive.value && (currentActive.value.pending ||
+const canSubmit=computed(()=>!!currentActive.value && !awaitingStart.value && (currentActive.value.pending ||
  (selectedProfessions.value.length ? selectedProfessions.value.every(name=>confirmedProfessions.value.includes(name)) : allVisited.value)));
 const submitReason=computed(()=>canSubmit.value ? lockReason.value : selectedProfessions.value.length
  ? '请逐页查看并完成所选专业确认' : '还需查看 '+unvisitedNames.value);
@@ -412,7 +413,26 @@ function originalCellStyle(cell:GridCell):Record<string,any>{const p=currentPage
  return {...source,...(!horizontal||horizontal==='general'?{textAlign:typeof cell.value==='number'?'right':'left'}:{}),fontSize:typeof source.fontSize==='number'?source.fontSize*scale.value+'px':undefined,
  ...(cell.current?{backgroundColor:'#fff0b8',color:'#111827'}:{}),height:mergedHeight(cell)+'px',padding:'0 2px'};
 }
-function cellContentStyle(cell:GridCell){const style=originalCellStyle(cell);return {justifyContent:style.verticalAlign==='middle'?'center':style.verticalAlign==='top'?'flex-start':'flex-end'};}
+function cellContentStyle(cell:GridCell){const style=originalCellStyle(cell);return {justifyContent:cell.filled||style.verticalAlign==='middle'?'center':style.verticalAlign==='top'?'flex-start':'flex-end'};}
+const filledFont='Arial, "Microsoft YaHei", sans-serif';
+const measuredValues=new Map<string,number>();
+let cellMeasure:CanvasRenderingContext2D|null|undefined;
+function filledTextStyle(cell:GridCell){
+ if(!cell.filled||!cell.displayText)return;
+ const value=cell.displayText;
+ let measured=measuredValues.get(value);
+ if(measured===undefined){
+  if(cellMeasure===undefined)cellMeasure=document.createElement('canvas').getContext('2d');
+  if(cellMeasure)cellMeasure.font='12px '+filledFont;
+  measured=cellMeasure?.measureText(value).width || [...value].length*12;
+  if(measuredValues.size>=4096)measuredValues.clear();
+  measuredValues.set(value,measured);
+ }
+ const width=columnWidths.value.slice(cell.colIndex,cell.colIndex+cell.colspan).reduce((sum,column)=>sum+column,0)-6;
+ const base=Math.min(12*scale.value,mergedHeight(cell)/1.2);
+ const fitted=Math.min(base,(Math.max(1,width)/measured)*12);
+ return {fontFamily:filledFont,fontSize:Math.max(1,fitted)+'px'};
+}
 const cellLayout=computed(()=>{
  const p=currentPage.value;if(!p)return [];
  const cached=layoutCache.get(p.rows);if(cached)return cached;
@@ -438,7 +458,7 @@ const grid=computed(()=>{
   if(!visibleById.has(r.round_id))continue;
   if(values.has(c.cell)){collisions.add(c.cell);continue;}
   const current=r.round_id===currentActive.value?.id,key=inspectionPosition(c.template,c.sheet,c.cell);
-  const configured=!current||configuredPositions.value.has(key),manual=manualPositions.value.has(key)||acknowledgedManual.value.has(roundPosition(r.round_id,c.template,c.sheet,c.cell));
+  const configured=!current||c.verified_operating===true||configuredPositions.value.has(key),manual=manualPositions.value.has(key)||acknowledgedManual.value.has(roundPosition(r.round_id,c.template,c.sheet,c.cell));
   values.set(c.cell,{value:c.value,round:r,readonly:c.read_only,mapped:configured,visible:configured||manual,parameter:c.parameter,value_type:c.value_type});
  }
  const active=activeRound.value;
@@ -461,6 +481,8 @@ const grid=computed(()=>{
  const remarks=new Set(p.remark_cells || []);
  const custom=report.value?.exemptions?.sheets[p.baseKey];
  const exemptions=custom ? new Set(custom) : null;
+ const frozen=currentActive.value?.cell_exemptions?.[p.baseKey];
+ const roundExemptions=frozen ? new Set(frozen) : null;
  const defaultRanges=(p.excluded_ranges||[]).map(range=>{const [x,y=x]=range.split(':');return [...coords(x),...coords(y)];});
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{
   const a=cell.address,v=values.get(a),remark=remarks.has(a);
@@ -474,17 +496,20 @@ const grid=computed(()=>{
    const edits=Array.from(byRound.values());override=edits[edits.length-1];
   }
   const current=!!round&&round.round_id===currentActive.value?.id;
-  const excluded=!remark&&(exemptions ? exemptions.has(a) :
+  const policy=current && currentActive.value?.source_locked && currentActive.value.cell_exemptions ? roundExemptions : exemptions;
+  const excluded=!remark&&(policy ? policy.has(a) :
    defaultRanges.some(([r,c,rr,cc])=>cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc));
   const exempt=excluded&&(current||!round)&&!text(cell.raw).trim();
   const editable=sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
-   ? !excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
+   ? !awaitingStart.value&&!excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
      && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))
    : report.value?.can_edit_history&&hasArchiveReceipt(round));
   const value=exempt?'':collisions.has(a)?'位置冲突，请核对映射':override?override.value:v?(v.visible?v.value:''):cell.raw;
   const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
   const modeCell=isChiller.value&&/^[K-P][789]$/.test(a);
-  return {...cell,value,modeCell,diagonal:style?.diagonal,text:text(value),displayText:!exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format),round,exempt,
+  const filled=!exempt&&!collisions.has(a)&&!!(override||v?.visible)&&!!text(value);
+  const displayed=!exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format);
+  return {...cell,value,modeCell,diagonal:style?.diagonal,text:text(value),displayText:filled?displayed.replace(/\s+/g,' ').trim():displayed,filled,round,exempt,
    current:!exempt&&current&&!!(v?.visible||override),historical:!!(v||override)&&!current,mapped:!exempt&&!!v?.mapped,
    stateCell:modeCell||v?.value_type==='状态'||/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(override?override.value:v?.value)),editable:!!editable};
  }));
@@ -646,6 +671,16 @@ function gotoNextEmpty(){
  focusReviewCell(rows[(index+1)%rows.length]||rows[0]);
 }
 let timer:number|undefined,controller:AbortController|undefined,disposed=false,storageKey='',storageUnverified=false;
+const sheetCache=new Map<string,Report>();
+let loadingKey='';
+const exporting=ref(false);
+function sheetCacheKey(baseKey?:string){return JSON.stringify([context(),baseKey||'']);}
+function rememberSheet(key:string,value:Report){
+ sheetCache.delete(key);
+ sheetCache.set(key,value);
+ if(sheetCache.size>24)sheetCache.delete(sheetCache.keys().next().value!);
+}
+function clearSheetCache(){for(const key of sheetCache.keys())if(JSON.parse(key)[0]===context())sheetCache.delete(key);}
 let requestedArchiveRevision=props.archiveRevision;
 const presence=ref<Presence[]>([]);
 const syncedVisited=ref(new Set<string>());
@@ -664,7 +699,7 @@ function restoreViewed(){
 }
 function markViewed(){
  const key=viewedKey();if(!key||!currentPage.value||!sheetLoaded.value||!activeRound.value||readOnly.value
-  ||currentActive.value?.pending||(isChiller.value&&chillerSlot.value!==activeSlot.value))return;
+  ||awaitingStart.value||currentActive.value?.pending||(isChiller.value&&chillerSlot.value!==activeSlot.value))return;
  visited.value=new Set([...visited.value,currentPage.value.baseKey]);
  try{localStorage.setItem(key,JSON.stringify([...visited.value]));}catch{/* The user can still confirm after viewing again. */}
  void syncProgress();
@@ -672,7 +707,7 @@ function markViewed(){
 const readOnly=computed(()=>props.readOnly);
 async function syncProgress(){
  const active=currentActive.value,page=currentPage.value;
- if(!active||!page||active.pending||props.readOnly||!activeRound.value||!sheetLoaded.value||document.hidden
+ if(!active||!page||active.pending||awaitingStart.value||props.readOnly||!activeRound.value||!sheetLoaded.value||document.hidden
   ||(isChiller.value&&chillerSlot.value!==activeSlot.value)||progressRequest)return;
  const controller=progressRequest=new AbortController();
  const key=context(),id=active.id;
@@ -726,6 +761,7 @@ watch(viewKey,markViewed);
 function beginEdit(cell:GridCell){
  if(editing.value===cell.address)return;
  if(storageUnverified||!sheetLoaded.value||!cell.editable||(saving.value&&!savingCells.value)||props.parentBusy||!currentPage.value||loading.value)return;
+ if(awaitingStart.value && cell.round?.round_id===currentActive.value?.id)return;
  finishEdit();if(abnormal.value)return;
  editor={cell,template:currentPage.value.template,sheet:currentPage.value.name,scope:scope.value,date:day.value};
  editValue.value=cell.text;editing.value=cell.address;
@@ -763,40 +799,59 @@ function attachTemplates(value:Report){if(value.original_templates?.length){cach
 function showTemplate(){if(!report.value?.draft_key&&cachedTemplates.value.length)report.value={scope:scope.value,date:day.value,draft_key:'',can_edit_history:false,rounds:[],original_templates:cachedTemplates.value};}
 async function loadTemplates(){const key=context();try{const cached=JSON.parse(localStorage.getItem('inspection-layout:'+scope.value)||'null');if(cached?.version&&cached.version===props.templateVersion&&Array.isArray(cached.templates)&&cached.templates.every((t:{scope?:string})=>t.scope===scope.value)){cachedTemplates.value=cached.templates;layoutVersion.value=cached.version;showTemplate();return;}}catch{}
  try{const data=await requestJson('/api/daily-inspection/templates?scope='+scope.value+'&v='+encodeURIComponent(props.templateVersion||''),{cache:'no-store'}) as {scope:string;version:string;templates:Report['original_templates']};if(disposed||key!==context()||data.scope!==scope.value||(props.templateVersion&&data.version!==props.templateVersion)||!Array.isArray(data.templates))return;cacheTemplates(data.templates,data.version);showTemplate();await nextTick();measureHeight();}catch{/* The data response can still provide the template; its error remains visible. */}}
-async function load(){
+async function load(force=false){
  if(disposed||dirty.value||saving.value||editing.value||abnormal.value)return;
- if(loading.value&&controller&&!controller.signal.aborted)return;
+ const selected=currentPage.value,cacheKey=sheetCacheKey(selected?.baseKey);
+ if(!force&&loadingKey===cacheKey&&controller&&!controller.signal.aborted)return;
  controller?.abort();const ctl=controller=new AbortController(),key=context(),stamp=mutation;
+ loadingKey=cacheKey;
  requestedArchiveRevision=props.archiveRevision;
-  const selected=currentPage.value;
-  const selection=selected ? {view_sheet:[selected.template,selected.name]} : {summary_only:true};
-  let accepted=false;
- loading.value=true;error.value='';
- try{
-   const value=await requestJson('/api/daily-inspection/day-sheet',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{},form_only:true,template_version:layoutVersion.value,...selection}),signal:ctl.signal,timeoutMs:180000}) as Report;
-  if(disposed||ctl.signal.aborted||controller!==ctl||key!==context()||stamp!==mutation||dirty.value||editing.value)return;
+ const selection=selected ? {view_sheet:[selected.template,selected.name]} : {summary_only:true};
+ const cached=sheetCache.get(cacheKey);
+ const valid=()=>!disposed&&!ctl.signal.aborted&&controller===ctl&&key===context()&&stamp===mutation&&!dirty.value&&!editing.value&&!abnormal.value;
+ const request=(archive_mode:'local'|'refresh')=>requestJson('/api/daily-inspection/day-sheet',{method:'POST',
+  body:JSON.stringify({scope:scope.value,date:day.value,drafts:{},form_only:true,template_version:layoutVersion.value,archive_mode,...selection}),
+  signal:ctl.signal,timeoutMs:180000}) as Promise<Report>;
+ const accept=async(value:Report)=>{
+  if(!valid())return;
   if(value.scope!==scope.value||value.date!==day.value||!value.draft_key)throw new Error('巡检表返回的楼栋或日期不一致，未替换当前数据。');
-   if(value.sheet_filter && JSON.stringify(value.sheet_filter)!==selected?.baseKey)throw new Error('返回的巡检工作表不一致，请刷新。');
-  attachTemplates(value);report.value=value;storageUnverified=false;storageKey='inspection-sheet-edits:'+value.draft_key;
-   accepted=true;
-  try{const pending=JSON.parse(localStorage.getItem(storageKey)||'[]');
+  if(value.sheet_filter && JSON.stringify(value.sheet_filter)!==selected?.baseKey)throw new Error('返回的巡检工作表不一致，请刷新。');
+  attachTemplates(value);report.value=value;rememberSheet(cacheKey,value);
+  const nextStorageKey='inspection-sheet-edits:'+value.draft_key;
+  if(nextStorageKey!==storageKey){
+   storageUnverified=false;storageKey=nextStorageKey;
+   try{const pending=JSON.parse(localStorage.getItem(storageKey)||'[]');
    if(!Array.isArray(pending))throw new Error();
    jobs.value=pending.map((job:any)=>{
     if(!job.round?.round_id||!Array.isArray(job.cells)||(job.scope&&job.scope!==scope.value)||(job.date&&job.date!==day.value))throw new Error();
     return {scope:scope.value,date:day.value,round:roundMeta(job.round),cells:job.cells,attempted:job.attempted!==false};
    });
-  }catch{storageUnverified=true;error.value='暂存修改无法核验，请先核对本机数据；未自动提交。';}
+   }catch{storageUnverified=true;error.value='暂存修改无法核验，请先核对本机数据；未自动提交。';}
+  }
   restoreViewed();
   if(!currentPage.value)pageKey.value=preferredPage();
-  await nextTick();markViewed();measureHeight();restoreScroll();focusLookupTarget();
+  loading.value=false;
+  await nextTick();
+  if(valid()){markViewed();measureHeight();restoreScroll();focusLookupTarget();}
+ };
+ loading.value=!cached;error.value='';
+ try{
+  if(cached && (!props.templateVersion || cached.template_version===props.templateVersion))await accept(cached);
+  const local=await request('local');
+  await accept(local);
+  if(valid()&&(!selected||currentPage.value?.baseKey===selected.baseKey)
+      &&(force||currentActive.value?.source_locked!==true||local.archive_incomplete)){
+   const fresh=await request('refresh');
+   if(valid())await accept(fresh);
+  }
  }catch(e){if(!ctl.signal.aborted&&key===context())error.value=e instanceof Error?e.message:'巡检表读取失败';}
   finally{if(controller===ctl){
-   loading.value=false;
-   if(accepted&&currentPage.value&&!sheetLoaded.value&&!storageUnverified)void load();
+   loading.value=false;loadingKey='';
   }}
 }
 function applySaved(job:Job,version:string|number){
  const value=report.value;if(!value)return;
+ clearSheetCache();
  report.value={...value,rounds:value.rounds.map(r=>{
   if(r.round_id!==job.round.round_id)return r;
   const readings=r.original_cells.map(c=>({...c})),extras=(r.extra_cells||[]).map(c=>({...c}));
@@ -861,7 +916,13 @@ function resolveJob(job:Job,keep:boolean){
 async function submit(){if(!currentActive.value||actionLocked.value||!canSubmit.value)return;saving.value=true;error.value='';
  try{await requestJson('/api/daily-inspection/finish?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:currentActive.value.review_version,sheet_workflow:true,visited_sheets:[...visited.value]}),timeoutMs:180000});emit('changed');}
  catch(e){error.value=e instanceof Error?e.message:'提交未确认，请重试原任务。';}finally{saving.value=false;await load();}}
-async function download(){try{await downloadFile('/api/daily-inspection/day-export',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{}}),timeoutMs:180000});}catch(e){error.value=e instanceof Error?e.message:'导出失败';}}
+async function download(){
+ if(exporting.value||dirty.value||saving.value||editing.value)return;
+ exporting.value=true;error.value='';const key=context();
+ try{await downloadFile('/api/daily-inspection/day-export',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{}}),timeoutMs:180000});}
+ catch(e){if(context()===key)error.value=e instanceof Error?e.message:'导出失败';}
+ finally{exporting.value=false;}
+}
 function chooseScope(value:string){
  if(value===scope.value||!props.scopes.includes(value)||storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value||exemptionSaving.value)return false;
  scope.value=value;emit('scope',scope.value);void loadPreferences();reset();
@@ -874,14 +935,20 @@ function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.va
 watch(()=>props.defaultScope,v=>{if(v&&v!==scope.value&&!dirty.value&&!saving.value&&!editing.value&&!abnormal.value){scope.value=v;void loadPreferences();reset();}});
 watch(()=>currentActive.value?.id,()=>{clearProgress();restoreViewed();void nextTick(markViewed);if(!saving.value&&!dirty.value)void load();});
 watch([()=>currentActive.value?.visited_sheets,()=>currentActive.value?.presence],restoreViewed);
-watch(()=>props.active?.review_version,version=>{if(!saving.value&&!dirty.value&&!editing.value&&report.value?.rounds.find(r=>r.round_id===currentActive.value?.id)?.version!==version)void load();});
+watch(()=>currentActive.value?.review_version,version=>{
+ if(!saving.value&&!dirty.value&&!editing.value&&report.value?.rounds.find(r=>r.round_id===currentActive.value?.id)?.version!==version){
+  controller?.abort();
+  void load();
+ }
+});
 const archiveRefreshIdle=computed(()=>!loading.value&&!saving.value&&!dirty.value&&!editing.value&&!abnormal.value&&!comparison.value&&
  !sortOpen.value&&!settingsOpen.value&&!confirmSubmit.value&&!props.parentBusy);
 watch([()=>props.archiveRevision,archiveRefreshIdle],([revision,idle])=>{
  if(idle&&!storageUnverified&&revision!==requestedArchiveRevision)void load();
 });
 watch(()=>props.parentBusy,busy=>{if(!busy&&dirty.value&&!error.value)scheduleSave();});
-watch([()=>currentPage.value?.baseKey,dirty],()=>{if(currentPage.value&&!sheetLoaded.value&&!storageUnverified)void load();});
+watch(()=>currentPage.value?.baseKey,()=>{if(currentPage.value&&!storageUnverified)void load();});
+watch(dirty,value=>{if(!value&&currentPage.value&&!sheetLoaded.value&&!storageUnverified)void load();});
 const scrollElement=ref<HTMLElement>();const scrollPositions=new Map<string,{left:number;top:number}>();
 const sheetTabs=ref<HTMLElement>();
 watch([sheetTabs,pageKey,orderedBase,rotation],()=>{
@@ -965,6 +1032,8 @@ async function saveExemption(operation:'add'|'remove'){
   if(disposed||key!==context()||!report.value)return;
   report.value={...report.value,exemptions:policy};
   exemptionNotice.value=policy.revision===revision?'所选范围已是该状态。':operation==='add'?'已设置免填。':'已取消所选范围的免填。';
+  if(policy.revision!==revision && currentActive.value?.source_locked)exemptionNotice.value+='从下一轮起生效。';
+  clearSheetCache();
   exemptionInput.value='';
   controller?.abort();
   void load();
@@ -1154,6 +1223,8 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.cl
 .book-scroll td{position:relative;line-height:normal}
 .book-scroll td>.cell-content{position:absolute;inset:0 2px;display:flex;flex-direction:column;overflow:hidden;line-height:normal}
 .cell-content>span{flex:0 0 auto;max-height:100%;overflow:hidden}
+.book-scroll td>.filled-value{align-items:center;text-align:center;letter-spacing:normal;font-weight:normal;font-style:normal}
+.filled-value>span{white-space:nowrap;max-width:none;line-height:1.2;overflow:visible}
 .book-scroll tbody .row-number{height:auto;padding:0;line-height:1}
 .row-number>span{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
 .book-scroll td>input,.book-scroll td>select{position:absolute;inset:0;width:100%;height:100%;min-height:0;z-index:1}

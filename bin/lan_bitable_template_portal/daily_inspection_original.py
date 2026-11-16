@@ -10,7 +10,7 @@ from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, get_column_letter, range_boundaries
+from openpyxl.utils.cell import coordinate_from_string, coordinate_to_tuple, column_index_from_string, get_column_letter, range_boundaries
 from openpyxl.cell.cell import MergedCell
 
 ORIGINAL_MAPPING_SHEET = '原表映射'
@@ -304,12 +304,16 @@ def original_views(templates, rounds, *, include_empty_rounds=False):
                 # Preserve free cell corrections without replacing other rounds' mapped readings.
                 from .daily_inspection_sheet_edit import overlay_views
                 current = {'template': template['name'], 'sheet': sheet['name'], 'rows': rows}
+                filled = set(occupied)
                 for item in group:
-                    overlay_views([current], [edit for edit in item.get('extra_cells', []) if edit['cell'] not in occupied])
+                    edits = [edit for edit in item.get('extra_cells', []) if edit['cell'] not in occupied]
+                    overlay_views([current], edits)
+                    filled.update(edit['cell'] for edit in edits
+                                  if (edit['template'], edit['sheet']) == (template['name'], sheet['name']))
                 round_label = f'{slot[0]}{slot[1]}-' if slot else ''
                 output.append({'name': f"原-{template['profession'][0]}-{round_label}{sheet['name'].strip()}",
                                'template': template['name'], 'sheet': sheet['name'],
-                               'rows': rows, 'merges': sheet['merges'], 'template_rows':sheet['rows'],
+                               'rows': rows, 'merges': sheet['merges'], 'template_rows':sheet['rows'], 'filled':filled,
                                **{key:sheet[key] for key in ('excel_styles','excel_settings','style_ids','artwork') if key in sheet}})
     return output
 
@@ -332,6 +336,7 @@ def write_original_sheet(target, source):
     """Render the same template and value matrix used by the inspection page."""
     import datetime as dt
     from openpyxl.cell import WriteOnlyCell
+    from openpyxl.styles import Alignment, Font
     from openpyxl.xml.functions import fromstring
     from openpyxl.worksheet.dimensions import SheetFormatProperties
     from openpyxl.worksheet.properties import WorksheetProperties
@@ -357,6 +362,8 @@ def write_original_sheet(target, source):
         for key,item in style.items():setattr(prototype,key,copy.copy(item))
         bound_styles.append(prototype._style)
     for merge in source['merges']:target.merged_cells.add(merge)
+    filled = {coordinate_to_tuple(cell) for cell in source.get('filled', ())}
+    filled_styles = {}
     for ri,row in enumerate(source['rows']):
         cells=[]
         for ci,value in enumerate(row):
@@ -368,6 +375,17 @@ def write_original_sheet(target, source):
                 if style['number_format'].lower() in ('h:mm','hh:mm','h:mm:ss','hh:mm:ss') and isinstance(value,str):
                     try:cell.value=dt.time.fromisoformat(value)
                     except ValueError:pass
+                if value not in (None, '') and (ri+1, ci+1) in filled:
+                    if index not in filled_styles:
+                        prototype = WriteOnlyCell(target)
+                        prototype._style = copy.copy(bound_styles[index])
+                        prototype.font = Font(name='Microsoft YaHei', size=9, color=style['font'].color)
+                        prototype.alignment = Alignment(horizontal='center', vertical='center',
+                                                        wrap_text=False, shrink_to_fit=True)
+                        filled_styles[index] = prototype._style
+                    cell._style = filled_styles[index]
+                    if isinstance(cell.value, str):
+                        cell.value = ' '.join(cell.value.split())
             if isinstance(cell.value,str):
                 baseline=source.get('template_rows',[])
                 formula=bool(cell.value.startswith('=') and ri<len(baseline) and ci<len(baseline[ri]) and baseline[ri][ci]==cell.value)

@@ -968,6 +968,8 @@ class PortalRuntime:
         now: float | None = None,
         preserve_verified_screenshot_on_empty: bool = True,
     ) -> dict:
+        from .change_screenshot_cards import format_start_time
+
         now = float(now or time.time())
         existing = dict(existing or {})
         fields = cls._change_confirmation_fields(record)
@@ -1057,6 +1059,10 @@ class PortalRuntime:
             ),
             "building_codes": building_codes,
             "target_status": str(lifecycle.get("status") or "").strip(),
+            "started_at": (
+                format_start_time(fields.get(CHANGE_NOTICE_FIELDS["start_time"]))
+                or str(existing.get("started_at") or "")
+            ),
             "screenshot_count": screenshot_count,
             "screenshot_tokens": screenshot_tokens,
             "screenshot_items": (
@@ -1118,7 +1124,9 @@ class PortalRuntime:
             existing.update(
                 {
                     "active_item_id": str(payload.get("active_item_id") or existing.get("active_item_id") or ""),
-                    "title": str(payload.get("title") or payload.get("name") or existing.get("title") or target_record_id),
+                    "title": cls.service._clean_source_text(
+                        payload.get("title") or payload.get("name") or existing.get("title") or target_record_id
+                    ),
                     "building": str(payload.get("building") or existing.get("building") or ""),
                     "building_codes": cls.service._building_codes_from_value(
                         payload.get("building_codes") or payload.get("building") or existing.get("building_codes") or []
@@ -1521,6 +1529,12 @@ class PortalRuntime:
                 return cls._put_change_confirmation_task(task)
             fingerprint = str(task.get("screenshot_fingerprint") or "")
             if fingerprint:
+                if task.get("empty_remote_screenshot_reads"):
+                    return cls._put_change_confirmation_task(task)
+                if not point_read and not task.get("started_at"):
+                    # A local upload projection may lack the actual start. Let
+                    # the scheduled point read fill it before composing the card.
+                    return cls._put_change_confirmation_task(task)
                 if now < float(task.get("h_notification_next_at") or 0):
                     return cls._put_change_confirmation_task(task)
                 h_open_id = str(BUILDING_OPEN_ID_MAP.get("H") or "").strip()

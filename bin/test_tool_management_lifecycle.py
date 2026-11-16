@@ -107,10 +107,12 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertEqual(len(visible['history']), AUDIT_LIMIT)
         self.assertEqual(visible['history'][-1]['detail'], '')
         self.assertNotRegex(json.dumps(result), 'PRIVATE|hidden location|internal-id')
-        for denied in (self.b, actor(identity='not_leader')):
+        for denied in (self.b,):
             with self.assertRaises(RiskError) as error:
                 self.service.tool_history(denied, asset['id'])
             self.assertEqual(error.exception.status, 404)
+        ordinary = self.service.tool_history(actor(identity='not_leader'), asset['id'])
+        self.assertEqual(ordinary['orders'], [])
         admin_view = self.service.tool_history(actor(admin=True), asset['id'])
         self.assertTrue(admin_view['has_more'])
         self.assertEqual(len(admin_view['orders']), HISTORY_LIMIT)
@@ -169,7 +171,8 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertEqual(self.service.send_building_reminders(deliver, utc)['sent'], ['A', 'B'])
         self.assertEqual(calls['A'][0], '2026-11-15')
         self.assertIn('carryover-A', calls['A'][1])
-        self.assertNotIn('expired-A', calls['A'][1])
+        self.assertIn('证书到期', calls['A'][1])
+        self.assertIn('expired-A（2026-10-03）', calls['A'][1])
         self.assertNotIn('cancelled-A', calls['A'][1])
         self.assertNotIn('legacy-only', calls['A'][1])
         self.assertIn('waiting-B', calls['B'][1])

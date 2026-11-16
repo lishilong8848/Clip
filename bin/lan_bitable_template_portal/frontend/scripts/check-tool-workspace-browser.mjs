@@ -25,7 +25,7 @@ const initialAssets = [
   { id: 'u', name: '未关联工具', scope: 'A', model: 'U-1', brand: '测试品牌', self_cycle: '月度' },
   { id: 'x', name: '周期冲突工具', scope: 'A', self_cycle: '月度', external_cycle: '年度', eligible_kinds: [], disabled_reason: '同时配置了维护和送检周期，请核对。' },
   { id: 'r1', name: '送检压力表', scope: 'A', model: 'P-100', brand: '计量品牌', external_cycle: '年度' },
-  { id: 'r2', name: '送检绝缘表', scope: 'B', model: 'R-100', brand: '计量品牌', external_cycle: '年度' },
+  { id: 'r2', name: '送检绝缘表', scope: 'A', model: 'R-100', brand: '计量品牌', external_cycle: '年度' },
 ];
 let state;
 function reset() {
@@ -41,9 +41,14 @@ function createSession(body) {
   const items = body.asset_ids.map(asset_id => {
     const asset = state.assets.find(asset => asset.id === asset_id);
     assert(asset && asset.id !== 'x');
-    const template_id = body.template_id || asset.template_id;
+    const template_id = body.template_ids?.[asset_id] || body.template_id || asset.template_id;
     const template = body.kind === 'self' ? clone(layouts[template_id]) : null;
-    const values = template ? { [template.schema.sheet + '!' + (template.schema.layout === 'hvac' ? 'C5' : 'C3')]: asset.scope + '楼' } : {};
+    const hvac = template?.schema.layout === 'hvac';
+    const values = template ? Object.fromEntries([
+      [template.schema.sheet + '!' + (hvac ? 'C5' : 'C3'), asset.scope + '楼'],
+      [template.schema.sheet + '!' + (hvac ? 'G6' : 'G4'), '本地测试人员'],
+      [template.schema.sheet + '!' + (hvac ? 'G11' : 'G8'), '2026-11-12'],
+    ]) : {};
     return { id: asset_id, asset_id, asset: clone(asset), template_id, template, values, checks: {},
       reviewer: '', reviewed_at: '', signature: '', qualified: null, can_edit: true, order_revision: 1,
       archive_status: 'draft', archive_error: '' };
@@ -57,7 +62,19 @@ const serverErrors = [];
 const server = createServer(async (request, response) => {
   const url = new URL(request.url, 'http://localhost');
   const pathname = url.pathname;
-  const ok = data => { response.setHeader('Content-Type', 'application/json'); response.end(JSON.stringify({ ok: true, data })); };
+  const ok = data => {
+    if (url.searchParams.get('compact') === '1' && Array.isArray(data.items) && data.items.some(item => item.template)) {
+      const layouts = {};
+      const items = data.items.map(({template, ...item}) => {
+        if (!template) return item;
+        layouts[item.template_id] = template;
+        return { ...item, layout_key: item.template_id };
+      });
+      data = { ...data, layouts, items };
+    }
+    response.setHeader('Content-Type', 'application/json');
+    response.end(JSON.stringify({ ok: true, data }));
+  };
   const fail = (message, status = 409) => { response.writeHead(status, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ ok: false, error: message })); };
   try {
     if (pathname.startsWith('/api/')) {
@@ -84,13 +101,14 @@ const server = createServer(async (request, response) => {
         const session = state.sessions.get(state.operations.get(body.operation_id)) || createSession(body);
         if (state.failOpen) { state.failOpen = false; session.status = 'opening'; session.can_edit = false; return fail('模板关联中断，请继续打开。', 503); }
         session.status = 'draft'; session.can_edit = true;
-        if (body.template_id) state.assets.forEach(asset => { if (body.asset_ids.includes(asset.id)) asset.template_id = body.template_id; });
+        for (const item of session.items) if (item.template_id) state.assets.find(asset => asset.id === item.id).template_id = item.template_id;
         return ok(session);
       }
       if (pathname.startsWith(api + '/')) {
         const [id, action] = pathname.slice(api.length + 1).split('/');
         const session = state.sessions.get(id);
         if (!session) return fail('记录不存在。', 404);
+        if (action === 'people') return ok({ A: [{ id: 'leaderA', name: 'A楼长' }], B: [{ id: 'leaderB', name: 'B楼长' }] });
         if (action === 'resume') {
           assert.equal(request.method, 'POST'); assert.equal(raw.length, 0);
           if (state.failResume) { state.failResume = false; return fail('继续打开暂时失败。', 503); }
@@ -135,7 +153,7 @@ const server = createServer(async (request, response) => {
           for (const input of body.items) {
             const entry = session.items.find(item => item.id === input.asset_id); assert(entry?.can_review);
             assert.equal(input.revision, entry.order_revision);
-            Object.assign(entry,{can_review:false, reviewer:'本楼楼长', reviewed_at:'2026-11-12T10:30',
+            Object.assign(entry,{can_review:false, reviewer:'本楼楼长', reviewed_at:input.reviewed_at || body.reviewed_at || '2026-11-12T10:30',
               signature:input.signature || body.signature, order_revision:3, archive_status:'pending'});
           }
           session.status = 'pending'; session.revision++; return ok(session);
@@ -211,7 +229,7 @@ async function drawSignature(openName) {
   await button('使用签名').click();
   await canvas.waitFor({ state: 'hidden' });
 }
-async function fillChecks() { for (const select of await page.locator('.sheet-table select').all()) await select.selectOption('是'); }
+async function fillChecks() { for (const select of await page.locator('.sheet-table select[aria-label^="检查 "]').all()) await select.selectOption('是'); }
 async function checkWorksheetLayout() {
   const layout = await page.evaluate(() => {
     const choices = [...document.querySelectorAll('.qualified-options label')].map(label => label.getBoundingClientRect().toJSON());
@@ -224,8 +242,17 @@ async function checkWorksheetLayout() {
   assert(layout.radii.every(radius => radius === '2px'), 'Original worksheet inputs retain compact corners');
 }
 async function noOverflow() {
-  const metrics = await page.evaluate(() => ({ viewport: innerWidth, page: document.documentElement.scrollWidth,
-    panel: document.querySelector('.tool-workspace').getBoundingClientRect().toJSON() }));
+  const metrics = await page.evaluate(() => {
+    const panel = document.querySelector('.tool-workspace');
+    const result = { viewport: innerWidth, page: document.documentElement.scrollWidth, panel: panel.getBoundingClientRect().toJSON() };
+    if (result.panel.right > innerWidth + 1 || result.page > innerWidth + 1) {
+      result.ancestors = [];
+      for (let node = panel; node; node = node.parentElement) {
+        result.ancestors.push({ class: node.className, width: node.getBoundingClientRect().width });
+      }
+    }
+    return result;
+  });
   assert(metrics.page <= metrics.viewport + 1, JSON.stringify(metrics));
   assert(metrics.panel.right <= metrics.viewport + 1, JSON.stringify(metrics));
   return metrics;
@@ -260,7 +287,7 @@ try {
     assert.equal(count('/refresh'), 1);
     assert.equal(state.calls.find(call => call.path === api + '/refresh').bytes, 0);
   });
-  await check('left multi-select, template table, retained explicit choice, scope/model/brand/cycle', async () => {
+  await check('multiple selection groups keep independent template assignments', async () => {
     const unavailable = page.getByRole('checkbox', { name: '选择工具 周期冲突工具', exact: true });
     assert.equal(await unavailable.getAttribute('aria-checked'), 'false');
     assert.equal(await button('月度工单').count(), 0);
@@ -268,8 +295,8 @@ try {
     assert(await page.getByRole('checkbox', { name: '选择工具 电能质量分析仪', exact: true }).isChecked());
     await chooseRadio('选用模板 电气原表模板');
     await chooseAssets('温湿度仪');
-    assert(await radio('选用模板 电气原表模板').isChecked());
-    await chooseRadio('使用各工具已关联模板');
+    await chooseRadio('选用模板 暖通原表模板');
+    await page.getByText('本次 2 台', { exact: true }).waitFor();
     await noOverflow();
     await page.screenshot({ path: path.join(output, 'desktop-selection.png'), fullPage: true });
   });
@@ -279,6 +306,7 @@ try {
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
     assert.equal(count('/open'), 1); assert.equal(state.sessions.size, 1);
     const operation = actions('open')[0].body.operation_id;
+    assert.deepEqual(actions('open')[0].body.template_ids,{ e:'electrical', h:'hvac' });
     state.failOpen = true;
     await openWorkspace();
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
@@ -324,9 +352,19 @@ try {
     await button('保存草稿').click();
     await page.getByText('草稿已保存', { exact: true }).waitFor();
   });
-  await check('complete both original worksheets without entering reviewer data', async () => {
-    await fillChecks();
-    await chooseRadio('合格');
+  await check('inspector/date defaults, one-click normal, and explicit completion are editable', async () => {
+    assert.equal(await page.getByLabel('填写 '+layouts.electrical.schema.sheet+'!G4',{exact:true}).inputValue(),'本地测试人员');
+    assert.equal(await page.getByLabel('填写 '+layouts.electrical.schema.sheet+'!G8',{exact:true}).inputValue(),'2026-11-12');
+    await button('一键正常').click();
+    assert.equal(await page.getByLabel('完成情况',{exact:true}).inputValue(),'completed');
+    await page.getByLabel('完成情况',{exact:true}).selectOption('incomplete');
+    const quickCompletion = page.getByLabel('填写完成情况', { exact: true });
+    assert.equal(await quickCompletion.inputValue(), 'incomplete');
+    await quickCompletion.selectOption('completed');
+    assert.equal(await page.getByLabel('完成情况', {exact:true}).inputValue(), 'completed');
+    await quickCompletion.selectOption('incomplete');
+    await page.getByLabel('选择审核人',{exact:true}).focus();
+    await page.getByLabel('选择审核人',{exact:true}).selectOption('leaderA');
     await checkWorksheetLayout();
     assert.equal(await page.getByLabel('审核人', { exact: true }).count(), 0);
     await page.screenshot({ path: path.join(output, 'desktop-electrical-review.png'), fullPage: true });
@@ -344,7 +382,14 @@ try {
     assert.equal(actions('submit').length, 0);
     assert.equal(await page.getByLabel('填写 ' + layouts.hvac.schema.sheet + '!E20', { exact: true }).inputValue(), '23.5');
     await submit();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByLabel('审核时间（北京时间）', { exact: true }).fill('2026-11-12T10:25');
+    assert.equal(await page.getByLabel('审核年月日时', { exact: true }).inputValue(), '2026-11-12T10:25');
+    await noOverflow();
+    await page.screenshot({ path: path.join(output, 'mobile-review-time.png'), fullPage: true });
     await button('批量审核').click();
+    await page.locator('.tool-workspace-dialog').filter({hasText:'批量审核'})
+      .getByLabel('审核时间（北京时间）', { exact: true }).fill('2026-11-12T10:30');
     await drawSignature('绘制批量签名');
     state.failPoll = true;
     await page.locator('.tool-workspace-dialog').filter({hasText:'重签批量签名'})
@@ -352,11 +397,44 @@ try {
     await page.getByText('归档处理中', { exact: true }).waitFor();
     assert.equal(actions('submit').length, 1);
     assert.equal(actions('review').length, 1);
+    assert.equal(actions('review')[0].body.reviewed_at, '2026-11-12T10:30');
+    assert.equal(actions('review')[0].body.items.find(item => item.asset_id === 'h').reviewed_at, '2026-11-12T10:25');
+    assert.equal(actions('review')[0].body.items.find(item => item.asset_id === 'e').reviewed_at, undefined);
     await page.getByText('归档状态暂时无法读取。', { exact: true }).waitFor();
     await page.getByRole('link', { name: '下载归档', exact: true }).waitFor({ timeout: 20000 });
     const download = page.waitForEvent('download');
     await page.getByRole('link', { name: '下载归档', exact: true }).click();
     assert.equal((await download).suggestedFilename(), 'fixture-archive.zip');
+    await page.setViewportSize({ width: 1440, height: 1000 });
+  });
+  await check('archived history reopens with original layouts, completion and review signatures', async () => {
+    await button('返回选择').click();
+    await chooseSaved('已归档');
+    await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
+    await button('电能质量分析仪 · A楼').click();
+    await page.getByText('已完成[ ]　未完成[√]', {exact: true}).waitFor();
+    assert.equal(await page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', {exact: true}).inputValue(), '逐台填写内容');
+    assert(await page.getByAltText('表内审核签名',{exact:true}).isVisible());
+    await page.locator('.sheet-table').getByText('2026-11-12 10:30', {exact:true}).waitFor();
+    await button('温湿度仪 · B楼').click();
+    await page.locator('.sheet-table').getByText('2026-11-12 10:25', {exact:true}).waitFor();
+    assert.equal(await page.locator('.sheet-table tbody tr').count(), layouts.hvac.sheets[1].rows.length);
+    await page.setViewportSize({ width: 320, height: 700 });
+    await noOverflow();
+    await checkWorksheetLayout();
+    const signedRow = await page.getByAltText('表内审核签名', {exact:true}).evaluate(image => {
+      const row = image.closest('tr');
+      const cell = image.closest('td').getBoundingClientRect();
+      const signature = image.getBoundingClientRect();
+      const signedHeight = row.getBoundingClientRect().height;
+      image.style.display = 'none';
+      const unsignedHeight = row.getBoundingClientRect().height;
+      image.style.removeProperty('display');
+      return { signedHeight, unsignedHeight, fits: signature.top >= cell.top && signature.bottom <= cell.bottom };
+    });
+    assert(signedRow.fits && signedRow.signedHeight <= signedRow.unsignedHeight + 1, JSON.stringify(signedRow));
+    await page.screenshot({ path: path.join(output, 'mobile-archived-320.png'), fullPage: true });
+    await page.setViewportSize({ width: 1440, height: 1000 });
   });
   await check('external tools share one binary report; upload failure retains file, repeat upload/submit guarded', async () => {
     await button('返回选择').click();
@@ -372,15 +450,22 @@ try {
     await button('上传报告').click();
     await page.getByText('共用报告.pdf', { exact: true }).waitFor();
     assert.equal(actions('report').length, 2);
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.getByLabel('实际检测日期').fill('2026-11-12');
     assert.equal(await button('提交归档').isDisabled(), true);
     await page.getByLabel('报告编号').fill('TEST-REPORT');
     await page.getByLabel('检测机构').fill('测试检测机构');
-    await page.getByLabel('检测结论').selectOption('qualified');
+    await page.getByLabel('检测结论', {exact:true}).selectOption('qualified');
+    await page.getByText(/逐台检测结论/).click();
+    await page.getByLabel('送检绝缘表检测结论', {exact:true}).selectOption('unqualified');
+    await noOverflow();
+    await page.screenshot({ path: path.join(output, 'mobile-external-report.png'), fullPage: true });
     await page.getByRole('checkbox', {name:/已核对报告/}).check();
     await submit('提交归档');
     await page.getByRole('link', { name: '下载归档', exact: true }).waitFor();
     assert.equal([...state.sessions.values()].at(-1).items.length, 2);
+    assert.deepEqual(actions('submit').at(-1).body.inspection.tools.r2, {result:'unqualified', expires_on:''});
+    await page.setViewportSize({ width: 1440, height: 1000 });
   });
   await check('explicit single template replacement requires confirmation and applies to both selected tools', async () => {
     reset(); await page.goto(legacy);
@@ -392,7 +477,7 @@ try {
     await openWorkspace('打开填写', true);
     await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
     assert.equal(count('/open'), 1);
-    assert.equal(actions('open')[0].body.template_id, 'hvac');
+    assert.deepEqual(actions('open')[0].body.template_ids, { e:'hvac', h:'hvac' });
     assert([...state.sessions.values()][0].items.every(entry => entry.template.schema.layout === 'hvac'));
   });
   await check('V2 desktop and mobile selection/editor; multiple templates remain separate', async () => {
@@ -411,6 +496,25 @@ try {
     await checkWorksheetLayout();
     await noOverflow();
     await page.screenshot({ path: path.join(output, 'mobile-editor.png'), fullPage: true });
+    await page.setViewportSize({ width: 320, height: 700 });
+    await noOverflow();
+    await checkWorksheetLayout();
+    const completion = page.getByRole('combobox', { name: '完成情况', exact: true });
+    const reviewer = page.getByRole('combobox', { name: '选择审核人', exact: true });
+    await completion.selectOption('completed');
+    await reviewer.selectOption('leaderA');
+    assert.equal(await completion.inputValue(), 'completed');
+    assert.equal(await reviewer.inputValue(), 'leaderA');
+    const footerPadding = await page.locator('.editor-footer').evaluate(node => getComputedStyle(node).paddingInlineEnd);
+    assert.equal(footerPadding, '38px', 'Leave room for the floating assistant on narrow screens');
+    await button('提交审核').scrollIntoViewIfNeeded();
+    assert(await button('提交审核').evaluate(node => {
+      const box = node.getBoundingClientRect();
+      return [.15, .5, .85].every(offset => node.contains(document.elementFromPoint(
+        box.left + box.width * offset, (box.top + box.bottom) / 2)));
+    }), 'Mobile footer stays reachable across the button width');
+    await page.screenshot({ path: path.join(output, 'mobile-editor-320.png'), fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
     await button('温湿度仪 · B楼').click();
     await button('电能质量分析仪 · A楼').click();
     assert.equal(await note.inputValue(), '手机草稿内容');
@@ -452,7 +556,7 @@ try {
 } finally {
   await writeFile(path.join(output, 'browser-results.json'), JSON.stringify({ passed: results, errors, serverErrors, blocked, legacy, v2 }, null, 2));
   await browser?.close();
-  if (process.env.TOOL_WORKSPACE_KEEP_PREVIEW === '1' && results.length === 11) {
+  if (process.env.TOOL_WORKSPACE_KEEP_PREVIEW === '1' && results.length === 12) {
     reset();
     await writeFile(path.join(output, 'preview-server.json'), JSON.stringify({ pid: process.pid, legacy, v2, fixturesOnly: true }, null, 2));
     console.log('Fixture preview remains available: ' + v2);

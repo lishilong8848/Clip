@@ -27,7 +27,7 @@ import threading
 from pathlib import Path
 from functools import lru_cache
 import packaging_preflight
-from bin.frontend_assets import FRONTEND_INDEX, is_frontend_asset, referenced_assets
+from bin.frontend_assets import FRONTEND_INDEX, V2_MANIFEST, is_frontend_asset, referenced_assets
 from bin.upload_event_module.services import release_journal
 
 
@@ -454,6 +454,8 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.zhihang_data_cards",
     "lan_bitable_template_portal.tool_workspace",
     "lan_bitable_template_portal.tool_workspace_workbook",
+    "lan_bitable_template_portal.tool_self_check_routes",
+    "lan_bitable_template_portal.change_screenshot_cards",
     "lan_bitable_template_portal.plan_convergence_recipients",
     "lan_bitable_template_portal.notice_recipients",
     "lan_bitable_template_portal.notice_alert_tags",
@@ -2170,19 +2172,24 @@ def _ensure_mcp_frontend_assets() -> None:
                (path.name.startswith('vite.') or path.name in {'package.json', 'package-lock.json', 'index.html', 'assistant.html'})]
     entries = [frontend / 'dist/assistant.html', frontend / 'dist/index.html']
     if (frontend / 'src/workspace-v2').is_dir():
-        entries.append(frontend / 'dist/assets/workspace-v2/index.html')
+        entries.extend((frontend / 'dist/assets/workspace-v2/index.html', PROJECT_ROOT / V2_MANIFEST))
     newest = max(path.stat().st_mtime for path in inputs)
     current = all(entry.is_file() and entry.stat().st_mtime >= newest for entry in entries)
     if current:
-        current = any("/api/assistant/extensions" in (PROJECT_ROOT / path).read_text(encoding="utf-8")
-                      for path in referenced_assets(PROJECT_ROOT) if path.suffix == ".js")
+        try:
+            current = any("/api/assistant/extensions" in (PROJECT_ROOT / path).read_text(encoding="utf-8")
+                          for path in referenced_assets(PROJECT_ROOT) if path.suffix == ".js")
+        except (OSError, ValueError):
+            current = False
     if current:
         return
     npm = shutil.which("npm.cmd" if os.name == "nt" else "npm")
     if not npm:
         raise RuntimeError("前端页面尚未完整构建，且未找到npm；请安装构建环境后重新打包，不能发布旧页面。")
     log("前端源码或资源有更新，正在构建完整新旧版前端资源。")
-    subprocess.run([npm, "run", "build"], cwd=frontend, check=True, timeout=300)
+    build_env = dict(os.environ)
+    build_env.pop("CLIPFLOW_WORKSPACE_BUILD_DIR", None)
+    subprocess.run([npm, "run", "build"], cwd=frontend, env=build_env, check=True, timeout=300)
 
 
 def _cleanup_vue_dist_assets() -> None:

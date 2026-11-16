@@ -5,7 +5,7 @@
     <div v-if="!session" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
-          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>可选 {{ visibleEligible.length }} 台 · 已选 {{ selectedIds.length }} 台</small>
+          <h3 id="tool-assets-title" tabindex="-1">工具台账</h3><small>已选 {{ selectedIds.length }} 台<span v-if="kind === 'self'"> · 已配模板 {{ assignedCount }} 台</span></small>
         </header>
         <NRadioGroup :value="kind" size="small" aria-label="办理类型" :disabled="!!busy" @update:value="chooseKind">
           <NRadioButton value="self">维护</NRadioButton><NRadioButton value="external">送检</NRadioButton>
@@ -28,10 +28,15 @@
                   @click="chooseAssetRow(asset, $event)">
                   <td><NCheckbox :checked="selected.has(asset.id)" :disabled="!!busy || !eligible(asset)"
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
-                  <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small></td>
+                  <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small>
+                    <small v-if="kind === 'self' && assigned[asset.id]">
+                      {{ templateName(assigned[asset.id]) }} · <NButton text size="tiny" :disabled="!!busy" @click="delete assigned[asset.id]">移出本次</NButton>
+                    </small>
+                  </td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
                     <NButton v-if="asset.plan?.mode === 'resume'" text size="small" @click="openSaved(asset.plan.workspace_id)">打开原记录</NButton>
+                    <NButton v-if="asset.plan?.mode === 'transfer'" size="small" :disabled="!!busy" @click="transferAsset(asset)">接收移交</NButton>
                   </td>
                 </tr>
               </tbody>
@@ -43,16 +48,15 @@
 
       <section v-if="kind === 'self'" class="workspace-panel" aria-labelledby="tool-templates-title">
         <header class="panel-heading"><h3 id="tool-templates-title">自检模板库</h3></header>
-        <p v-if="mixedTemplates" class="workspace-muted">所选工具的已关联模板不同，可分别沿用或选用同一模板。</p>
-        <p v-else-if="selectedIds.length && !allAssociated" class="workspace-muted">部分工具还没有可用的模板关联，请选择统一模板。</p>
-        <NRadioGroup v-if="templates.length" :value="templateChoice" :disabled="!!busy" aria-label="选择自检模板" @update:value="chooseTemplate">
+        <p class="workspace-muted">{{ selectedIds.length ? '为当前勾选的工具选择模板，可继续配下一组。' : '勾选左侧工具后，选择这组工具使用的模板。' }}</p>
+        <NRadioGroup v-if="templates.length" :value="null" :disabled="!!busy || !selectedIds.length" aria-label="选择自检模板" @update:value="chooseTemplate">
           <div class="template-list">
-            <NRadio v-if="allAssociated" :value="existingTemplate">{{ associatedLabel }}</NRadio>
+            <NRadio v-if="allAssociated" :value="existingTemplate">使用各工具已关联模板</NRadio>
             <table class="templates" aria-label="自检模板记录">
               <thead><tr><th scope="col">选择</th><th scope="col">模板名称</th></tr></thead>
-              <tbody><tr v-for="template in templates" :key="template.id" :class="{ 'is-selected': templateChoice === template.id }">
+              <tbody><tr v-for="template in templates" :key="template.id">
                 <td><NRadio :value="template.id" :aria-label="'选用模板 ' + (template.label || template.name)" /></td>
-                <td><label @click="!busy && chooseTemplate(template.id)">{{ template.label || template.name }}</label></td>
+                <td><label @click="chooseTemplate(template.id)">{{ template.label || template.name }}</label></td>
               </tr></tbody>
             </table>
           </div>
@@ -62,9 +66,13 @@
 
       <aside class="workspace-panel opening-panel" aria-label="办理操作">
         <NButton type="primary" :disabled="!!busy || !canOpen" :loading="busy === 'open'" @click="requestOpen">{{ kind === 'self' ? '打开填写' : '打开送检' }}</NButton>
+        <span v-if="kind === 'self' && pendingIds.length" class="workspace-muted">本次 {{ pendingIds.length }} 台<span v-if="unassignedCount"> · {{ unassignedCount }} 台待选模板</span></span>
+        <span v-if="mixedReportBuildings" class="workspace-muted" role="status">送检报告请按楼栋分批上传。</span>
         <label v-if="sessionOptions.length">办理记录
           <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="openSaved" />
         </label>
+        <NButton v-if="board?.history_cursor" size="small" :loading="busy === 'history'" :disabled="!!busy" @click="loadMoreHistory">加载更早的办理记录</NButton>
+        <span v-if="busy === 'read'" class="workspace-muted" role="status">正在打开办理记录…</span>
       </aside>
     </div>
     <section v-else class="workspace-panel editor-panel" aria-labelledby="tool-editor-title">
@@ -84,23 +92,43 @@
                 </NButton>
               </div>
               <NButton v-if="reviewable.length > 1" size="small" :disabled="!!busy" @click="openBatchReview">批量审核</NButton>
+              <NButton v-if="item?.can_edit && activeSheet?.name === item.template?.schema?.sheet" size="small" :disabled="!!busy" @click="normalFill">一键正常</NButton>
             </div>
             <template v-if="item">
+              <div v-if="item.can_edit || item.can_reassign || item.can_release || item.can_withdraw" class="workspace-actions item-actions">
+                <label v-if="item.can_edit" class="workspace-actions">完成情况
+                  <select data-native-select aria-label="填写完成情况" :value="item.completion || ''" :disabled="!!busy" @change="setCompletion">
+                    <option value="">请选择</option><option value="completed">已完成</option><option value="incomplete">未完成</option>
+                  </select>
+                </label>
+                <NButton v-if="item.can_reassign" :disabled="!!busy" size="small" @click="startReassign">改派审核人</NButton>
+                <NButton v-if="item.can_withdraw" :disabled="!!busy" size="small" @click="confirmItemAction('withdraw')">撤回审核</NButton>
+                <NButton v-if="item.can_release" :disabled="!!busy" size="small" @click="confirmItemAction('release')">取消本台办理</NButton>
+              </div>
               <div class="review-line">
-                <span>审核人 {{ item.reviewer || '待本人审核' }}</span>
+                <span>审核人 {{ item.reviewer || item.reviewer_name || '本楼楼长' }}</span>
                 <span v-if="item.reviewed_at">{{ item.reviewed_at.replace('T', ' ') }}</span>
                 <NButton v-if="item.can_review" size="small" :disabled="!!busy" @click="openSignature(false)">{{ reviewSignatures[item.id] ? '重签' : '手绘审核签名' }}</NButton>
                 <img v-if="isPng(item.signature)" class="signature-preview" :src="item.signature" alt="审核签名" />
                 <img v-else-if="reviewSignatures[item.id]" class="signature-preview" :src="reviewSignatures[item.id]" alt="待提交审核签名" />
                 <small v-if="item.review_note">{{ item.review_note }}</small>
               </div>
+              <div v-if="item.can_review" class="review-line">
+                <label>审核时间（北京时间）
+                  <input type="datetime-local" :value="reviewDates[item.id] || ''" :disabled="!!busy" @input="setReviewDate" />
+                </label>
+                <small v-if="!reviewDates[item.id]" class="workspace-muted">留空时使用审核通过的时间</small>
+              </div>
               <div v-if="item.can_review" class="workspace-actions">
+                <NCheckbox v-model:checked="savedSignature" :disabled="!!busy">使用我的已登记签名</NCheckbox>
                 <NInput v-model:value="reviewNote" size="small" placeholder="审核意见，驳回时必填" aria-label="审核意见" />
                 <NButton :disabled="!!busy || !reviewNote.trim()" @click="reviewItems([item], false)">驳回修改</NButton>
-                <NButton type="primary" :disabled="!!busy || !reviewSignatures[item.id]" @click="reviewItems([item], true)">审核通过</NButton>
+                <NButton type="primary" :disabled="!!busy || (!reviewSignatures[item.id] && !savedSignature)" @click="reviewItems([item], true)">审核通过</NButton>
               </div>
-              <div v-if="item.binding_error" class="workspace-actions">
+              <p v-if="item.binding_pending" class="workspace-muted" role="status">正在核验本台工具与模板的关联…</p>
+              <div v-if="item.binding_error && item.order_status !== 'cancelled'" class="workspace-actions">
                 <span>{{ item.binding_error }}</span>
+                <NButton :disabled="!!busy" @click="retryBindings">重试关联</NButton>
                 <NSelect v-model:value="replacementTemplate" size="small" :options="templates.map(row => ({label:row.label || row.name,value:row.id}))" placeholder="选择替换模板" />
                 <NButton :disabled="!!busy || !replacementTemplate" @click="resolveBinding(false)">重新关联</NButton>
                 <NButton :disabled="!!busy" @click="resolveBinding(true)">移出本批</NButton>
@@ -122,14 +150,31 @@
                       <tr v-for="row in activeSheet.rows" :key="row.index" :style="{ height: row.height + 'px' }">
                         <td v-for="cell in row.cells" :key="cell.address" :rowspan="cell.rowspan" :colspan="cell.colspan"
                           :style="cell.style" :class="{ 'fillable-cell': cell.editable || cell.check }">
-                          <select v-if="cell.check" :value="item.checks[cellKey(cell)] || ''" :disabled="!item.can_edit || !!busy" :aria-label="'检查 ' + cellKey(cell)" @change="setCheck(cell, $event)">
+                          <select v-if="cell.check" data-native-select :value="item.checks[cellKey(cell)] || ''" :disabled="!item.can_edit || !!busy" :aria-label="'检查 ' + cellKey(cell)" @change="setCheck(cell, $event)">
                             <option value="">请选择</option><option value="是">√ 是</option><option value="否">× 否</option>
                           </select>
-                          <input v-else-if="cell.editable" :value="item.values[cellKey(cell)] ?? cell.value ?? ''"
+                          <select v-else-if="reviewCell(cell) === 'result' && item.can_edit" data-native-select :value="item.completion || ''"
+                            :disabled="!!busy" aria-label="完成情况" @change="setCompletion">
+                            <option value="">请选择</option><option value="completed">已完成[√]　未完成[ ]</option><option value="incomplete">已完成[ ]　未完成[√]</option>
+                          </select>
+                          <select v-else-if="reviewCell(cell) === 'reviewer' && item.can_edit" data-native-select :value="item.reviewer_id || ''"
+                            :disabled="!!busy || reviewerLoading" :aria-busy="reviewerLoading"
+                            aria-label="选择审核人" @focus="loadReviewers()" @change="setReviewer">
+                            <option value="">{{ reviewerLoading ? '正在读取审核人' : '本楼楼长' }}</option>
+                            <option v-if="item.reviewer_id && !reviewerOptions.some(person => person.id === item?.reviewer_id)" :value="item.reviewer_id">{{ item.reviewer_name }}</option>
+                            <option v-for="person in reviewerOptions" :key="person.id" :value="person.id">{{ person.name }}</option>
+                          </select>
+                          <input v-else-if="reviewCell(cell) === 'time' && item.can_review" type="datetime-local"
+                            aria-label="审核年月日时" :value="reviewDates[item.id] || ''" :disabled="!!busy" @input="setReviewDate" />
+                          <input v-else-if="cell.editable" :type="editCellType(cell)" :value="inputCellValue(cell)"
                             :disabled="!item.can_edit || !!busy" :aria-label="'填写 ' + cellKey(cell)" @input="setCell(cell, $event)" />
                           <template v-else-if="reviewCell(cell)">
-                            <span>{{ reviewText(cell) }}</span>
-                            <img v-if="isSignatureCell(cell) && isPng(item.signature)" class="signature-in-cell" :src="item.signature" alt="表内审核签名" />
+                            <span v-if="isSignatureCell(cell) && isPng(item.signature || reviewSignatures[item.id])" class="signed-cell">
+                              <span :title="String(reviewText(cell) ?? '')">{{ reviewText(cell) }}</span>
+                              <img class="signature-in-cell" :src="item.signature || reviewSignatures[item.id]" alt="表内审核签名"
+                                :style="{ maxHeight: Math.max(0, row.height - 6) + 'px' }" />
+                            </span>
+                            <span v-else>{{ reviewText(cell) }}</span>
                           </template>
                           <span v-else>{{ cell.value }}</span>
                         </td>
@@ -159,7 +204,8 @@
             <ul class="archive-list"><li v-for="entry in session.items" :key="entry.id">{{ entry.asset.name }} · {{ scopeLabel(entry.asset.scope) }} · {{ entry.asset.model || '—' }}</li></ul>
             <div v-if="session.report_name" class="workspace-actions">
               <span role="status">{{ session.report_name }}</span>
-              <NButton size="small" tag="a" :href="sessionUrl + '/report-file'" target="_blank" rel="noopener">查看报告</NButton>
+              <NButton v-if="session.report_available !== false" size="small" tag="a" :href="sessionUrl + '/report-file'" target="_blank" rel="noopener">查看报告</NButton>
+              <small v-else class="workspace-muted">报告包含当前账号无权查看的工具，仅显示已授权登记信息。</small>
             </div>
             <div v-if="editable" class="workspace-actions">
               <label>实际检测日期 <input v-model="actualDate" aria-label="实际检测日期" type="date" :disabled="!!busy" /></label>
@@ -171,6 +217,7 @@
             </div>
             <p v-else-if="session.actual">实际检测日期 {{ session.actual }}</p>
             <ToolInspectionReportFields :model="reportCheck" :asset-ids="reportAssets" :actual="actualDate"
+              :assets="session.items.filter(entry => !editable || entry.can_edit).map(entry => entry.asset)"
               :expires-on="session.inspection_expires_on" :editable="editable" :disabled="!!busy || !session.report_name || !!report" />
           </div>
           <ul v-if="session.status !== 'draft'" class="archive-list">
@@ -179,12 +226,13 @@
           <footer class="workspace-actions editor-footer">
             <span v-if="editable" class="workspace-muted" role="status">{{ dirty ? '有未保存修改' : '草稿已保存' }}</span>
             <NButton v-if="editable && session.kind === 'self'" size="small" :disabled="!!busy || !dirty" :loading="busy === 'save'" @click="saveDraft">保存草稿</NButton>
-            <NPopconfirm v-if="editable" positive-text="确认提交" negative-text="取消" @positive-click="submit">
+            <NPopconfirm v-if="editable && session.status !== 'opening'" positive-text="确认提交" negative-text="取消" @positive-click="submit">
               <template #trigger><NButton size="small" type="primary" :loading="busy === 'submit'"
                 :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !inspectionReady(reportCheck, reportAssets, actualDate)))">{{ session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
               {{ session.kind === 'self' ? '提交待填写工具，由楼长或授权人员审核。' : '提交送检报告归档。' }}
             </NPopconfirm>
-            <NButton v-if="session.status === 'archived'" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
+            <span v-if="session.status === 'opening'" class="workspace-muted">本批模板核验完成后可提交审核</span>
+            <NButton v-if="session.status === 'archived' && session.report_available !== false" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
           </footer>
     </section>
     <NModal :show="!!confirmAction" preset="card" :title="confirmAction?.title" class="tool-workspace-dialog" @update:show="closeConfirm">
@@ -193,14 +241,24 @@
         <NButton @click="closeConfirm(false)">取消</NButton><NButton type="primary" @click="runConfirm">确认</NButton>
       </div></template>
     </NModal>
+    <NModal v-model:show="reassignOpen" preset="card" title="改派审核人" class="tool-workspace-dialog">
+      <NSelect v-model:value="reassignReviewer" :loading="reviewerLoading" :disabled="!!busy || reviewerLoading"
+        aria-label="改派给" :options="[{label:'由本楼楼长审核',value:''}, ...reviewerOptions.map(person => ({label:person.name,value:person.id}))]" />
+      <template #footer><div class="workspace-actions dialog-actions">
+        <NButton :disabled="!!busy" @click="reassignOpen = false">取消</NButton>
+        <NButton type="primary" :disabled="!!busy || reviewerLoading" @click="manageItem('reassign')">确认改派</NButton>
+      </div></template>
+    </NModal>
     <NModal v-model:show="batchOpen" preset="card" title="批量审核" class="tool-workspace-dialog">
       <div class="review-line">
+        <NCheckbox v-model:checked="batchSavedSignature">使用我的已登记签名</NCheckbox>
+        <label>审核时间（北京时间） <input v-model="batch.reviewed_at" type="datetime-local" /></label>
         <NButton size="small" @click="openSignature(true)">{{ batch.signature ? '重签批量签名' : '绘制批量签名' }}</NButton>
         <img v-if="isPng(batch.signature)" class="signature-preview" :src="batch.signature" alt="批量审核签名" />
       </div>
       <p class="workspace-muted">审核 {{ reviewable.length }} 台获授权工具。已单独绘制的签名优先使用。</p>
       <template #footer><div class="workspace-actions dialog-actions"><NButton @click="batchOpen = false">取消</NButton>
-        <NButton type="primary" :disabled="!batch.signature || !!busy" @click="applyBatchReview">审核通过</NButton>
+        <NButton type="primary" :disabled="(!batch.signature && !batchSavedSignature) || !!busy" @click="applyBatchReview">审核通过</NButton>
       </div></template>
     </NModal>
     <NModal v-model:show="signatureOpen" preset="card" title="手绘审核签名" class="tool-workspace-dialog" @after-enter="resetCanvas">
@@ -214,13 +272,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue';
 import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadio, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { requestBinaryJson, requestJson } from '../api/client';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
-type OrderPlan = { mode: string; workspace_id: string };
+type OrderPlan = { mode: string; workspace_id: string; revision?: number };
 type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
   self_cycle?: string | number; external_cycle?: string | number; template_id?: string; eligible_kinds?: Kind[];
   disabled_reason?: string };
@@ -231,17 +289,28 @@ type Sheet = { name: string; columns: number[]; rows: { index: number; height: n
   review?: { reviewer_address: string; reviewed_at_address: string; signature_address: string };
   images?: { address: string; src: string; offsetX: number; offsetY: number; width: number; height: number }[] };
 type Review = { reviewer: string; reviewed_at: string; signature: string };
-type Item = Review & { id: string; asset_id: string; asset: Asset; template?: { sheets: Sheet[]; schema?: { sheet: string; review_row: number; result_row: number } } | null;
+type Layout = { sheets: Sheet[]; schema?: { sheet: string; layout?: string; review_row: number; result_row: number };
+  prefill_fields?: { inspector: string; checked_at: string } };
+type Item = Review & { id: string; asset_id: string; asset: Asset; template?: Layout | null; layout_key?: string;
   values: Record<string, string>; checks: Record<string, string>; qualified: boolean | null; archive_status?: string; archive_error?: string;
   outcome?: string; reason?: string; quantity?: number; order_revision?: number; can_edit?: boolean; can_review?: boolean;
-  review_note?: string; binding_error?: string; order_status?: string };
+  can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean;
+  review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
 type Summary = { id: string; kind: Kind; status: string; items?: Item[]; created_at?: string; item_count?: number; archived_count?: number };
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
-  inspection?: InspectionReport; inspection_expires_on?: string };
+  inspection?: InspectionReport; inspection_expires_on?: string; layouts?: Record<string, Layout>; report_available?: boolean; binding_pending?: boolean };
 const emit = defineEmits<{ 'asset-history': [id: string] }>();
 const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
+const reviewDates = reactive<Record<string, string>>({});
+const reviewers = shallowRef<Record<string, { id: string; name: string }[]>>();
+const reviewerLoading = ref(false);
+let reviewerRequest: AbortController | undefined;
+const savedSignature = ref(false);
+const batchSavedSignature = ref(false);
 const reviewNote = ref('');
+const reassignOpen = ref(false);
+const reassignReviewer = ref('');
 const actualDate = ref('');
 const reportCheck = ref(emptyInspectionReport());
 const reportSnapshot = computed(() => JSON.stringify([actualDate.value, reportCheck.value]));
@@ -249,7 +318,8 @@ const savedReport = ref(reportSnapshot.value);
 const reportAssets = computed(() => session.value?.items.filter(entry => entry.can_edit).map(entry => entry.asset_id) || []);
 const replacementTemplate = ref<string | null>(null);
 const savedItems = new Map<string, string>();
-type Board = { assets: Asset[]; templates: Template[]; sessions: Summary[]; warning?: string };
+type HistoryPage = { sessions: Summary[]; history_cursor?: { before: string; id: string } | null };
+type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: string };
 
 const api = '/api/tool-self-check/workspace';
 const existingTemplate = '__associated__';
@@ -260,7 +330,7 @@ const scope = ref(props.scope && props.scope !== 'ALL' ? props.scope : '');
 const search = ref('');
 const selectedIds = ref<string[]>([]);
 const selected = computed(() => new Set(selectedIds.value));
-const templateChoice = ref<string | null>(null);
+const assigned = reactive<Record<string, string>>({});
 const itemId = ref('');
 const sheetName = ref('');
 const zoom = ref(100);
@@ -279,6 +349,7 @@ const pad = ref<HTMLCanvasElement>();
 const signed = ref(false);
 const lifetime = new AbortController();
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let pollVersion = '';
 let boardRead: AbortController | undefined;
 let openOperation: { key: string; id: string } | undefined;
 let strokeId: number | undefined;
@@ -297,20 +368,25 @@ const visibleEligible = computed(() => visibleAssets.value.filter(eligible));
 const allVisibleSelected = computed(() => !!visibleEligible.value.length && visibleEligible.value.every(asset => selected.value.has(asset.id)));
 const someVisibleSelected = computed(() => visibleEligible.value.some(asset => selected.value.has(asset.id)));
 const selectedAssets = computed(() => assets.value.filter(asset => selected.value.has(asset.id)));
-const associations = computed(() => [...new Set(selectedAssets.value.map(asset => asset.template_id || ''))]);
-const allAssociated = computed(() => selectedAssets.value.length > 0 && associations.value.every(id => templates.value.some(template => template.id === id)));
-const mixedTemplates = computed(() => allAssociated.value && associations.value.length > 1);
-const associatedLabel = computed(() => {
-  if (mixedTemplates.value) return '使用各工具已关联模板';
-  const template = templates.value.find(row => row.id === associations.value[0]);
-  return '使用已关联模板 · ' + (template?.label || template?.name || '');
+const templatesById = computed(() => new Map(templates.value.map(template => [template.id, template])));
+const allAssociated = computed(() => selectedAssets.value.length > 0 &&
+  selectedAssets.value.every(asset => templatesById.value.has(asset.template_id || '')));
+const assignedCount = computed(() => Object.keys(assigned).length);
+const pendingIds = computed(() => [...new Set([...Object.keys(assigned), ...selectedIds.value])]);
+const templateAssignments = computed(() => {
+  const result: Record<string, string> = { ...assigned };
+  for (const asset of selectedAssets.value) if (!result[asset.id] && asset.template_id) result[asset.id] = asset.template_id;
+  return result;
 });
-const canOpen = computed(() => selectedIds.value.length > 0 && (kind.value === 'external' ||
-  (templateChoice.value === existingTemplate ? allAssociated.value : templates.value.some(template => template.id === templateChoice.value))));
+const unassignedCount = computed(() => pendingIds.value.filter(id => !templatesById.value.has(templateAssignments.value[id])).length);
+const mixedReportBuildings = computed(() => kind.value === 'external' &&
+  new Set(assets.value.filter(asset => pendingIds.value.includes(asset.id)).map(asset => asset.scope)).size > 1);
+const canOpen = computed(() => pendingIds.value.length > 0 && !mixedReportBuildings.value && (kind.value === 'external' || unassignedCount.value === 0));
 const sessionOptions = computed(() => (board.value?.sessions || []).filter(entry => entry.kind === kind.value)
   .map(entry => ({ value: entry.id, label: `${sessionStatus(entry)} · ${entry.item_count ?? entry.items?.length ?? 0} 台 · ${entry.created_at?.slice(0, 16).replace('T', ' ') || entry.id.slice(0, 8)}` })));
 const sessionUrl = computed(() => api + '/' + encodeURIComponent(session.value?.id || ''));
 const item = computed(() => session.value?.items.find(entry => entry.id === itemId.value));
+const reviewerOptions = computed(() => reviewers.value?.[item.value?.asset.scope || ''] || []);
 const sheets = computed(() => item.value?.template?.sheets || []);
 const activeSheet = computed(() => {
   return sheets.value.find(sheet => sheet.name === sheetName.value) || sheets.value.find(sheet => sheet.rows.some(row => row.cells.some(cell => cell.check || cell.editable))) || sheets.value[0];
@@ -327,15 +403,11 @@ const sheetImages = computed(() => {
     return [{ key: image.address + index, src: image.src, style: { left: left + 'px', top: top + 'px', width: image.width + 'px', height: image.height + 'px' } }];
   });
 });
-const editable = computed(() => session.value?.status === 'draft' && session.value.can_edit);
+const editable = computed(() => !!session.value && ['draft', 'opening'].includes(session.value.status) &&
+  session.value.can_edit && session.value.report_available !== false);
 const reviewable = computed(() => session.value?.items.filter(entry => entry.can_review) || []);
-const dirty = computed(() => !!report.value || Object.keys(reviewSignatures).length > 0 ||
+const dirty = computed(() => !!report.value || Object.keys(reviewSignatures).length > 0 || Object.values(reviewDates).some(Boolean) ||
   !!editable.value && (session.value?.kind === 'external' ? reportSnapshot.value !== savedReport.value : JSON.stringify(fields()) !== saved.value));
-watch([allAssociated, templates], () => {
-  if (!templates.value.some(template => template.id === templateChoice.value)) {
-    templateChoice.value = allAssociated.value ? existingTemplate : null;
-  }
-});
 
 function scopeLabel(value: string) {
   if (!value) return '—';
@@ -373,16 +445,23 @@ function chooseKind(value: Kind) {
   leave(() => {
     kind.value = value;
     selectedIds.value = [];
-    templateChoice.value = null;
+    for (const id of Object.keys(assigned)) delete assigned[id];
     clearSession();
   });
 }
 function chooseTemplate(value: string) {
-  templateChoice.value = value;
+  if (busy.value || !selectedIds.value.length) return;
+  if (value === existingTemplate ? !allAssociated.value : !templatesById.value.has(value)) return;
+  for (const asset of selectedAssets.value) assigned[asset.id] = value === existingTemplate ? asset.template_id! : value;
+  selectedIds.value = [];
+}
+function templateName(id: string) {
+  const template = templatesById.value.get(id);
+  return template?.label || template?.name || '模板待核对';
 }
 function toggleAsset(id: string, checked: boolean) {
   if (selected.value.has(id) === checked) return;
-  if (checked && !selected.value.has(id) && selectedIds.value.length >= 200) {
+  if (checked && !assigned[id] && pendingIds.value.length >= 200) {
     error.value = '每批最多选择 200 台工具，请分批办理。';
     return;
   }
@@ -393,10 +472,17 @@ function chooseAssetRow(asset: Asset, event: MouseEvent) {
       (event.target instanceof Element && event.target.closest('button,a,input,[role="checkbox"]'))) return;
   toggleAsset(asset.id, !selected.value.has(asset.id));
 }
+function transferAsset(asset: Asset) {
+  ask('接收工具移交？', `「${asset.name}」的原楼栋办理会结束，已保存草稿保留在原记录。接收后可在本楼重新填写。`,
+    () => void perform('transfer', async () => {
+      await post(api + '/transfer', { asset_id: asset.id, scope: asset.scope, revision: asset.plan?.revision });
+      await readBoard();
+    }));
+}
 function toggleVisible(checked: boolean) {
   const ids = new Set(visibleEligible.value.map(asset => asset.id));
   const selection = checked ? [...new Set([...selectedIds.value, ...ids])] : selectedIds.value.filter(id => !ids.has(id));
-  if (selection.length > 200) {
+  if (new Set([...selection, ...Object.keys(assigned)]).size > 200) {
     error.value = '筛选结果超过每批 200 台上限，请缩小筛选范围。';
     return;
   }
@@ -425,15 +511,65 @@ function reviewText(cell: Cell) {
   const sheet = activeSheet.value;
   if (!current || !sheet) return cell.value;
   switch (reviewCell(cell)) {
-    case 'reviewer': return current.reviewer || cell.value;
+    case 'reviewer': return current.reviewer || current.reviewer_name || cell.value;
     case 'time': return current.reviewed_at?.replace('T', ' ') || cell.value;
     case 'result': {
+      if (current.completion === 'completed') return '已完成[√]　未完成[ ]';
+      if (current.completion === 'incomplete') return '已完成[ ]　未完成[√]';
       const checks = sheet.rows.flatMap(row => row.cells.filter(entry => entry.check)).map(entry => current.checks[cellKey(entry)]);
       if (!checks.length || checks.some(value => value !== '是' && value !== '否')) return cell.value;
       return checks.every(value => value === '是') ? '已完成[√]　未完成[ ]' : '已完成[ ]　未完成[√]';
     }
     default: return cell.value;
   }
+}
+function editCellType(cell: Cell) {
+  const layout = item.value?.template;
+  if (!layout || layout.schema?.sheet !== activeSheet.value?.name) return 'text';
+  const dateAddress = layout.prefill_fields?.checked_at || (layout.schema?.layout === 'hvac' ? 'G11' : 'G8');
+  return cell.address === dateAddress ? 'date' : 'text';
+}
+function inputCellValue(cell: Cell) {
+  const value = item.value?.values[cellKey(cell)] ?? cell.value ?? '';
+  return editCellType(cell) === 'date' ? String(value).slice(0, 10) : value;
+}
+function setCompletion(event: Event) {
+  if (item.value?.can_edit) item.value.completion = (event.target as HTMLSelectElement).value;
+}
+function setReviewer(event: Event) {
+  if (!item.value?.can_edit) return;
+  const id = (event.target as HTMLSelectElement).value;
+  item.value.reviewer_id = id;
+  item.value.reviewer_name = reviewerOptions.value.find(person => person.id === id)?.name || '';
+}
+function setReviewDate(event: Event) {
+  if (item.value?.can_review) reviewDates[item.value.id] = (event.target as HTMLInputElement).value;
+}
+async function loadReviewers(showError = true) {
+  const current = session.value;
+  if (!current || reviewers.value || reviewerLoading.value) return;
+  const request = new AbortController();
+  reviewerRequest = request;
+  reviewerLoading.value = true;
+  const path = sessionUrl.value + '/people';
+  try {
+    const people = await read(path, request.signal) as NonNullable<typeof reviewers.value>;
+    if (!request.signal.aborted && session.value?.id === current.id) reviewers.value = people;
+  } catch (cause) {
+    if (showError && !request.signal.aborted && session.value?.id === current.id) error.value = message(cause);
+  } finally {
+    if (reviewerRequest === request) reviewerLoading.value = false;
+  }
+}
+function normalFill() {
+  const current = item.value;
+  const sheet = activeSheet.value;
+  if (!current?.can_edit || !sheet) return;
+  for (const row of sheet.rows) for (const cell of row.cells) {
+    if (cell.check) current.checks[cellKey(cell)] = '是';
+  }
+  current.completion = 'completed';
+  current.outcome = 'normal';
 }
 function setCell(cell: Cell, event: Event) {
   if (item.value && editable.value) item.value.values[cellKey(cell)] = (event.target as HTMLInputElement).value;
@@ -450,8 +586,8 @@ function selectItem(id: string) {
   sheetName.value = '';
 }
 function fields() {
-  return (session.value?.items || []).filter(entry => entry.can_edit).map(({ id, asset_id, values, checks, outcome, reason, quantity }) =>
-    ({ id, asset_id, values, checks, outcome, reason, quantity }));
+  return (session.value?.items || []).filter(entry => entry.can_edit).map(({ id, asset_id, values, checks, outcome, reason, quantity, completion, reviewer_id }) =>
+    ({ id, asset_id, values, checks, outcome, reason, quantity, completion, reviewer_id }));
 }
 function clearSession() {
   clearTimeout(pollTimer);
@@ -463,6 +599,11 @@ function clearSession() {
   reportCheck.value = emptyInspectionReport();
   savedReport.value = reportSnapshot.value;
   reviewNote.value = '';
+  savedSignature.value = false;
+  reviewers.value = undefined;
+  reviewerRequest?.abort();
+  reviewerLoading.value = false;
+  for (const id of Object.keys(reviewDates)) delete reviewDates[id];
   for (const id of Object.keys(reviewSignatures)) delete reviewSignatures[id];
 }
 function returnToSelection() {
@@ -479,17 +620,27 @@ function returnToSelection() {
 function applySession(value: Session, retainReportDraft = false) {
   const opened = session.value?.id !== value.id;
   if (opened) clearSession();
+  for (const entry of value.items) {
+    const layout = entry.layout_key ? value.layouts?.[entry.layout_key] : entry.template;
+    if (layout) entry.template = markRaw(layout);
+  }
   session.value = value;
+  pollVersion = '';
+  if (value.kind === 'self' && value.items.some(entry => entry.can_edit || entry.can_reassign)) void loadReviewers(false);
   if (!retainReportDraft) {
     actualDate.value = value.actual || '';
     reportCheck.value = emptyInspectionReport(value.inspection);
     savedReport.value = reportSnapshot.value;
   }
-  if (!value.items.some(entry => entry.id === itemId.value)) selectItem(value.items[0]?.id || '');
+  if (!value.items.some(entry => entry.id === itemId.value)) selectItem((value.items.find(entry => entry.can_edit) || value.items[0])?.id || '');
   saved.value = JSON.stringify(fields());
   savedItems.clear();
   for (const entry of fields()) savedItems.set(entry.id, JSON.stringify(entry));
-  if (board.value) board.value = { ...board.value, sessions: [value, ...board.value.sessions.filter(entry => entry.id !== value.id)] };
+  if (board.value) {
+    const { id, kind, status, item_count, created_at } = value;
+    const summary = { id, kind, status, item_count: item_count ?? value.items.length, created_at };
+    board.value = { ...board.value, sessions: [summary, ...board.value.sessions.filter(entry => entry.id !== value.id)] };
+  }
   if (opened) void nextTick(() => {
     const heading = document.getElementById('tool-editor-title');
     heading?.focus({ preventScroll: true });
@@ -501,10 +652,11 @@ function message(cause: unknown) {
   return cause instanceof Error ? cause.message : '操作尚未确认，请刷新核对。';
 }
 function read(path: string, signal = lifetime.signal) {
-  return requestJson(path, { signal, cache: 'no-store', fresh: true });
+  return requestJson(compactPath(path), { signal, cache: 'no-store', fresh: true });
 }
+function compactPath(path: string) { return path + (path.includes('?') ? '&' : '?') + 'compact=1'; }
 function post(path: string, payload: object, timeoutMs?: number) {
-  return requestJson(path, { method: 'POST', body: JSON.stringify(payload), signal: lifetime.signal, timeoutMs });
+  return requestJson(compactPath(path), { method: 'POST', body: JSON.stringify(payload), signal: lifetime.signal, timeoutMs });
 }
 async function readBoard(refresh = false) {
   boardRead?.abort();
@@ -519,6 +671,7 @@ async function readBoard(refresh = false) {
       board.value = data;
       const ids = new Set(data.assets.filter(eligible).map(asset => asset.id));
       selectedIds.value = selectedIds.value.filter(id => ids.has(id));
+      for (const id of Object.keys(assigned)) if (!ids.has(id)) delete assigned[id];
     }
   } catch (cause) {
     if (!controller.signal.aborted) error.value = message(cause);
@@ -534,32 +687,45 @@ async function perform(action: string, operation: () => Promise<void>) {
   catch (cause) { if (!lifetime.signal.aborted) error.value = message(cause); }
   finally { busy.value = ''; schedulePoll(); }
 }
+function loadMoreHistory() {
+  const cursor = board.value?.history_cursor;
+  if (!cursor) return;
+  void perform('history', async () => {
+    const page = await read(api + '/history?' + new URLSearchParams(cursor)) as HistoryPage;
+    if (!board.value) return;
+    const known = new Set(board.value.sessions.map(entry => entry.id));
+    board.value = { ...board.value, history_cursor: page.history_cursor,
+      sessions: [...board.value.sessions, ...page.sessions.filter(entry => !known.has(entry.id))] };
+  });
+}
 function requestOpen() {
   if (!canOpen.value) return;
   leave(() => {
-    const choice = kind.value === 'self' && templateChoice.value !== existingTemplate ? templateChoice.value : null;
-    const changed = choice ? selectedAssets.value.filter(asset => asset.template_id && asset.template_id !== choice) : [];
-    const run = () => void openSelection(choice);
+    const mapping = kind.value === 'self' ? { ...templateAssignments.value } : {};
+    const changed = assets.value.filter(asset => mapping[asset.id] && asset.template_id && mapping[asset.id] !== asset.template_id);
+    const run = () => void openSelection(mapping);
     if (changed.length) ask('更换已关联模板？', `将更新 ${changed.length} 台工具与原模板的关联。`, run);
     else run();
   });
 }
-async function openSelection(template_id: string | null) {
+async function openSelection(template_ids: Record<string, string>) {
   await perform('open', async () => {
-    const payload = { asset_ids: [...selectedIds.value].sort(), template_id, kind: kind.value };
+    const payload = { asset_ids: [...pendingIds.value], template_ids, kind: kind.value, defer_bindings: true };
     const key = JSON.stringify(payload);
     if (openOperation?.key !== key) openOperation = { key, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), part => part.toString(16).padStart(2, '0')).join('') };
     let result: Session;
     try {
       result = await post(api + '/open', { ...payload, operation_id: openOperation.id }, 120000) as Session;
     } catch (cause) {
-      await readBoard();
+      void readBoard();
       throw cause;
     }
     openOperation = undefined;
     report.value = undefined;
     applySession(result);
-    await readBoard();
+    selectedIds.value = [];
+    for (const id of Object.keys(assigned)) delete assigned[id];
+    void readBoard();
   });
 }
 function openSaved(id: string) {
@@ -570,9 +736,9 @@ function openSaved(id: string) {
     if (data.legacy_draft) {
       ask('接续旧草稿', '保留原表填写内容，审核签名由审核人确认。', () =>
         void perform('read', async () => applySession(await post(path + '/resume', {}, 120000) as Session)));
-    } else if (data.status === 'opening') {
+    } else if (data.status === 'opening' && !data.binding_pending) {
       try {
-        data = await requestJson(path + '/resume', { method: 'POST', signal: lifetime.signal, timeoutMs: 120000 }) as Session;
+        data = await requestJson(compactPath(path + '/resume'), { method: 'POST', signal: lifetime.signal, timeoutMs: 120000 }) as Session;
       } catch (cause) {
         await readBoard();
         throw cause;
@@ -644,29 +810,45 @@ function submit() {
 function schedulePoll(delay = 3000) {
   clearTimeout(pollTimer);
   const current = session.value;
-  if (!current || lifetime.signal.aborted || (!['pending', 'review_pending'].includes(current.status)
+  if (!current || lifetime.signal.aborted || (!current.binding_pending && !['pending', 'review_pending'].includes(current.status)
       && !current.items.some(entry => ['review_pending', 'verifying', 'retrying'].includes(entry.archive_status || '')
         || entry.order_status === 'submitted' && entry.archive_status === 'pending'))) return;
   pollTimer = setTimeout(async () => {
     if (busy.value) return schedulePoll();
     try {
-      const data = await read(api + '/' + encodeURIComponent(current.id) + '/status') as Session;
-      if (session.value?.id === current.id && !lifetime.signal.aborted) {
+      const data = await read(api + '/' + encodeURIComponent(current.id) + '/status?known=' + encodeURIComponent(pollVersion)) as
+        Session & { status_version?: string; unchanged?: boolean };
+      if (session.value === current && !lifetime.signal.aborted) {
+        if (busy.value) return schedulePoll();
         error.value = '';
+        if (data.unchanged) return schedulePoll();
+        const statuses = new Map(data.items.map(entry => [entry.id, entry]));
         if (data.status !== current.status || data.revision !== current.revision ||
-            current.items.some(entry => data.items.find(next => next.id === entry.id)?.order_revision !== entry.order_revision)) {
-          if (!dirty.value) applySession(await read(sessionUrl.value) as Session);
-          else schedulePoll();
+            current.items.some(entry => {
+              const next = statuses.get(entry.id);
+              return next?.order_revision !== entry.order_revision || next?.binding_pending !== entry.binding_pending ||
+                next?.binding_error !== entry.binding_error;
+            })) {
+          if (!busy.value && !dirty.value) {
+            const latest = await read(api + '/' + encodeURIComponent(current.id)) as Session;
+            if (session.value !== current || lifetime.signal.aborted) return;
+            if (!busy.value && !dirty.value) {
+              applySession(latest);
+              return;
+            }
+          }
+          schedulePoll();
         } else {
+          pollVersion = data.status_version || '';
           current.items.forEach(entry => {
-            const status = data.items.find(next => next.id === entry.id);
+            const status = statuses.get(entry.id);
             if (status) Object.assign(entry, status);
           });
           schedulePoll();
         }
       }
     } catch (cause) {
-      if (session.value?.id === current.id && !lifetime.signal.aborted) {
+      if (session.value === current && !lifetime.signal.aborted) {
         error.value = message(cause);
         schedulePoll(6000);
       }
@@ -676,18 +858,47 @@ function schedulePoll(delay = 3000) {
 
 function openBatchReview() {
   Object.assign(batch, { reviewer: '', reviewed_at: '', signature: '' });
+  batchSavedSignature.value = savedSignature.value;
   batchOpen.value = true;
 }
 function applyBatchReview() {
-  if (batch.signature) void reviewItems(reviewable.value, true, batch.signature);
+  if (batch.signature || batchSavedSignature.value) void reviewItems(reviewable.value, true, batch.signature, batchSavedSignature.value, batch.reviewed_at);
 }
-async function reviewItems(entries: Item[], approve: boolean, signature = '') {
+function startReassign() {
+  reassignReviewer.value = item.value?.reviewer_id || '';
+  reassignOpen.value = true;
+  void loadReviewers();
+}
+function confirmItemAction(action: 'withdraw' | 'release') {
+  const release = action === 'release';
+  ask(release ? '取消本台工具办理？' : '撤回本台审核？',
+    `${item.value?.asset.name || ''} · 已填写内容会保留，${release ? '该工具可重新办理' : '撤回后可以继续填写'}。`,
+    () => void manageItem(action));
+}
+async function manageItem(action: 'reassign' | 'withdraw' | 'release') {
+  const id = item.value?.id;
+  if (!id) return;
+  await perform('manage', async () => {
+    if (editable.value) await save();
+    const entry = session.value?.items.find(tool => tool.id === id);
+    if (!entry) return;
+    applySession(await post(sessionUrl.value + '/manage', { action, asset_id: entry.id, revision: entry.order_revision,
+      reviewer_id: reassignReviewer.value, note: '工作台取消本台办理，保留原草稿。' }) as Session);
+    delete reviewSignatures[entry.id];
+    delete reviewDates[entry.id];
+    reassignOpen.value = false;
+    void readBoard();
+  });
+}
+async function reviewItems(entries: Item[], approve: boolean, signature = '', useSaved = savedSignature.value, reviewedAt = '') {
   await perform('review', async () => {
     const items = entries.map(entry => ({asset_id: entry.id, revision: entry.order_revision,
-      ...(approve && reviewSignatures[entry.id] ? {signature: reviewSignatures[entry.id]} : {})}));
+      ...(approve && reviewSignatures[entry.id] ? {signature: reviewSignatures[entry.id]} : {}),
+      ...(approve && reviewDates[entry.id] ? {reviewed_at: reviewDates[entry.id]} : {})}));
     applySession(await post(sessionUrl.value + '/review', {action: approve ? 'approve' : 'reject',
-      note: reviewNote.value, signature, items}, 120000) as Session);
-    for (const entry of entries) delete reviewSignatures[entry.id];
+      note: reviewNote.value, signature, use_saved_signature: approve && useSaved && !signature &&
+        entries.some(entry => !reviewSignatures[entry.id]), reviewed_at: reviewedAt, items}, 120000) as Session);
+    for (const entry of entries) { delete reviewSignatures[entry.id]; delete reviewDates[entry.id]; }
     reviewNote.value = '';
     batchOpen.value = false;
   });
@@ -705,6 +916,14 @@ function resolveBinding(remove: boolean) {
     await readBoard();
   });
   ask(remove ? '移出本批？' : '重新关联模板？', current.asset.name, run);
+}
+function retryBindings() {
+  void perform('binding', async () => {
+    if (editable.value) await save();
+    applySession(await requestJson(compactPath(sessionUrl.value + '/resume'), {
+      method: 'POST', signal: lifetime.signal, timeoutMs: 120000,
+    }) as Session);
+  });
 }
 function isPng(value: string) {
   return /^data:image\/png;base64,/.test(value);
@@ -791,6 +1010,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   lifetime.abort();
   boardRead?.abort();
+  reviewerRequest?.abort();
   clearTimeout(pollTimer);
 });
 </script>
@@ -826,6 +1046,7 @@ onBeforeUnmount(() => {
 .tool-tabs { flex: 1; min-width: 0; flex-wrap: nowrap; overflow-x: auto; padding-block: 3px; }
 .tool-tabs > .n-button, .tool-toolbar > .n-button { flex-shrink: 0; }
 .review-line > label { display: grid; gap: 3px; min-width: 0; font-size: 12px; }
+.item-actions select { min-height: 32px; max-width: 100%; padding: 2px 7px; background: var(--v2-card, var(--cf-surface, transparent)); color: inherit; border: 1px solid var(--tool-border); border-radius: 4px; }
 .qualified-options { display: inline-flex; align-items: center; flex-wrap: nowrap; }
 .qualified-options :deep(.n-radio-button) { display: inline-flex; align-items: center; }
 .review-line label .n-input { max-width: 142px; }
@@ -839,19 +1060,25 @@ onBeforeUnmount(() => {
 .sheet-frame { position: relative; }
 .sheet-table { border-collapse: collapse; table-layout: fixed; width: 100%; background: #fff; color: #141414; font-size: 13px; }
 .sheet-table td { border: 1px solid #cbd1d8; vertical-align: middle; white-space: pre-wrap; overflow-wrap: anywhere; }
-.sheet-table input, .sheet-table select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 26px; padding: 2px 4px; border: 1px solid #9ab6e7; border-radius: 2px !important; color: #182333; background: #eff6ff; font: inherit; }
+.sheet-table input, .sheet-table select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 22px; padding: 1px 3px; border: 1px solid #9ab6e7; border-radius: 2px !important; color: #182333; background: #eff6ff; font: inherit; }
 .sheet-frame > img { position: absolute; object-fit: contain; pointer-events: none; }
-.signature-in-cell { display: block; max-width: 100%; height: 35px; object-fit: contain; }
+.signed-cell { display: flex; align-items: center; gap: 3px; min-width: 0; }
+.signed-cell > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.signature-in-cell { display: block; max-width: 55%; height: 35px; object-fit: contain; }
 .archive-list { margin: 10px 0; padding-left: 20px; font-size: 13px; }
 .dialog-actions { justify-content: flex-end; }
 canvas { display: block; width: 100%; height: auto; touch-action: none; background: #fff; border: 1px solid #8592a1; }
 @media (max-width: 680px) {
   .workspace-grid, .workspace-grid.is-external { grid-template-columns: minmax(0, 1fr); }
+  .workspace-panel { padding: 8px; }
+  :global(.workspace-v2 .tool-workspace .editor-footer) { padding-inline-end: 38px; }
   .asset-list { max-height: 52dvh; }
   .template-list { max-height: 28dvh; }
   .tool-workspace :deep(.n-button) { min-height: 40px; }
   .assets :deep(.n-checkbox), .templates :deep(.n-radio) { padding-block: 10px; }
-  .review-line input[type=datetime-local], .sheet-table input, .sheet-table select { min-height: 40px; }
+  .review-line input[type=datetime-local] { min-height: 40px; }
+  .item-actions select { min-height: 40px; }
+  .qualified-options :deep(.n-radio-button) { padding-inline: 7px; min-height: 40px; }
 }
 </style>
 

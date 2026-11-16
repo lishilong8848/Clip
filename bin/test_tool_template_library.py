@@ -99,11 +99,17 @@ class ToolTemplateLibraryTests(TestCase):
         self.assertEqual(self.svc.selectable_feishu_templates(self.leader), [])
         self.svc.library_template_availability(self.admin, identity, {'active': True, 'version': 2})
         self.assertEqual(len(self.svc.selectable_feishu_templates(self.leader)), 1)
+        with self.assertRaisesRegex(RiskError, '仍有工具关联'):
+            self.svc.delete_library_template(self.admin, identity, {'version': 2})
+        target = self.svc.save_library_template(self.admin, '替换模板', self.content)['id']
+        result = self.svc.rebind_library_template(self.admin, identity, {'version': 2, 'target_id': target})
+        self.assertEqual((result['updated'], result['failed']), (2, []))
+        self.assertEqual(self.transport.records[(INVENTORY, 'recAsset')][TEMPLATE_LINK], target)
         self.svc.delete_library_template(self.admin, identity, {'version': 2})
         self.assertTrue((TEMPLATE_TABLE, identity) in self.transport.records)
         with self.svc.connect() as db:
             self.assertEqual(self.svc._records(db, [entry], pinned, submit=False), pinned)
-            self.assertEqual(self.svc.list_templates(db, True), [])
+            self.assertEqual([row['id'] for row in self.svc.list_templates(db, True)], [target])
             self.assertEqual(db.execute('SELECT content FROM tool_workspace_templates WHERE cache_key=?', (key,))
                              .fetchone()[0], self.content)
             with self.assertRaises(RiskError):

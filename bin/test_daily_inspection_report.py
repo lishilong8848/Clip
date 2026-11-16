@@ -36,6 +36,24 @@ class InspectionReportTests(unittest.TestCase):
         self.service = DailyInspection(self.store, self.cloud)
         self.service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
 
+    def test_day_report_uses_persistent_index_and_cached_attachments(self):
+        current = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        self.service.change('a', '甲', DAY, 'finish', fixtures.DailyInspectionTests.submission(current))
+        refreshed = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', drafts={}, archive_mode='refresh')
+        restarted = DailyInspection(self.store, self.cloud)
+        with patch.object(self.cloud, 'request', side_effect=AssertionError('local read accessed Feishu')):
+            local = inspection_report(restarted, 'D', DAY['date'], 'a', '甲', drafts={}, archive_mode='local')
+            other = inspection_report(restarted, 'E', DAY['date'], 'a', '甲', drafts={}, archive_mode='local')
+        self.assertFalse(local['archive_incomplete'])
+        self.assertEqual(local['rounds'], refreshed['rounds'])
+        self.assertFalse(other['rounds'])
+        self.assertTrue(other['archive_incomplete'])
+        local['template_version'] = 'fixture'
+        content = restarted.export_report(local)
+        with patch('lan_bitable_template_portal.daily_inspection.inspection_report_workbook',
+                   side_effect=AssertionError('unchanged export was rebuilt')):
+            self.assertEqual(restarted.export_report(local), content)
+
     def test_form_headers_use_shift_roster_and_cold_round_inspector(self):
         stamp = dt.datetime(2026, 11, 4, 0, 8, tzinfo=CN)
         duty = {**NIGHT, 'shift_names': {'白': ['白班甲', '白班乙'], '夜': ['夜班甲']}}
@@ -318,38 +336,32 @@ class InspectionReportTests(unittest.TestCase):
                 if sheet['name'] == 'SVG巡检表':
                     self.assertEqual(len(cell_exemption_selection(sheet, sheet['excluded_ranges'])), 144)
                     layouts[template['scope']] = template['name']
-        active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
         location = {'template': layouts['D'], 'sheet': 'SVG巡检表'}
         options = {**location, 'ranges': 'H7:H8', 'operation': 'remove', 'revision': 0}
         policy = self.service.change_cell_exemptions('D', options)
         key = form_sheet_key(*location.values())
         self.assertEqual(len(policy['sheets'][key]), 142)
         self.assertNotIn('exemptions', self.service.load('E'))
-        self.assertEqual(self.service.load('D')['active']['review_version'], 1)
         with self.assertRaisesRegex(RiskError, '已有更新'):
             self.service.change_cell_exemptions('D', options)
         with self.assertRaisesRegex(RiskError, '超出原表边界'):
             self.service.change_cell_exemptions('D', {**options, 'ranges': 'XFD104857', 'revision': 1})
         restarted = DailyInspection(self.store, self.cloud)
         self.assertEqual(restarted.load('D')['exemptions'], policy)
+        active = restarted.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
         edit = {**location, 'cell': 'H7', 'value': '17'}
         saved = restarted.change('a', '甲', DAY, 'draft',
-            {'id': active['id'], 'review_version': 1, 'sheet_cells': [edit]})['active']
+            {'id': active['id'], 'review_version': active['review_version'], 'sheet_cells': [edit]})['active']
         blocked = restarted.change_cell_exemptions('D', {**options, 'operation': 'add', 'revision': 1})
         self.assertEqual(blocked['sheets'], {})
-        with self.assertRaisesRegex(RiskError, '无需填写'):
-            restarted.change('a', '甲', DAY, 'draft',
-                {'id': active['id'], 'review_version': saved['review_version'] + 1, 'sheet_cells': [edit]})
-        hidden = restarted.active_report_content(restarted.load('D')['active'], 'D')[1]
-        self.assertFalse(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] for c in hidden['extra_cells']))
-        restarted.change_cell_exemptions('D', {**options, 'revision': 2})
         restored = restarted.load('D')['active']
+        self.assertEqual(restored['cell_exemptions'], policy['sheets'])
+        self.assertEqual(restored['review_version'], saved['review_version'])
         visible = restarted.active_report_content(restored, 'D')[1]
         self.assertTrue(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] and c['value'] == '17'
                             for c in visible['extra_cells']))
         restarted.change('a', '甲', DAY, 'finish',
                          {'id': restored['id'], 'review_version': restored['review_version'], 'reviews': {}})
-        self.service.change_cell_exemptions('D', {**options, 'operation': 'add', 'revision': 3})
         archive = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', drafts={})
         self.assertEqual(archive['rounds'][0]['status'], '已归档')
         self.assertTrue(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] and c['value'] == '17'

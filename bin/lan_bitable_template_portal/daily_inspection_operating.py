@@ -97,6 +97,42 @@ def pressure_value(value):
         return ''
 
 
+def compressor_running_marks(scope, batch, template, start, end, sealed, marks):
+    """Use only configured, in-round compressor current for the same building and unit."""
+    readings = {}
+    for device in batch.get('devices', ()):
+        if device.get('scope') != scope or device.get('profession') != '暖通':
+            continue
+        for point in device.get('points', ()):
+            cell, sample = point.get('cell'), point.get('sampled')
+            if (not isinstance(cell, str) or not re.fullmatch(r'[B-G]4', cell) or type(sample) is not int
+                    or not start <= sample < end or sample > sealed or point.get('enabled') is False
+                    or point.get('template') != template or str(point.get('sheet') or '').strip() != CHILLER_SHEET
+                    or not point.get('round_cells') or set(point['round_cells'].values()) != {cell}
+                    or point.get('source_kind') in ('fixed_value', 'fixed_status', 'manual_status')):
+                continue
+            raw = point.get('corrected_value')
+            if raw is None:
+                raw = point.get('raw_value')
+            number = pressure_value(str(raw or '').strip().removesuffix('%'))
+            if number:
+                readings.setdefault(cell, set()).add(Decimal(number))
+    updated = dict(marks)
+    for left, right in zip('BCDEFG', 'KLMNOP'):
+        values = readings.get(f'{left}4', set())
+        if len(values) != 1 or next(iter(values)) <= 20:
+            continue
+        updated[f'{right}4'] = '√'
+        # Keep a verified mode. A former stop marker cannot identify which mode is active now.
+        modes = tuple(f'{right}{line}' for line in (7, 8, 9))
+        if [updated.get(cell) for cell in modes].count('√') != 1:
+            for cell in modes:
+                updated[cell] = ''
+        for cell in [*(f'{left}{line}' for line in _NUMERIC_ROWS), *(f'{right}{line}' for line in range(10, 16))]:
+            updated.pop(cell, None)
+    return updated
+
+
 def remember_pump_pressures(state, active, edits):
     scope = active['duty']['scope']
     batch = active['batches'][scope]
@@ -133,7 +169,8 @@ def apply_operating_marks(scope, batch, marks, *, template=None, saved_pressures
             cell = point.get('cell')
             if (cell in _PRESSURE_CELLS and point.get('template') == template
                     and str(point.get('sheet') or '').strip() == CHILLER_SHEET
-                    and point.get('enabled') is not False and pressure_value(point.get('value'))):
+                    and point.get('enabled') is not False
+                    and (pressure_value(point.get('value')) or pressure_value(point.get('handover_value')))):
                 has_live_value.add(cell)
         for section in device['sections']:
             prefix = (scope + '楼', device['name'], '暖通', section['location'], section['form'].strip())
@@ -141,7 +178,8 @@ def apply_operating_marks(scope, batch, marks, *, template=None, saved_pressures
                 target = catalogue.get((*prefix, name))
                 if target and target['template'] == template:
                     cell = target['cells'].get('白1')
-                    if cell in _PRESSURE_CELLS and pressure_value(value):
+                    fallback = section.get('handover_readings', {}).get(name, {}).get('value')
+                    if cell in _PRESSURE_CELLS and (pressure_value(value) or pressure_value(fallback)):
                         has_live_value.add(cell)
     carried = {}
     for cell, (status_cell, key) in _PRESSURE_CELLS.items():

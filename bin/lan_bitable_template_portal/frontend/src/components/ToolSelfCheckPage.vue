@@ -62,13 +62,26 @@
                 <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">基于此模板新建</NButton>
                 <NButton size="small" :disabled="busy" @click="chooseImport(template)">导入新版</NButton>
                 <NButton size="small" :disabled="busy" @click="toggleTemplate(template)">{{ template.active ? '停用' : '启用' }}</NButton>
+                <NButton v-if="template.linked_tools_count" size="small" :disabled="busy" @click="startRebind(template)">批量换绑</NButton>
                 <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }"
                   @positive-click="deleteTemplate(template)">
-                  <template #trigger><NButton size="small" type="error" quaternary :disabled="busy">删除</NButton></template>
+                  <template #trigger><NButton size="small" type="error" quaternary :disabled="busy || !!template.linked_tools_count">删除</NButton></template>
                   删除「{{ template.name }}」？<template v-if="template.open_usage">该模板正被 {{ template.open_usage }} 张未提交工单引用：删除后这些工单仍按已保存的版本继续填写和提交，但不能再新选此模板。</template><template v-else>当前没有未提交工单引用它。</template>已有自检记录仍可查看和导出。
                 </NPopconfirm>
               </div>
             </article>
+            <NModal :show="!!rebindTemplate" preset="card" title="批量换绑自检模板" class="tool-workspace-dialog"
+              @update:show="closeRebind">
+              <p>将授权楼栋内仍关联「{{ rebindTemplate?.name }}」的工具关联至目标模板。已有草稿和历史继续使用原版本。</p>
+              <NSelect v-model:value="rebindTarget" :options="rebindOptions" aria-label="目标自检模板" placeholder="选择目标模板" :disabled="busy" />
+              <p v-if="rebindProgress" role="status">{{ rebindProgress }}</p>
+              <p v-if="error" role="alert">{{ error }}</p>
+              <ul v-if="rebindFailures.length"><li v-for="(failure, index) in rebindFailures" :key="index">{{ failure.scope }}楼 · {{ failure.name }} · {{ failure.error }}</li></ul>
+              <template #footer><div class="tool-bar">
+                <NButton :disabled="busy" @click="rebindTemplate = undefined">关闭</NButton>
+                <NButton type="primary" :disabled="busy || !rebindTarget" :loading="busy" @click="applyRebind">确认换绑</NButton>
+              </div></template>
+            </NModal>
             <details v-if="library?.legacy_templates.length" class="tool-context">
               <summary>原有本地模板（{{ library.legacy_templates.length }} 份）</summary>
               <article v-for="template in library.legacy_templates" :key="template.id" class="tool-template">
@@ -373,6 +386,12 @@ const folderInput = ref<HTMLInputElement>();
 const folderProgress = ref('');
 const folderFailures = ref<{file:string;reason:string}[]>([]);
 const replacing = shallowRef<Template>();
+const rebindTemplate = shallowRef<Template>();
+const rebindTarget = ref<string | null>(null);
+const rebindProgress = ref('');
+const rebindFailures = ref<{name:string; scope:string; error:string}[]>([]);
+const rebindOptions = computed(() => (library.value?.templates || []).filter(template =>
+  template.active && template.id !== rebindTemplate.value?.id).map(template => ({value:template.id, label:template.name})));
 const afterDiscard = shallowRef<(() => void) | null>(null);
 let reader: AbortController | undefined;
 let disposed = false;
@@ -696,6 +715,34 @@ async function toggleTemplate(template: Template) {
     await loadLibrary();
   });
 }
+function startRebind(template: Template) {
+  rebindTemplate.value = template;
+  rebindTarget.value = null;
+  rebindProgress.value = '';
+  rebindFailures.value = [];
+}
+function closeRebind(show: boolean) {
+  if (!show && !busy.value) rebindTemplate.value = undefined;
+}
+async function applyRebind() {
+  const template = rebindTemplate.value;
+  const target = rebindTarget.value;
+  if (!template || !target) return;
+  await mutate(async () => {
+    let total = 0;
+    rebindFailures.value = [];
+    for (;;) {
+      const result = await requestJson(`${api}/templates/${encodeURIComponent(template.id)}/rebind`, {
+        method: 'POST', timeoutMs: 120000, body: JSON.stringify({ version: template.version, target_id: target }),
+      }) as { updated: number; remaining: number; failed: typeof rebindFailures.value };
+      total += result.updated;
+      rebindFailures.value = result.failed;
+      rebindProgress.value = `已核验 ${total} 台${result.failed.length ? `，本批 ${result.failed.length} 台待处理` : ''}${result.remaining ? `，另有 ${result.remaining} 台未处理` : ''}。`;
+      if (!result.remaining || result.failed.length || !result.updated || disposed) break;
+    }
+    if (!disposed) await loadLibrary();
+  });
+}
 async function deleteTemplate(template: Template) {
   await mutate(async () => {
     await requestJson(`${api}/templates/${template.id}/delete`, {
@@ -744,7 +791,7 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
   --tool-soft:color-mix(in srgb,var(--tool-surface),var(--tool-ink) 4%);
   --tool-primary:var(--v2-blue,var(--cf-brand-blue,#2563eb));
   --tool-tint:color-mix(in srgb,var(--tool-surface),var(--tool-primary) 7%);
-  display:grid; gap:12px; container-type:inline-size; box-sizing:border-box;
+  display:grid; grid-template-columns:minmax(0,1fr); gap:12px; container-type:inline-size; box-sizing:border-box;
   width:100%; min-width:0; max-width:1520px; padding:14px 16px; margin:auto; color:var(--tool-ink);
 }
 .tool-header,.tool-overview,.tool-worklist,.tool-library,.tool-edit-panel,.tool-result {

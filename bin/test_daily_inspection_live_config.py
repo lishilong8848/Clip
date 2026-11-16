@@ -3,7 +3,7 @@
 The panorama producer syncs point-configuration changes to the Feishu config
 table immediately.  The portal must pick them up without waiting for a fixed
 cache window, and open inspection rounds must re-derive their automatic
-positions/values while carrying human reviews over by stable identity.
+positions/values before the operator locks the round.
 """
 import copy
 import datetime as dt
@@ -11,12 +11,13 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
     sys.path.insert(0, str(BIN_DIR))
 
-from lan_bitable_template_portal.daily_inspection import CN, SOURCES, DailyInspection
+from lan_bitable_template_portal.daily_inspection import CN, SOURCES, DailyInspection, SYSTEM_INSPECTION_ACTOR
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 
 try:
@@ -91,7 +92,7 @@ class DailyInspectionLiveConfigTests(unittest.TestCase):
         batches = self.service.capture(['D'])
         state = {'active': None, 'history': []}
         device, point = self.point(batches['D'])
-        state['active'] = self.service.new_round(state, DAY, 1, batches, '测试员', dt.datetime.now(CN))
+        state['active'] = self.service.new_round(state, DAY, 1, batches, SYSTEM_INSPECTION_ACTOR, dt.datetime.now(CN))
         state['active']['reviews'] = {device['id']: {'values': {'p:' + point['id']: '5'},
                                                      'result': '', 'note': '', 'revision': 0}}
         self.store.put_document('daily_de_inspection', 'building:D', state)
@@ -120,11 +121,33 @@ class DailyInspectionLiveConfigTests(unittest.TestCase):
             row['fields']['上传日期'] = ok_stamp
         batches = self.service.capture(['D'])
         state = {'active': None, 'history': []}
-        state['active'] = self.service.new_round(state, DAY, 1, batches, '测试员', dt.datetime.now(CN))
+        state['active'] = self.service.new_round(state, DAY, 1, batches, SYSTEM_INSPECTION_ACTOR, dt.datetime.now(CN))
         self.store.put_document('daily_de_inspection', 'building:D', state)
         synced = self.service.sync_active_live('D')
         self.assertEqual(synced['active'].get('review_version', 0), 0)
         self.assertEqual(synced['active']['live_fp']['batch'], ok_stamp)
+
+    def test_start_locks_prepared_round_and_keeps_reference_after_restart(self):
+        sample = int(self.service.round_cutoff(DAY, 1).timestamp() * 1000) - 120_000
+        for row in self.cloud.tables[self.source_table]:
+            row['fields'].update({'源文件时间': sample, '上传日期': sample})
+        batches = self.service.capture(['D'])
+        state = {'active': None, 'history': []}
+        state['active'] = self.service.new_round(state, DAY, 1, batches, SYSTEM_INSPECTION_ACTOR, dt.datetime.now(CN))
+        self.store.put_document('daily_de_inspection', 'building:D', state)
+        self.cloud.tables[self.config_table][0]['fields']['目标单元格'] = 'C3'
+        self.expire_probe()
+        self.service.refresh_source('D')
+        started = self.service.change('owner', '测试员', DAY, 'start', {'duty': DAY})['active']
+        self.assertEqual(started['id'], state['active']['id'])
+        self.assertTrue(started['source_locked'])
+        self.assertEqual(self.point(self.service.load('D')['active']['batches']['D'])[1]['cell'], 'C3')
+        restarted = DailyInspection(self.store, self.cloud)
+        self.cloud.tables[self.config_table][0]['fields']['目标单元格'] = 'D4'
+        with patch.object(restarted, 'capture', side_effect=AssertionError('locked round accessed source')):
+            locked = restarted.sync_active_live('D')['active']
+        self.assertEqual(locked['review_version'], started['review_version'])
+        self.assertEqual(self.point(locked['batches']['D'])[1]['cell'], 'C3')
 
     def test_completed_round_keeps_frozen_snapshot(self):
         batches = self.service.capture(['D'])

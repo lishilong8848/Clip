@@ -1,5 +1,6 @@
 """Persistent tool workspace sessions and per-tool archive receipts."""
 
+import base64
 import datetime as dt
 import io
 import json
@@ -16,9 +17,11 @@ from .tool_self_check import TZ, dumps, timestamp
 MAX_ASSETS = 200
 ARCHIVE_RETRY_SECONDS = 60
 ARCHIVE_LEASE_SECONDS = 600
-EDIT_FIELDS = ("values", "checks", "outcome", "reason", "quantity", "actual")
+EDIT_FIELDS = ("values", "checks", "completion", "reviewer_id", "outcome", "reason", "quantity", "actual")
 ORDER_STATUS_FIELDS = """id,month,scope,kind,due,revision,owner,owner_name,submitted_at,outcome,
-    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta"""
+    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct"""
+WORKSPACE_SESSION_SUMMARY_FIELDS = "id,revision,kind,status,owner,owner_name,created_at,updated_at,submitted_at,report_name"
+WORKSPACE_ITEM_STATUS_FIELDS = "asset_id,asset,template_key,order_id,binding_error,binding_pending,remote_id,attempted_at,archive_error"
 
 
 class ToolWorkspaceMixin:
@@ -57,8 +60,11 @@ class ToolWorkspaceMixin:
             for name in ("order_id", "binding_error"):
                 if name not in columns:
                     db.execute(f"ALTER TABLE tool_workspace_items ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+            if 'binding_pending' not in columns:
+                db.execute('ALTER TABLE tool_workspace_items ADD COLUMN binding_pending INTEGER NOT NULL DEFAULT 0')
             db.execute("""CREATE UNIQUE INDEX IF NOT EXISTS tool_workspace_order
                 ON tool_workspace_items(order_id) WHERE order_id<>''""")
+            db.execute('CREATE INDEX IF NOT EXISTS tool_workspace_recent ON tool_workspace_sessions(updated_at DESC,id DESC)')
 
     @staticmethod
     def _workspace_for_order(db, identity):
@@ -80,12 +86,7 @@ class ToolWorkspaceMixin:
     def _workspace_allowed(self, db, actor, asset, kind):
         from .tool_management import can_scope
 
-        scope = asset.get("scope")
-        return can_scope(actor, scope) and (
-            self.administrator(actor) or self.eligible(db, actor, {
-                "scope": scope, "kind": kind, "supervisor": asset.get("supervisor", ""),
-            })
-        )
+        return can_scope(actor, asset.get('scope'))
 
     @staticmethod
     def _workspace_inventory_asset(row):
@@ -105,12 +106,10 @@ class ToolWorkspaceMixin:
         from .tool_management import can_scope
 
         if any(item["order_id"] for item in items):
-            authorized = []
-            for item in items:
-                order = self._workspace_order(db, item, status_only=True)
-                if order and self.visible(db, actor, order):
-                    authorized.append(item)
-            return authorized
+            orders = self._workspace_orders(db, items)
+            leaders = json.loads(self.state(db, 'leaders') or '{}')
+            return [item for item in items if (order := orders.get(item['order_id']))
+                    and self.visible(db, actor, order, leaders=leaders)]
         if (session["owner"] == actor["id"] or self.administrator(actor)) and all(
                 can_scope(actor, json.loads(item["asset"])["scope"]) for item in items):
             return items
@@ -123,16 +122,28 @@ class ToolWorkspaceMixin:
                           (item["order_id"],)).fetchone() if item["order_id"] else None
 
     @staticmethod
-    def _workspace_rows(db, identity, *, status_only=False):
-        fields = "asset_id,asset,template_key,order_id,binding_error,remote_id,attempted_at,archive_error" if status_only else "*"
+    def _workspace_orders(db, items):
+        ids = tuple(item['order_id'] for item in items if item['order_id'])
+        if not ids:
+            return {}
+        placeholders = ','.join('?' for _ in ids)
+        return {row['id']: row for row in db.execute(
+            f'SELECT {ORDER_STATUS_FIELDS} FROM tool_work_orders WHERE id IN ({placeholders})', ids)}
+
+    @staticmethod
+    def _workspace_rows(db, identity, *, status_only=False, include_files=True):
+        fields = WORKSPACE_ITEM_STATUS_FIELDS
+        if not status_only:
+            fields = "*" if include_files else fields + ",template_id,template_version,draft"
         return db.execute(
             f"SELECT {fields} FROM tool_workspace_items WHERE session_id=? ORDER BY position", (identity,),
         ).fetchall()
 
-    def _workspace_session(self, db, actor, identity, *, status_only=False):
-        fields = "id,revision,kind,status,owner,owner_name,created_at,updated_at,submitted_at,report_name" if status_only else "*"
+    def _workspace_session(self, db, actor, identity, *, status_only=False, include_files=True):
+        fields = "*" if include_files and not status_only else WORKSPACE_SESSION_SUMMARY_FIELDS
         row = db.execute(f"SELECT {fields} FROM tool_workspace_sessions WHERE id=?", (identity,)).fetchone()
-        items = self._workspace_visible_items(db, actor, row, self._workspace_rows(db, identity, status_only=status_only)) if row else []
+        items = self._workspace_visible_items(db, actor, row, self._workspace_rows(
+            db, identity, status_only=status_only, include_files=include_files)) if row else []
         if not items:
             raise RiskError("工具办理会话不存在或无权查看。", 404)
         return row, items
@@ -155,24 +166,24 @@ class ToolWorkspaceMixin:
             ORDER BY session.submitted_at,session.id""", (asset_id, kind, month)).fetchall()
 
     def _workspace_asset_state(self, db, actor, asset, kind):
-        batch = db.execute("""SELECT work.scope,work.kind,work.supervisor,work.manager,
-                  work.submitted_at,item.session_id
+        batch = db.execute("""SELECT work.id,work.scope,work.kind,work.supervisor,work.manager,work.owner,work.workspace_direct,
+                  work.revision,work.outcome,work.submitted_at,item.session_id
             FROM tool_work_orders work JOIN tool_workspace_items item ON item.order_id=work.id
             WHERE work.asset_id=? AND work.outcome<>'cancelled' AND
                 (work.submitted_at IS NULL OR EXISTS (SELECT 1 FROM tool_work_sync
                     WHERE order_id=work.id AND synced<revision))
             ORDER BY work.submitted_at IS NOT NULL,work.month,work.id LIMIT 1""", (asset["id"],)).fetchone()
         if batch:
+            if (batch['scope'] != asset['scope'] and not batch['submitted_at'] and not batch['outcome']
+                    and self.workspace_can_review(db, actor, {'scope': asset['scope']})):
+                return {'mode': 'transfer', 'revision': batch['revision'],
+                        'problem': '原楼栋有未完成的办理记录，移交后可重新办理。'}
             if batch["scope"] != asset["scope"] or not self.visible(db, actor, batch):
                 return {"mode": "blocked", "problem": "工具已有办理记录，请由原楼栋或获授权人员处理。"}
             return {"mode": "resume", "workspace_id": batch["session_id"],
                     "problem": "归档待同步" if batch["submitted_at"] else "已有办理记录"}
         if self._workspace_legacy_overlaps(db, asset["id"], kind):
             return {"mode": "blocked", "problem": "旧批次正在归档，可在办理记录查看。"}
-        if not self.eligible(db, actor, {
-            "scope": asset["scope"], "kind": kind, "supervisor": asset.get("supervisor", ""),
-        }):
-            return {"mode": "blocked", "problem": "仅本楼楼长、对应专业主管或获授权人员可办理。"}
         if not self.tool_available(db, asset):
             return {"mode": "blocked", "problem": "工具在检修、报废审批中或已全部报废。"}
         return {"mode": "direct"}
@@ -246,13 +257,13 @@ class ToolWorkspaceMixin:
             "version": row.get("digest") or digest(row.get("file_token") or row["id"]),
         } for row in templates]
 
-    def workspace_list(self, actor):
+    def workspace_list(self, actor, *, refresh_templates=False):
         from .tool_management import can_scope
 
         self._workspace_access(actor)
         warning = ""
         try:
-            templates = self._workspace_template_list(self.selectable_feishu_templates(actor))
+            templates = self._workspace_template_list(self.selectable_feishu_templates(actor, fresh=refresh_templates))
         except Exception:
             warning = "飞书模板暂时无法读取，已有办理记录仍可打开。"
             with self.connect() as db:
@@ -276,37 +287,90 @@ class ToolWorkspaceMixin:
                     "selectable": selectable,
                     "disabled_reason": reason, "plan": plan,
                 })
-            sessions = []
-            for row in db.execute("""
-                SELECT * FROM tool_workspace_sessions
-                WHERE (owner=? OR ? OR EXISTS(SELECT 1 FROM tool_workspace_items
-                    WHERE session_id=tool_workspace_sessions.id AND order_id<>'')) ORDER BY updated_at DESC,id
-            """, (actor["id"], self.administrator(actor))):
-                items = self._workspace_visible_items(db, actor, row, self._workspace_rows(db, row["id"]))
-                if items:
-                    summary = self._workspace_detail(db, row, items, actor, status_only=True)
-                    summary.pop("items")
-                    sessions.append(summary)
+            history = self._workspace_history_page(db, actor)
         assets.sort(key=lambda item: (item["scope"], item["name"], item["id"]))
-        return {"assets": assets, "templates": templates, "sessions": sessions, "warning": warning}
+        return {"assets": assets, "templates": templates, "warning": warning, **history}
+
+    def _workspace_history_page(self, db, actor, before='', before_id='', *, kind=''):
+        from .tool_management import BUILDINGS, can_scope
+
+        allowed = [scope for scope in BUILDINGS if can_scope(actor, scope)]
+        slots = ','.join('?' for _ in allowed)
+        sessions = []
+        cursor = None
+        rows = db.execute(f'''SELECT {WORKSPACE_SESSION_SUMMARY_FIELDS} FROM tool_workspace_sessions s
+            WHERE (?='' OR (s.updated_at,s.id) < (?,?)) AND (?='' OR s.kind=?)
+            AND (s.owner=? OR EXISTS (SELECT 1 FROM tool_workspace_items i
+                LEFT JOIN tool_work_orders w ON w.id=i.order_id WHERE i.session_id=s.id
+                AND (w.scope IN ({slots}) OR (? AND i.order_id=''))))
+            ORDER BY s.updated_at DESC,s.id DESC''',
+            (before, before, before_id, kind, kind, actor['id'], *allowed, self.administrator(actor)))
+        for row in rows:
+            items = self._workspace_visible_items(db, actor, row, self._workspace_rows(db, row['id'], status_only=True))
+            if not items:
+                continue
+            if len(sessions) == 30:
+                last = sessions[-1]
+                cursor = {'before': last['updated_at'], 'id': last['id']}
+                break
+            summary = self._workspace_detail(db, row, items, actor, status_only=True)
+            summary.pop('items')
+            sessions.append(summary)
+        return {'sessions': sessions, 'history_cursor': cursor}
+
+    def workspace_history(self, actor, before='', before_id='', kind=''):
+        self._workspace_access(actor)
+        if len(before) > 40 or len(before_id) > 128 or bool(before) != bool(before_id) or kind not in ('', 'self', 'external'):
+            raise RiskError('办理记录分页参数无效。')
+        with self.connect() as db:
+            db.execute('BEGIN')
+            return self._workspace_history_page(db, actor, before, before_id, kind=kind)
 
     def workspace_refresh(self, actor):
         self._workspace_access(actor)
         with self._workspace_refresh_lock:
             self.refresh()
-        return self.workspace_list(actor)
+        return self.workspace_list(actor, refresh_templates=True)
 
     def workspace_get(self, actor, identity):
         self._workspace_access(actor)
         with self.connect() as db:
-            row, items = self._workspace_session(db, actor, identity)
+            db.execute('BEGIN')
+            row, items = self._workspace_session(db, actor, identity, include_files=False)
             return self._workspace_detail(db, row, items, actor)
 
-    def workspace_status(self, actor, identity):
+    def workspace_status(self, actor, identity, known=''):
+        self._workspace_access(actor)
+        with self.connect() as db:
+            db.execute('BEGIN')
+            row, items = self._workspace_session(db, actor, identity, status_only=True)
+            result = self._workspace_detail(db, row, items, actor, status_only=True)
+        version = digest([result['revision'], result['status'], result['items']])
+        if version == known:
+            return {'unchanged': True, 'status_version': version}
+        return result | {'status_version': version}
+
+    def workspace_people(self, actor, identity):
         self._workspace_access(actor)
         with self.connect() as db:
             row, items = self._workspace_session(db, actor, identity, status_only=True)
-            return self._workspace_detail(db, row, items, actor, status_only=True)
+            scopes = {json.loads(item["asset"])["scope"] for item in items}
+            leaders = json.loads(self.state(db, "leaders") or "{}")
+        leader_ids = set().union(*(leaders.get(scope, ()) for scope in scopes))
+        directory = self.workspace_directory() if self.workspace_directory else []
+        candidates = {actor["id"]: actor}
+        for person in directory:
+            person_id = person.get("record_id")
+            if (not person_id or person_id in candidates or not person.get("selectable") or person.get("departed")
+                    or person.get("open_id") not in leader_ids and person.get("name") not in {"李世龙", "刘小杏"}):
+                continue
+            try:
+                candidates[person_id] = self.person_for(person_id)
+            except RiskError:
+                continue
+        with self.connect() as db:
+            return {scope: [{"id": person["id"], "name": person["name"]} for person in candidates.values()
+                            if self.workspace_can_review(db, person, {"scope": scope})] for scope in scopes}
 
     def workspace_resume(self, actor, identity, body=None):
         self._workspace_access(actor)
@@ -340,17 +404,34 @@ class ToolWorkspaceMixin:
                 return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
     def _workspace_detail(self, db, row, items, actor, *, status_only=False):
+        from collections import defaultdict
+        from .tool_management import full_access
+
         layouts = {}
         result = []
+        orders = self._workspace_orders(db, items)
+        leaders = json.loads(self.state(db, 'leaders') or '{}') if orders else {}
+        reviews, jobs = {}, defaultdict(list)
+        if orders:
+            slots = ','.join('?' for _ in orders)
+            reviews = {entry['order_id']: entry for entry in db.execute(
+                f'SELECT order_id,status,note FROM tool_work_reviews WHERE order_id IN ({slots})', tuple(orders))}
+            for job in db.execute(f'''SELECT order_id,revision,synced,error,attempted_at,remote_id
+                    FROM tool_work_sync WHERE order_id IN ({slots}) ORDER BY dest''', tuple(orders)):
+                jobs[job['order_id']].append(job)
         for item in items:
             key = item["template_key"]
             if key and key not in layouts and not status_only:
                 layouts[key] = json.loads(db.execute(
                     "SELECT layout FROM tool_workspace_templates WHERE cache_key=?", (key,),
                 ).fetchone()[0])
-            order = self._workspace_order(db, item, status_only=True)
-            info = self.work_info(db, actor, order) if order else {}
-            sync = info.get("sync", [])
+            order = orders.get(item['order_id'])
+            review = reviews.get(item['order_id'])
+            sync = jobs[item['order_id']]
+            pending_review = bool(review and review['status'] == 'pending')
+            open_order = bool(order and not order['submitted_at'] and order['outcome'] != 'cancelled')
+            order_status = ('cancelled' if order['outcome'] == 'cancelled' else 'review_pending' if pending_review
+                            else 'pending' if open_order else 'submitted') if order else None
             archive_status = (
                 "archived" if item["remote_id"] else "verifying" if item["attempted_at"]
                 else "retrying" if item["archive_error"] else row["status"]
@@ -358,29 +439,49 @@ class ToolWorkspaceMixin:
             archive_error = item["archive_error"]
             if order:
                 archive_error = next((job["error"] for job in sync if job["error"]), "")
-                archive_status = ("verifying" if any(job.get("verifying") for job in sync if job["state"] != "done")
-                                  else "retrying" if archive_error else "pending") if order["submitted_at"] else info["status"]
-                if sync and all(job["state"] == "done" for job in sync):
+                archive_status = ("verifying" if any(job['attempted_at'] and not job['remote_id']
+                                                        for job in sync if job['synced'] != job['revision'])
+                                  else "retrying" if archive_error else "pending") if order["submitted_at"] else order_status
+                if sync and all(job['synced'] == job['revision'] for job in sync):
                     archive_status = "archived"
             status = {"id": item["asset_id"], "order_id": item["order_id"],
-                      "order_revision": info.get("revision"), "order_status": info.get("status"),
-                      "binding_error": item["binding_error"], "archive_status": archive_status, "archive_error": archive_error}
+                      "order_revision": order['revision'] if order else None, "order_status": order_status,
+                      "binding_error": item["binding_error"], 'binding_pending': bool(item['binding_pending']),
+                      "archive_status": archive_status, "archive_error": archive_error}
             if status_only:
                 result.append(status)
                 continue
+            draft = json.loads(item["draft"])
+            eligible = bool(order and self.eligible(db, actor, order, leaders=leaders))
+            mine = bool(order and (self.owns_workspace_item(actor, order) or eligible and
+                                   (order['owner'] == actor['id'] or full_access(actor) and order['owner'])))
+            can_edit = bool(open_order and not pending_review and mine)
+            can_manage = bool(order and not order['submitted_at'] and not order['outcome'] and
+                              self.workspace_can_review(db, actor, order, leaders=leaders))
             result.append(status | {
                 "id": item["asset_id"], "asset_id": item["asset_id"], "asset": json.loads(item["asset"]),
                 "template_id": item["template_id"], "template_version": item["template_version"],
-                "template": layouts.get(key), **{name: value for name, value in json.loads(item["draft"]).items()
-                                                  if name != "legacy_review"},
-                "can_edit": bool(info.get("can_edit")) and not item["binding_error"] and row["status"] != "opening",
-                "can_review": bool(info.get("can_review")), "review_note": info.get("review_note"),
+                "template": layouts.get(key), **{name: value for name, value in draft.items() if name != "legacy_review"},
+                "can_edit": can_edit and not item['binding_pending'] and not item['binding_error'],
+                "can_review": bool(can_manage and pending_review and draft.get('reviewer_id', '') in ('', actor['id'])),
+                'can_reassign': bool(can_manage and pending_review),
+                'can_withdraw': bool(order and not order['outcome'] and pending_review
+                                     and (can_manage or self.owns_workspace_item(actor, order)
+                                          or order['owner'] == actor['id'] and eligible)),
+                'can_release': bool(order and not order['submitted_at'] and not order['outcome']
+                                    and (can_manage or can_edit)),
+                "review_note": review['note'] if review else '',
                 "remote_id": item["remote_id"],
             })
         summary = self._workspace_summary(row, items)
+        summary['binding_pending'] = any(item['binding_pending'] for item in items)
+        if row['status'] == 'opening' and not status_only:
+            summary['can_edit'] = any(item.get('can_edit') for item in result)
+        summary["current_actor_name"] = actor["name"]
         if row["kind"] == "external" and not status_only:
-            completed = next((order for item in items if (order := self._workspace_order(db, item, status_only=True))
-                              and order["actual"]), None)
+            summary['report_available'] = len(items) == db.execute(
+                'SELECT count(*) FROM tool_workspace_items WHERE session_id=?', (row['id'],)).fetchone()[0]
+            completed = next((order for order in orders.values() if order['actual']), None)
             summary["actual"] = completed['actual'] if completed else ''
             summary["inspection"] = json.loads(completed['inspection_meta']) if completed else {}
             if "confirmed_asset_ids" in summary["inspection"]:
@@ -392,6 +493,15 @@ class ToolWorkspaceMixin:
                 from .tool_management import inspection_end
                 summary["inspection_expires_on"] = inspection_end(
                     json.loads(completed['asset']), completed['actual'], summary["inspection"])
+                summary['inspection']['tools'] = {}
+                for entry in result:
+                    order = orders.get(entry['order_id'])
+                    if order and order['submitted_at']:
+                        meta = json.loads(order['inspection_meta'])
+                        summary['inspection']['tools'][entry['id']] = {
+                            'result': meta.get('result', ''),
+                            'expires_on': inspection_end(json.loads(order['asset']), order['actual'], meta),
+                        }
         if any(item["order_id"] for item in items) and row["status"] != "opening":
             states = {item["archive_status"] for item in result}
             summary.update(status="archived" if "archived" in states and states <= {"archived", "cancelled"} else "draft" if "pending" in {
@@ -426,11 +536,21 @@ class ToolWorkspaceMixin:
         with self.connect() as db:
             row = db.execute("SELECT * FROM tool_workspace_templates WHERE cache_key=?", (cache_key,)).fetchone()
         if row:
-            return cache_key, row["content"], json.loads(row["layout"])
-        content = self.cloud.download_template(template)
+            layout = json.loads(row["layout"])
+            if layout.get("prefill_fields"):
+                return cache_key, row["content"], layout
+            content = row["content"]
+        else:
+            with self.connect() as db:
+                catalog = db.execute("""SELECT c.entry,t.content FROM tool_check_template_catalog c
+                    JOIN tool_check_templates t ON t.id=c.id AND t.version=c.version WHERE c.id=?""",
+                                     (template["id"],)).fetchone()
+            content = (catalog["content"] if catalog and self._library_stamp(json.loads(catalog["entry"]))
+                       == self._library_stamp(template) else self.cloud.download_template(template))
         layout = describe(content)
         with self.connect(True) as db:
-            db.execute("INSERT OR IGNORE INTO tool_workspace_templates VALUES(?,?,?)", (cache_key, content, dumps(layout)))
+            db.execute("""INSERT INTO tool_workspace_templates VALUES(?,?,?)
+                ON CONFLICT(cache_key) DO UPDATE SET layout=excluded.layout""", (cache_key, content, dumps(layout)))
         return cache_key, content, layout
 
     def workspace_open(self, actor, body):
@@ -443,11 +563,18 @@ class ToolWorkspaceMixin:
         if len(set(asset_ids)) != len(asset_ids):
             raise RiskError("同一工具只能选择一次。")
         template_id = text(body.get("template_id") or "", 120)
-        if kind == "external" and template_id:
+        template_ids = body.get("template_ids", {})
+        if not isinstance(template_ids, dict) or set(template_ids) - set(asset_ids) or template_id and template_ids:
+            raise RiskError("工具与模板关联格式不正确。")
+        template_ids = {key: text(value, 120, True) for key, value in template_ids.items()}
+        if kind == "external" and (template_id or template_ids):
             raise RiskError("送检直接上传报告。")
         operation = text(body.get("operation_id"), 128, True)
         allow_temporary = body.get("allow_temporary") is True
+        defer_bindings = body.get('defer_bindings') is True and kind == 'self' and not actor.get('_tool_impersonation')
         fingerprint = digest([kind, sorted(asset_ids), template_id, allow_temporary])
+        if template_ids:
+            fingerprint = digest([kind, sorted(asset_ids), sorted(template_ids.items())])
         with self._workspace_open_lock:
             with self.connect() as db:
                 existing = db.execute(
@@ -455,7 +582,7 @@ class ToolWorkspaceMixin:
                 ).fetchone()
                 if existing:
                     legacy_fingerprint = digest([kind, sorted(asset_ids), template_id])
-                    if existing["fingerprint"] not in (fingerprint, legacy_fingerprint):
+                    if existing["fingerprint"] != fingerprint and (template_ids or existing["fingerprint"] != legacy_fingerprint):
                         raise RiskError("同一操作编号已用于其他工具或模板。", 409)
                     row, items = self._workspace_session(db, actor, existing["id"])
                     if row["status"] != "opening":
@@ -464,44 +591,47 @@ class ToolWorkspaceMixin:
                         return self._workspace_detail(db, row, items, actor)
                 assets = self._workspace_assets_for_open(db, actor, asset_ids, kind)
                 if not existing:
+                    if kind == 'external' and len({asset['scope'] for asset in assets}) != 1:
+                        raise RiskError('共用送检报告只能选择同一楼栋的工具，请按楼栋分批办理。')
                     plans = [self._workspace_asset_state(db, actor, asset, kind) for asset in assets]
                     if len(plans) == 1 and plans[0]["mode"] == "resume":
                         return self._workspace_detail(db, *self._workspace_session(db, actor, plans[0]["workspace_id"]), actor)
             if existing:
                 identity = existing["id"]
             else:
-                identity = self._workspace_create_session(actor, operation, fingerprint, kind, assets, template_id)
-            if kind == "self":
+                identity = self._workspace_create_session(actor, operation, fingerprint, kind, assets, template_id, template_ids)
+            if kind == "self" and not defer_bindings:
                 self._workspace_apply_bindings(actor, identity)
             with self.connect(True) as db:
                 row, items = self._workspace_session(db, actor, identity)
                 self._workspace_finish_open(db, identity)
                 return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
-    def _workspace_create_session(self, actor, operation, fingerprint, kind, assets, template_id):
+    def _workspace_create_session(self, actor, operation, fingerprint, kind, assets, template_id, template_ids):
+        from .tool_workspace_workbook import initial_values
+
         templates = {row["id"]: row for row in self.selectable_feishu_templates(actor)} if kind == "self" else {}
         identity = uuid.uuid4().hex
         snapshots = {}
         rows = []
+        now = dt.datetime.now(TZ)
         for index, asset in enumerate(assets):
             selected, version, cache_key = "", "", ""
             values = {}
             if kind == "self":
-                from .tool_workspace_workbook import prefill
-
-                selected = template_id or asset["template_id"]
+                selected = template_ids.get(asset["id"]) or template_id or asset["template_id"]
                 if selected not in templates:
                     raise RiskError(f"「{asset['name']}」缺少可用的关联模板，请选择模板。", 409)
                 if selected not in snapshots:
                     snapshots[selected] = self._workspace_snapshot(templates[selected])
-                cache_key, content, layout = snapshots[selected]
+                cache_key, _, layout = snapshots[selected]
                 version = layout["template_sha256"]
-                values = prefill(content, asset)
+                values = initial_values(layout, asset, actor["name"], now.date().isoformat())
             draft = {"values": values, "checks": {}, "reviewer": "", "reviewed_at": "",
                      "signature": "", "qualified": None}
             rows.append((identity, asset["id"], index, dumps(asset | {"template_id": selected}),
                          selected, version, cache_key, asset["template_id"], dumps(draft)))
-        now = dt.datetime.now(TZ).isoformat(timespec="seconds")
+        now = now.isoformat(timespec="seconds")
         with self.connect(True) as db:
             prior = db.execute("SELECT id,fingerprint FROM tool_workspace_sessions WHERE owner=? AND operation=?",
                                (actor["id"], operation)).fetchone()
@@ -518,8 +648,9 @@ class ToolWorkspaceMixin:
                 VALUES(?,?,?,?,?,?,?,?,?)""",
                        (identity, actor["id"], actor["name"], operation, fingerprint, kind, "opening", now, now))
             db.executemany("""INSERT INTO tool_workspace_items
-                (session_id,asset_id,position,asset,template_id,template_version,template_key,previous_template,draft,order_id)
-                VALUES(?,?,?,?,?,?,?,?,?,?)""", [(*row, order_id) for row, order_id in zip(rows, order_ids)])
+                (session_id,asset_id,position,asset,template_id,template_version,template_key,previous_template,draft,order_id,binding_pending)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", [(*row, order_id, int(bool(row[4]) and row[4] != row[7]))
+                                                   for row, order_id in zip(rows, order_ids)])
         return identity
 
     def _workspace_create_item(self, db, actor, asset, kind):
@@ -538,43 +669,103 @@ class ToolWorkspaceMixin:
 
     @staticmethod
     def _workspace_finish_open(db, identity):
-        if not db.execute("SELECT 1 FROM tool_workspace_items WHERE session_id=? AND binding_error<>''", (identity,)).fetchone():
+        if not db.execute("""SELECT 1 FROM tool_workspace_items i LEFT JOIN tool_work_orders w ON w.id=i.order_id
+                WHERE i.session_id=? AND (i.binding_pending=1 OR i.binding_error<>'')
+                  AND COALESCE(w.outcome,'')<>'cancelled'""", (identity,)).fetchone():
             db.execute("UPDATE tool_workspace_sessions SET status='draft' WHERE id=? AND status='opening'", (identity,))
 
-    def _workspace_apply_bindings(self, actor, identity):
+    def _workspace_bind_templates(self, entries):
+        batch = getattr(self.cloud, 'bind_templates', None)
+        if callable(batch):
+            yield from batch(entries)
+            return
+        for asset_id, template_id, previous in entries:
+            try:
+                yield asset_id, self.cloud.bind_template(asset_id, template_id, previous), ''
+            except RiskError as exc:
+                yield asset_id, '', str(exc)
+            except Exception:
+                yield asset_id, '', '飞书关联结果暂未确认，请重试。'
+
+    @staticmethod
+    def _workspace_save_inventory_binding(db, asset_id, previous, template_id):
+        current = db.execute('SELECT source FROM tool_inventory WHERE id=? AND active=1', (asset_id,)).fetchone()
+        if current:
+            source = json.loads(current['source'])
+            if (source.get('template_id') or '') == previous:
+                source['template_id'] = template_id
+                db.execute('UPDATE tool_inventory SET source=? WHERE id=?', (dumps(source), asset_id))
+
+    def _workspace_apply_bindings(self, actor, identity, *, pending_only=False):
         with self.connect() as db:
             row, items = self._workspace_session(db, actor, identity)
             if row["status"] != "opening":
                 return
             if row["owner"] != actor["id"]:
                 raise RiskError("仅本批的领取人可核对模板关联。", 403)
-            self._workspace_assets_for_open(db, actor, [item["asset_id"] for item in items], row["kind"])
-            self._workspace_check_scopes(db, items)
+            items = [item for item in items if not item['order_id'] or
+                     (order := self._workspace_order(db, item, status_only=True)) and order['outcome'] != 'cancelled']
+            selectable = {template['id'] for template in self.list_templates(db, False)}
+        records = {}
+        rejected = {}
         for item in items:
             template_id = item['template_id']
             previous = item["previous_template"]
-            if not template_id:
+            if not template_id or pending_only and not item['binding_pending']:
                 continue
-            asset_id = item["asset_id"]
-            try:
-                if self.cloud.bind_template(asset_id, template_id, previous) != template_id:
-                    raise RiskError("飞书未确认模板关联，请重试原操作。", 503)
-            except Exception as exc:
-                message = str(exc) if isinstance(exc, RiskError) else "飞书关联结果暂未确认，请重试。"
-                with self.connect(True) as db:
-                    db.execute("UPDATE tool_workspace_items SET binding_error=? WHERE session_id=? AND asset_id=?",
-                               (message, identity, asset_id))
-                if not item["order_id"]:
-                    raise
+            if template_id == previous and not item['binding_error'] and not item['binding_pending']:
                 continue
+            records[item['asset_id']] = item
+            if pending_only and len(records) == 8:
+                break
+        with self.connect() as db:
+            for asset_id, item in records.items():
+                try:
+                    self._workspace_assets_for_open(db, actor, [asset_id], row['kind'])
+                    self._workspace_check_scopes(db, [item])
+                    if item['template_id'] not in selectable:
+                        raise RiskError('模板已停用，请选择其他模板。', 409)
+                except RiskError as exc:
+                    rejected[asset_id] = str(exc)
+        entries = [(asset_id, record['template_id'], record['previous_template'])
+                   for asset_id, record in records.items() if asset_id not in rejected]
+        outcomes = self._workspace_bind_templates(entries)
+        from itertools import chain
+
+        for asset_id, bound, error in chain(((asset_id, '', reason) for asset_id, reason in rejected.items()), outcomes):
+            item = records[asset_id]
+            template_id, previous = item['template_id'], item['previous_template']
+            message = '' if template_id == bound else error or '飞书未确认模板关联，请重试原操作。'
             with self.connect(True) as db:
-                db.execute("UPDATE tool_workspace_items SET binding_error='' WHERE session_id=? AND asset_id=?", (identity, asset_id))
-                current = db.execute("SELECT source FROM tool_inventory WHERE id=? AND active=1", (asset_id,)).fetchone()
-                if current:
-                    source = json.loads(current["source"])
-                    if (source.get("template_id") or "") == previous:
-                        source["template_id"] = template_id
-                        db.execute("UPDATE tool_inventory SET source=? WHERE id=?", (dumps(source), asset_id))
+                db.execute('UPDATE tool_workspace_items SET binding_pending=0,binding_error=? WHERE session_id=? AND asset_id=?',
+                           (message, identity, asset_id))
+                if not message:
+                    self._workspace_save_inventory_binding(db, asset_id, previous, template_id)
+                    db.execute('UPDATE tool_workspace_items SET previous_template=? WHERE session_id=? AND asset_id=?',
+                               (template_id, identity, asset_id))
+                if pending_only:
+                    self._workspace_finish_open(db, identity)
+            if message and not item['order_id']:
+                raise RiskError(message, 503)
+
+    def workspace_binding_tick(self):
+        with self._workspace_open_lock, self.connect() as db:
+            row = db.execute("""SELECT s.id,s.owner FROM tool_workspace_sessions s WHERE s.status='opening'
+                AND EXISTS (SELECT 1 FROM tool_workspace_items i JOIN tool_work_orders w ON w.id=i.order_id
+                    WHERE i.session_id=s.id AND i.binding_pending=1 AND w.outcome<>'cancelled')
+                ORDER BY s.updated_at,s.id LIMIT 1""").fetchone()
+        if not row:
+            return False
+        with self._workspace_open_lock:
+            try:
+                actor = self.person_for(row['owner'])
+                self._workspace_access(actor)
+                self._workspace_apply_bindings(actor, row['id'], pending_only=True)
+            except RiskError as exc:
+                with self.connect(True) as db:
+                    db.execute('UPDATE tool_workspace_items SET binding_error=?,binding_pending=0 WHERE session_id=? AND binding_pending=1',
+                               (str(exc), row['id']))
+        return True
 
     def workspace_resolve_binding(self, actor, identity, body):
         self._workspace_access(actor)
@@ -592,11 +783,11 @@ class ToolWorkspaceMixin:
                 template = next((entry for entry in self.selectable_feishu_templates(actor) if entry["id"] == template_id), None)
                 if not template:
                     raise RiskError("模板已停用或不存在。", 409)
-                key, content, layout = self._workspace_snapshot(template)
-                from .tool_workspace_workbook import prefill
+                key, _, layout = self._workspace_snapshot(template)
+                from .tool_workspace_workbook import initial_values
 
                 draft = json.loads(item["draft"])
-                draft["values"] = prefill(content, asset)
+                draft["values"] = initial_values(layout, asset, actor["name"], dt.datetime.now(TZ).date().isoformat())
             with self.connect(True) as db:
                 current, _ = self._workspace_session(db, actor, identity)
                 self.check_revision(current, body.get("revision"))
@@ -620,10 +811,10 @@ class ToolWorkspaceMixin:
                 return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
     @staticmethod
-    def _workspace_draft(row, revision):
+    def _workspace_draft(row, revision, *, allow_opening=False):
         if type(revision) is not int or revision != row["revision"]:
             raise RiskError("办理会话已更新，请刷新后核对再保存。", 409)
-        if row["status"] != "draft":
+        if row["status"] != "draft" and not (allow_opening and row['status'] == 'opening'):
             raise RiskError("此批次已提交，表格与报告已锁定。", 409)
 
     def workspace_save(self, actor, identity, body):
@@ -635,7 +826,7 @@ class ToolWorkspaceMixin:
             raise RiskError("没有可保存的工具表格。")
         with self.connect() as db:
             row, items = self._workspace_session(db, actor, identity)
-            self._workspace_draft(row, body.get("revision"))
+            self._workspace_draft(row, body.get("revision"), allow_opening=True)
             if row["kind"] != "self":
                 raise RiskError("送检批次请使用上传报告。")
             by_id = {item["asset_id"]: item for item in items}
@@ -648,11 +839,24 @@ class ToolWorkspaceMixin:
                 if asset_id not in by_id or asset_id in updates or patch.get("id", asset_id) != asset_id:
                     raise RiskError("工具填写记录不存在、重复或标识冲突。")
                 item = by_id[asset_id]
+                if item['binding_pending'] or item['binding_error']:
+                    raise RiskError('该工具的模板关联尚未核验，请核对后再填写。', 409)
                 order = self._workspace_order(db, item)
                 if not order or not self.work_info(db, actor, order)["can_edit"]:
                     raise RiskError("仅已领取且待填写的工单可保存。", 403)
                 draft = json.loads(item["draft"])
+                previous_reviewer = draft.get("reviewer_id", "")
                 draft.update({name: patch[name] for name in EDIT_FIELDS if name in patch})
+                if draft.get("completion", "") not in ("", "completed", "incomplete"):
+                    raise RiskError("请选择有效的完成情况。")
+                if "reviewer_id" in patch and previous_reviewer != patch["reviewer_id"]:
+                    reviewer_id = text(patch["reviewer_id"], 130)
+                    if reviewer_id:
+                        reviewer = actor if reviewer_id == actor["id"] else self.person_for(reviewer_id)
+                        if not self.workspace_can_review(db, reviewer, order):
+                            raise RiskError("只能选择本楼楼长或获授权的审核人。", 403)
+                    draft["reviewer_id"] = reviewer_id
+                    draft["reviewer_name"] = reviewer["name"] if reviewer_id else ""
                 draft["reason"] = text(draft.get("reason") or "", 1000)
                 key = item["template_key"]
                 if key not in contents:
@@ -663,7 +867,7 @@ class ToolWorkspaceMixin:
                 updates[asset_id] = dumps(draft)
         with self.connect(True) as db:
             row, items = self._workspace_session(db, actor, identity)
-            self._workspace_draft(row, body.get("revision"))
+            self._workspace_draft(row, body.get("revision"), allow_opening=True)
             for item in items:
                 if item["asset_id"] in updates:
                     order = self._workspace_order(db, item)
@@ -688,6 +892,7 @@ class ToolWorkspaceMixin:
             row, items = self._workspace_session(db, actor, identity)
             if row["kind"] != "external":
                 raise RiskError("维护报告由各工具的自检表生成。")
+            self._check_workspace_report_scope(db, actor, row, items)
             self._workspace_draft(row, revision)
             orders = [self._workspace_order(db, item) for item in items]
             editable = [order for order in orders if order and not order["submitted_at"] and not order["outcome"]]
@@ -702,14 +907,30 @@ class ToolWorkspaceMixin:
                 self._workspace_bump(db, identity)
             return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
+    @staticmethod
+    def _workspace_inspection_receipts(body, assets, actual, *, required=True):
+        from .tool_management import inspection_meta
+
+        raw = body.get('inspection')
+        overrides = raw.get('tools', {}) if isinstance(raw, dict) else {}
+        ids = {asset['id'] for asset in assets}
+        if not isinstance(overrides, dict) or set(overrides) - ids or any(
+                not isinstance(value, dict) or set(value) - {'result', 'expires_on'} for value in overrides.values()):
+            raise RiskError('逐台检测结论与本批工具不一致。')
+        return {asset_id: inspection_meta(
+            {'inspection': raw | override} if (override := overrides.get(asset_id)) else body,
+            assets, actual, required=required) for asset_id in ids}
+
     def workspace_submit(self, actor, identity, body, *, require_report_check=False):
         self._workspace_access(actor)
-        from .tool_management import clock, date_value, inspection_meta
+        from .tool_management import clock, date_value
         from .tool_workspace_workbook import validate_inputs
 
         revision = body.get("revision")
         with self.connect(True) as db:
             row, items = self._workspace_session(db, actor, identity)
+            if row['kind'] == 'external':
+                self._check_workspace_report_scope(db, actor, row, items)
             if type(revision) is int and revision == row["submitted_revision"]:
                 if row["kind"] == "external":
                     previous = [order for item in items if (order := self._workspace_order(db, item)) and order["submitted_at"]]
@@ -718,7 +939,8 @@ class ToolWorkspaceMixin:
                     if previous and body.get("inspection") is not None:
                         saved = json.loads(previous[0]["inspection_meta"])
                         participants = [{"id": key} for key in saved.get("confirmed_asset_ids", [])]
-                        if inspection_meta(body, participants, previous[0]["actual"]) != saved:
+                        receipts = self._workspace_inspection_receipts(body, participants, previous[0]['actual'])
+                        if any(receipts.get(order['asset_id']) != json.loads(order['inspection_meta']) for order in previous):
                             raise RiskError("送检报告已按原核对结果提交，请刷新查看。", 409)
                 return self._workspace_detail(db, row, items, actor)
             self._workspace_draft(row, revision)
@@ -739,8 +961,8 @@ class ToolWorkspaceMixin:
                 actual = date_value(body.get("actual"), required=True)
                 if actual > now.date().isoformat():
                     raise RiskError("实际检测日期不能晚于今天。")
-                receipt = dumps(inspection_meta(body, [json.loads(order['asset']) for _, order in editable],
-                                                actual, required=require_report_check))
+                receipts = self._workspace_inspection_receipts(body, [json.loads(order['asset']) for _, order in editable],
+                                                              actual, required=require_report_check)
             for item, order in editable:
                 self._workspace_check_scopes(db, [item], require_available=True)
                 asset = json.loads(order['asset'])
@@ -754,7 +976,7 @@ class ToolWorkspaceMixin:
                     db.execute("""UPDATE tool_work_orders SET actual=?,submitted_at=?,report_name=?,report=?,
                         inspection_meta=?,revision=revision+1 WHERE id=?""",
                         (actual, now.isoformat(), row["report_name"] or order["report_name"],
-                         row["report"] or order["report"], receipt, order["id"]))
+                         None if row['report'] else order['report'], dumps(receipts[asset['id']]), order["id"]))
                     self.audit(db, order["id"], actor, "提交送检工单")
                     self.enqueue(db, order["id"], "inspection")
                     db.execute("UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?", (order["month"],))
@@ -814,6 +1036,15 @@ class ToolWorkspaceMixin:
         shared = body.get("signature") or ""
         if approval and shared:
             validate_signature(shared)
+        if approval and body.get("use_saved_signature") is True:
+            if not self.workspace_signature or actor.get("_tool_impersonation") or actor["id"].startswith("account:"):
+                raise RiskError("当前账号没有可用的本人签名，请手绘签名。", 403)
+            try:
+                saved_signature = self.workspace_signature(actor["id"])
+                shared = "data:image/png;base64," + base64.b64encode(saved_signature).decode("ascii")
+            except Exception:
+                raise RiskError("读取本人已登记签名失败，请核对签名或手绘签名。", 409) from None
+            validate_signature(shared)
         now = clock()
         with self.connect(True) as db:
             row, items = self._workspace_session(db, actor, identity)
@@ -838,20 +1069,27 @@ class ToolWorkspaceMixin:
                 self.check_revision(order, entry.get("revision"))
                 if not review or review["status"] != "pending" or order["submitted_at"] or order["outcome"]:
                     raise RiskError("原工单已变化，请刷新后审核。", 409)
+                draft = json.loads(review["payload"])
+                if draft.get("reviewer_id", "") not in ("", actor["id"]):
+                    raise RiskError("请选择该记录指定的审核人账号登录确认。", 403)
                 self._workspace_check_scopes(db, [item])
                 if approval:
                     if self._workspace_legacy_overlaps(db, asset_id, row["kind"],
                                                        None if order["workspace_direct"] else order["month"]):
                         raise RiskError("旧工作台批次可能已归档，请先核对原台账回执。", 409)
-                    draft = json.loads(review["payload"])
                     signature = entry.get("signature") or shared
                     validate_signature(signature)
-                    draft.update(reviewer=actor["name"], reviewed_at=now.strftime("%Y-%m-%dT%H:%M"), signature=signature)
+                    selected_time = entry.get("reviewed_at") or body.get("reviewed_at") or ""
+                    reviewed_at = timestamp(selected_time) if selected_time else now.strftime("%Y-%m-%dT%H:%M")
+                    if not reviewed_at or dt.datetime.fromisoformat(reviewed_at).replace(tzinfo=TZ) > now:
+                        raise RiskError("请选择有效的审核日期和时间，不能晚于当前时间。")
+                    draft.update(reviewer=actor["name"], reviewed_at=reviewed_at, signature=signature)
                     content = db.execute("SELECT content FROM tool_workspace_templates WHERE cache_key=?",
                                          (item["template_key"],)).fetchone()[0]
                     asset = json.loads(item["asset"])
                     report = fill(content, draft["values"], draft["reviewer"], draft["reviewed_at"], signature,
-                                  draft["checks"], asset, expected_sha256=item["template_version"])
+                                  draft["checks"], asset, expected_sha256=item["template_version"],
+                                  completion=draft.get("completion", ""))
                     if len(report) > MAX_REPORT:
                         raise RiskError("单份归档报告超过 12 MB。", 413)
                     outcome = draft["outcome"]
@@ -876,11 +1114,11 @@ class ToolWorkspaceMixin:
             self._workspace_bump(db, identity)
             return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 
-    def workspace_can_review(self, db, actor, order):
+    def workspace_can_review(self, db, actor, order, *, leaders=None):
         from .tool_management import can_scope, full_access
 
         return not actor.get("_tool_impersonation") and can_scope(actor, order["scope"]) and (
-            self.is_building_leader(db, actor, order["scope"]) or full_access(actor)
+            self.is_building_leader(db, actor, order["scope"], leaders=leaders) or full_access(actor)
         )
 
     def _workspace_check_scopes(self, db, items, *, require_available=False):
@@ -893,30 +1131,116 @@ class ToolWorkspaceMixin:
             if require_available and not self.tool_available(db, asset):
                 raise RiskError('工具正在检修或报废，暂不能提交原工单。', 409)
 
+    def _workspace_release_order(self, db, actor, order, session_id, note):
+        if (order['submitted_at'] or order['outcome'] or db.execute(
+                'SELECT 1 FROM tool_work_sync WHERE order_id=?', (order['id'],)).fetchone()):
+            raise RiskError('已形成归档或处置记录，不能释放原办理。', 409)
+        db.execute("UPDATE tool_work_orders SET outcome='cancelled',resolution=?,revision=revision+1 WHERE id=?",
+                   (note, order['id']))
+        db.execute("UPDATE tool_work_reviews SET status='cancelled' WHERE order_id=? AND status='pending'", (order['id'],))
+        db.execute('UPDATE tool_workspace_items SET binding_pending=0 WHERE order_id=?', (order['id'],))
+        db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (order['month'],))
+        if not db.execute('''SELECT 1 FROM tool_workspace_items i JOIN tool_work_orders w ON w.id=i.order_id
+                             WHERE i.session_id=? AND w.outcome<>'cancelled' ''', (session_id,)).fetchone():
+            db.execute("UPDATE tool_workspace_sessions SET status='cancelled' WHERE id=?", (session_id,))
+        self.audit(db, order['id'], actor, '释放原工具办理', note)
+        self._workspace_bump(db, session_id)
+
+    def workspace_transfer(self, actor, body):
+        self._workspace_access(actor)
+        asset_id = text(body.get('asset_id'), 120, True)
+        expected_scope = text(body.get('scope'), 10, True)
+        with self._workspace_open_lock, self.connect(True) as db:
+            current = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (asset_id,)).fetchone()
+            asset = self._workspace_inventory_asset(current) if current else None
+            if not asset or asset['scope'] != expected_scope:
+                raise RiskError('工具所在楼栋已变化，请刷新后重试。', 409)
+            if not self.workspace_can_review(db, actor, {'scope': expected_scope}):
+                raise RiskError('仅接收楼栋楼长或获授权人员可办理移交。', 403)
+            orders = db.execute('''SELECT w.*,i.session_id FROM tool_work_orders w
+                JOIN tool_workspace_items i ON i.order_id=w.id WHERE w.asset_id=? AND w.scope<>?
+                    AND w.submitted_at IS NULL AND w.outcome='' ''', (asset_id, expected_scope)).fetchall()
+            if len(orders) != 1:
+                raise RiskError('未找到唯一的原办理记录，请刷新核对。', 409)
+            order = orders[0]
+            self.check_revision(order, body.get('revision'))
+            self._workspace_release_order(db, actor, order, order['session_id'],
+                                          f"工具由{order['scope']}移交至{expected_scope}，保留原楼栋草稿和审核记录。")
+        return {'transferred': True}
+
+    def workspace_manage_item(self, actor, identity, body):
+        self._workspace_access(actor)
+        asset_id = text(body.get('asset_id'), 120, True)
+        action = body.get('action')
+        with self._workspace_open_lock, self.connect(True) as db:
+            row, items = self._workspace_session(db, actor, identity, include_files=False)
+            item = next((entry for entry in items if entry['asset_id'] == asset_id), None)
+            order = self._workspace_order(db, item, status_only=False) if item else None
+            if not order or order['submitted_at'] or order['outcome']:
+                raise RiskError('工具办理已结束或无权操作。', 409)
+            self.check_revision(order, body.get('revision'))
+            review = db.execute('SELECT status,payload FROM tool_work_reviews WHERE order_id=?', (order['id'],)).fetchone()
+            pending = bool(review and review['status'] == 'pending')
+            manager = self.workspace_can_review(db, actor, order)
+            owner = self.owns_workspace_item(actor, order) or order['owner'] == actor['id'] and self.eligible(db, actor, order)
+            if action == 'reassign':
+                if not manager or not pending:
+                    raise RiskError('仅本楼楼长或获授权人员可改派待审核记录。', 403)
+                self._workspace_check_scopes(db, [item])
+                reviewer_id = text(body.get('reviewer_id') or '', 130)
+                reviewer = self.person_for(reviewer_id) if reviewer_id else None
+                if reviewer and (reviewer.get('inactive') or not self.workspace_can_review(db, reviewer, order)):
+                    raise RiskError('只能改派本楼楼长或获授权审核人。', 403)
+                fields = {'reviewer_id': reviewer_id, 'reviewer_name': reviewer['name'] if reviewer else ''}
+                draft, payload = json.loads(item['draft']) | fields, json.loads(review['payload']) | fields
+                db.execute('UPDATE tool_workspace_items SET draft=? WHERE session_id=? AND asset_id=?',
+                           (dumps(draft), identity, asset_id))
+                db.execute('UPDATE tool_work_reviews SET payload=? WHERE order_id=?', (dumps(payload), order['id']))
+                self.audit(db, order['id'], actor, '改派审核人', fields['reviewer_name'] or '由本楼楼长确认')
+            elif action == 'withdraw':
+                if not pending or not (manager or owner):
+                    raise RiskError('当前记录无法撤回审核。', 409)
+                self._workspace_check_scopes(db, [item])
+                db.execute("UPDATE tool_work_reviews SET status='withdrawn' WHERE order_id=?", (order['id'],))
+                self.audit(db, order['id'], actor, '撤回审核并保留草稿')
+            elif action == 'release':
+                if not (manager or owner and not pending):
+                    raise RiskError('仅获授权人员可释放原办理。', 403)
+                self._workspace_release_order(db, actor, order, identity, text(body.get('note'), 500, True))
+                return self._workspace_detail(db, *self._workspace_session(db, actor, identity, include_files=False), actor)
+            else:
+                raise RiskError('请选择有效的办理操作。')
+            db.execute('UPDATE tool_work_orders SET revision=revision+1 WHERE id=?', (order['id'],))
+            self._workspace_bump(db, identity)
+            return self._workspace_detail(db, *self._workspace_session(db, actor, identity, include_files=False), actor)
+
     def workspace_download(self, actor, identity):
         self._workspace_access(actor)
         with self.connect() as db:
-            row, items = self._workspace_session(db, actor, identity)
+            db.execute('BEGIN')
+            row, items = self._workspace_session(db, actor, identity, include_files=False)
+            if row['kind'] == 'external':
+                self._check_workspace_report_scope(db, actor, row, items)
             if any(item["order_id"] for item in items):
-                orders = [order for item in items if (order := self._workspace_order(db, item))
-                          and order["outcome"] != "cancelled"]
+                orders = [order for order in self._workspace_orders(db, items).values() if order['outcome'] != 'cancelled']
                 if not orders or any(not order["submitted_at"] for order in orders):
                     raise RiskError("请先完成工单提交。", 409)
                 output = io.BytesIO()
-                self.package_work(db, row["created_at"][:7], orders, output)
+                self.package_work(db, row['created_at'][:7], (db.execute('SELECT * FROM tool_work_orders WHERE id=?',
+                                                                        (order['id'],)).fetchone() for order in orders), output)
                 return output.getvalue()
-            if not row["package"]:
+            package = db.execute('SELECT package FROM tool_workspace_sessions WHERE id=?', (identity,)).fetchone()[0]
+            if not package:
                 raise RiskError("请先提交本批工具报告。", 409)
-            return row["package"]
+            return package
 
     def workspace_report_attachment(self, actor, identity):
         self._workspace_access(actor)
         with self.connect() as db:
             row, items = self._workspace_session(db, actor, identity, status_only=True)
-            if len(items) != len(self._workspace_rows(db, identity, status_only=True)):
-                raise RiskError('该批报告包含其他楼栋工具，请从有权限的原工单查看。', 403)
             if row['kind'] != 'external':
                 raise RiskError('没有可查看的送检报告。', 404)
+            self._check_workspace_report_scope(db, actor, row, items)
             stored = db.execute('SELECT report_name,report FROM tool_workspace_sessions WHERE id=?', (identity,)).fetchone()
             if stored['report']:
                 return stored['report_name'], stored['report']
@@ -925,6 +1249,39 @@ class ToolWorkspaceMixin:
                 if order and order['report']:
                     return order['report_name'], order['report']
             raise RiskError('没有可查看的送检报告。', 404)
+
+    def _check_workspace_report_scope(self, db, actor, session, visible=None):
+        items = self._workspace_rows(db, session['id'], status_only=True)
+        visible = self._workspace_visible_items(db, actor, session, items) if visible is None else visible
+        if len(items) != len(visible):
+            raise RiskError('共用送检报告包含当前账号无权查看的工具，请由有权限的人员办理。', 403)
+
+    def _check_order_report_scope(self, db, actor, order):
+        if order['kind'] != 'external':
+            return
+        linked = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (order['id'],)).fetchone()
+        if linked:
+            session = db.execute('SELECT id,owner FROM tool_workspace_sessions WHERE id=?', (linked['session_id'],)).fetchone()
+            if session:
+                self._check_workspace_report_scope(db, actor, session)
+
+    @staticmethod
+    def _workspace_order_report(db, order, report_cache=None):
+        name, content = order['report_name'], order['report']
+        if order['kind'] != 'external' or content:
+            return '', name, content
+        linked = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (order['id'],)).fetchone()
+        if not linked:
+            return '', name, content
+        key = linked['session_id']
+        if report_cache is None or key not in report_cache:
+            row = db.execute('SELECT report_name,report FROM tool_workspace_sessions WHERE id=?', (key,)).fetchone()
+            attachment = (row['report_name'], row['report']) if row else (name, content)
+            if report_cache is not None:
+                report_cache[key] = attachment
+        else:
+            attachment = report_cache[key]
+        return key, *attachment
 
     def workspace_sync_one(self):
         """Archive one tool at a time; the session lease serializes shared file upload."""

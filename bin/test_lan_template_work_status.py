@@ -1919,6 +1919,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 screenshot_record["fields"]["阿里确认截图"] = [
                     {"file_token": "ali-token", "url": "https://example.test/one"}
                 ]
+                screenshot_record["fields"]["变更开始时间"] = "2026-11-05 12:30"
                 refreshed_screenshot_record = copy.deepcopy(screenshot_record)
                 refreshed_screenshot_record["fields"]["阿里确认截图"][0][
                     "url"
@@ -1932,11 +1933,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                         (True, refreshed_screenshot_record),
                         (True, refreshed_screenshot_record),
                     ],
-                ), patch.object(
-                    portal_server_module,
-                    "_send_text_to_open_ids_guarded",
-                    side_effect=lambda _text, recipients: (
-                        h_messages.append(list(recipients)) or (True, "ok", [])
+                ), patch(
+                    "lan_bitable_template_portal.change_screenshot_cards.send",
+                    side_effect=lambda _runtime, task, recipient, _link: (
+                        h_messages.append((recipient, task["started_at"])) or (True, "ok", [])
                     ),
                 ):
                     notified = PortalRuntime._process_change_confirmation_task(
@@ -1954,8 +1954,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 self.assertEqual(
                     h_messages,
                     [
-                        [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
-                        [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
+                        (portal_server_module.BUILDING_OPEN_ID_MAP["H"], "2026-11-05 12:30"),
+                        (portal_server_module.BUILDING_OPEN_ID_MAP["H"], "2026-11-05 12:30"),
                     ],
                 )
                 self.assertEqual(notified["state"], "awaiting_confirmation")
@@ -1965,9 +1965,8 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     portal_server_module,
                     "query_record_by_id",
                     return_value=(True, confirmed_record),
-                ), patch.object(
-                    portal_server_module,
-                    "_send_text_to_open_ids_guarded",
+                ), patch(
+                    "lan_bitable_template_portal.change_screenshot_cards.send",
                 ) as send_after_confirm:
                     confirmed = PortalRuntime._process_change_confirmation_task(
                         repeated,
@@ -2022,26 +2021,25 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     portal_server_module,
                     "query_record_by_id",
                     return_value=(True, stale_record),
-                ), patch.object(
-                    portal_server_module,
-                    "_send_text_to_open_ids_guarded",
-                    side_effect=lambda text, recipients: (
-                        sent.append((text, list(recipients))) or (True, "ok", [])
+                ), patch.object(portal_server_module, "_send_text_to_open_ids_guarded") as remind, patch(
+                    "lan_bitable_template_portal.change_screenshot_cards.send",
+                    side_effect=lambda _runtime, task, recipient, _link: (
+                        sent.append((task["screenshot_tokens"], recipient)) or (True, "ok", [])
                     ),
-                ):
+                ) as deliver:
                     refreshed = PortalRuntime._process_change_confirmation_task(
                         task,
                         now=1600,
                     )
+                    remind.assert_not_called()
+                    deliver.assert_not_called()
+                    with patch.object(portal_server_module, "query_record_by_id",
+                                      return_value=(True, screenshot_record)):
+                        PortalRuntime._process_change_confirmation_task(refreshed, now=1660)
                 self.assertEqual(refreshed["state"], "awaiting_confirmation")
                 self.assertEqual(refreshed["screenshot_count"], 1)
                 self.assertEqual(refreshed["empty_remote_screenshot_reads"], 1)
-                self.assertEqual(
-                    sent[0][1],
-                    [portal_server_module.BUILDING_OPEN_ID_MAP["H"]],
-                )
-                self.assertIn("无需重复上传", sent[0][0])
-                self.assertNotIn("待上传", sent[0][0])
+                self.assertEqual(sent, [(["ali-token"], portal_server_module.BUILDING_OPEN_ID_MAP["H"])])
             finally:
                 PortalRuntime.state_store = previous_store
                 PortalRuntime.service = previous_service

@@ -38,6 +38,23 @@ def scope_fixture(scope):
 
 
 class HandoverInspectionTests(unittest.TestCase):
+    def test_compressor_current_above_twenty_only_uses_same_round_matching_unit(self):
+        book, _, batch = scope_fixture('D')
+        from lan_bitable_template_portal.daily_inspection_operating import compressor_running_marks
+
+        def point(cell, value, sampled=150):
+            return {'template':book, 'sheet':inspection.CHILLER_SHEET, 'cell':cell,
+                    'round_cells':dict.fromkeys(('白1','白2','夜1','夜2'), cell),
+                    'raw_value':value, 'sampled':sampled}
+        batch['devices'].extend([
+            {'scope':'D', 'profession':'暖通', 'points':[point('B4','20.01%'), point('C4','20'), point('D4','34',99)]},
+            {'scope':'E', 'profession':'暖通', 'points':[point('E4','80')]},
+        ])
+        stopped = {'B4':'△', 'B6':'/', 'K4':'△', 'K7':'/', 'K8':'/', 'K9':'/', 'B21':'√', 'K26':'△'}
+        marks = compressor_running_marks('D', batch, book, 100, 200, 180, stopped)
+        self.assertEqual((marks['K4'], marks['K7'], marks['B21'], marks['K26']), ('√', '', '√', '△'))
+        self.assertTrue({'B4', 'B6', 'L4', 'M4', 'N4'}.isdisjoint(marks))
+
     def test_stopped_plate_modes_are_slashes_with_old_or_current_batch(self):
         for scope, old_value in (('D', '△'), ('E', '/')):
             book, names, batch = scope_fixture(scope)

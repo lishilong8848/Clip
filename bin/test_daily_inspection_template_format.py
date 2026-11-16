@@ -56,8 +56,12 @@ class TemplateFormatTests(unittest.TestCase):
                 self.assertEqual(ws['B4'].value,source['rows'][3][1])
                 self.assertEqual(ws['C4'].value,'=1+2')
                 self.assertEqual(ws['C4'].data_type,'s')
-                expected=native_style(json.dumps(source['excel_styles'][source['style_ids'][3][1]],sort_keys=True))
-                self.assertEqual(ws['B4'].font,expected['font'])
+                for cell in (ws['B4'], ws['C4']):
+                    self.assertEqual(cell.font.sz,9)
+                    self.assertEqual(cell.alignment.horizontal,'center')
+                    self.assertEqual(cell.alignment.vertical,'center')
+                    self.assertTrue(cell.alignment.shrink_to_fit)
+                    self.assertFalse(cell.alignment.wrap_text)
         finally:book.close()
 
 

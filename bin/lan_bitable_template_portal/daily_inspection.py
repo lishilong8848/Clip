@@ -28,7 +28,7 @@ from upload_event_module.services.http_client import FeishuHTTPError
 from .daily_inspection_form_fields import CHILLER_SHEET, form_header, remark_positions
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
-from .daily_inspection_operating import (OPERATING_SOURCE, apply_operating_marks, collect_operating_marks,
+from .daily_inspection_operating import (OPERATING_SOURCE, apply_operating_marks, collect_operating_marks, compressor_running_marks,
                                          remember_pump_pressures, unbound_operating_cells)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
                                         original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
@@ -1002,7 +1002,7 @@ def configured_form_devices(scope, devices, configs):
     return form_devices
 
 
-def apply_handover_readings(scope, batch, rows, start, slot, end, sealed, *, saved_pressures=None):
+def apply_handover_readings(scope, batch, rows, start, slot, end, sealed, *, saved_pressures=None, include_modes=True):
     """Fill existing original-form points with verified, time-bounded supplementary data."""
     candidates = {}
     duplicate = set()
@@ -1021,7 +1021,7 @@ def apply_handover_readings(scope, batch, rows, start, slot, end, sealed, *, sav
             continue
         value = plain(fields.get('测点值')).strip()
         if source == HANDOVER_MODE:
-            if not re.fullmatch(r'[K-P][789]', cell) or value not in ('√', '△', '/'):
+            if not include_modes or not re.fullmatch(r'[K-P][789]', cell) or value not in ('√', '△', '/'):
                 continue
         else:
             if not re.fullmatch(r'(?:[B-G](?:17|19|24|25)|[K-P](?:24|25))', cell):
@@ -1728,6 +1728,7 @@ def visible_sheet_overrides(active, layouts):
 class DailyInspection:
     PROBE_INTERVAL = 5
     CACHE_HARD_TTL = 900
+    ARCHIVE_PROBE_INTERVAL = 15
 
     def __init__(self, store, cloud, source_clouds=None, *, scheduled=False):
         self.store, self.cloud = store, cloud
@@ -1740,19 +1741,41 @@ class DailyInspection:
         self.source_cache = {}
         self.schema_lock = threading.Lock()
         self.report_locks = {scope: threading.Lock() for scope in SOURCES}
-        self.active_reports = {}
+        self.active_reports = {scope: {} for scope in SOURCES}
+        self.day_archive_locks = {scope: threading.Lock() for scope in SOURCES}
+        self.day_exports = {}
+        self.export_locks = {scope: threading.Lock() for scope in SOURCES}
 
     def active_report_content(self, active, scope):
         key = (active['id'], active.get('review_version', 0), bool(active.get('completed')), template_version())
         with self.report_locks[scope]:
-            cached = self.active_reports.get(scope)
-            if cached and cached[0] == key:
-                return cached[1]
+            cache = self.active_reports[scope]
+            cached = cache.pop(key, None)
+            if cached is not None:
+                cache[key] = cached
+                return cached
             content = workbook(active, {scope: []}, strict_original=False, presentation=False)
             data = archived_report_content.__wrapped__(content, scope, active['id'], active['duty']['shift'],
-                active['round'], False, active.get('cell_exemptions'))
-            self.active_reports[scope] = (key, data)
+                active['round'], bool(active.get('completed')), active.get('cell_exemptions'))
+            cache[key] = data
+            if len(cache) > 6:
+                del cache[next(iter(cache))]
             return data
+
+    def export_report(self, report):
+        if any(item['local_draft'] for item in report['rounds']):
+            return inspection_report_workbook(report)
+        scope = report['scope']
+        key = (report['date'], report['template_version'], tuple(
+            (item['round_id'], item['version'], item['status']) for item in report['rounds']))
+        with self.export_locks[scope]:
+            cached = self.day_exports.get(scope)
+            if cached and cached[0] == key and not report['archive_incomplete']:
+                return cached[1]
+            content = inspection_report_workbook(report)
+            if not report['archive_incomplete']:
+                self.day_exports[scope] = (key, content)
+            return content
 
     def path(self, table):
         return self.cloud.table_path(BASE, table)
@@ -1884,11 +1907,11 @@ class DailyInspection:
                     value = None
             return value
 
-    def refresh_source(self, scope):
+    def refresh_source(self, scope, *, force_probe=False):
         with self.source_locks[scope]:
             cached = self.cached_source(scope)
             now = time.time()
-            if (cached and now - cached.get('probed_at', 0) < self.PROBE_INTERVAL
+            if (not force_probe and cached and now - cached.get('probed_at', 0) < self.PROBE_INTERVAL
                     and now - cached.get('refreshed_at', 0) < self.CACHE_HARD_TTL):
                 return cached
             if cached:
@@ -1915,14 +1938,14 @@ class DailyInspection:
                     logging.exception('%s楼巡检数据本地缓存未持久化', scope)
             return value
 
-    def capture(self, scopes, allow_stale=False):
+    def capture(self, scopes, allow_stale=False, *, force_probe=False):
         result = {}
         for scope in scopes:
             if scope not in SOURCES:
                 raise RiskError('巡检楼栋无效。', 400)
             cached = self.cached_source(scope)
             try:
-                value = self.refresh_source(scope)
+                value = self.refresh_source(scope, force_probe=force_probe)
                 stale = False
             except RiskError:
                 if not (allow_stale and cached):
@@ -1933,23 +1956,32 @@ class DailyInspection:
             result[scope]['cache_stale'] = stale and bool(allow_stale)
         return result
 
-    def sync_active_live(self, scope):
-        """Re-derive an open round's automatic data from the latest source batch.
+    @staticmethod
+    def source_locked(active):
+        if 'source_locked' in active:
+            return active['source_locked']
+        actor = active.get('started_by') or active.get('actor')
+        return bool((actor and actor != SYSTEM_INSPECTION_ACTOR) or active.get('manual_sheet_cells')
+                    or active.get('profession_confirmations')
+                    or any(item.get('actor') and item.get('revision', 0) > 0
+                           for item in active.get('reviews', {}).values()))
 
-        Point-configuration or batch changes on the producer side update the
-        round's positions and values in real time. Human review values are
-        carried over by stable parameter identity, and the review version is
-        bumped so concurrent editors refresh instead of overwriting each other.
-        Finished or pending-freeze rounds keep their frozen snapshot.
-        """
+    def sync_active_live(self, scope, *, cached_only=False):
+        """Refresh the system's provisional round before an operator starts it."""
         with self.locks[scope]:
             state = self.load(scope)
             active = state.get('active')
-            if not active or 'completed' in active:
+            if not active or 'completed' in active or self.source_locked(active):
                 return state
             stored = active.get('live_fp') or {}
             try:
-                live = self.capture([scope])[scope]
+                if cached_only:
+                    cached = self.cached_source(scope)
+                    if not cached:
+                        return state
+                    live = copy.deepcopy(cached['batch'])
+                else:
+                    live = self.capture([scope])[scope]
             except RiskError:
                 return state
             fp = {'batch': live.get('batch'), 'config_fp': live.get('config_fp')}
@@ -2059,7 +2091,7 @@ class DailyInspection:
             policy = {'revision': policy['revision'] + 1, 'sheets': sheets}
             state['exemptions'] = policy
             active = state.get('active')
-            if active and 'completed' not in active:
+            if active and 'completed' not in active and not self.source_locked(active):
                 active['cell_exemptions'] = sheets
                 active['review_version'] = active.get('review_version', 0) + 1
                 invalidate_professions(active, '免填范围已调整，请重新核对。', scope)
@@ -2145,6 +2177,8 @@ class DailyInspection:
             professions = list(dict.fromkeys(device_profession(device) for device in selected_devices(active, scope)))
             result['active'] = {'id': active['id'], 'duty': active['duty'], 'round': active['round'],
                                 'started': active['started'], 'pending': 'completed' in active,
+                                'source_locked': self.source_locked(active),
+                                'cell_exemptions': active.get('cell_exemptions', {}),
                                 'draft_key': hashlib.sha256(f'{owner}:{active["id"]}'.encode()).hexdigest(),
                                 'reviews': active.get('reviews', {}), 'review_version': active.get('review_version', 0),
                                 'manual_sheet_cells': active.get('manual_sheet_cells'),
@@ -2251,30 +2285,37 @@ class DailyInspection:
         sealed = source.get('batch') or 0
         if not int(start.timestamp() * 1000) <= sealed <= int(dt.datetime.now(CN).timestamp() * 1000):
             return False
-        fixed_remote_control = False
+        start_ms, slot_ms, end_ms = int(start.timestamp() * 1000), int(when.timestamp() * 1000), int(end * 1000)
+        marks, template = {}, ''
+        operating_start = start_ms
         if sealed == destination.get('batch'):
             template = next((item['name'] for item in original_templates()
                              if item['scope'] == scope and item['profession'] == '暖通'), '')
-            marks = collect_operating_marks(scope, source, template, int(start.timestamp() * 1000),
-                                            int(end * 1000), sealed, plain)
-            if marks:
-                destination.pop('handover_tower_samples', None)
-                if destination.get('operating_marks') == marks and destination.get('operating_template') == template:
-                    return False
-                apply_operating_marks(scope, destination, marks, template=template, saved_pressures=saved_pressures)
-                return True
-            if template and not destination.get('operating_marks'):
-                apply_operating_marks(scope, destination, {f'{column}5': '√' for column in 'KLMNOP'}, template=template)
-                fixed_remote_control = True
-        changed = apply_handover_readings(scope, destination, source.get('rows', []),
-                                          int(start.timestamp() * 1000), int(when.timestamp() * 1000),
-                                          int(end * 1000), sealed, saved_pressures=saved_pressures)
-        return fixed_remote_control or changed
+            # The producer uses the first 15-minute reading in its report. The
+            # 12:00 report can legitimately contain an 11:45 sample. Only use
+            # that allowance in a sealed batch whose source files belong here.
+            if self.matches_scheduled_batch(source, duty, number, dt.datetime.now(CN)):
+                operating_start = start_ms - 15 * 60 * 1000
+            marks = collect_operating_marks(scope, source, template, operating_start, end_ms, sealed, plain)
+        changed = apply_handover_readings(scope, destination, source['rows'], start_ms, slot_ms, end_ms, sealed,
+                                          saved_pressures=saved_pressures, include_modes=not marks)
+        if not template:
+            return changed
+        if marks:
+            destination.pop('handover_tower_samples', None)
+        else:
+            marks = {**{f'{column}5': '√' for column in 'KLMNOP'}, **destination.get('operating_marks', {})}
+        marks = compressor_running_marks(scope, source, template, operating_start, end_ms, sealed, marks)
+        if changed or destination.get('operating_marks') != marks or destination.get('operating_template') != template:
+            apply_operating_marks(scope, destination, marks, template=template, saved_pressures=saved_pressures)
+            return True
+        return False
 
     def new_round(self, state, duty, number, batches, actor, started, professions=None):
         scope, day, shift = duty['scope'], duty['date'], duty['shift']
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                   'started': int(started.timestamp() * 1000), 'duty': duty, 'round': number,
+                  'source_locked': actor != SYSTEM_INSPECTION_ACTOR,
                   'batches': batches, 'manual_sheet_cells': [],
                   'cell_exemptions': state.get('exemptions', {}).get('sheets', {})}
         if state.get('form_remarks'):
@@ -2330,6 +2371,8 @@ class DailyInspection:
                     state = self.load(scope)
                     saved = state['active']
                     if saved and saved['id'] == active['id'] and 'completed' not in saved and not saved['duty'].get('shift_names'):
+                        if self.source_locked(saved):
+                            return
                         saved['duty']['shift_names'] = names
                         saved['review_version'] = saved.get('review_version', 0) + 1
                         self.store.put_document(NS, 'building:' + scope, state)
@@ -2354,13 +2397,14 @@ class DailyInspection:
         now = now or dt.datetime.now(CN)
         with self.locks[scope]:
             state = self.load(scope)
-            state = self.sync_active_live(scope)
             active = state.get('active')
             if not active:
                 return
             cutoff = self.round_cutoff(active['duty'], active['round'])
             if now < cutoff:
                 return
+            active = self.sync_active_live(scope, cached_only=True)['active']
+            state = self.load(scope)
             frozen = copy.deepcopy(active)
             if 'completed' not in frozen:
                 frozen.update(auto_closed=True, actor=SYSTEM_ROLLOVER_ACTOR, completed=int(cutoff.timestamp()*1000), archive_order=[])
@@ -2411,7 +2455,6 @@ class DailyInspection:
         state_key = 'building:' + scope
         with self.locks[scope]:
             state = self.load(scope)
-            state = self.sync_active_live(scope)
             if action == 'start':
                 submitted_duty = data.get('duty')
                 if not isinstance(submitted_duty, dict) or any(submitted_duty.get(key) != value
@@ -2419,7 +2462,17 @@ class DailyInspection:
                     raise RiskError('当班安排已变化，请刷新后开始巡检。', 409)
                 if state['active']:
                     active = state['active']
-                    if active.get('started_by') == SYSTEM_INSPECTION_ACTOR and duty_key(active['duty']) == duty_key(duty):
+                    if ('completed' not in active and duty_key(active['duty']) == duty_key(duty)
+                            and (active.get('started_by') == SYSTEM_INSPECTION_ACTOR
+                                 or active.get('source_lock_owner') == owner)):
+                        if not self.source_locked(active):
+                            state = self.sync_active_live(scope, cached_only=True)
+                            active = state['active']
+                            active.update(source_locked=True, started_by=actor, source_lock_owner=owner)
+                            if duty.get('shift_names') and not active['duty'].get('shift_names'):
+                                active['duty']['shift_names'] = duty['shift_names']
+                            active['review_version'] = active.get('review_version', 0) + 1
+                            self.store.put_document(NS, state_key, state)
                         return self.view(state, owner, duty)
                     raise RiskError('本楼已有一次巡检，请刷新后继续。', 409)
                 now = dt.datetime.now(CN)
@@ -2430,7 +2483,11 @@ class DailyInspection:
                     from .daily_inspection_reminders import slot_time
                     if now < slot_time(duty['date'], duty['shift'], number):
                         raise RiskError('尚未到本轮取数时点，可先预览。', 409)
-                batches = self.capture([scope])
+                cached = self.cached_source(scope)
+                if self.scheduled and cached and self.matches_scheduled_batch(cached['batch'], duty, number, now):
+                    batches = {scope: copy.deepcopy(cached['batch'])}
+                else:
+                    batches = self.capture([scope], force_probe=not self.scheduled)
                 if self.scheduled:
                     current = dt.datetime.now(CN)
                     if current >= self.round_cutoff(duty, number) or not self.matches_scheduled_batch(batches[scope], duty, number, current):
@@ -2458,6 +2515,8 @@ class DailyInspection:
                 if action == 'finish' and any(row['id'] == data.get('id') for row in state['history']):
                     return self.view(state, owner, duty)
                 active = self.current(state, data.get('id'))
+                if action in {'draft', 'finish', 'confirm-profession'} and not self.source_locked(active):
+                    raise RiskError('请先开始巡检，锁定本轮数据。', 409)
                 devices = review_devices(active, scope)
                 if action == 'order':
                     ids = data.get('order')
@@ -2660,6 +2719,7 @@ class DailyInspection:
         token = uploaded.get('file_token')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', token):
             raise RiskError('飞书未确认巡检附件上传，请重试。', 503)
+        self.cache_archive_content(token, content)
         return token
 
     @staticmethod
@@ -2678,16 +2738,19 @@ class DailyInspection:
                 'abnormal': archive_integer(fields.get('异常设备数')),
                 'url': f'https://vnet.feishu.cn/base/{BASE}?table={ARCHIVE}&view={ARCHIVE_VIEW}&record={rid}'}
 
+    def archive_rows(self, scope, day):
+        conditions = [{'field_name': '巡检范围', 'operator': 'is', 'value': [scope + '楼']}]
+        if day:
+            conditions.append({'field_name': '排班日期', 'operator': 'is', 'value': [day]})
+        return self.records(ARCHIVE, {'filter': {'conjunction': 'and', 'conditions': conditions}})
+
     def archive_history(self, scope, day):
         if day:
             try:
                 day = dt.date.fromisoformat(day).isoformat()
             except (ValueError, TypeError):
                 raise RiskError('请选择有效巡检日期。', 400) from None
-        conditions = [{'field_name': '巡检范围', 'operator': 'is', 'value': [scope + '楼']}]
-        if day:
-            conditions.append({'field_name': '排班日期', 'operator': 'is', 'value': [day]})
-        rows = self.records(ARCHIVE, {'filter': {'conjunction': 'and', 'conditions': conditions}})
+        rows = self.archive_rows(scope, day)
         summaries = [self.archive_summary(row, scope) for row in rows]
         return sorted((row for row in summaries if row and (not day or row['date'] == day)),
                       key=lambda row: row['completed'] or 0, reverse=True)
@@ -2700,22 +2763,72 @@ class DailyInspection:
         summary = self.archive_summary(row, scope) if row.get('record_id') == rid and row.get('fields') else None
         if not summary:
             raise RiskError('找不到本楼的巡检归档。', 404)
-        attachments = row['fields'].get('巡检快照')
+        return path, summary, self.archive_attachment(row['fields']), row['fields']
+
+    @staticmethod
+    def archive_attachment(fields):
+        attachments = fields.get('巡检快照')
         if not isinstance(attachments, list) or len(attachments) != 1 or not isinstance(attachments[0], dict):
             raise RiskError('归档缺少唯一的巡检附件，请在飞书核对。', 409)
         attachment = attachments[0]
         token = attachment.get('file_token')
         if not isinstance(token, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,180}', token):
             raise RiskError('归档附件标识无效。', 409)
-        return path, summary, attachment, row['fields']
+        return attachment
 
-    def download_archive(self, attachment):
+    def day_archive_snapshot(self, scope, day, *, refresh):
+        key = f'day-archive:{scope}:{day}'
+        cached = self.store.get_document(NS, key) or {}
+        if not refresh:
+            return cached
+        with self.day_archive_locks[scope]:
+            cached = self.store.get_document(NS, key) or {}
+            if time.time() - cached.get('checked_at', 0) < self.ARCHIVE_PROBE_INTERVAL:
+                return cached
+            entries, slots, rounds = {}, set(), set()
+            for row in self.archive_rows(scope, day):
+                summary = self.archive_summary(row, scope)
+                if not summary or summary['date'] != day:
+                    continue
+                slot = (summary['shift'], summary['round'])
+                if (slot in slots or summary['round_id'] in rounds
+                        or not re.fullmatch(r'rec[A-Za-z0-9]{1,80}', summary['id'])
+                        or slot[0] not in ('白班', '夜班') or slot[1] not in (1, 2)):
+                    raise RiskError('当日巡检归档的轮次不唯一或无效，请核对原记录。', 409)
+                slots.add(slot)
+                rounds.add(summary['round_id'])
+                entries[summary['id']] = [summary, self.archive_attachment(row['fields'])]
+            snapshot = {'checked_at': time.time(), 'complete': True, 'entries': entries}
+            self.store.put_document(NS, key, snapshot)
+            return snapshot
+
+    def remember_day_archive(self, summary, attachment):
+        scope, day = summary['scope'], summary['date']
+        key = f'day-archive:{scope}:{day}'
+        try:
+            with self.day_archive_locks[scope]:
+                snapshot = self.store.get_document(NS, key) or {}
+                snapshot.setdefault('entries', {})[summary['id']] = [summary, attachment]
+                snapshot['checked_at'] = 0
+                self.store.put_document(NS, key, snapshot)
+        except Exception:
+            logging.exception('%s楼巡检归档索引暂未写入缓存', scope)
+
+    def cache_archive_content(self, token, content):
+        try:
+            self.store.put_document(NS, 'archive-file:' + token, {'content': base64.b64encode(content).decode('ascii')})
+        except Exception:
+            logging.exception('巡检归档附件暂未写入本地缓存')
+
+    def download_archive(self, attachment, *, local_only=False):
         cached = self.store.get_document(NS, 'archive-file:' + attachment['file_token']) or {}
         if cached.get('content'):
             try:
                 return base64.b64decode(cached['content'], validate=True)
             except (ValueError, TypeError):
                 pass  # Re-fetch a damaged cache from the verified attachment.
+        if local_only:
+            return None
         extra = parse_qs(urlsplit(attachment.get('url') or '').query).get('extra', [''])[0]
         with self.cloud.lock:
             headers = self.cloud.headers()
@@ -2725,7 +2838,7 @@ class DailyInspection:
                 headers=headers, params={'extra': extra} if extra else None, max_bytes=MAX_ARCHIVE)
         except FeishuHTTPError:
             raise RiskError('未能下载飞书巡检附件，请核对附件权限或稍后重试。', 503) from None
-        self.store.put_document(NS, 'archive-file:' + attachment['file_token'], {'content': base64.b64encode(content).decode('ascii')})
+        self.cache_archive_content(attachment['file_token'], content)
         return content
 
     @staticmethod
@@ -2766,6 +2879,7 @@ class DailyInspection:
         self.cloud.request('PUT', path, json={'fields': expected})
         _, summary, attachment, fields = self.archive_record(scope, rid)
         self.verify_archive_fields(fields, expected)
+        self.remember_day_archive(summary, attachment)
         return summary, attachment
 
     def edit_archive(self, scope, rid, payload, actor):
@@ -2899,6 +3013,9 @@ class DailyInspection:
             raise RiskError(error_message, 503)
         self.verify_archive_fields(record.get('fields') or {},
                                    {**expected, '巡检快照': [{'file_token': active['file_token']}]}, error_message)
+        summary = self.archive_summary(record, scopes[0])
+        if summary:
+            self.remember_day_archive(summary, self.archive_attachment(record['fields']))
         state['history'] = ([{'id': active['id'], 'duty': active['duty'], 'round': active['round'],
                               'actor': active['actor'], 'completed': active['completed'],
                               'url': f'https://vnet.feishu.cn/base/{BASE}?table={ARCHIVE}&view={ARCHIVE_VIEW}&record={rid}'}] + state['history'])[:40]
@@ -3068,17 +3185,26 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                 if view['sheet'].strip() == CHILLER_SHEET:
                     occupied = {entry['cell'] for entry in entries
                                 if (entry['template'], entry['sheet']) == (view['template'], view['sheet'])}
-                    overlay_views([view], unbound_operating_cells(
-                        marks, view['template'], layouts[view['template'], view['sheet']], occupied))
+                    operating_cells = unbound_operating_cells(
+                        marks, view['template'], layouts[view['template'], view['sheet']], occupied)
+                    overlay_views([view], operating_cells)
+                    view['filled'].update(item['cell'] for item in operating_cells)
                     inspector, stamp = chiller_inspection_details(active, view['template'], view['sheet'])
                     if stamp:
                         inspected = dt.datetime.fromtimestamp(stamp / 1000, CN)
                 header = form_header(layouts[view['template'], view['sheet']], duty,
                                      inspector=inspector, started=inspected)
+                view['filled'].update(header)
                 for address, value in header.items():
                     col, row = coordinate_from_string(address)
                     view['rows'][row - 1][column_index_from_string(col) - 1] = value
-            overlay_views(views, visible_sheet_overrides(active, layouts))
+            overrides = visible_sheet_overrides(active, layouts)
+            overlay_views(views, overrides)
+            filled_by_sheet = {(view['template'], view['sheet']): view['filled'] for view in views}
+            for edit in overrides:
+                filled = filled_by_sheet.get((edit['template'], edit['sheet']))
+                if filled is not None:
+                    filled.add(edit['cell'])
             names = {}
             for source in views:
                 base = re.sub(r'[\\/*?:\[\]]', '_', source['name'])[:27]
@@ -3152,7 +3278,7 @@ def archived_report_content(content, scope, identity, shift, number, frozen, exe
 
 
 def inspection_report(service, scope, day, owner, actor, *, include_active=False, drafts=None, active_id=None,
-                      summary_only=False, view_sheet=None, lookup=None, lookup_round=None):
+                      summary_only=False, view_sheet=None, lookup=None, lookup_round=None, archive_mode=None):
     """Read one duty date's archived sheets and, when authorized, the current snapshot."""
     try:
         day = dt.date.fromisoformat(day).isoformat()
@@ -3188,13 +3314,25 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
         active.update(reviews=reviews, review_version=version)
 
     archive_warning = ''
+    snapshot = {}
     try:
-        archives = service.archive_history(scope, day)
+        if archive_mode:
+            snapshot = service.day_archive_snapshot(scope, day, refresh=archive_mode == 'refresh')
+            archives = [entry[0] for entry in snapshot.get('entries', {}).values()]
+        else:
+            archives = service.archive_history(scope, day)
     except (RiskError, FeishuHTTPError):
-        if not pending_rounds and not active:
+        if archive_mode:
+            snapshot = service.day_archive_snapshot(scope, day, refresh=False)
+            archives = [entry[0] for entry in snapshot.get('entries', {}).values()]
+        elif not pending_rounds and not active:
             raise
-        archives = []
+        else:
+            archives = []
         archive_warning = '云端历史暂未读取，当前展示本地已保存的巡检；恢复连接后可刷新。'
+    archive_incomplete = bool(archive_mode and not snapshot.get('complete'))
+    if archive_incomplete and not archive_warning:
+        archive_warning = '已显示本地数据，正在核对云端归档。'
     try:
         templates = [item for item in original_templates() if item.get('scope') == scope]
     except (OSError, ValueError, TypeError, KeyError):
@@ -3217,6 +3355,20 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             args = (content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
             parsed = reader(*args, exemptions) if exemptions else reader(*args)
         count, data = parsed
+        if active and summary['round_id'] == active['id']:
+            batch = active['batches'][scope]
+            template = batch.get('operating_template')
+            known = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {})}
+            if template and known:
+                # Configured sensor readings and verified operating marks are
+                # both eligible for display. Catalogue placeholders alone are not.
+                data = {**data, 'original_cells': [
+                    {**entry, 'verified_operating': True}
+                    if (entry['template'] == template and entry['sheet'].strip() == CHILLER_SHEET
+                        and known.get(entry['cell']) not in (None, '')
+                        and str(entry['value']) == known[entry['cell']])
+                    else entry for entry in data['original_cells']
+                ]}
         cells += count
         if cells > 1000000:
             raise RiskError('当日巡检数据过大，请分开查看原记录。', 413)
@@ -3244,7 +3396,10 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
         if lookup and lookup_round and summary['round_id'] != lookup_round:
             continue
         if not summary_only:
-            _, confirmed, attachment, _ = service.archive_record(scope, summary['id'])
+            if archive_mode:
+                attachment = snapshot['entries'][summary['id']][1]
+            else:
+                _, confirmed, attachment, _ = service.archive_record(scope, summary['id'])
             if any(confirmed.get(key) != summary.get(key) for key in ('round_id', 'date', 'scope', 'shift', 'round')):
                 raise RiskError('巡检归档在读取时发生变化，请刷新后重试。', 409)
         if confirmed['round_id'] in archived_ids:
@@ -3256,11 +3411,22 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
         is_pending = bool(pending_active)
         if is_pending and attachment and pending_active.get('file_token') != attachment.get('file_token'):
             raise RiskError('本轮巡检归档附件尚未核验，请稍后重试。', 409)
+        content = None
+        if attachment:
+            if archive_mode == 'local':
+                content = service.download_archive(attachment, local_only=True)
+                if content is None:
+                    archive_incomplete = True
+                    if is_pending:
+                        archived_ids.discard(confirmed['round_id'])
+                    continue
+            else:
+                content = service.download_archive(attachment)
         collect({**confirmed, 'shift': (confirmed.get('shift') or '').removesuffix('班'),
                  'status': '待归档核验' if is_pending else '已归档',
                  'version': service.archive_version(attachment) if attachment else '', 'local_draft': False,
                  'auto_closed': confirmed.get('actor') == SYSTEM_ROLLOVER_ACTOR},
-                service.download_archive(attachment) if attachment else None)
+                content)
     for pending in pending_rounds:
         saved = pending.get('active')
         if (saved and saved['duty']['scope']==scope and saved['duty']['date']==day and saved['id'] not in archived_ids
@@ -3269,8 +3435,7 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                      'round':saved['round'],'version':saved.get('review_version',0),'status':'自动确认·待上传',
                      'auto_closed':bool(saved.get('auto_closed')),'local_draft':False,
                      'source_time': source_query_time(saved['batches'][scope])},
-                    None if summary_only else workbook(saved,{scope:saved.get('archive_order',[])},strict_original=False,presentation=False),
-                    exemptions=saved.get('cell_exemptions'))
+                    parsed=None if summary_only else service.active_report_content(saved, scope))
     if (active and active.get('duty', {}).get('date') == day
             and (not lookup or not lookup_round or active['id'] == lookup_round)):
         if active['id'] in archived_ids:
@@ -3280,9 +3445,10 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             summary = {'round_id': active['id'], 'scope': scope, 'date': day,
                        'shift': active['duty']['shift'], 'round': active['round'],
                        'actor': active.get('actor', ''), 'version': active.get('review_version', 0), 'status': '待归档' if 'completed' in active else '进行中',
+                       'source_locked': service.source_locked(active),
                        'local_draft': bool(drafts), 'source_time': source_query_time(active['batches'][scope]),
                        'sheet_groups': active.get('sheet_groups', {})}
-            if view_sheet or lookup:
+            if not summary_only:
                 if not drafts:
                     collect(summary, parsed=service.active_report_content(active, scope))
                 else:
@@ -3323,6 +3489,9 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                                           'auto_closed': bool(record and record.get('auto_closed'))})
     group_shift = active['duty']['shift'] if active and active['duty']['date'] == day else (result['rounds'][-1]['shift'] if result['rounds'] else duty_period(dt.datetime.now(CN))[1])
     result['sheet_groups'] = (service.store.get_document(NS, 'sheet-groups:' + scope + ':' + day + ':' + group_shift) or {}).get('groups', {})
+    result['archive_incomplete'] = archive_incomplete
+    if archive_incomplete and not result['archive_warning']:
+        result['archive_warning'] = '部分云端归档正在读取，已显示本地可用数据。'
     return result
 
 
@@ -3357,6 +3526,8 @@ def install_daily_inspection(app, controller, runtime):
     service = None
     lock = threading.Lock()
     stopped = threading.Event()
+    source_wake = {scope: threading.Event() for scope in SOURCES}
+    workers = []
 
     def manager():
         nonlocal service
@@ -3374,19 +3545,23 @@ def install_daily_inspection(app, controller, runtime):
 
     def prefetch(scope):
         last_refresh = 0
+        wake = source_wake[scope]
         while not stopped.is_set():
+            requested = wake.is_set()
+            wake.clear()
             try:
                 svc = manager()
                 svc.rollover_due(scope)
                 if svc.scheduled:
                     from .personnel_source import daily_roster
                     svc.open_scheduled_round(scope, lambda day: daily_roster(runtime.service, day))
-                if time.monotonic()-last_refresh >= 300:
+                if requested or time.monotonic()-last_refresh >= 300:
                     svc.refresh_source(scope)
                     last_refresh = time.monotonic()
+                    svc.sync_active_live(scope, cached_only=True)
             except Exception:
                 logging.exception('%s楼巡检参考数据预取失败，保留上次完整批次', scope)
-            stopped.wait(60)
+            wake.wait(60)
 
     def archive_worker(scope):
         while not stopped.is_set():
@@ -3398,11 +3573,21 @@ def install_daily_inspection(app, controller, runtime):
 
     def startup():
         for scope in SOURCES:
-            threading.Thread(target=prefetch, args=(scope,), name='daily-inspection-prefetch-' + scope, daemon=True).start()
-            threading.Thread(target=archive_worker, args=(scope,), name='daily-inspection-archive-' + scope, daemon=True).start()
+            for worker, name in ((prefetch, 'prefetch'), (archive_worker, 'archive')):
+                thread = threading.Thread(target=worker, args=(scope,), name=f'daily-inspection-{name}-{scope}', daemon=True)
+                workers.append(thread)
+                thread.start()
 
     app.add_event_handler('startup', startup)
-    app.add_event_handler('shutdown', stopped.set)
+    def shutdown():
+        stopped.set()
+        for wake in source_wake.values():
+            wake.set()
+        deadline = time.monotonic() + 1
+        for thread in workers:
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+
+    app.add_event_handler('shutdown', shutdown)
 
     async def endpoint(request: Request):
         try:
@@ -3444,7 +3629,7 @@ def install_daily_inspection(app, controller, runtime):
                 if not viewer and scope not in home_scopes:
                     raise RiskError('没有该楼栋的巡检权限。',403)
                 await asyncio.to_thread(svc.rollover_due,scope)
-                state = await asyncio.to_thread(svc.load,scope)
+                state = await asyncio.to_thread(svc.sync_active_live, scope, cached_only=True)
                 date,shift = duty_period(dt.datetime.now(CN))
                 duty = {'scope':scope,'date':date,'shift':shift}
                 if state.get('active') and duty_key(state['active']['duty'])==duty_key(duty):
@@ -3517,10 +3702,20 @@ def install_daily_inspection(app, controller, runtime):
                                and any(sheet['name'] == sheet_filter[1] for sheet in template['sheets'])
                                for template in original_templates()):
                         raise RiskError('该楼栋没有所选巡检工作表。', 404)
-                report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
-                    user.get('name') or owner, include_active=viewer or can_write_scope or scope in home_scopes,
+                archive_mode = 'local' if action == 'day-export' or payload.get('archive_mode') == 'local' else 'refresh'
+                report_args = dict(
+                    include_active=viewer or can_write_scope or scope in home_scopes,
                     drafts=submitted, active_id=payload.get('active_id'), summary_only=summary_only, view_sheet=sheet_filter,
                     lookup=lookup.strip().casefold() if lookup else None, lookup_round=lookup_round)
+                report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
+                    user.get('name') or owner, archive_mode=archive_mode, **report_args)
+                if action == 'day-export' and report['archive_incomplete']:
+                    report = await asyncio.to_thread(inspection_report, svc, scope, report['date'], owner,
+                        user.get('name') or owner, archive_mode='refresh', **report_args)
+                if action == 'day-sheet' and archive_mode == 'refresh' and not lookup:
+                    current_day, _ = duty_period(dt.datetime.now(CN))
+                    if report['date'] == current_day and not any(item.get('source_locked') for item in report['rounds']):
+                        source_wake[scope].set()
                 if lookup:
                     matches = [cell for item in report['rounds'] for cell in item.get('lookup_cells', [])]
                     return JSONResponse({'ok': True, 'data': {'matches': matches}}, headers={'Cache-Control': 'private, no-store'})
@@ -3538,9 +3733,11 @@ def install_daily_inspection(app, controller, runtime):
                         and await asyncio.to_thread(auth.is_admin, session))
                 report['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{report["date"]}'.encode()).hexdigest()
                 if action == 'day-export':
+                    if report['archive_incomplete']:
+                        raise RiskError('当日云端归档尚未核对完整，请稍后重试导出。', 503)
                     if not report['rounds']:
                         raise RiskError('该日期没有可导出的巡检记录。', 404)
-                    content = await asyncio.to_thread(inspection_report_workbook, report)
+                    content = await asyncio.to_thread(svc.export_report, report)
                     filename = quote(f'{scope}楼-{report["date"]}-白夜班巡检.xlsx')
                     return Response(content, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                         headers={'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
@@ -3616,8 +3813,7 @@ def install_daily_inspection(app, controller, runtime):
             if request.method == 'POST' and selected_scope and selected_scope != scope:
                 raise RiskError('只能办理本人当班楼栋的巡检。', 403)
             if request.method == 'GET':
-                state = await asyncio.to_thread(svc.load, scope)
-                state = await asyncio.to_thread(svc.sync_active_live, scope)
+                state = await asyncio.to_thread(svc.sync_active_live, scope, cached_only=True)
                 if action == 'source':
                     if not viewer and scope not in home_scopes and not can_manage:
                         raise RiskError('没有当前参考数据的查看权限。', 403)

@@ -169,10 +169,12 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def administrator(actor):
         return full_access(actor) or ToolSelfChecks.administrator(actor)
 
-    def __init__(self, inspection, cloud):
+    def __init__(self, inspection, cloud, *, people=None, signature=None):
         super().__init__(inspection)
         self.cloud = cloud
         self.person_for = inspection.person_for
+        self.workspace_directory = people
+        self.workspace_signature = signature
         self.archive_dir = inspection.db_path.parent / 'tool_management_archives'
         with self.connect(True) as db:
             db.executescript("""
@@ -268,13 +270,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         return can_scope(actor, scope) and (actor.get('category') == 'supervisor' or '主管' in (actor.get('position') or ''))
 
     def available_to(self, actor):
-        scopes = [scope for scope in BUILDINGS if can_scope(actor, scope)]
-        if not scopes:
+        try:
+            self.access(actor)
+        except RiskError:
             return False
-        if self.administrator(actor) or actor.get('category') == 'manager' or any(self.supervisor(actor, s) for s in scopes):
-            return True
-        with self.connect() as db:
-            return any(self.is_building_leader(db, actor, scope) for scope in scopes)
+        return any(can_scope(actor, scope) for scope in BUILDINGS)
 
     def configure(self, actor, identity, body):
         self.access(actor)
@@ -706,17 +706,24 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     self.insert_work_order(db, identity, month, asset, kind, due)
                     db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (month,))
 
-    def is_building_leader(self, db, actor, scope):
-        leaders = json.loads(self.state(db, 'leaders') or '{}')
+    def is_building_leader(self, db, actor, scope, *, leaders=None):
+        if leaders is None:
+            leaders = json.loads(self.state(db, 'leaders') or '{}')
         return can_scope(actor, scope) and actor['open_id'] in leaders.get(scope, ())
 
-    def eligible(self, db, actor, row):
-        return full_access(actor) or self.is_building_leader(db, actor, row['scope']) or (
+    def eligible(self, db, actor, row, *, leaders=None):
+        return full_access(actor) or self.is_building_leader(db, actor, row['scope'], leaders=leaders) or (
             row['kind'] == 'external' and actor['id'] == row['supervisor'] and self.supervisor(actor, row['scope']))
 
-    def visible(self, db, actor, row):
-        return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row)
+    def visible(self, db, actor, row, *, leaders=None):
+        return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row, leaders=leaders)
+                 or self.owns_workspace_item(actor, row)
                  or actor['id'] == row['manager'] and actor.get('category') == 'manager')
+
+    @staticmethod
+    def owns_workspace_item(actor, row):
+        return ('workspace_direct' in row.keys() and row['workspace_direct'] and row['owner'] == actor['id']
+                and can_scope(actor, row['scope']))
 
     def _work(self, db, actor, identity):
         self.access(actor)
@@ -730,7 +737,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         open_order = not row['submitted_at'] and row['outcome'] != 'cancelled'
         review = db.execute('SELECT status,note FROM tool_work_reviews WHERE order_id=?', (row['id'],)).fetchone()
         awaiting_review = bool(review and review['status'] == 'pending')
-        mine = eligible and (row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
+        mine = self.owns_workspace_item(actor, row) or eligible and (
+            row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
         result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
                                             'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty')}
         sync = [{'label': DESTINATIONS[job['dest']], 'state': 'done' if job['synced'] == job['revision'] else 'pending',
@@ -846,9 +854,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def report_attachment(self, actor, identity):
         with self.connect() as db:
             row = self._work(db, actor, identity)
-            if row['kind'] != 'external' or not row['report']:
+            self._check_order_report_scope(db, actor, row)
+            _, name, content = self._workspace_order_report(db, row)
+            if row['kind'] != 'external' or not content:
                 raise RiskError('没有可查看的送检报告。', 404)
-            return row['report_name'], row['report']
+            return name, content
 
     @staticmethod
     def check_revision(row, revision):
@@ -1038,6 +1048,9 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                        (lease, now + 600, identity, dest))
             row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (identity,)).fetchone()
             linked = self._workspace_for_order(db, identity)
+            if row and linked and dest == 'inspection':
+                _, report_name, report = self._workspace_order_report(db, row)
+                row = dict(row) | {'report_name': report_name, 'report': report}
             if linked or dest == 'inspection' and row and row['inspection_meta'] != '{}':
                 job['verify_write'] = True
             if linked:
@@ -1108,6 +1121,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
 
     def package_work(self, db, month, rows, output):
         manifest = []
+        shared_reports = {}
+        written = set()
         with ZipFile(output, 'w', ZIP_DEFLATED) as archive:
             for row in rows:
                 folder = f'{row["scope"]}楼/{KINDS[row["kind"]]}/{row["id"]}'
@@ -1120,10 +1135,14 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     name = f'{folder}/{index:02d}-{safe}.xlsx'
                     archive.writestr(name, fill_template(template['content'], json.loads(template['schema']), entry, row['scope']))
                     files.append(name)
-                if row['submitted_at'] and row['report']:
-                    name = f'{folder}/{row["report_name"]}'
-                    archive.writestr(name, row['report'])
-                    files.append(name)
+                if row['submitted_at']:
+                    shared, report_name, report = self._workspace_order_report(db, row, shared_reports)
+                    if report:
+                        name = f'送检报告/{shared}/{report_name}' if shared else f'{folder}/{report_name}'
+                        if name not in written:
+                            archive.writestr(name, report)
+                            written.add(name)
+                        files.append(name)
                 manifest.append({'id': row['id'], 'tool': json.loads(row['asset'])['name'], 'scope': row['scope'],
                     'type': KINDS[row['kind']], 'due': row['due'], 'actual': row['actual'],
                     'outcome': OUTCOMES.get(row['outcome'], '已提交' if row['submitted_at'] else '已取消'),
@@ -1175,6 +1194,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 row = self._work(db, actor, identity)
                 if not row['submitted_at']:
                     raise RiskError('工单尚未提交。', 409)
+                self._check_order_report_scope(db, actor, row)
                 output = io.BytesIO()
                 self.package_work(db, row['month'], [row], output)
                 return output.getvalue()

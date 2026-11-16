@@ -5,6 +5,7 @@ import datetime as dt
 import hashlib
 import json
 import logging
+import time
 from threading import RLock
 
 from .risk_inspection import RiskError, text
@@ -16,6 +17,7 @@ class ToolTemplateLibrary:
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self._template_library_lock = RLock()
+        self._workspace_catalog_cache = (0.0, [])
 
     def _library_access(self, actor, *, manage=False):
         self.access(actor)
@@ -37,6 +39,7 @@ class ToolTemplateLibrary:
             raise RiskError('无法预览此 XLSX 自检模板，请核对文件。') from exc
 
     def _library_store(self, db, entry, content, schema):
+        self._workspace_catalog_cache = (0.0, [])
         identity = entry['id']
         latest = db.execute('SELECT version,active FROM tool_check_templates WHERE id=? ORDER BY version DESC LIMIT 1',
                             (identity,)).fetchone()
@@ -78,6 +81,7 @@ class ToolTemplateLibrary:
                 db.executemany('UPDATE tool_check_template_catalog SET present=0 WHERE id=?', ((key,) for key in missing))
                 db.executemany('UPDATE tool_check_template_catalog SET present=1 WHERE id=?', ((key,) for key in restored))
         warning = f'{unavailable} 份飞书模板附件无法读取或校验，暂不可选。' if unavailable else ''
+        self._workspace_catalog_cache = (time.monotonic() + (0 if unavailable else 30), entries)
         return entries, warning
 
     def refresh_template_library(self, actor):
@@ -114,12 +118,14 @@ class ToolTemplateLibrary:
             active = {row['id'] for row in self.list_templates(db, False)}
         return [entry for entry in templates if entry['id'] in active]
 
-    def selectable_feishu_templates(self, actor):
+    def selectable_feishu_templates(self, actor, *, fresh=False):
         self._library_access(actor)
         if not self._has_feishu_templates():
             return []
         with self._template_library_lock:
-            entries, _ = self._library_sync()
+            expires, entries = self._workspace_catalog_cache
+            if fresh or time.monotonic() >= expires:
+                entries, _ = self._library_sync()
             return self.filter_selectable_feishu_templates(entries)
 
     @staticmethod
@@ -259,7 +265,7 @@ class ToolTemplateLibrary:
         version = self._library_version(body.get('version'))
         if type(active) is not bool:
             raise RiskError('模板启用状态无效。')
-        with self._template_library_lock:
+        with self._workspace_open_lock, self._template_library_lock:
             self._library_sync()
             with self.connect(True) as db:
                 row, _ = self._library_head(db, identity, version)
@@ -269,10 +275,45 @@ class ToolTemplateLibrary:
     def delete_library_template(self, actor, identity, body):
         self._library_access(actor, manage=True)
         version = self._library_version(body.get('version'))
-        with self._template_library_lock:
+        with self._workspace_open_lock, self._template_library_lock:
             self._library_sync()
+            if any(asset.get('template_id') == identity for asset in self.cloud.inventory()[0]):
+                raise RiskError('仍有工具关联此模板，请先批量换绑后再删除。已填写记录将保留原版本。', 409)
             with self.connect(True) as db:
                 self._library_head(db, identity, version, include_deleted=True)
+                if db.execute('''SELECT 1 FROM tool_workspace_items i JOIN tool_workspace_sessions s ON s.id=i.session_id
+                    WHERE i.template_id=? AND i.binding_pending=1 AND s.status='opening' LIMIT 1''', (identity,)).fetchone():
+                    raise RiskError('此模板还有待核验的关联，请等待办理人核对后再删除。', 409)
                 db.execute('INSERT OR IGNORE INTO tool_check_template_deletions VALUES(?,?)',
                            (identity, dt.datetime.now(TZ).isoformat(timespec='seconds')))
         return {'deleted': True}
+
+    def rebind_library_template(self, actor, identity, body):
+        from .tool_management import can_scope
+
+        self._library_access(actor, manage=True)
+        version = self._library_version(body.get('version'))
+        target = text(body.get('target_id'), 120, True)
+        if target == identity:
+            raise RiskError('请选择不同的目标模板。')
+        with self._workspace_open_lock:
+            selectable = {entry['id'] for entry in self.selectable_feishu_templates(actor, fresh=True)}
+            if target not in selectable:
+                raise RiskError('目标模板已停用或不存在，请刷新模板库。', 409)
+            with self.connect() as db:
+                self._library_head(db, identity, version)
+            linked = [asset for asset in self.cloud.inventory()[0]
+                      if asset.get('template_id') == identity and can_scope(actor, asset['scope'])]
+            successes, failures = [], []
+            chunk = {asset['id']: asset for asset in linked[:20]}
+            entries = [(asset_id, target, identity) for asset_id in chunk]
+            for asset_id, bound, error in self._workspace_bind_templates(entries):
+                if bound != target:
+                    asset = chunk[asset_id]
+                    failures.append({'name': asset['name'], 'scope': asset['scope'], 'error': error or '关联尚未核验。'})
+                else:
+                    successes.append(asset_id)
+            with self.connect(True) as db:
+                for asset_id in successes:
+                    self._workspace_save_inventory_binding(db, asset_id, identity, target)
+            return {'updated': len(successes), 'failed': failures, 'remaining': max(0, len(linked) - len(chunk))}

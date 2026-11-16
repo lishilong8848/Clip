@@ -24,6 +24,19 @@ def report_response(attachment):
     })
 
 
+def compact_workspace(data):
+    layouts = {}
+    for item in data.get('items') or ():
+        layout = item.pop('template', None)
+        if layout:
+            key = item['template_version']
+            item['layout_key'] = key
+            layouts[key] = layout
+    if layouts:
+        data['layouts'] = layouts
+    return data
+
+
 def install_tool_self_check_routes(app, controller, service, read_actor, same_origin, response):
     base = '/api/tool-self-check'
 
@@ -43,11 +56,20 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             ):
                 raise RiskError('月度工单已停用，请在工具工作台办理。', 410)
             if path == 'workspace' or path.startswith('workspace/'):
+                def workspace_response(data):
+                    return response(compact_workspace(data) if request.query_params.get('compact') == '1' else data)
+
                 if request.method == 'GET':
                     if path == 'workspace':
                         return response(await asyncio.to_thread(svc.workspace_list, actor))
+                    if path == 'workspace/history':
+                        query = request.query_params
+                        return response(await asyncio.to_thread(svc.workspace_history, actor, query.get('before', ''),
+                                                               query.get('id', ''), query.get('kind', '')))
                     if path.endswith('/report-file'):
                         return report_response(await asyncio.to_thread(svc.workspace_report_attachment, actor, identity))
+                    if path.endswith('/people'):
+                        return response(await asyncio.to_thread(svc.workspace_people, actor, identity))
                     if path.endswith('/download'):
                         content = await asyncio.to_thread(svc.workspace_download, actor, identity)
                         filename = quote(f'{identity}-工具办理归档.zip')
@@ -55,8 +77,9 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                             'Content-Disposition': f"attachment; filename*=UTF-8''{filename}",
                             'Cache-Control': 'no-store',
                         })
-                    reader = svc.workspace_status if path.endswith('/status') else svc.workspace_get
-                    return response(await asyncio.to_thread(reader, actor, identity))
+                    if path.endswith('/status'):
+                        return response(await asyncio.to_thread(svc.workspace_status, actor, identity, request.query_params.get('known', '')))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_get, actor, identity))
                 same_origin(request)
                 if path == 'workspace/refresh':
                     return response(await asyncio.to_thread(svc.workspace_refresh, actor))
@@ -64,7 +87,7 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     body = await controller._read_json_request(request, max_bytes=4096) if request.headers.get('content-type') else {}
                     if not isinstance(body, dict):
                         raise RiskError('工具办理请求格式无效。')
-                    return response(await asyncio.to_thread(svc.workspace_resume, actor, identity, body))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_resume, actor, identity, body))
                 if path.endswith('/report'):
                     revision = request.query_params.get('revision', '')
                     if not revision.isascii() or not revision.isdecimal() or len(revision) > 9:
@@ -82,16 +105,20 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 if not isinstance(body, dict):
                     raise RiskError('工具办理请求格式无效。')
                 if path == 'workspace/open':
-                    return response(await asyncio.to_thread(svc.workspace_open, actor, body))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_open, actor, body))
+                if path == 'workspace/transfer':
+                    return response(await asyncio.to_thread(svc.workspace_transfer, actor, body))
                 if path.endswith('/save'):
-                    return response(await asyncio.to_thread(svc.workspace_save, actor, identity, body))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_save, actor, identity, body))
                 if path.endswith('/review'):
-                    return response(await asyncio.to_thread(svc.workspace_review, actor, identity, body))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_review, actor, identity, body))
+                if path.endswith('/manage'):
+                    return workspace_response(await asyncio.to_thread(svc.workspace_manage_item, actor, identity, body))
                 if path.endswith('/binding'):
-                    return response(await asyncio.to_thread(svc.workspace_resolve_binding, actor, identity, body))
+                    return workspace_response(await asyncio.to_thread(svc.workspace_resolve_binding, actor, identity, body))
                 if path.endswith('/reconcile'):
                     return response(await asyncio.to_thread(svc.workspace_reconcile, actor, identity, body))
-                return response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body, require_report_check=True))
+                return workspace_response(await asyncio.to_thread(svc.workspace_submit, actor, identity, body, require_report_check=True))
             if request.method == 'GET':
                 if not path:
                     result = await asyncio.to_thread(svc.list, actor, request.query_params.get('month', ''))
@@ -155,6 +182,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 return response(await asyncio.to_thread(svc.refresh_inventory, actor))
             if path.endswith('/clone') and path.startswith('templates/'):
                 return response(await asyncio.to_thread(svc.clone_library_template, actor, identity, body))
+            if path.endswith('/rebind') and path.startswith('templates/'):
+                return response(await asyncio.to_thread(svc.rebind_library_template, actor, identity, body))
             if path.endswith('/delete') and path.startswith('templates/'):
                 delete_template = svc.delete_library_template if identity.startswith('rec') else svc.delete_template
                 return response(await asyncio.to_thread(delete_template, actor, identity, body))
@@ -183,9 +212,14 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                           ('/orders/{identity}/{action}', ['POST']), ('/templates', ['GET', 'POST']),
                           ('/templates/{identity}/availability', ['POST']), ('/templates/{identity}/clone', ['POST']),
                           ('/templates/{identity}/delete', ['POST']),
+                          ('/templates/{identity}/rebind', ['POST']),
                           ('/workspace', ['GET']), ('/workspace/open', ['POST']), ('/workspace/refresh', ['POST']),
+                          ('/workspace/transfer', ['POST']),
+                          ('/workspace/history', ['GET']),
                           ('/workspace/{identity}', ['GET']), ('/workspace/{identity}/status', ['GET']),
+                          ('/workspace/{identity}/people', ['GET']),
                           ('/workspace/{identity}/review', ['POST']), ('/workspace/{identity}/binding', ['POST']),
+                          ('/workspace/{identity}/manage', ['POST']),
                           ('/workspace/{identity}/reconcile', ['POST']),
                           ('/workspace/{identity}/save', ['POST']),
                           ('/workspace/{identity}/resume', ['POST']),

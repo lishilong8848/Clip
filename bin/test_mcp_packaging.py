@@ -121,7 +121,8 @@ class PackagingTests(unittest.TestCase):
                     'src/workspace-v2/dashboard/PreShiftCheck.vue','src/preShiftUtils.ts',
                     'scripts/workspace-build-adapter.mjs','scripts/workspace-night-theme.mjs',
                     'scripts/prune-dist-assets.mjs']
-            entries=['dist/assistant.html','dist/index.html','dist/assets/workspace-v2/index.html']
+            entries=['dist/assistant.html','dist/index.html','dist/assets/workspace-v2/index.html',
+                     'dist/assets/workspace-v2/entry.json']
             for relative in inputs+entries+['dist/assets/tools.js']:
                 path=frontend/relative;path.parent.mkdir(parents=True,exist_ok=True)
                 path.write_text('/api/assistant/extensions',encoding='utf-8')
@@ -140,6 +141,11 @@ class PackagingTests(unittest.TestCase):
                     build.reset_mock();os.utime(frontend/relative,(50,50))
                 (frontend/'scripts/check-navigation-back.mjs').touch()
                 package._ensure_mcp_frontend_assets();build.assert_not_called()
+                with patch.object(package, 'referenced_assets', side_effect=ValueError('V2 chunk missing')), \
+                     patch.dict(os.environ, {'CLIPFLOW_WORKSPACE_BUILD_DIR': 'isolated-preview'}):
+                    package._ensure_mcp_frontend_assets()
+                build.assert_called_once()
+                self.assertNotIn('CLIPFLOW_WORKSPACE_BUILD_DIR', build.call_args.kwargs['env'])
 
 
 if __name__ == '__main__':

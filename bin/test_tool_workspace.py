@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from zipfile import ZipFile
 
 from PIL import Image, ImageDraw
@@ -139,6 +139,66 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(RiskError):
             self.service.workspace_get(actor(scope='B', identity='other'), first['id'])
 
+    def test_grouped_templates_prefill_and_independent_completion_with_assigned_signature(self):
+        from bin.lan_bitable_template_portal.tool_self_check_routes import compact_workspace
+
+        ids = ['recTool0', 'recTool1']
+        second = {'id': 'recTemplateTwo', 'name': '第二个模板', 'file_token': 'second', 'digest': 'second'}
+        self.cloud.templates = lambda: [
+            {'id': 'recTemplate', 'name': '记录单', 'file_token': 'templateToken', 'digest': 'fixture'}, second]
+        self.service.person_for = lambda identity: self.leader if identity == self.leader['id'] else self.admin
+        signer = Mock(return_value=base64.b64decode(self.signature().split(',', 1)[1]))
+        self.service.workspace_signature = signer
+        payload = dict(kind='self', asset_ids=ids, operation_id='mixed-mapping',
+                       template_ids=dict(zip(ids, ('recTemplate', 'recTemplateTwo'))))
+        session = self.service.workspace_open(self.filler, payload)
+        self.assertEqual([row['template_id'] for row in self.cloud.assets[:2]], ['recTemplate', 'recTemplateTwo'])
+        self.assertEqual([row['template_id'] for row in session['items']], ['recTemplate', 'recTemplateTwo'])
+        self.assertEqual(self.service.workspace_open(self.filler, payload)['id'], session['id'])
+        with self.assertRaisesRegex(RiskError, '同一操作编号'):
+            self.service.workspace_open(self.filler, payload | {'template_ids': dict.fromkeys(ids, 'recTemplate')})
+        compact = compact_workspace(copy.deepcopy(session))
+        self.assertEqual(len(compact['layouts']), 1)
+        self.assertTrue(all('template' not in item and item['layout_key'] in compact['layouts'] for item in compact['items']))
+        for row in session['items']:
+            form = row['template']['schema']['sheet'] + '!'
+            addresses = row['template']['prefill_fields']
+            self.assertEqual(row['values'][form + addresses['inspector']], self.filler['name'])
+            self.assertEqual(row['values'][form + addresses['checked_at']], dt.datetime.now(TZ).date().isoformat())
+            row['reviewer_id'] = self.leader['id']
+            row['completion'] = 'incomplete'
+        prepared = self.complete(session)
+        pending = self.service.workspace_submit(self.filler, session['id'], {'revision': prepared['revision']})
+        self.assertFalse(any(row['can_review'] for row in pending['items']))
+        with self.assertRaisesRegex(RiskError, '指定的审核人'):
+            self.approve(pending, self.filler)
+        reviewed_at = (dt.datetime.now(TZ) - dt.timedelta(days=1)).strftime('%Y-%m-%dT%H:%M')
+        override_at = (dt.datetime.now(TZ) - dt.timedelta(days=2)).strftime('%Y-%m-%dT%H:%M')
+        selected = [{'asset_id': item['id'], 'revision': item['order_revision']} for item in pending['items']]
+        selected[1]['reviewed_at'] = override_at
+        approved = self.service.workspace_review(self.leader, session['id'], {
+            'action': 'approve', 'use_saved_signature': True, 'reviewed_at': reviewed_at,
+            'items': selected,
+        })
+        signer.assert_called_once_with(self.leader['id'])
+        dates = dict(zip(ids, (reviewed_at, override_at)))
+        self.assertEqual({row['id']: row['reviewed_at'] for row in approved['items']}, dates)
+        while self.service.sync_one():
+            pass
+        reopened = self.service.workspace_get(self.leader, session['id'])
+        self.assertEqual({row['id']: row['reviewed_at'] for row in reopened['items']}, dates)
+        with self.service.connect() as db:
+            row, items = self.service._workspace_session(db, self.leader, session['id'], include_files=False)
+            self.assertTrue({'report', 'package'}.isdisjoint(row.keys()))
+            self.assertTrue(all('report' not in item.keys() for item in items))
+        schema = session['items'][0]['template']['schema']
+        for order, _, content, _, _ in self.cloud.writes.values():
+            book = load_workbook(io.BytesIO(content))
+            self.assertIn('未完成[√]', book[schema['sheet']][f'E{schema["result_row"]}'].value)
+            self.assertEqual(book[schema['sheet']][f'G{schema["review_row"]}'].value,
+                             dates[order['asset_id']].replace('T', ' '))
+            book.close()
+
     def test_individual_signed_files_and_failed_item_do_not_block_others(self):
         session = self.complete(self.open())
         body = {'revision': session['revision']}
@@ -193,6 +253,43 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(all(data == report for _, _, data, _, _ in self.cloud.writes.values()))
         self.assertTrue(all(date == actual for _, _, _, date, _ in self.cloud.writes.values()))
 
+    def test_report_scope_per_tool_conclusions_and_one_stored_attachment(self):
+        self.cloud.assets[3]['scope'] = 'B'
+        self.service.refresh()
+        with self.assertRaisesRegex(RiskError, '同一楼栋'):
+            self.open('external')
+        self.cloud.assets[3]['scope'] = 'A'
+        self.service.refresh()
+        session = self.open('external')
+        report = b'%PDF-1.7\nfixture'
+        session = self.service.workspace_report(self.filler, session['id'], session['revision'], '报告.pdf', report)
+        actual = dt.datetime.now(TZ).date().isoformat()
+        ids = [item['id'] for item in session['items']]
+        body = {'revision': session['revision'], 'actual': actual, 'inspection': {
+            'report_no':'test', 'institution':'fixture', 'result':'qualified', 'expires_on': actual,
+            'confirmed_asset_ids':ids, 'tools':{ids[1]:{'result':'unqualified', 'expires_on':''}},
+        }}
+        submitted = self.service.workspace_submit(self.filler, session['id'], body, require_report_check=True)
+        self.assertEqual(submitted['inspection']['tools'][ids[1]], {'result':'unqualified', 'expires_on':''})
+        self.service.workspace_submit(self.filler, session['id'], body, require_report_check=True)
+        orders = [item['order_id'] for item in submitted['items']]
+        self.assertEqual(self.service.report_attachment(self.leader, orders[0])[1], report)
+        with ZipFile(io.BytesIO(self.service.workspace_download(self.leader, submitted['id']))) as archive:
+            self.assertEqual(sum(name.endswith('.pdf') for name in archive.namelist()), 1)
+        with self.service.connect(True) as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM tool_work_orders WHERE report IS NOT NULL').fetchone()[0], 0)
+            # Simulate a pre-upgrade mixed-floor batch with copied attachments.
+            db.execute('UPDATE tool_work_orders SET scope=?,report=? WHERE id=?', ('B', report, orders[1]))
+            db.execute('UPDATE tool_work_orders SET report=? WHERE id=?', (report, orders[0]))
+        self.assertFalse(self.service.workspace_get(self.leader, submitted['id'])['report_available'])
+        for reader, args in [(self.service.workspace_report_attachment, (submitted['id'],)),
+                             (self.service.workspace_download, (submitted['id'],)),
+                             (self.service.report_attachment, (orders[0],)),
+                             (self.service.download, ('', orders[0]))]:
+            with self.assertRaises(RiskError) as error:
+                reader(self.leader, *args)
+            self.assertEqual(error.exception.status, 403)
+
     def test_cancelled_monthly_orders_do_not_block_workspace_and_review_routes_per_tool(self):
         self.service.configure(self.admin, 'park-manager', {'manager_id': self.admin['id']})
         self.service.schedule()
@@ -237,14 +334,21 @@ class WorkspaceTests(unittest.TestCase):
         orders = [row for row in self.service.list(self.filler)['orders'] if row['asset_id'] == asset['id']]
         self.assertEqual([row['id'] for row in orders], [session['items'][0]['order_id']])
 
-    def test_view_only_admin_cannot_reserve_assets(self):
-        self.assertTrue(self.service.workspace_list(self.admin)['assets'])
-        self.assertFalse(any(asset['selectable'] for asset in self.service.workspace_list(self.admin)['assets']))
-        with self.assertRaisesRegex(RiskError, '获授权人员可办理'):
-            self.service.workspace_open(self.admin, {
-                'kind': 'external', 'asset_ids': ['recTool2'], 'operation_id': 'view-only',
-            })
-        self.assertEqual(self.service.workspace_list(self.filler)['sessions'], [])
+    def test_module_holder_can_fill_and_select_completion_without_review_permission(self):
+        worker = actor(identity='operator')
+        self.assertTrue(self.service.available_to(worker))
+        self.assertFalse(self.service.available_to(worker | {'modules': []}))
+        session = self.service.workspace_open(worker, {'kind': 'self', 'asset_ids': ['recTool0'],
+                                                        'template_id': 'recTemplate', 'operation_id': 'worker-fill'})
+        entry, = session['items']
+        self.assertTrue(entry['can_edit'])
+        self.assertFalse(entry['can_review'])
+        saved = self.service.workspace_save(worker, session['id'], {'revision': session['revision'],
+            'items': [{'asset_id': entry['id'], 'completion': 'incomplete'}]})
+        self.assertEqual(saved['items'][0]['completion'], 'incomplete')
+        with self.assertRaises(RiskError):
+            self.service.workspace_get(actor(scope='B', identity='other-worker'), session['id'])
+        self.assertFalse(self.service.workspace_list(actor(identity='different-worker'))['sessions'])
 
     def test_upgrade_keeps_old_batches_and_can_open_same_month_after_archive(self):
         from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
@@ -329,6 +433,60 @@ class WorkspaceTests(unittest.TestCase):
         self.service.refresh()
         with self.assertRaisesRegex(RiskError, '归属楼栋'):
             self.service.workspace_submit(self.filler, original['id'], {'revision': complete['revision']})
+        receiver = actor(scope='B', identity='other')
+        moved, = self.service.workspace_list(receiver)['assets']
+        self.assertEqual(moved['plan']['mode'], 'transfer')
+        transfer = {'asset_id': moved['id'], 'scope': 'B', 'revision': moved['plan']['revision']}
+        with self.assertRaises(RiskError):
+            self.service.workspace_transfer(self.leader, transfer)
+        self.service.workspace_transfer(receiver, transfer)
+        old = self.service.workspace_get(self.leader, original['id'])
+        self.assertEqual(old['items'][0]['order_status'], 'cancelled')
+        self.assertEqual(old['items'][0]['values'], complete['items'][0]['values'])
+        self.assertEqual(self.service.workspace_submit(self.filler, old['id'], {'revision': old['revision']})['status'], 'review_pending')
+        new = self.service.workspace_open(receiver, {'kind':'self', 'asset_ids':[moved['id']], 'operation_id':'moved'})
+        self.assertEqual(new['items'][0]['asset']['scope'], 'B')
+
+    def test_pending_bindings_allow_verified_tool_to_save_and_resume_after_restart(self):
+        self.cloud.assets[0]['template_id'] = 'recTemplate'
+        self.service.refresh()
+        body = {'kind':'self', 'asset_ids':['recTool0', 'recTool1'], 'template_id':'recTemplate',
+                'operation_id':'queued', 'defer_bindings': True}
+        opened = self.service.workspace_open(self.filler, body)
+        first, second = opened['items']
+        self.assertTrue(first['can_edit'])
+        self.assertFalse(second['can_edit'])
+        self.assertTrue(second['binding_pending'])
+        self.assertEqual(self.cloud.bindings, [])
+        saved = self.service.workspace_save(self.filler, opened['id'], {'revision':opened['revision'],
+            'items':[{'asset_id':first['id'], 'completion':'incomplete'}]})
+        self.service = self.restart()
+        self.assertTrue(self.service.workspace_binding_tick())
+        draft = self.service.workspace_get(self.filler, saved['id'])
+        self.assertEqual(draft['status'], 'draft')
+        self.assertEqual(draft['revision'], saved['revision'])
+        self.assertEqual(draft['items'][0]['completion'], 'incomplete')
+        self.assertTrue(draft['items'][1]['can_edit'])
+        self.assertEqual(self.cloud.bindings, ['recTool1'])
+
+    def test_reassign_pending_and_preserve_original_draft(self):
+        session = self.complete(self.open())
+        row = session['items'][0]
+        session = self.service.workspace_save(self.filler, session['id'], {'revision': session['revision'],
+            'items': [{'asset_id': row['id'], 'reviewer_id': self.filler['id']}]})
+        selected = self.service.workspace_submit(self.filler, session['id'], {'revision': session['revision']})
+        received = self.service.workspace_get(self.leader, session['id'])
+        self.assertFalse(received['items'][0]['can_review'])
+        self.assertTrue(received['items'][0]['can_reassign'])
+        body = {'asset_id': row['id'], 'revision': selected['items'][0]['order_revision'], 'action': 'reassign', 'reviewer_id': ''}
+        with self.assertRaises(RiskError):
+            self.service.workspace_manage_item(actor(scope='B', identity='other'), session['id'], body)
+        changed = self.service.workspace_manage_item(self.leader, session['id'], body)
+        self.assertTrue(changed['items'][0]['can_review'])
+        self.assertEqual(changed['items'][0]['values'], row['values'])
+        with self.assertRaises(RiskError):
+            self.approve(selected, self.filler)
+        self.approve(changed, self.leader)
 
     def test_routes_enforce_actor_and_preserve_report_bytes(self):
         from fastapi import FastAPI

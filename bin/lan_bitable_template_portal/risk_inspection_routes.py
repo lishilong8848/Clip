@@ -146,7 +146,8 @@ def install_risk_inspection_routes(app, controller, runtime):
         inspection, remote = get_services()
         with lock:
             if tool_checks is None:
-                tool_checks = ToolManagement(inspection, ToolCloud(remote))
+                tool_checks = ToolManagement(inspection, ToolCloud(remote), people=directory,
+                    signature=lambda identity: runtime.service.signature_image_bytes(record_id=identity)[0])
         return tool_checks
 
     if tool_checks_enabled:

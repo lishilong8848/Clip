@@ -39,7 +39,10 @@
       :read-only="readOnly" :planned-groups="state.planned_sheet_groups" :parent-busy="!!busy || autoSaving || hasDrafts"
       @changed="load" @round-state="acceptRoundState" @scope="switchView" @exit="back">
       <template #start>
-        <div v-if="duty && !readOnly && !active && canStartRound" class="inspection-start">
+        <div v-if="duty && !readOnly && active?.source_locked===false && !active.pending" class="inspection-start">
+          <NButton type="primary" :loading="busy==='start'" :disabled="!!busy" @click="start">开始第 {{ active.round }} 次巡检</NButton>
+        </div>
+        <div v-else-if="duty && !readOnly && !active && canStartRound" class="inspection-start">
           <strong>{{ duty.scope }}楼 · {{ duty.shift }}班第 {{ nextRound }} 轮</strong>
           <label v-for="item in availableProfessions" :key="item.name"><input v-model="selectedProfessions" type="checkbox" :value="item.name"> {{ item.name }}<small v-if="preview"> · {{ item.count }} 台</small></label>
           <NButton v-if="!waitingForSlot" type="primary" :loading="busy==='start'" :disabled="!!busy || !selectedProfessions.length" @click="start">开始第 {{ nextRound }} 次巡检</NButton>
@@ -89,7 +92,7 @@ type ProfessionConfirmation = {actor:string;confirmed:number;version:string};
 type State = {template_version?:string;archive_revision?:string;duty:Duty|null; completed_rounds:number; archived_rounds?:number; round_limit:number; next_round?:number; scheduled?:boolean; opens_at?:number|null; history_scopes?:string[]; duty_warning?:string;
   view_scopes?:string[]; view_scope?:string; can_edit?:boolean;
   planned_sheet_groups?:Record<string,string>;
-  active:null|{id:string;started_by?:string;started?:number;visited_sheets?:string[];presence?:{actor:string;sheet:string;seen_at:number}[];sheet_groups?:Record<string,string>;confirmation_invalidations?:Record<string,string>;worksheet_mode?:boolean;available_professions?:string[]; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
+  active:null|{id:string;started_by?:string;started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;visited_sheets?:string[];presence?:{actor:string;sheet:string;seen_at:number}[];sheet_groups?:Record<string,string>;confirmation_invalidations?:Record<string,string>;worksheet_mode?:boolean;available_professions?:string[]; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
     professions?:string[]|null;profession_confirmations?:Record<string,ProfessionConfirmation>;profession_versions?:Record<string,string>;
     orders?:Record<string,string[]>};
   history:{id:string; duty:Duty; round:number; actor:string; completed:number; url:string;draft_key?:string}[]};

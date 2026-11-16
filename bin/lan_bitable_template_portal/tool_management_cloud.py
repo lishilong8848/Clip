@@ -319,6 +319,19 @@ class ToolCloud:
 
     def bind_template(self, asset_id, template_id, expected_template_id):
         """Update the text link after checking its current value; return the bound ID."""
+        return self._bind_template(asset_id, template_id, expected_template_id, set())
+
+    def bind_templates(self, bindings):
+        verified = set()
+        for asset_id, template_id, expected in bindings:
+            try:
+                yield asset_id, self._bind_template(asset_id, template_id, expected, verified), ''
+            except RiskError as exc:
+                yield asset_id, '', str(exc)
+            except Exception:
+                yield asset_id, '', '飞书关联结果暂未确认，请重试。'
+
+    def _bind_template(self, asset_id, template_id, expected_template_id, verified):
         if (not record_id(asset_id) or not record_id(template_id)
                 or expected_template_id != '' and not record_id(expected_template_id)):
             raise RiskError('工具或模板记录编号无效。')
@@ -329,9 +342,11 @@ class ToolCloud:
                 return template_id
             if before != expected_template_id:
                 raise RiskError('工具的关联模板已变化，请刷新后重试。', 409)
-            template_path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
-            if not self._template_entry(self._read_record(template_path, template_id)):
-                raise RiskError('所选飞书模板尚未配置完整。', 409)
+            if template_id not in verified:
+                template_path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+                if not self._template_entry(self._read_record(template_path, template_id)):
+                    raise RiskError('所选飞书模板尚未配置完整。', 409)
+                verified.add(template_id)
             actual = self._inventory_template_id(path, asset_id)
             if actual == template_id:
                 return template_id
@@ -627,6 +642,9 @@ def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None):
             for _ in range(4):
                 if stop.is_set() or not service.workspace_sync_one():
                     break
+            bind_pending = getattr(service, 'workspace_binding_tick', None)
+            if callable(bind_pending) and not stop.is_set():
+                bind_pending()
             if deliver_reminder and not stop.is_set() and now >= next_reminder:
                 next_reminder = now + 60
                 result = service.send_building_reminders(deliver_reminder, link_for_scope=reminder_link)
