@@ -127,6 +127,30 @@ class WorkspaceTests(unittest.TestCase):
             'signature': self.signature(), 'action': 'approve',
             'items': [{'asset_id': item['id'], 'revision': item['order_revision']} for item in session['items']]})
 
+    def test_inventory_refresh_does_not_block_or_replace_existing_history(self):
+        saved = self.complete(self.open())
+        submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
+        self.approve(submitted)
+        while self.service.sync_one():
+            pass
+        draft = self.complete(self.open(operation='draft-after-archive'))
+        history = self.service.workspace_history(self.filler)
+        warning = '组织架构表中 A 楼的楼长配置冲突，请核对楼长人员字段。'
+        with self.service.connect(True) as db:
+            self.service.set_state(db, 'inventory_error', warning)
+        self.assertEqual(self.service.workspace_list(self.filler)['inventory_error'], warning)
+        with patch.object(self.cloud, 'inventory', side_effect=RiskError(warning, 503)):
+            with self.assertRaises(RiskError):
+                self.service.workspace_refresh(self.filler)
+            self.assertEqual(self.service.workspace_history(self.filler), history)
+            self.assertEqual(self.service.workspace_get(self.filler, saved['id'])['status'], 'archived')
+        self.cloud.assets[0]['brand'] = '更新后的品牌'
+        refreshed = self.service.workspace_refresh(self.filler)
+        self.assertEqual(refreshed['inventory_error'], '')
+        self.assertIn('更新后的品牌', {asset['brand'] for asset in refreshed['assets']})
+        self.assertEqual(self.service.workspace_history(self.filler), history)
+        self.assertEqual(self.service.workspace_get(self.filler, draft['id'])['items'], draft['items'])
+
     def test_submit_existing_multi_tool_draft_with_seconds_and_unassigned_reviewer(self):
         draft = self.complete(self.open())
         first, second = copy.deepcopy(draft['items'])

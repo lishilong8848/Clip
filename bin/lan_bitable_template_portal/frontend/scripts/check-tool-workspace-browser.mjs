@@ -28,13 +28,20 @@ const initialAssets = [
   { id: 'r2', name: '送检绝缘表', scope: 'A', model: 'R-100', brand: '计量品牌', external_cycle: '年度' },
 ];
 let state;
+const inventoryConflict = '组织架构表中 A 楼的楼长配置冲突，请核对楼长人员字段。';
 function reset() {
   state = { assets: clone(initialAssets), sessions: new Map(), operations: new Map(), calls: [],
-    failOpen: false, failSave: false, failReport: false, failPoll: false, failResume: false, warning: '', polls: 0 };
+    failOpen: false, failSave: false, failReport: false, failPoll: false, failResume: false, warning: '', polls: 0,
+    inventoryError: '', failRefresh: false };
 }
 reset();
 function board() {
-  return { assets: state.assets, templates, warning: state.warning, sessions: [...state.sessions.values()].map(({ items, ...rest }) => ({ ...rest, item_count: items.length })) };
+  return { assets: state.assets, templates, warning: state.warning, inventory_error: state.inventoryError,
+    sessions: [...state.sessions.values()].map(({ items, ...rest }) => ({
+      ...rest, item_count: items.length, history_items: items.map(item => ({
+        id: item.id, asset_name: item.asset.name, scope: item.asset.scope, archive_status: item.archive_status,
+      })),
+    })) };
 }
 function createSession(body) {
   const id = 'fixture-' + (state.sessions.size + 1);
@@ -87,14 +94,17 @@ const server = createServer(async (request, response) => {
         user: { open_id: 'fixture-tools', name: '本地测试人员', role: 'admin', level: 'L0', category: 'engineer', tool_management_enabled: true, modules: ['risk_inspection'] },
         allowed_scopes: ['A', 'B'], scope_options: [{ value: 'A', label: 'A楼' }, { value: 'B', label: 'B楼' }], default_scope: 'A' });
       if (pathname === '/api/health') { response.setHeader('Content-Type', 'application/json'); return response.end(JSON.stringify({ ok: true, service: 'clipflow_backend', instance_id: 'tool-workspace-fixture' })); }
-      if (pathname === '/api/tool-self-check') return ok({ month: '2026-11', orders: [], followups: [], templates: [], can_manage_templates: true, can_create_orders: true, can_download_month: true, actor_name: '测试人员' });
+      if (pathname === '/api/tool-self-check') return ok({ month: '2026-11', orders: [], followups: [], templates: [], can_manage_templates: true, can_create_orders: true, can_download_month: true, actor_name: '测试人员', inventory_error: state.inventoryError });
       if (pathname === api && request.method === 'GET') return ok(board());
       if (pathname === api + '/refresh') {
         assert.equal(request.method, 'POST'); assert.equal(raw.length, 0);
+        if (state.failRefresh) return fail(inventoryConflict, 503);
+        state.inventoryError = '';
         state.warning = '模板读取暂时不可用，已显示上次记录。';
         state.assets[0].brand = '刷新后的品牌';
         return ok(board());
       }
+      if (pathname === api + '/history') return ok({ sessions: board().sessions, history_cursor: null });
       if (pathname === api + '/open') {
         assert.equal(request.method, 'POST'); assert(body.operation_id); assert(body.asset_ids.length);
         await delay(180);
@@ -419,7 +429,23 @@ try {
   });
   await check('archived history reopens with original layouts, completion and review signatures', async () => {
     await button('返回选择').click();
-    await chooseSaved('已归档');
+    state.inventoryError = inventoryConflict;
+    state.failRefresh = true;
+    await page.reload();
+    const conflict = page.getByText(inventoryConflict, { exact: true });
+    await conflict.waitFor();
+    await button('查看办理记录').click();
+    const archivedTool = page.locator('.record-tools li').filter({ hasText: '电能质量分析仪' });
+    await archivedTool.waitFor();
+    await button('刷新').click();
+    await page.getByRole('alert').filter({ hasText: inventoryConflict }).waitFor();
+    assert.equal(await conflict.count(), 1);
+    await button('刷新记录').click();
+    await archivedTool.waitFor();
+    state.failRefresh = false;
+    await button('刷新').click();
+    await conflict.waitFor({ state: 'hidden' });
+    await archivedTool.getByRole('button', { name: '查看记录', exact: true }).click();
     await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
     await button('电能质量分析仪 · A楼').click();
     await page.getByText('已完成[ ]　未完成[√]', {exact: true}).waitFor();
@@ -445,6 +471,8 @@ try {
     assert(signedRow.fits && signedRow.signedHeight <= signedRow.unsignedHeight + 1, JSON.stringify(signedRow));
     await page.screenshot({ path: path.join(output, 'mobile-archived-320.png'), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
+    await button('返回选择').click();
+    await page.getByRole('heading', { name: '办理记录', exact: true }).waitFor();
   });
   await check('external tools share one binary report; upload failure retains file, repeat upload/submit guarded', async () => {
     await button('返回选择').click();

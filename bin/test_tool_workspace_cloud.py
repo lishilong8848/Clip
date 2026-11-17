@@ -125,6 +125,34 @@ class ToolWorkspaceCloudTests(unittest.TestCase):
         self.transport = FakeFeishu()
         self.tool = ToolCloud(self.transport)
 
+    def test_building_alias_without_leaders_does_not_conflict(self):
+        people = '楼长（借用报废审批）'
+        rows = (
+            ('A楼', {people: None, '机房经理（送检维护报废审批）': [{'id': 'ou_Manager'}]}),
+            ('南通A楼', {people: [{'id': 'ou_A1'}]}),
+            ('南通B楼', {people: [{'id': 'ou_B1'}, {'id': 'ou_B2'}]}),
+            ('B楼', {people: [{'id': 'ou_B2'}, {'id': 'ou_B1'}]}),
+            ('C楼', {}),
+            ('南通C楼', {people: [{'id': 'no_open_id'}]}),
+        )
+        for index, (name, fields) in enumerate(rows):
+            self.transport.records[ORGANIZATION, f'recOrg{index}'] = {'楼栋': name, **fields}
+        before = deepcopy(self.transport.records)
+        assets, leaders = self.tool.inventory()
+        self.assertEqual([asset['id'] for asset in assets], ['recAsset'])
+        self.assertEqual(leaders, {'A': ['ou_A1'], 'B': ['ou_B1', 'ou_B2'], 'C': []})
+        self.assertEqual(self.transport.records, before)
+
+    def test_different_leader_assignments_report_conflicting_buildings(self):
+        people = '楼长（借用报废审批）'
+        for index, (name, identity) in enumerate((
+                ('A楼', 'ou_A1'), ('南通A楼', 'ou_A2'),
+                ('南通D楼', 'ou_D1'), ('D楼', 'ou_D2'))):
+            self.transport.records[ORGANIZATION, f'recOrg{index}'] = {'楼栋': name, people: [{'id': identity}]}
+        with self.assertRaisesRegex(RiskError, 'A 楼、D 楼 的楼长配置冲突'):
+            self.tool.inventory()
+        self.assertEqual(self.transport.updates + self.transport.creates, [])
+
     def test_monthly_linked_write_rechecks_returned_id_when_search_is_delayed(self):
         order = {'id': 'order1', 'outcome': 'normal', 'due': DAY, 'actual': DAY,
                  'reason': '', 'resolution': '', 'scrap_reason': ''}

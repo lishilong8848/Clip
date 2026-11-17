@@ -1229,10 +1229,16 @@ def parameters(device):
                         reference = state_reference(matches[0]['value'], matches[0])
                 except (OSError, TypeError, KeyError, ValueError, AttributeError):
                     pass
-            rows.append({'id': f's:{index}:{name}', 'name': name,
-                         'reference': operating.get(name, reference), 'operating': name in operating,
-                         'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值',
-                         'section': index, 'mode_cell': mode_cell, 'handover': handover})
+            row = {'id': f's:{index}:{name}', 'name': name,
+                   'reference': operating.get(name, reference), 'operating': name in operating,
+                   'source_reference': value if is_state else None, 'value_type': '状态' if is_state else '数值',
+                   'section': index, 'mode_cell': mode_cell, 'handover': handover}
+            if mapping and settings and settings.get('enabled') is True and settings.get('configured_point_id'):
+                row['configured_target'] = {
+                    'template': mapping['template'], 'sheet': mapping['sheet'].strip(),
+                    'round_cells': mapping['cells'],
+                }
+            rows.append(row)
     for point in device['points']:
         if deferred_point(device, point):
             continue

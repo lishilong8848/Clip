@@ -1,6 +1,6 @@
 // A template/catalogue placeholder is not itself an enabled point configuration.
 type Point = {id:string;point_id?:string;configured_point_id?:string;enabled?:boolean|null;template?:string;sheet?:string;round_cells?:Record<string,string>;mapping_issue?:string;shared_plate_cell?:string};
-type Parameter = {id:string;point?:string;section?:number;read_only?:boolean};
+type Parameter = {id:string;point?:string;section?:number;read_only?:boolean;configured_target?:{template:string;sheet:string;round_cells:Record<string,string>}};
 type Device = {id:string;points?:Point[];sections?:{location?:string;form?:string}[];parameters?:Parameter[]};
 type Reading = {template:string;sheet:string;cell:string;device?:string;kind?:string;point_id?:string;parameter?:string;location?:string;form?:string;members?:Reading[]};
 export type InspectionVisibilityActive = {duty:{shift:string};round:number;batch?:{devices?:Device[];form_devices?:Device[]};reviews?:Record<string,{values?:Record<string,string>;inherited_states?:Record<string,unknown>}>;manual_sheet_cells?:{template:string;sheet:string;cell:string}[]|null;manual_sheet_cells_legacy?:boolean};
@@ -13,13 +13,21 @@ export function configuredInspectionPositions(active:InspectionVisibilityActive|
   // Form placeholders are visible as configured only after an explicit point binding.
   const collected=active.batch?.devices||[];
   const forms=active.batch?.form_devices||[];
-  for(const [device,formOnly] of [...collected.map(d=>[d,false] as const),...forms.map(d=>[d,true] as const)])for(const point of device.points||[]){
-    if(formOnly&&!point.configured_point_id)continue;
-    const address=point.round_cells?.[slot];
-    if(point.enabled!==true||point.mapping_issue||!point.template||!point.sheet||!address)continue;
-    if(!(device.parameters||[]).some(parameter=>parameter.point===point.id&&!parameter.read_only))continue;
-    result.add(inspectionPosition(point.template,point.sheet,address));
-    if(point.shared_plate_cell)result.add(inspectionPosition(point.template,point.sheet,point.shared_plate_cell));
+  for(const [device,formOnly] of [...collected.map(d=>[d,false] as const),...forms.map(d=>[d,true] as const)]){
+    const parameters=device.parameters||[];
+    for(const parameter of parameters){
+      const target=parameter.configured_target;
+      const address=target?.round_cells[slot];
+      if(target&&address&&!parameter.read_only)result.add(inspectionPosition(target.template,target.sheet,address));
+    }
+    for(const point of device.points||[]){
+      if(formOnly&&!point.configured_point_id)continue;
+      const address=point.round_cells?.[slot];
+      if(point.enabled!==true||point.mapping_issue||!point.template||!point.sheet||!address)continue;
+      if(!parameters.some(parameter=>parameter.point===point.id&&!parameter.read_only))continue;
+      result.add(inspectionPosition(point.template,point.sheet,address));
+      if(point.shared_plate_cell)result.add(inspectionPosition(point.template,point.sheet,point.shared_plate_cell));
+    }
   }
   return result;
 }

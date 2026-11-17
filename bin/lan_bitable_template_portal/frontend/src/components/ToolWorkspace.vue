@@ -1,7 +1,7 @@
 <template>
   <section class="tool-workspace" aria-label="工具工作台" data-v2-inline-feedback>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
-    <NAlert v-if="board?.warning" type="warning" :bordered="false" role="status">{{ board.warning }}</NAlert>
+    <NAlert v-for="warning in sourceWarnings" :key="warning" type="warning" :bordered="false" role="status">{{ warning }}</NAlert>
     <div v-if="!session && !recordsOpen" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
@@ -380,7 +380,7 @@ type Summary = { id: string; kind: Kind; status: string; revision?: number; item
   created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
   inspection?: InspectionReport; inspection_expires_on?: string; layouts?: Record<string, Layout>; report_available?: boolean; binding_pending?: boolean };
-const emit = defineEmits<{ 'asset-history': [id: string] }>();
+const emit = defineEmits<{ 'asset-history': [id: string]; 'inventory-status': [warning: string] }>();
 const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
 const reviewDates = reactive<Record<string, string>>({});
@@ -400,7 +400,7 @@ const reportAssets = computed(() => session.value?.items.filter(entry => entry.c
 const replacementTemplate = ref<string | null>(null);
 const savedItems = new Map<string, string>();
 type HistoryPage = { sessions: Summary[]; history_cursor?: { before: string; id: string } | null };
-type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: string };
+type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: string; inventory_error?: string };
 
 const api = '/api/tool-self-check/workspace';
 const existingTemplate = '__associated__';
@@ -416,6 +416,10 @@ const itemId = ref('');
 const sheetName = ref('');
 const zoom = ref(100);
 const error = ref('');
+const sourceWarnings = computed(() => [...new Set(
+  [board.value?.inventory_error, board.value?.warning]
+    .filter((warning): warning is string => !!warning && warning !== error.value),
+)]);
 const busy = ref('');
 const loading = ref(false);
 const saved = ref('');
@@ -811,6 +815,7 @@ async function readBoard(refresh = false) {
       : read(api, controller.signal)) as Board;
     if (!controller.signal.aborted) {
       board.value = data;
+      if (typeof data.inventory_error === 'string') emit('inventory-status', data.inventory_error);
       const ids = new Set(data.assets.filter(eligible).map(asset => asset.id));
       selectedIds.value = selectedIds.value.filter(id => ids.has(id));
       for (const id of Object.keys(assigned)) if (!ids.has(id)) delete assigned[id];

@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 from lan_bitable_template_portal.daily_inspection import (CN,DailyInspection,RiskError,inspection_report,
-    ROUND_LOCATION_FIELDS, configured_form_devices, parameters, review_devices,
+    ROUND_LOCATION_FIELDS, catalog_locations, configured_form_devices, display_device, parameters, review_devices,
     manual_state_key, inherit_manual_states, adopt_manual_state_overrides, state_reference)
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_daily_inspection import InspectionCloud,DAY,NIGHT
@@ -126,6 +126,31 @@ class ManualStateTests(unittest.TestCase):
                      if any(row.get('configured_point_id')==identity and row['id']==p.get('point') for row in d['points']))
         self.assertEqual(matched[1]['reference'],'△')
         self.assertIsNone(manual_state_key(*matched))
+
+    def test_frozen_svg_section_exposes_enabled_point_coordinates(self):
+        sheet = 'SVG巡检表'
+        name = '告警状态'
+        settings = {'source_kind': 'manual_status', 'value_type': '状态', 'fixed_value': '',
+                    'enabled': True, 'configured_point_id': 'local_' + '1' * 32}
+        for scope in ('D', 'E'):
+            with self.subTest(scope=scope):
+                device_name = scope + '-144-SVG-101'
+                section = {'location': sheet, 'form': sheet, 'values': {name: ''},
+                           'form_point_settings': {name: settings.copy()}}
+                device = {'id': device_name, 'scope': scope, 'name': device_name, 'profession': '电气',
+                          'sections': [section], 'points': []}
+                target = catalog_locations()[(scope + '楼', device_name, '电气', sheet, sheet, name)]
+                [parameter] = display_device(device)['parameters']
+                self.assertEqual(parameter['reference'], '√')
+                self.assertEqual(parameter['configured_target'], {
+                    'template': target['template'], 'sheet': sheet,
+                    'round_cells': {'白1': 'B7', '白2': 'B8', '夜1': 'B9', '夜2': 'B10'},
+                })
+                section['form_point_settings'][name]['enabled'] = False
+                self.assertEqual(display_device(device)['parameters'], [])
+                section['form_point_settings'].clear()
+                [placeholder] = display_device(device)['parameters']
+                self.assertNotIn('configured_target', placeholder)
 
     def test_range_status_uses_corrected_number_and_rejects_nonmatch(self):
         rules=[{'min':'-2','max':'0','status':'not_running'}, {'min':'1','max':'10','status':'normal'}]

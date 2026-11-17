@@ -314,8 +314,10 @@ class ToolWorkspaceMixin:
                     "disabled_reason": reason, "plan": plan,
                 })
             history = self._workspace_history_page(db, actor)
+            inventory_error = self.state(db, "inventory_error")
         assets.sort(key=lambda item: (item["scope"], item["name"], item["id"]))
-        return {"assets": assets, "templates": templates, "warning": warning, **history}
+        return {"assets": assets, "templates": templates, "warning": warning,
+                "inventory_error": inventory_error, **history}
 
     def _workspace_history_page(self, db, actor, before='', before_id='', *, kind='', asset_id=''):
         from .tool_management import BUILDINGS, can_scope

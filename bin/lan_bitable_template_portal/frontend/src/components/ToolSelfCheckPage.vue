@@ -37,9 +37,10 @@
             <span v-if="tab.count" class="tool-nav-count">{{ tab.count }}</span>
           </NButton>
         </nav>
-        <NAlert v-if="board?.inventory_error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
+        <NAlert v-if="view !== 'workspace' && board?.inventory_error && board.inventory_error !== error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
-          :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event" />
+          :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event"
+          @inventory-status="updateInventoryStatus" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
@@ -600,6 +601,9 @@ function refresh() {
   else if (view.value === 'workspace' && workspace.value) void workspace.value.refresh();
   else if (view.value === 'settings') void mutate(loadLibrary);
   else void loadBoard();
+}
+function updateInventoryStatus(warning: string) {
+  if (board.value) board.value = { ...board.value, inventory_error: warning };
 }
 function selectView(next: string) {
   if (next === view.value) return;

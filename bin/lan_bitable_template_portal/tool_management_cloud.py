@@ -168,15 +168,28 @@ class ToolCloud:
                 'self_cycle': plain(fields.get('维护周期')), 'external_cycle': plain(fields.get('送检周期')),
                 'self_last': source_date(fields.get('当前维护日期')), 'external_last': source_date(fields.get('当前送检日期'))})
         leaders = {}
+        conflicts = set()
         for row in self.cloud.all(self.cloud.table_path(BASE, ORGANIZATION) + '/records', user_id_type='open_id'):
             fields = row.get('fields') or {}
             scope = re.fullmatch(r'(?:南通)?([ABCDEH])楼', plain(fields.get('楼栋')))
             if not scope:
                 continue
-            if scope[1] in leaders:
-                raise RiskError(f'组织架构表中 {scope[1]} 楼重复配置，暂缓排期。', 503)
-            leaders[scope[1]] = sorted({person['id'] for person in fields.get('楼长（借用报废审批）', [])
+            building = scope[1]
+            people = fields.get('楼长（借用报废审批）')
+            if not isinstance(people, list):
+                people = []
+            assigned = sorted({person['id'] for person in people
                 if isinstance(person, dict) and re.fullmatch(r'ou_[A-Za-z0-9]+', str(person.get('id', '')))})
+            previous = leaders.setdefault(building, [])
+            if not assigned:
+                continue
+            if previous and assigned != previous:
+                conflicts.add(building)
+            else:
+                leaders[building] = assigned
+        if conflicts:
+            buildings = '、'.join(f'{scope} 楼' for scope in sorted(conflicts))
+            raise RiskError(f'组织架构表中 {buildings} 的楼长配置冲突，请核对楼长人员字段。', 503)
         return result, leaders
 
     def _read_record(self, path, identity, **kwargs):
