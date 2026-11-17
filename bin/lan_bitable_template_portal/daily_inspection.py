@@ -28,8 +28,9 @@ from upload_event_module.services.http_client import FeishuHTTPError
 from .daily_inspection_form_fields import CHILLER_SHEET, form_header, remark_positions
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
-from .daily_inspection_operating import (OPERATING_SOURCE, apply_operating_marks, collect_operating_marks, compressor_running_marks,
-                                         remember_pump_pressures, unbound_operating_cells)
+from .daily_inspection_operating import (AUXILIARY_STATE_CELLS, OPERATING_SOURCE, apply_operating_marks, auxiliary_levels,
+                                         collect_operating_marks, compressor_running_marks, remember_pump_pressures,
+                                         unbound_operating_cells, unit_pump_marks)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
                                         original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
                                         cell_exemption_selection, form_sheet_key, with_cell_exemptions,
@@ -1246,11 +1247,16 @@ def parameters(device):
         mode_cell = (str(point.get('sheet', '')).strip() == CHILLER_SHEET
                      and bool(re.fullmatch(r'[K-P][789]', point.get('cell') or '')))
         reference = state_reference(point['value'], point) if is_state else point.get('handover_value', point['value'])
-        rows.append({'id': 'p:' + point['id'], 'name': point['name'],
-                     'reference': point.get('operating_value', reference), 'operating': 'operating_value' in point,
-                     'source_reference': (point.get('raw_value') if point.get('raw_value') is not None else point['value']) if is_state else None,
-                     'value_type': '状态' if is_state else '数值',
-                     'point': point['id'], 'read_only': point.get('enabled') is False, 'mode_cell': mode_cell})
+        row = {'id': 'p:' + point['id'], 'name': point['name'],
+               'reference': point.get('operating_value', reference), 'operating': 'operating_value' in point,
+               'source_reference': (point.get('raw_value') if point.get('raw_value') is not None else point['value']) if is_state else None,
+               'value_type': '状态' if is_state else '数值',
+               'point': point['id'], 'read_only': point.get('enabled') is False, 'mode_cell': mode_cell}
+        if (device.get('form_only') and is_state and point.get('enabled') is True and point.get('round_cells')
+                and not point.get('mapping_issue')
+                and str(point.get('sheet') or '').strip() == CHILLER_SHEET and point.get('cell') in AUXILIARY_STATE_CELLS):
+            row['configured_target'] = {key: point[key] for key in ('template', 'sheet', 'round_cells')}
+        rows.append(row)
     for parameter in rows:
         if manual_state_binding(device, parameter):
             parameter.update(reference='√', default_state=True)
@@ -1577,6 +1583,11 @@ def worksheet_review_versions(active, scope, profession):
     policy = {key: cells for key, cells in active.get('cell_exemptions', {}).items() if key in sheets}
     if policy:
         version.append(policy)
+    batch = active['batches'][scope]
+    levels = batch.get('auxiliary_levels')
+    if levels and any(template == batch.get('operating_template') and sheet.strip() == CHILLER_SHEET
+                      for template, sheet in targets):
+        version.append(levels)
     return version
 
 
@@ -1977,7 +1988,18 @@ class DailyInspection:
         with self.locks[scope]:
             state = self.load(scope)
             active = state.get('active')
-            if not active or 'completed' in active or self.source_locked(active):
+            if not active or 'completed' in active:
+                return state
+            old_batch = active['batches'].get(scope) or {}
+            old_marks = old_batch.get('operating_marks', {})
+            marks = unit_pump_marks(old_marks)
+            if marks != old_marks and old_batch.get('operating_template'):
+                apply_operating_marks(scope, old_batch, marks, template=old_batch['operating_template'],
+                                      saved_pressures=state.get('pump_pressures'))
+                active['review_version'] = active.get('review_version', 0) + 1
+                invalidate_professions(active, '本轮水泵运行状态已补齐，请重新核对。', scope)
+                self.store.put_document(NS, 'building:' + scope, state)
+            if self.source_locked(active):
                 return state
             stored = active.get('live_fp') or {}
             try:
@@ -1993,14 +2015,13 @@ class DailyInspection:
             fp = {'batch': live.get('batch'), 'config_fp': live.get('config_fp')}
             if stored.get('batch') == fp['batch'] and stored.get('config_fp') == fp['config_fp']:
                 return state
-            old_batch = active['batches'].get(scope) or {}
             if not self.live_batch_belongs_to_round(active, live):
-                if old_batch and fp['batch'] and fp['batch'] != active.get('handover_checked_batch'):
-                    active['handover_checked_batch'] = fp['batch']
+                if old_batch and fp['batch'] and fp != active.get('handover_checked_source'):
+                    active['handover_checked_source'] = fp
                     if self.fill_handover_points(scope, active, old_batch, live):
                         inherit_manual_states(state, active, scope)
                         active['review_version'] = active.get('review_version', 0) + 1
-                        invalidate_professions(active, '本轮压力或制冷模式已更新，请重新核对。', scope)
+                        invalidate_professions(active, '本轮暖通补充读数已更新，请重新核对。', scope)
                     self.store.put_document(NS, 'building:' + scope, state)
                 return state
             if (old_batch.get('batch') == fp['batch']
@@ -2292,11 +2313,12 @@ class DailyInspection:
         if not int(start.timestamp() * 1000) <= sealed <= int(dt.datetime.now(CN).timestamp() * 1000):
             return False
         start_ms, slot_ms, end_ms = int(start.timestamp() * 1000), int(when.timestamp() * 1000), int(end * 1000)
-        marks, template = {}, ''
+        marks = {}
+        template = next((item['name'] for item in original_templates()
+                         if item['scope'] == scope and item['profession'] == '暖通'), '')
         operating_start = start_ms
-        if sealed == destination.get('batch'):
-            template = next((item['name'] for item in original_templates()
-                             if item['scope'] == scope and item['profession'] == '暖通'), '')
+        same_batch = sealed == destination.get('batch')
+        if same_batch:
             # The producer uses the first 15-minute reading in its report. The
             # 12:00 report can legitimately contain an 11:45 sample. Only use
             # that allowance in a sealed batch whose source files belong here.
@@ -2305,13 +2327,23 @@ class DailyInspection:
             marks = collect_operating_marks(scope, source, template, operating_start, end_ms, sealed, plain)
         changed = apply_handover_readings(scope, destination, source['rows'], start_ms, slot_ms, end_ms, sealed,
                                           saved_pressures=saved_pressures, include_modes=not marks)
+        if not same_batch:
+            # A completed batch from within the provisional round may add a missing
+            # level without replacing its original chiller or electrical snapshot.
+            if template and sealed < end_ms:
+                levels = auxiliary_levels(scope, source, template, slot_ms, end_ms, sealed)
+                existing = destination.get('auxiliary_levels', {})
+                if levels != existing:
+                    destination['auxiliary_levels'] = levels
+                    changed = True
+            return changed
         if not template:
             return changed
         if marks:
             destination.pop('handover_tower_samples', None)
         else:
             marks = {**{f'{column}5': '√' for column in 'KLMNOP'}, **destination.get('operating_marks', {})}
-        marks = compressor_running_marks(scope, source, template, operating_start, end_ms, sealed, marks)
+        marks = unit_pump_marks(compressor_running_marks(scope, source, template, operating_start, end_ms, sealed, marks))
         if changed or destination.get('operating_marks') != marks or destination.get('operating_template') != template:
             apply_operating_marks(scope, destination, marks, template=template, saved_pressures=saved_pressures)
             return True
@@ -3191,8 +3223,15 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                 if view['sheet'].strip() == CHILLER_SHEET:
                     occupied = {entry['cell'] for entry in entries
                                 if (entry['template'], entry['sheet']) == (view['template'], view['sheet'])}
-                    operating_cells = unbound_operating_cells(
-                        marks, view['template'], layouts[view['template'], view['sheet']], occupied)
+                    layout = layouts[view['template'], view['sheet']]
+                    operating_cells = list(unbound_operating_cells(marks, view['template'], layout, occupied))
+                    # The original snapshot keeps its existing level readings. A
+                    # verified supplementary value can only fill an empty cell.
+                    if levels := batch.get('auxiliary_levels'):
+                        level_occupied = {entry['cell'] for entry in entries
+                                          if (entry['template'], entry['sheet']) == (view['template'], view['sheet'])
+                                          and (entry['value'] not in ('', None) or entry.get('read_only'))}
+                        operating_cells.extend(unbound_operating_cells(levels, view['template'], layout, level_occupied))
                     overlay_views([view], operating_cells)
                     view['filled'].update(item['cell'] for item in operating_cells)
                     inspector, stamp = chiller_inspection_details(active, view['template'], view['sheet'])
@@ -3364,7 +3403,8 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
         if active and summary['round_id'] == active['id']:
             batch = active['batches'][scope]
             template = batch.get('operating_template')
-            known = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {})}
+            known = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {}),
+                     **batch.get('auxiliary_levels', {})}
             if template and known:
                 # Configured sensor readings and verified operating marks are
                 # both eligible for display. Catalogue placeholders alone are not.

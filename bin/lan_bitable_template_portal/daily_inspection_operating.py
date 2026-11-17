@@ -8,6 +8,8 @@ from .daily_inspection_original import catalog_locations, cell_excluded
 
 
 OPERATING_SOURCE = 'inspection_operating'
+AUXILIARY_STATE_CELLS = frozenset(f'{col}{row}' for col in 'KL' for row in range(17, 22))
+AUXILIARY_LEVEL_CELLS = frozenset(('K22', 'L22'))
 _BASIC = re.compile(r'[B-G](?:[4-9]|1[0124579]|2[1456])')
 _RIGHT = re.compile(r'[K-P](?:[45789]|1[0-5]|2[456])')
 _STATE = re.compile(r'(?:[B-G](?:21|26)|[K-P](?:[45789]|26))')
@@ -131,6 +133,47 @@ def compressor_running_marks(scope, batch, template, start, end, sealed, marks):
         for cell in [*(f'{left}{line}' for line in _NUMERIC_ROWS), *(f'{right}{line}' for line in range(10, 16))]:
             updated.pop(cell, None)
     return updated
+
+
+def unit_pump_marks(marks):
+    """Use the same-number unit only when a primary or cooling pump has no feedback."""
+    updated = dict(marks)
+    for left, right in zip('BCDEFG', 'KLMNOP'):
+        unit = marks.get(f'{right}4')
+        if unit not in ('√', '△'):
+            continue
+        for state_row, pressure_rows in ((21, (17, 19)), (26, (24, 25))):
+            status_cell = f'{left}{state_row}'
+            if updated.get(status_cell) in ('√', '△'):
+                continue
+            updated[status_cell] = unit
+            for row in pressure_rows:
+                address = f'{left}{row}'
+                if unit == '△':
+                    updated[address] = '/'
+                else:
+                    updated.pop(address, None)
+    return updated
+
+
+def auxiliary_levels(scope, batch, template, start, end, sealed):
+    """Select verified auxiliary level readings from this building and round."""
+    candidates = {}
+    for device in batch.get('devices', ()):
+        if device.get('scope') != scope or device.get('profession') != '暖通':
+            continue
+        for point in device['points']:
+            cell, sampled = point.get('cell'), point.get('sampled')
+            if (cell not in AUXILIARY_LEVEL_CELLS or point.get('template') != template
+                    or str(point.get('sheet') or '').strip() != CHILLER_SHEET
+                    or point.get('enabled') is not True or point.get('mapping_issue')
+                    or not point.get('round_cells') or len(point['round_cells']) != 4
+                    or set(point['round_cells'].values()) != {cell}):
+                continue
+            value = pressure_value(point.get('value'))
+            valid = type(sampled) is int and start <= sampled < end and sampled <= sealed and value
+            candidates.setdefault(cell, []).append(value if valid else '')
+    return {cell: values[0] for cell, values in candidates.items() if len(values) == 1 and values[0]}
 
 
 def remember_pump_pressures(state, active, edits):

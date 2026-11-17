@@ -1,5 +1,6 @@
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from openpyxl import load_workbook
@@ -38,6 +39,70 @@ def scope_fixture(scope):
 
 
 class HandoverInspectionTests(unittest.TestCase):
+    def test_primary_and_cooling_follow_unit_only_without_pump_feedback(self):
+        from lan_bitable_template_portal.daily_inspection_operating import unit_pump_marks
+
+        marks = unit_pump_marks({'K4': '√', 'L4': '△', 'B17': '', 'B26': '△', 'B24': '/',
+                                 'C21': '√', 'K26': '', 'L26': '√'})
+        self.assertEqual(marks['B21'], '√')
+        self.assertNotIn('B17', marks)
+        self.assertEqual([marks[cell] for cell in ('B26', 'B24', 'C21', 'C26', 'C24', 'K26', 'L26')],
+                         ['△', '/', '√', '△', '/', '', '√'])
+        self.assertNotIn('D21', marks)
+        self.assertEqual(unit_pump_marks(marks), marks)
+
+    def test_auxiliary_status_defaults_are_exposed_for_the_current_workbook(self):
+        for scope in 'DE':
+            forms = inspection.supplemental_form_devices(scope)
+            device = next(d for d in forms if any(p['cell'] == 'K17' and
+                          p['sheet'].strip() == inspection.CHILLER_SHEET for p in d['points']))
+            point = next(p for p in device['points'] if p['cell'] == 'K17')
+            parameter = next(p for p in inspection.parameters(device) if p.get('point') == point['id'])
+            self.assertEqual(parameter['reference'], '√')
+            self.assertEqual(parameter['configured_target']['round_cells'], dict.fromkeys(('白1','白2','夜1','夜2'), 'K17'))
+
+    def test_opening_snapshot_is_supplemented_before_start_only(self):
+        import datetime as dt
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+
+        root = self.enterContext(tempfile.TemporaryDirectory())
+        store = LanPortalStateStore(Path(root) / 'state.sqlite3')
+        service = inspection.DailyInspection(store, None, scheduled=True)
+        duty = {'scope': 'D', 'date': '2026-11-14', 'shift': '白'}
+        template, _, original = scope_fixture('D')
+        ts = lambda hour, minute: int(dt.datetime(2026, 11, 14, hour, minute,
+                                                   tzinfo=inspection.CN).timestamp() * 1000)
+        original.update(batch=ts(9, 54), rows=[{'record_id': 'recInitial', 'fields': {'源文件时间': ts(9, 45)}}])
+        active = service.new_round({}, duty, 1, {'D': original}, inspection.SYSTEM_INSPECTION_ACTOR,
+                                   dt.datetime.fromtimestamp(ts(9, 54) / 1000, inspection.CN))
+        active['worksheet_mode'] = True
+        store.put_document(inspection.NS, 'building:D', {'active': active, 'history': []})
+
+        def batch(sealed, sampled, value):
+            point = {'cell': 'K22', 'value': value, 'sampled': sampled, 'enabled': True, 'template': template,
+                     'sheet': inspection.CHILLER_SHEET, 'round_cells': dict.fromkeys(('白1','白2','夜1','夜2'), 'K22')}
+            device = {'scope': 'D', 'profession': '暖通', 'points': [point]}
+            return {'batch': sealed, 'rows': [{'fields': {'源文件时间': sampled}}], 'devices': [device]}
+
+        service.source_cache['D'] = {'batch': batch(ts(10, 33), ts(10, 10), '19.30')}
+        state = service.sync_active_live('D', cached_only=True)
+        current = state['active']
+        self.assertEqual(current['batches']['D']['batch'], ts(9, 54))
+        self.assertEqual(current['batches']['D']['auxiliary_levels'], {'K22': '19.30'})
+        self.assertEqual(service.sync_active_live('D', cached_only=True)['active']['review_version'],
+                         current['review_version'])
+        _, report = service.active_report_content(current, 'D')
+        values = {entry['cell']: entry['value'] for entry in report['extra_cells']}
+        self.assertEqual(values['K22'], '19.30')
+        service.source_cache['D'] = {'batch': batch(ts(12, 0), ts(11, 59), '21.00')}
+        self.assertEqual(service.sync_active_live('D', cached_only=True)['active']['batches']['D']['auxiliary_levels'],
+                         {'K22': '19.30'})
+        current['source_locked'] = True
+        store.put_document(inspection.NS, 'building:D', state)
+        service.source_cache['D'] = {'batch': batch(ts(11, 0), ts(10, 50), '20.00')}
+        self.assertEqual(service.sync_active_live('D', cached_only=True)['active']['batches']['D']['auxiliary_levels'],
+                         {'K22': '19.30'})
+
     def test_compressor_current_above_twenty_only_uses_same_round_matching_unit(self):
         book, _, batch = scope_fixture('D')
         from lan_bitable_template_portal.daily_inspection_operating import compressor_running_marks
