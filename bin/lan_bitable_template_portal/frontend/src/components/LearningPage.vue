@@ -28,7 +28,7 @@
     <div v-else-if="tab !== 'sharing' && viewMode === 'practice' && !learner && identityIssue" class="empty"><AlertCircle :size="30" /><strong>尚未关联个人身份</strong><span>{{ identityIssue || '无法进行个人答题，请与管理员核对人员目录。' }}</span></div>
 
     <template v-else>
-      <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" @open="openLearning" @refresh="refreshView" />
+      <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" :exemption-date="boot.daily_exemption?.resume_date" @open="openLearning" @refresh="refreshView" />
       <LearningSharing v-else-if="tab === 'sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty = $event" @busy="busy = $event" />
       <LearningCompletion v-else-if="tab === 'completion'" :scope="viewMode === 'overview' ? scope : ''" :person-id="learner?.id" :can-view-buildings="canViewBuildings" :refresh-key="completionRefresh" @open-paper="openCompletionPaper" />
       <template v-else-if="tab === 'today' || (reading && ['review', 'history'].includes(tab))">
@@ -43,13 +43,14 @@
           </div>
           <div v-if="tab === 'today' && viewMode === 'practice' && boot.can_answer" class="actions">
             <div class="view-switch" role="group" aria-label="学练方式"><button :class="{ active: studyMode === 'daily' }" :aria-pressed="studyMode === 'daily'" :disabled="busy || loading" @click="switchStudyMode('daily')">每日题单</button><button :class="{ active: studyMode === 'practice' }" :aria-pressed="studyMode === 'practice'" :disabled="busy || loading" @click="switchStudyMode('practice')">自主练习</button></div>
-            <button v-if="studyMode === 'practice' || !paper?.questions?.length" class="primary" :disabled="busy || loading" @click="studyMode === 'daily' ? continueLearning() : startSelfPractice()"><Loader2 v-if="busy || loading" :size="16" class="spin" /><BookOpen v-else-if="studyMode === 'daily'" :size="16" /><Shuffle v-else :size="16" />{{ studyMode === 'daily' ? '打开每日题单' : '开始自主练习' }}</button>
+            <button v-if="studyMode === 'practice' || (!boot.daily_exemption && !paper?.questions?.length)" class="primary" :disabled="busy || loading" @click="studyMode === 'daily' ? continueLearning() : startSelfPractice()"><Loader2 v-if="busy || loading" :size="16" class="spin" /><BookOpen v-else-if="studyMode === 'daily'" :size="16" /><Shuffle v-else :size="16" />{{ studyMode === 'daily' ? '打开每日题单' : '开始自主练习' }}</button>
           </div>
         </div>
         <div v-if="tab === 'today'" class="actions" role="note"><span class="muted">此处显示本题单进度；每日完成统计包含当班自主练习的有效首答，复习不重复计数。</span><button :disabled="busy || loading" @click="switchTab('completion')">查看每日完成</button></div>
         <div v-if="paper?.legacy" class="muted read-only"><Eye :size="16" />旧楼栋题单 · 只读历史，不计入个人画像</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
+        <div v-else-if="tab === 'today' && studyMode === 'daily' && boot.daily_exemption && !paper" class="empty"><BookOpen :size="30" /><strong>入职首月免做</strong><span>{{ boot.daily_exemption.resume_date }} 起按排班安排每日题单。</span><button @click="switchStudyMode('practice')">自主练习</button></div>
         <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>{{ studyMode === 'practice' ? '尚未开始自主练习' : '今日暂无可学习题目' }}</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : studyMode === 'practice' ? '可开始新的自主练习，每轮随机生成15题。' : '每日题单未发布或有效题目不足，可切换到自主练习。' }}</span></div>
         <div v-else-if="current" class="practice-layout">
           <aside class="question-rail" aria-label="题号导航">
@@ -145,11 +146,16 @@
               <span class="shift-result-label">{{ shiftStatus(shift.key).label || '发送结果尚未就绪' }}</span>
               <time>{{ boot.delivery_status?.date || boot.today }}</time>
               <span v-if="shiftStatus(shift.key).expected">已发送 {{ shiftStatus(shift.key).sent }} / {{ shiftStatus(shift.key).expected }} 人</span>
+              <span v-if="shiftStatus(shift.key).exempt">首月免做 {{ shiftStatus(shift.key).exempt }} 人</span>
             </div>
             <p v-if="shiftStatus(shift.key).failed" class="shift-failed-names">发送失败：{{ (shiftStatus(shift.key).issues || []).filter((person: Dict) => person.status === 'failed').map((person: Dict) => person.name).join('、') }}</p>
             <details v-if="shiftStatus(shift.key).issues?.length" class="shift-delivery-issues">
               <summary>发送异常 {{ shiftStatus(shift.key).failed || 0 }} 人 · 待发送或核对 {{ shiftStatus(shift.key).pending || 0 }} 人</summary>
               <ul><li v-for="(person, index) in shiftStatus(shift.key).issues" :key="index"><strong>{{ person.name }}<span v-if="person.scope"> · {{ person.scope }}楼</span></strong><span>{{ person.reason }}</span></li></ul>
+            </details>
+            <details v-if="shiftStatus(shift.key).entry_date_issues?.length" class="shift-delivery-issues">
+              <summary>入职日期待核对 {{ shiftStatus(shift.key).entry_date_issues.length }} 人</summary>
+              <ul><li v-for="(person, index) in shiftStatus(shift.key).entry_date_issues" :key="index"><strong>{{ person.name }}<span v-if="person.scope"> · {{ person.scope }}楼</span></strong><span>{{ person.reason }}</span></li></ul>
             </details>
           </div>
         </div>
@@ -806,6 +812,7 @@ async function loadView(): Promise<void> {
       const data = await requestLearning(readOptions,`/papers?${query({ today: 1, mode: studyMode.value })}`);
       if (token !== epoch) return;
       date.value = data.today || date.value;
+      if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
       const p = data.items?.[0];
       const nextPaper = p ? (p.questions ? p : await requestLearning(readOptions,`/papers/${encodeURIComponent(p.id)}`)) : null;
       if (token !== epoch) return;
@@ -924,8 +931,9 @@ async function loadTodayPaper(): Promise<void> {
     const data = await requestLearning(learningOptions, `/papers?` + query({ today: 1, mode: studyMode.value }));
     if (token !== epoch) return;
     date.value = data.today || date.value;
+    if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
     let p = data.items?.[0] || null;
-    if (!p && studyMode.value === 'daily' && data.published && boot.value.can_answer === true) {
+    if (!p && studyMode.value === 'daily' && !boot.value.daily_exemption && data.published && boot.value.can_answer === true) {
       p = await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value.id });
     }
     if (token !== epoch) return;
@@ -1037,6 +1045,7 @@ async function checkToday(): Promise<void> {
   try {
     const data = await requestLearning(learningOptions, `/papers?${query({ today: 1, mode: studyMode.value, refresh: 1 })}`);
     if (disposed || token !== epoch || tab.value !== "today" || busy.value || loading.value) return;
+    if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
     const day = data.today || date.value;
     const changed = day !== date.value || data.items?.[0]?.id !== paper.value?.id;
     if (changed) { saveDraft(); date.value = day; paper.value = data.items?.[0] || null; index.value = 0; hydrateQuestion(); }

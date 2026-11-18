@@ -15,12 +15,12 @@ const browser=await chromium.launch({headless:true});
 const errors=[],writes=[];
 let bound=false;
 const title='B楼手填过滤器检查';
-const details=()=>`<form id="lite-notice-form" data-action="update" data-detail-mode="ongoing">
+const details=()=>`<form id="lite-notice-form" data-action="${bound?'start':'update'}" data-detail-mode="ongoing">
   ${Object.entries({scope:'B',work_type:'maintenance',notice_type:'维保通告',active_item_id:'active-manual',target_record_id:'rec-manual',source_record_id:bound?'rec-month':'',source_month:'10月',site_photo_count:'1'}).map(([key,value])=>`<input type="hidden" name="${key}" value="${value}">`).join('')}
   <input type="checkbox" name="building_codes" checked value="B">
   <label><span>名称</span><input name="title" value="${title}" required></label>
   <label><span>进度</span><textarea name="progress">现场进行中</textarea></label>
-  <button name="submit_action" value="update"></button><button name="submit_action" value="end"></button>
+  ${bound?'<button name="submit_action" value="start"></button>':''}<button name="submit_action" value="update"></button><button name="submit_action" value="end"></button>
   </form>`;
 const ok=(route,data)=>route.fulfill({json:{ok:true,data}});
 try{
@@ -80,6 +80,8 @@ try{
  await binding.getByRole('button',{name:'确认关联',exact:true}).click();
  await page.getByRole('button',{name:'确认绑定',exact:true}).click();
  await binding.getByText('已关联计划',{exact:true}).first().waitFor();
+  await page.getByRole('button',{name:'预览并确认更新',exact:true}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'预览并确认开始',exact:true}).count(),0,'binding preserves the user-selected update even if a stale source proposes start');
  await manual.getByText('源表事项',{exact:true}).waitFor();
  assert.deepEqual(writes,['/api/notice-identity/bind'],'binding reuses the existing API and never resends the notice');
  assert.equal(await binding.locator('.n-select').count(),0,'successful association collapses the picker');

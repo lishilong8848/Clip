@@ -3,7 +3,11 @@
     <header v-if="workspaceV2" class="v2-home-header"><h2>{{ management ? '学习管理' : '个人学习' }}</h2><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
     <header :class="{ 'v2-home-desktop-header': workspaceV2 }"><div><span class="eyebrow">{{ management ? '学习管理' : '我的学习' }}</span><h2>{{ management ? '安排学习，跟进完成情况' : `${person?.name || '欢迎回来'}，继续今天的学习` }}</h2><p>{{ management ? '发布、题库与人员进度集中管理。' : '每日题单与当班自主练习一起计入完成情况。' }}</p></div><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
     <template v-if="!management">
-      <div class="learning-today">
+      <div v-if="exemptionDate" class="learning-today">
+        <div><h3>入职首月免做</h3><p>{{ exemptionDate }} 起按排班安排每日题单。</p></div>
+        <div class="home-task-actions"><button class="primary" :disabled="loading" @click="emit('open','practice')">自主练习<ChevronRight :size="18" /></button></div>
+      </div>
+      <div v-else class="learning-today">
         <div><span class="eyebrow">{{ data.today_summary?.task_label || '当班学练' }}</span><h3>{{ loading ? '正在读取学习进度' : failed ? '学习进度暂未更新' : completed ? '当班学习已完成' : total ? '完成今天的学习任务' : selfProgress?.activity_answered ? '今天已有学习记录' : '今天还没有必答题单' }}</h3><p v-if="failed">暂时无法读取最新进度，请重试；也可直接打开题单核对。</p><p v-else-if="total">已答 <strong>{{ answered }}</strong> / {{ total }} 题，{{ completed ? '可以继续练习或复习错题。' : `还需完成 ${Math.max(0,total-answered)} 题。` }}</p><p v-else-if="!loading"><template v-if="selfProgress?.activity_answered">今日已有效首答 {{ selfProgress.activity_answered }} 题；</template>可以继续自主练习，也可以查看已发布的资料练习。</p><progress v-if="total && !failed" :value="Math.min(answered,total)" :max="total" aria-label="今日学练完成进度" /></div>
         <div class="home-task-actions"><button class="primary" :disabled="loading" @click="emit('open','today')">{{ completed ? '查看每日题单' : answered ? '继续每日题单' : '打开每日题单' }}<ChevronRight :size="18" /></button><button :disabled="loading" @click="emit('open','completion')">查看每日完成</button></div>
       </div>
@@ -16,7 +20,7 @@
 import {computed} from 'vue';
 import {BookOpen,ChevronRight,RotateCcw,History,ChartNoAxesCombined,Settings,FileText,Users,MessageSquare,CheckCircle2,RefreshCw} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
-const props=defineProps<{data:Dict;person?:Dict|null;date:string;loading:boolean;failed?:boolean;management?:boolean;isAdmin?:boolean}>();
+const props=defineProps<{data:Dict;person?:Dict|null;date:string;loading:boolean;failed?:boolean;management?:boolean;isAdmin?:boolean;exemptionDate?:string}>();
 const workspaceV2=document.documentElement.classList.contains('workspace-v2');
 const emit=defineEmits<{open:[value:string];refresh:[]}>();
 const selfProgress=computed(()=>props.data.people?.find((row:Dict)=>row.person_id===props.person?.id)?.today);

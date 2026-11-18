@@ -127,6 +127,28 @@ class WorkspaceTests(unittest.TestCase):
             'signature': self.signature(), 'action': 'approve',
             'items': [{'asset_id': item['id'], 'revision': item['order_revision']} for item in session['items']]})
 
+    def test_followup_removal_hides_the_same_workbench_item_only(self):
+        saved = self.complete(self.open(), ('repair', 'normal'))
+        submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
+        self.approve(submitted)
+        while self.service.sync_one():
+            pass
+        order = self.service.list(self.leader)['followups'][0]
+        self.assertEqual(order['workspace_id'], saved['id'])
+        self.assertFalse(order['can_remove_followup'])
+        repairing = next(item for item in self.service.workspace_history(self.leader)['sessions'][0]['history_items']
+                         if item['order_id'] == order['id'])
+        self.assertFalse(repairing['can_delete'])
+        result = self.service.action(self.leader, order['id'], 'repaired', {'revision': order['revision'], 'reason': '试验通过'})
+        while self.service.sync_one():
+            pass
+        self.service.action(self.leader, order['id'], 'remove-followup', {'revision': result['revision']})
+        self.service = self.restart()
+        self.assertFalse(self.service.list(self.leader)['followups'])
+        history = self.service.workspace_history(self.leader)['sessions'][0]['history_items']
+        self.assertEqual([item['id'] for item in history], ['recTool1'])
+        self.assertEqual(self.service.detail(self.leader, order['id'])['outcome'], 'repaired')
+
     def test_inventory_refresh_does_not_block_or_replace_existing_history(self):
         saved = self.complete(self.open())
         submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
@@ -246,7 +268,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(notify())
         self.assertEqual(calls, [selected['open_id']])
 
-    def test_two_tool_cards_are_batched_and_scrap_requires_two_distinct_managers(self):
+    def test_two_tools_share_one_card_per_manager_and_first_approval_finishes_both(self):
         from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant
         from bin.lan_bitable_template_portal.tool_review_cards import send_scrap_review_one
 
@@ -297,13 +319,15 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(any(element.get('img_key') == 'img_fixture' and element.get('preview') is True
                             for element in elements))
         self.assertTrue(any('检查时间' in element.get('text', {}).get('content', '') for element in elements))
+        self.assertTrue(any('任一位同意' in element.get('text', {}).get('content', '') for element in elements))
         ids = [entry['order_id'] for entry in pending['items']]
         self.assertFalse(approve(out[0], self.leader['open_id'])['ok'])
-        self.assertIn('2 项等待', approve(out[0])['toast'])
-        self.assertEqual([self.service.detail(self.filler, identity)['outcome'] for identity in ids], ['scrap', 'scrap'])
-        self.assertIn('2 项等待', approve(out[0])['toast'])
-        self.assertIn('2 项已批准', approve(out[1])['toast'])
-        self.assertEqual([self.service.detail(self.filler, identity)['tool_status_label'] for identity in ids], ['报废', '报废'])
+        self.assertIn('2 项已批准报废', approve(out[0])['toast'])
+        finished = [self.service.detail(self.filler, identity) for identity in ids]
+        self.assertEqual([detail['tool_status_label'] for detail in finished], ['报废', '报废'])
+        self.assertIn('2 项已批准报废', approve(out[0])['toast'])
+        self.assertIn('2 项已处理', approve(out[1])['toast'])
+        self.assertEqual([self.service.detail(self.filler, identity) for identity in ids], finished)
 
     def test_lost_card_receipt_after_partial_web_review_replays_original_card(self):
         from bin.lan_bitable_template_portal.tool_review_cards import apply, send_scrap_review_one
@@ -374,9 +398,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(attempts.count(mei_card), 2)
         self.assertEqual(len(receipts), 3)
         self.assertEqual(self.cloud.review_photo.call_count, 2)
-        self.assertIn('1 项等待', click(mei_card))
-        self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrap')
-        self.assertIn('1 项已批准报废', click(manager_cards[ma['open_id']]))
+        self.assertIn('1 项已批准报废', click(mei_card))
+        self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrapped')
+        self.assertIn('2 项已处理', click(manager_cards[ma['open_id']]))
         self.assertEqual(self.service.detail(self.filler, first['order_id'])['outcome'], 'rejected')
         self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrapped')
 

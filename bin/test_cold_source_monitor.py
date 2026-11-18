@@ -120,11 +120,14 @@ class ColdSourceTests(unittest.TestCase):
         self.store.put_document(monitor.NS,'job:other',{'id':'other','row':{**row,'scope':'D'},'created_at':99,'status':'sent'})
         with patch.object(monitor,'snapshot',return_value=[row,{**row,'id':'rec2','scope':'D'}]), \
              patch.object(monitor,'allowed_modules',return_value=['daily']):
-            response=TestClient(app).get('/api/cold-source-monitor?page=2')
+            response=TestClient(app).get('/api/cold-source-monitor?page=6')
+            with patch.object(runtime.state_store,'list_documents',side_effect=AssertionError('状态页不应读推送历史')):
+                status_only=TestClient(app).get('/api/cold-source-monitor?status_only=1')
         self.assertEqual(response.status_code,200)
         data=response.json()['data']
         self.assertEqual((len(data['items']),data['history_total'],len(data['history'])),(1,55,5))
         self.assertEqual(data['items'][0]['scope'],'E')
+        self.assertEqual(status_only.json()['data'],{'items':[row]})
 
 
 if __name__=='__main__': unittest.main()

@@ -28,6 +28,7 @@ DESTINATIONS = {'maintenance': '工具办理台账', 'inspection': '送检存档
 MAX_REPORT = 12 * 1024 * 1024
 MAX_ORDER_DELETIONS = 200
 MANUAL_DELETE = '手动删除工单'
+HIDE_FOLLOWUP = '删除已归档处置记录'
 PLAN_RESET = '月度清理，允许重新生成'
 MAX_ORDER_CREATIONS = 200
 SCRAP_APPROVERS = {'14258': '梅冰冰', '18871': '马进宇'}
@@ -260,6 +261,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             db.execute('''CREATE UNIQUE INDEX IF NOT EXISTS tool_work_orders_legacy_month
                 ON tool_work_orders(month,asset_id,kind) WHERE workspace_direct=0''')
         self._init_tool_workspace()
+        self._finish_existing_scrap_approvals()
 
     def _migrate_tool_ledger(self, db):
         db.execute("""UPDATE tool_work_orders SET repair_started_at=COALESCE(submitted_at,'')
@@ -849,6 +851,30 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                          'can_approve': row['outcome'] == 'scrap' and any(
                              vote['employee_no'] == voter and not vote['decision'] for vote in votes), 'sync': sync}
 
+    def _can_remove_followup(self, db, actor, row, sync):
+        return (row['outcome'] in {'repaired', 'scrapped', 'rejected'} and row['submitted_at']
+                and not any(job['state'] != 'done' for job in sync)
+                and can_scope(actor, row['scope'])
+                and (self.administrator(actor) or self.is_building_leader(db, actor, row['scope'])
+                     or self.owns_workspace_item(actor, row)))
+
+    def remove_followup(self, actor, identity, revision):
+        with self._workspace_open_lock, self.connect(True) as db:
+            row = self._work(db, actor, identity)
+            info = self.work_info(db, actor, row)
+            if not self._can_remove_followup(db, actor, row, info['sync']):
+                raise RiskError('仅可删除获授权、已处理完成且没有待同步任务的办理记录。', 409)
+            if db.execute('SELECT 1 FROM tool_work_audit WHERE order_id=? AND action=?', (identity, HIDE_FOLLOWUP)).fetchone():
+                return {'deleted': True}
+            self.check_revision(row, revision)
+            sessions = db.execute("SELECT session_id FROM tool_workspace_items WHERE order_id=? AND deleted_at=''", (identity,)).fetchall()
+            db.execute("UPDATE tool_workspace_items SET deleted_at=? WHERE order_id=? AND deleted_at=''",
+                       (clock().isoformat(timespec='seconds'), identity))
+            for session in sessions:
+                self._workspace_bump(db, session['session_id'])
+            self.audit(db, identity, actor, HIDE_FOLLOWUP, '保留飞书台账与归档文件')
+            return {'deleted': True}
+
     def list(self, actor, month=''):
         self.access(actor)
         if not self.available_to(actor):
@@ -862,7 +888,15 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 WHERE month=? OR outcome IN('repair','scrap','scrapped','rejected') OR repair_started_at<>'' OR
                     (?=? AND month<? AND submitted_at IS NULL AND outcome='')
                 ORDER BY month DESC,scope,due,kind""", (month, month, current, current)).fetchall()
-            visible = [self.work_info(db, actor, row) for row in rows if self.visible(db, actor, row)]
+            hidden_followups = {row[0] for row in db.execute('SELECT order_id FROM tool_work_audit WHERE action=?', (HIDE_FOLLOWUP,))}
+            visible, followups = [], []
+            for row in rows:
+                if not self.visible(db, actor, row):
+                    continue
+                info = self.work_info(db, actor, row)
+                visible.append(info)
+                if row['id'] not in hidden_followups and (row['outcome'] in {'repair', 'scrap', 'scrapped', 'rejected'} or info['from_repair']):
+                    followups.append(info | {'can_remove_followup': bool(self._can_remove_followup(db, actor, row, info['sync']))})
             admin = self.administrator(actor)
             all_scopes = admin and all(can_scope(actor, scope) for scope in BUILDINGS)
             archive = db.execute('SELECT created_at,needs_refresh FROM tool_work_archives WHERE month=?', (month,)).fetchone()
@@ -883,7 +917,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                         archive_status = 'settled'
             return {'month': month, 'orders': month_orders, 'carryovers': carryovers,
                     'plan_count': plan_count, 'waiting_sync': waiting_sync, 'archive_status': archive_status,
-                    'followups': [row for row in visible if row['outcome'] in {'repair', 'scrap', 'scrapped', 'rejected'} or row['from_repair']],
+                    'followups': followups,
                     'can_create_orders': bool(self.order_creation_scopes(db, actor)),
                     'templates': templates, 'can_manage_templates': admin, 'can_download_month': all_scopes,
                     'archived_at': archive[0] if archive and all_scopes else None,
@@ -946,6 +980,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             raise RiskError('工单已变化，请重新打开核对后再操作。', 409)
 
     def action(self, actor, identity, action, body, *, require_report_check=False):
+        if action == 'remove-followup':
+            return self.remove_followup(actor, identity, body.get('revision'))
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
             if action in {'approve', 'reject'}:
@@ -1127,28 +1163,55 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             self.check_revision(row, body.get('revision'))
         note = text(body.get('reason', ''), 1000, action == 'reject')
         now = clock().isoformat(timespec='seconds')
+        if action == 'approve':
+            self._validate_scrap_approval(db, row)
         db.execute('''UPDATE tool_scrap_votes SET decision=?,at=?,note=?
             WHERE order_id=? AND request_revision=? AND employee_no=?''',
             (action, now, note, row['id'], vote['request_revision'], vote['employee_no']))
-        both = action == 'approve' and all(item['decision'] == 'approve' or item['employee_no'] == vote['employee_no'] for item in votes)
-        if both:
-            self.scrap_request(db, row, {'quantity': row['scrap_qty'], 'reason': row['scrap_reason'],
-                                         'scrap_photos': json.loads(row['scrap_photos'])})
-        if action == 'reject':
-            outcome, status = ('repair' if row['repair_started_at'] else 'rejected'), 'rejected'
-        elif both:
-            outcome, status = 'scrapped', 'approved'
-        else:
-            outcome, status = 'scrap', 'pending_pair'
-        db.execute('UPDATE tool_work_orders SET outcome=?,scrap_status=?,resolved_at=?,revision=revision+1 WHERE id=?',
-                   (outcome, status, '' if outcome == 'scrap' else now, row['id']))
-        if both:
-            self.cancel_scrapped_siblings(db, row, actor)
+        self._finish_scrap(db, row, actor, action, now)
         self.audit(db, row['id'], actor, '通过报废审批' if action == 'approve' else '驳回报废审批', note)
-        self.enqueue(db, row['id'], 'maintenance')
-        db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
         updated = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (row['id'],)).fetchone()
         return self.work_info(db, actor, updated)
+
+    def _validate_scrap_approval(self, db, row):
+        self.scrap_request(db, row, {'quantity': row['scrap_qty'], 'reason': row['scrap_reason'],
+                                     'scrap_photos': json.loads(row['scrap_photos'])})
+
+    def _finish_scrap(self, db, row, actor, action, now):
+        if action == 'reject':
+            outcome, status = ('repair' if row['repair_started_at'] else 'rejected'), 'rejected'
+        else:
+            outcome, status = 'scrapped', 'approved'
+        changed = db.execute("""UPDATE tool_work_orders SET outcome=?,scrap_status=?,resolved_at=?,revision=revision+1
+            WHERE id=? AND outcome='scrap'""", (outcome, status, now, row['id']))
+        if not changed.rowcount:
+            return
+        if action == 'approve':
+            self.cancel_scrapped_siblings(db, row, actor)
+        self.enqueue(db, row['id'], 'maintenance')
+        db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
+
+    def _finish_existing_scrap_approvals(self):
+        # The old workflow kept a confirmed manager's vote while the order was still pending.
+        with self.connect(True) as db:
+            waiting = db.execute("""SELECT w.*, v.employee_no, v.at AS vote_at FROM tool_work_orders w
+                JOIN tool_scrap_votes v ON v.order_id=w.id
+                WHERE w.outcome='scrap' AND v.decision='approve'
+                  AND v.request_revision=(SELECT MAX(request_revision) FROM tool_scrap_votes WHERE order_id=w.id)
+                ORDER BY v.at,w.id""").fetchall()
+            for row in waiting:
+                name = SCRAP_APPROVERS.get(row['employee_no'])
+                receipt = db.execute("""SELECT actor FROM tool_work_audit
+                    WHERE order_id=? AND name=? AND action='通过报废审批' AND at>=? ORDER BY id LIMIT 1""",
+                    (row['id'], name, row['vote_at'])).fetchone()
+                if not receipt or not receipt['actor']:
+                    continue
+                try:
+                    self._validate_scrap_approval(db, row)
+                except RiskError:
+                    continue
+                self._finish_scrap(db, row, {'id': receipt['actor'], 'name': name}, 'approve',
+                                   clock().isoformat(timespec='seconds'))
 
     def scrap_review_batch(self, actor, entries, action, note):
         self.access(actor)

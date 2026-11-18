@@ -19,6 +19,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 
 from .portal_service import PERMISSION_DIRECTORY_APP_TOKEN as APP_TOKEN, PERMISSION_DIRECTORY_TABLE_ID as TABLE_ID, PortalError
+from .learning_onboarding import ENTRY_DATE_FIELD, normalize_entry_date
 
 PASSWORD_FIELD = "密码"
 IDENTITY_FIELD = "身份证号"
@@ -129,6 +130,7 @@ class PersonnelPasswordLogin:
                 "specialties": [item for item in assignments if item in PERMISSION_DIRECTORY_SPECIALTY_LABELS],
                 "login_ids": [open_id] if re.fullmatch(r"ou_[A-Za-z0-9]+", open_id) else [],
                 "password_revision": "" if initial or not stored else hashlib.sha256(stored.encode("utf-8")).hexdigest()}
+        item["entry_date"] = normalize_entry_date(fields.get(ENTRY_DATE_FIELD))
         if isinstance(fields.get("员工姓名"), list) and len(fields["员工姓名"]) > 1:
             item.update(selectable=False, disabled_reason="人员记录关联多个飞书账号，请管理员核对")
         return item
@@ -139,14 +141,28 @@ class PersonnelPasswordLogin:
             if force or self.snapshot.get("schema") != 4 or self.snapshot.get("app_id") != app_id or time.time() - float(self.snapshot.get("loaded_at") or 0) >= 300:
                 service = self.service()
                 records, token, seen = {}, "", set()
+                field_names = [*FIELDS, ENTRY_DATE_FIELD]
+
+                def read_page(params, fields):
+                    return service._request_payload("POST",
+                        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records/search",
+                        context="姓名密码登录人员目录", headers=service._auth_headers(), params=params,
+                        json_payload={"field_names": fields})
+
                 for _ in range(20):
                     params = {"page_size": 500, "user_id_type": "open_id"}
                     if token:
                         params["page_token"] = token
-                    payload = service._request_payload("POST",
-                        f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records/search",
-                        context="姓名密码登录人员目录", headers=service._auth_headers(), params=params,
-                        json_payload={"field_names": FIELDS})
+                    try:
+                        payload = read_page(params, field_names)
+                    except PortalError:
+                        if token or ENTRY_DATE_FIELD not in field_names:
+                            raise
+                        payload = {}
+                    if not token and payload.get("code") != 0 and ENTRY_DATE_FIELD in field_names:
+                        # A table without the optional learning date must still support login.
+                        field_names = FIELDS
+                        payload = read_page(params, field_names)
                     data = payload.get("data") or {}
                     if payload.get("code") != 0 or not isinstance(data.get("items"), list) or not isinstance(data.get("has_more"), bool):
                         raise PasswordLoginError("人员名单读取失败，请稍后重试。", 503)

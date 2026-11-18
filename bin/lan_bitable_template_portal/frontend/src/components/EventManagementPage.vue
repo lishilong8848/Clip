@@ -283,6 +283,7 @@ const props = defineProps<{
   scopeOptions: ScopeOption[];
   refreshNonce?: number;
   isAdmin?: boolean;
+  focusRecordId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -319,11 +320,20 @@ const statusFilter = ref("");
 const levelFilter = ref("");
 const sourceFilter = ref("");
 const specialtyFilter = ref("");
-const initialDetailRequested = new URLSearchParams(window.location.search).get("detail") === "1";
+const initialDetailRequested = !!props.focusRecordId || new URLSearchParams(window.location.search).get("detail") === "1";
 const initialDetailScope = initialDetailRequested ? normalizeScope(props.scope) : "";
 const detailScope = ref(initialDetailScope);
 const detailRequested = ref(initialDetailRequested);
 const selectedEvent = ref<LooseDict | null>(null);
+let focusedRecord = '';
+watch([events, () => props.focusRecordId], () => {
+  if (!props.focusRecordId || focusedRecord === props.focusRecordId) return;
+  const match = events.value.find(item => eventRecordId(item) === props.focusRecordId || item.id === props.focusRecordId);
+  if (match) {
+    focusedRecord = props.focusRecordId;
+    selectedEvent.value = match;
+  }
+});
 const selectedEventDetailTab = ref<"summary" | "timeline" | "fields">("summary");
 const eventTransferBusy = ref(false);
 type EventMetricKey = "repairing" | "i2plus" | "i3";

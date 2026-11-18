@@ -260,7 +260,8 @@ class DeliveryStatusTests(unittest.TestCase):
         result = self.read()
         self.assertEqual(set(result), {'date', 'shifts'})
         for shift in result['shifts']:
-            self.assertEqual(set(shift), {'shift', 'publish_time', 'state', 'label', 'expected', 'sent', 'failed', 'pending', 'issues'})
+            self.assertEqual(set(shift), {'shift', 'publish_time', 'state', 'label', 'expected', 'sent', 'failed', 'pending', 'issues',
+                                          'exempt', 'entry_date_issues'})
             for key in ('expected', 'sent', 'failed', 'pending'):
                 self.assertIs(type(shift[key]), int)
             for issue in shift['issues']:

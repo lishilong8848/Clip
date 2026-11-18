@@ -10,13 +10,16 @@ const point=(id,cell,enabled=true)=>({id,point_id:id,enabled,template:'D.xlsx',s
 const active={id:'round1',duty:{scope:'D',date:'2026-11-06',shift:'白'},round:1,pending:false,review_version:0,manual_sheet_cells:[],reviews:{},batch:{
   devices:[{id:'device',points:[point('p1','B2'),point('p2','C2')],sections:[{location:'D-178',form:'原表'}],parameters:[{id:'p:p1',point:'p1'},{id:'p:p2',point:'p2'},{id:'s:0:未配置',section:0}]}],
   form_devices:[{id:'supplement',points:[point('original-supplement','F2')],sections:[],parameters:[{id:'p:original-supplement',point:'original-supplement'}]}]}};
-const template={scope:'D',name:'D.xlsx',profession:'电气',sheets:[{name:'原表',rows:[['名称','已配置','已配置空值','未配置','手工格','状态'],['本次',null,null,null,null,null],['历史',null,null,null,null,null]],merges:[]}]};
+const template={scope:'D',name:'D.xlsx',profession:'电气',sheets:[{name:'原表',rows:[['名称','已配置','已配置空值','未配置','手工格','状态','固定填斜杠'],['本次',null,null,null,null,null,null],['历史',null,null,null,null,null,null]],merges:[],slash_cells:['G2','G3']}]};
 const report={scope:'D',date:'2026-11-06',draft_key:'test-only',can_edit_history:true,template_version:'test',original_templates:[template],rounds:[
   {round_id:'round1',shift:'白',round:1,version:0,status:'进行中',original_cells:[
     {template:'D.xlsx',sheet:'原表',cell:'B2',value:'230',device:'device',kind:'point',point_id:'p1',parameter:'电压'},
     {template:'D.xlsx',sheet:'原表',cell:'D2',value:'42',device:'device',kind:'section',location:'D-178',form:'原表',parameter:'未配置'},
-    {template:'D.xlsx',sheet:'原表',cell:'F2',value:'√',device:'supplement',kind:'point',point_id:'original-supplement',parameter:'运行状态',value_type:'状态'}]},
-  {id:'old',round_id:'old',shift:'白',round:2,version:'v1',status:'已归档',original_cells:[{template:'D.xlsx',sheet:'原表',cell:'B3',value:'210'}]}]};
+    {template:'D.xlsx',sheet:'原表',cell:'F2',value:'√',device:'supplement',kind:'point',point_id:'original-supplement',parameter:'运行状态',value_type:'状态'}],
+    extra_cells:[{template:'D.xlsx',sheet:'原表',cell:'G2',value:'旧手填值'}]},
+  {id:'old',round_id:'old',shift:'白',round:2,version:'v1',status:'已归档',original_cells:[
+    {template:'D.xlsx',sheet:'原表',cell:'B3',value:'210'},
+    {template:'D.xlsx',sheet:'原表',cell:'G3',value:'旧测点值'}]}]};
 const dist=path.resolve(process.env.INSPECTION_LEGACY_DIR || path.join(root,'dist'));
 const server=createServer(async(request,response)=>{
  const url=new URL(request.url,'http://localhost');
@@ -55,6 +58,11 @@ try{
   await page.goto(entry);await page.locator('td[data-address="B2"]').waitFor();
   const cell=address=>page.locator(`td[data-address="${address}"]`);
   await page.waitForFunction(()=>document.querySelector('td[data-address="B2"]')?.textContent?.trim()==='230');
+  for(const address of ['G2','G3']){
+   assert.equal((await cell(address).innerText()).trim(),'/');
+   await cell(address).click();
+   assert.equal(await page.getByRole('textbox',{name:'编辑 '+address}).count(),0);
+  }
   assert.equal((await cell('C2').innerText()).trim(),'待填写');
   assert.equal((await cell('D2').innerText()).trim(),'');assert.equal((await cell('F2').innerText()).trim(),'');
   assert.equal((await cell('B3').innerText()).trim(),'210');

@@ -361,7 +361,6 @@ class OpenClawToolAgent:
             if remaining <= 0:
                 raise TimeoutError
             async with asyncio.timeout(remaining), AsyncExitStack() as stack:
-                await self.engine.wait_warmup(self.actor, self.emit)
                 self._fallback_attempt = 0
                 self._routing_failure = ''
                 if self.profile.get('_automatic_selection') is True:
@@ -848,9 +847,101 @@ class LighthouseOpenClaw(LighthouseModel):
         self.closing = False
         self.gateways = {}
 
+    async def answer(self, actor, turn, history, request, emit, authorize, context, *, warm_only=False):
+        if not warm_only and self._simple_question(actor, turn, history):
+            return await self._direct_reply(actor, turn, history, emit, authorize)
+        return await super().answer(actor, turn, history, request, emit, authorize, context, warm_only=warm_only)
+
+    @staticmethod
+    def _simple_question(actor, turn, history):
+        from .lighthouse_ai import FOLLOW_UP, MODEL_QUESTION, is_business_query, private_identifier
+        from .lighthouse_artifacts import file_generation_requested
+        from .lighthouse_basics import (assistant_capability_request, calculation_request, current_user_request,
+                                        public_capability_request, time_request)
+        from .lighthouse_knowledge import company_question
+        from .lighthouse_knowledge_answer import company_request
+        from .lighthouse_message_delivery import feishu_delivery_requested
+        from .lighthouse_model import workpartner_question
+        from .lighthouse_public import WEATHER_EXPLANATION, WEATHER_INTENT
+        from .lighthouse_queries import business_domains, query_refinement
+
+        question = turn['question']
+        if (not question.strip() or question.lstrip().startswith('/') or actor.get('_scheduled_task')
+                or any(turn.get(key) for key in ('file_ids', 'preview_file', 'commands', 'submitted_commands',
+                    '_command_context', '_research_mode', '_private_request', '_clarification_reply', '_read_only_phase'))
+                or turn.get('prompt') not in (None, '', question)
+                or company_request(turn) is not None or company_question(question)
+                or private_identifier(question) or MODEL_QUESTION.fullmatch(question)):
+            return False
+        if (is_business_query(question) or business_domains(question) or workpartner_question(question)
+                or feishu_delivery_requested(question) or file_generation_requested(question)
+                or calculation_request(question) is not None or time_request(question) or current_user_request(question)
+                or assistant_capability_request(question) or public_capability_request(question)
+                or WEATHER_INTENT.search(question) and not WEATHER_EXPLANATION.search(question)):
+            return False
+        if re.search(r'本(?:公司|单位|项目|系统|平台|楼|机房)|我们(?:公司|项目|楼)|公司资料|多维表|飞书|钉钉|巡检|检验报告'
+                     r'|工具管理|个人工作台|冷源运行状态|EOP场景'
+                     r'|重启|部署|附件|这份(?:文件|文档|表格)|资料包|文档工作区|长期记忆|记住|忘记'
+                     r'|定时|提醒|每天|每周|每月|闹钟|日程|搜索|查找|查询|查一下|帮我查|联网|上网|最新|实时'
+                     r'|出处|引用|参考资料|权威来源|现行标准|法规|诊断|处方|投资建议|流量图|流程图|图表'
+                     r'|朗读|播报|读给我听|语音|执行代码|运行代码|https?://|(?:今天|今日|当前).{0,16}(?:新闻|要闻|资讯|股价|汇率)'
+                     r'|\b(?:search|look up|latest|schedule|remind|cite)\b', question, re.I):
+            return False
+        if history and (FOLLOW_UP.search(question) or query_refinement(question)
+                        or re.match(r'^(?:那|继续|详细点|再说|还有)', question)):
+            return (history[-1].get('answer_review') or {}).get('reason') == 'direct_general'
+        return True
+
+    async def _direct_reply(self, actor, turn, history, emit, authorize):
+        from .lighthouse_ai import LighthouseAssistant
+        from .lighthouse_context import reply_preference_hint
+
+        async def current_actor():
+            current = await authorize()
+            if (current['id'] != actor['id']
+                    or set(actor.get('allowed_scopes', actor['scopes'])) - set(current['scopes'])
+                    or set(actor.get('modules', [])) - set(current.get('modules', []))):
+                raise AssistantError('登录权限已变化，请重新提问。', 403)
+            return current
+
+        profile = turn['_profile']
+        instructions = ('你是灯塔助手。用用户使用的语言直接、简洁地回答普通问题。'
+                        '本轮没有工具或公司资料，不能声称查过系统、核实现场信息或完成操作。'
+                        '涉及具体现场、内部规定或仍需核验的要求时，说明需要哪些信息，勿编造。'
+                        + reply_preference_hint(turn.get('_reply_preferences')))
+        messages = [{'role': 'system', 'content': instructions}]
+        for old in history[-3:]:
+            if ((old.get('answer_review') or {}).get('reason') == 'direct_general'
+                    and old.get('status') == 'completed' and old.get('answer')
+                    and not old.get('sources') and not old.get('file_ids') and LighthouseAssistant._allowed(old, actor)):
+                messages.extend(({'role': 'user', 'content': safe_text(old['question'], limit=1000)},
+                                 {'role': 'assistant', 'content': safe_text(old['answer'], limit=1800)}))
+        messages.append({'role': 'user', 'content': safe_text(turn['question'])})
+        model = self.assistant.model_for(await current_actor())
+        await emit('status', {'label': '正在等待模型回答', 'phase': 'model'})
+        try:
+            answer = await asyncio.wait_for(asyncio.to_thread(model.complete, messages,
+                profile={**profile, 'reasoning': False}, max_tokens=1200, timeout=25), timeout=28)
+        except asyncio.TimeoutError:
+            raise AssistantError('模型服务响应超时，原问题已保留，可直接重试。', 504,
+                                 category='general_model_timeout') from None
+        except AssistantError as exc:
+            if exc.category == 'timeout':
+                raise AssistantError('模型服务响应超时，原问题已保留，可直接重试。', 504,
+                                     category='general_model_timeout') from None
+            if exc.category == 'model_connection':
+                raise AssistantError('模型服务连接失败或响应超时，原问题已保留，可直接重试。', 502,
+                                     category='general_model_connection') from None
+            raise
+        await current_actor()
+        await emit('text', {'delta': answer})
+        return {'answer': answer, 'sources': [],
+                'answer_review': {'status': 'live_general', 'reason': 'direct_general', 'repairs': 0}}
+
     def gateway_ready(self, actor):
         cached = self.gateways.get(account_key(execution_key(actor)))
-        return bool(cached and cached[1].connected and not cached[0].get('stopped'))
+        return bool(cached and cached[1].connected and not cached[0].get('stopped')
+                    and (cached[0].get('process') is None or cached[0]['process'].poll() is None))
 
     async def keep_gateway(self, actor, item, client):
         key = account_key(execution_key(actor))
@@ -876,7 +967,8 @@ class LighthouseOpenClaw(LighthouseModel):
                 await entry[1].close()
         for old_key, cached_entry in tuple(self.gateways.items()):
             old_item, client = cached_entry
-            if old_item.get('stopped') or not client.connected:
+            if (old_item.get('stopped') or not client.connected
+                    or old_item.get('process') is not None and old_item['process'].poll() is not None):
                 if self.gateways.get(old_key) is cached_entry:
                     self.gateways.pop(old_key, None)
                     await client.close()
@@ -920,22 +1012,9 @@ class LighthouseOpenClaw(LighthouseModel):
                 await asyncio.gather(*tasks, return_exceptions=True)
 
     def queue_warmup(self, actor):
-        key = account_key(execution_key(actor))
-        existing = self.manager.accounts.get(key)
-        if self.closing or key in self.warming or (existing and existing.get('process') and existing['process'].poll() is None):
-            return
-        # Keep the queued warmup burst bounded independently: an explicit
-        # positive manager.maximum is honored (existing injected-cap tests), and
-        # the unlimited sentinel (0) falls back to the small WARMUP_CONCURRENCY.
-        maximum = getattr(self.manager, 'maximum', 0) or 0
-        cap = maximum if maximum > 0 else self.WARMUP_CONCURRENCY
-        if len(self.warming) >= cap or time.monotonic() - self.warm_attempts.get(key, -60) < 60:
-            return
-        self.warm_attempts[key] = time.monotonic()
-        self.warm_errors.pop(key, None)
-        task = asyncio.create_task(self._warmup(copy.deepcopy(actor)))
-        self.warming[key] = task
-        task.add_done_callback(lambda done: self.warming.pop(key, None) if self.warming.get(key) is done else None)
+        # Compatibility hook for login callers. Native capabilities are prepared
+        # only for a turn that actually needs them, with its real tool allowlist.
+        return None
 
     async def _warmup(self, actor):
         key = account_key(execution_key(actor))
@@ -961,18 +1040,13 @@ class LighthouseOpenClaw(LighthouseModel):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            startup_log('startup_failed', account=key[:8], error=type(exc).__name__, last_stage='warmup')
+            startup_log('startup_failed', account=key[:8], error=type(exc).__name__, last_stage=getattr(exc, 'category', '') or 'warmup')
             self.warm_errors[key] = exc if isinstance(exc, AssistantError) else AssistantError('助手后台准备未完成，请重试原消息。', 503)
             logging.getLogger(__name__).warning('Assistant warmup failed: account=%s type=%s', key, type(exc).__name__)
 
     async def wait_warmup(self, actor, emit):
-        key = account_key(execution_key(actor))
-        task = self.warming.get(key)
-        if task and task is not asyncio.current_task():
-            await emit('status', {'label': '正在准备助手，原消息已保留'})
-            await asyncio.shield(task)
-            if key in self.warm_errors:
-                raise self.warm_errors[key]
+        # A prior optional warmup failure is not the current request's outcome.
+        return None
 
     def make_agent(self, profile, *, actor, turn, emit, **kwargs):
         return OpenClawToolAgent(self, actor, turn, emit, profile, **kwargs)

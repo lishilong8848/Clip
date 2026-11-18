@@ -15,6 +15,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from clipflow_backend.api_models import WorkbenchActionRequest
 from lan_bitable_template_portal.lighthouse_api import PortalAPICatalog
 from lan_bitable_template_portal.lighthouse_model import LighthouseModel
+from openclaw_service.assistant.lighthouse_ai import AssistantError
+from openclaw_service.assistant.lighthouse_knowledge_answer import company_request
+from openclaw_service.assistant.lighthouse_openclaw import LighthouseOpenClaw
 from openclaw_service.assistant import lighthouse_public as public
 from upload_event_module.services import http_client as tls_policy
 import test_lighthouse_stream as stream_tests
@@ -35,6 +38,80 @@ class FastPathTests(unittest.IsolatedAsyncioTestCase):
 
     async def authorize(self):
         return self.actor
+
+    async def submit_ups_question(self):
+        payload = stream_tests.StreamTests.payload(self, 'UPS的基本原理是什么')
+        await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+        await stream_tests.StreamTests.finish(self)
+
+    async def test_ups_question_bypasses_unavailable_gateway_and_knowledge(self):
+        manager = Mock(acquire=AsyncMock(side_effect=AssertionError('Startup gate entered')), close=AsyncMock())
+        engine = LighthouseOpenClaw(self.portal, bridge_url=lambda: '', manager=manager)
+        self.runtime.engine = engine
+        self.portal.get_knowledge = Mock(side_effect=AssertionError('Company search entered'))
+        self.model.complete.return_value = 'UPS在市电中断时由电池经逆变器继续向负载供电。'
+        with patch('openclaw_service.assistant.lighthouse_query_intent.resolve_query_intent',
+                   AsyncMock(side_effect=AssertionError('Classifier entered'))):
+            await self.submit_ups_question()
+        state = await self.runtime.conversation(self.actor)
+        self.assertEqual(state['turns'][-1]['status'], 'completed')
+        self.assertIn('逆变器', state['turns'][-1]['answer'])
+        self.model.complete.assert_called_once()
+        self.assertFalse(self.model.complete.call_args.kwargs['profile']['reasoning'])
+        self.assertEqual(self.model.complete.call_args.kwargs['timeout'], 25)
+        manager.acquire.assert_not_awaited()
+        self.portal.get_knowledge.assert_not_called()
+        self.assertEqual(self.reads, [])
+
+    async def test_general_provider_failure_keeps_its_own_error(self):
+        manager = Mock(acquire=AsyncMock(), close=AsyncMock())
+        engine = LighthouseOpenClaw(self.portal, bridge_url=lambda: '', manager=manager)
+        self.runtime.engine = engine
+        self.model.complete.side_effect = AssistantError('模型服务响应超时', 504, category='timeout')
+        await self.submit_ups_question()
+        result = (await self.runtime.conversation(self.actor))['turns'][-1]
+        self.assertEqual(result['status'], 'failed')
+        self.assertIn('模型服务响应超时', result['error'])
+        manager.acquire.assert_not_awaited()
+
+    def test_explicit_company_command_and_special_queries_keep_existing_routes(self):
+        cases = (
+            ('D楼本周有哪些未结束的维修', {}),
+            ('查询公司资料：UPS巡检要求', {}),
+            ('UPS巡检要求', {'commands': [{'kind': 'tool', 'id': 'company_documents'}]}),
+            ('按照文件解释这个参数', {'file_ids': ['fixture']}),
+            ('联网查一下UPS最新规格', {}),
+            ('每天早上九点提醒我填表', {}),
+            ('明天南通天气怎么样', {}),
+        )
+        for question, fields in cases:
+            with self.subTest(question=question):
+                self.assertFalse(LighthouseOpenClaw._simple_question(self.actor, {'question': question, **fields}, []))
+        self.assertEqual(company_request({'question': '查询公司资料：UPS巡检要求'}), 'UPS巡检要求')
+        self.assertEqual(company_request({'question': '/查询公司资料 UPS巡检要求'}), 'UPS巡检要求')
+        self.assertIsNone(company_request({'question': '我们的UPS巡检要求是什么'}))
+
+    async def test_company_lookup_requires_an_explicit_choice_for_each_question(self):
+        self.actor['modules'] = ['assistant', 'knowledge']
+        engine = LighthouseModel(self.portal, model_factory=no_model)
+        self.portal.get_knowledge = Mock(side_effect=AssertionError('Unexpected company search'))
+        emit = AsyncMock()
+        evidence = {'answer': '已按原文核对。', 'sources': []}
+        with patch('openclaw_service.assistant.lighthouse_query_intent.resolve_query_intent',
+                   AsyncMock(return_value={'kind': 'knowledge'})) as classify, patch(
+                   'openclaw_service.assistant.lighthouse_knowledge_answer.answer_company',
+                   AsyncMock(return_value=evidence)) as search:
+            question = '我们的UPS巡检要求是什么'
+            result = await engine.answer(self.actor, {'question': question}, [], self.request, emit, self.authorize, {})
+            self.assertIn('请选择「查询公司资料」', result['answer'])
+            search.assert_not_awaited()
+            self.assertFalse(classify.call_args.kwargs['include_document_context'])
+            turn = {'question': 'UPS巡检要求', 'submitted_commands': [{'kind': 'tool', 'id': 'company_documents'}]}
+            result = await engine.answer(self.actor, turn, [], self.request, emit, self.authorize, {})
+            self.assertEqual(result['answer'], evidence['answer'])
+            self.assertEqual(search.await_args.args[3], 'UPS巡检要求')
+            self.assertEqual(classify.await_count, 1)
+        self.portal.get_knowledge.assert_not_called()
 
     async def test_weather_skill_and_failure_do_not_call_model_or_business(self):
         weather = Mock(weather=AsyncMock(return_value={'ok': False, 'note': 'Source unavailable'}))

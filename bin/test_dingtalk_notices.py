@@ -43,6 +43,32 @@ class DingTalkTests(unittest.TestCase):
     def run_again(self,event_id):
         self.store.mark_outbox_event(event_id,'pending',count_attempt=False);self.service.process(self.runtime)
 
+    def test_message_first_robots_send_in_parallel_and_archive_later_does_not_resend(self):
+        self.service.save({'revision': 0, 'robots': [self.robot(), self.robot('b')]})
+        targets = self.service.snapshot('设备调整', {'buildings': ['D楼'],
+            'dingtalk_robot_ids': [row['id'] for row in self.service.config()['robots']]})
+        operation_id = 'notice_action:early-update'
+        self.store.begin_notice_remote_operation(operation_id=operation_id, operation_type='update',
+            request={'action': 'update', 'dingtalk_robot_ids': [row['id'] for row in targets]})
+        self.store.mark_notice_remote_operation(operation_id, status='executing', result={
+            'message_first': True, 'robot_notice_type': '设备调整',
+            'robot_payload': {'text': '【设备调整】状态：更新\n隔离正文'}, 'dingtalk_targets': targets})
+        event = self.store.list_outbox_events(CHANNEL)[0]['id']
+        barrier = threading.Barrier(2)
+        def send(*args, **kwargs):
+            barrier.wait(timeout=5)
+            return {'state': 'sent', 'reason': ''}
+        with patch.object(self.transport, 'send', side_effect=send) as transport:
+            self.service.process(self.runtime)
+            self.assertEqual(transport.call_count, 2)
+            operation = self.store.get_notice_remote_operation(operation_id)
+            self.assertEqual(operation['status'], 'executing')
+            self.assertTrue(operation['result']['dingtalk_first_sent_at'])
+            self.store.mark_notice_remote_operation(operation_id, status='completed', target_record_id='rec-isolated')
+            self.run_again(event)
+            self.assertEqual(transport.call_count, 2)
+        self.assertEqual(self.store.get_notice_remote_operation(operation_id)['status'], 'completed')
+
     def test_multiple_robots_remark_secret_masking_and_config_conflict(self):
         result=self.service.save({'revision':0,'robots':[self.robot(),self.robot('b')]})
         public=json.dumps(result,ensure_ascii=False)

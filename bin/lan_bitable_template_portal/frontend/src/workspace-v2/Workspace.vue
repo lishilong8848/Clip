@@ -25,6 +25,8 @@
           </template>
         </SidebarNavigation>
         <main v-if="!impersonationBlocked" class="v2-main">
+          <NButton v-if="loggedIn && workbenchReturn" text type="primary" class="v2-workbench-return" data-v2-navigation
+            style="min-height:44px" @click="navigate(workbenchReturn)"><ArrowLeft :size="16" />返回工作台</NButton>
           <NAlert v-if="authError" type="error" :bordered="false" class="v2-alert">{{ authError }} <NButton text type="primary" @click="loadAuth">重新读取</NButton></NAlert>
           <NAlert v-if="operationError" type="error" :bordered="false" closable role="alert" class="v2-alert" @close="operationError=''">{{ operationError }}</NAlert>
           <div v-if="checking" class="v2-loading"><NSpin size="medium" /><span>正在检查登录状态</span></div>
@@ -37,7 +39,7 @@
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
-            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event)" />
+            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event,view==='home')" />
             <section v-else-if="view === 'my' && route.pathname === '/'" class="v2-my">
               <header class="v2-profile-heading"><NAvatar :size="48" :style="{background:'var(--v2-nav-active)',color:'var(--v2-nav-text)'}"><UserRound :size="25" /></NAvatar><div class="v2-profile-name"><h1>{{ user.name }}</h1><p>个人信息</p></div>
                 <div v-if="!desktopNavigation" class="v2-mobile-profile-tools">
@@ -84,7 +86,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
 import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
-import { Activity, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
+import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, zhihangDataModule } from './modules';
@@ -202,6 +204,11 @@ const authDefaultScope=ref('');
 const noticeDefaultScope=computed(()=>scopes.value.some(s=>s.value==='ALL')?'ALL':scopes.value.some(s=>s.value===authDefaultScope.value)?authDefaultScope.value:scopes.value[0]?.value||'');
 function scopeFor(module:string){return moduleScope(module,scopes.value,rememberedScopes.value[scopeFamily(module)]||'',scopeFamily(module)==='notices'?noticeDefaultScope.value:authDefaultScope.value);}
 const currentScope = computed(() => route.value.pathname === '/cabinet-power' && route.value.searchParams.get('view') === 'overview' && !route.value.searchParams.has('scope') ? '' : route.value.searchParams.get('scope') || scopeFor(activeModule.value));
+const workbenchReturn = computed(() => {
+  const scope = route.value.searchParams.get('workbench_return');
+  if (scope === null) return '';
+  return '/?'+new URLSearchParams({view:'home',...(scopes.value.some(option=>option.value===scope)?{scope}:{})});
+});
 provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value),changeScope});
 watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(scopeOwner(user.value)&&value&&scopes.value.some(s=>s.value===value)){rememberedScopes.value={...rememberedScopes.value,[scopeFamily(activeModule.value)]:value};saveScopeMemory(user.value,rememberedScopes.value);}},{flush:'sync'});
 const noticeActive = computed(() => loggedIn.value && !checking.value && !denied.value && route.value.pathname === '/workbench-lite');
@@ -274,10 +281,11 @@ function selectMenu(key: string) {
  const module = permittedModules.value.find(m => m.id === key);
  if (module) navigate(moduleUrl(module, scopeFor(module.id)));
 }
-function openWorkspaceModule(target:string){
+function openWorkspaceModule(target:string,fromHome=false){
  const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);
- const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','token','tool_session','tool_order','tool_view'].some(key=>url.searchParams.has(key));
- if(module && module !== zhihangDataModule.id && !precise)url.searchParams.set('scope',scopeFor(module));
+ const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','task_id','drill_id','notice_key','token','tool_session','tool_order','tool_view'].some(key=>url.searchParams.has(key));
+ const homeScope=fromHome&&scopes.value.some(scope=>scope.value===url.searchParams.get('scope'));
+ if(module && module !== zhihangDataModule.id && !precise&&!homeScope)url.searchParams.set('scope',scopeFor(module));
  navigate(url);
 }
 
@@ -312,12 +320,12 @@ const componentProps = computed(() => {
     case 'risk_inspection': return {releaseId:p.get('id')||'',view:p.get('view')||''};
     case 'tool_management': return {scope:p.get('scope')||'',toolView:p.get('tool_view')||'',
       toolSession:p.get('tool_session')||'',toolAsset:p.get('tool_asset')||'',toolOrder:p.get('tool_order')||''};
-    case 'event': return {...common, refreshNonce:0};
+    case 'event': return {...common, refreshNonce:0, focusRecordId:p.get('event_id')||''};
     case 'water': return {...common, initialView:p.get('water_view')==='records'?'records':'overview'};
     case 'repair_status':
     case 'repair_management': return {...common, userId:String(user.value.open_id || ''), canDelete:user.value.can_delete_business === true, focusRecordId:p.get('record_id') || '', focusFollowups:p.get('workspace_tab')==='followups', initialInProgress:p.get('state')==='in_progress'};
     case 'learning': return {...common, scope:p.get('scope') || '', personId:p.get('person_id') || '', userId:String(user.value.open_id || '')};
-    case 'critical_guard': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:moduleAdminMode.value};
+    case 'critical_guard': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, user:user.value, adminMode:moduleAdminMode.value, focusTaskId:p.get('task_id')||''};
     case 'drills': return {...common, scope:moduleAdminMode.value||['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, currentUser:user.value, adminMode:moduleAdminMode.value, printMode:printMode.value};
     case 'cabinet': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, userId:String(user.value.open_id || ''), readOnly:user.value.role === 'guest', canDelete:user.value.can_delete_business === true};
     case 'cabinet_batch': return {...common, userId:String(user.value.open_id || '')};

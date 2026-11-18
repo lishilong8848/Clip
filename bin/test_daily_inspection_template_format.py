@@ -12,6 +12,8 @@ class TemplateFormatTests(unittest.TestCase):
     def test_export_preserves_every_original_sheet_style_and_dimensions(self):
         for scope in ('D','E'):
             templates=[t for t in original_templates() if t['scope']==scope]
+            fixed = {(t['name'], s['name']): set(s.get('slash_cells', ())) for t in templates for s in t['sheets']}
+            self.assertEqual(sum(map(len, fixed.values())), {'D':308, 'E':280}[scope])
             report={'scope':scope,'date':'2026-11-05','rounds':[],'original_templates':templates}
             views=original_views(templates,[],include_empty_rounds=True)
             content=inspection_report_workbook(report)
@@ -20,6 +22,7 @@ class TemplateFormatTests(unittest.TestCase):
             try:
                 self.assertEqual(len(book.worksheets),len(views))
                 for ws,source in zip(book.worksheets,views):
+                    slashes = fixed[source['template'], source['sheet']]
                     if source.get('artwork'):
                         self.assertEqual(drawings[ws.title]['xml'],source['artwork']['xml'])
                         self.assertEqual(drawings[ws.title]['assets'],source['artwork']['assets'])
@@ -31,7 +34,12 @@ class TemplateFormatTests(unittest.TestCase):
                             if isinstance(cell,MergedCell):continue
                             expected=native[source['style_ids'][ri][ci]]
                             for key,value in expected.items():
+                                if cell.coordinate in slashes and key in ('font', 'alignment'):
+                                    continue
                                 self.assertEqual(getattr(cell,key),value,f'{scope} {ws.title} {cell.coordinate} {key}')
+                    for address in slashes:
+                        cell = ws[address]
+                        self.assertEqual((cell.value, cell.data_type, cell.alignment.horizontal), ('/', 's', 'center'))
                     for index,values in source['excel_settings']['row_dimensions'].items():
                         for key,value in values.items():self.assertEqual(getattr(ws.row_dimensions[int(index)],key),value)
                     for index,values in source['excel_settings']['column_dimensions'].items():
@@ -39,6 +47,16 @@ class TemplateFormatTests(unittest.TestCase):
                     self.assertTrue(ws.page_margins)
                     self.assertEqual(len([s for s in book.sheetnames if '暖通冷机系统' in s]),4)
             finally:book.close()
+
+    def test_slash_cells_win_over_frozen_readings_and_manual_overrides(self):
+        templates = [t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '电气']
+        target = {'template': templates[0]['name'], 'sheet': 'SVG巡检表'}
+        rounds = [{'shift':'白', 'round':1, 'original_cells': [
+            {**target, 'cell':'H7', 'value':'旧测点值', 'conflict':True},
+            {**target, 'cell':'G7', 'value':'相邻测点'}],
+            'extra_cells': [{**target, 'cell':'I7', 'value':'旧手填值'}]}]
+        view = next(s for s in original_views(templates, rounds) if s['sheet'] == target['sheet'])
+        self.assertEqual(view['rows'][6][6:9], ['相邻测点', '/', '/'])
 
     def test_values_are_same_as_page_overlay_and_cannot_become_formulas(self):
         templates=[t for t in original_templates() if t['scope']=='D' and t['profession']=='暖通']

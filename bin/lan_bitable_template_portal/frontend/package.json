@@ -20,6 +20,7 @@
     "check:workspace-repairs": "node scripts/check-workspace-repairs.mjs",
     "check:workspace-surfaces": "node scripts/check-workspace-surfaces.mjs",
     "check:workspace-history": "node scripts/check-workspace-history.mjs",
+    "check:workbench-redesign": "node scripts/check-workbench-redesign.mjs",
     "check:cabinet-reliability": "node scripts/check-cabinet-reliability.mjs",
     "check:plan-convergence": "node --experimental-strip-types scripts/check-plan-convergence.ts",
     "smoke": "python ../../tools/frontend_runtime_smoke.py",

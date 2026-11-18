@@ -6699,6 +6699,20 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
+        def workbench_draft_readable(session: dict, scope: str, draft: dict) -> bool:
+            raw_scope = draft.get("scope")
+            if not isinstance(raw_scope, str):
+                return False
+            text = raw_scope.strip().upper()
+            known = {str(option[key]).upper() for option in SCOPE_OPTIONS for key in ("value", "label")}
+            # normalize_scope defaults unknown text to ALL; do not trust that fallback for stored data.
+            if text not in known | {"PARK"} and not re.fullmatch(r"[ABCDEH][栋座]", text):
+                return False
+            auth = PortalRuntime.auth_manager
+            return auth.scope_allowed(session, scope) and auth.scope_allowed(
+                session, auth.normalize_scope(text)
+            )
+
         @app.get("/api/workbench/draft")
         async def workbench_draft_get(request: Request):
             session = self._current_session(request)
@@ -6722,8 +6736,15 @@ class FastAPIPortalController:
                     work_type=work_type,
                     target_record_id=target_record_id,
                 )
-                if draft and str(draft.get("scope") or "").upper() != scope.upper():
-                    raise PortalError("草稿不属于当前楼栋。")
+                if draft and not workbench_draft_readable(session, scope, draft):
+                    return self._json_ok(request, session, {
+                        "exists": False,
+                        "draft_base": {
+                            "version": int(draft.get("version") or 0),
+                            "client_revision": int(draft.get("client_revision") or 0),
+                        },
+                        "warning": "已有草稿当前不可恢复，已保留；可继续办理当前通告。",
+                    })
                 return self._json_ok(
                     request, session, {"exists": bool(draft), "draft": draft}
                 )
@@ -6753,16 +6774,39 @@ class FastAPIPortalController:
                         target_record_id=target_record_id,
                     )
                     return self._json_ok(request, session, result)
-                draft = await asyncio.to_thread(
-                    PortalRuntime.save_workbench_notice_draft,
-                    open_id=open_id,
-                    scope=scope,
-                    work_type=work_type,
-                    target_record_id=target_record_id,
-                    action=action,
-                    fields=payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
-                    client_revision=int(payload.get("client_revision") or 0),
-                )
+                client_revision = int(payload.get("client_revision") or 0)
+
+                def save_draft():
+                    # Preserve readable, identical retries; never echo an unreadable or conflicting draft.
+                    with PortalRuntime._workbench_draft_lock:
+                        if client_revision:
+                            current = PortalRuntime.get_workbench_notice_draft(
+                                open_id=open_id, work_type=work_type, target_record_id=target_record_id
+                            )
+                            if client_revision <= int(current.get("client_revision") or 0):
+                                if (
+                                    client_revision == int(current.get("client_revision") or 0)
+                                    and current.get("action") == action
+                                    and workbench_draft_readable(session, scope, current)
+                                    and current.get("fields") == PortalRuntime._normalize_workbench_notice_draft_fields(
+                                        payload.get("fields") if isinstance(payload.get("fields"), dict) else {}
+                                    )
+                                ):
+                                    return current
+                                raise PortalConflictError("草稿已变更，请重新读取后重试。")
+                        return PortalRuntime.save_workbench_notice_draft(
+                            open_id=open_id,
+                            scope=scope,
+                            work_type=work_type,
+                            target_record_id=target_record_id,
+                            action=action,
+                            fields=payload.get("fields") if isinstance(payload.get("fields"), dict) else {},
+                            client_revision=client_revision,
+                        )
+
+                draft = await asyncio.to_thread(save_draft)
+                if not workbench_draft_readable(session, scope, draft):
+                    raise PortalConflictError("草稿已变更，请重新读取后重试。")
                 return self._json_ok(request, session, {"saved": True, "draft": draft})
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)

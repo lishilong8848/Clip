@@ -718,7 +718,7 @@ class LanPortalStateStore:
         self,
         operation_id: str,
         *,
-        status: str,
+        status: str | None,
         target_record_id: str | None = None,
         expected_record_version: str | None = None,
         observed_record_version: str | None = None,
@@ -757,7 +757,7 @@ class LanPortalStateStore:
                     WHERE operation_id = ?
                     """,
                     (
-                        self._text(status) or "unknown",
+                        self._text(status if status is not None else existing.get("status")) or "unknown",
                         self._text(
                             target_record_id
                             if target_record_id is not None
@@ -785,7 +785,8 @@ class LanPortalStateStore:
                     "SELECT * FROM notice_remote_operations WHERE operation_id = ?",
                     (normalized_operation_id,),
                 ).fetchone()
-                if (status == "completed" and result_payload.get("robot_background")
+                delivery_ready = (status == "completed" or result_payload.get("message_first") is True)
+                if (delivery_ready and result_payload.get("robot_background")
                         and result_payload.get("robot_delivery_state") == "pending"):
                     self._enqueue_outbox_event_locked(
                         conn, channel="notice_robot",
@@ -793,7 +794,7 @@ class LanPortalStateStore:
                                  "idempotency_key": f"notice_robot:{normalized_operation_id}"},
                         now=now,
                     )
-                if (status=='completed' and not normalized_operation_id.startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:'))
+                if (delivery_ready and not normalized_operation_id.startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:'))
                         and result_payload.get('dingtalk_targets') and result_payload.get('robot_payload')):
                     self._enqueue_outbox_event_locked(conn,channel='notice_dingtalk',
                         payload={'operation_id':normalized_operation_id,'idempotency_key':'notice_dingtalk:'+normalized_operation_id},now=now)

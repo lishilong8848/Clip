@@ -273,7 +273,7 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(self.transcript, [])
                 self.assertEqual(self.fixture.writes, [])
 
-    async def test_legacy_followup_keeps_current_request_once_when_classifier_skips(self):
+    async def test_explicit_document_followup_keeps_current_request_once(self):
         base = 'D楼现场巡检规程有哪些适用条件'
         history = [{'question': base, 'answer': '旧文档回答', 'scopes': ['D'],
                     'sources': [{'kind': 'company_knowledge'}]}]
@@ -283,13 +283,13 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
                                  return_value=resolved('unknown', question=followup, attempts=0)), \
                     patch.object(documents, 'answer_company', new_callable=AsyncMock,
                                  return_value={'answer': '补充回答', 'sources': []}) as synth:
-                turn = self.turn(followup)
+                turn = self.turn('查询公司资料：' + followup)
                 await self.answer(turn, history)
                 query = synth.await_args.args[3]
                 self.assertIn(base, query)
                 self.assertEqual(query.count(followup), 1)
                 self.assertEqual(documents.company_followup(query, history) or query, query)
-                self.assertEqual(turn['question'], followup)
+                self.assertEqual(turn['question'], '查询公司资料：' + followup)
         self.assertEqual(self.transcript, [])
 
     async def test_explicit_skill_and_warmup_skip_classifier(self):
@@ -413,22 +413,16 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn('_task_context', result)
                 self.assertEqual(self.texts(), result['answer'])
 
-    async def test_model_requested_documents_preserve_business_when_no_document_is_available(self):
+    async def test_model_requested_documents_do_not_expand_ordinary_business_queries(self):
         self.patch_intent(resolved('unknown'))
         business = self.business_result(_requested_company_query=DOCUMENT_QUERY)
         self.engine._answer_candidate = AsyncMock(return_value=business)
-        async def unavailable(engine, actor, turn, question, emit, authorize, **kwargs):
-            await emit('text', {'delta': '未取得适用文档。'})
-            return {'answer': '未取得适用文档。', 'sources': [],
-                    'answer_review': {'status': 'original_flow', 'reason': 'source_unavailable'}}
-        with patch.object(documents, 'answer_company', new_callable=AsyncMock,
-                          side_effect=unavailable):
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock) as search:
             result = await self.answer()
+        search.assert_not_awaited()
         self.assertIn('本轮业务结果。[1]', result['answer'])
-        self.assertIn('未取得适用文档', result['answer'])
         self.assertTrue(result['sources'])
-        self.assertEqual(result['answer_review']['reason'], 'source_unavailable')
-        self.assertEqual(self.texts(), result['answer'])
+        self.assertNotIn('_requested_company_query', result)
 
     async def test_partial_review_and_missing_document_produce_one_specific_limitation(self):
         from openclaw_service.assistant.lighthouse_review import PARTIAL_REVIEW_NOTICE
@@ -442,27 +436,54 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(PARTIAL_REVIEW_NOTICE, result['answer'])
         self.assertEqual(result['answer'].count('尚未核实'), 1)
 
-    async def test_model_requested_document_denial_never_returns_the_business_draft(self):
-        self.patch_intent(resolved('unknown'))
-        self.engine._answer_candidate = AsyncMock(return_value=self.business_result(_requested_company_query=DOCUMENT_QUERY))
+    async def test_explicit_document_denial_never_returns_a_draft(self):
+        classify = self.patch_intent(resolved('unknown'))
         with patch.object(documents, 'answer_company', new_callable=AsyncMock,
                           side_effect=AssistantError('权限已撤销', 403)):
             with self.assertRaises(AssistantError) as denied:
-                await self.answer()
+                await self.answer(self.turn('查询公司资料：' + DOCUMENT_QUERY))
         self.assertEqual(denied.exception.status, 403)
         self.assertEqual(self.texts(), '')
+        classify.assert_not_awaited()
 
-    async def test_model_requested_document_fallback_rechecks_permission_before_emitting(self):
-        self.patch_intent(resolved('unknown'))
-        self.engine._answer_candidate = AsyncMock(return_value=self.business_result(_requested_company_query=DOCUMENT_QUERY))
+    async def test_explicit_mixed_lookups_recheck_permission_before_emitting(self):
+        from openclaw_service.assistant.lighthouse_context import task_context
+        question = safe_text(QUESTION)
+        self.patch_intent(resolved(question=question))
+        self.engine._answer_candidate = AsyncMock(return_value=self.business_result())
+        turn = self.turn(question, submitted_commands=[{'kind': 'tool', 'id': 'company_documents'}],
+                         _task_context=task_context(question, None, self.actor, scopes=['D']))
         async def unavailable(*args, **kwargs):
             self.current_actor['scopes'] = []
             return {'answer': '文档暂不可用。', 'sources': []}
         with patch.object(documents, 'answer_company', new_callable=AsyncMock, side_effect=unavailable):
             with self.assertRaises(AssistantError) as denied:
-                await self.answer()
+                await self.answer(turn)
         self.assertEqual(denied.exception.status, 403)
         self.assertEqual(self.texts(), '')
+
+    async def test_mixed_read_only_uses_company_documents_when_selected_for_this_turn(self):
+        from openclaw_service.assistant.lighthouse_context import task_context
+        question = safe_text(QUESTION)
+        self.patch_intent(resolved(question=question))
+        for selections in ([], [{'kind': 'tool', 'id': 'company_documents'}]):
+            with self.subTest(selected=bool(selections)):
+                turn = self.turn(question, submitted_commands=selections,
+                                 _task_context=task_context(question, None, self.actor, scopes=['D']))
+                self.engine._answer_candidate = AsyncMock(return_value=self.business_result())
+                with patch.object(documents, 'answer_company', new_callable=AsyncMock, return_value=self.combined_result()) as search:
+                    result = await self.answer(turn)
+                business_turn = self.engine._answer_candidate.await_args.args[1]
+                self.assertTrue(business_turn['_read_only_phase'])
+                self.assertEqual(business_turn['question'], BUSINESS_QUERY)
+                if selections:
+                    search.assert_awaited_once()
+                    self.assertEqual(search.await_args.kwargs['document_query'], DOCUMENT_QUERY)
+                    self.assertIn(FINAL, result['answer'])
+                else:
+                    search.assert_not_awaited()
+                    self.assertIn('本轮业务结果', result['answer'])
+                    self.assertIn('请选择「查询公司资料」', result['answer'])
 
     async def test_unavailable_documents_do_not_rewrite_reviewed_business_from_old_history(self):
         for routing in ('mixed', 'unknown'):
@@ -648,7 +669,7 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['answer'], FINAL)
         self.assertEqual(self.fixture.writes, [])
 
-    async def test_document_only_tool_hands_off_after_filename_lookup_without_unverified_draft(self):
+    async def test_model_cannot_invoke_document_only_tool_without_explicit_selection(self):
         question = '现场仪表失联时，依据在用规程应该如何处置？'
         self.patch_intent(resolved('unknown', question=question))
         outer = self
@@ -660,19 +681,14 @@ class MixedQueryTests(unittest.IsolatedAsyncioTestCase):
             search = Mock(side_effect=AssertionError('Filename discovery must not retrieve passages twice'))
         self.filename_reads = 0
         self.fixture.portal.get_knowledge.return_value = FilenameKnowledge()
-        self.steps = [('company_documents', {'query': question, 'document_only': True}), 'UNVERIFIED_DRAFT_MUST_NOT_RUN']
-        async def review(actor, turn, history, result, authorize):
-            self.assertIn(DOCUMENT_BODY, repr(result['sources']))
-            return {**result, 'answer_review': {'status': 'passed', 'repairs': 0}}
-        self.engine.answer_reviewer = SimpleNamespace(run=AsyncMock(side_effect=review))
-        with patch.object(documents, 'answer_company', new_callable=AsyncMock, return_value=self.combined_result()) as synth:
+        self.steps = [('company_documents', {'query': question, 'document_only': True}), '请主动选择「查询公司资料」核对规程。']
+        with patch.object(documents, 'answer_company', new_callable=AsyncMock) as synth:
             result = await self.answer(self.turn(question))
-        self.assertEqual(self.filename_reads, 1)
-        self.assertEqual(len(self.transcript), 1)
-        self.assertEqual(synth.await_count, 1)
-        self.assertEqual(self.engine.answer_reviewer.run.await_count, 1)
-        self.assertNotIn('UNVERIFIED_DRAFT', repr(result))
-        self.assertEqual(result['answer'], FINAL)
+        self.assertEqual(self.filename_reads, 0)
+        self.assertEqual(len(self.transcript), 2)
+        synth.assert_not_awaited()
+        self.fixture.portal.get_knowledge.assert_not_called()
+        self.assertIn('查询公司资料', result['answer'])
         self.assertEqual(self.fixture.writes, [])
 
     async def test_prior_company_answer_is_not_reimported_into_native_prompt(self):

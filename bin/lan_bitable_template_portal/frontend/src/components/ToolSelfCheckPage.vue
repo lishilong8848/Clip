@@ -37,10 +37,10 @@
             <span v-if="tab.count" class="tool-nav-count">{{ tab.count }}</span>
           </NButton>
         </nav>
-        <NAlert v-if="view !== 'workspace' && board?.inventory_error && board.inventory_error !== error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
+        <NAlert v-if="view === 'settings' && board?.inventory_error && board.inventory_error !== error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
           :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event"
-          @inventory-status="updateInventoryStatus" />
+          @inventory-status="updateInventoryStatus" @records="selectView('followups')" />
         <div v-else-if="view === 'settings'" class="tool-settings-layout">
           <ToolManagementSettings />
           <section class="tool-library" aria-label="自检模板">
@@ -106,8 +106,13 @@
             <input ref="folderInput" type="file" accept=".xlsx" webkitdirectory multiple hidden @change="importTemplateFolder" />
           </section>
         </div>
-        <div v-else class="tool-worklist">
+        <ToolWorkspace v-else key="records" ref="workspace" records-only :scope="scope"
+          :followup-order-ids="followupOrderIds" :inventory-warning="board?.inventory_error"
+          @records-refresh="loadBoard()" @inventory-status="updateInventoryStatus" @choose="selectView('workspace')">
+        <template #followups>
+        <div class="tool-worklist" aria-label="检修与报废">
           <div class="tool-list-head">
+            <h4>检修与报废</h4>
             <div class="tool-counts">
               <span><strong>{{ repairCount }}</strong> 检修中</span>
               <span><strong>{{ approvalCount }}</strong> 待报废审批</span>
@@ -140,7 +145,7 @@
               </div>
               <div class="tool-order-state" role="cell">
                 <NTag :type="row.result_label === '合格' ? 'success' : 'warning'" :bordered="false">{{ row.tool_status_label || outcomeLabels[row.outcome] }}</NTag>
-                <small v-if="row.result_label">{{ row.result_label }}<span v-if="row.outcome === 'scrap'"> · {{ approvedVotes(row) }}/2 已同意</span></small>
+                <small v-if="row.result_label">{{ row.result_label }}<span v-if="row.outcome === 'scrap'"> · 任一经理同意即可</span></small>
                 <small v-if="row.sync.length" :class="{ 'tool-pending': row.sync.some(item => item.state !== 'done') }">
                   {{ row.sync.some(item => item.verifying) ? '飞书待核验' : row.sync.some(item => item.error) ? '同步失败 · 自动重试'
                     : row.sync.some(item => item.state !== 'done') ? '飞书待同步' : '飞书已同步' }}
@@ -153,6 +158,11 @@
                   <template #trigger><NButton size="small" :disabled="busy">释放领取</NButton></template>
                   草稿将保留，工单可重新领取。
                 </NPopconfirm>
+                <NPopconfirm v-if="row.can_remove_followup" positive-text="删除记录" negative-text="取消"
+                  :positive-button-props="{ type: 'error' }" @positive-click="removeFollowup(row)">
+                  <template #trigger><NButton size="small" type="error" secondary :disabled="busy">删除记录</NButton></template>
+                  从办理记录移除「{{ row.tool_name }}」？飞书台账与归档文件将保留。
+                </NPopconfirm>
               </div>
             </article>
           </div>
@@ -162,6 +172,8 @@
             <NPagination v-if="visibleOrders.length > pageSize" :page="page" :item-count="visibleOrders.length" :page-size="pageSize" :disabled="busy || loading" simple @update:page="changePage" />
           </footer>
         </div>
+        </template>
+        </ToolWorkspace>
       </template>
     </NSpin>
 
@@ -270,7 +282,7 @@
           <div v-if="order.outcome && !order.can_edit" class="tool-context">
             <NTag :type="order.result_label === '合格' ? 'success' : 'warning'">{{ order.tool_status_label || outcomeLabels[order.outcome] || '已取消' }}</NTag>
             <p v-if="order.reason">{{ order.reason }}</p><p v-if="order.resolution">{{ order.resolution }}</p>
-            <p v-if="order.scrap_approvals?.length">{{ order.scrap_approvals.map(vote => vote.name + ' · ' + voteLabel(vote.decision)).join('　') }}</p>
+            <p v-if="order.scrap_approvals?.length">{{ order.scrap_approvals.filter(vote => vote.decision || order?.outcome === 'scrap').map(vote => vote.name + ' · ' + voteLabel(vote.decision)).join('　') }}</p>
           </div>
           <div v-if="order.status==='review_pending'" class="tool-context"><strong>待审核结果：{{ outcomeLabels[outcome] || outcome }}</strong><p v-if="reason">处理原因：{{reason}}</p><p v-if="outcome==='scrap'">报废数量：{{quantity}}</p></div>
           <div v-if="order.can_repair || order.can_approve" class="tool-result-fields">
@@ -285,7 +297,7 @@
             </div>
             <NPopconfirm v-for="step in transitions" :key="step.action" @positive-click="advance(step.action)">
               <template #trigger><NButton :type="step.type" :disabled="busy">{{ step.label }}</NButton></template>
-              {{ step.action === 'repair-scrap' ? '提交检修后报废，由梅冰冰、马进宇共同审批。' : '确认' + step.label + '？' }}
+              {{ step.action === 'repair-scrap' ? '提交检修后报废，梅冰冰、马进宇任一位同意即可。' : '确认' + step.label + '？' }}
             </NPopconfirm>
           </div>
         </aside>
@@ -344,6 +356,7 @@ interface Order {
   submitted_at: string | null; can_claim: boolean; can_edit: boolean; can_release: boolean;
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
   supervisor_assigned: boolean; assigned_to_me: boolean; can_approve: boolean; can_repair: boolean; can_review: boolean; can_delete:boolean;
+  can_remove_followup?: boolean;
   actual: string; outcome: string; reason: string; resolution: string; report_name: string;
   result_label?: string; tool_status_label?: string; from_repair?: boolean;
   scrap_approvals?: { name: string; decision: string; at: string; note: string }[];
@@ -367,7 +380,7 @@ const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref(/^[a-f0-9]{32}$/.test(props.toolSession || '') && /^rec[A-Za-z0-9]{1,119}$/.test(props.toolAsset || '')
   ? props.toolSession! : '');
 const linkedAsset = ref(linkedSession.value ? props.toolAsset! : '');
-const stateFilter = ref('pending');
+const stateFilter = ref('all');
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
 const search = ref('');
@@ -413,32 +426,35 @@ let disposed = false;
 let listPosition = 0;
 
 const active = computed(() => records.value.find(record => record.entry_id === selected.value));
-const repairCount = computed(() => board.value?.followups.filter(row => row.outcome === 'repair').length || 0);
-const approvalCount = computed(() => board.value?.followups.filter(row => row.outcome === 'scrap').length || 0);
+const scopedFollowups = computed(() => (board.value?.followups || []).filter(row =>
+  !props.scope || ['ALL', 'CAMPUS'].includes(props.scope) || row.scope === props.scope));
+const repairCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'repair').length);
+const approvalCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'scrap').length);
 const completed = (row: Order) => ['repaired', 'scrapped', 'rejected'].includes(row.outcome);
-const completedCount = computed(() => board.value?.followups.filter(completed).length || 0);
-const approvedVotes = (row: Order) => row.scrap_approvals?.filter(vote => vote.decision === 'approve').length || 0;
+const completedCount = computed(() => scopedFollowups.value.filter(completed).length);
+const followupOrderIds = computed(() => scopedFollowups.value.map(row => row.id));
 const voteLabel = (decision: string) => ({ approve: '已同意', reject: '已驳回' }[decision] || '待审批');
 const tabs = computed(() => [
   { value: 'workspace', label: '工作台', icon: ClipboardList, count: 0 },
-  { value: 'followups', label: '检修与报废', icon: Wrench, count: repairCount.value + approvalCount.value },
+  { value: 'followups', label: '办理记录', icon: Wrench, count: repairCount.value + approvalCount.value },
   ...(board.value?.can_manage_templates ? [{ value: 'settings', label: '工具与模板', icon: Settings2, count: 0 }] : []),
 ]);
 const stateOptions = [{ value: 'pending', label: '待处理' }, { value: 'repair', label: '检修中' },
   { value: 'scrap', label: '待报废审批' }, { value: 'done', label: '已处置' }, { value: 'all', label: '全部状态' }];
 const visibleOrders = computed(() => {
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  return (board.value?.followups || []).filter(row =>
+  return scopedFollowups.value.filter(row =>
     (stateFilter.value === 'all' || row.outcome === stateFilter.value
       || (stateFilter.value === 'done' ? completed(row) : stateFilter.value === 'pending' && !completed(row))) &&
     terms.every(term => [row.tool_name, row.model, row.location, row.scope + '楼', row.owner_name]
-      .join(' ').toLowerCase().includes(term)));
+      .join(' ').toLowerCase().includes(term)))
+    .sort((left, right) => Number(completed(left)) - Number(completed(right)));
 });
 const pagedOrders = computed(() => visibleOrders.value.slice((page.value - 1) * pageSize, page.value * pageSize));
-const emptyDescription = computed(() => search.value.trim() || stateFilter.value !== 'pending'
-  ? '没有符合筛选条件的记录' : '暂无待处理的检修或报废审批');
+const emptyDescription = computed(() => search.value.trim() || stateFilter.value !== 'all'
+  ? '没有符合筛选条件的记录' : '暂无检修或报废记录');
 watch(view, () => {
-  stateFilter.value = 'pending';
+  stateFilter.value = 'all';
   if (view.value === 'settings') void loadLibrary().catch(fail);
 });
 watch([view, search, stateFilter], () => { page.value = 1; });
@@ -527,6 +543,14 @@ function applyOrder(data: Detail) {
 async function action(row: Order, kind: string, data: object = {}) {
   return requestJson(api + orderPath(row) + '/' + kind, { method: 'POST', body: JSON.stringify({ revision: row.revision, ...data }) });
 }
+async function removeFollowup(row: Order) {
+  await mutate(async () => {
+    await action(row, 'remove-followup');
+    await loadBoard();
+    await workspace.value?.reloadRecords();
+    message.value = '办理记录已删除。';
+  });
+}
 async function openOrder(row: Order, claim = false) {
   if (busy.value) return;
   if (order.value?.id !== row.id) repairPhotos.value = [];
@@ -598,7 +622,7 @@ function back() {
 }
 function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
-  else if (view.value === 'workspace' && workspace.value) void workspace.value.refresh();
+  else if (workspace.value) void workspace.value.refresh();
   else if (view.value === 'settings') void mutate(loadLibrary);
   else void loadBoard();
 }

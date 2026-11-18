@@ -32,15 +32,15 @@ const inventoryConflict = '组织架构表中 A 楼的楼长配置冲突，请�
 function reset() {
   state = { assets: clone(initialAssets), sessions: new Map(), operations: new Map(), calls: [],
     failOpen: false, failSave: false, failReport: false, failPoll: false, failResume: false, warning: '', polls: 0,
-    inventoryError: '', failRefresh: false };
+    inventoryError: '', failRefresh: false, followups: [] };
 }
 reset();
 function board() {
   return { assets: state.assets, templates, warning: state.warning, inventory_error: state.inventoryError,
     sessions: [...state.sessions.values()].map(({ items, ...rest }) => ({
       ...rest, item_count: items.length, history_items: items.map(item => ({
-        id: item.id, asset_name: item.asset.name, scope: item.asset.scope, archive_status: item.archive_status,
-      })),
+        id: item.id, order_id: item.order_id, asset_name: item.asset.name, scope: item.asset.scope, archive_status: item.archive_status,
+      })).filter(item => !state.removedOrder || item.order_id !== state.removedOrder),
     })) };
 }
 function createSession(body) {
@@ -94,7 +94,14 @@ const server = createServer(async (request, response) => {
         user: { open_id: 'fixture-tools', name: '本地测试人员', role: 'admin', level: 'L0', category: 'engineer', tool_management_enabled: true, modules: ['risk_inspection'] },
         allowed_scopes: ['A', 'B'], scope_options: [{ value: 'A', label: 'A楼' }, { value: 'B', label: 'B楼' }], default_scope: 'A' });
       if (pathname === '/api/health') { response.setHeader('Content-Type', 'application/json'); return response.end(JSON.stringify({ ok: true, service: 'clipflow_backend', instance_id: 'tool-workspace-fixture' })); }
-      if (pathname === '/api/tool-self-check') return ok({ month: '2026-11', orders: [], followups: [], templates: [], can_manage_templates: true, can_create_orders: true, can_download_month: true, actor_name: '测试人员', inventory_error: state.inventoryError });
+      if (pathname === '/api/tool-self-check') return ok({ month: '2026-11', orders: [], followups: state.followups, templates: [], can_manage_templates: true, can_create_orders: true, can_download_month: true, actor_name: '测试人员', inventory_error: state.inventoryError });
+      if (pathname.endsWith('/remove-followup')) {
+        const order = state.followups.find(row => pathname.includes(row.id));
+        assert(order?.can_remove_followup && body.revision === order.revision);
+        state.removedOrder = order.id;
+        state.followups = state.followups.filter(row => row.id !== order.id);
+        return ok({ deleted: true });
+      }
       if (pathname === api && request.method === 'GET') return ok(board());
       if (pathname === api + '/refresh') {
         assert.equal(request.method, 'POST'); assert.equal(raw.length, 0);
@@ -607,6 +614,29 @@ try {
     await button('批量工具200 · A楼').click();
     assert.equal(await button('批量工具200 · A楼').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.locator('.sheet-scroll').evaluate(element => element.scrollTop), 0);
+  });
+  await check('one records page deduplicates repair/scrap and removes only a completed record', async () => {
+    for (const [location, width] of [[legacy, 1440], [v2, 390]]) {
+      reset();
+      const id = 'archived-followup';
+      const session = createSession({ asset_ids: ['e', 'u'], template_ids: { u: 'electrical' }, kind: 'self' });
+      session.items[0].order_id = id;
+      state.followups = [{ id, tool_name: '电能质量分析仪', scope: 'A', kind: 'self', outcome: 'repaired', status: 'submitted',
+        revision: 2, result_label: '合格', tool_status_label: '检修后合格', can_remove_followup: true, sync: [] }];
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(location);
+      await page.getByRole('navigation', { name: '工具管理分区' }).getByRole('button', { name: '办理记录', exact: true }).click();
+      const followups = page.getByRole('table', { name: '检修和报废记录' });
+      await followups.getByText('电能质量分析仪', { exact: true }).waitFor();
+      await page.locator('.record-tools').getByText('未关联工具', { exact: true }).waitFor();
+      assert.equal(await page.locator('.record-tools').getByText('电能质量分析仪', { exact: true }).count(), 0);
+      await noOverflow();
+      await followups.getByRole('button', { name: '删除记录', exact: true }).click();
+      await page.locator('.n-popover').getByRole('button', { name: '删除记录', exact: true }).click();
+      await followups.waitFor({ state: 'hidden' });
+      await page.locator('.record-tools').getByText('未关联工具', { exact: true }).waitFor();
+      assert.equal(state.removedOrder, id);
+    }
   });
   assert.deepEqual(errors, []); assert.deepEqual(serverErrors, []); assert.deepEqual(blocked, []);
   console.log('PASS all tool workspace browser checks');

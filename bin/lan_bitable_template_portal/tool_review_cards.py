@@ -126,7 +126,7 @@ def send_scrap_review_group(service, deliver, link, open_id, votes, delivery):
         if (saved := json.loads(vote['card'] or '{}').get(message_uuid))), None)
     if card is None:
         url = link(votes[0]['scope'], keys[0][0] if len(keys) == 1 else '')
-        elements = [{'tag': 'div', 'text': plain(f'{len(votes)} 项待审批，需梅冰冰、马进宇均同意后生效。')}]
+        elements = [{'tag': 'div', 'text': plain(f'{len(votes)} 项待审批，梅冰冰、马进宇任一位同意即可报废。')}]
         if len(votes) <= 12:
             for vote in votes:
                 asset = json.loads(vote['asset'])
@@ -203,11 +203,12 @@ def apply(runtime, data, app_id):
     note = '' if decision == 'approve' else '审批人在飞书卡片驳回'
     if value.get('review') == 'scrap':
         results = service.scrap_review_batch(actor, entries, decision, note)
-        finished = sum(result['outcome'] == 'scrapped' for result in results)
-        waiting = sum(result['outcome'] == 'scrap' for result in results)
-        message = f'已记录审批。{finished} 项已批准报废，{waiting} 项等待另一位经理审批。' if decision == 'approve' else f'已驳回 {len(results)} 项报废申请。'
-        if len(results) < len(entries):
-            message += f' {len(entries) - len(results)} 项已处理或已变更，已跳过。'
+        count = sum(result['outcome'] == 'scrapped' for result in results) if decision == 'approve' else len(results)
+        message = ''
+        if count:
+            message = f'{count} 项已批准报废。' if decision == 'approve' else f'已驳回 {count} 项报废申请。'
+        if count < len(entries):
+            message = f'{message} {len(entries) - count} 项已处理或已变更，已跳过。'.strip()
     elif value.get('review') == 'self':
         if not re.fullmatch(r'[a-f0-9]{32}', str(value.get('session') or '')) or any(
                 not re.fullmatch(r'rec[A-Za-z0-9]+', str(entry.get('asset') or '')) for entry in entries):

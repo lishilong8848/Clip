@@ -65,7 +65,7 @@ try{
    await page.getByRole('button',{name:'系统设置',exact:true}).click();await page.getByRole('heading',{name:'后台状态',exact:true}).waitFor();
    await page.getByRole('combobox',{name:'设置分类',exact:true}).click();await page.locator('.n-base-select-menu').getByText('账号与权限',{exact:true}).click();await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
    await page.locator('.v2-mobile-nav').getByRole('button',{name:'我的',exact:true}).click();await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
-  }else{await openRail();const rect=await page.locator('.v2-rail-footer').boundingBox();assert(rect.y>=0&&rect.y+rect.height<=viewport.height+1);assert.equal(await rail.evaluate(e=>getComputedStyle(e).borderBottomRightRadius),'20px');}
+  }else{await openRail();const rect=await page.locator('.v2-rail-footer').boundingBox();assert(rect.y>=0&&rect.y+rect.height<=viewport.height+1);assert.equal(await rail.evaluate(e=>getComputedStyle(e).borderBottomRightRadius),'0px');}
   await page.screenshot({path:path.join(out,`navigation-${viewport.width}.png`)});
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
  }
@@ -78,6 +78,6 @@ try{
  archiveFail=true;await failure.getByRole('button',{name:'重试归档'}).click();await page.getByText('归档仍失败',{exact:true}).first().waitFor();assert(await failure.isVisible(),'HTTP 200 with failed result must not clear warning');
  archiveFail=false;slowWeather=true;await page.clock.fastForward(31_000);for(let i=0;i<100&&!releaseWeather;i++)await new Promise(r=>setTimeout(r,20));assert(releaseWeather,'old status request is in flight');await failure.getByRole('button',{name:'重试归档'}).click();await failure.waitFor({state:'hidden'});releaseWeather();await page.waitForTimeout(200);assert.equal(await failure.count(),0,'late failed snapshot cannot restore successful task warning');
  assert(await page.locator('.weather-archive-failures').getByText('其它未解决任务',{exact:false}).isVisible());
- assert.deepEqual(errors,[]);console.log('PASS: floating 72/240 rail, 80ms labels, 20px corners, fixed PC footer, mobile bottom navigation, account/settings routes and permissions, 12 themes, account isolation, mobile layouts, logout, archive retry outcomes.');
+ assert.deepEqual(errors,[]);console.log('PASS: floating 72/240 square rail, 80ms labels, fixed PC footer, mobile bottom navigation, account/settings routes and permissions, 12 themes, account isolation, mobile layouts, logout, archive retry outcomes.');
 }catch(error){await page.screenshot({path:path.join(out,'failure.png'),fullPage:true});console.error(await page.locator('body').innerText());throw error;}
 finally{await context.close();await browser.close();await new Promise(r=>server.httpServer.close(r));}

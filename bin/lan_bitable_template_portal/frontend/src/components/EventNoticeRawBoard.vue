@@ -1,6 +1,6 @@
 <template>
   <section class="event-board" aria-label="事件通告">
-    <header class="event-board-tools"><strong>事件通告</strong><span>I3 发飞书 I3 群，其它级别不发飞书</span><button type="button" :disabled="!options.user_id" @click="openDefaults">默认钉钉机器人 · {{ defaultNames }}</button><button type="button" :disabled="loading" @click="load(true)">刷新</button></header>
+    <header v-if="!focusEventId" class="event-board-tools"><strong>事件通告</strong><span>I3 发飞书 I3 群，其它级别不发飞书</span><button type="button" :disabled="!options.user_id" @click="openDefaults">默认钉钉机器人 · {{ defaultNames }}</button><button type="button" :disabled="loading" @click="load(true)">刷新</button></header>
     <div v-if="defaultsOpen" class="event-defaults" role="dialog" aria-label="默认钉钉机器人">
       <strong>我的默认钉钉机器人</strong><p>新增、更新、结束自动使用默认选择，可选多个并行发送；不改变已提交任务的重试对象。</p>
       <div class="default-choices"><label v-for="robot in options.robots||[]" :key="robot.id"><input v-model="selected" type="checkbox" :value="robot.id" />{{ robot.name }}<small v-if="robot.remark"> · {{ robot.remark }}</small></label></div>
@@ -8,8 +8,12 @@
       <p v-if="defaultsError" role="alert">{{ defaultsError }}</p><footer><button :disabled="defaultsBusy" @click="defaultsOpen=false">取消</button><button :disabled="defaultsBusy" @click="saveDefaults">保存默认选择</button></footer>
     </div>
     <p v-if="error" role="alert">{{ error }} <button @click="initialize">重试读取</button></p>
-    <div v-if="!options.user_id" class="event-defaults"><h2>新建事件通告</h2><label>本次通告原文<textarea v-model="pendingText" rows="9" maxlength="15000" placeholder="粘贴完整的事件通告"></textarea></label><p>{{error?'暂未取得操作权限，请重试读取。':'正在读取权限和默认机器人，完成后即可发送。'}}</p></div>
-    <template v-if="options.user_id">
+    <div v-if="!focusEventId && !options.user_id" class="event-defaults"><h2>新建事件通告</h2><label>本次通告原文<textarea v-model="pendingText" rows="9" maxlength="15000" placeholder="粘贴完整的事件通告"></textarea></label><p>{{error?'暂未取得操作权限，请重试读取。':'正在读取权限和默认机器人，完成后即可发送。'}}</p></div>
+    <template v-if="focusEventId">
+      <EventNoticeRawCard v-if="focused && options.user_id" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
+      <p v-else-if="!error" role="status">{{ loading || !options.user_id ? '正在读取这条事件通告…' : '当前范围内找不到这条事件通告。' }}</p>
+    </template>
+    <template v-else-if="options.user_id">
       <h2>新建与进行中事件 <small>{{ ongoing.length }} 条</small></h2><p v-if="warning" class="event-warning">{{ warning }}</p>
       <div class="event-grid"><EventNoticeRawCard :key="context+':new'" creation :initial-text="pendingText" :options="options" :scope="scope" @changed="changed" @accepted="pendingText=''" /><EventNoticeRawCard v-for="row in ongoing" :key="context+':'+row.event_id" :row="row" :scope="scope" :options="options" @changed="changed" /></div>
       <p v-if="!ongoing.length&&!loading">暂无进行中事件</p>
@@ -23,13 +27,14 @@
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {requestJson,type Dict} from '../workspace-v2/client';
 import EventNoticeRawCard from './EventNoticeRawCard.vue';
-const props=defineProps<{scope:string;active?:boolean}>();
+const props=defineProps<{scope:string;active?:boolean;focusEventId?:string}>();
 const options=ref<Dict>({}),rows=ref<Dict[]>([]),error=ref(''),warning=ref(''),loading=ref(false),month=ref(new Date(Date.now()+8*3600000).toISOString().slice(0,7));
 const pendingText=ref('');
 const defaultsOpen=ref(false),defaultsBusy=ref(false),defaultsError=ref(''),selected=ref<string[]>([]);
 let generation=0,timer=0,disposed=false;
 const context=computed(()=>props.scope+':'+options.value.user_id);
 const ongoing=computed(()=>rows.value.filter(row=>row.state!=='ended'));
+const focused=computed(()=>rows.value.find(row=>row.event_id===props.focusEventId));
 const history=computed(()=>rows.value.filter(row=>row.state==='ended'&&historyDate(row).startsWith(month.value)));
 const defaultNames=computed(()=> (options.value.defaults?.robot_ids||[]).map((id:string)=>options.value.robots?.find((r:Dict)=>r.id===id)?.name||'需核对的机器人').join('、')||'未设置');
 const historyTitle=(row:Dict)=>row.metadata?.summary||String(row.text||'事件通告').split('\n').slice(0,2).join(' ').slice(0,160);

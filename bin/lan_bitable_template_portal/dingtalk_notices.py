@@ -558,10 +558,10 @@ class DingTalkNotices:
                     if operation_id.startswith(('qt_notice:','qt_upload:','qt_update:','qt_end:','qt_upload_replace:')):
                         self.store.mark_outbox_event(task['id'],'done',error='Qt通告不发送钉钉',count_attempt=False);continue
                     operation=self.store.get_notice_remote_operation(operation_id) or {};result=operation.get('result') or {}
-                    if operation.get('status')!='completed':raise DingTalkError('通告尚未完成，钉钉推送等待确认。',409)
+                    if operation.get('status')!='completed' and not result.get('message_first'):raise DingTalkError('通告尚未完成，钉钉推送等待确认。',409)
                     if not self.selection_matches(operation):
                         reason='实际钉钉目标与本次勾选不一致，已停止发送，请核对原任务。'
-                        self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':'failed','dingtalk_selection_error':reason})
+                        self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_delivery_state':'failed','dingtalk_selection_error':reason})
                         if operation_id.startswith('notice_action:') and hasattr(runtime.service,'set_notice_followup'):
                             runtime.service.set_notice_followup(operation_id.removeprefix('notice_action:'),'dingtalk','failed',reason)
                         self.store.mark_outbox_event(task['id'],'failed',error=reason,count_attempt=False);continue
@@ -570,7 +570,7 @@ class DingTalkNotices:
                         if operation_id.startswith('notice_action:'):
                             job=runtime.service.get_job(operation_id.removeprefix('notice_action:')) or {}
                             if job.get('superseded_by_job_id'):
-                                self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':'superseded'})
+                                self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_delivery_state':'superseded'})
                                 self.store.mark_outbox_event(task['id'],'done',count_attempt=False);continue
                         from .event_priority import blockers
                         if blockers(self.store):
@@ -579,10 +579,10 @@ class DingTalkNotices:
                         reason,error=runtime._event_robot_retry_guard(operation,check_remote=False)
                         if error:raise DingTalkError('事件状态尚未核验，等待确认。',409)
                         if reason:
-                            self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':'superseded'})
+                            self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_delivery_state':'superseded'})
                             self.store.mark_outbox_event(task['id'],'done',error='事件已被后续操作替代',count_attempt=False);continue
                     if result.get('robot_delivery_state')=='superseded':
-                        self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':'superseded'})
+                        self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_delivery_state':'superseded'})
                         self.store.mark_outbox_event(task['id'],'done',count_attempt=False);continue
                     targets=list({target['id']:target for target in result.get('dingtalk_targets') or []}.values())
                     if targets:
@@ -594,17 +594,21 @@ class DingTalkNotices:
                     else:outcomes=[]
                     first_sent=min((x['first_sent_at'] for x in outcomes if x.get('first_sent_at')),default=0)
                     time_state='unchanged'
-                    if first_sent and operation.get('target_record_id'):
+                    if first_sent and (operation.get('target_record_id') or result.get('message_first')):
                         from .dingtalk_notice_time import sync_start_time
                         first_sent=result.get('dingtalk_first_sent_at') or first_sent
-                        self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_first_sent_at':first_sent})
-                        time_state=sync_start_time(runtime,operation,first_sent)
-                        self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_start_time_state':time_state})
+                        self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_first_sent_at':first_sent})
+                        # A start's target can still be synchronizing. The same
+                        # receipt later fills its actual time without resending.
+                        time_state=sync_start_time(runtime,operation,first_sent) if operation.get('status')=='completed' else 'pending'
+                        self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_start_time_state':time_state})
                     state='deferred' if time_state=='pending' or any(x['state'] in ('pending','posting') for x in outcomes) else 'failed' if time_state=='conflict' or any(x['state']!='sent' for x in outcomes) else 'done'
-                    self.store.mark_notice_remote_operation(operation_id,status='completed',result={'dingtalk_delivery_state':state})
+                    self.store.mark_notice_remote_operation(operation_id,status=None,result={'dingtalk_delivery_state':state})
                     if operation_id.startswith('notice_action:') and hasattr(runtime.service,'set_notice_followup'):
-                        runtime.service.set_notice_followup(operation_id.removeprefix('notice_action:'),'dingtalk',state,
-                            '' if state=='done' else '钉钉推送或开始时间回填尚未完成，请查看钉钉通告推送设置。')
+                        delivered = result.get('message_first') and outcomes and all(row['state']=='sent' for row in outcomes)
+                        runtime.service.set_notice_followup(operation_id.removeprefix('notice_action:'),'dingtalk',
+                            'sent' if delivered else state,
+                            '' if delivered or state=='done' else '钉钉推送或开始时间回填尚未完成，请查看钉钉通告推送设置。')
                     self.store.mark_outbox_event(task['id'],state,error='' if state=='done' else '钉钉推送详情见系统设置',count_attempt=False)
             except Exception:
                 # Never put raw transport exceptions or credentials into the outbox.

@@ -43637,7 +43637,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 job["updated_at"] = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
                 self._state_store.put_document(STATE_NS_ACTION_JOB, job_id, job)
             elif (
-                phase in {"remote_intent", "uploading"}
+                phase in {"remote_intent", "uploading", "archive_pending"}
                 and bool(job.get("remote_intent"))
                 and str(job.get("remote_operation_id") or "").strip()
             ):
@@ -44814,7 +44814,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         compacted = {
             "job_id": str(job.get("job_id") or job_id),
             "phase": "success",
-            **{key: copy.deepcopy(job[key]) for key in ('recipient_results', 'message_delivery_state', 'message_delivery_warning', 'source_sync_state', 'source_sync_warning', '_notice_personal_staging_pending', '_notice_personal_retry_after') if key in job},
+            "message_first": bool(job.get('message_first')),
+            "archive_state": 'synced',
+            **{key: copy.deepcopy(job[key]) for key in ('recipient_results', 'message_delivery_state', 'message_delivery_warning', 'source_sync_state', 'source_sync_warning', 'dingtalk_state', 'dingtalk_warning', 'feishu_group_state', 'feishu_group_warning', '_notice_personal_staging_pending', '_notice_personal_retry_after') if key in job},
             **{key: copy.deepcopy(job[key]) for key in ("execution_origin", "qt_request", "qt_result", "event_wait", "was_event_waiting", "event_wait_attempt", "impersonation_binding_pending", "impersonation_audit_pending") if key in job},
             "created_at": str(job.get("created_at") or ""),
             "updated_at": str(job.get("updated_at") or ""),
@@ -44883,6 +44885,10 @@ class MaintenancePortalService(RepairOperationsMixin):
     def _compact_failed_job_locked(self, job_id: str) -> None:
         job = self._jobs.get(job_id)
         if not isinstance(job, dict) or str(job.get("phase") or "") != "failed" or job.get("qt_completion_pending"):
+            return
+        if job.get('message_first'):
+            # Delivery and archive have separate durable outcomes. Retain the
+            # frozen content while its original archive task is being repaired.
             return
         if job.get("remote_written") and str((job.get("request") or {}).get("work_type") or "") != WORK_TYPE_EVENT:
             # Preserve the confirmed target and prepared data for local-only
@@ -45195,6 +45201,11 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
         else:
             prepared = self.prepare_maintenance_action(request_payload, job_id=job_id)
+        expected_action = str(request_payload.get('action') or '').strip().lower()
+        if work_type != WORK_TYPE_EVENT and expected_action in {'start', 'update', 'end'}:
+            if prepared.get('action') != expected_action:
+                raise PortalError('通告操作在准备期间发生变化，请重新核对本次开始、更新或结束。')
+            prepared['status'] = {'start': '开始', 'update': '更新', 'end': '结束'}[expected_action]
         if (
             work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}
             and str(request_payload.get("action") or "").lower() == "start"

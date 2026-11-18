@@ -142,6 +142,28 @@ class LearningRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/learning/papers/p/answer", json={}).status_code, 200)
         self.auth.scope_allowed.assert_not_called()
 
+    def test_workbench_summary_respects_role_module_and_authorized_buildings(self):
+        from lan_bitable_template_portal import learning_completion
+
+        profile = {"category": "supervisor", "home_scope": "A", "role": "building", "modules": ["learning"]}
+        self.auth.public_user = lambda session: profile
+        self.auth.session_scopes = lambda session: ["A", "B"]
+        path = "/api/learning/workbench-summary"
+        with patch.object(learning_completion, "workbench_summary",
+                          side_effect=lambda service, scopes, query: {"scopes": scopes, "summary": {}}) as summary:
+            self.assertEqual(self.client.get(path + "?scope=A").json()["data"]["scopes"], ["A"])
+            self.assertEqual(self.client.get(path + "?scope=B").status_code, 403)
+            self.assertEqual(self.client.get(path + "?scope=ALL").status_code, 403)
+            profile["category"] = "manager"
+            self.assertEqual(self.client.get(path + "?scope=ALL").json()["data"]["scopes"], ["A", "B"])
+            self.assertEqual(self.client.get(path + "?scope=E").status_code, 403)
+            self.assertEqual(self.client.get(path + "?scope=A&scope=B").status_code, 400)
+            profile["modules"] = []
+            self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
+            profile.update(modules=["learning"], category="duty")
+            self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
+            self.assertEqual(summary.call_count, 2)
+
     def test_personnel_password_session_uses_virtual_directory_resolver(self):
         # A personnel-password session carries a real Feishu open id + HR record id.
         self.session = {
@@ -499,7 +521,8 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("refresh")
             dispatch("publish")
             dispatch("paper.delete", {"id": "paper-H"})
-            self.assertEqual(actions, {action for methods in routes.ROUTES.values() for action in methods.values()} - {"bootstrap", "attachments", "attachment", "export"})
+            self.assertEqual(actions, {action for methods in routes.ROUTES.values() for action in methods.values()} -
+                             {"bootstrap", "attachments", "attachment", "export", "workbench_summary"})
             self.assertEqual(cloud.mock_calls, [])
 
     def test_real_disabled_service_start_waits_without_cloud_io(self):

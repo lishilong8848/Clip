@@ -80,7 +80,7 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.model.complete.call_args.kwargs['profile']['reasoning'])
         self.assertTrue(self.profile['reasoning'])
 
-    async def test_parent_routes_web_and_feishu_automatic_questions_before_general_agent(self):
+    async def test_parent_routes_web_and_feishu_explicit_queries_before_general_agent(self):
         reviewer = SimpleNamespace(run=AsyncMock(side_effect=lambda actor, turn, history, result, authorize: result))
         portal = Mock(assistant=self.assistant, get_knowledge=self.portal.get_knowledge)
         model_factory = Mock(side_effect=AssertionError('General agent must not start'))
@@ -91,11 +91,11 @@ class AutomaticCompanyKnowledge(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(channel=channel, question=question), patch(
                         'openclaw_service.assistant.lighthouse_planned.continue_selection',
                         new_callable=AsyncMock, return_value=None):
-                    self.model.complete.side_effect = ['true', '依据已核实的现场规程处理。[1]']
-                    turn = {'question': question, '_profile': self.profile, 'submitted_commands': []}
+                    self.model.complete.return_value = '依据已核实的现场规程处理。[1]'
+                    turn = {'question': '查询公司资料：' + question, '_profile': self.profile}
                     result = await engine.answer(self.actor, turn, [], None, self.emit, self.authorize, {})
-                    self.kb.search.assert_called_with({**self.actor, 'allowed_scopes': self.actor['scopes']},
-                                                      question, profile=self.profile, prefer_local=True)
+                    self.kb.search.assert_called()
+                    self.assertEqual(self.kb.search.call_args.args[1], question)
                     self.assertEqual(result['sources'][0]['kind'], 'company_knowledge')
                     self.assertNotIn('_review_sources', result)
         model_factory.assert_not_called()

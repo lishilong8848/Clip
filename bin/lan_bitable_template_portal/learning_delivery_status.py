@@ -5,11 +5,12 @@ from contextlib import closing
 
 from . import learning as core
 from .learning_reminders import ROSTER_VERSION, resolve_roster, shift_times
+from .learning_onboarding import daily_eligibility
 from .learning_shift_storage import current_directory
 
 
 LABELS = {'success': '发布及发送成功', 'partial': '部分未完成', 'pending': '待发送',
-          'not_due': '未到发布时间', 'disabled': '未启用', 'unverified': '结果待核验'}
+          'not_due': '未到发布时间', 'disabled': '未启用', 'unverified': '结果待核验', 'exempt': '本班人员均免做'}
 
 
 def _state(result, state, label=None):
@@ -92,7 +93,7 @@ def _delivery(notices, open_id, app_id):
 def _shift(shift, publish_time, current, enabled, snapshot, publication, directory, ready, app_id, notices):
     people, roster_reason = _people(snapshot, shift)
     result = {'shift': shift, 'publish_time': publish_time, 'expected': len(people),
-              'sent': 0, 'failed': 0, 'pending': len(people), 'issues': []}
+              'sent': 0, 'failed': 0, 'pending': len(people), 'issues': [], 'exempt': 0, 'entry_date_issues': []}
     if not enabled:
         return _state(result, 'disabled')
     if current.strftime('%H:%M') < publish_time:
@@ -109,14 +110,22 @@ def _shift(shift, publish_time, current, enabled, snapshot, publication, directo
     for person in people:
         try:
             matches, warnings = resolve_roster([person], directory)
-            resolved.append(matches[0]['open_id'] if len(matches) == 1 and not warnings else '')
+            resolved.append(matches[0] if len(matches) == 1 and not warnings else {})
         except (KeyError, TypeError, ValueError, AttributeError):
-            resolved.append('')
-    counts = Counter(resolved)
-    for person, open_id in zip(people, resolved):
+            resolved.append({})
+    counts = Counter(row.get('open_id') for row in resolved)
+    for person, matched in zip(people, resolved):
+        open_id = matched.get('open_id')
         if not open_id or counts[open_id] != 1:
             status, reason = 'unverified', '排班人员未唯一匹配当前应用身份'
         else:
+            eligibility, _ = daily_eligibility(matched, current.date().isoformat(), directory)
+            if eligibility == 'exempt':
+                result['exempt'] += 1
+                result['expected'] -= 1
+                continue
+            if eligibility == 'unknown':
+                result['entry_date_issues'].append(_issue(person, 'unknown', '入职日期待核对'))
             status, reason = _delivery(notices.get((shift, open_id), []), open_id, app_id)
         if status == 'sent':
             result['sent'] += 1
@@ -125,6 +134,8 @@ def _shift(shift, publish_time, current, enabled, snapshot, publication, directo
                 result['failed'] += 1
             result['issues'].append(_issue(person, status, reason))
     result['pending'] = result['expected'] - result['sent'] - result['failed']
+    if not result['expected'] and result['exempt'] and not result['issues']:
+        return _state(result, 'exempt')
     published = bool(publication and publication.get('date') == current.date().isoformat()
                      and publication.get('_dirty') is False)
     if not published:

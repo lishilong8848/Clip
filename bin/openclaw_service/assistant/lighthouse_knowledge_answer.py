@@ -111,13 +111,20 @@ def document_references(turn):
     return result
 
 
+COMPANY_QUERY_HINT = '公司资料需要主动查询。请选择「查询公司资料」，或在问题前加上“查询公司资料：”。'
+
+
 def company_request(turn):
     """Only this message's explicit command can open the shared knowledge base."""
     question = str(turn.get('question') or '').strip()
+    command = re.match(r'^/?查询公司资料(?=$|[\s:：,，])', question)
+    if command:
+        return question[command.end():].lstrip(' \t\r\n:：,，')
     if question.startswith('/公司知识库'):
         return question[len('/公司知识库'):].lstrip(' \t\r\n:：,，')
     selections = turn.get('submitted_commands', turn.get('commands', []))
-    if any(item.get('kind') == 'skill' and item.get('id') == 'company-knowledge' for item in selections):
+    if any((item.get('kind'), item.get('id')) in {('skill', 'company-knowledge'), ('tool', 'company_documents')}
+           for item in selections):
         return question
     return None
 

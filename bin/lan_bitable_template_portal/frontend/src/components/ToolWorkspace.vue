@@ -84,7 +84,7 @@
           </li>
         </ul>
         <span v-if="mixedReportBuildings" class="workspace-muted" role="status">送检报告请按楼栋分批上传。</span>
-        <NButton :disabled="!!busy" @click="showRecords()">查看办理记录</NButton>
+        <NButton :disabled="!!busy" @click="emit('records')">查看办理记录</NButton>
         <label v-if="sessionOptions.length">办理记录
           <NSelect :value="null" :options="sessionOptions" size="small" placeholder="选择记录" aria-label="办理记录" :disabled="!!busy" @update:value="id => openSaved(id)" />
         </label>
@@ -95,18 +95,20 @@
     <section v-else-if="!session" class="workspace-panel records-panel" aria-labelledby="tool-records-title">
       <header class="panel-heading">
         <div class="workspace-actions">
-          <NButton size="small" :disabled="!!busy" @click="recordsOpen = false">返回选择</NButton>
+          <NButton size="small" :disabled="!!busy" @click="recordsOnly ? emit('choose') : (recordsOpen = false)">返回选择</NButton>
           <h3 id="tool-records-title" tabindex="-1">办理记录</h3>
         </div>
         <div class="workspace-actions">
           <NButton v-if="recordAsset" size="small" :disabled="!!busy" @click="showRecords()">查看全部</NButton>
-          <NButton size="small" :disabled="!!busy" :loading="busy === 'records'" @click="loadRecords()">刷新记录</NButton>
+          <NButton size="small" :disabled="!!busy" :loading="busy === 'records'" @click="reloadRecords">刷新记录</NButton>
         </div>
       </header>
+      <slot name="followups" />
+      <h4 v-if="recordsOnly" class="record-section-title">维护与送检</h4>
       <p v-if="recordAsset" class="workspace-muted">{{ recordAsset.name }} · {{ scopeLabel(recordAsset.scope) }}</p>
       <NSpin :show="busy === 'records'">
-        <div v-if="recordSessions.length" class="record-list">
-          <article v-for="batch in recordSessions" :key="batch.id" class="record-batch">
+        <div v-if="visibleRecordSessions.length" class="record-list">
+          <article v-for="batch in visibleRecordSessions" :key="batch.id" class="record-batch">
             <div class="record-heading">
               <strong>{{ batch.kind === 'self' ? '维护' : '送检' }} · {{ batch.created_at?.slice(0, 16).replace('T', ' ') }}</strong>
               <NTag size="small">{{ sessionStatus(batch) }}</NTag>
@@ -126,7 +128,7 @@
             </ul>
           </article>
         </div>
-        <NEmpty v-else-if="busy !== 'records'" description="暂无办理记录" />
+        <NEmpty v-else-if="busy !== 'records'" :description="recordsOnly ? '暂无维护或送检记录' : '暂无办理记录'" />
       </NSpin>
       <NButton v-if="recordCursor" size="small" :disabled="!!busy" @click="loadRecords(true)">加载更早的记录</NButton>
     </section>
@@ -270,7 +272,7 @@
                   </li>
                 </ul>
               </div>
-              <p v-if="item.outcome === 'scrap'" class="workspace-muted scrap-approval-note">自检审核后提交报废申请，梅冰冰和马进宇均同意后才标记报废。</p>
+              <p v-if="item.outcome === 'scrap'" class="workspace-muted scrap-approval-note">自检审核后提交报废申请，梅冰冰、马进宇任一位同意即可报废。</p>
             </template>
           </div>
           <div v-else class="workspace-editor">
@@ -373,15 +375,15 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: La
   outcome?: string; reason?: string; quantity?: number; scrap_photos?: string[]; order_revision?: number; can_edit?: boolean; can_review?: boolean;
   can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean;
   review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
-type HistoryItem = { id: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
+type HistoryItem = { id: string; order_id?: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
   binding_pending?: boolean; binding_error?: string; result_label?: string; tool_status_label?: string;
   order_revision?: number; can_release?: boolean; can_delete?: boolean };
 type Summary = { id: string; kind: Kind; status: string; revision?: number; items?: Item[]; history_items?: HistoryItem[];
   created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
   inspection?: InspectionReport; inspection_expires_on?: string; layouts?: Record<string, Layout>; report_available?: boolean; binding_pending?: boolean };
-const emit = defineEmits<{ 'asset-history': [id: string]; 'inventory-status': [warning: string] }>();
-const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string }>();
+const emit = defineEmits<{ 'asset-history': [id: string]; 'inventory-status': [warning: string]; records: []; choose: []; 'records-refresh': [] }>();
+const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string; recordsOnly?: boolean; followupOrderIds?: string[]; inventoryWarning?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
 const reviewDates = reactive<Record<string, string>>({});
 const reviewers = shallowRef<Record<string, { id: string; name: string }[]>>();
@@ -417,7 +419,7 @@ const sheetName = ref('');
 const zoom = ref(100);
 const error = ref('');
 const sourceWarnings = computed(() => [...new Set(
-  [board.value?.inventory_error, board.value?.warning]
+  [board.value?.inventory_error, board.value?.warning, props.inventoryWarning]
     .filter((warning): warning is string => !!warning && warning !== error.value),
 )]);
 const busy = ref('');
@@ -438,9 +440,17 @@ let pollVersion = '';
 let boardRead: AbortController | undefined;
 let openOperation: { key: string; id: string } | undefined;
 let strokeId: number | undefined;
-const recordsOpen = ref(false);
+const recordsOpen = ref(!!props.recordsOnly);
 const recordAsset = ref<Asset>();
 const recordSessions = shallowRef<Summary[]>([]);
+const visibleRecordSessions = computed(() => {
+  const followups = new Set(props.followupOrderIds || []);
+  const building = props.scope && !['ALL', 'CAMPUS'].includes(props.scope) ? props.scope : '';
+  if (!props.recordsOnly) return recordSessions.value;
+  return recordSessions.value.map(batch => ({ ...batch, history_items: (batch.history_items || []).filter(tool =>
+    !followups.has(tool.order_id || '') && (!building || tool.scope === building)),
+  })).filter(batch => batch.history_items.length);
+});
 const recordCursor = shallowRef<HistoryPage['history_cursor']>();
 const scrapPhotoLimit = 3;
 const scrapPhotoMaxBytes = 1024 * 1024;
@@ -858,6 +868,10 @@ async function fetchRecords(more = false) {
 function loadRecords(more = false) {
   return perform('records', () => fetchRecords(more));
 }
+function reloadRecords() {
+  emit('records-refresh');
+  return loadRecords();
+}
 function showRecords(asset?: Asset) {
   recordAsset.value = asset;
   recordSessions.value = [];
@@ -936,6 +950,11 @@ function openSaved(id: string, assetId = '') {
   }));
 }
 function refresh() {
+  if (recordsOpen.value && !session.value) return perform('records', async () => {
+    await readBoard(true);
+    emit('records-refresh');
+    await fetchRecords();
+  });
   leave(() => void perform('read', async () => {
     await readBoard(true);
     if (session.value) {
@@ -1188,10 +1207,11 @@ function leave(proceed: () => void) {
   if (dirty.value) askDiscard(proceed);
   else proceed();
 }
-defineExpose({ refresh, leave, busy, dirty });
+defineExpose({ refresh, reloadRecords: loadRecords, leave, busy, dirty });
 onMounted(() => {
   if (props.sessionId) openSaved(props.sessionId);
-  void readBoard();
+  if (props.recordsOnly) void loadRecords();
+  else void readBoard();
 });
 onBeforeUnmount(() => {
   lifetime.abort();
@@ -1253,6 +1273,7 @@ onBeforeUnmount(() => {
 .opening-panel label { display: grid; gap: 4px; font-size: 12px; }
 .records-panel,.record-list { display: grid; gap: 10px; }
 .record-batch { border: 1px solid var(--tool-border); padding: 10px 12px; border-radius: 6px; }
+.record-section-title { margin: 16px 0 8px; font-size: 14px; }
 .record-heading,.record-tools li { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; }
 .record-tools { list-style: none; padding: 0; margin: 8px 0 0; }
 .record-tools li { border-top: 1px solid var(--tool-border); justify-content: space-between; padding: 8px 0 2px; }

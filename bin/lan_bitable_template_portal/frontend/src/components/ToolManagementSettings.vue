@@ -21,7 +21,7 @@
       </div>
     </template>
     <p v-if="data?.scrap_approvers?.length" class="settings-line settings-approval">
-      报废审批人 {{ data.scrap_approvers.join('、') }}（均通过后生效）
+      报废审批人 {{ data.scrap_approvers.join('、') }}（任一位同意后生效）
     </p>
   </section>
 </template>

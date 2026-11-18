@@ -1,8 +1,10 @@
 import io
 import json
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Barrier
 from unittest import TestCase
 from zipfile import ZipFile
 
@@ -32,6 +34,28 @@ class LedgerFixture:
 
 
 class ToolManagementTest(TestCase):
+    def test_completed_followup_can_be_removed_from_worklist_without_erasing_ledger(self):
+        scrap = self.submit_self(next(row for row in self.orders if row['kind'] == 'self'), 'scrap')
+        identity = scrap['id']
+        with self.assertRaises(RiskError):
+            self.svc.action(self.leader, identity, 'remove-followup', {'revision': scrap['revision']})
+        completed = self.svc.action(self.park, identity, 'approve', {'revision': scrap['revision']})
+        body = {'revision': completed['revision']}
+        with self.assertRaises(RiskError):
+            self.svc.action(self.leader, identity, 'remove-followup', body)
+        while self.svc.sync_one():
+            pass
+        with self.assertRaises(RiskError):
+            self.svc.action(actor(scope='B', identity='outsider'), identity, 'remove-followup', body)
+        self.assertTrue(next(row for row in self.svc.list(self.leader)['followups'] if row['id'] == identity)['can_remove_followup'])
+        self.assertTrue(self.svc.action(self.leader, identity, 'remove-followup', body)['deleted'])
+        self.assertTrue(self.svc.action(self.leader, identity, 'remove-followup', body)['deleted'])
+        self.assertNotIn(identity, {row['id'] for row in self.svc.list(self.leader)['followups']})
+        detail = self.svc.detail(self.leader, identity)
+        self.assertEqual(detail['outcome'], 'scrapped')
+        self.assertTrue(all(item['state'] == 'done' for item in detail['sync']))
+        self.assertEqual(sum(row['action'] == '删除已归档处置记录' for row in detail['history']), 1)
+
     def full_actor(self,name):
         return actor(scope='H',identity=name) | {'name':name,'level':'L4','category':'engineer',
              'modules':[],'scope_rules':['H'],'_tool_management_full_access':True}
@@ -51,7 +75,7 @@ class ToolManagementTest(TestCase):
         ordinary=self.full_actor('李世龙') | {'_tool_management_full_access':False}
         with self.assertRaises(RiskError):self.svc.list(ordinary)
 
-    def test_designated_people_can_handle_claimed_report_but_scrap_requires_both_managers(self):
+    def test_designated_people_can_handle_claimed_report_and_either_manager_can_approve_scrap(self):
         li=self.full_actor('李世龙');liu=self.full_actor('刘小杏')
         external=next(row for row in self.orders if row['kind']=='external')
         claimed=self.svc.action(self.leader,external['id'],'claim',{'revision':external['revision']})
@@ -69,10 +93,62 @@ class ToolManagementTest(TestCase):
         with self.assertRaises(RiskError):
             self.svc.action(liu,scrap['id'],'approve',{'revision':scrap['revision']})
         first = self.svc.action(self.park, scrap['id'], 'approve', {'revision': scrap['revision']})
-        self.assertEqual(first['outcome'], 'scrap')
+        self.assertEqual(first['outcome'], 'scrapped')
         self.assertEqual(self.svc.action(self.park, scrap['id'], 'approve', {'revision': scrap['revision']}), first)
-        approved = self.svc.action(self.second_manager, scrap['id'], 'approve', {'revision': first['revision']})
-        self.assertEqual(approved['outcome'],'scrapped')
+        self.assertFalse(self.svc.detail(self.second_manager, scrap['id'])['can_approve'])
+        with self.assertRaisesRegex(RiskError, '已处理'):
+            self.svc.action(self.second_manager, scrap['id'], 'approve', {'revision': first['revision']})
+
+    def test_concurrent_manager_approvals_update_the_order_and_queue_once(self):
+        scrap = self.submit_self(next(row for row in self.orders if row['kind'] == 'self'), 'scrap')
+        identity = scrap['id']
+        with self.svc.connect() as db:
+            sync_before = db.execute('SELECT revision FROM tool_work_sync WHERE order_id=?', (identity,)).fetchone()[0]
+        barrier = Barrier(2, timeout=10)
+
+        def approve(manager):
+            barrier.wait()
+            try:
+                return self.svc.action(manager, identity, 'approve', {'revision': scrap['revision']})['outcome']
+            except RiskError as exc:
+                self.assertIn('已处理', str(exc))
+                return 'already_processed'
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(approve, (self.park, self.second_manager)))
+        self.assertCountEqual(results, ['scrapped', 'already_processed'])
+        detail = self.svc.detail(self.leader, identity)
+        self.assertEqual(detail['revision'], scrap['revision'] + 1)
+        self.assertEqual([vote['decision'] for vote in detail['scrap_approvals']].count('approve'), 1)
+        self.assertEqual([entry['action'] for entry in detail['history']].count('通过报废审批'), 1)
+        with self.svc.connect() as db:
+            sync_revisions = db.execute('SELECT revision FROM tool_work_sync WHERE order_id=?', (identity,)).fetchall()
+        self.assertEqual([row[0] for row in sync_revisions], [sync_before + 1])
+
+    def test_restart_finishes_an_existing_single_approval_and_keeps_its_vote(self):
+        scrap = self.submit_self(next(row for row in self.orders if row['kind'] == 'self'), 'scrap')
+        identity = scrap['id']
+        with self.svc.connect(True) as db:
+            decided_at = clock().isoformat(timespec='seconds')
+            db.execute("""UPDATE tool_scrap_votes SET decision='approve',at=?,note='旧审批备注'
+                         WHERE order_id=? AND employee_no=?""", (decided_at, identity, self.park['employee_no']))
+            db.execute('UPDATE tool_work_orders SET revision=revision+1 WHERE id=?', (identity,))
+            self.svc.audit(db, identity, self.park, '通过报废审批', '旧审批备注')
+            self.svc.enqueue(db, identity, 'maintenance')
+        while self.svc.sync_one():
+            pass
+        risk = RiskInspections(self.db_path, self.people.__getitem__)
+        migrated = ToolManagement(risk, self.cloud)
+        detail = migrated.detail(self.leader, identity)
+        self.assertEqual(detail['outcome'], 'scrapped')
+        self.assertEqual(detail['revision'], scrap['revision'] + 2)
+        self.assertEqual([vote['decision'] for vote in detail['scrap_approvals']], ['approve', ''])
+        self.assertEqual([entry['action'] for entry in detail['history']].count('通过报废审批'), 1)
+        self.assertTrue(migrated.sync_one())
+        self.assertEqual(self.cloud.writes[-1], ('maintenance', 'scrapped', 'recmaintenance'))
+        restarted = ToolManagement(risk, self.cloud)
+        self.assertEqual(restarted.detail(self.leader, identity), migrated.detail(self.leader, identity))
+        self.assertFalse(restarted.sync_one())
 
     def test_full_access_requires_current_unique_directory_identity(self):
         from types import SimpleNamespace
@@ -121,7 +197,8 @@ class ToolManagementTest(TestCase):
             'level': 'L2', 'category': 'manager', 'name': '马进宇', 'employee_no': '18871'}
         self.people = {person['id']: person for person in (self.admin, self.leader, self.supervisor, self.park)}
         self.cloud = LedgerFixture()
-        self.svc = ToolManagement(RiskInspections(Path(temp.name) / 'tool.db', self.people.__getitem__), self.cloud)
+        self.db_path = Path(temp.name) / 'tool.db'
+        self.svc = ToolManagement(RiskInspections(self.db_path, self.people.__getitem__), self.cloud)
         self.svc.refresh()
         self.svc.configure(self.admin, 'park-manager', {'manager_id': 'manager'})
         self.svc.configure(self.admin, 'recTool0', {'revision': 0, 'supervisor': 'professional'})
@@ -182,9 +259,7 @@ class ToolManagementTest(TestCase):
         self.assertTrue(self.svc.detail(self.leader, repair['id'])['can_repair'])
         repair = self.svc.action(self.leader, repair['id'], 'repair-scrap',
                                  {'revision': returned['revision'], 'reason': '复核无法修复', 'quantity': 1})
-        waiting = self.svc.action(self.park, repair['id'], 'approve', {'revision': repair['revision']})
-        self.assertEqual(waiting['outcome'], 'scrap')
-        approved = self.svc.action(self.second_manager, repair['id'], 'approve', {'revision': waiting['revision']})
+        approved = self.svc.action(self.second_manager, repair['id'], 'approve', {'revision': repair['revision']})
         self.assertEqual(approved['outcome'], 'scrapped')
         self.assertEqual(approved['tool_status_label'], '检修后报废')
         rejected = self.svc.action(self.park, scrap['id'], 'reject', {'revision': scrap['revision'], 'reason': '继续使用'})

@@ -308,7 +308,7 @@ def _login_directory(service):
 
     This never pulls from the cloud and never reads raw password or national-ID
     fields: the HR snapshot only carries {id,name,employee_no,scopes,inactive,
-    selectable,needs_setup,password_revision,login_ids}. Returns (people, valid).
+    selectable,needs_setup,password_revision,login_ids,entry_date}. Returns (people, valid).
 
     ``valid`` is True only when a real snapshot with a ``people`` mapping was
     actually presented.  A missing snapshot (reader absent / non-dict / no
@@ -859,12 +859,17 @@ def claim(service, actor, payload):
             raise LearningError('排班日期或班次无效。') from None
         if not beginning <= current < end:
             raise LearningError('对应班次已结束或尚未开始，不能领取该排班日题单。', 409)
-        learners = shift_learners(service, day.isoformat(), shift)
+        date = day.isoformat()
+    from .learning_onboarding import daily_eligibility, directory_for_learning
+    eligibility, resume = daily_eligibility(self_person, date, directory_for_learning(service))
+    if eligibility == 'exempt':
+        raise LearningError(f'入职首月免做，{resume} 起按排班安排。', 409)
+    if shift:
+        learners = shift_learners(service, date, shift)
         if learners is None:
             raise LearningError('对应排班名单暂不可用，请稍后重试。', 503)
         if not any(duty['scope'] == scope and learner['id'] == self_person['id'] for duty, learner in learners):
             raise LearningError('只能领取本人当前值班楼栋和排班日的题单。', 403)
-        date = day.isoformat()
     with service.transaction() as conn:
         if shift and not beginning <= core.now() < end:
             raise LearningError('对应班次已结束或尚未开始，不能领取该排班日题单。', 409)
@@ -1153,7 +1158,11 @@ def profile(service, actor, query):
                 questions.append({'id': qid, 'stem': own[0]['stem'], 'answered': len(own), 'wrong': sum(r['correct'] == 0 for r in own)})
     available = candidates(service, None) if actor.get('is_admin') else []
     inventory = {bank: {'available': len({q['family_id'] for q in available if q['bank'] == bank})} for bank in BANKS}
-    today_papers = [p for p in all_papers if p.get('date') == today and p.get('mode') != 'practice']
+    from .learning_onboarding import daily_eligibility, directory_for_learning
+    entry_directory = directory_for_learning(service)
+    learners = {p['id']: p for p in data['person']}
+    today_papers = [p for p in all_papers if p.get('date') == today and p.get('mode') != 'practice'
+                    and daily_eligibility(learners.get(p['person_id']) or {}, today, entry_directory)[0] != 'exempt']
     today_summary = summarize(today_rows, today_papers, practice_rows=today_practices)
     if today_tasks:
         assigned = sum(t.get('assigned') or 0 for t in today_tasks.values())

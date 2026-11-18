@@ -470,7 +470,7 @@ def _candidates(engine, actor, original):
     return model, selected
 
 
-async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
+async def resolve_query_intent(engine, actor, turn, history, authorize, *, include_document_context=True) -> dict:
     """Return QueryIntent's fields plus a server-owned attempts integer (0..2).
 
     attempts counts dispatched classifications, including failures/timeouts. It
@@ -510,7 +510,12 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
                 questions = _history_questions(previous, authority)
             else:
                 questions = public_questions
-            documents = await asyncio.to_thread(_document_context, engine, authority, turn, previous, questions)
+            async def document_context(current, candidate_turn):
+                if not include_document_context:
+                    return []
+                return await asyncio.to_thread(_document_context, engine, current, candidate_turn, previous, questions)
+
+            documents = await document_context(authority, turn)
             packet = {'question': question, 'history': questions,
                 'documents': documents,
                 'constraints': dict(zip(('time', 'scopes', 'status', 'shift', 'devices', 'counting_basis'),
@@ -523,8 +528,7 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
             for attempts, profile in enumerate(candidates, 1):
                 fallback['attempts'] = attempts
                 try:
-                    if documents != await asyncio.to_thread(_document_context, engine, authority,
-                            {**turn, '_profile': profile}, previous, questions):
+                    if documents != await document_context(authority, {**turn, '_profile': profile}):
                         continue
                     value = await asyncio.wait_for(asyncio.to_thread(model.complete, copy.deepcopy(messages),
                         profile={**profile, 'reasoning': False}, max_tokens=1800,
@@ -553,7 +557,7 @@ async def resolve_query_intent(engine, actor, turn, history, authorize) -> dict:
                         if len(candidates) == 1:
                             candidates.append(profile)
                         continue
-                    if documents != await asyncio.to_thread(_document_context, engine, latest_authority, turn, previous, questions):
+                    if documents != await document_context(latest_authority, turn):
                         return fallback
                     selected = set(candidate.pop('document_refs', []))
                     references = [{key: row[key] for key in ('document_id', 'version', 'ordinal', 'name')}

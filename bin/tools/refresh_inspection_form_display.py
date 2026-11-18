@@ -29,6 +29,10 @@ def color(c,default):
     if c.type=='indexed' and 0<=c.indexed<len(COLOR_INDEX):return '#'+COLOR_INDEX[c.indexed][-6:]
     return default
 
+def is_fixed_slash(cell):
+    return cell.fill.patternType == 'solid' and color(cell.fill.fgColor, '').lower() == '#ff0000'
+
+
 def css(cell,show_grid=True):
     f,a,b,fill=cell.font,cell.alignment,cell.border,cell.fill
     out={'fontFamily':f.name or 'Calibri','fontSize':round((f.sz or 11)*4/3,2),'fontWeight':'700' if f.bold else '400',
@@ -57,8 +61,10 @@ def main():
         digit_width=round((base_font.sz or 11)*2/3) if base_font.name in ('宋体','新宋体','SimSun') else 7
         for ws in book:
             values=[c for c in ws._cells.values() if c.value is not None and str(c.value).strip()]
-            if not values:continue
-            maxrow=max(c.row for c in values);maxcol=max(c.column for c in values)
+            fixed = sorted((c for c in ws._cells.values() if is_fixed_slash(c)), key=lambda c: (c.row, c.column))
+            if not values and not fixed:continue
+            used = values + fixed
+            maxrow=max(c.row for c in used);maxcol=max(c.column for c in used)
             for merge in ws.merged_cells.ranges:
                 anchor=ws.cell(merge.min_row,merge.min_col)
                 if anchor.value is not None:
@@ -93,6 +99,7 @@ def main():
                       'column_dimensions':{key:{k:getattr(d,k) for k in ('width','hidden','outlineLevel','collapsed','min','max','bestFit')} for key,d in ws.column_dimensions.items() if (d.min or 0)<=maxcol}}
             art=artwork.get(ws.title)
             sheets.append({'excluded_ranges':old.get(name,{}).get('excluded_ranges',[]),'name':name,'rows':rows,'merges':merges,'column_widths':widths,'row_heights':heights,'styles':styles,'excel_styles':native_styles,'excel_settings':settings,'style_ids':style_ids,'source_range':f'A1:{ws.cell(maxrow,maxcol).coordinate}',
+                           **({'slash_cells': [c.coordinate for c in fixed]} if fixed else {}),
                            'artwork':art,'display_artwork':display_artwork(art,widths,heights) if art else []})
             print(template['scope'],name,maxcol,maxrow,flush=True)
         template.update(sheets=sheets,source_name=source.name,source_sha256=hashlib.sha256(source.read_bytes()).hexdigest())

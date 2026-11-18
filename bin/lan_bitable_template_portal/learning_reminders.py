@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from uuid import NAMESPACE_URL, uuid5
 
 from .personnel_source import APP_TOKEN, TABLE_ID
+from .learning_onboarding import daily_eligibility
 VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
@@ -177,7 +178,7 @@ def shift_learners(service, day, shift, *, current=None):
         service._last_error = '学练排班待核对：' + '；'.join(warnings)
     learners = []
     for duty in roster:
-        if duty['shift'] != shift:
+        if duty['shift'] != shift or daily_eligibility(duty, day, directory)[0] == 'exempt':
             continue
         rows = [rid for rid, row in directory.items() if str(row.get('name') or '').strip() == duty['name']
                 and _hr_learning_scopes(row) == [duty['scope']] and duty['open_id'] in (row.get('login_ids') or [])]
@@ -211,6 +212,7 @@ def enqueue_shift_reminders(service, current):
                     for issue in snapshot.get('issues', []))
     if warnings:
         service._last_error = '学练排班待核对：' + '；'.join(warnings)
+    people = [person for person in people if daily_eligibility(person, day, directory)[0] != 'exempt']
     with service.transaction() as conn:
         for person in people:
             if current.strftime('%H:%M') < times[person['shift']]:
@@ -220,7 +222,7 @@ def enqueue_shift_reminders(service, current):
                 continue
             key = f"shift:{day}:{person['shift']}:{person['open_id']}"
             existing = service._get('notification', key, conn)
-            if existing and existing.get('status') not in {'skipped_role', 'skipped_roster'}:
+            if existing and existing.get('status') not in {'skipped_role', 'skipped_roster', 'skipped_onboarding'}:
                 continue
             service._put('notification', key, {'id': key, 'kind': 'shift', 'scope': '', 'date': day,
                 'open_id': person['open_id'], 'shift': person['shift'], 'status': 'pending',
@@ -241,6 +243,7 @@ def notification_jobs(service, current, assignments):
         day = current.date().isoformat()
         notices = service._all('notification')
         reported = {member for job in notices if job.get('kind') == 'app_access' and job.get('date') == day
+                    and job.get('status') != 'skipped_onboarding'
                     for member in job.get('members', [])}
         by_id = defaultdict(list)
         for person in directory.values():
@@ -266,7 +269,8 @@ def notification_jobs(service, current, assignments):
             for (scope, shift), members in groups.items():
                 identities = sorted(member[0] for member in members)
                 identity = 'app-access:' + str(uuid5(NAMESPACE_URL, '|'.join(identities)))
-                if service._get('notification', identity, conn):
+                previous = service._get('notification', identity, conn)
+                if previous and previous.get('status') != 'skipped_onboarding':
                     continue
                 names = '、'.join(dict.fromkeys(member[1] for member in members))
                 message = (f'【学练应用授权待处理】{day} {scope}楼{shift}班\n'

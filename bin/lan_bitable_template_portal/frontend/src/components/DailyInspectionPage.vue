@@ -35,10 +35,11 @@
     <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
     <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
       :template-version="state.template_version" :archive-revision="state.archive_revision" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date"
-      :default-shift="duty?.shift" :next-round="state.next_round" :active="active || undefined"
+      :default-shift="duty?.shift" :next-round="state.next_round" :active="active || undefined" :source-time="batch?.source_time"
       :read-only="readOnly" :planned-groups="state.planned_sheet_groups" :parent-busy="!!busy || autoSaving || hasDrafts"
       @changed="load" @round-state="acceptRoundState" @scope="switchView" @exit="back">
       <template #start>
+        <small v-if="collectionStatus" role="status">{{ collectionStatus }}</small>
         <div v-if="duty && !readOnly && active?.source_locked===false && !active.pending" class="inspection-start">
           <NButton type="primary" :loading="busy==='start'" :disabled="!!busy" @click="start">开始第 {{ active.round }} 次巡检</NButton>
         </div>
@@ -70,7 +71,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vu
 import { NAlert, NButton, NModal } from 'naive-ui';
 import { ArrowLeft } from 'lucide-vue-next';
 import './inspection.css';
-import { ApiError, requestJson } from '../api/client';
+import { ApiError, requestJson, type ApiRequestOptions } from '../api/client';
 import { registerNavigationGuard } from '../navigation';
 import DailyInspectionWorkbook from './DailyInspectionWorkbook.vue';
 
@@ -82,14 +83,14 @@ type Reading = {location:string; form:string; integrity:string; missing:string; 
 type Point = {id:string; point_id:string; name:string; sampled:number|null; integrity:string; location:string; path:string; note:string; template:string; sheet:string; cell:string; template_known:boolean;mapping_issue?:string};
 type Parameter = {id:string; name:string; reference:Value; source_reference?:Value; value_type?:string; section?:number; point?:string; read_only?:boolean};
 type Device = {id:string; name:string; scope?:string; profession:string; sections:Reading[]; points:Point[]; parameters:Parameter[];deferred_sections?:number[]};
-type Batch = {batch:number; count:number; devices:Device[];form_devices?:Device[];cache_stale?:boolean;cache_refreshed_at?:number};
+type Batch = {batch:number;source_time?:number; count:number; devices:Device[];form_devices?:Device[];cache_stale?:boolean;cache_refreshed_at?:number};
 type Duty = {scope:string; date:string; shift:string};
 type Review = {values:Record<string,string>; result:''|'正常'|'异常'; note:string; revision:number};
 type Reviews = Record<string,Review>;
 type DraftReview = Review & {base?:Review;pending?:Review;label?:string;parameterLabels?:Record<string,string>};
 type Recovery = {key:string;duty:Duty;round:number;drafts:Record<string,DraftReview>};
 type ProfessionConfirmation = {actor:string;confirmed:number;version:string};
-type State = {template_version?:string;archive_revision?:string;duty:Duty|null; completed_rounds:number; archived_rounds?:number; round_limit:number; next_round?:number; scheduled?:boolean; opens_at?:number|null; history_scopes?:string[]; duty_warning?:string;
+type State = {collection?:{state:string;error?:string};template_version?:string;archive_revision?:string;duty:Duty|null; completed_rounds:number; archived_rounds?:number; round_limit:number; next_round?:number; scheduled?:boolean; opens_at?:number|null; history_scopes?:string[]; duty_warning?:string;
   view_scopes?:string[]; view_scope?:string; can_edit?:boolean;
   planned_sheet_groups?:Record<string,string>;
   active:null|{id:string;started_by?:string;started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;visited_sheets?:string[];presence?:{actor:string;sheet:string;seen_at:number}[];sheet_groups?:Record<string,string>;confirmation_invalidations?:Record<string,string>;worksheet_mode?:boolean;available_professions?:string[]; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
@@ -102,6 +103,7 @@ const state = ref<State>();
 const busy = ref('');
 const error = ref('');
 const message = ref('');
+const collectionStatus = ref('');
 const inspectionProfessions = ['电气','暖通'];
 const selectedProfessions = ref([...inspectionProfessions]);
 const workbookPage=ref<InstanceType<typeof DailyInspectionWorkbook>>();
@@ -350,10 +352,24 @@ async function fetchState(action:string, body?:object, selectedScope?:string) {
   try {
     const scope=selectedScope ?? state.value?.view_scope ?? '';
     const suffix=scope ? '?'+new URLSearchParams({view_scope:scope}) : '';
-    const next=await requestJson(api+(body?'/'+action:'')+suffix,{
+    const options:ApiRequestOptions={
       ...(body?{method:'POST',body:JSON.stringify(body)}:{cache:'no-store',fresh:true}),
       signal:request.signal,timeoutMs:120000,
-    }) as State;
+    };
+    let next=await requestJson(api+(body?'/'+action:'')+suffix,options) as State;
+    const waitingSince=Date.now();
+    while(action==='start' && next.collection && !disposed && !request.signal.aborted){
+      useState(next);
+      if(next.collection.state==='failed')throw new Error(next.collection.error || '本楼采集尚未完成，可重试原请求。');
+      collectionStatus.value=next.collection.state==='waiting_bitable' ? '新数据已上传，正在核验本楼完整批次…' : '正在采集并核验本楼最新数据，完成后自动进入巡检…';
+      if(Date.now()-waitingSince>12*60*1000)throw new Error('本楼采集尚未核实，稍后点击开始可继续核对原请求。');
+      await new Promise<void>((resolve,reject)=>{
+        const abort=()=>{window.clearTimeout(timer);reject(new DOMException('Aborted','AbortError'));};
+        const timer=window.setTimeout(()=>{request.signal.removeEventListener('abort',abort);resolve();},2000);
+        request.signal.addEventListener('abort',abort,{once:true});
+      });
+      next=await requestJson(api+'/'+action+suffix,options) as State;
+    }
     if (disposed || request.signal.aborted) return false;
     useState(next,action==='finish' || action==='confirm-profession' && !next.active);
     if (action==='finish') message.value='本轮巡检已归档。';
@@ -385,7 +401,7 @@ async function fetchState(action:string, body?:object, selectedScope?:string) {
     }
     return false;
   } finally {
-    if (controller===request) {busy.value='';if (hasDrafts.value) queueAutoSave();}
+    if (controller===request) {busy.value='';collectionStatus.value='';if (hasDrafts.value) queueAutoSave();}
   }
 }
 async function refreshSharedStatus() {

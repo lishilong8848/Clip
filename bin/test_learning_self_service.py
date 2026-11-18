@@ -32,6 +32,24 @@ class SelfServiceTests(unittest.TestCase):
     dispatch = support.LearningTests.dispatch
     question = support.LearningTests.question
 
+    def test_entry_month_blocks_daily_claim_but_preserves_self_practice(self):
+        self.seed_service()
+        self.seed(self.question(i, bank, 'single' if bank == 'supplemental' else 'interview')
+                  for bank, quota in learning.QUOTAS.items() if bank != 'written' for i in range(quota + 2))
+        self.service._login_people_reader = lambda: {'people': {'recP1': {
+            'selectable': True, 'login_ids': ['ou_p1'], 'entry_date': '2026-09-01'}}}
+        actor = self.actor(id='ou_p1', person_id='p1', can_answer=True)
+        payload = {'person_id': 'p1', 'scope': 'A'}
+        with patch.object(learning, 'now', return_value=CURRENT):
+            boot = self.service.bootstrap('A', actor)
+            self.assertEqual(boot['daily_exemption'], {'status': 'exempt', 'resume_date': '2026-10-01'})
+            self.assertNotIn('entry_date', boot['self_person'])
+            with self.assertRaisesRegex(learning.LearningError, '入职首月免做'):
+                self.dispatch('paper.claim', payload, actor)
+            practice = self.dispatch('paper.claim', payload | {'mode': 'practice', 'operation_id': 'voluntary-fixture'}, actor)
+        self.assertEqual(practice['mode'], 'practice')
+        self.assertFalse(self.service._get('paper', f'personal:{DAY}:p1'))
+
     def seed_service(self, people=None, multiple=False):
         kind = 'multiple' if multiple else 'single'
         self.seed(self.question(i, 'written', kind) for i in range(40))

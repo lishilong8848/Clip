@@ -672,42 +672,62 @@ class NativeAgentLaneTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(value.health.snapshot(value._health_key(value.profile)), {})
                 await client.close()
 
-    async def test_warmup_queues_failures_and_waits_are_lane_local_and_bounded(self):
-        engine = self.engine
-        engine.warming, engine.warm_attempts, engine.warm_errors = {}, {}, {}
-        engine.manager.accounts, engine.manager.maximum = {}, 0
-        engine.WARMUP_CONCURRENCY = 2
-        release = asyncio.Event()
-        started = []
-        async def warm(owner):
-            started.append(owner)
-            await release.wait()
-        engine._warmup = warm
-        owners = [actor(lane) for lane in ('a', 'b', 'c')]
-        for owner in owners:
-            native.LighthouseOpenClaw.queue_warmup(engine, owner)
-        tasks = list(engine.warming.values())
-        try:
-            self.assertEqual(set(engine.warming), {runtime.account_key(execution_key(owner)) for owner in owners[:2]})
-            await asyncio.sleep(0)
-            self.assertEqual(len(started), 2)
-            emit = AsyncMock()
-            await native.LighthouseOpenClaw.wait_warmup(engine, owners[2], emit)
-            emit.assert_not_awaited()
-            first_key = runtime.account_key(execution_key(owners[0]))
-            engine.warm_errors[first_key] = AssistantError('fixture failed', 503)
-            first = asyncio.create_task(native.LighthouseOpenClaw.wait_warmup(engine, owners[0], emit))
-            await asyncio.sleep(0)
-            second = asyncio.create_task(native.LighthouseOpenClaw.wait_warmup(engine, owners[1], emit))
-            await asyncio.sleep(0)
-            release.set()
-            with self.assertRaises(AssistantError):
-                await first
-            await second
-        finally:
-            release.set()
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self.assertFalse(engine.warming)
+    async def test_login_does_not_queue_gateway_or_block_explicit_lane_tasks_and_close_cancels(self):
+        from test_lighthouse_startup import make_engine
+        with tempfile.TemporaryDirectory() as directory:
+            engine, _ = make_engine(directory)
+            owners = [actor(lane) for lane in ('a', 'b', 'c')] + [actor('a', id='other-owner')]
+            original_owners = copy.deepcopy(owners)
+            agents = [agent(engine, owner) for owner in owners]
+            keys = [runtime.account_key(execution_key(owner)) for owner in owners]
+            self.assertEqual(len(set(keys)), 4)
+            self.assertEqual(len({value.session_key for value in agents}), 4)
+            self.assertEqual(len({value.token for value in agents}), 4)
+            engine._warmup = AsyncMock(side_effect=AssertionError('login started a gateway'))
+            pending = []
+            client = agent_fixtures.FakeGatewayClient('ws://127.0.0.1:19999', 'fixture')
+            try:
+                for owner in owners:
+                    engine.queue_warmup(owner)
+                await asyncio.sleep(0)
+                self.assertEqual(engine.warming, {})
+                self.assertEqual(engine.warm_attempts, {})
+                engine._warmup.assert_not_awaited()
+                # Residual optional tasks from an older lifecycle stay lane-local,
+                # but neither their wait nor their failure can gate this turn.
+                async def legacy_optional():
+                    await asyncio.Event().wait()
+                pending = [asyncio.create_task(legacy_optional()) for _ in range(2)]
+                engine.warming.update(zip(keys[:2], pending))
+                engine.warm_errors[keys[0]] = AssistantError('old lane failure', 503)
+                emit = AsyncMock()
+                await asyncio.wait_for(asyncio.gather(*(engine.wait_warmup(owner, emit) for owner in owners)), 1)
+                emit.assert_not_awaited()
+                self.assertTrue(all(not task.done() for task in pending))
+                self.assertNotIn(keys[1], engine.warm_errors)
+                self.assertNotIn(keys[2], engine.warm_errors)
+                self.assertNotIn(keys[3], engine.warm_errors)
+                explicit = agents[2]
+                explicit._acquire_runtime = AsyncMock(return_value={
+                    'port': 19999, 'token': 'fixture', 'busy': True,
+                    'used_at': 0, 'process': runtime_fixtures._FakeProcess()})
+                async def empty_events(*args):
+                    if False: yield None
+                explicit._events = empty_events
+                engine.gateway_client = AsyncMock(return_value=client)
+                engine.keep_gateway = AsyncMock()
+                async with asyncio.timeout(2), explicit.run_stream_events(['explicit business'], message_history=[]) as events:
+                    async for _ in events: pass
+                explicit._acquire_runtime.assert_awaited_once()
+                self.assertTrue(all(not task.done() for task in pending))
+                self.assertEqual(owners, original_owners)
+            finally:
+                await engine.close()
+                await client.close()
+            self.assertTrue(engine.closing)
+            self.assertEqual(engine.warming, {})
+            self.assertTrue(all(task.cancelled() for task in pending))
+            self.assertEqual(engine.manager.accounts, {})
 
 
 if __name__ == '__main__':

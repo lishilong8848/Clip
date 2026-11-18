@@ -14,7 +14,8 @@ const adapted=adaptLearningPage(oldPage),parsed=parse(adapted);assert.deepEqual(
 assert.equal(parsed.descriptor.script.content,parse(oldPage.replaceAll('\r\n','\n')).descriptor.script.content,'module-level question/import helpers remain unchanged');
 compileScript(parsed.descriptor,{id:'learning-v2',inlineTemplate:true});
 assert(adapted.includes('v2Resume(\'daily\')')&&adapted.includes('v2NewPractice'));
-const buildCache=path.join(out,'build');await mkdir(buildCache,{recursive:true});
+const buildCache=process.env.CLIPFLOW_WORKSPACE_BUILD_DIR || path.join(out,'build');await mkdir(buildCache,{recursive:true});
+const fromWorkbench=process.argv.includes('--workbench-entry');
 const assets=new Map();
 if(process.argv.includes('--reuse-build')){
   for(const name of await readdir(buildCache))assets.set('/assets/workspace-v2/'+name,await readFile(path.join(buildCache,name)));
@@ -41,7 +42,7 @@ papers.set('daily-other',makePaper('daily-other','daily','other-learning'));
 const summary={assigned:15,task_answered:3,answered:3,choice_answered:2,wrong:1,correct:1,accuracy:50,independent_answered:2,independent_correct:1,learning_days:2,practice_count:1,attempt_count:4,interview_total:1,interview_ratings:{'需复习':1},answered_people:24};
 const people=Array.from({length:25},(_,n)=>({person_id:'person-'+n,name:'画像人员'+n,employee_no:'fixture-'+n,scope:'A',summary:{...summary,accuracy:n%2?100:50},today:n%3?{answered:3,total:15}:null,last_answered_at:day+'T09:00:00'}));
 const profile=pid=>({person:pid?pid===person.id?person:{id:pid,name:'A楼其他人员'}:null,summary:{...summary},today_summary:{...summary,papers:1,answered_people:12,completed_people:4,not_started_people:3},people,trend:[{date:'2026-10-12',attempt_count:2,people:2,accuracy:50},{date:'2026-10-13',attempt_count:0,people:0,accuracy:null},{date:day,attempt_count:4,people:3,accuracy:100}],banks:[{bank:'written',label:'笔试题库',wrong:1}],topics:[{topic:'电气安全',wrong:1}],distribution:[{label:'0-59%',count:13},{label:'60-79%',count:0},{label:'80-99%',count:0},{label:'100%',count:12}],published:true});
-const publicPaper=p=>({...structuredClone(p),stats:{total:15,answered:p.questions.filter(q=>q.attempt).length,accuracy:50}});
+const publicPaper=p=>({...structuredClone(p),stats:{total:p.questions.length,answered:p.questions.filter(q=>q.attempt).length,accuracy:50}});
 function reveal(p,q){q.answer={correct_option_ids:q.type==='multiple'?['A','B','C','D']:q.type==='interview'?[]:['A'],answer_text:q.type==='interview'?'先确认安全条件再操作':'',analysis:'按原题参考答案核对',hint:'先核实现场安全条件',attachments:[]};}
 try{
   await mkdir(out,{recursive:true});
@@ -62,6 +63,7 @@ try{
     if(p==='/api/learning/review')return ok({items:[{paper_id:'daily-self',date:day,scope:'A',mistake_count:1,question:publicPaper(papers.get('daily-self')).questions[0]}],total:1});
     if(p==='/api/learning/settings')return ok({enabled:true,publish_time:'13:00',night_publish_time:'20:00',reminder_time:'17:00',timeout_reminder_enabled:true,weekly_report_enabled:true});
     if(p==='/api/learning/papers'){
+      if(fromWorkbench&&!url.searchParams.has('today')) return ok({items:[publicPaper(papers.get('workbench-practice'))],total:1,page_size:20});
       const mode=url.searchParams.get('mode')||'daily';
       return ok({today:day,published:true,items:mode==='practice'?[...papers.values()].filter(row=>row.mode==='practice').slice(-1).map(publicPaper):claimed?[publicPaper(papers.get('daily-self'))]:[]});
     }
@@ -88,6 +90,27 @@ try{
   const page=await context.newPage();auditPage=page;page.setDefaultTimeout(20000);page.on('pageerror',e=>errors.push(e.message));page.on('console',event=>{if(event.type()==='error'||event.type()==='warning')console.log('Browser:',event.text());});
   async function go(search){await page.goto(origin+entry+'?__page=/learning&'+search);await page.locator('.learning-page').waitFor();await page.waitForFunction(()=>document.querySelector('.learning-page')?.getAttribute('aria-busy')==='false');}
   async function noOverflow(){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'page has no horizontal overflow');}
+  if(fromWorkbench){
+    role='personal';
+    const paper=makePaper('workbench-practice','practice');
+    paper.questions=paper.questions.slice(0,1);
+    papers.set(paper.id,paper);
+    await page.setViewportSize({width:390,height:844});
+    await page.goto(origin+entry+'?view=home&scope=A');
+    const task=page.getByRole('button',{name:'办理 自主练习',exact:true});
+    await task.click();
+    await page.waitForFunction(()=>new URLSearchParams(location.search).get('paper_id')==='workbench-practice');
+    await page.locator('.options label').filter({hasText:'核对现场安全条件'}).click();
+    await page.getByRole('button',{name:'确认作答',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('.learning-page')?.getAttribute('aria-busy')==='false');
+    assert.equal(paper.status,'completed');
+    await page.getByRole('button',{name:'返回工作台',exact:true}).click();
+    await page.getByText('当前没有未完成的待办。',{exact:true}).waitFor();
+    assert.equal(await task.count(),0);
+    await noOverflow();
+    assert.deepEqual(errors,[]);
+    console.log('PASS: workbench todo opens the exact paper, confirms the answer, and disappears on return.');
+  } else {
   await go('view=practice');await page.waitForFunction(()=>document.querySelector('.stem')?.textContent.includes('第2题'));
   assert.equal(writes.filter(row=>row.body.mode==='practice').length,0);
   assert.equal(await page.locator('.v2-learning-tabs button').count(),5);
@@ -149,6 +172,7 @@ try{
   role='duty';await go('view=overview&scope=A');assert.equal(await page.getByRole('radio',{name:'个人学习',exact:true}).count(),0);assert.equal(await page.locator('.v2-learning-studybar').count(),0);
   await noOverflow();assert.deepEqual(errors,[]);assert.equal(await readFile(oldPath,'utf8'),oldPage,'legacy source is unchanged');
   console.log('PASS: V2 in-memory production build; daily/practice actions, saved progress, busy guard, unordered multi-select, inline grading, chart/date drill-down, compact mobile answer card/footer, completion, mobile roster, read-only person view and role gates. No real business writes.');
+  }
 }catch(error){
   console.error('Fixture page errors:',errors);console.error('Learning reads:',requests.filter(row=>row.p.startsWith('/api/learning')));if(auditPage){console.error((await auditPage.locator('.learning-page').evaluateAll(nodes=>nodes.map(node=>node.outerHTML))).join('').slice(0,5000));console.error((await auditPage.locator('body').innerText()).slice(0,1500));await auditPage.screenshot({path:path.join(out,'failed.png'),fullPage:true});}throw error;
 }finally{releaseGate?.();await browser.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}

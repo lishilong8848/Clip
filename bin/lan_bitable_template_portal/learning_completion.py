@@ -245,11 +245,15 @@ def _sharing_tasks(data, pid, date, current):
         yield task
 
 
-def project(service, date, *, current=None, data=None, scope=''):
+def project(service, date, *, current=None, data=None, scope='', entry_directory=None):
+    from .learning_onboarding import daily_eligibility, directory_for_learning
+
     date = day(date)
     current = current or core.now()
     current = current.astimezone(core.TZ) if current.tzinfo else current.replace(tzinfo=core.TZ)
     data = data or _data(service)
+    if entry_directory is None:
+        entry_directory = directory_for_learning(service)
     by_person, sharing_by_person = defaultdict(list), defaultdict(list)
     for attempt in data['sharing_attempt']:
         sharing_by_person[attempt.get('person_id')].append(attempt)
@@ -306,8 +310,12 @@ def project(service, date, *, current=None, data=None, scope=''):
         duties = [d for d in planned.get(pid, []) if not scope or d['scope'] == scope]
         tasks = []
         person_papers = by_person[pid]
+        exempt = daily_eligibility(person, date, entry_directory)[0] == 'exempt' or any(
+            daily_eligibility(duty, date, entry_directory)[0] == 'exempt' for duty in duties)
+        if exempt:
+            duties = []
         daily = [p for p in person_papers if p.get('date') == date and p.get('mode') != 'practice'
-                 and (not scope or p.get('scope') == scope)]
+                 and not exempt and (not scope or p.get('scope') == scope)]
         shifts = {duty['shift'] for duty in duties}
         for paper in daily:
             shift = paper.get('shift') or (next(iter(shifts)) if len(shifts) == 1 else '')
@@ -336,7 +344,7 @@ def project(service, date, *, current=None, data=None, scope=''):
             task['status'] = _status(task, current)
             tasks.append(task)
         # A restored frozen plan remains evidence when the local roster cache is absent.
-        if not roster:
+        if not roster and not exempt:
             known = {task['task_id'] for task in tasks}
             for task in old.get('tasks', []):
                 if (task.get('source') == 'roster' and (not scope or task.get('scope') == scope)
@@ -458,20 +466,47 @@ def refresh(service, current=None):
         service._put('local', 'completion_initialized', {'version': VERSION, 'rules_version': RULE_VERSION}, conn, False)
 
 
-def report(service, actor, query):
-    access = service._access(actor, scope=query.get('scope'), person_id=query.get('person_id'))
-    if access['scope'] and access['scope'] not in core.SCOPES:
-        raise core.LearningError('楼栋范围无效。')
+def _report_dates(query, today):
     query = {key: value for key, value in query.items() if key not in {'date', 'from', 'to'} or value != ''}
-    today = core.now().date().isoformat()
     default = query.get('date', today)
     start, end = day(query.get('from', default)), day(query.get('to', default))
     span = (dt.date.fromisoformat(end) - dt.date.fromisoformat(start)).days
     if span < 0 or span > 30:
         raise core.LearningError('一次最多查询31天，开始日期不能晚于结束日期。')
+    dates = [(dt.date.fromisoformat(start) + dt.timedelta(days=offset)).isoformat() for offset in range(span + 1)]
+    return dates
+
+
+def workbench_summary(service, scopes, query):
+    """Summarize authorized buildings without returning personnel or paper identifiers."""
+    from .learning_onboarding import directory_for_learning
+
+    current = core.now()
+    dates = _report_dates(query, current.date().isoformat())
+    data, directory = _data(service), directory_for_learning(service)
+    filters = [''] if set(scopes) == set(core.SCOPES) else scopes
+    priority = {state: rank for rank, state in enumerate(
+        ('未安排', '已完成', '未到时', '待答', '答题中', '逾期', '待核对'))}
+    counts = Counter()
+    for date in dates:
+        people = {}
+        for scope in filters:
+            for row in project(service, date, scope=scope, current=current, data=data, entry_directory=directory):
+                person, status = row['person_id'], row['status']
+                if priority[status] > priority.get(people.get(person), -1):
+                    people[person] = status
+        counts.update(people.values())
+    return {'summary': {state: counts[state] for state in STATES}, 'scopes': list(scopes),
+            'from': dates[0], 'to': dates[-1]}
+
+
+def report(service, actor, query):
+    access = service._access(actor, scope=query.get('scope'), person_id=query.get('person_id'))
+    if access['scope'] and access['scope'] not in core.SCOPES:
+        raise core.LearningError('楼栋范围无效。')
+    dates = _report_dates(query, core.now().date().isoformat())
     data, items = _data(service), []
-    for offset in range(span + 1):
-        date = (dt.date.fromisoformat(start) + dt.timedelta(days=offset)).isoformat()
+    for date in dates:
         for value in project(service, date, data=data, scope=access['scope']):
             if access['person_id'] and value['person_id'] != access['person_id']:
                 continue
@@ -488,7 +523,7 @@ def report(service, actor, query):
     except (ValueError, TypeError):
         raise core.LearningError('分页参数无效。') from None
     return {'items': items[(page - 1) * size:page * size], 'total': len(items), 'page': page, 'page_size': size,
-            'from': start, 'to': end, 'summary': dict(Counter(value['status'] for value in items)), 'states': list(STATES)}
+            'from': dates[0], 'to': dates[-1], 'summary': dict(Counter(value['status'] for value in items)), 'states': list(STATES)}
 
 
 def display_fields(value):

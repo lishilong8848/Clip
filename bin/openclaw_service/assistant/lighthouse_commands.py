@@ -10,6 +10,7 @@ TOOLS = {
     'weather': ('天气查询', '实时及历史天气，标注数据源和查询时间'),
     'public_search': ('联网搜索', '查询公开网页，不发送内部业务资料'),
     'public_page': ('读取公开网页', '读取原文及同站点链接，不访问内部记录或执行网页脚本'),
+    'company_documents': ('查询公司资料', '本轮按权限查询公司知识库并核对原文'),
     'pending_work': ('未完成工作', '查询当前权限内各模块的待办与未结束工作'),
     'search_history': ('业务历史', '检索当前权限内的历史业务记录'),
     'discover': ('业务接口目录', '查找原业务工具及其输入要求'),
@@ -74,7 +75,8 @@ def commands(store, actor, api_catalog, *, kind='skills', keyword='', group='', 
                          'skill': MODULE_GUIDES.get(item['group'], 'lighthouse-business')}
                         for item in data['items'])
         rows = [{'id': key, 'kind': 'tool', 'label': label, 'description': description,
-                 'group': '常用工具', 'read_only': True} for key, (label, description) in TOOLS.items()] + rows
+                'group': '常用工具', 'read_only': True} for key, (label, description) in TOOLS.items()
+                if key != 'company_documents' or 'knowledge' in actor.get('modules', [])] + rows
         groups = ['常用工具'] + [item['name'] for item in found.get('groups', [])]
     rows = [item for item in rows if (not group or item.get('group') == group)
             and all(part in ' '.join(str(item.get(key, '')) for key in
@@ -110,6 +112,8 @@ def resolve(store, actor, api_catalog, selections):
                 'content': guide['content'][:8000], 'references': guide.get('references', []),
                 'next_offset': min(8000, len(guide['content'])) if len(guide['content']) > 8000 else guide.get('next_offset', 0)})
         elif identity in TOOLS:
+            if identity == 'company_documents' and 'knowledge' not in actor.get('modules', []):
+                raise AssistantError('当前账号尚未获授共享知识库权限。', 403)
             public.append({'kind': kind, 'id': identity, 'label': TOOLS[identity][0]})
             context.append({'kind': 'tool', 'name': identity, 'description': TOOLS[identity][1]})
         else:

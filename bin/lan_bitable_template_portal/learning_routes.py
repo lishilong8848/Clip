@@ -41,6 +41,7 @@ ROUTES = {
     "review": {"GET": "review"},
     "profile": {"GET": "profile"},
     "completion": {"GET": "completion"},
+    "workbench-summary": {"GET": "workbench_summary"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
     "issues/{id}": {"GET": "issue.get", "PATCH": "issue.update"},
     "questions": {"GET": "questions.list", "POST": "question.save"},
@@ -160,6 +161,24 @@ def install_learning_routes(app, controller, runtime):
             return
         if not isinstance(scope, str) or scope not in SCOPES:
             raise LearningError("楼栋须为 A、B、C、D、E 或 H。", 400)
+
+    def workbench_summary_scopes(session, requested):
+        auth = runtime.auth_manager
+        user = auth.public_user(session)
+        category = user.get("category")
+        if (category not in {"manager", "supervisor"} or "learning" not in user.get("modules", ())
+                or user.get("impersonation") or user.get("role") in {"guest", "temporary"}):
+            raise LearningError("当前账号无权查看楼栋学练汇总。", 403)
+        assigned = set(auth.session_scopes(session))
+        allowed = sorted(SCOPES if 'ALL' in assigned else SCOPES & assigned)
+        if category == "supervisor":
+            home = user.get("home_scope") or (allowed[0] if len(allowed) == 1 else "")
+            allowed = [scope for scope in allowed if scope == home]
+        if requested in {"", "ALL", "CAMPUS"} and category == "manager" and allowed:
+            return allowed
+        if requested in allowed:
+            return [requested]
+        raise LearningError("当前账号无权查看所选楼栋学练汇总。", 403)
 
     def check_origin(request):
         # The portal uses HttpOnly/SameSite=Lax cookies, without CSRF tokens.
@@ -291,6 +310,14 @@ def install_learning_routes(app, controller, runtime):
             path = request.scope["route"].path.removeprefix("/api/learning/")
             action = ROUTES[path][request.method]
             query = dict(request.query_params)
+            if action == "workbench_summary":
+                from .learning_completion import workbench_summary
+                if len(request.query_params.getlist("scope")) > 1:
+                    raise LearningError("请选择一个楼栋范围。")
+                scopes = await asyncio.to_thread(workbench_summary_scopes, session, query.get("scope", ""))
+                current = await asyncio.to_thread(get_service)
+                data = await asyncio.to_thread(workbench_summary, current, scopes, query)
+                return await asyncio.to_thread(controller._json_ok, request, session, data)
             for scope in request.query_params.getlist("scope"):
                 check_scope({"scope": scope}, actor, all_buildings=action == "issues.list")
             check_scope(query, actor, all_buildings=action == "issues.list")

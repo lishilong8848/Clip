@@ -71,6 +71,18 @@ class CommandsTests(unittest.TestCase):
         self.assertIn('本轮', context[0]['content'])
         self.assertFalse(found['items'][0]['removable'])
 
+    def test_company_lookup_tool_is_listed_and_resolved_only_with_knowledge_access(self):
+        authorized = {**ACTOR, 'modules': ['assistant', 'knowledge']}
+        selection = {'kind': 'tool', 'id': 'company_documents'}
+        found = commands.commands(self.store, authorized, self.catalog, kind='tools', keyword='查询公司资料')
+        self.assertEqual([row['id'] for row in found['items']], [selection['id']])
+        chosen, _ = commands.resolve(self.store, authorized, self.catalog, [selection])
+        self.assertEqual(chosen[0]['label'], '查询公司资料')
+        self.assertEqual(commands.commands(self.store, ACTOR, self.catalog, kind='tools', keyword='查询公司资料')['items'], [])
+        with self.assertRaises(AssistantError) as caught:
+            commands.resolve(self.store, ACTOR, self.catalog, [selection])
+        self.assertEqual(caught.exception.status, 403)
+
     def test_guide_snapshot_survives_delete_but_cannot_reselect(self):
         item = SharedSkills(self.store).install(ACTOR, 'SKILL.md', GUIDE)
         selected, context = commands.resolve(self.store, ACTOR, self.catalog, [{'kind': 'skill', 'id': item['name']}])

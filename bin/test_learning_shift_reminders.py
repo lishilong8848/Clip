@@ -9,6 +9,32 @@ from lan_bitable_template_portal import learning_reminders as reminders
 
 
 class ShiftReminderTests(TestCase):
+    def test_entry_month_skips_queued_reminder_and_resumes_on_anniversary(self):
+        day = '2026-10-10'
+        key = f'shift:{day}:白:ou_external'
+        self.people['people']['external']['entry_date'] = '2026-09-11'
+        with self.service.transaction() as conn:
+            self.service._put('notification', key, {'id': key, 'kind': 'shift', 'scope': '', 'date': day,
+                'open_id': 'ou_external', 'shift': '白', 'status': 'pending', 'message': 'fixture'}, conn)
+        self.run_at(13)
+        self.sender.assert_not_called()
+        self.assertEqual(self.service._get('notification', key)['status'], 'skipped_onboarding')
+        self.service = self.make_service()
+        self.run_at(13, 11)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_external'])
+
+    def test_entry_month_clips_month_end_and_rejects_ambiguous_identity(self):
+        from lan_bitable_template_portal.learning_onboarding import daily_eligibility, normalize_entry_date
+        person = {'open_id': 'ou_id'}
+        date_field = dt.datetime(2024, 1, 31, 0, tzinfo=learning.TZ).timestamp() * 1000
+        row = {'selectable': True, 'login_ids': ['ou_id'], 'entry_date': normalize_entry_date(date_field)}
+        directory = {'recA': row}
+        self.assertEqual(row['entry_date'], '2024-01-31')
+        self.assertEqual(daily_eligibility(person, '2024-02-28', directory), ('exempt', '2024-02-29'))
+        self.assertEqual(daily_eligibility(person, '2024-02-29', directory), ('eligible', '2024-02-29'))
+        self.assertEqual(daily_eligibility(person, '2024-02-28', directory | {'recB': row}), ('unknown', ''))
+        self.assertEqual(normalize_entry_date(['2024-01-30', '2024-01-31']), '')
+
     def test_existing_local_publication_sends_before_cloud_maintenance_failure(self):
         self.service._restored = True
         with self.service.transaction() as conn:

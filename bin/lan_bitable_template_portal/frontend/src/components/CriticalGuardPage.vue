@@ -708,6 +708,7 @@ const props = defineProps<{
   isAdmin: boolean;
   user: Dict;
   adminMode?: boolean;
+  focusTaskId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -1107,8 +1108,9 @@ async function loadTasks(): Promise<void> {
     clearTaskSelection();
   }
   if (!selectedTask.value && tasks.value.length) {
-    const requestedTaskId = new URLSearchParams(window.location.search).get("task_id") || "";
+    const requestedTaskId = props.focusTaskId || new URLSearchParams(window.location.search).get("task_id") || "";
     const requested = tasks.value.find((item) => item.task_id === requestedTaskId);
+    if (props.focusTaskId && !requested) return;
     await selectTask((requested || tasks.value[0]).task_id, viewMode.value === "admin");
   }
 }

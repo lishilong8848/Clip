@@ -39,6 +39,7 @@ from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views
 from .daily_inspection_template_art import preserve_artwork, read_artwork
 from .eop_scenario_editor import plain
 from .module_access import allowed_modules
+from .inspection_collection import InspectionCollection, minimum_source_time, FRESH_SECONDS
 from .risk_inspection import RiskError
 from .risk_inspection_cloud import API, RiskCloud
 
@@ -1749,6 +1750,7 @@ class DailyInspection:
 
     def __init__(self, store, cloud, source_clouds=None, *, scheduled=False):
         self.store, self.cloud = store, cloud
+        self.collection = InspectionCollection(store)
         self.source_clouds = source_clouds or {}
         self.scheduled = scheduled
         self.locks = {scope: threading.RLock() for scope in SOURCES}
@@ -1990,6 +1992,8 @@ class DailyInspection:
             active = state.get('active')
             if not active or 'completed' in active:
                 return state
+            if self.source_locked(active):
+                return state
             old_batch = active['batches'].get(scope) or {}
             old_marks = old_batch.get('operating_marks', {})
             marks = unit_pump_marks(old_marks)
@@ -1999,8 +2003,6 @@ class DailyInspection:
                 active['review_version'] = active.get('review_version', 0) + 1
                 invalidate_professions(active, '本轮水泵运行状态已补齐，请重新核对。', scope)
                 self.store.put_document(NS, 'building:' + scope, state)
-            if self.source_locked(active):
-                return state
             stored = active.get('live_fp') or {}
             try:
                 if cached_only:
@@ -2065,6 +2067,8 @@ class DailyInspection:
         if not upload or upload > now_ms:
             return False
         if self.scheduled:
+            if self.collection.config().get('enabled'):
+                return self.matches_scheduled_batch(live, duty, round_number, dt.datetime.now(CN))
             from .daily_inspection_reminders import slot_time
             slot = slot_time(duty.get('date'), duty.get('shift'), round_number)
             start = slot.replace(hour=slot.hour - slot.hour % 2, minute=0, second=0, microsecond=0)
@@ -2099,7 +2103,7 @@ class DailyInspection:
         except ValueError as error:
             raise RiskError(str(error), 400) from error
         if not selection:
-            raise RiskError('范围内没有可设置免填的数据格。', 400)
+            raise RiskError('范围内没有可设置免填的数据格，固定填斜杠的格子由模板管理。', 400)
         key = form_sheet_key(template, sheet)
         with self.locks[scope]:
             state = self.load(scope)
@@ -2222,6 +2226,7 @@ class DailyInspection:
                                     for profession in active.get('professions', [])},
                                 'orders': {view: self.order(owner, scope, view) for view in ['ALL', *professions]},
                                 'batch': {'batch': batch['batch'], 'count': len(batch['rows']),
+                                          'source_time': minimum_source_time(batch),
                                           'devices': [display_device(device)
                                                       for device in self.ordered(batch, self.order(owner, scope))
                                                       if device['id'] in selected],
@@ -2308,6 +2313,9 @@ class DailyInspection:
         duty, number = active['duty'], active['round']
         when = slot_time(duty['date'], duty['shift'], number)
         start = when.replace(hour=when.hour - when.hour % 2, minute=0, second=0, microsecond=0)
+        live_collection = self.collection.config().get('enabled')
+        if live_collection:
+            start = when - dt.timedelta(seconds=FRESH_SECONDS)
         end = min(self.round_cutoff(duty, number).timestamp(), shift_bounds(duty['date'], duty['shift'])[1])
         sealed = source.get('batch') or 0
         if not int(start.timestamp() * 1000) <= sealed <= int(dt.datetime.now(CN).timestamp() * 1000):
@@ -2319,10 +2327,9 @@ class DailyInspection:
         operating_start = start_ms
         same_batch = sealed == destination.get('batch')
         if same_batch:
-            # The producer uses the first 15-minute reading in its report. The
-            # 12:00 report can legitimately contain an 11:45 sample. Only use
-            # that allowance in a sealed batch whose source files belong here.
-            if self.matches_scheduled_batch(source, duty, number, dt.datetime.now(CN)):
+            # Legacy reports can begin with an earlier 15-minute sample. Live
+            # prefetch already has its explicit freshness window above.
+            if not live_collection and self.matches_scheduled_batch(source, duty, number, dt.datetime.now(CN)):
                 operating_start = start_ms - 15 * 60 * 1000
             marks = collect_operating_marks(scope, source, template, operating_start, end_ms, sealed, plain)
         changed = apply_handover_readings(scope, destination, source['rows'], start_ms, slot_ms, end_ms, sealed,
@@ -2375,6 +2382,12 @@ class DailyInspection:
         source_start = scheduled_at.replace(hour=scheduled_at.hour - scheduled_at.hour % 2, minute=0).timestamp() * 1000
         source_end = min(shift_bounds(day, shift)[1], self.round_cutoff(duty, number).timestamp()) * 1000
         upload_time = batch['batch']
+        if self.collection.config().get('enabled'):
+            # Learned prefetch can finish just before a slot or midnight. Fresh
+            # on-demand samples later in this round may cross a two-hour bucket.
+            source_start = (scheduled_at.timestamp() - FRESH_SECONDS) * 1000
+            if upload_time >= source_end:
+                return False
         if not source_start <= upload_time <= now.timestamp() * 1000:
             return False
         source_times = list(sampled_source_times(batch['rows']))
@@ -2498,6 +2511,9 @@ class DailyInspection:
                 if not isinstance(submitted_duty, dict) or any(submitted_duty.get(key) != value
                                                                for key, value in duty_key(duty).items()):
                     raise RiskError('当班安排已变化，请刷新后开始巡检。', 409)
+                collecting = self.prepare_start_collection(state, duty)
+                if collecting and collecting['state'] != 'ready':
+                    return {**self.view(state, owner, duty), 'collection': collecting}
                 if state['active']:
                     active = state['active']
                     if ('completed' not in active and duty_key(active['duty']) == duty_key(duty)
@@ -2511,6 +2527,7 @@ class DailyInspection:
                                 active['duty']['shift_names'] = duty['shift_names']
                             active['review_version'] = active.get('review_version', 0) + 1
                             self.store.put_document(NS, state_key, state)
+                            self.collection.remember_start(owner, duty, active['round'], active['id'])
                         return self.view(state, owner, duty)
                     raise RiskError('本楼已有一次巡检，请刷新后继续。', 409)
                 now = dt.datetime.now(CN)
@@ -2737,7 +2754,32 @@ class DailyInspection:
                     if action == 'finish':
                         self.finish(state_key, state, active, actor, self.order(owner, scope))
             self.store.put_document(NS, state_key, state)
+            if action == 'start':
+                active = state['active']
+                self.collection.remember_start(owner, duty, active['round'], active['id'])
             return self.view(state, owner, duty)
+
+    def prepare_start_collection(self, state, duty):
+        active = state.get('active')
+        if active and ('completed' in active or duty_key(active['duty']) != duty_key(duty)
+                       or self.source_locked(active)):
+            return None
+        now = dt.datetime.now(CN)
+        number = active['round'] if active else self.next_round(state, duty, now)
+        if number > ROUNDS_PER_SHIFT:
+            return None
+        if self.scheduled:
+            from .daily_inspection_reminders import slot_time
+            if not slot_time(duty['date'], duty['shift'], number) <= now < self.round_cutoff(duty, number):
+                return None
+        cached = self.cached_source(duty['scope'])
+        batch = (cached or {}).get('batch') or {}
+        pending = self.collection.ensure(duty, number, source_time=minimum_source_time(batch))
+        if pending and pending['state'] == 'ready':
+            latest = self.capture([duty['scope']], force_probe=True)[duty['scope']]
+            if minimum_source_time(latest) < max(pending['not_before'], int(time.time()*1000)-FRESH_SECONDS*1000):
+                return {**pending, 'state': 'waiting_bitable', 'error': '新采集已上传，正在核验本楼完整批次。'}
+        return pending
 
     def ensure_archive_fields(self, specs=ARCHIVE_FIELDS):
         with self.schema_lock:
@@ -3302,7 +3344,7 @@ def archived_report_content(content, scope, identity, shift, number, frozen, exe
                      for value in row] for row in sheet.iter_rows(values_only=True)]
             sheets.append({'name': sheet.title, 'rows': rows})
         if frozen and ORIGINAL_MAPPING_SHEET in book and ORIGINAL_INDEX_SHEET in book:
-            entries = frozen_readings(book, scope)
+            entries = frozen_readings(book, scope, templates)
         else:
             entries = original_cells(sheets, with_cell_exemptions(templates, exemptions), shift, number)
         extras = form_extras(book, templates, entries) if ORIGINAL_INDEX_SHEET in book else []
@@ -3598,6 +3640,29 @@ def install_daily_inspection(app, controller, runtime):
             try:
                 svc = manager()
                 svc.rollover_due(scope)
+                if svc.collection.config().get('enabled'):
+                    from .personnel_source import daily_roster
+                    roster_cache = {}
+                    def eligible(owner, duty):
+                        profile = runtime.auth_manager.account_profile(owner)
+                        if not profile.get('enabled'):
+                            return False
+                        actor_session = {'user': {'open_id': owner}}
+                        if not runtime.auth_manager.scope_allowed(actor_session, scope):
+                            return False
+                        if scope in inspection_history_scopes(runtime.auth_manager, actor_session):
+                            return True
+                        from .portal_service import LI_SHILONG_OPEN_ID
+                        if owner == LI_SHILONG_OPEN_ID:
+                            return True
+                        def roster(day):
+                            if day not in roster_cache:
+                                roster_cache[day] = daily_roster(runtime.service, day)
+                            return roster_cache[day]
+                        resolved = resolve_duty(roster, {**profile, 'open_id': owner}, [scope])
+                        return bool(resolved and duty_key(resolved) == duty_key(duty))
+                    cached = svc.cached_source(scope)
+                    svc.collection.prefetch(scope, eligible, minimum_source_time((cached or {}).get('batch')))
                 if svc.scheduled:
                     from .personnel_source import daily_roster
                     svc.open_scheduled_round(scope, lambda day: daily_roster(runtime.service, day))
@@ -3663,6 +3728,11 @@ def install_daily_inspection(app, controller, runtime):
                 raise RiskError('没有该楼栋的当前巡检查看权限。', 403)
             svc = await asyncio.to_thread(manager)
             action = request.path_params.get('action', '')
+            if request.method == 'GET' and action == 'collection-settings':
+                if impersonating or not can_manage or not await asyncio.to_thread(auth.is_admin, session):
+                    raise RiskError('需要管理员权限才能配置巡检采集联动。', 403)
+                return JSONResponse({'ok': True, 'data': svc.collection.public_config()},
+                                    headers={'Cache-Control': 'private, no-store'})
             if request.method == 'GET' and action == 'templates':
                 template_scope = request.query_params.get('scope')
                 if template_scope not in history_scopes:
@@ -3701,9 +3771,16 @@ def install_daily_inspection(app, controller, runtime):
                         request, max_bytes=4 * 1024 * 1024 if action in {'draft', 'finish', 'history-edit', 'day-sheet', 'day-export'} else 128 * 1024)
                 except ValueError as error:
                     raise RiskError('巡检资料格式无效或超过提交大小限制。', 400) from error
-                if not isinstance(payload, dict) or (action not in {'start', 'exemptions'} and
+                if not isinstance(payload, dict) or (action not in {'start', 'exemptions', 'collection-settings'} and
                         not report_action and not isinstance(payload.get('id'), str)):
                     raise RiskError('巡检请求格式无效。', 400)
+                if action == 'collection-settings':
+                    if impersonating or not can_manage or not await asyncio.to_thread(auth.is_admin, session):
+                        raise RiskError('需要管理员权限才能配置巡检采集联动。', 403)
+                    result = await asyncio.to_thread(svc.collection.save_config, payload)
+                    for wake in source_wake.values():
+                        wake.set()
+                    return JSONResponse({'ok': True, 'data': result}, headers={'Cache-Control': 'private, no-store'})
                 if action in {'sheet-group', 'view-sheet', 'append-profession', 'confirm-profession'} and (
                         session.get('impersonation') or session.get('source') == 'admin_impersonation'):
                     raise RiskError('代登录仅可查看巡检。', 403)

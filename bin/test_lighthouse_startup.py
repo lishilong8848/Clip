@@ -1,26 +1,9 @@
-"""Focused synthetic startup regression tests for OpenClaw warm-start / runtime readiness.
+"""Demand-only native capabilities; explicit tool warmup remains isolated.
 
-These verify the regressions around the user-reported "first question timed out before
-model inference" defect (gateway not prewarmed):
-
-* ``OpenClawRuntime.prepare`` caches a verified runtime/install under ``prepare_lock``
-  (default ``startup_timeout=180``) and the canonical tool fingerprint lets the warm run
-  and the first real run reuse one Node process (one ``Popen``).
-* ``LighthouseOpenClaw.queue_warmup`` dedups per-account, honours the resource cap and
-  per-account rate limit, and never spawns for disabled/missing models.
-* ``_warmup`` registers the same typed tool schemas via ``LighthouseModel.answer(..., warm_only=True)``
-  but runs no model turn, no business query, no file reads and no messages.
-* The first real question ``run_stream_events`` calls ``wait_warmup`` before acquiring a
-  runtime (joins in-flight preparation), and warmup failures propagate safely.
-* ``close()`` cancels in-flight preparation/handshake; a legacy/guest route never spawns.
-
-Everything is synthetic: temporary state roots, mocked subprocess / GatewayClient, no real
-Node, model, cloud or credentials. Reuses helpers from ``bin.test_lighthouse_openclaw``
-and ``bin.test_lighthouse_runtime``.
+Login, appearance and ordinary questions must not start a gateway. Business turns
+prepare their actual typed tool allowlist; optional warmup never gates a turn.
+All process, network and model interactions in these tests use doubles.
 """
-
-from __future__ import annotations
-
 import asyncio
 import contextlib
 import sys
@@ -193,7 +176,8 @@ class OpenClawRuntimeStartupTests(unittest.IsolatedAsyncioTestCase):
                 return (Path("node.exe"), Path("openclaw.mjs"))
 
             try:
-                with patch.object(runtime, "_ready", new_callable=AsyncMock,
+                with patch.object(runtime, "_configured", new_callable=AsyncMock), \
+                     patch.object(runtime, "_ready", new_callable=AsyncMock,
                                   side_effect=lambda item, *a, **k: item), \
                      patch("lan_bitable_template_portal.lighthouse_runtime.runtime_files",
                            side_effect=fake_runtime_files), \
@@ -235,7 +219,8 @@ class OpenClawRuntimeStartupTests(unittest.IsolatedAsyncioTestCase):
             common = dict(tool_names=["query", "prepare_business"],
                           bridge_url="http://bridge", bridge_token="bt")
             try:
-                with patch.object(runtime, "_ready", new_callable=AsyncMock,
+                with patch.object(runtime, "_configured", new_callable=AsyncMock), \
+                     patch.object(runtime, "_ready", new_callable=AsyncMock,
                                   side_effect=lambda item, *a, **k: item), \
                      patch("lan_bitable_template_portal.lighthouse_runtime.runtime_files",
                            return_value=(Path("node.exe"), Path("openclaw.mjs"))), \
@@ -378,7 +363,8 @@ class WarmupStartupTests(unittest.IsolatedAsyncioTestCase):
             return self.actor
 
         await self.engine.answer(
-            self.actor, {"question": "你好", "_profile": profile}, [], None,
+            self.actor, {"question": "你好", "_profile": profile,
+                         "commands": [{"kind": "skill", "id": "assistant-general"}]}, [], None,
             _noop_emit, authorize, {}, warm_only=False)
 
         self.assertEqual(set(warm_spy.tools), set(real_spy.tools),
@@ -465,7 +451,7 @@ class WarmupStartupTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await engine.close()
 
-    async def test_wait_warmup_joins_inflight_preparation(self):
+    async def test_wait_warmup_does_not_join_optional_preparation(self):
         key = account_key(self.actor["id"])
         started = asyncio.Event()
         release = asyncio.Event()
@@ -479,30 +465,24 @@ class WarmupStartupTests(unittest.IsolatedAsyncioTestCase):
         self.engine.manager.acquire = blocking_acquire
         client = FakeGatewayClient('ws://127.0.0.1:19999', 'gw')
         self.engine.gateway_client = AsyncMock(return_value=client)
-        self.engine.queue_warmup(self.actor)
+        optional = asyncio.create_task(self.engine._warmup(self.actor))
+        self.engine.warming[key] = optional
         await asyncio.wait_for(started.wait(), 2)
 
         emit = AsyncMock()
-        waiter = asyncio.create_task(self.engine.wait_warmup(self.actor, emit))
-        await asyncio.sleep(0)  # let the waiter start awaiting the in-flight warmup
+        await self.engine.wait_warmup(self.actor, emit)
+        emit.assert_not_awaited()
+        self.assertFalse(optional.done(), 'ordinary turns must not join optional warmup')
         release.set()
-        await waiter
-
-        emit.assert_awaited_once()
-        self.assertEqual(
-            emit.await_args.args[1]["label"], "正在准备助手，原消息已保留",
-            "first question must join in-flight preparation with a status message")
+        await optional
         self.assertEqual([name for name, _ in client.calls], ['sessions.patch'])
         self.assertTrue(client.calls[0][1]['key'].startswith('agent:lh-'))
 
-    async def test_warmup_failure_propagates_safe_via_wait_warmup(self):
+    async def test_old_optional_warmup_failure_is_not_current_request_failure(self):
         self.engine.agent_factory = lambda model, **kw: FailingWarmupAgent(model, **kw)
-        self.engine.queue_warmup(self.actor)
+        await self.engine._warmup(self.actor)
         key = account_key(self.actor["id"])
-
-        with self.assertRaises(AssistantError) as caught:
-            await self.engine.wait_warmup(self.actor, _noop_emit)
-        self.assertEqual(caught.exception.status, 503)
+        await self.engine.wait_warmup(self.actor, _noop_emit)
         self.assertIn(key, self.engine.warm_errors)
 
     async def test_cold_session_preparation_does_not_overlap_handshakes(self):
@@ -540,7 +520,7 @@ class WarmupStartupTests(unittest.IsolatedAsyncioTestCase):
             await asyncio.Event().wait()
 
         self.engine.manager.acquire = blocking_acquire
-        self.engine.queue_warmup(self.actor)
+        self.engine.warming[key] = asyncio.create_task(self.engine._warmup(self.actor))
         await asyncio.wait_for(started.wait(), 2)
 
         await self.engine.close()
@@ -556,7 +536,7 @@ class WarmupStartupTests(unittest.IsolatedAsyncioTestCase):
 
 
 class FirstQuestionStartupTests(unittest.IsolatedAsyncioTestCase):
-    async def test_real_run_calls_wait_warmup_before_acquire(self):
+    async def test_real_run_acquires_only_current_request_capabilities(self):
         engine = SimpleNamespace(
             assistant=SimpleNamespace(
                 _state=lambda actor: {"id": "conv-" + actor["id"]},
@@ -592,9 +572,9 @@ class FirstQuestionStartupTests(unittest.IsolatedAsyncioTestCase):
                 async for _ in events:
                     break
 
-        engine.wait_warmup.assert_awaited_once_with(agent.actor, agent.emit)
+        engine.wait_warmup.assert_not_awaited()
         self.assertEqual(agent._acquire_runtime.await_count, 1,
-                         "the real question must acquire the runtime only after wait_warmup")
+                         "only the real turn may acquire its required runtime")
 
 
 # ---------------------------------------------------------------------------
@@ -718,162 +698,64 @@ class AppLifespanStartupTests(unittest.IsolatedAsyncioTestCase):
                 return
             await asyncio.sleep(0.001)
 
-    async def test_startup_nonblocking_prepares_without_question_and_shutdown_joins(self):
+    async def test_startup_and_appearance_never_prepare_runtime_or_private_agent(self):
         with contextlib.ExitStack() as stack:
-            for patcher in self._engine_patches():
-                stack.enter_context(patcher)
+            for patcher in self._engine_patches(): stack.enter_context(patcher)
             async with self.app.router.lifespan_context(self.app):
-                await self._wait_for_prepare()
-                self.engine.prepare.assert_awaited_once()
-                # Startup only preps: no warmup/question is queued by the portal.
-                self.engine.queue_warmup.assert_not_called()
-                transport = httpx.ASGITransport(app=self.app)
-                async with httpx.AsyncClient(transport=transport,
-                                             base_url="http://testserver") as client:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://testserver") as client:
                     response = await client.get("/api/assistant/appearance")
                     self.assertEqual(response.status_code, 200, response.text)
-                # An authenticated appearance queued a warmup for exactly this actor.
-                self.engine.queue_warmup.assert_called_once()
-                actor = self.engine.queue_warmup.call_args.args[0]
-                self.assertEqual(actor["id"], "user-a")
-        # Shutdown joined engine.close() and stream.close() before exiting the app.
-        self.engine.close.assert_awaited_once()
-        self.stream.close.assert_awaited_once()
+                self.engine.prepare.assert_not_awaited()
+                self.engine.queue_warmup.assert_not_called()
+        self.engine.close.assert_not_awaited()
+        self.stream.close.assert_not_awaited()
 
     async def test_guest_request_never_queues_warmup(self):
         self.session["is_guest"] = True
         with contextlib.ExitStack() as stack:
-            for patcher in self._engine_patches():
-                stack.enter_context(patcher)
+            for patcher in self._engine_patches(): stack.enter_context(patcher)
             async with self.app.router.lifespan_context(self.app):
-                await self._wait_for_prepare()
-                self.engine.prepare.assert_awaited_once()
-                transport = httpx.ASGITransport(app=self.app)
-                async with httpx.AsyncClient(transport=transport,
-                                             base_url="http://testserver") as client:
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://testserver") as client:
                     response = await client.get("/api/assistant/appearance")
                     self.assertEqual(response.status_code, 403, response.text)
-                # A guest is rejected before warm_authenticated; never queues.
+                self.engine.prepare.assert_not_awaited()
                 self.engine.queue_warmup.assert_not_called()
-        self.engine.close.assert_awaited_once()
 
-    async def test_framework_preparation_limits_warmups_not_login_accounts(self):
-        entered, release = asyncio.Event(), asyncio.Event()
+    async def test_many_logins_do_not_build_streams_or_change_business_scopes(self):
         original = asyncio.to_thread
-        async def delayed(function, *args, **kwargs):
+        async def no_streams(function, *args, **kwargs):
             if getattr(function, '__name__', '') == 'get_streams':
-                entered.set()
-                await release.wait()
+                raise AssertionError('login started a native/stream runtime')
             return await original(function, *args, **kwargs)
         with contextlib.ExitStack() as stack:
-            for patcher in self._engine_patches():
-                stack.enter_context(patcher)
-            stack.enter_context(patch('asyncio.to_thread', new=delayed))
+            for patcher in self._engine_patches(): stack.enter_context(patcher)
+            stack.enter_context(patch('asyncio.to_thread', new=no_streams))
             async with self.app.router.lifespan_context(self.app):
-                await asyncio.wait_for(entered.wait(), 2)
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url='http://testserver') as client:
                     for index in range(21):
-                        self.session['open_id'] = 'queued-' + str(index)
+                        self.session.update(open_id='queued-' + str(index), allowed_scopes=['A'])
                         response = await client.get('/api/assistant/appearance')
                         self.assertEqual(response.status_code, 200)
-                    self.session.update(open_id='queued-0', allowed_scopes=['A'])
-                    self.assertEqual((await client.get('/api/assistant/appearance')).status_code, 200)
+                        self.assertEqual(self.session['allowed_scopes'], ['A'])
                 self.engine.queue_warmup.assert_not_called()
-                release.set()
-                await self._wait_for_prepare()
-                actors = [call.args[0] for call in self.engine.queue_warmup.call_args_list]
-                self.assertEqual({actor['id'] for actor in actors}, {'queued-0', 'queued-1'})
-                actor = next(actor for actor in actors if actor['id'] == 'queued-0')
-                self.assertEqual(set(actor['scopes']), {'110', 'A', 'B', 'C', 'D', 'E', 'H'})
-                self.assertEqual(actor['_business_write_access']['scopes'], ['A'])
-                self.assertEqual(self.session['allowed_scopes'], ['A'])
+                self.engine.prepare.assert_not_awaited()
 
-    async def test_lifespan_enters_immediately_and_routes_respond_while_prepare_blocked(self):
-        # engine.prepare stays blocked forever on a never-set gate; the lifespan
-        # must still start and both health + authenticated appearance must answer
-        # on the same event loop without ever waiting for OpenClaw.
-        prepare_started = asyncio.Event()
-        prepare_cancelled = asyncio.Event()
-        prep_task = {}
-        gate = asyncio.Event()
-
-        async def blocked_prepare():
-            prep_task["task"] = asyncio.current_task()
-            prepare_started.set()
-            try:
-                await gate.wait()
-            except asyncio.CancelledError:
-                # shutdown must cancel the in-flight prepare instead of leaking it
-                prepare_cancelled.set()
-                raise
-
-        self.engine.prepare = blocked_prepare
-
-        with contextlib.ExitStack() as stack:
-            for patcher in self._engine_patches():
-                stack.enter_context(patcher)
-            transport = httpx.ASGITransport(app=self.app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://testserver") as client:
+    async def test_lifespan_does_not_start_blocked_or_failed_optional_dependencies(self):
+        for mode in ('blocked', 'failed'):
+            called = asyncio.Event()
+            async def forbidden_prepare():
+                called.set()
+                if mode == 'failed': raise AssistantError('fixture', 503)
+                await asyncio.Event().wait()
+            self.engine.prepare = forbidden_prepare
+            with contextlib.ExitStack() as stack:
+                for patcher in self._engine_patches(): stack.enter_context(patcher)
                 async with asyncio.timeout(5), self.app.router.lifespan_context(self.app):
-                    # Startup returned immediately and reached the blocking gate.
-                    await asyncio.wait_for(prepare_started.wait(), 2)
-                    background = {t for t in asyncio.all_tasks()
-                                  if t is not asyncio.current_task()}
-                    self.assertTrue(prep_task["task"] in background)
-                    self.assertFalse(prep_task["task"].done())
-
-                    health = await asyncio.wait_for(client.get("/api/health"), 2)
-                    self.assertEqual(health.status_code, 200, health.text)
-                    appearance = await asyncio.wait_for(
-                        client.get("/api/assistant/appearance"), 2)
-                    self.assertEqual(appearance.status_code, 200, appearance.text)
-                    self.engine.queue_warmup.assert_called_once()
-                    self.assertFalse(prep_task["task"].done())
-
-        # Shutdown cancelled and joined the in-flight preparation; nothing leaked.
-        self.assertTrue(prepare_cancelled.is_set(),
-                        "shutdown must cancel the blocked engine.prepare")
-        self.assertTrue(prep_task["task"].done(),
-                        "preparation task must finish during shutdown")
-        for task in background:
-            self.assertTrue(task.done(), f"leaked background task: {task}")
-
-    async def test_lifespan_routes_respond_and_shutdown_joins_when_prepare_raises(self):
-        prepare_started = asyncio.Event()
-        prep_task = {}
-
-        async def failing_prepare():
-            prep_task["task"] = asyncio.current_task()
-            prepare_started.set()
-            raise AssistantError("fixture prepare failure", 503)
-
-        self.engine.prepare = failing_prepare
-
-        with contextlib.ExitStack() as stack:
-            for patcher in self._engine_patches():
-                stack.enter_context(patcher)
-            transport = httpx.ASGITransport(app=self.app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://testserver") as client:
-                async with asyncio.timeout(5), self.app.router.lifespan_context(self.app):
-                    await asyncio.wait_for(prepare_started.wait(), 2)
-                    background = {t for t in asyncio.all_tasks()
-                                  if t is not asyncio.current_task()}
-
-                    health = await asyncio.wait_for(client.get("/api/health"), 2)
-                    self.assertEqual(health.status_code, 200, health.text)
-                    appearance = await asyncio.wait_for(
-                        client.get("/api/assistant/appearance"), 2)
-                    self.assertEqual(appearance.status_code, 200, appearance.text)
-                    self.engine.queue_warmup.assert_called_once()
-
-        task = prep_task["task"]
-        self.assertTrue(task.done(), "preparation task must not leak")
-        self.assertIsNone(task.exception(),
-                          "prepare_runtime must swallow AssistantError at startup")
-        for candidate in background:
-            self.assertTrue(candidate.done(), f"leaked background task: {candidate}")
+                    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=self.app), base_url="http://testserver") as client:
+                        self.assertEqual((await client.get('/api/health')).status_code, 200)
+                        self.assertEqual((await client.get('/api/assistant/appearance')).status_code, 200)
+                    self.assertFalse(called.is_set())
+                    self.engine.queue_warmup.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -494,7 +494,7 @@ class ToolWorkspaceMixin:
             if status_only:
                 asset = json.loads(item['asset'])
                 if order:
-                    can_delete = (owner or manager) and (
+                    can_delete = order['outcome'] not in {'repair', 'scrap'} and (owner or manager) and (
                         archive_status == 'archived' or (not order['submitted_at'] and order['outcome'] in ('', 'cancelled')))
                 else:
                     can_delete = row['status'] == 'archived' and archive_status == 'archived'
@@ -1390,6 +1390,9 @@ class ToolWorkspaceMixin:
                         self._workspace_release_order(db, actor, order, identity, '删除办理记录，保留原草稿。')
                     else:
                         self._workspace_bump(db, identity)
+                        if order and order['outcome'] in {'repaired', 'scrapped', 'rejected'}:
+                            from .tool_management import HIDE_FOLLOWUP
+                            self.audit(db, order['id'], actor, HIDE_FOLLOWUP, '保留飞书台账与归档文件')
                     db.execute("UPDATE tool_workspace_items SET deleted_at=? WHERE session_id=? AND asset_id=?",
                                (clock().isoformat(timespec='seconds'), identity, asset_id))
                     self.audit(db, order['id'] if order else identity, actor, '删除工作台办理记录', asset_id)

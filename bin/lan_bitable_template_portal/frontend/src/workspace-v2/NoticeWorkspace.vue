@@ -1,5 +1,6 @@
 <template>
   <section class="v2-notices" aria-label="通告办理" data-v2-inline-feedback>
+    <template v-if="!recordOnly">
     <header class="v2-notice-heading"><div><h1>通告办理</h1><p>{{ scopeLabel }} · {{ kind==='event'?'进行中事件与历史事件':applied.month+'计划与当前进行中通告' }}</p></div><div v-if="kind!=='event'" class="v2-notice-tools"><NButton class="v2-notice-history-action" data-v2-navigation secondary aria-label="查看历史通告" @click="historyOpen=true"><History :size="16" /><span>历史通告</span></NButton><NDropdown :options="moreOptions" trigger="click" @select="more"><NButton class="v2-notice-more-action" data-v2-navigation aria-label="更多办理" title="更多办理"><Ellipsis :size="17" /><span>更多办理</span></NButton></NDropdown><NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton class="v2-notice-refresh-action" :loading="loading||syncing" data-v2-navigation aria-label="刷新通告" title="刷新通告"><RefreshCw :size="16" /><span>刷新</span></NButton></NDropdown><NDropdown :options="newOptions" trigger="click" @select="newNotice"><NButton class="v2-notice-create-action" data-v2-navigation type="primary" aria-label="新建通告"><Plus :size="17" /><span>新建通告</span></NButton></NDropdown></div></header>
     <div class="v2-notice-type-filters"><nav ref="typeNavigation" class="v2-notice-types" aria-label="通告类型"><NButton v-for="entry in types" :key="entry.id" data-v2-navigation :type="kind===entry.id?'primary':'default'" :secondary="kind===entry.id" :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</NButton></nav></div>
     <div v-if="kind!=='event'&&!selectedScopes&&buildingOptions.length>1" class="v2-notice-global-scope"><WidgetScopePicker :value="selectedBuildings||(['ALL','CAMPUS'].includes(scope)?['ALL']:[scope])" :options="buildingOptions" label="通告楼栋" @change="changeBuildings" /><small>适用于计划与进行中通告</small></div>
@@ -40,10 +41,12 @@
       </section>
       </template>
     </PageCanvas>
+    </template>
 
     <NModal :show="editing" preset="card" class="v2-notice-editor v2-notice-handling" data-v2-inline-feedback :title="form?.values.title || '填写通告'" :bordered="false" :mask-closable="false" :close-on-esc="!busy&&!uploading&&!saving" :closable="!busy&&!uploading&&!saving" @update:show="value=>{if(!value)closeEditor()}">
       <NSpin v-if="detailLoading" class="v2-notice-loading" description="正在读取通告填写内容" />
       <NAlert v-if="detailError" type="error" role="alert" :bordered="false">{{ detailError }}<NButton v-if="issueTarget&&!job&&!ambiguous" text data-v2-navigation @click="focusIssue">{{ issueTarget.label }}</NButton></NAlert>
+      <NAlert v-if="draftWarning" type="warning" :bordered="false">{{ draftWarning }}</NAlert>
       <template v-if="form&&!detailLoading">
         <div v-if="confirming||job||ambiguous" class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div>
         <NAlert v-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看，不可重新发送。</NAlert>
@@ -52,6 +55,7 @@
         <section v-if="job||ambiguous" class="v2-notice-task-result" role="status" :aria-label="taskTitle">
           <Clock3 v-if="eventWaiting" :size="36" /><NSpin v-else-if="job&&!terminal" size="large" /><CheckCircle2 v-else-if="succeeded" :size="38" class="is-success" /><CircleAlert v-else :size="36" />
           <h2>{{ taskTitle }}</h2><p>{{ eventWaiting?'已保存本次正文、时间和附件；事件结束或删除后自动发送，可返回列表继续办理其它通告。':job?.error || job?.upload_message || job?.message || (ambiguous?'提交响应未确认，已保留原操作标识，请勿重新创建。':succeeded?'已按原业务流程完成，列表正在同步。':'任务已受理，可返回列表继续办理其它通告。') }}</p>
+          <div v-if="job?.message_first" class="v2-notice-tools" data-notice-delivery-status><NTag :bordered="false">飞书群 · {{ deliveryLabel(job.feishu_group_state) }}</NTag><NTag :bordered="false">飞书个人 · {{ deliveryLabel(job.message_delivery_state) }}</NTag><NTag :bordered="false">钉钉 · {{ deliveryLabel(job.dingtalk_state) }}</NTag><NTag :bordered="false" :type="succeeded?'success':'warning'">多维 · {{ succeeded?'已同步':job.archive_state==='failed'?'同步失败':job.archive_state==='verification_required'?'待核验':'后台同步中' }}</NTag></div>
           <div class="v2-notice-tools"><NButton v-if="job?.phase==='failed'&&job.error_retryable" type="primary" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="retryJob">重试原任务</NButton><NButton v-else-if="job?.phase==='failed'&&job.error_category==='field_or_payload'" type="primary" :disabled="busy" @click="resetRejected">返回填写</NButton><NButton v-if="ambiguous" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="send">核验并重试原提交</NButton><NButton v-if="job&&!terminal" data-v2-navigation @click="pollJob">查询进度</NButton><NButton v-if="job" data-v2-navigation @click="showTaskRecords">查看办理记录</NButton></div>
         </section>
 
@@ -137,7 +141,8 @@ import { createRepairOperationId } from '../repairManagementUtils';
 import { noticeIsEnded } from '../mopSelectionUtils';
 import {readNoticeBuildings} from './noticeBuildingPages';
 import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
-const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean}>();
+const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean;recordOnly?:boolean}>();
+const emit=defineEmits<{recordClose:[]}>();
 const dialog=useDialog(),message=useMessage();
 const params=computed(()=>new URL(props.url,location.origin).searchParams);
 const types=computed(()=>{
@@ -201,6 +206,7 @@ function rowAttention(row:Dict,lane:string){if(lane==='planned'&&rowUnknown(row)
 const actionLabel=(value:string)=>({start:'开始',update:'更新',end:'结束'}[value]||'');
 let listAbort:AbortController|undefined,detailAbort:AbortController|undefined,disposed=false,timer=0;
 const editing=ref(false),detailLoading=ref(false),form=ref<NoticeForm|null>(null),detailError=ref(''),busy=ref(false),saving=ref(false),uploading=ref(false),confirming=ref(false),ambiguous=ref(false);
+const draftWarning=ref('');
 const selectedDingNames=ref<string[]>([]);
 const viewport=ref({width:innerWidth,height:innerHeight});
 function measureViewport(){viewport.value={width:innerWidth,height:innerHeight};void nextTick(revealActiveType);}
@@ -234,7 +240,17 @@ const changedFields=computed(()=>form.value?.fields.filter(f=>String(form.value!
 const terminal=computed(()=>!!job.value&&['success','succeeded','completed','failed','cancelled'].includes(job.value.phase));
 const succeeded=computed(()=>!!job.value&&['success','succeeded','completed'].includes(job.value.phase));
 const eventWaiting=computed(()=>job.value?.phase==='event_waiting');
-const taskTitle=computed(()=>eventWaiting.value?'已排队，等待事件结束':ambiguous.value?'提交结果待核验':succeeded.value?'通告办理完成':job.value?.phase==='failed'?'本次未完成':job.value?.phase==='cancelled'?'任务已取消':'后台处理中');
+const messagesDelivered=computed(()=>job.value?.message_first && [job.value.feishu_group_state,job.value.message_delivery_state,job.value.dingtalk_state].every(state=>['sent','done','skipped'].includes(state)));
+const taskTitle=computed(()=>{
+  if(eventWaiting.value)return '已排队，等待事件结束';
+  if(ambiguous.value)return '提交结果待核验';
+  if(succeeded.value)return '通告办理完成';
+  if(messagesDelivered.value)return job.value?.phase==='failed'?'消息已送达，多维同步待处理':'消息已送达，多维后台同步中';
+  if(job.value?.phase==='failed')return '本次未完成';
+  if(job.value?.phase==='cancelled')return '任务已取消';
+  return job.value?.message_first?'通告已受理，消息投递与多维同步中':'后台处理中';
+});
+function deliveryLabel(state:string){return ({sent:'已送达',done:'已送达',skipped:'无需发送',failed:'失败，请核验',blocked:'权限待核验',verification_required:'回执待核验',uncertain:'回执待核验'} as Record<string,string>)[state]||'正在投递';}
 const shownEventWaits=new Set<string>();
 function showEventWait(value:Dict){
   if(value.phase!=='event_waiting'||shownEventWaits.has(value.job_id))return;
@@ -242,7 +258,7 @@ function showEventWait(value:Dict){
   dialog.info({title:'事件优先：通告已排队',content:()=>h('div',{style:'white-space:pre-line;max-height:60vh;overflow:auto'},String(value.event_wait?.message||'事件结束或删除后自动发送。')),positiveText:'知道了，保留排队'});
 }
 const nextRecord=computed(()=>{const v=form.value?.values||{};return (action.value==='start'?lanes.value[0].rows:lanes.value[1].rows).find(r=>![v.active_item_id,v.source_record_id,v.target_record_id].includes(rowKey(r))&&!rowEnded(r)&&!(action.value==='start'&&(rowStarted(r)||rowUnknown(r))));});
-function showTaskRecords(){closeEditor();recordsOpen.value=true;}
+function showTaskRecords(){if(!props.recordOnly)closeEditor();recordsOpen.value=true;}
 const locked=computed(()=>busy.value||saving.value||uploading.value||detailLoading.value||ambiguous.value||!!job.value||!form.value?.actions.length);
 const saved=ref('');
 let draftVersion=0,operationId='',frozen:Dict|null=null,formKey='',originalProgress='',progressBeforeEnd='';
@@ -250,6 +266,7 @@ const snapshot=()=>JSON.stringify({values:form.value?.values,sop:sop.value,photo
 const dirty=computed(()=>!!form.value&&(snapshot()!==saved.value||pendingPhotos.value>0));
 function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,specialty:applied.value.specialty||'',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20',...(selectedBuildings.value?{buildings:selectedBuildings.value.join(',')}:{})});}
 async function load(fresh=false){
+  if(props.recordOnly)return;
   if(kind.value==='event'){listAbort?.abort();loading.value=false;return;}
   if(!props.active||disposed||document.hidden)return;
   listAbort?.abort();const c=new AbortController();listAbort=c;loading.value=true;error.value='';
@@ -283,6 +300,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   if(busy.value||uploading.value||saving.value)return;
   if(editing.value&&dirty.value&&!job.value){askLeave(()=>openRecord(row,initial,desiredAction,parsedHtml,manualType,focusBinding));return;}
   attempted.value=false;issueTarget.value=null;confirming.value=false;verifyBeforeStart.value=false;attentionKeys.value=[];
+  draftWarning.value='';
   detailAbort?.abort();const c=new AbortController();detailAbort=c;editing.value=true;detailLoading.value=true;detailError.value='';form.value=null;job.value=null;ambiguous.value=false;frozen=null;operationId='';draftVersion=0;photos.value=[];aliPhotos.value=[];sop.value={};sopField.value={};formKey='';
   const work=row?.work_type||manualType||kind.value;
   const q=new URLSearchParams({scope:row?._request_scope||props.scope,work_type:work,month:applied.value.month});
@@ -292,12 +310,22 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     const next=parseNoticeForm(result.fragments?.detail||'');
     next.values.dingtalk_robot_ids=[];
     if(!NOTICE_IDS.includes(next.values.work_type)||!(props.user.modules||[]).includes(next.values.work_type))throw new Error('无权办理此类通告。');
-    form.value=next;action.value=next.actions.includes(next.initialAction)?next.initialAction:next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;sourceExpanded.value=focusBinding||!!(next.values.manual_binding_required&&!next.values.source_record_id&&!next.values.target_record_id);
+    const preferredAction=desiredAction||next.initialAction;
+    form.value=next;action.value=next.actions.includes(preferredAction)?preferredAction:desiredAction?'':next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;sourceExpanded.value=focusBinding||!!(next.values.manual_binding_required&&!next.values.source_record_id&&!next.values.target_record_id);
     if(sourceChoice.value&&!sourceOptions.value.some(o=>o.value===sourceChoice.value))sourceOptions.value.unshift({label:'已绑定源表事项',value:sourceChoice.value});
-    verifyBeforeStart.value=!!row&&rowStarted(row)&&!row.active_item_id&&!next.values.target_record_id&&next.actions.includes('start');
+    verifyBeforeStart.value=Boolean((row?rowStarted(row)&&!row.active_item_id:initial&&params.value.get('notice_action')==='verify')
+      &&!next.values.target_record_id&&next.actions.includes('start'));
     originalFields.value={...next.values};attentionKeys.value=next.fields.filter(f=>f.required&&!String(next.values[f.key]??'').trim()).map(f=>f.key);
     sop.value={sop_version:0,scope:sopScope.value,exempt:next.values.polling_work_order_exempt===true};sopField.value={notice_scope:sopScope.value,work_type:next.values.work_type};
-    if(next.values.target_record_id){const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:next.values.scope||q.get('scope')||props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;if(draft.draft){draftVersion=Number(draft.draft.version)||0;for(const field of next.fields)if(draft.draft.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];}}
+    if(next.values.target_record_id){
+      const draft=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:next.values.scope||q.get('scope')||props.scope,work_type:next.values.work_type,target_record_id:next.values.target_record_id,action:action.value}),{signal:c.signal,cache:'no-store'});
+      if(c.signal.aborted)return;
+      draftWarning.value=draft.warning||'';
+      draftVersion=Number((draft.draft||draft.draft_base)?.version)||0;
+      for(const field of next.fields){
+        if(draft.draft?.fields?.[field.key]!==undefined)next.values[field.key]=draft.draft.fields[field.key];
+      }
+    }
     originalFields.value=JSON.parse(JSON.stringify(next.values));originalProgress=String(next.values.progress||'');progressBeforeEnd=originalProgress;saved.value=snapshot();
     try{
       let cached=JSON.parse(sessionStorage.getItem(formKey)||'null');
@@ -350,7 +378,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   finally{if(detailAbort===c)detailLoading.value=false;}
 }
 function askLeave(proceed:()=>void){dialog.warning({title:'当前填写尚未保存',content:'继续将关闭当前填写区。本机恢复副本仍保留，未提交的内容不会发送。'+(pendingPhotos.value?'未上传成功的图片需要重新选择。':''),positiveText:'保留副本并离开',negativeText:'继续填写',onPositiveClick:()=>{if(!persist()){message.error(detailError.value);return false;}saved.value=snapshot();editing.value=false;proceed();}});}
-function closeEditor(){if(busy.value||uploading.value||saving.value)return;const close=()=>{editing.value=false;detailAbort?.abort();window.clearTimeout(timer);};if(dirty.value&&!job.value){askLeave(close);return;}if(persist()||!dirty.value&&!job.value&&!ambiguous.value)close();}
+function closeEditor(){if(busy.value||uploading.value||saving.value)return;const close=()=>{editing.value=false;detailAbort?.abort();window.clearTimeout(timer);if(props.recordOnly)emit('recordClose');};if(dirty.value&&!job.value){askLeave(close);return;}if(persist()||!dirty.value&&!job.value&&!ambiguous.value)close();}
 function changeAction(){
   const values=form.value?.values;
   if(values)values.dingtalk_robot_ids=[];
@@ -369,13 +397,14 @@ async function saveDraft(){
     const v=form.value.values;
     const current=await requestJson('/api/workbench/draft?'+new URLSearchParams({scope:v.scope,work_type:v.work_type,target_record_id:v.target_record_id,action:action.value}),{cache:'no-store'});
     const conflict='草稿已被其他窗口修改，请保留本次填写并重新核对，未覆盖对方内容。';
-    if(Number(current.draft?.version||0)!==draftVersion)throw new Error(conflict);
+    const base=current.draft||current.draft_base;
+    if(Number(base?.version||0)!==draftVersion)throw new Error(conflict);
     const fields=Object.fromEntries(form.value.fields.map(f=>[f.key,String(v[f.key]??'').trim()]));
     fields.building_codes=v.building_codes.join(',');
-    const revision=Number(current.draft?.client_revision||0)+1;
+    const revision=Number(base?.client_revision||0)+1;
     const result=await requestJson('/api/workbench/draft',{method:'PUT',body:JSON.stringify({scope:v.scope,work_type:v.work_type,target_record_id:v.target_record_id,action:action.value,fields,client_revision:revision})});
     if(Number(result.draft?.client_revision)!==revision||Object.entries(fields).some(([key,value])=>String(result.draft?.fields?.[key]??'')!==value))throw new Error(conflict);
-    draftVersion=Number(result.draft.version);saved.value=snapshot();persist();message.success('草稿已保存');return true;
+    draftVersion=Number(result.draft.version);draftWarning.value='';saved.value=snapshot();persist();message.success('草稿已保存');return true;
   }catch(e){detailError.value=e instanceof Error?e.message:'草稿保存失败';return false;}
   finally{saving.value=false;}
 }
@@ -489,7 +518,7 @@ function pastePhotos(event:ClipboardEvent){if(event.clipboardData?.files.length&
 let sourceTimer=0,sourceSequence=0;
 function searchSources(q:string){clearTimeout(sourceTimer);sourceTimer=window.setTimeout(()=>loadSources(q),300);}
 async function loadSources(q=''){if(!form.value)return;const current=form.value,sequence=++sourceSequence;sourceLoading.value=true;try{const value=await requestJson('/api/workbench/source-options?'+new URLSearchParams({scope:current.values.scope,work_type:current.values.work_type,month:applied.value.month,q}));if(form.value===current&&sequence===sourceSequence){sourceOptions.value=(value.items||[]).map((r:Dict)=>({label:[r.title,r.maintenance_cycle,r.building,r.progress].filter(Boolean).join(' · '),value:r.source_record_id,title:r.title,building:r.building,cycle:r.maintenance_cycle}));if(current.values.source_record_id&&!sourceOptions.value.some(o=>o.value===current.values.source_record_id))sourceOptions.value.unshift({label:'已绑定源表事项',value:current.values.source_record_id});}}catch(e){if(form.value===current&&sequence===sourceSequence)detailError.value=(e as Error).message;}finally{if(form.value===current&&sequence===sourceSequence)sourceLoading.value=false;}}
-async function associationBound(result:Dict){const v=form.value?.values;if(!v)return;try{sessionStorage.removeItem(formKey);}catch{/* Server identity is authoritative. */}saved.value=snapshot();editing.value=false;busy.value=false;window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,record_id:result.source_record_id||result.repair_management_record_id||v.source_record_id||result.target_record_id||v.target_record_id});}
+async function associationBound(result:Dict){const v=form.value?.values;if(!v)return;const selectedAction=['update','end'].includes(action.value)?action.value:'update';try{sessionStorage.removeItem(formKey);}catch{/* Server identity is authoritative. */}saved.value=snapshot();editing.value=false;busy.value=false;window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,record_id:result.target_record_id||v.target_record_id,_request_scope:v.scope},false,selectedAction);}
 function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;
   const current=form.value,selected=sourceChoice.value;

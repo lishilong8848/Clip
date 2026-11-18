@@ -482,6 +482,29 @@ class PortalRuntime:
                 return {}
             return copy.deepcopy(draft)
 
+    @staticmethod
+    def _normalize_workbench_notice_draft_fields(fields: dict) -> dict:
+        clean_fields: dict[str, Any] = {}
+        for name, value in dict(fields or {}).items():
+            if name not in WORKBENCH_NOTICE_DRAFT_FIELDS:
+                continue
+            if name == 'dingtalk_robot_ids':
+                clean_fields[name] = list(dict.fromkeys(item for item in value if isinstance(item,str) and re.fullmatch(r'[a-f0-9]{32}',item)))[:20] if isinstance(value,list) else []
+            elif name == "building_codes":
+                raw_codes = value if isinstance(value, list) else str(value or "").split(",")
+                clean_fields[name] = list(
+                    dict.fromkeys(
+                        str(code or "").strip().upper()[:16]
+                        for code in raw_codes
+                        if str(code or "").strip()
+                    )
+                )[:16]
+            else:
+                clean_fields[name] = str(value or "")[:8000]
+        if len(json.dumps(clean_fields, ensure_ascii=False).encode("utf-8")) > 64 * 1024:
+            raise PortalError("自动保存内容过大。")
+        return clean_fields
+
     @classmethod
     def save_workbench_notice_draft(
         cls,
@@ -502,25 +525,7 @@ class PortalRuntime:
             raise PortalError("首条通告不保存草稿。")
         if not open_id or not work_type or not target_record_id:
             raise PortalError("自动保存缺少通告身份。")
-        clean_fields: dict[str, Any] = {}
-        for name, value in dict(fields or {}).items():
-            if name not in WORKBENCH_NOTICE_DRAFT_FIELDS:
-                continue
-            if name == 'dingtalk_robot_ids':
-                clean_fields[name] = list(dict.fromkeys(item for item in value if isinstance(item,str) and re.fullmatch(r'[a-f0-9]{32}',item)))[:20] if isinstance(value,list) else []
-            elif name == "building_codes":
-                raw_codes = value if isinstance(value, list) else str(value or "").split(",")
-                clean_fields[name] = list(
-                    dict.fromkeys(
-                        str(code or "").strip().upper()[:16]
-                        for code in raw_codes
-                        if str(code or "").strip()
-                    )
-                )[:16]
-            else:
-                clean_fields[name] = str(value or "")[:8000]
-        if len(json.dumps(clean_fields, ensure_ascii=False).encode("utf-8")) > 64 * 1024:
-            raise PortalError("自动保存内容过大。")
+        clean_fields = cls._normalize_workbench_notice_draft_fields(fields)
         now = time.time()
         key = cls._workbench_draft_key(open_id, work_type, target_record_id)
         owner_prefix = cls._workbench_draft_owner_key(open_id) + ":"
@@ -7051,9 +7056,8 @@ class PortalRuntime:
 
     @classmethod
     def enqueue_initial_message_or_upload_job(cls, job_id: str) -> None:
-        # Run the business upload first.  Personal openid messages are sent only
-        # after the target table write succeeds, so a Feishu message cannot be
-        # delivered for a notice that failed to create/update the bitable record.
+        # Preparation and validation run in the action queue. Web notices stage
+        # durable delivery there, then synchronize Bitable independently.
         cls.enqueue_action_job(job_id)
 
     @classmethod
@@ -7086,13 +7090,11 @@ class PortalRuntime:
             queued_job_id = str((item or {}).get("job_id") or "").strip()
             if not queued_job_id:
                 continue
-            cls.service.mark_job(
-                queued_job_id,
-                phase="accepted",
-                message_queue_position=index,
-                message_queue_size=total,
-                _persist=False,
-            )
+            fields = {"message_queue_position": index, "message_queue_size": total}
+            # Delivery position cannot rewind the independently advancing archive.
+            if not (cls.service.get_job(queued_job_id) or {}).get('message_first'):
+                fields['phase'] = 'accepted'
+            cls.service.mark_job(queued_job_id, **fields, _persist=False)
 
     @classmethod
     def _message_worker_loop(
@@ -7326,7 +7328,7 @@ class PortalRuntime:
                 except Exception:
                     pass
                 return False
-        if phase in {"success", "failed"}:
+        if phase in {"success", "failed"} and not (queue_name == 'message' and job.get('message_first')):
             try:
                 cls.state_store.mark_runtime_queue_item(
                     queue_name,
@@ -7378,17 +7380,27 @@ class PortalRuntime:
     @classmethod
     def _process_initial_message_job(cls, job_id: str) -> None:
         try:
-            # The message queue is kept only to drain queue items persisted by
-            # older builds.  Current safety rule: upload/update the target table
-            # first, then send personal openid messages inside the action worker.
-            # Therefore a queued message item must only hand the job to the
-            # action queue and must not send anything here.
+            job = cls.service.get_job(job_id) or {}
+            if job.get('message_first'):
+                # All content and destinations were durably frozen by the
+                # validated action worker. Delivery cannot re-enter upload.
+                cls.process_notice_robot_messages()
+                cls.process_notice_personal_messages(limit=5)
+                cls.state_store.mark_runtime_queue_item('message', job_id, 'done')
+                return
+            # Older jobs retain their upload-first ordering.
             try:
                 cls.state_store.mark_runtime_queue_item("message", job_id, "done")
             except Exception:
                 pass
             cls.enqueue_action_job(job_id)
         except Exception as exc:
+            if (cls.service.get_job(job_id) or {}).get('message_first'):
+                cls.service.set_notice_followup(job_id, 'message_delivery', 'pending', '消息队列暂未完成，后台继续核对原投递。')
+                cls.state_store.requeue_runtime_queue_item('message', job_id,
+                    available_at=time.time() + 10, error='消息队列等待恢复')
+                cls.message_queue_event.set()
+                return
             cls.service.mark_job(job_id, phase="failed", error=str(exc))
             try:
                 cls.state_store.mark_runtime_queue_item(
@@ -9063,15 +9075,128 @@ class PortalRuntime:
         payload._clipflow_robot_background = True
         if 'dingtalk_targets' not in (operation.get('result') or {}):
             from .dingtalk_notices import DingTalkNotices
-            cls._mark_notice_remote_operation(operation_id,status=operation['status'],
+            cls._mark_notice_remote_operation(operation_id,status=None,
                 result={'dingtalk_targets':DingTalkNotices(cls.state_store).snapshot(notice_type,asdict(payload))})
         if not (operation.get("result") or {}).get("robot_delivery_state"):
             cls._mark_notice_remote_operation(
-                operation_id, status=operation["status"],
+                operation_id, status=None,
                 result={"robot_background": True, "robot_delivery_state": "pending",
                         "robot_message_uuid": cls._event_robot_message_uuid(operation_id),
                         "robot_payload": asdict(payload), "robot_notice_type": notice_type},
             )
+
+    @classmethod
+    def _validate_message_first_notice(cls, prepared):
+        """Read-only delivery checks before any channel receives a notice."""
+        if external_real_write_guard().get('mock_external'):
+            return
+        action, notice_type = prepared['action'], prepared['notice_type']
+        if action == 'start':
+            cls._existing_target_for_prepared_start(prepared, notice_type)
+            return
+        record_id = str(prepared.get('target_record_id') or prepared.get('record_id') or '')
+        if not record_id or is_local_record_id(record_id):
+            raise PortalError('缺少已核实的目标通告，未投递消息。')
+        ok, record = query_record_by_id(record_id, notice_type)
+        if not ok or not isinstance(record, dict):
+            raise PortalError(f'目标通告暂未核实，未投递消息：{record}')
+        expected = cls._expected_remote_record_version(prepared)
+        current = str(record.get('record_version') or '')
+        if expected and current and expected != current:
+            raise PortalError('目标多维记录已被其他用户修改，请刷新后重新提交。')
+        fields = record.get('fields') or {}
+        lifecycle = cls.service._target_record_lifecycle(work_type=prepared['work_type'],
+            notice_type=notice_type, target_record={'display_fields': {
+                key: cls._remote_compare_value(value) for key, value in fields.items()}})
+        if lifecycle.get('finished'):
+            raise PortalError('目标通告已结束，请刷新后核对，未投递消息。')
+        if action == 'end':
+            _, site_tokens, _ = cls._existing_tokens_for_notice_type(notice_type, fields)
+            if (cls._end_site_photo_required(notice_type)
+                    and not cls._has_cumulative_site_photo_for_notice(prepared, notice_type) and not site_tokens):
+                raise PortalError('结束通告前必须添加至少一张现场照片。')
+            if (notice_type == NOTICE_TYPE_CHANGE and not prepared.get('ali_confirmation_images')
+                    and not cls._change_confirmation_attachment_tokens(fields.get(CHANGE_NOTICE_FIELDS['ali_confirmation_snapshot']))):
+                raise PortalError('结束变更通告前必须上传至少一张阿里确认截图，现场照片不能代替。')
+            if notice_type in {NOTICE_TYPE_MAINTENANCE, NOTICE_TYPE_POLLING, NOTICE_TYPE_ADJUST}:
+                error = cls._work_order_end_error(target_record_id=record_id,
+                    work_type=prepared['work_type'], fields=fields)
+                if error:
+                    raise PortalError(error)
+
+    @classmethod
+    def _stage_message_first_notice(cls, job_id, prepared, operation):
+        job = cls.service.get_job(job_id) or {}
+        request = job.get('request') or {}
+        if (not request.get('_web_action_request') or prepared.get('work_type') == WORK_TYPE_EVENT
+                or request.get('execution_origin') == 'qt_local'):
+            return
+        guard = external_real_write_guard()
+        if guard.get('mock_external') or not guard.get('real_write_allowed'):
+            return
+        from .notice_actions import check_notice_job_impersonation
+        check_notice_job_impersonation(cls, job_id)
+        if request.get('_auth_open_id'):
+            from .module_access import require_module
+            session = {'user': {'open_id': request['_auth_open_id']}}
+            require_module(cls.auth_manager, session, request.get('work_type'))
+            if not cls.auth_manager.scope_allowed(session, request.get('scope') or 'ALL'):
+                raise PortalError('当前楼栋权限已变化，未投递通告。')
+        if cls._hold_for_active_event(job_id):
+            return
+        if prepared.get('action') not in {'start', 'update', 'end'}:
+            raise PortalError('通告操作状态无效，未投递消息。')
+        if not job.get('message_first'):
+            cls._validate_message_first_notice(prepared)
+        prepared = cls.service._synchronize_prepared_notice_text(prepared)
+        operation_id = operation['operation_id']
+        cls._stage_notice_robot_delivery(operation_id, prepared['notice_type'],
+                                         cls._prepared_to_notice_payload(prepared))
+        cls.service.mark_job(job_id, message_first=True, archive_state='pending', prepared=prepared)
+        if prepared.get('skip_personal_message'):
+            cls.service.set_notice_followup(job_id, 'message_delivery', 'skipped', '')
+        if not prepared.get('skip_personal_message'):
+            try:
+                cls.service.send_action_personal_message(prepared, recipient_limit=0)
+                document = cls.state_store.get_document('notice_personal_delivery', job_id)
+                if document and document.get('state') != 'sent':
+                    document['next_check_at'] = 0
+                    cls.state_store.put_document('notice_personal_delivery', job_id, document)
+                    cls.state_store.mark_outbox_event(document['outbox_id'], 'pending', count_attempt=False)
+            except Exception:
+                logging.exception('个人消息快照暂未保存，后台继续恢复原任务: job_id=%s', job_id)
+        cls._mark_notice_remote_operation(operation_id, status=None, result={'message_first': True})
+        cls.enqueue_message_job(job_id)
+
+    @classmethod
+    def _defer_message_first_archive(cls, job_id, prepared, error):
+        job = cls.service.get_job(job_id) or {}
+        if not job.get('message_first'):
+            return False
+        operation = cls._get_notice_remote_operation(f'notice_action:{job_id}') or {}
+        category = cls.service.classify_job_error(str(error)).get('error_category')
+        if category in {'permission_denied', 'token_or_auth', 'field_or_payload', 'remote_record_missing'}:
+            cls.service.mark_job(job_id, archive_state='failed')
+            return False
+        if any(value in str(error) for value in ('已被其他用户修改', '不能更新', '不能发送', '必须上传',
+                                                '缺少目标', '已结束', '未全部完成', '尚未到期', '已被替换或删除')):
+            cls.service.mark_job(job_id, archive_state='failed')
+            return False
+        uncertain = cls._remote_operation_outcome_uncertain(operation)
+        temporary = category in {'network_timeout', 'network_error', 'remote_rate_limited'} or any(
+            value in str(error).lower() for value in ('502', '503', '504', 'temporarily unavailable'))
+        if not (temporary or uncertain):
+            cls.service.mark_job(job_id, archive_state='failed')
+            return False
+        attempts = int(job.get('archive_retry_count') or 0) + 1
+        cls.service.mark_job(job_id, phase='archive_pending', archive_state='verification_required' if uncertain else 'pending',
+                             archive_retry_count=attempts, prepared=prepared, error='',
+                             message='消息投递与多维同步分别处理，多维同步等待后台核验并重试。',
+                             archive_warning=str(error))
+        cls.state_store.requeue_runtime_queue_item('qt_action', job_id,
+            available_at=time.time() + min(300, 5 * 2 ** min(attempts, 6)), error=str(error))
+        cls.action_queue_event.set()
+        return True
 
     @classmethod
     def _notice_robot_impersonation(cls, operation):
@@ -9097,7 +9222,7 @@ class PortalRuntime:
         except Exception:
             log_warning('钉钉通告队列暂未完成处理，原任务保留。')
         cls.dispatch_notice_personal_messages()
-        # Completion queues these atomically; messaging never re-enters upload.
+        # Staging or completion queues these atomically. Delivery never uploads.
         for task in cls.state_store.lease_outbox_events("notice_robot", limit=3, lease_seconds=900):
             operation_id = str(task["payload"].get("operation_id") or "")
             key, owner = f"notice_robot:{operation_id}", uuid.uuid4().hex
@@ -9124,7 +9249,7 @@ class PortalRuntime:
                 if previous.get("robot_delivery_state") in {"sent", "skipped", "superseded"}:
                     cls.state_store.mark_outbox_event(task["id"], "done")
                     continue
-                if operation.get("status") != "completed":
+                if operation.get("status") != "completed" and not previous.get('message_first'):
                     raise RuntimeError("通告尚未完成本地同步，群消息暂缓发送。")
                 reason, error = (
                     cls._event_robot_retry_guard(operation, check_remote=False)
@@ -9143,9 +9268,12 @@ class PortalRuntime:
                     if not (result.get("robot_sent") or result.get("robot_skipped")):
                         raise RuntimeError(result.get("last_robot_error") or "群消息未确认发送成功。")
                     cls._mark_notice_remote_operation(
-                        operation_id, status="completed",
+                        operation_id, status=None,
                         result={**result, "robot_delivery_state": "sent" if result.get("robot_sent") else "skipped"},
                     )
+                    if operation_id.startswith('notice_action:'):
+                        cls.service.set_notice_followup(operation_id.removeprefix('notice_action:'),
+                            'feishu_group', 'sent' if result.get('robot_sent') else 'skipped', '')
                 cls.state_store.mark_outbox_event(task["id"], "done")
             except Exception as exc:
                 from .notice_actions import NoticeJobPermissionDenied, NoticeImpersonationPending
@@ -9160,7 +9288,7 @@ class PortalRuntime:
                 marked = cls.state_store.mark_outbox_event(task["id"], "pending", error=str(exc), max_attempts=8) or {}
                 if operation:
                     cls._mark_notice_remote_operation(
-                        operation_id, status=operation["status"],
+                        operation_id, status=None,
                         result={"last_robot_error": str(exc), "robot_delivery_state": "failed" if marked.get("status") == "failed" else "pending"},
                     )
                 log_warning(f"通告写入不受影响，群消息后台发送失败: {operation_id}: {exc}")
@@ -9198,7 +9326,7 @@ class PortalRuntime:
         from .portal_auth import TOPIC_EXECUTION, TopicDelegations
         with cls.service._jobs_lock:
             staging = sorted((copy.deepcopy(job['_notice_personal_staging_pending']) for job in cls.service._jobs.values()
-                       if job.get('phase') == 'success' and job.get('_notice_personal_staging_pending')
+                       if (job.get('phase') == 'success' or job.get('message_first')) and job.get('_notice_personal_staging_pending')
                        and float(job['_notice_personal_staging_pending'].get('next_check_at') or 0) <= time.time()),
                        key=lambda snapshot: float(snapshot.get('next_check_at') or 0))[:limit]
         tasks = []
@@ -9217,7 +9345,7 @@ class PortalRuntime:
             promoted = 0
             for document in due:
                 job = cls.service.get_job(document['job_id']) or {}
-                if job.get('phase') not in {'success', 'message_sent'} or job.get('message_delivery_state') == 'blocked':
+                if (job.get('phase') not in {'success', 'message_sent'} and not job.get('message_first')) or job.get('message_delivery_state') == 'blocked':
                     continue
                 if float(job.get('_notice_personal_retry_after') or 0) > time.time():
                     continue
@@ -9248,8 +9376,10 @@ class PortalRuntime:
             topic_token = None
             try:
                 job = cls.service.get_job(job_id) or {}
-                if not job or job.get('phase') not in {'success', 'message_sent'}:
+                if not job or (job.get('phase') not in {'success', 'message_sent'} and not job.get('message_first')):
                     raise PortalError('原目标写入尚未确认完成，个人消息暂缓；不会重新执行通告。')
+                if job.get('message_first') and cls._hold_for_active_event(job_id):
+                    raise PortalError('等待进行中事件结束后发送。')
                 request = document.get('request') or {}
                 if request.get('_topic_delegation_id'):
                     registry = getattr(cls.auth_manager, '_topic_delegations', None)
@@ -11845,6 +11975,13 @@ class PortalRuntime:
 
     @staticmethod
     def _remote_operation_outcome_uncertain(operation: dict) -> bool:
+        saved = (operation or {}).get('result') or {}
+        if (saved.get('message_first') and operation.get('operation_type') == 'start'
+                and not operation.get('target_record_id')
+                and not any(saved.get(key) for key in ('create_fields', 'create_client_token', 'created_record_id', 'record_id', 'written_fields'))):
+            # This path always checkpoints the create before HTTP submission.
+            # Message receipts alone do not mean a record write was attempted.
+            return False
         status = str((operation or {}).get("status") or "").strip().lower()
         if status == "executing":
             return True
@@ -11966,6 +12103,25 @@ class PortalRuntime:
                 )
                 if replay_error:
                     return False, "", replay_error, True
+                saved = operation.get('result') or {}
+                if (not target_record_id and saved.get('message_first')
+                        and isinstance(saved.get('create_fields'), dict) and saved['create_fields']
+                        and saved.get('create_client_token')):
+                    # Replay the exact accepted create with its persisted
+                    # idempotency token. No new token or rebuilt fields.
+                    from upload_event_module.services.feishu_service import create_bitable_record_fields
+                    guard = external_real_write_guard()
+                    if not guard.get('real_write_allowed'):
+                        return False, '', str(guard.get('reason') or '后台补传暂未获准。'), True
+                    cls._check_current_notice_actor()
+                    ok, replay = create_bitable_record_fields(notice_type, saved['create_fields'],
+                        client_token=saved['create_client_token'], audit_action='通告后台补传')
+                    if not ok:
+                        return False, '', str(replay), True
+                    target_record_id = str(replay or '').strip()
+                    if target_record_id:
+                        cls._mark_notice_remote_operation(operation['operation_id'], status='executing',
+                            target_record_id=target_record_id, result={'created_record_id': target_record_id})
                 if not target_record_id:
                     return (
                         False,
@@ -16289,7 +16445,9 @@ class PortalRuntime:
                 )
                 ok = True
             else:
-                prepared = cls.service.prepare_action_job(job_id)
+                prepared = (copy.deepcopy(current_job['prepared'])
+                            if current_job.get('message_first') and current_job.get('prepared')
+                            else cls.service.prepare_action_job(job_id))
                 prepared.pop("_accepted_target_fields", None)
                 prepared.pop("_accepted_target_at", None)
                 stored_prepared = (
@@ -16397,6 +16555,7 @@ class PortalRuntime:
                     remote_intent_at=time.time(),
                     prepared=prepared,
                 )
+                cls._stage_message_first_notice(job_id, prepared, operation)
                 operation_status = str(operation.get("status") or "")
                 operation_target_id = str(
                     operation.get("target_record_id")
@@ -16451,6 +16610,7 @@ class PortalRuntime:
                         current_job.get("restart_recovered")
                         and current_job.get("remote_intent")
                         and str(prepared.get("work_type") or "") != WORK_TYPE_EVENT
+                        and not current_job.get('message_first')
                     ):
                         ok = False
                         remote_record_id = str(
@@ -16568,6 +16728,8 @@ class PortalRuntime:
                         cls._mark_notice_remote_operation(remote_operation_id,status='remote_written',target_record_id=verified_id,
                             result={'record_id':verified_id,'message':verified_message,'reconciled':True})
             if not ok:
+                if cls._defer_message_first_archive(job_id, prepared, result_message):
+                    return
                 target_selection = None
                 if cls._remote_record_not_found(result_message) or (
                     "目标多维记录不存在" in str(result_message or "")
@@ -16998,7 +17160,7 @@ class PortalRuntime:
                     message_queue_position=0,
                     queue_position=0,
                 )
-            elif not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
+            elif not current_job.get('message_first') and not prepared.get("skip_personal_message") and not prepared.get("message_sent"):
                 from .notice_actions import check_notice_job_impersonation
                 check_notice_job_impersonation(cls, job_id)
                 cls.service.mark_job(
@@ -17290,6 +17452,9 @@ class PortalRuntime:
             if current.get("execution_origin") == "qt_local":
                 cls._finish_qt_event_wait_job(job_id, current["qt_request"], {"ok": False, "message": str(exc)})
                 return
+            if current.get('message_first') and not current.get('remote_written'):
+                if cls._defer_message_first_archive(job_id, current.get('prepared') or {}, exc):
+                    return
             try:
                 operation = cls._get_notice_remote_operation(
                     remote_operation_id

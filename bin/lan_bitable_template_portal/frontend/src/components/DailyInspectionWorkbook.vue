@@ -23,8 +23,8 @@
     <div class="book-options" :class="{expanded:compactMenu}">
     <div class="book-toolbar">
     <div class="book-tools" aria-label="巡检楼栋与日期">
-      <label :title="lockReason"><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
-      <label :title="lockReason"><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
+      <label :title="lockReason"><span class="toolbar-label">楼栋</span> <select aria-label="楼栋" :value="scope" data-native-select :disabled="parentBusy || saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeScope"><option v-for="s in scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
+      <label :title="lockReason"><span class="toolbar-label">日期</span> <input aria-label="巡检日期" :value="day" type="date" :disabled="parentBusy || saving || dirty || !!editing || !!abnormal || sortOpen" @change="changeDay"></label>
       <NButton size="small" :disabled="loading || saving || dirty || !!editing" :title="lockReason" @click="load(true)">刷新</NButton>
       <NButton size="small" :loading="exporting" :disabled="exporting || saving || dirty || !!editing || !report?.rounds.length" :title="!report?.rounds.length ? '本楼本日尚无巡检记录' : lockReason" @click="download">{{ exporting ? '正在导出' : '导出' }}</NButton>
       <NButton size="small" class="book-settings" @click="openSettings">表格设置</NButton>
@@ -44,7 +44,7 @@
       <button class="zoom-reset" aria-label="恢复紧凑显示" @click="resizeSheet(compactZoom-zoom)">{{ Math.round(scale*100) }}%</button>
       <button aria-label="放大巡检表" :disabled="zoom>=28" @click="resizeSheet(2)">＋</button>
     </div>
-    <slot name="start" v-if="isCurrentDate && (!active || awaitingStart)" />
+    <slot name="start" v-if="(!mobileSheet || compactMenu) && isCurrentDate && (!active || awaitingStart)" />
     <span v-if="preferencesError" class="book-error">{{ preferencesError }}<button @click="loadPreferences">重读排序</button></span>
     <div class="book-status">
       <span v-if="currentActive && !readOnly" class="status-review">
@@ -55,6 +55,7 @@
         <strong v-if="editing" class="editing-address">正在编辑 {{ editing }}</strong>
         <span v-if="lockReason" class="lock-reason">{{ lockReason }}</span>
         <span>{{ saving ? '正在保存…' : dirty ? '有未保存修改' : '自动保存' }}</span>
+        <span v-if="currentActive?.source_locked && sourceTime" data-inspection-source-time :title="'本轮采样 '+roundClock.format(sourceTime)+' · 已锁定'">采样 {{ roundClock.format(sourceTime) }}</span>
         <button v-if="dirty && !saving" @click="flush">重试保存</button><button v-if="dirty && !saving" @click="compareLatest">核对最新数据</button>
       </span>
     </div>
@@ -158,6 +159,7 @@
           </div>
           <p v-if="exemptionNotice" :class="exemptionFailed?'book-error':'settings-note'" :role="exemptionFailed?'alert':'status'">{{ exemptionNotice }}</p>
         </div>
+        <InspectionCollectionSettings v-if="settingsOpen && report?.can_edit_exemptions" />
         <div v-if="canGroup && showGroups" ref="groupPanel" class="settings-section">
           <strong>本班专业归属</strong><small>仅影响{{ scope }}楼{{ defaultShift }}班，下一班恢复默认。</small>
           <div class="group-list">
@@ -223,11 +225,12 @@ import './inspection.css';
 import {requestJson,downloadFile} from '../api/client';
 import {registerNavigationGuard} from '../navigation';
 import {inspectionCellText} from './inspectionCellFormat';
+import InspectionCollectionSettings from './InspectionCollectionSettings.vue';
 import {configuredInspectionPositions,manuallyFilledInspectionPositions,inspectionPosition,type InspectionVisibilityActive} from './inspectionCellVisibility';
 type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
 type Reading=CellEdit & {value:any;read_only?:boolean;verified_operating?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
 type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
-type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
+type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];slash_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
 type Exemptions={revision:number;sheets:Record<string,string[]>};
 type Report={template_version?:string;archive_warning?:string;archive_incomplete?:boolean;draft_key:string;can_edit_history:boolean;can_edit_exemptions?:boolean;exemptions?:Exemptions;scope:string;date:string;rounds:Round[];slot_states?:SlotState[];sheet_groups?:Record<string,string>;summary_only?:boolean;sheet_filter?:[string,string]|null;original_templates:{name:string;profession:string;sheets:Omit<Page,'key'|'baseKey'|'template'|'profession'>[]}[]};
@@ -241,7 +244,7 @@ type Active=InspectionVisibilityActive & Progress & {
  profession_confirmations?:Record<string,{actor?:string;confirmed?:number;version?:string}>;
  profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;
 };
-const props=defineProps<{immersive?:boolean;scopes:string[];templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:Active;plannedGroups?:Record<string,string>;readOnly:boolean;parentBusy:boolean}>();
+const props=defineProps<{immersive?:boolean;scopes:string[];sourceTime?:number;templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:Active;plannedGroups?:Record<string,string>;readOnly:boolean;parentBusy:boolean}>();
 const emit=defineEmits<{changed:[];scope:[scope:string];exit:[];'round-state':[state:any]}>();
 const compactMenu=ref(false);
 const phoneMedia=window.matchMedia('(max-width:760px), (max-height:500px) and (pointer:coarse)');
@@ -355,7 +358,9 @@ const exemptionSummary=computed(()=>{
  if(!page)return '';
  const custom=report.value?.exemptions?.sheets[page.baseKey];
  const cells=custom ?? page.excluded_ranges ?? [];
- return cells.length ? (custom ? custom.length+' 格免填 · ' : '默认免填 · ')+cells.join('、') : '当前工作表无免填范围';
+ const fixed=page.slash_cells?.length ? page.slash_cells.length+' 格由模板固定填 /' : '';
+ const ranges=cells.length ? (custom ? '已设免填 · ' : '默认免填 · ')+cells.join('、') : '';
+ return [fixed,ranges].filter(Boolean).join('；') || '当前工作表无免填范围';
 });
 const canSaveExemption=computed(()=>!!report.value?.can_edit_exemptions && !!exemptionPage.value && !!exemptionInput.value && !actionLocked.value && !exemptionSaving.value);
 watch(exemptionSheet,()=>{exemptionNotice.value='';exemptionInput.value='';});
@@ -479,6 +484,7 @@ const grid=computed(()=>{
  for(const round of visibleRounds.value)for(const cell of round.extra_cells||[])overlay(round,cell);
  for(const job of jobs.value){const round=visibleById.get(job.round.round_id);if(round)for(const cell of job.cells)overlay(round,cell);}
  const remarks=new Set(p.remark_cells || []);
+ const fixedSlashes=new Set(p.slash_cells || []);
  const custom=report.value?.exemptions?.sheets[p.baseKey];
  const exemptions=custom ? new Set(custom) : null;
  const frozen=currentActive.value?.cell_exemptions?.[p.baseKey];
@@ -486,6 +492,9 @@ const grid=computed(()=>{
  const defaultRanges=(p.excluded_ranges||[]).map(range=>{const [x,y=x]=range.split(':');return [...coords(x),...coords(y)];});
  return cellLayout.value.map(row=>row.slice(0,columnCount.value).map(cell=>{
   const a=cell.address,v=values.get(a),remark=remarks.has(a);
+  const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0];
+  if(fixedSlashes.has(a))return {...cell,value:'/',modeCell:false,diagonal:style?.diagonal,text:'/',displayText:'/',
+   filled:true,round:undefined,exempt:false,current:false,historical:false,mapped:false,stateCell:false,editable:false};
   const rowSlot=isChiller.value?chillerSlot.value:remark?undefined:p.round_rows?.[String(cell.rowIndex+1)];
   // Existing mappings keep their owner. An assigned row never inherits a different round.
   const round=v?.round||(rowSlot?roundsBySlot.value.get(rowSlot):freeRound.value);
@@ -505,7 +514,7 @@ const grid=computed(()=>{
      && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))
    : report.value?.can_edit_history&&hasArchiveReceipt(round));
   const value=exempt?'':collisions.has(a)?'位置冲突，请核对映射':override?override.value:v?(v.visible?v.value:''):cell.raw;
-  const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0],format=style?.number_format;
+  const format=style?.number_format;
   const modeCell=isChiller.value&&/^[K-P][789]$/.test(a);
   const filled=!exempt&&!collisions.has(a)&&!!(override||v?.visible)&&!!text(value);
   const displayed=!exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format);
@@ -924,12 +933,12 @@ async function download(){
  finally{exporting.value=false;}
 }
 function chooseScope(value:string){
- if(value===scope.value||!props.scopes.includes(value)||storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value||exemptionSaving.value)return false;
+ if(value===scope.value||!props.scopes.includes(value)||props.parentBusy||storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value||exemptionSaving.value)return false;
  scope.value=value;emit('scope',scope.value);void loadPreferences();reset();
  return true;
 }
 function changeScope(e:Event){chooseScope((e.target as HTMLSelectElement).value);}
-function changeDay(e:Event){if(storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;day.value=(e.target as HTMLInputElement).value;reset();}
+function changeDay(e:Event){if(props.parentBusy||storageUnverified||dirty.value||saving.value||editing.value||abnormal.value||sortOpen.value)return;day.value=(e.target as HTMLInputElement).value;reset();}
 function clearProgress(){progressRequest?.abort();progressRequest=undefined;syncedVisited.value=new Set();presence.value=[];}
 function reset(){cachedTemplates.value=[];layoutVersion.value='';settingsOpen.value=false;exemptionSheet.value=null;exemptionPicking.value=false;exemptionInput.value='';exemptionNotice.value='';sortOpen.value=false;lookupMode.value='';lookupTarget.value=undefined;reviewOpen.value=false;groupDraft.value={};sortTarget=undefined;controller?.abort();window.clearTimeout(timer);storageKey='';mutation++;scrollPositions.clear();editor=undefined;editing.value='';comparison.value=undefined;report.value=undefined;visited.value=new Set();clearProgress();pageKey.value='';selectedSlot.value='';chillerSelection.value='';void loadTemplates();void load();}
 watch(()=>props.defaultScope,v=>{if(v&&v!==scope.value&&!dirty.value&&!saving.value&&!editing.value&&!abnormal.value){scope.value=v;void loadPreferences();reset();}});

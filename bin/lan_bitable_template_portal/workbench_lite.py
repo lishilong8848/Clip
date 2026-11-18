@@ -2423,6 +2423,9 @@ def _detail_form(
     )
     if ongoing_item and not target_record_id:
         action = "start"
+    elif ongoing_item and target_record_id and action == "start":
+        # An independent notice keeps its lifecycle after a plan is linked.
+        action = "update"
     active_item_id = (
         str(source.get("active_item_id") or target_record_id or source_record_id or "")
         if ongoing_item
@@ -4316,6 +4319,7 @@ def render_workbench_lite(
           if (!response.ok || data.ok === false) throw new Error(data.error || '自动保存失败');
           const draft = data?.data?.draft || {{}};
           if (liteDraftContextKey !== key) return true;
+          if (Number(draft.client_revision) !== revision) throw new Error('草稿已有其它窗口修改，请重新读取后核对；本次填写仍保留。');
           liteDraftServerVersion = Number(draft.version || liteDraftServerVersion || 0);
           liteDraftSavedRevision = Math.max(liteDraftSavedRevision, revision);
           if (liteDraftSavedRevision >= liteDraftRevision) {{
@@ -4352,7 +4356,17 @@ def render_workbench_lite(
         const response = await fetch('/api/workbench/draft?' + query.toString(), {{ credentials:'same-origin' }});
         const data = await response.json().catch(() => ({{}}));
         if (handleLiteAuthRequired(response, data) || !response.ok || data.ok === false) return;
-        if (liteDraftKey(liteDraftContext(form)) !== key || liteDraftRevision !== initialRevision) return;
+        if (liteDraftKey(liteDraftContext(form)) !== key) return;
+        const base = data?.data?.draft_base;
+        if (!data?.data?.exists && base) {{
+          const edits = Math.max(1, liteDraftRevision - initialRevision);
+          liteDraftServerVersion = Number(base.version || 0);
+          liteDraftSavedRevision = Number(base.client_revision || 0);
+          liteDraftRevision = liteDraftSavedRevision + edits;
+          setLiteStatus(data?.data?.warning || '旧草稿已保留，可继续办理当前通告');
+          return;
+        }}
+        if (liteDraftRevision !== initialRevision) return;
         const draft = data?.data?.draft;
         if (!draft || !data?.data?.exists) return;
         const fields = draft.fields && typeof draft.fields === 'object' ? draft.fields : {{}};
@@ -9618,6 +9632,7 @@ def render_workbench_lite(
         upload_waiting: '等待上传多维',
         remote_intent: '正在写入多维',
         uploading: '正在上传多维',
+        archive_pending: '消息独立投递，多维同步等待后台核验重试',
         remote_written: '多维已写入，正在同步页面',
         undo_queued: '回退已排队',
         undoing_remote: '正在恢复多维记录',
@@ -9711,7 +9726,8 @@ def render_workbench_lite(
             const message = job.error || job.upload_message || job.message_error || '发送失败';
             try {{ applyJobPatch(job.frontend_patch, payload, false, message); }} catch (error) {{}}
             if (isCurrent()) showLiteError(message);
-            updateStatus((job.remote_written ? '多维已写入，后续处理失败：' : '发送失败：') + friendlyLiteMessage(message));
+            const delivered = job.message_first && [job.feishu_group_state, job.message_delivery_state, job.dingtalk_state].every(value => ['sent','done','skipped'].includes(value));
+            updateStatus((delivered ? '消息已送达，多维同步待处理：' : job.remote_written ? '多维已写入，后续处理失败：' : '发送失败：') + friendlyLiteMessage(message));
             return true;
           }}
           const slow = Date.now() - startedAt >= 90000 ? `（后台仍在执行，任务号 ${{jobId}}，请勿重复提交）` : '';
@@ -9719,7 +9735,9 @@ def render_workbench_lite(
             ? '正在准备通告' : phase === 'qt_queued' && job.depends_on_phase
               ? '等待同一通告上一条操作完成' : phase === 'remote_written' && job.paired_upload_status === 'failed'
                 ? '主通告已写入，正在重试关联维保同步' : jobPhaseText(phase);
-          updateStatus('发送中：' + stage + (job.projection_pending && job.message_warning ? '（' + job.message_warning + '）' : slow));
+          const deliveryLabel = value => ['sent','done'].includes(value) ? '已送达' : value === 'skipped' ? '无需发送' : ['failed','blocked'].includes(value) ? '待处理' : ['uncertain','verification_required'].includes(value) ? '回执待核验' : '投递中';
+          const delivery = job.message_first ? `飞书群 ${{deliveryLabel(job.feishu_group_state)}} · 飞书个人 ${{deliveryLabel(job.message_delivery_state)}} · 钉钉 ${{deliveryLabel(job.dingtalk_state)}} · 多维 ${{stage}}` : '发送中：' + stage;
+          updateStatus(delivery + (job.projection_pending && job.message_warning ? '（' + job.message_warning + '）' : slow));
         }} catch (error) {{
           readFailures += 1;
           updateStatus(readFailures >= 3

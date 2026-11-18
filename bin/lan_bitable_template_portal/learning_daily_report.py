@@ -109,6 +109,7 @@ def collect(service, date, current, conn, directory, app_id):
     from .learning_shift_storage import person_open_id
     from .learning_schedule import windows
     from .learning_reminders import excluded_long_day
+    from .learning_onboarding import daily_eligibility
     from .personnel_source import observed_on_day, signature_aliases
 
     result = {'date': date, 'as_of': current.isoformat(timespec='seconds'),
@@ -138,6 +139,8 @@ def collect(service, date, current, conn, directory, app_id):
         row = {k: raw.get(k, '') for k in ('name', 'scope', 'shift')}
         matches, warnings = resolve_roster([{**raw, 'open_id': raw.get('open_id', '')}], directory)
         oid = matches[0]['open_id'] if matches and not warnings else ''
+        if oid and daily_eligibility(matches[0], date, directory)[0] == 'exempt':
+            continue
         pid = targets.get(oid)
         person = people_by_id.get(pid, {})
         if not app_id:
@@ -168,7 +171,8 @@ def collect(service, date, current, conn, directory, app_id):
     normalized = {**roster, 'people': list(duties.values())}
     view._get = lambda kind, key: normalized if kind == 'local' and key in (
         'shift_roster', 'shift_roster:' + date) else service._get(kind, key, conn)
-    projected = {r['person_id']: r for r in completion.project(view, date, current=current, data=data)}
+    projected = {r['person_id']: r for r in completion.project(view, date, current=current, data=data,
+                                                             entry_directory=directory)}
     publication = service._get('publication', service._publication_key(date), conn) or {}
     try:
         published_at = dt.datetime.fromisoformat(publication.get('created_at', ''))

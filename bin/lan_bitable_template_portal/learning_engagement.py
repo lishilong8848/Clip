@@ -140,7 +140,8 @@ def repeated_reminders(service, current):
                     context = {'paper': paper, 'person_id': person['id'], 'open_id': duty['open_id']}
                     contexts[assignment] = context
                     identity = assignment + ':' + str(int(due.timestamp()))
-                    if service._get('engagement', identity, conn):
+                    previous = service._get('engagement', identity, conn)
+                    if previous and previous['status'] != 'skipped_onboarding':
                         continue
                     legacy = service._get('engagement', 'timeout:' + paper['id'], conn) if paper else None
                     notice = service._get('notification', f"shift:{day}:{shift}:{duty['open_id']}", conn)
@@ -445,6 +446,8 @@ def send_due(service, current):
         return
     people = service._all('person')
     people_by_id = {person['id']: person for person in people}
+    from .learning_onboarding import daily_eligibility, directory_for_learning
+    entry_directory = directory_for_learning(service)
     url = service.portal_url()
     targets = recipients(people) if url else {}
     managers = {}
@@ -492,6 +495,8 @@ def send_due(service, current):
             job['status'] = 'expired'
         elif job['kind'] == 'timeout' and paper and paper.get('mode') != 'practice':
             job['status'] = 'superseded'
+        elif job['kind'] == 'shift_timeout' and daily_eligibility(person or {}, job['date'], entry_directory)[0] == 'exempt':
+            job['status'] = 'skipped_onboarding'
         elif job['kind'] == 'shift_timeout' and job['date'] in unavailable:
             job['due_at'] = current.timestamp() + 300
         elif job['kind'] == 'shift_timeout' and (completed or paper and (paper.get('deleted_at') or service._completed(paper, record))):

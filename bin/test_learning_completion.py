@@ -67,6 +67,16 @@ class CompletionTests(unittest.TestCase):
     def actor(self, pid='p1'):
         return {'id': 'oid-' + pid, 'person_id': pid, 'is_admin': False, 'shared_account': False, 'can_answer': True}
 
+    def test_workbench_summary_deduplicates_person_days_and_returns_only_counts(self):
+        data = {'A': [{'person_id': 'shared', 'status': '已完成'}, {'person_id': 'local', 'status': '待答'}],
+                'B': [{'person_id': 'shared', 'status': '答题中'}],
+                'E': [{'person_id': 'outside', 'status': '逾期'}]}
+        with patch.object(completion, 'project', side_effect=lambda _, date, *, scope, **kw: data[scope]) as project:
+            result = completion.workbench_summary(self.service, ['A', 'B'], {'from': DATE, 'to': DATE})
+        self.assertEqual(result['summary'], dict.fromkeys(completion.STATES, 0) | {'待答': 1, '答题中': 1})
+        self.assertEqual(set(result), {'summary', 'scopes', 'from', 'to'})
+        self.assertEqual([call.kwargs['scope'] for call in project.call_args_list], ['A', 'B'])
+
     def test_first_backfill_ignores_unanswered_attempt_empty_dates(self):
         paper = self.paper()
         self.put('record', {'id': paper['id'], 'person_id': 'p1', 'date': DATE, 'scope': 'A',

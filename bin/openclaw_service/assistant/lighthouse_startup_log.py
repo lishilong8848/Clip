@@ -9,6 +9,8 @@ import re
 PREFIX = '[ClipFlow][OpenClaw] '
 STAGES = {
     'preparing': '正在后台准备助手',
+    'capabilities_on_demand': '助手已就绪，业务能力和公司资料按需加载',
+    'gateway_backoff': '共享网关暂不可用，等待退避后核验，不重复启动',
     'service_connecting': '正在后台启动灯塔助手',
     'service_ready': '灯塔助手后台已连接',
     'service_failed': '灯塔助手仍在后台准备，其他业务可继续使用',
@@ -19,7 +21,7 @@ STAGES = {
     'runtime_extract': '正在校验并解压助手运行环境',
     'runtime_ready': '运行环境已就绪',
     'skills_ready': '技能目录已加载',
-    'awaiting_login': '等待登录账号，登录后自动准备独立 Agent',
+    'awaiting_login': '等待业务请求，按需准备独立 Agent',
     'gateway_starting': '正在启动共享常驻网关',
     'gateway_ready': '共享常驻网关已就绪',
     'startup_failed': '助手准备或启动失败',
@@ -32,7 +34,7 @@ TEXT_FIELDS = {
     'account': r'[0-9a-f]{8,32}', 'error': r'[A-Za-z][A-Za-z0-9_]{0,60}',
     'last_stage': r'[A-Za-z][A-Za-z0-9_]{0,60}',
 }
-NUMBERS = {'pid', 'port', 'elapsed_ms', 'protocol', 'skills', 'backend_pid', 'exit_code', 'part', 'parts'}
+NUMBERS = {'pid', 'port', 'elapsed_ms', 'protocol', 'skills', 'backend_pid', 'exit_code', 'part', 'parts', 'retry_ms', 'failures'}
 
 
 def render(line, *, backend_pid=None):
@@ -52,7 +54,7 @@ def render(line, *, backend_pid=None):
         if key in NUMBERS and (isinstance(value, bool) or not isinstance(value, (int, float)) or
                                abs(value) > 1_000_000_000 or not math.isfinite(value)):
             return None
-    details = ' '.join(f'{key}={data[key]}' for key in (*TEXT_FIELDS, 'skills', 'pid', 'port', 'protocol', 'elapsed_ms', 'exit_code', 'part', 'parts') if key in data)
+    details = ' '.join(f'{key}={data[key]}' for key in (*TEXT_FIELDS, 'skills', 'pid', 'port', 'protocol', 'elapsed_ms', 'exit_code', 'part', 'parts', 'retry_ms', 'failures') if key in data)
     return '[ClipFlow][OpenClaw] ' + STAGES[data['stage']] + (' | ' + details if details else '')
 
 

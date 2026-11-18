@@ -237,6 +237,9 @@ def install_cold_source_monitor(app, controller, runtime):
             scopes=await asyncio.to_thread(runtime.auth_manager.session_scopes,session)
             allowed=lambda scope: 'ALL' in scopes or scope in scopes
             rows=await asyncio.to_thread(snapshot,cloud)
+            items=[r for r in rows if allowed(r['scope'])]
+            if request.query_params.get('status_only') == '1':
+                return JSONResponse({'ok':True,'data':{'items':items}},headers={'Cache-Control':'private, no-store'})
             history=await asyncio.to_thread(runtime.state_store.list_documents,NS,key_prefix='job:')
             jobs=[d['payload'] for d in history if isinstance(d.get('payload'),dict) and allowed((d['payload'].get('row') or {}).get('scope'))]
             jobs.sort(key=lambda x:x.get('created_at',0),reverse=True)
@@ -245,7 +248,7 @@ def install_cold_source_monitor(app, controller, runtime):
             except ValueError:
                 raise RiskError('记录页码无效。',400) from None
             page=min(page,max(1,(len(jobs)+9)//10))
-            return JSONResponse({'ok':True,'data':{'items':[r for r in rows if allowed(r['scope'])],
+            return JSONResponse({'ok':True,'data':{'items':items,
                                                   'history':jobs[(page-1)*10:page*10],
                                                   'history_total':len(jobs),'history_page':page}},headers={'Cache-Control':'private, no-store'})
         except RiskError as error:

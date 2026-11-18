@@ -438,6 +438,7 @@ SMOKE_IMPORT_MODULES = [
     "alarm_scan.routes",
     "alarm_scan.receiver",
     "lan_bitable_template_portal.server",
+    "lan_bitable_template_portal.inspection_collection",
     "lan_bitable_template_portal.risk_inspection_imports",
     "lan_bitable_template_portal.learning_shift_storage",
     "lan_bitable_template_portal.learning_personnel_storage",
@@ -1759,6 +1760,7 @@ FRONTEND_PREFLIGHT_SCRIPTS = (
     "check-document-library-all-scopes.mjs", "check-document-library-resilience.mjs",
     "check-learning-sharing-types.mjs", "check-learning-sharing-resilience.mjs", "check-learning-question-import.mjs", "check-learning-daily-entry.mjs",
     "check-pre-shift-edits.mjs", "check-repair-plan-binding.mjs", "check-notice-convergence-confirmation.mjs",
+    "check-notice-draft-scope.mjs", "check-inspection-live-start.mjs", "check-workbench-role-layout.mjs",
 )
 
 
@@ -1907,6 +1909,9 @@ def _run_packaging_preflight_tests_once() -> None:
          "bin.test_polling_work_order_undo", "bin.test_change_notice_rich_text"],
         [ "bin.test_transport_safety", "bin.test_patch_mirror", "bin.test_release_readiness", "bin.test_dependency_bootstrap", "bin.test_feishu_credentials", "bin.test_cabinet_guest", "bin.test_logger_reentry", "bin.test_update_check_recovery", "bin.test_release_journal", "bin.test_release_journal_routes"],
         ["bin.test_packaging_preflight_selection", "bin.test_signature_usage_cards", "bin.test_feishu_card_lifetime"],
+        ["bin.test_notice_message_first", "bin.test_workbench_draft_scope",
+         "bin.test_inspection_collection", "bin.test_daily_inspection_live_config",
+         "bin.test_lighthouse_gateway_recovery"],
     ]
 
     log("开始执行打包前自动测试。")
@@ -2149,7 +2154,8 @@ def _run_packaging_preflight_tests_once() -> None:
 
     run_tests(test_groups[8])
     log("补丁传输与打包完整性检查已核对（执行或复用通过记录）。")
-    run_tests(test_groups[9])
+    for group in test_groups[9:]:
+        run_tests(group)
 
     if selection.full:
         _run_frontend_notice_navigation_checks()

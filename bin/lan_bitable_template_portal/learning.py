@@ -881,11 +881,17 @@ class LearningService:
     def _send_notifications(self, current):
         from .learning_reminders import enqueue_shift_reminders, reminder_card, shift_times, notification_jobs, APP_ACCESS_URL
         from .learning_completion import daily_progress
+        from .learning_onboarding import daily_eligibility, directory_for_learning
         settings = self.settings()
         if not settings['enabled']:
             return
         assignments = enqueue_shift_reminders(self, current)
         date = current.date().isoformat()
+        entry_directory = directory_for_learning(self)
+
+        def requires_reminder(paper, conn=None):
+            person = self._get('person', paper.get('person_id', ''), conn) or paper.get('person') or {}
+            return daily_eligibility(person, paper['date'], entry_directory)[0] != 'exempt'
         completed_papers = {task['task_id'] for task in daily_progress(self, date, current).values()
                             if task['status'] == '已完成'} if settings['reminder_enabled'] else set()
         link = None
@@ -894,7 +900,7 @@ class LearningService:
                 for paper in self._documents("paper", start=date, end=date, conn=conn):
                     key = "reminder:personal:" + date + ":" + paper["scope"]
                     record = self._get("record", paper["id"], conn) or {}
-                    if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and paper['id'] not in completed_papers and not self._completed(paper, record) and not self._get("notification", key, conn):
+                    if paper["date"] == date and paper.get('mode') != 'practice' and not paper.get("deleted_at") and paper.get("notify", True) and paper["questions"] and paper['id'] not in completed_papers and not self._completed(paper, record) and not self._get("notification", key, conn) and requires_reminder(paper, conn):
                         self._put("notification", key, {"id": key, "kind": "reminder", "personal_mode": True, "scope": paper["scope"], "date": date, "status": "pending"}, conn)
         for notification in notification_jobs(self, current, assignments):
             if notification.get("status") != "pending" or notification.get("retry_at", 0) > time.time():
@@ -913,6 +919,14 @@ class LearningService:
                 notification['status'] = 'expired'
             elif notification['kind'] == 'shift' and assignments is None:
                 continue
+            elif notification['kind'] == 'shift' and daily_eligibility(
+                    {'open_id': notification.get('open_id')}, notification['date'], entry_directory)[0] == 'exempt':
+                notification['status'] = 'skipped_onboarding'
+            elif notification['kind'] == 'app_access' and any(
+                    daily_eligibility({'open_id': (self._get('notification', member) or {}).get('open_id')},
+                                      date, entry_directory)[0] == 'exempt'
+                    for member in notification.get('members', ())):
+                notification['status'] = 'skipped_onboarding'
             elif notification['kind'] == 'shift' and (notification.get('shift'), notification.get('open_id')) not in assignments:
                 notification['status'] = 'skipped_roster'
             elif notification["kind"] == "correction" and not self._correction_matches(notification, paper):
@@ -925,7 +939,7 @@ class LearningService:
                 if notification["kind"] == "correction" and (self._get("record", notification.get("paper_id", "")) or {}).get("_dirty"):
                     continue
                 outstanding = [p for p in self._documents("paper", scope=notification["scope"], start=date, end=date)
-                               if p.get('mode') != 'practice' and not p.get("deleted_at") and p["questions"] and p['id'] not in completed_papers and not self._completed(p, self._get("record", p["id"]) or {})] if notification["kind"] == "reminder" else []
+                               if p.get('mode') != 'practice' and not p.get("deleted_at") and p["questions"] and p['id'] not in completed_papers and not self._completed(p, self._get("record", p["id"]) or {}) and requires_reminder(p)] if notification["kind"] == "reminder" else []
                 if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:
@@ -1094,6 +1108,14 @@ class LearningService:
         else:
             summary = self.profile(actor, {"scope": scope})["summary"]
         delivery = {}
+        if self_person:
+            from .learning_onboarding import daily_eligibility, directory_for_learning
+            from .learning_schedule import active_night_date
+            current = now()
+            date = active_night_date(self, self_person, current) or current.date().isoformat()
+            status, resume = daily_eligibility(self_person, date, directory_for_learning(self))
+            if status == 'exempt':
+                delivery['daily_exemption'] = {'status': status, 'resume_date': resume}
         if admin:
             from .learning_delivery_status import report
             delivery['delivery_status'] = report(self)
@@ -1322,9 +1344,25 @@ class LearningService:
             papers = [p for p in papers if p.get('mode', 'daily') == mode]
         papers.sort(key=lambda p: (p["date"], p["scope"], p.get('created_at', ''), p['id']), reverse=True)
         result = self._page(papers, query)
-        result["items"] = [self.public_paper(p, actor) for p in result["items"]]
+        from .learning_onboarding import daily_eligibility, directory_for_learning
+        directory = directory_for_learning(self)
+        exemption_cache = {}
+
+        def exempt(p):
+            key = p['person_id'], p['date']
+            if key not in exemption_cache:
+                learner = self._get('person', p['person_id']) or p.get('person') or {}
+                exemption_cache[key] = daily_eligibility(learner, p['date'], directory)[0] == 'exempt'
+            return exemption_cache[key]
+
+        result["items"] = [self.public_paper(p, actor) | ({'daily_exempt': True}
+            if p.get('person_id') and p.get('mode') != 'practice' and exempt(p) else {}) for p in result["items"]]
         if query.get("today") == "1":
             result["today"] = query["date"]
+            if mode == 'daily' and person_id and person_id == self._self_person(actor):
+                learner = self._get('person', person_id) or {}
+                state, resume = daily_eligibility(learner, query['date'], directory)
+                result['daily_exemption'] = {'status': state, 'resume_date': resume} if state == 'exempt' else None
             result["published"] = bool(self._get("publication", self._publication_key(query["date"])))
             result["personal_mode"] = True
         return result

@@ -215,7 +215,11 @@ async def submit_notice_action(controller, runtime, session, payload, *, card_su
             and not payload.get("active_item_id")
             and not payload.get("target_record_id")
         )
-        ongoing = [] if standalone_start else await asyncio.to_thread(controller._get_ongoing, scope)
+        identified_update = (payload.get('action') in {'update', 'end'}
+                             and bool(payload.get('active_item_id') or payload.get('target_record_id')))
+        # The expander re-reads exact active identities from SQLite. The worker
+        # still verifies the selected target before performing the cloud write.
+        ongoing = [] if standalone_start or identified_update else await asyncio.to_thread(controller._get_ongoing, scope)
         payload = await asyncio.to_thread(
             runtime.service.expand_workbench_action_command,
             payload,

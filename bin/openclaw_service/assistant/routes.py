@@ -11,7 +11,6 @@ from starlette.formparsers import MultiPartException, MultiPartParser
 
 from .lighthouse_ai import AssistantError, LighthouseAssistant
 from .lighthouse_startup_log import emit as startup_log
-from ..protocol import MAX_CONCURRENT_ACCOUNTS
 
 
 def install_assistant_routes(app, host):
@@ -19,13 +18,10 @@ def install_assistant_routes(app, host):
     agent = None
     streams = None
     lock = threading.Lock()
-    preparation = None
     closing = False
-    pending_warmups = {}
     tagging_pool = None
     sharing_slot = asyncio.Semaphore(1)
     knowledge = None
-    knowledge_preparation = None
     knowledge_lock = threading.Lock()
     extensions = None
     extensions_lock = threading.Lock()
@@ -129,52 +125,10 @@ def install_assistant_routes(app, host):
             await asyncio.gather(task, return_exceptions=True)
             raise
 
-    async def prepare_runtime():
-        try:
-            current = await ready_streams()
-            if getattr(current.engine, 'public_sources', None) and hasattr(host, 'spawn'):
-                host.spawn(asyncio.to_thread(current.engine.public_sources.prepare))
-            if getattr(current.engine, 'manages_runtime', False) is True:
-                for actor in tuple(pending_warmups.values()):
-                    warm_current(current, actor)
-                pending_warmups.clear()
-                await current.engine.prepare()
-                from .lighthouse_skills import catalog
-                startup_log('skills_ready', skills=len(await asyncio.to_thread(catalog)))
-                if not getattr(current.engine, 'warming', {}) and not getattr(getattr(current.engine, 'manager', None), 'accounts', {}):
-                    startup_log('awaiting_login')
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            startup_log('startup_failed', error=type(exc).__name__)
-            logging.getLogger(__name__).warning('Assistant startup preparation failed: type=%s', type(exc).__name__)
-
     async def startup():
-        nonlocal preparation, knowledge_preparation
-        # Do not delay the portal listener or execute work on Qt's main thread.
-        async def prepare_knowledge():
-            try:
-                await asyncio.to_thread(get_knowledge)
-            except Exception as exc:
-                logging.getLogger(__name__).warning('Knowledge source preparation failed: type=%s', type(exc).__name__)
-        # This starts only the existing knowledge worker, including direct library use.
-        knowledge_preparation = asyncio.create_task(prepare_knowledge())
-        if os.environ.get("LIGHTHOUSE_AGENT_ENGINE", "openclaw").strip().lower() != "legacy":
-            startup_log('preparing')
-            preparation = asyncio.create_task(prepare_runtime())
-        else:
-            startup_log('legacy_engine')
-
-    def warm_current(current, actor):
-        if not closing and getattr(current.engine, 'manages_runtime', False) is True:
-            current.engine.queue_warmup(actor)
-
-    def warm_authenticated(actor):
-        if streams is not None:
-            warm_current(streams, actor)
-        elif not closing and preparation is not None and not preparation.done() and (
-                actor['id'] in pending_warmups or len(pending_warmups) < (MAX_CONCURRENT_ACCOUNTS or 2)):
-            pending_warmups[actor['id']] = actor
+        # Login/appearance/general chat need neither native tools nor a vector
+        # worker. Each is acquired by the authorized business/document request.
+        startup_log('capabilities_on_demand')
 
     async def actor_for(request):
         return await host.authorize(request)
@@ -184,10 +138,6 @@ def install_assistant_routes(app, host):
         closing = True
         if tagging_pool is not None:
             tagging_pool.shutdown(wait=False, cancel_futures=True)
-        pending_warmups.clear()
-        if preparation:
-            preparation.cancel()
-            await asyncio.gather(preparation, return_exceptions=True)
         if streams is not None:
             await streams.close()
         if agent is not None:
@@ -197,8 +147,6 @@ def install_assistant_routes(app, host):
                 await asyncio.gather(*tuple(agent.tasks), return_exceptions=True)
         if service is not None:
             await asyncio.to_thread(service.model.close)
-        if knowledge_preparation is not None:
-            await asyncio.gather(knowledge_preparation, return_exceptions=True)
         def close_knowledge():
             # Cancelled requests can leave their to_thread constructor running.
             with knowledge_lock:
@@ -207,7 +155,7 @@ def install_assistant_routes(app, host):
         await asyncio.to_thread(close_knowledge)
         if extensions is not None:
             await extensions.pool.close()
-    # Host starts preparation only after migration and portal registration.
+    # Company knowledge stays lazy until its explicit, authorized endpoint is used.
     from .lighthouse_knowledge_routes import install_knowledge_routes
     async def knowledge_actor(request):
         from lan_bitable_template_portal.assistant_shared_read import original_actor
@@ -349,7 +297,6 @@ def install_assistant_routes(app, host):
                 from .lighthouse_appearance import read_appearance, save_appearance
                 args = (host.store, actor["id"])
                 data = await asyncio.to_thread(read_appearance, *args) if request.method == "GET" else await asyncio.to_thread(save_appearance, *args, payload)
-                warm_authenticated(actor)
                 return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
             if action == 'workspace':
                 from .lighthouse_workspace import Workspace
@@ -555,7 +502,6 @@ def install_assistant_routes(app, host):
             if action == "conversation":
                 if request.method == "GET":
                     current_streams = await ready_streams()
-                    warm_current(current_streams, actor)
                     stamp = await asyncio.to_thread(current.conversation_stamp, actor)
                     data = await current_streams.conversation(actor, operation=request.query_params.get('operation_id'))
                     if agent is not None:
@@ -582,10 +528,7 @@ def install_assistant_routes(app, host):
             data = await asyncio.to_thread(fn, *args)
             if action == "conversation":
                 current_streams = await ready_streams()
-                warm_current(current_streams, actor)
                 data = await current_streams.conversation(actor)
-            elif action == "settings" and request.method == "PUT":
-                warm_current(await ready_streams(), actor)
             # Conversation and configuration must not enter shared/browser caches.
             return JSONResponse({"ok": True, "data": data}, headers={"Cache-Control": "no-store"})
         except AssistantError as exc:
@@ -613,8 +556,6 @@ def install_assistant_routes(app, host):
         pending = list(agent.tasks) if agent is not None else []
         if streams is not None:
             pending += [task for task in streams.workers.values() if not task.done()]
-        if preparation is not None and not preparation.done():
-            pending.append(preparation)
         if streams is not None and getattr(streams.engine, 'warming', None):
             pending.extend(streams.engine.warming.values())
         for task in pending:

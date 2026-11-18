@@ -330,17 +330,12 @@ class InspectionReportTests(unittest.TestCase):
     def test_exemptions_override_defaults_preserve_drafts_and_freeze_archive(self):
         merged = {'name': '巡检表', 'rows': [['项目', None, '说明'], [None, None, None]], 'merges': ['A1:B1', 'A2:B2']}
         self.assertEqual(cell_exemption_selection(merged, ['B1:B2']), {'A2'})
-        layouts = {}
-        for template in original_templates():
-            for sheet in template['sheets']:
-                if sheet['name'] == 'SVG巡检表':
-                    self.assertEqual(len(cell_exemption_selection(sheet, sheet['excluded_ranges'])), 144)
-                    layouts[template['scope']] = template['name']
-        location = {'template': layouts['D'], 'sheet': 'SVG巡检表'}
-        options = {**location, 'ranges': 'H7:H8', 'operation': 'remove', 'revision': 0}
+        template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '暖通')
+        location = {'template': template['name'], 'sheet': '辅助区空调巡检表 (2)'}
+        options = {**location, 'ranges': 'G45:G46', 'operation': 'remove', 'revision': 0}
         policy = self.service.change_cell_exemptions('D', options)
         key = form_sheet_key(*location.values())
-        self.assertEqual(len(policy['sheets'][key]), 142)
+        self.assertEqual(len(policy['sheets'][key]), 80)
         self.assertNotIn('exemptions', self.service.load('E'))
         with self.assertRaisesRegex(RiskError, '已有更新'):
             self.service.change_cell_exemptions('D', options)
@@ -349,7 +344,7 @@ class InspectionReportTests(unittest.TestCase):
         restarted = DailyInspection(self.store, self.cloud)
         self.assertEqual(restarted.load('D')['exemptions'], policy)
         active = restarted.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
-        edit = {**location, 'cell': 'H7', 'value': '17'}
+        edit = {**location, 'cell': 'G45', 'value': '17'}
         saved = restarted.change('a', '甲', DAY, 'draft',
             {'id': active['id'], 'review_version': active['review_version'], 'sheet_cells': [edit]})['active']
         blocked = restarted.change_cell_exemptions('D', {**options, 'operation': 'add', 'revision': 1})
@@ -366,6 +361,17 @@ class InspectionReportTests(unittest.TestCase):
         self.assertEqual(archive['rounds'][0]['status'], '已归档')
         self.assertTrue(any(c['sheet'] == edit['sheet'] and c['cell'] == edit['cell'] and c['value'] == '17'
                             for c in archive['rounds'][0]['extra_cells']))
+
+    def test_fixed_svg_slash_cannot_be_cancelled_or_edited(self):
+        template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '电气')
+        location = {'template': template['name'], 'sheet': 'SVG巡检表'}
+        with self.assertRaisesRegex(RiskError, '固定填斜杠'):
+            self.service.change_cell_exemptions('D', {**location, 'ranges': 'H7', 'operation': 'remove', 'revision': 0})
+        active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        with self.assertRaisesRegex(RiskError, '固定填写 /'):
+            self.service.change('a', '甲', DAY, 'draft', {'id': active['id'],
+                'review_version': active['review_version'],
+                'sheet_cells': [{**location, 'cell': 'h7', 'value': '17'}]})
 
     def test_concurrent_original_form_edits_do_not_silently_overwrite_each_other(self):
         active=self.service.change('a','甲',DAY,'start',{'duty':DAY})['active']
@@ -637,8 +643,8 @@ class InspectionAccessTests(unittest.TestCase):
         self.assertEqual(self.post('day-sheet',{**body,'scope':'E'}).status_code,403)
 
     def test_only_admin_with_building_scope_can_update_exemptions(self):
-        template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '电气')
-        body = {'scope': 'D', 'template': template['name'], 'sheet': 'SVG巡检表', 'ranges': 'H7',
+        template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '暖通')
+        body = {'scope': 'D', 'template': template['name'], 'sheet': '辅助区空调巡检表 (2)', 'ranges': 'G45',
                 'operation': 'remove', 'revision': 0}
         self.modules = {'daily'}
         self.assertEqual(self.post('exemptions', body).status_code, 403)

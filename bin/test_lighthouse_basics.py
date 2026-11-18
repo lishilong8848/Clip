@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from bin import test_lighthouse_stream as fixtures
 from pydantic_ai.models.function import DeltaToolCall, FunctionModel
 from openclaw_service.assistant.lighthouse_basics import calculate, CalculationError, date_time, calculation_request, time_request, public_capability_request, current_user_request, assistant_capability_request
-from openclaw_service.assistant.lighthouse_model import LighthouseModel, equipment_knowledge_question, instructions_for_question
+from openclaw_service.assistant.lighthouse_model import LighthouseModel, instructions_for_question
 from openclaw_service.assistant.lighthouse_ai import is_business_query
 from openclaw_service.assistant.lighthouse_ai import AssistantError, CustomModel
 from openclaw_service.assistant.lighthouse_openclaw import LighthouseOpenClaw
@@ -81,7 +81,7 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn('问答', answer['answer'])
                 self.assertIn('天气', answer['answer'])
                 self.assertEqual('业务表单' in answer['answer'], 'maintenance' in modules)
-                self.assertEqual('/公司知识库' in answer['answer'], 'knowledge' in modules)
+                self.assertEqual('查询公司资料' in answer['answer'], 'knowledge' in modules)
                 self.assertNotIn('未取得', _reply_text(answer['answer']))
                 self.assertEqual(answer['sources'], [])
                 emit.assert_awaited_once()
@@ -156,14 +156,11 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
     async def authorize(self):
         return self.actor
 
-    def test_equipment_knowledge_policy_is_narrow_and_permission_aware(self):
+    def test_equipment_concepts_do_not_request_automatic_question_bank_lookup(self):
         for question in ('UPS是什么？', 'what is UPS?', 'HVDC原理是什么', '柴油发电机有哪些常见故障',
                          '机柜正式电和测试电的区别'):
-            self.assertTrue(equipment_knowledge_question(question), question)
-            self.assertIn('设备原理', instructions_for_question(question))
-            self.assertNotIn('设备原理', instructions_for_question(question, knowledge_access=False))
-        for question in ('汽车维修有哪些问题', 'Python原理是什么', 'D楼这台UPS当前状态是什么', 'MYUPSTOOL是什么'):
-            self.assertFalse(equipment_knowledge_question(question), question)
+            self.assertNotIn('题库检索不要求', instructions_for_question(question))
+        self.assertIn('题库检索不要求', instructions_for_question('查询题库中关于UPS的试题'))
 
     async def test_simple_calculation_and_time_skip_model_and_business(self):
         @asynccontextmanager
@@ -406,7 +403,7 @@ class GeneralModelTests(unittest.IsolatedAsyncioTestCase):
                 async def emit(kind, value):
                     emitted.append((kind, value))
                 result = await LighthouseModel(self.portal, model_factory=factory).answer(self.actor,
-                    {'question': 'UPS是什么？解释并给出处。', '_profile': self.model.profile()},
+                    {'question': '查询题库中的UPS资料，解释UPS是什么并给出处。', '_profile': self.model.profile()},
                     [], self.request, emit, self.authorize, {})
                 self.assertEqual(len(rounds), expected_rounds)
                 self.assertIn(answer, result['answer'])

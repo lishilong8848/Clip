@@ -97,6 +97,8 @@ def catalog_locations():
 
 
 def cell_excluded(sheet, address):
+    if address in sheet.get('slash_cells', ()):
+        return True
     if '_exempt_cells' in sheet:
         return address in sheet['_exempt_cells']
     if not sheet.get('excluded_ranges'):
@@ -137,7 +139,7 @@ def cell_exemption_selection(sheet, selection):
                              for col in range(left, right + 1)})
     header = form_header(sheet, {'date': '2000-01-01', 'shift': '白'},
                          inspector='巡检人员', started=dt.datetime(2000, 1, 1))
-    reserved = set(remark_cells(sheet)) | header.keys()
+    reserved = set(remark_cells(sheet)) | header.keys() | set(sheet.get('slash_cells', ()))
     result = set()
     for span in selection:
         if not re.fullmatch(r'[A-Z]{1,3}[1-9]\d{0,5}(?::[A-Z]{1,3}[1-9]\d{0,5})?', span):
@@ -159,7 +161,8 @@ def cell_exemption_selection(sheet, selection):
 
 @lru_cache(maxsize=1)
 def excluded_layouts():
-    return {(t['name'],s['name'].strip()):s for t in original_templates() for s in t['sheets'] if s.get('excluded_ranges')}
+    return {(t['name'],s['name'].strip()):s for t in original_templates() for s in t['sheets']
+            if s.get('excluded_ranges') or s.get('slash_cells')}
 
 
 def all_cells_excluded(template, sheet, cells):
@@ -283,15 +286,19 @@ def original_views(templates, rounds, *, include_empty_rounds=False):
     for template in templates:
         for sheet in template['sheets']:
             per_round = sheet['name'].strip() == '暖通冷机系统巡检表'
+            fixed = set(sheet.get('slash_cells', ()))
             groups = ([(slot, by_slot.get(slot, [])) for slot in slots
                        if include_empty_rounds or slot in by_slot]
                       if per_round else [(None, rounds)])
             for slot,group in groups:
                 rows = copy.deepcopy(sheet['rows'])
+                for address in fixed:
+                    row, column = coordinate_to_tuple(address)
+                    rows[row - 1][column - 1] = '/'
                 occupied = set()
                 for item in group:
                     for cell in item.get('original_cells', []):
-                        if cell['template'] != template['name'] or cell['sheet'] != sheet['name']:
+                        if cell['template'] != template['name'] or cell['sheet'] != sheet['name'] or cell['cell'] in fixed:
                             continue
                         if cell.get('conflict'):
                             raise ValueError('同一原表位置的来源读数不一致')
@@ -304,9 +311,9 @@ def original_views(templates, rounds, *, include_empty_rounds=False):
                 # Preserve free cell corrections without replacing other rounds' mapped readings.
                 from .daily_inspection_sheet_edit import overlay_views
                 current = {'template': template['name'], 'sheet': sheet['name'], 'rows': rows}
-                filled = set(occupied)
+                filled = occupied | fixed
                 for item in group:
-                    edits = [edit for edit in item.get('extra_cells', []) if edit['cell'] not in occupied]
+                    edits = [edit for edit in item.get('extra_cells', []) if edit['cell'] not in occupied and edit['cell'] not in fixed]
                     overlay_views([current], edits)
                     filled.update(edit['cell'] for edit in edits
                                   if (edit['template'], edit['sheet']) == (template['name'], sheet['name']))

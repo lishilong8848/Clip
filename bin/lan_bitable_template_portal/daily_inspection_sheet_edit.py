@@ -24,7 +24,7 @@ def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=Non
         raise RiskError('请提交有效的单元格修改。', 400)
     index = form_index(book)
     layouts = {(t['name'], s['name']): s for t in with_cell_exemptions(original_templates(), exemptions) if t['scope'] == scope
-               for s in t['sheets']} if enforce_exclusions or slot else {}
+               for s in t['sheets']}
     layout_slots = {}
     remarks = remark_positions(scope) if enforce_exclusions or slot else ()
     mappings = {}
@@ -54,6 +54,8 @@ def apply_cells(book, scope, edits, actor, *, enforce_exclusions=False, slot=Non
         sheet_key = (edit.get('template'), edit.get('sheet'))
         layout = layouts.get(sheet_key)
         is_remark = (*sheet_key, address) in remarks
+        if layout and cell.coordinate in layout.get('slash_cells', ()):
+            raise RiskError('该单元格固定填写 /，无需修改。', 409)
         if layout and not is_remark and enforce_exclusions and cell_excluded(layout, address):
             raise RiskError('该区域已设为本次无需填写，原有历史记录保留。',409)
         if layout and not is_remark and slot and (name, address) not in mappings:
@@ -92,10 +94,11 @@ def form_extras(book, templates, entries):
             name = index.get((template['name'], sheet['name']))
             if not name or name not in book:
                 continue
+            fixed = set(sheet.get('slash_cells', ()))
             for ri, row in enumerate(sheet['rows'], 1):
                 for ci, original in enumerate(row, 1):
                     cell = book[name].cell(ri, ci)
-                    if isinstance(cell, MergedCell):
+                    if isinstance(cell, MergedCell) or cell.coordinate in fixed:
                         continue
                     key = (template['name'], sheet['name'], cell.coordinate)
                     if key in mapped:
@@ -115,20 +118,24 @@ def overlay_views(views, edits):
     return views
 
 
-def frozen_readings(book, scope):
+def frozen_readings(book, scope, templates):
     """History uses its saved coordinates, never today's mapping configuration."""
     index = {name: key for key, name in form_index(book).items()}
     known = {device['id']: device for device in archived_devices(book, scope)}
+    fixed = {(t['name'], s['name'], address) for t in templates for s in t['sheets']
+             for address in s.get('slash_cells', ())}
     grouped = {}
     for name, address, identity, kind, point, parameter, location, form in book[ORIGINAL_MAPPING_SHEET].iter_rows(min_row=2, values_only=True):
         if name not in index or name not in book:
             raise RiskError('历史巡检原表目录无法核验。', 409)
+        template, sheet = index[name]
+        if (template, sheet, address) in fixed:
+            continue
         members = known.get(identity, {}).get('rows', [])
         matched = [row for row in members if row['name'] == parameter and
                    (row['source'] == point if kind == 'point' else row['location'] == location and row['source'] == form)]
         if len(matched) != 1:
             raise RiskError('历史巡检测点关联不唯一，请核对原附件。', 409)
-        template, sheet = index[name]
         grouped.setdefault((name,address), []).append({'template':template,'sheet':sheet,'cell':address,
             'value':json_cell_value(book[name][address].value),'value_type':matched[0].get('value_type','数值'),'device':identity,'kind':kind,'point_id':point or '',
             'parameter':parameter,'location':location or '', 'form':form or '', 'read_only':matched[0]['read_only']})

@@ -310,7 +310,7 @@ class CompanyAnswers(unittest.IsolatedAsyncioTestCase):
             with patch('openclaw_service.assistant.lighthouse_knowledge_answer.answer_company',
                        new_callable=AsyncMock, return_value={'answer': '两种故障的安全概述'}) as query:
                 self.reviewer.run.reset_mock()
-                result = await engine.answer(actor, {'question': question, 'submitted_commands': []}, [unrelated, first],
+                result = await engine.answer(actor, {'question': '查询公司资料：' + question}, [unrelated, first],
                     None, self.emit, AsyncMock(return_value=actor), {'summary': '以前聊鱼缸。'})
             self.assertEqual(result['answer'], '两种故障的安全概述')
             self.reviewer.run.assert_awaited_once()
