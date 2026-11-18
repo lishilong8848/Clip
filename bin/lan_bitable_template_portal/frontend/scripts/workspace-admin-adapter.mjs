@@ -94,7 +94,9 @@ export function adaptModuleAdminEntry(source, filename) {
       const end = node.loc.end.offset - '</header>'.length;
       edits.push([end,end,button]);
     }
-    if (node.type === 1 && classes.includes('building-card') && classes.includes('admin')) edits.push([node.loc.start.offset,node.loc.end.offset,'']);
+    if (node.type === 1 && classes.includes('building-card') && classes.includes('admin')
+      && node.props?.some(prop=>prop.name==='on'&&prop.arg?.content==='click'&&prop.exp?.content==='openAdmin'))
+      edits.push([node.loc.start.offset,node.loc.end.offset,'']);
     for (const child of node.children || []) visit(child);
   }
   visit(descriptor.template.ast);

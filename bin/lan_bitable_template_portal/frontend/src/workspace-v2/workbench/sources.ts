@@ -5,8 +5,8 @@ import type { Dict } from '../client';
 import type { Role, Section } from './recipes';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
-export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts';
-export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId };
+export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
+export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; note?: string };
 export type Source = {
   id: SourceId;
@@ -22,15 +22,15 @@ const labels = {
   critical_guard:'待填写重保', risk_inspection:'专项排查待办',
   water:'水耗待补', learning:'个人学练', signatures:'个人签名',
   event_notices:'事件通告', drills:'待完成演练', engineer_mop:'待处理维护单', cabinet:'待确认机柜批次',
-  tool_management:'待办工具记录', accounts:'待审权限申请',
+  tool_management:'待办工具记录', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',
 };
 const sections: Record<SourceId,Source['section']> = {
   events:'operations', notices:'business', repair_management:'business',
   critical_guard:'operations', risk_inspection:'business', water:'operations', learning:'people', signatures:'people',
-  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people',
+  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',
 };
 const managerNoticeTypes = ['change','repair','power'];
-type HomeContext = TodoContext & {role:Role; pending?:SourceId[]};
+type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string};
 const array = (value: unknown): Dict[] => {
   if (!Array.isArray(value)) throw new Error('待办数据未完整返回。');
   return value;
@@ -53,7 +53,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     if (ctx.pending&&!ctx.pending.includes(id) || id==='learning'&&ctx.user.category==='duty') return [];
     if (!scoped && ['critical_guard','water'].includes(id)) return [];
     if (id==='signatures' && ctx.user.impersonation) return [];
-    const readOnly=ctx.role==='manager'&&id==='notices';
+    const readOnly=ctx.role==='manager'&&id==='notices'&&!ctx.accessLevel;
     const available = todoSources(id,{...ctx,home:true,noticeTypes:readOnly?managerNoticeTypes:undefined},get);
     if (!available.length) return [];
     return [{
@@ -137,13 +137,41 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
       }),delayed:Boolean(data.warning)};
     });
   }
+  if (ctx.user.category==='duty' && ctx.user.home_scope==='H' && (ctx.scope==='H'||['ALL','CAMPUS'].includes(ctx.scope)) && enabled('ali_confirmation','change')) {
+    const url=link('/workbench-lite',{work_type:'change'});
+    add('ali_confirmation',url,['H'],async(scope,signal)=>{
+      const data=await get('/api/change-confirmations',signal);
+      if(data.can_confirm!==true) return {rows:[],delayed:true};
+      return {rows:array(data.items).flatMap(item=>item.state==='awaiting_confirmation' && item.target_record_id
+        ?[row('ali_confirmation',item.target_record_id,scope,item.title||'阿里截图待确认','待确认',
+          scopedUrl('/workbench-lite',{scope,work_type:'change',change_confirmation:item.target_record_id}),
+          {time:String(item.started_at||item.start_time||'')})]:[]),delayed:!!data.warning};
+    });
+  }
+  if(ctx.accessLevel==='duty'&&['D','E'].includes(ctx.scope)&&enabled('inspection','daily')){
+    const url=link('/daily-inspection');
+    add('inspection',url,[ctx.scope],async(scope,signal)=>{
+      const data=await get(scopedUrl('/api/daily-inspection/status',{view_scope:scope}),signal);
+      if(data.view_scope!==scope||data.duty?.scope!==scope||!Number.isSafeInteger(data.next_round)||!Number.isSafeInteger(data.round_limit))
+        return {rows:[],delayed:true};
+      const sameShift=data.active?.duty?.date===data.duty.date&&data.active?.duty?.shift===data.duty.shift;
+      const active=sameShift&&data.active?.pending===false;
+      const round=active?data.active.round:data.next_round;
+      if(!Number.isSafeInteger(round)||round<1) return {rows:[],delayed:true};
+      if(round>data.round_limit) return {rows:[]};
+      return {rows:[row('inspection',data.duty.date+':'+data.duty.shift+':'+round,scope,
+        scope+'楼'+data.duty.shift+'班第 '+round+' 轮巡检',active?'进行中':'待开始',url,
+        {detail:'巡检',scheduledAt:!active?data.opens_at:undefined})]};
+    });
+  }
   if (enabled('drills')) add('drills',link('/drill-management'),operated,async(scope,signal)=>{
     const month=beijingDate().slice(0,7);
     const data=await get(link('/api/drills',{scope,month}),signal);
     return {rows:array(data.items??data.drills).flatMap(item=>{
       if (item.status!=='published'||!item.drill_id||['synced','completed'].includes(item.execution?.status)) return [];
       return [row('drills',item.drill_id,scope,item.name||'演练任务',item.execution?.status==='error'?'生成异常':item.execution?.status==='sync_pending'?'待同步':'待完成',
-        link('/drill-management',{scope,month,drill_id:item.drill_id}))];
+        link('/drill-management',{scope,month,drill_id:item.drill_id}),
+        {detail:'演练',scheduledAt:item.scheduled_at||item.start_time||item.plan_date,dueAt:todoTimestamp(item.deadline)})];
     })};
   });
   if (enabled('engineer_mop')) add('engineer_mop',link('/engineer/mop'),buildings,async(scope,signal)=>{
@@ -169,15 +197,20 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     }
     return {rows,more};
   });
-  if (ctx.role==='administrator'&&enabled('accounts')&&ctx.user.can_manage_accounts===true) {
+  if ((ctx.role==='administrator'||['L0','L1'].includes(ctx.accessLevel||''))&&enabled('accounts')&&ctx.user.can_manage_accounts===true) {
     const url='/admin/settings?tab=permissions';
     sources.push({id:'accounts',label:labels.accounts,section:sections.accounts,url,async load(signal) {
       const data=await get('/api/auth/permission-requests/admin?status=pending&limit=200',signal);
       return {rows:array(data.items).flatMap(item=>item.request_id&&item.status==='pending'
-        ? [row('accounts',item.request_id,ctx.scope,String(item.name||item.applicant_name||'楼栋权限申请'),'待审核',url)] : [])};
+        && (!ctx.accessLevel||['ALL','CAMPUS'].includes(ctx.scope)||item.requested_scopes?.includes(ctx.scope))
+        ? [row('accounts',item.request_id,ctx.scope,String(item.name||item.applicant_name||'楼栋权限申请'),'待审核',
+          scopedUrl('/admin/settings',{tab:'permissions',request_id:item.request_id}),{
+          time:item.created_at,referencedScopes:Array.isArray(item.requested_scopes)?item.requested_scopes.filter((scope:unknown)=>typeof scope==='string'):undefined,
+        })] : []),
+        more:!!data.has_more};
     }});
   }
-  if (ctx.role==='administrator'&&ctx.pending?.includes('tool_management')&&ctx.user.tool_management_enabled===true) {
+  if ((ctx.role==='administrator'||['L0','L1'].includes(ctx.accessLevel||''))&&ctx.pending?.includes('tool_management')&&ctx.user.tool_management_enabled===true) {
     const url=link('/risk-inspections',{view:'tool-self-check',tool_view:'followups'});
     sources.push({id:'tool_management',label:labels.tool_management,section:sections.tool_management,url,async load(signal,pages) {
       const rows:WorkItem[]=[];

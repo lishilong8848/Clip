@@ -164,6 +164,7 @@ const props = defineProps<{
   open: boolean;
   systemAdmin?: boolean;
   initialTab?: AdminTabKey;
+  focusPermissionRequestId?: string;
   scopeOptions: Array<{ value: string; label: string }>;
 }>();
 
@@ -233,7 +234,9 @@ const confirmDialog = reactive({
 
 const filteredPermissionRequests = computed(() => {
   const query = permissionRequestSearch.value.trim().toLowerCase();
-  const items = permissionRequests.value || [];
+  const items = props.focusPermissionRequestId
+    ? permissionRequests.value.filter(item=>item.request_id===props.focusPermissionRequestId)
+    : permissionRequests.value;
   if (!query) return items;
   return items.filter((item) => {
     const haystack = [

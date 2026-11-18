@@ -3,7 +3,7 @@
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
       <div :key="impersonationSession" class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'has-rail':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
-        <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink || user.role==='guest')" class="v2-header">
+        <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink)" class="v2-header">
           <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
@@ -36,10 +36,14 @@
           <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge','documents','eop_scenarios',zhihangDataModule.id].includes(activeModule) && !assignedRiskPage)"
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/?view=my')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
+            <div v-if="user.role==='guest' && !publicLink" class="wb-home">
+              <GuestWorkbenchHeader guest :name="String(user.name||'访客')" :clock="Date.now()" :links="guestSearchLinks" :tasks="[]" :unread="[]"
+                @open="navigate" @guest-account="selectAccountAction('logout')" />
+            </div>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
-            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event,view==='home')" />
+            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :search-links="workbenchSearchLinks" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event,view==='home')" />
             <section v-else-if="view === 'my' && route.pathname === '/'" class="v2-my">
               <header class="v2-profile-heading"><NAvatar :size="48" :style="{background:'var(--v2-nav-active)',color:'var(--v2-nav-text)'}"><UserRound :size="25" /></NAvatar><div class="v2-profile-name"><h1>{{ user.name }}</h1><p>个人信息</p></div>
                 <div v-if="!desktopNavigation" class="v2-mobile-profile-tools">
@@ -113,6 +117,7 @@ import AsyncPageState from '../components/AsyncPageState.vue';
 import AccountSignature from '../components/AccountSignature.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
 const HomePage = lazy(() => import('./HomePage.vue'));
+const GuestWorkbenchHeader = lazy(() => import('./workbench/WorkbenchDailyLayout.vue'));
 const PageCanvas = lazy(() => import('./PageCanvas.vue'));
 const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
 const NoticeWorkspace = lazy(() => import('./NoticeWorkspace.vue'));
@@ -241,6 +246,12 @@ const permittedModules = computed(() => {
   if (zhihangDataAllowed.value) entries.push(zhihangDataModule);
   return entries;
 });
+const workbenchSearchLinks = computed(() => [
+  ...permittedModules.value.map(module => ({label:module.label,url:moduleUrl(module,scopeFor(module.id))})),
+  ...visibleSettings.value.map(item => ({label:item.label,url:'/admin/settings?tab='+item.key})),
+  {label:'个人信息',url:'/?view=my'},
+]);
+const guestSearchLinks = [{label:'机柜查询',url:'/cabinet-power'}];
 const menuGroups = computed(() => sidebarGroups([
   ...permittedModules.value.map(module => ({ key: module.id, label: module.label, icon: moduleIcons[module.icon as keyof typeof moduleIcons] })),
   ...visibleSettings.value.map(item => ({ key: 'settings:' + item.key, label: item.label })),
@@ -330,7 +341,7 @@ const componentProps = computed(() => {
     case 'cabinet': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, userId:String(user.value.open_id || ''), readOnly:user.value.role === 'guest', canDelete:user.value.can_delete_business === true};
     case 'cabinet_batch': return {...common, userId:String(user.value.open_id || '')};
     case 'signature': return {defaultScope:currentScope.value};
-    case 'accounts': return {open:true, systemAdmin:admin, initialTab:p.get('tab') || 'permissions', scopeOptions:scopes.value};
+    case 'accounts': return {open:true, systemAdmin:admin, initialTab:p.get('tab') || 'permissions', scopeOptions:scopes.value, focusPermissionRequestId:p.get('request_id')||''};
     case 'daily': return {...common, printMode:printMode.value};
     default:return common;
   }

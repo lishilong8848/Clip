@@ -13,6 +13,8 @@
     </section>
   </main>
 
+  <ZhihangHDrillPage v-else-if="showHDrill && isAdmin" @back="showHDrill = false" />
+
   <main v-else class="drill-page">
     <header class="drill-page__header">
       <VnetBackButton @click="leavePage" />
@@ -72,6 +74,12 @@
             <span class="building-icon"><Settings2 :size="25" /></span>
             <strong>管理员入口</strong>
             <small>上传模板、校对布局并发布</small>
+            <b>进入 <ChevronRight :size="17" /></b>
+          </button>
+          <button v-if="isAdmin" type="button" class="building-card admin" @click="showHDrill = true">
+            <span class="building-icon"><ListChecks :size="25" /></span>
+            <strong>H 楼值班演练</strong>
+            <small>查看智航演练及半小时同步结果</small>
             <b>进入 <ChevronRight :size="17" /></b>
           </button>
         </div>
@@ -582,6 +590,7 @@ import ConfirmDialog from "./ConfirmDialog.vue";
 import MessageBanner from "./MessageBanner.vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import VnetSelect from "./VnetSelect.vue";
+import ZhihangHDrillPage from "./ZhihangHDrillPage.vue";
 
 type SheetKind = "record" | "assessment";
 type BannerTone = "info" | "success" | "warning" | "failed";
@@ -608,6 +617,7 @@ const emit = defineEmits<{
   status: [text: string];
   "switch-scope": [scope: string];
 }>();
+const showHDrill = ref(false);
 
 const SheetTable = defineComponent({
   name: "DrillSheetTable",

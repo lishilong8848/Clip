@@ -73,31 +73,51 @@ class IconWeather:
         self.slots = asyncio.Semaphore(3)
         self.closed = False
 
-    async def get(self, city):
+    async def get(self, city, *, detail=False):
         if self.closed:
             raise AssistantError('天气连接正在关闭。', 503)
         city = city_name(city)
-        cached = self.cache.get(city)
+        key = (city, detail)
+        cached = self.cache.get(key)
         today = dt.datetime.now(TZ).date().isoformat()
         if cached and time.monotonic() < cached[0] and (not cached[1]['available'] or cached[1].get('date') == today):
-            self.cache.move_to_end(city)
+            self.cache.move_to_end(key)
             return {**cached[1], 'server_time': time.time()}
-        if city not in self.tasks:
+        if key not in self.tasks:
             # Bound both network concurrency and queued work, including failed cities.
             if len(self.tasks) >= 32:
                 return {'available': False, 'city': city, 'note': '天气暂忙', 'server_time': time.time()}
-            self.tasks[city] = asyncio.create_task(self._load(city))
-        result = await asyncio.shield(self.tasks[city])
+            self.tasks[key] = asyncio.create_task(self._load(city, detail=detail))
+        result = await asyncio.shield(self.tasks[key])
         return {**result, 'server_time': time.time()}
 
-    async def _load(self, city):
+    async def _load(self, city, *, detail=False):
         result = None
         try:
             async with asyncio.timeout(12), self.slots:
-                data = await self.sources._weather_china(city, dt.datetime.now(TZ).isoformat())
+                queried_at = dt.datetime.now(TZ).isoformat()
+                if detail:
+                    try:
+                        data = await asyncio.wait_for(self.sources._weather_wttr(city, queried_at, include_hourly=True), timeout=6)
+                    except (httpx.HTTPError, OSError, ValueError, TypeError, asyncio.TimeoutError):
+                        data = {}
+                    if not data.get('ok'):
+                        data = await self.sources._weather_china(city, queried_at)
+                else:
+                    data = await self.sources._weather_china(city, queried_at)
                 result = snapshot(data, city, time.time())
+                if detail:
+                    current = data.get('current') or {}
+                    result.update(source=data.get('source') or '公开天气服务',
+                                  temperature=current.get('temperature'),
+                                  humidity=current.get('relative_humidity_pct'),
+                                  current_description=current.get('weather_desc'),
+                                  hourly=data.get('hourly') or [],
+                                  forecast=[{'date': row['date'], 'description': row.get('weather_desc'),
+                                             'minimum': row.get('min'), 'maximum': row.get('max')}
+                                            for row in data['daily'][:5]])
                 url = data.get('sourceURL', '')
-                if re.fullmatch(r'https://www\.weather\.com\.cn/weather/101\d{6}\.shtml', url):
+                if not detail and re.fullmatch(r'https://www\.weather\.com\.cn/weather/101\d{6}\.shtml', url):
                     try:
                         async with self.sources._client() as client:
                             async with client.stream('GET', url.replace('/weather/', '/weather1d/'), timeout=3) as response:
@@ -114,9 +134,10 @@ class IconWeather:
             if result is None:
                 result = {'available': False, 'city': city, 'note': '天气暂不可用', 'fetched_at': time.time()}
         finally:
-            self.tasks.pop(city, None)
-        self.cache[city] = (time.monotonic() + (600 if result['available'] else 60), result)
-        self.cache.move_to_end(city)
+            self.tasks.pop((city, detail), None)
+        key = (city, detail)
+        self.cache[key] = (time.monotonic() + (600 if result['available'] else 60), result)
+        self.cache.move_to_end(key)
         while len(self.cache) > 32:
             self.cache.popitem(last=False)
         return result
@@ -139,7 +160,8 @@ def install_icon_weather(app, controller, runtime):
     async def endpoint(request: Request):
         try:
             await actor_for(controller, runtime, request)
-            data = await weather.get(request.query_params.get('city', '南通'))
+            detail = request.query_params.get('detail') == '1'
+            data = await weather.get('南通' if detail else request.query_params.get('city', '南通'), detail=detail)
             return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'no-store'})
         except AssistantError as exc:
             return JSONResponse({'ok': False, 'error': str(exc)}, status_code=exc.status)

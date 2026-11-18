@@ -68,12 +68,31 @@ class IconWeatherTests(unittest.IsolatedAsyncioTestCase):
         source._weather_china.return_value = forecast()
         weather = IconWeather(source)
         yesterday = (dt.datetime.now(TZ).date() - dt.timedelta(days=1)).isoformat()
-        weather.cache['南通'] = (time.monotonic() + 600, {'available': True, 'city': '南通', 'date': yesterday})
+        weather.cache['南通', False] = (time.monotonic() + 600, {'available': True, 'city': '南通', 'date': yesterday})
         self.assertEqual((await weather.get('南通'))['date'], forecast()['daily'][0]['date'])
         source._weather_china.assert_awaited_once()
         await weather.close()
         with self.assertRaises(AssistantError):
             await weather.get('南通')
+
+    async def test_workbench_detail_uses_observation_and_keeps_legacy_snapshot(self):
+        source = AsyncMock()
+        source._weather_china.return_value = forecast()
+        source._weather_wttr.return_value = {**forecast(), 'current': {
+            'temperature': 16, 'relative_humidity_pct': 62, 'weather_desc': '多云',
+        }}
+        weather = IconWeather(source)
+        try:
+            await weather.get('南通')
+            detail, _ = await asyncio.gather(weather.get('南通', detail=True), weather.get('南通', detail=True))
+            self.assertEqual(detail['temperature'], 16)
+            self.assertEqual(detail['humidity'], 62)
+            self.assertEqual(detail['forecast'][0]['maximum'], 23)
+            self.assertNotIn('temperature', await weather.get('南通'))
+            source._weather_wttr.assert_awaited_once()
+            source._weather_china.assert_awaited_once()
+        finally:
+            await weather.close()
 
     async def test_network_concurrency_is_three_and_cancellation_releases_slots(self):
         running = maximum = 0

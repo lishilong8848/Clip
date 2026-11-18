@@ -37,6 +37,47 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
     def setUp(self) -> None:
         self.service = object.__new__(MaintenancePortalService)
 
+    def test_pasted_independent_update_recovers_only_same_occurrence(self):
+        self.service._state_store = mock.Mock()
+        self.service._state_store.list_qt_active_items.return_value = []
+        self.service._state_store.resolve_notice_identity.return_value = None
+        title = "EA118机房A楼电力安全工器具维护"
+        fields = {"work_type": "maintenance", "notice_type": "维保通告",
+                  "title": title, "building_codes": ["A"], "building": "A楼",
+                  "start_time": "2026-11-18T09:30", "end_time": "2026-11-18T18:30"}
+        target = {**fields, "status": "开始", "target_record_id": "recFixtureA20261118",
+                  "active_item_id": "active-fixture-A"}
+        old = {**target, "target_record_id": "recFixtureOld", "active_item_id": "active-fixture-old",
+               "start_time": "2026-10-18T09:30", "end_time": "2026-10-18T18:30"}
+        wrong_building = {**target, "target_record_id": "recFixtureOther", "active_item_id": "active-fixture-other",
+                          "building_codes": ["B"], "building": "B楼"}
+        command = {"command_format": "notice_command", "work_type": "maintenance",
+                   "_web_action_request": True, "patch": {**fields, "manual": True, "progress": "进度已填写"}}
+        for action in ("update", "end"):
+            with self.subTest(action=action):
+                expanded = self.service.expand_workbench_action_command(
+                    {**command, "action": action}, scope="A", ongoing_items=[old, wrong_building, target],
+                )
+                self.assertEqual(expanded["target_record_id"], target["target_record_id"])
+                self.assertEqual(expanded["action"], action)
+                self.assertEqual(expanded["progress"], "进度已填写")
+                self.assertFalse(expanded.get("source_record_id"))
+                html = workbench_lite._detail_form(
+                    record=None, ongoing_item=target, scope="A", work_type="maintenance",
+                    manual=True, parsed_draft=command["patch"], parsed_action=action,
+                )
+                self.assertIn(f'data-action="{action}"', html)
+                self.assertIn('name="target_record_id" value="recFixtureA20261118"', html)
+                self.assertIn('name="active_item_id" value="active-fixture-A"', html)
+                self.assertIn('进度已填写', html)
+        duplicate = {**target, "target_record_id": "recFixtureSecond", "active_item_id": "active-fixture-second"}
+        finished = {**target, "status": "已结束"}
+        for rows in ([old, wrong_building], [target, duplicate], [finished]):
+            with self.subTest(rows=rows), self.assertRaisesRegex(PortalError, "尚未定位到原通告"):
+                self.service.expand_workbench_action_command(
+                    {**command, "action": "update"}, scope="A", ongoing_items=rows,
+                )
+
     def test_native_planned_ended_bind_pending_source_is_truthful_and_retry_preserves_end(self):
         root = Path(self.enterContext(tempfile.TemporaryDirectory()))
         store = LanPortalStateStore(root / "state.sqlite3")

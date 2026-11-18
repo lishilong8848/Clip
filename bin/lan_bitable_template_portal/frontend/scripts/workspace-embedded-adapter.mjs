@@ -22,20 +22,25 @@ export function adaptEmbeddedNavigation(source,filename){
   const path=filename.replaceAll('\\','/').includes('/workspace-v2/')?'./embeddedContext':'../workspace-v2/embeddedContext';
   const business=!filename.endsWith('/LighthouseAssistant.vue')&&(!filename.replaceAll('\\','/').includes('/workspace-v2/')||/(?:NoticeWorkspace|NoticeSopManager|WaterWorkspace|RepairWorkspace|MopWorkspace)\.vue$/.test(filename));
   if(business)next=adaptBrowserReferences(next,filename,path.replace('embeddedContext','browser.ts'),true)||next;
-  if(filename.endsWith('/CriticalGuardPage.vue')||filename.endsWith('/SignaturePage.vue')){
+  if(filename.endsWith('/CriticalGuardPage.vue')||filename.endsWith('/SignaturePage.vue')||filename.endsWith('/DrillManagementPage.vue')){
     const signature=filename.endsWith('/SignaturePage.vue');
+    const drill=filename.endsWith('/DrillManagementPage.vue');
+    const busy=signature?'saving.value':drill?'busy.value':'saving.value||sourceFileUploading.value';
+    const dirty=signature?'hasInk.value':drill?'hasUnsavedChanges.value':'dirty.value';
+    const confirm=signature?"embeddedLeaveDialog.warning({title:'签名尚未保存',content:'离开将丢弃本次手写签名。',positiveText:'放弃并离开',negativeText:'继续签名',onPositiveClick:proceed});"
+      :drill?'requestDiscardChanges("离开会放弃当前未保存修改。", proceed);':'requestSwitch(proceed);';
     const navigation=path.replace('embeddedContext','navigation');
     if(signature)next=next.replace('document.body.classList.add("signature-link-active");','if(!embeddedLeaveContext) document.body.classList.add("signature-link-active");').replace('document.body.classList.remove("signature-link-active");','if(!embeddedLeaveContext) document.body.classList.remove("signature-link-active");').replace('canvas && rect && linkMode.value &&','canvas && rect && !embeddedLeaveContext && linkMode.value &&');
     next=`import {registerNavigationGuard as registerEmbeddedLeave} from '${navigation}';\n${signature?"import {useDialog as useEmbeddedConfirm} from 'naive-ui';\n":''}`+next+`
 const embeddedLeaveContext=currentEmbedded();
 ${signature?'const embeddedLeaveDialog=useEmbeddedConfirm();':''}
 const releaseEmbeddedLeave=embeddedLeaveContext?registerEmbeddedLeave((_target,proceed)=>{
-  if(${signature?'saving.value':'saving.value||sourceFileUploading.value'})return false;
-  if(!${signature?'hasInk.value':'dirty.value'})return true;
-  ${signature?"embeddedLeaveDialog.warning({title:'签名尚未保存',content:'离开将丢弃本次手写签名。',positiveText:'放弃并离开',negativeText:'继续签名',onPositiveClick:proceed});":'requestSwitch(proceed);'}
+  if(${busy})return false;
+  if(!${dirty})return true;
+  ${confirm}
   return false;
 }):()=>{};
-function embeddedBeforeUnload(event:BeforeUnloadEvent){if(embeddedLeaveContext&&(${signature?'saving.value||hasInk.value':'saving.value||sourceFileUploading.value||dirty.value'})){event.preventDefault();event.returnValue='';}}
+function embeddedBeforeUnload(event:BeforeUnloadEvent){if(embeddedLeaveContext&&(${busy}||${dirty})){event.preventDefault();event.returnValue='';}}
 window.addEventListener('beforeunload',embeddedBeforeUnload);
 onBeforeUnmount(()=>{releaseEmbeddedLeave();window.removeEventListener('beforeunload',embeddedBeforeUnload);});
 `;

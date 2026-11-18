@@ -75,7 +75,7 @@ import { ApiError, requestJson, type ApiRequestOptions } from '../api/client';
 import { registerNavigationGuard } from '../navigation';
 import DailyInspectionWorkbook from './DailyInspectionWorkbook.vue';
 
-defineProps<{embedded?:boolean;immersive?:boolean}>();
+const props=defineProps<{embedded?:boolean;immersive?:boolean;initialScope?:string}>();
 const emit = defineEmits<{close:[]}>();
 
 type Value = string | number | boolean | null;
@@ -471,7 +471,7 @@ async function refreshPreview() {
 }
 watch([()=>state.value?.view_scope,()=>state.value?.duty?.scope,()=>state.value?.can_edit,()=>state.value?.active?.id],()=>void refreshPreview());
 const load = async()=>{
-  if (await fetchState('load') && !active.value) void refreshPreview();
+  if (await fetchState('load',undefined,state.value?.view_scope||props.initialScope) && !active.value) void refreshPreview();
 };
 function switchView(scope:string) {
   if (scope!==state.value?.view_scope) void fetchState('load',undefined,scope);

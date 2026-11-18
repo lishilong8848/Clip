@@ -43865,6 +43865,39 @@ class MaintenancePortalService(RepairOperationsMixin):
             job.update(saved)
             return copy.deepcopy(job)
 
+    def identify_pasted_notice_target(self, draft, *, scope, work_type, ongoing_items):
+        """Recover a published notice only from an unambiguous, full occurrence match."""
+        if work_type not in BINDABLE_NOTICE_TARGET_WORK_TYPES:
+            return None
+        title = self._ongoing_business_text_key(draft.get("title") or "")
+        buildings = self._building_codes_from_request_payload(draft)
+        if not buildings and scope in BUILDING_SCOPE_CODES:
+            buildings = [scope]
+        time_fields = ("start_time", "end_time")
+
+        def occurrence(item):
+            return tuple(
+                value.strftime("%Y-%m-%d %H:%M") if value else ""
+                for value in (self._parse_notice_datetime(item.get(key)) for key in time_fields)
+            )
+
+        times = occurrence(draft)
+        if not title or not buildings or not all(times):
+            return None
+        notice_type = str(draft.get("notice_type") or "")
+        matches = {}
+        for item in self._project_ongoing_items(scope, ongoing_items):
+            target = canonical_target_record_id(item)
+            if (not target or self._item_work_type(item) != work_type
+                    or notice_type and item.get("notice_type") != notice_type
+                    or self._target_status_is_finished(item.get("status"))
+                    or self._ongoing_business_text_key(item.get("title") or "") != title
+                    or self._building_codes_from_request_payload(item) != buildings
+                    or occurrence(item) != times):
+                continue
+            matches[target] = item
+        return next(iter(matches.values())) if len(matches) == 1 else None
+
     def expand_workbench_action_command(
         self,
         payload: dict[str, Any],
@@ -44017,6 +44050,12 @@ class MaintenancePortalService(RepairOperationsMixin):
             command_hint.update(copy.deepcopy(patch))
             command_hint["work_type"] = work_type
             command_hint = normalize_notice_identity_payload(command_hint)
+            if payload.get("_web_action_request") and not (active_item_id or target_record_id or source_record_id):
+                base = self.identify_pasted_notice_target(
+                    command_hint, scope=scope, work_type=work_type, ongoing_items=ongoing_candidates
+                )
+                if not base:
+                    raise PortalError("尚未定位到原通告。请在「已发通告」中查找并核验对应的未结束记录，或在办理记录中核对首条同步状态。")
             same_type_items = [
                 item
                 for item in projected_ongoing
@@ -44035,7 +44074,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if exact_signature
                 else []
             )
-            if len(exact_matches) == 1:
+            if not base and len(exact_matches) == 1:
                 base = exact_matches[0]
             if not base:
                 command_business_keys = self._ongoing_business_merge_keys(

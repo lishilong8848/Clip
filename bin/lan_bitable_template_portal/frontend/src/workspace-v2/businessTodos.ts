@@ -10,7 +10,7 @@ export const todoCatalog = [
   { value:'signatures', label:'我的签名' },
 ] as const;
 export type TodoKind = typeof todoCatalog[number]['value'];
-export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string} };
+export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number };
 export type TodoPage = { rows:TodoRow[]; more:boolean; note?:string; partial?:boolean };
 export type TodoSource = { id:string; page:number; more:boolean; load:(page:number, signal:AbortSignal)=>Promise<TodoPage> };
 export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[]; selectedScopes?:string[]; home?:boolean; noticeTypes?:string[] };
@@ -27,6 +27,11 @@ function number(value:unknown):number { const n=waterNumber(value);if(n===null||
 const link=(path:string,query:Dict)=>path+'?'+new URLSearchParams(Object.entries(query).filter(([,v])=>v!==''&&v!==undefined&&v!==null).map(([k,v])=>[k,String(v)])).toString();
 const ended=(status:string)=>!/未结束|未完成|未闭环/.test(status)&&/已结束|正常结束|延期结束|闭环|已完成|维修完成|作废|删除|^(结束|完成|end|completed|deleted|cancelled)$/.test(status);
 const noticeTypeLabels:Record<string,string>={maintenance:'维保',change:'变更',repair:'检修',polling:'轮巡',adjust:'设备调整',power:'上下电'};
+const ownership=(row:Dict)=>({
+  actorIds:[row.created_by_open_id,row.creator_open_id,row.assignee_open_id,row.owner_open_id,
+    ...(Array.isArray(row.assignee_open_ids)?row.assignee_open_ids:[])].filter((id):id is string=>typeof id==='string'&&!!id),
+  ownerLevel:typeof row.owner_level==='string'?row.owner_level:undefined,
+});
 function title(row:Dict) { const f=row.display_fields||row.fields||{};return text(row.title||row.name||row.notice_title||f['维护总项']||f['名称（标题）']||f['维修名称']||f['名称'])||'未命名事项'; }
 export function todoTimestamp(value:unknown):number|undefined {
   if(typeof value==='number')return Number.isFinite(value)&&value>0?(value<1e12?value*1000:value):undefined;
@@ -60,7 +65,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
       const status=noticeListStatus(row,'ongoing').label;
       const id=row.active_item_id||row.record_id||row.id;if(!id)throw new Error('通告缺少记录标识，暂不能办理。');
       const sourceId=row.source_record_id||row.record_id;
-      result.push({key:`notice:${type}:active:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
+      result.push({...ownership(row),key:`notice:${type}:active:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
         status,time:text(row.start_time||row.time||row.updated_at),detail:noticeTypeLabels[type],noticeWindow:noticePlanWindow(row),
         ongoing:true,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),
         url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,[row.active_item_id?'active_item_id':'record_id']:id})});
@@ -79,7 +84,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
       if(!id) return [];
       const started=/进行中|已开始|^开始$|^更新$/.test(label);
       const plan=noticePlanWindow(row);
-      return [{key:`notice:${type}:plan:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope)||ctx.scope,
+      return [{...ownership(row),key:`notice:${type}:plan:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope)||ctx.scope,
         status:started?'待核验':label,time:plan.start,detail:noticeTypeLabels[type],noticeWindow:plan,sourceKey:`${type}:${id}`,dueAt:todoTimestamp(plan.end),
         url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,record_id:id,notice_action:started?'verify':'start'})}];
     });
@@ -89,7 +94,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
     const data=await read('/api/repair-management/status',{scope:ctx.scope,state:'all',period:'all',limit:50,offset:(page-1)*50},signal);
     const result=rows(data.records).filter(row=>row.is_completed!==true&&!ended(text(row.workflow||row.status||row.state))).map(row=>{
       if(!row.record_id)throw new Error('维修项目缺少记录标识。');
-      return {key:'repair:'+row.record_id,kind,module:kind,title:title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time:text(row.fault_time||row.latest_followup_time||row.updated_at),detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
+      return {...ownership(row),key:'repair:'+row.record_id,kind,module:kind,title:title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time:text(row.fault_time||row.latest_followup_time||row.updated_at),detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
     });
     return {rows:result,more:(page-1)*50+rows(data.records).length<number(data.total)};
   })];
@@ -99,7 +104,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
       if(typeof row.complete!=='boolean')throw new Error(scope+'楼重保完成状态未返回。');
       if(row.complete||ended(text(row.status)))return [];
       if(!row.task_id)throw new Error('重保任务标识未返回。');
-      return [{key:`guard:${scope}:${row.task_id}`,kind,module:kind,title:title(row),scope,status:'待填写',time:text(row.created_at||row.start_date),dueAt:todoTimestamp(row.deadline),url:link('/critical-guard',{scope,task_id:row.task_id})}];
+      return [{key:`guard:${scope}:${row.task_id}`,kind,module:kind,title:title(row),scope,status:'待填写',time:text(row.created_at||row.start_date),scheduledAt:text(row.start_date),dueAt:todoTimestamp(row.deadline),url:link('/critical-guard',{scope,task_id:row.task_id})}];
     }),more:false};
   }));
   if(kind==='risk_inspection')return [source(kind,async(page,signal)=>{

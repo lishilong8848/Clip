@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
+import { adaptEmbeddedNavigation } from './workspace-embedded-adapter.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
 const output=path.resolve(root,'../../../output/playwright/workbench-redesign');
@@ -31,7 +32,8 @@ const server=await createServer({
   optimizeDeps:{include:['vue','naive-ui','lucide-vue-next']},
   server:{host:'127.0.0.1',port:0},
   plugins:[{name:'workbench-fixture',enforce:'pre',resolveId(id){if (id.startsWith('/@workbench-check.')) return id;},
-    load(id){if(id==='/@workbench-check.vue')return fixture;if(id==='/@workbench-check.js')return entry;}},vue()],
+    load(id){if(id==='/@workbench-check.vue')return fixture;if(id==='/@workbench-check.js')return entry;},
+    transform(code,id){if(id.endsWith('.vue')&&/[\\/]src[\\/]/.test(id))return adaptEmbeddedNavigation(code,id.replaceAll('\\','/'));}},vue()],
 });
 await server.listen();
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
@@ -44,6 +46,12 @@ try {
   const errors=[], requests=[], unexpected=[];
   page.on('pageerror',error=>errors.push(error.stack||error.message));
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
+  let dailyDesk=false;
+  let embeddedTest=false;
+  let waterTrial=false,waterSaved=false;
+  const waterWrites=[];
+  const waterRow=()=>({record_id:'water-home',statistic_date:'2026-11-18',meter:'工作台验收水表',
+    frequency:'日',shift:'白',meter_value:waterSaved?1250:null,photo_count:1});
   const periodDates=['2026-11-18','2026-11-17','2026-11-10'];
   const selfPerson={id:'one',name:'隔离学练人员',scopes:['A'],active:true};
   await page.route('**/*',async route=>{
@@ -53,7 +61,42 @@ try {
     if(!url.pathname.startsWith('/api/'))return route.continue();
     requests.push([req.method(),url.pathname,scope,url.searchParams]);
     const ok=data=>route.fulfill({json:{ok:true,data}});
+    if(waterTrial&&url.pathname==='/api/capacity/water/records/water-home'&&req.method()==='PATCH'){
+      waterWrites.push(req.postDataJSON());
+      if(waterWrites.length===1)return route.fulfill({status:400,json:{ok:false,error:'隔离保存失败'}});
+      waterSaved=true;
+      return ok({record_id:'water-home',warnings:[]});
+    }
     if(req.method()!=='GET') {unexpected.push(req.method()+' '+url.pathname);return route.abort();}
+    if(url.pathname==='/api/assistant/icon-weather')return ok({
+      available:true,date:'2026-11-18',temperature:16,humidity:62,description:'多云',
+      forecast:[{date:'2026-11-18',minimum:9,maximum:19,description:'多云'},
+        {date:'2026-11-19',minimum:10,maximum:18,description:'小雨'}],
+    });
+    if(url.pathname==='/api/personal-calendar')return ok({
+      month:url.searchParams.get('month'),unavailable:[],
+      days:dailyDesk&&scope==='A'?{'2026-11-18':{
+        items:[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'}],
+        staff:[{scope:'A',shift:'白班',names:['验收值班员']}],
+      }}:{},
+    });
+    if(url.pathname==='/api/personal-calendar/weather')return ok({
+      hourly_ready:true,warning_ready:true,hours:[
+        {time:'2026-11-18T12:00:00+08:00',temp:18,condition:'多云'},
+        {time:'2026-11-18T15:00:00+08:00',temp:17,condition:'阴'},
+        {time:'2026-11-18T18:00:00+08:00',temp:14,condition:'小雨'},
+        {time:'2026-11-18T21:00:00+08:00',temp:12,condition:'阴'},
+      ],
+      alerts:[{id:'yellow',title:'大风预警',guard_level:'三级'}],guard_level:'三级',guard_actions:['关注临时设施'],
+    });
+    if(url.pathname==='/api/change-confirmations')return ok({can_confirm:true,items:[
+      {state:'awaiting_confirmation',target_record_id:'ali-1',title:'本日变更截图待确认',building:'B楼'},
+      {state:'confirmed',target_record_id:'ali-2',title:'已确认变更',building:'A楼'},
+    ]});
+    if(url.pathname==='/api/daily-inspection/status')return ok({
+      view_scope:url.searchParams.get('view_scope'),duty:{scope:'D',date:'2026-11-18',shift:'白'},
+      next_round:2,round_limit:2,opens_at:Date.parse('2026-11-18T16:00:00+08:00'),
+    });
     if(url.pathname.startsWith('/api/workspace-layouts/'))return ok({revision:0,value:null});
     if(url.pathname==='/api/events/monthly'){
       const month=url.searchParams.get('month');
@@ -82,6 +125,19 @@ try {
         return ok({ongoing:[{work_type:type,active_item_id:scope+type,scope,title:scope+'楼隔离'+title,status:'开始'}],records:[],
           ongoing_pagination:{total_pages:1},records_pagination:{total_pages:1}});
       }
+      if(dailyDesk){
+        const plan=(id,title,work_type,plan_time,owner_level,created_by_open_id)=>({
+          record_id:scope+'-'+id,source_record_id:scope+'-'+id,scope,title,work_type,source_progress:'未开始',
+          start_time:plan_time,planned_start_time:plan_time,
+          planned_end_time:plan_time.slice(0,10)+' 17:30',
+          owner_level,created_by_open_id,
+        });
+        return ok({ongoing:[],ongoing_pagination:{total_pages:1},records:[
+          plan('power','UPS 支路上电确认','power','2026-11-18 15:30','L4','basic-desk'),
+          plan('change','冷冻水系统运行参数调整','change','2026-11-18 10:00','L4','basic-desk'),
+          plan('maintenance','配电柜保护定值复核','maintenance','2026-11-20 09:30','L2','other-person'),
+        ],records_pagination:{total_pages:1}});
+      }
       const plan=(id,title,source_progress)=>({record_id:id,source_record_id:id,title,work_type:'maintenance',source_progress});
       return ok({ongoing:[{...plan('linked','计划和进行中同一条','未开始'),active_item_id:'active-1',status:'开始'}],ongoing_pagination:{total_pages:1},
         records:planPage===1?[plan('linked','计划和进行中同一条','未开始'),plan('first','本月计划通告','未开始'),plan('completed','已结束的计划','已结束')]:[plan('second','下一页计划通告','未开始')],
@@ -92,7 +148,15 @@ try {
       ? [{task_id:'guard-live',title:'本楼重保任务',complete:false,status:'published'},{task_id:'guard-done',title:'已完成重保',complete:true,status:'published'}] : []});
     if(url.pathname==='/api/risk-inspections')return ok({total:1,items:[{id:'risk-1',name:'隔离专项排查',total:2,approved:1,submitted:1,status:'active'}]});
     if(url.pathname==='/api/cabinet-power/batches')return ok({total:2,items:[{batch_id:'cab-live',title:'机柜待确认',is_todo:true},{batch_id:'cab-done',title:'机柜已确认',is_todo:false}]});
-    if(url.pathname==='/api/capacity/water/records')return ok({total:0,records:[]});
+    if(url.pathname==='/api/capacity/water/records')return ok({total:waterTrial?1:0,records:waterTrial?[waterRow()]:[],snapshot:{exists:true}});
+    if(url.pathname==='/api/capacity/water/bootstrap')return ok({
+      scope:'A',options:{meters:['工作台验收水表'],frequencies:['日'],shifts:['白']},
+      snapshot:{exists:true},permissions:{can_create:false},
+    });
+    if(url.pathname==='/api/capacity/water/records/water-home')return ok({...waterRow(),version:'isolated-version',
+      photos:[{image_id:'photo-home',name:'验收附件.png'}],edit_policy:{can_edit:true,remaining_edits:2},
+    });
+    if(url.pathname.startsWith('/api/capacity/water/images/'))return route.fulfill({status:404,body:''});
     if(url.pathname==='/api/drills')return ok({items:[{drill_id:'drill-live',name:'待完成演练甲',status:'published'},
       {drill_id:'drill-done',name:'已完成演练甲',status:'published',execution:{status:'synced'}}]});
     if(url.pathname==='/api/engineer/mop/bootstrap')return ok({notices:[
@@ -132,7 +196,8 @@ try {
     }
     if(url.pathname==='/api/signatures/management/account')return ok({person:{is_self:true,building:'A楼',signature_status:'signed'}});
     if(url.pathname==='/api/daily-tasks')return ok({scope,date:url.searchParams.get('date'),stats:{total:5,completed:3,ongoing:1,attention:1}});
-    unexpected.push(url.pathname);return route.fulfill({status:404,json:{ok:false,error:'No fixture'}});
+    if(!embeddedTest)unexpected.push(url.pathname);
+    return route.fulfill({status:404,json:{ok:false,error:'No fixture'}});
   });
   await page.goto(origin+'/fixture');
   await page.waitForFunction(()=>!!window.setAccount);
@@ -151,14 +216,23 @@ try {
   assert.equal(await page.locator('.wb-shortcuts').getByText('账号与权限').count(),0);
   assert.equal(await page.locator('.wb-shortcuts').getByText('画像学练').count(),1);
   assert.equal(await page.locator('.wb-scope select').count(),0);
-  const todo=page.getByRole('region',{name:/待办事项/});
+  const todo=page.getByRole('region',{name:/待办阅览/});
   const task=name=>todo.getByRole('button',{name:'办理 '+name,exact:true});
+  const dialog=title=>page.getByRole('dialog').filter({has:page.getByRole('heading',{name:title,exact:true})});
+  async function closeTask(title){
+    await dialog(title).getByRole('button',{name:'关闭待办办理'}).click();
+    await dialog(title).waitFor({state:'hidden'});
+    embeddedTest=false;
+  }
   await task('自主练习').waitFor();
   await task('A楼隔离维修').waitFor();
   assert.equal(await page.getByText('每日学练',{exact:true}).count(),0);
   await page.setViewportSize({width:390,height:844});
+  embeddedTest=true;
   await task('自主练习').click();
-  assert.equal(await page.evaluate(()=>window.opened),'/learning?view=practice&paper_id=practice&workbench_return=A');
+  await dialog('自主练习').locator('[data-module-widget=learning]').waitFor();
+  assert.equal(new URL(page.url()).pathname,'/fixture');
+  await closeTask('自主练习');
   assert.equal(await task('自主练习').count(),1,'opening a todo does not complete it');
   practiceFinished=true;
   await todo.getByRole('button',{name:'刷新',exact:true}).click();
@@ -183,8 +257,13 @@ try {
   await task('本月计划通告').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
   assert.equal(await task('已结束的计划').count(),0);
+  embeddedTest=true;
+  const noticeDetail=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('record_id')==='first');
   await task('本月计划通告').click();
-  assert.equal(await page.evaluate(()=>window.opened),'/workbench-lite?scope=A&work_type=maintenance&month=11%E6%9C%88&record_id=first&notice_action=start&workbench_return=A');
+  assert.equal(new URL((await noticeDetail).url()).searchParams.get('scope'),'A');
+  assert.equal(new URL(page.url()).pathname,'/fixture');
+  await page.getByRole('button',{name:'关闭',exact:true}).first().click();
+  embeddedTest=false;
   await task('本月计划通告').waitFor();
   await todo.getByLabel('业务分类').selectOption('notices');
   await todo.getByLabel('搜索待办').fill('下一页');
@@ -275,8 +354,10 @@ try {
   assert.equal(await page.locator('.wb-scope select').count(),0);
   assert.equal(await todo.getByText('机柜已确认',{exact:true}).count(),0);
   assert.equal(await todo.getByText('B楼隔离维修',{exact:true}).count(),0);
+  embeddedTest=true;
   await task('机柜待确认').click();
-  assert.match(await page.evaluate(()=>window.opened),/scope=A&batch_id=cab-live/);
+  await dialog('机柜待确认').locator('[data-module-widget=cabinet]').waitFor();
+  await closeTask('机柜待确认');
 
   await set(account('engineer-dashboard','engineer',full),['A']);
   await task('隔离专项排查').waitFor();
@@ -315,9 +396,130 @@ try {
       }
     }
   }
+  dailyDesk=true;
+  await page.setViewportSize({width:1440,height:1000});
+  await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B'],false);
+  const indicators=page.getByLabel('工作台指标');
+  await indicators.getByRole('heading',{name:'全域待办总数'}).waitFor();
+  assert.equal(await indicators.locator('article').count(),4);
+  const agenda=page.getByRole('complementary',{name:'我的日程'});
+  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
+  const search=page.getByRole('searchbox',{name:'全局搜索'});
+  await search.fill('维项');
+  await page.getByRole('region',{name:'搜索结果'}).getByRole('button',{name:'维修项目'}).waitFor();
+  await search.press('Enter');
+  assert.match(await page.evaluate(()=>window.opened),/^\/repair-management/);
+  await page.getByRole('button',{name:'天气详情'}).click();
+  await page.getByText(/16°C.*湿度 62%/).waitFor();
+  await page.keyboard.press('Escape');
+  await agenda.getByLabel('日程楼栋').selectOption('B');
+  await agenda.getByRole('button',{name:/2026-11-18.*项日程/}).waitFor();
+  await agenda.getByLabel('日程楼栋').selectOption('A');
+  const futureDate=agenda.getByRole('button',{name:/^2026-11-20/});
+  await futureDate.hover();
+  const preview=page.getByRole('region',{name:'2026-11-20 通告预览'});
+  await preview.getByText('配电柜保护定值复核',{exact:true}).waitFor();
+  assert.equal(await preview.getByText(/B楼/).count(),0);
+  assert.equal(await futureDate.getAttribute('aria-pressed'),'false');
+  await agenda.getByRole('button',{name:/^2026-11-19/}).click();
+  await agenda.getByLabel('选中日期天气').getByText('10～18°C').waitFor();
+  await agenda.getByRole('button',{name:'今天',exact:true}).click();
+  await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
+  await agenda.getByText('验收值班员',{exact:true}).waitFor();
+  const trend=agenda.getByRole('region',{name:'未来 12 小时气温'});
+  const weatherPlot=trend.getByRole('img',{name:/12:00.*18°C.*21:00.*12°C/});
+  await weatherPlot.locator('svg').waitFor();
+  const weatherSummary=await agenda.getByLabel('选中日期天气').boundingBox();
+  const trendBox=await trend.boundingBox();
+  const dates=await agenda.locator('.desk-calendar').boundingBox();
+  assert.ok(weatherSummary.y+weatherSummary.height<=trendBox.y && trendBox.y+trendBox.height<=dates.y,
+    'temperature trend sits directly under the weather summary and before the calendar');
+  await agenda.getByText('大风预警',{exact:true}).waitFor();
+  await agenda.getByText('戒备等级 三级',{exact:true}).waitFor();
+  await page.setViewportSize({width:390,height:844});
+  await page.waitForFunction(()=>{
+    const chart=document.querySelector('.weather-trend');
+    return chart?.querySelector('svg')?.getBoundingClientRect().width===chart?.clientWidth;
+  });
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'weather chart fits a phone viewport');
+  await page.mouse.move(0,0);
+  await agenda.locator('.desk-weather-panel').screenshot({path:path.join(output,'daily-weather-mobile.png'),animations:'disabled'});
+  await page.setViewportSize({width:1440,height:1320});
+  await page.mouse.move(5,5);
+  await preview.waitFor({state:'hidden'});
+  await page.evaluate(()=>{
+    document.activeElement?.blur();
+    document.querySelector('#app').style.padding='18px 22px';
+    window.scrollTo(0,0);
+  });
+  await page.screenshot({path:path.join(output,'daily-desktop.png'),animations:'disabled'});
+  await page.evaluate(()=>{document.querySelector('#app').style.padding='';});
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('.wb-scope select').selectOption('B');
+  assert.equal(await agenda.getByLabel('日程楼栋').inputValue(),'A','agenda scope is independent');
+  assert.equal(await task('A楼隔离维修').count(),0);
+  await task('B楼隔离维修').waitFor();
+  await page.locator('.wb-scope select').selectOption('A');
+  await page.getByRole('button',{name:/消息通知/}).click();
+  await page.getByRole('button',{name:'查看全部未读'}).click();
+  assert.equal(await todo.getByRole('button',{name:/^未读/}).getAttribute('aria-pressed'),'true');
+  embeddedTest=true;
+  await task('A楼隔离维修').click();
+  await dialog('A楼隔离维修').locator('[data-module-widget=repair_management]').waitFor();
+  assert.equal(new URL(page.url()).pathname,'/fixture');
+  await closeTask('A楼隔离维修');
+  await task('A楼隔离维修').waitFor({state:'hidden'});
+  await todo.getByRole('button',{name:'全部待办'}).click();
+  await task('A楼隔离维修').waitFor();
+
+  await set({...account('basic-desk','other',['maintenance','change','power','repair_management']),level:'L4'},['A','B']);
+  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
+  assert.equal(await page.locator('.wb-scope select').count(),0);
+  assert.equal(await todo.getByRole('button',{name:'删除单据'}).count(),0);
+  await set({...account('engineer-desk','engineer',full),level:'L2'},['A','B'],false);
+  await todo.getByText('配电柜保护定值复核',{exact:true}).waitFor();
+  await page.locator('.wb-scope select').selectOption('B');
+  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
+  await set({...account('supervisor-desk','supervisor',full),level:'L3'},['A','B'],false);
+  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  assert.equal(await page.locator('.wb-scope select').count(),0);
+  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
+  assert.equal(await task('B楼隔离维修').count(),0);
+  await set({...account('manager-desk','manager',full),level:'L1',can_manage_accounts:true},['A','B'],false);
+  await indicators.getByRole('heading',{name:'交接班审核待办'}).waitFor();
+  assert.equal(await indicators.getByRole('heading',{name:'账号权限待审批'}).count(),0);
+  await set({...account('h-duty','duty',full),home_scope:'H',level:'L4'},['H']);
+  await todo.getByRole('button',{name:'确认截图 本日变更截图待确认'}).waitFor();
+  assert.equal(await todo.getByText('已确认变更',{exact:true}).count(),0);
+  await set({...account('h-duty-admin','duty',full),home_scope:'H',role:'admin',level:'L4'},['A','H'],false);
+  await indicators.getByRole('heading',{name:'交接班审核待办'}).waitFor();
+  await set({...account('d-duty','duty',full),home_scope:'D',level:'L4'},['D','E']);
+  await todo.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
+  assert.equal(await page.locator('.wb-scope select').count(),0);
+  waterTrial=true;
+  await set(account('water-desk','other',['water']),['A']);
+  await task('工作台验收水表').click();
+  const input=dialog('工作台验收水表').getByLabel('本次水表读数',{exact:true});
+  await input.fill('1250');
+  await input.press('Enter');
+  await dialog('工作台验收水表').getByText('隔离保存失败',{exact:false}).waitFor();
+  assert.equal(await input.inputValue(),'1250');
+  await input.press('Enter');
+  await dialog('工作台验收水表').locator('.water-notice').filter({hasText:'已保存'}).waitFor();
+  assert.equal(waterWrites.length,2);
+  assert.equal(waterWrites[1].meter_value,1250);
+  await closeTask('工作台验收水表');
+  await task('工作台验收水表').waitFor({state:'hidden'});
+  waterTrial=false;
+  await set(account('visual-check','manager'),['A','B']);
+  await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
   assert.ok(await page.locator('.wb-primary').evaluate(element=>element.getBoundingClientRect().height>=48));
-  assert.ok(requests.every(([method])=>method==='GET'));
+  assert.deepEqual(requests.filter(([method])=>method!=='GET').map(([method,url])=>[method,url]),[
+    ['PATCH','/api/capacity/water/records/water-home'],['PATCH','/api/capacity/water/records/water-home'],
+  ]);
   assert.deepEqual(unexpected,[]);
   assert.deepEqual(errors,[]);
   const before=await readFile(path.join(root,'src/workspace-v2/HomePage.vue'),'utf8');

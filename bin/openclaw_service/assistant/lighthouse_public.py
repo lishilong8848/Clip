@@ -1316,7 +1316,7 @@ class PublicSources:
                 "daily": forecast["daily"], "temperature_unit": "°C", "wind_unit": "km/h",
                 "capability": {"structured_weather": True, "provider": "open-meteo-commercial"}}
 
-    async def _weather_wttr(self, city: str, queried_at: str) -> dict:
+    async def _weather_wttr(self, city: str, queried_at: str, *, include_hourly=False) -> dict:
         zh_city = city
         english_city, is_known = _wttr_english_city(city)
         url = WTTR_URL.format(city=quote(english_city))
@@ -1332,6 +1332,22 @@ class PublicSources:
                                      city=zh_city,
                                      note="wttr.in 返回的结构/城市/时间无效或过时，未虚构数据。")
         resolved = payload["resolved"]
+        hourly = []
+        if include_hourly:
+            for day in data['weather'][:len(payload['daily'])]:
+                for observation in day.get('hourly') or []:
+                    if not isinstance(observation, dict):
+                        continue
+                    raw_time = str(observation['time']) if observation.get('time') is not None else ''
+                    if not raw_time.isdigit():
+                        continue
+                    hour, minute = divmod(int(raw_time), 100)
+                    temperature = _fnum_str(observation.get('tempC'))
+                    if hour >= 24 or minute >= 60 or temperature is None or not -90 <= temperature <= 60:
+                        continue
+                    rain = _fnum_str(observation.get('chanceofrain'))
+                    hourly.append({"time":f"{day['date']}T{hour:02}:{minute:02}:00+08:00","temp":temperature,
+                                   "condition":_wttr_desc(observation),"rain":rain if rain is not None and 0 <= rain <= 100 else None})
         return {"ok": True, "source": WTTR_LABEL, "sourceURL": url,
                 "queried_at": queried_at, "unavailable": False, "empty": False,
                 "count": len(payload["daily"]), "city": zh_city,
@@ -1345,6 +1361,7 @@ class PublicSources:
                 "timezone": SHANGHAI_TZ,
                 "current_date": payload["current_date"], "current": payload["current"],
                 "daily": payload["daily"], "observation_time": payload["observation_time"],
+                **({"hourly":hourly} if include_hourly else {}),
                 "observation_unavailable": payload["observation_unavailable"],
                 "observation_note": payload["observation_note"],
                 "temperature_unit": "°C", "wind_unit": "km/h",

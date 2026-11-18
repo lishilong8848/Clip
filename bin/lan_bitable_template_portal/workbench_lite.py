@@ -2371,8 +2371,7 @@ def _detail_form(
         )
     )
     effective_manual = bool(
-        manual
-        or parsed_draft
+        (not ongoing_item and (manual or parsed_draft))
         or local_ongoing
         or (
             not ongoing_item
@@ -2525,8 +2524,9 @@ def _detail_form(
             'name="submit_action" value="start">发送开始</button>'
         )
     else:
+        submit_label = {"start": "开始", "update": "更新", "end": "结束"}.get(action, "更新")
         action_buttons = (
-            f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e('开始' if action == 'start' else '更新')}</button>"
+            f"<button class=\"btn primary\" type=\"submit\" name=\"submit_action\" value=\"{_e(action)}\"{disabled}>发送{_e(submit_label)}</button>"
         )
     if ongoing_item and can_delete:
         action_buttons += '<button class="btn danger-ghost" type="button" data-ongoing-delete-mode="remote">删除通告</button>'
@@ -7379,10 +7379,14 @@ def render_workbench_lite(
     function isEndedCandidate(candidate) {{
       return Boolean(candidate?.target_finished) || String(candidate?.status || '').includes('结束');
     }}
+    function needsOriginalNotice(form) {{
+      return form?.dataset.detailMode === 'manual' && ['update', 'end'].includes(form.dataset.action)
+        && !previewValue(form, 'target_record_id') && !previewValue(form, 'source_record_id');
+    }}
     function targetLookupPayload(form) {{
       return {{
         scope: previewValue(form, 'scope') || getCurrentScope(),
-        lookup_context: form?.dataset.detailMode === 'ongoing'
+        lookup_context: needsOriginalNotice(form) ? 'scoped_active_target_table' : form?.dataset.detailMode === 'ongoing'
           ? 'target_table'
           : 'planned_target_table',
         work_type: previewValue(form, 'work_type') || form?.dataset.workType || 'maintenance',
@@ -7397,7 +7401,7 @@ def render_workbench_lite(
         text: document.getElementById('lite-notice-preview')?.textContent || '',
       }};
     }}
-    function renderTargetCandidates(candidates) {{
+    function renderTargetCandidates(candidates, restoringOriginal = false) {{
       const list = document.getElementById('lite-target-candidate-list');
       const confirmButton = document.getElementById('lite-target-candidates-confirm');
       if (!list || !confirmButton) return;
@@ -7407,7 +7411,9 @@ def render_workbench_lite(
       if (!liteTargetCandidates.length) {{
         const empty = document.createElement('div');
         empty.className = 'target-candidate-empty';
-        empty.textContent = '未找到可关联的未结束或本月已结束目标记录。可以先发送开始通告，由后端创建新的目标记录。';
+        empty.textContent = restoringOriginal
+          ? '未找到可核验的未结束原通告，请在办理记录中核对首条同步状态。'
+          : '未找到可关联的未结束或本月已结束目标记录。';
         list.replaceChildren(empty);
         return;
       }}
@@ -7455,7 +7461,7 @@ def render_workbench_lite(
         if (handleLiteAuthRequired(response, data)) return;
         if (!response.ok || data.ok === false) throw new Error(data.error || '查询目标记录失败');
         const result = data.data || data;
-        renderTargetCandidates(result.candidates || []);
+        renderTargetCandidates(result.candidates || [], needsOriginalNotice(form));
         const modal = document.getElementById('lite-target-candidates');
         if (modal) modal.hidden = false;
         setLiteStatus(`找到 ${{(result.candidates || []).length}} 条候选目标记录`);
@@ -7501,6 +7507,8 @@ def render_workbench_lite(
       const sourceRecordIdAtStart = previewValue(form, 'source_record_id');
       const activeItemIdAtStart = previewValue(form, 'active_item_id');
       const currentTargetIdAtStart = previewValue(form, 'target_record_id');
+      const restoringOriginal = needsOriginalNotice(form);
+      const originalAction = form.dataset.action;
       const workTypeAtStart = (
         previewValue(form, 'work_type') || form.dataset.workType || 'maintenance'
       );
@@ -7514,7 +7522,7 @@ def render_workbench_lite(
       try {{
         const payload = {{
           scope: previewValue(form, 'scope') || getCurrentScope(),
-          binding_context: form.dataset.detailMode === 'ongoing' ? 'ongoing' : 'planned',
+          binding_context: restoringOriginal || form.dataset.detailMode === 'ongoing' ? 'ongoing' : 'planned',
           work_type: previewValue(form, 'work_type') || form.dataset.workType || 'maintenance',
           notice_type: previewValue(form, 'notice_type'),
           active_item_id: String(
@@ -7567,7 +7575,7 @@ def render_workbench_lite(
         const formChangedWhileSaving = (
           JSON.stringify(captureNoticeFormValues(form)) !== formValuesAtStart
         );
-        const appliedFieldCount = formChangedWhileSaving
+        const appliedFieldCount = formChangedWhileSaving || restoringOriginal
           ? 0
           : applyTargetRecordFormFields(form, targetFormFields);
         applyIdentityBindingToInbox(
@@ -7587,6 +7595,10 @@ def render_workbench_lite(
           updateNoticePreview(form);
         }} else {{
           setOngoingSubmitButtons(form);
+          if (restoringOriginal) {{
+            form.dataset.action = originalAction;
+            updateNoticePreview(form);
+          }}
         }}
         // The backend has already persisted the relation and returned fields.
         // Only preserve edits that existed before binding so the drawer can close
@@ -9854,6 +9866,11 @@ def render_workbench_lite(
       const submitter = event.submitter;
       const submitAction = form.dataset.pendingSubmitAction || (submitter && submitter.value ? submitter.value : (form.dataset.action || 'start'));
       delete form.dataset.pendingSubmitAction;
+      if (needsOriginalNotice(form)) {{
+        showLiteError('请先核验原通告的楼栋、名称和时间，再发送更新或结束。');
+        await openTargetCandidates(form, form.querySelector('#lite-target-search') || submitter);
+        return;
+      }}
       if (submitAction === 'end' && form.dataset.endCheckApproved !== '1') {{
         openEndCheck(form, submitter);
         return;

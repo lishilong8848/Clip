@@ -70,7 +70,10 @@
             <tr v-for="item in dashboard.history" :key="item.id">
               <td>{{ taskLabel(item.kind) }} · {{ modeText(item.mode) }}</td>
               <td>{{ dateText(item.created_at) }}</td>
-              <td><NTag size="small" :type="statusType(item.status)" :bordered="false">{{ statusText(item.status) }}</NTag></td>
+              <td>
+                <NTag size="small" :type="statusType(item.status)" :bordered="false">{{ statusText(item.status) }}</NTag>
+                <div v-if="item.status==='failed'" class="run-failure">{{ item.error || '该次执行未记录失败详情' }}</div>
+              </td>
               <td>{{ notificationText(item) }}</td>
               <td><NButton text type="primary" :aria-label="`查看${taskLabel(item.kind)}执行详情`" @click="openRun(item.id)">查看</NButton></td>
             </tr>
@@ -105,6 +108,20 @@
             <span>{{ dateText(run.finished_at || run.created_at) }}</span>
           </div>
           <NAlert v-if="run.error" type="warning">{{ run.error }}</NAlert>
+          <dl v-if="run.stage" class="facts">
+            <dt>{{ run.error ? '失败阶段' : '执行阶段' }}</dt><dd>{{ run.stage }}</dd>
+          </dl>
+          <div v-if="run.checks && Object.keys(run.checks).length" class="table-scroll" tabindex="0" aria-label="核对数字">
+            <table>
+              <thead><tr><th scope="col">核对阶段</th><th scope="col">核对结果</th></tr></thead>
+              <tbody>
+                <tr v-for="(facts, stage) in run.checks" :key="stage">
+                  <th scope="row">{{ stage }}</th>
+                  <td>{{ Object.entries(facts).map(([name, value]) => `${name} ${value}`).join(' · ') || '等待源端回执' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
           <dl v-if="countEntries(run.counts).length" class="facts">
             <template v-for="[name, value] in countEntries(run.counts)" :key="name"><dt>{{ name }}</dt><dd>{{ value }}</dd></template>
           </dl>
@@ -147,10 +164,13 @@ type Target = { label: string; url?: string };
 type NotificationTarget = Target | string;
 type Receipt = { status?: string; message?: string; error?: string; targets?: NotificationTarget[] };
 type RunSummary = {
-  id: string; kind: string; status: string; mode: string; created_at?: Stamp; finished_at?: Stamp;
+  id: string; kind: string; status: string; mode: string; created_at?: Stamp; finished_at?: Stamp; error?: string;
   notification?: Receipt; notification_status?: string; notification_error?: string; counts?: Record<string, unknown>;
 };
-type Run = RunSummary & { error?: string; rows: Record<string, unknown>[]; total: number; page: number; page_size: number };
+type Run = RunSummary & {
+  rows: Record<string, unknown>[]; total: number; page: number; page_size: number;
+  stage?: string; checks?: Record<string, Record<string, number | string>>;
+};
 type Task = {
   kind: string; label: string; times: string[]; enabled: boolean; confirmed: boolean;
   notify?: boolean; targets: Target[]; latest?: RunSummary | null; next_at?: Stamp; notification_targets?: NotificationTarget[];
@@ -501,6 +521,7 @@ h1 { margin: 0 0 8px; font-size: 24px; }
 .settings-targets { margin: 0; }
 .dialog-actions, .pagination { justify-content: flex-end; }
 .table-scroll { overflow: auto; min-width: 0; }
+.run-failure { margin-top: 4px; max-width: 36ch; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
 .preview-table { max-height: 46vh; }
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent); vertical-align: top; }

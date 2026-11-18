@@ -776,6 +776,8 @@ class FastAPIPortalController:
         install_eop_scenario_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.daily_inspection import install_daily_inspection
         install_daily_inspection(app, self, PortalRuntime)
+        from lan_bitable_template_portal.workbench_calendar import install_workbench_calendar
+        install_workbench_calendar(app, self, PortalRuntime)
         from lan_bitable_template_portal.cold_source_monitor import install_cold_source_monitor
         install_cold_source_monitor(app, self, PortalRuntime)
         from lan_bitable_template_portal.plan_convergence_routes import install_plan_convergence_routes
@@ -1276,6 +1278,17 @@ class FastAPIPortalController:
                     checked_scope,
                 )
                 self._reconcile_orphan_started_items(checked_scope, ongoing)
+                parsed_target = None
+                if parsed_action in {"update", "end"}:
+                    parsed_target = await asyncio.to_thread(
+                        PortalRuntime.service.identify_pasted_notice_target, parsed_draft,
+                        scope=checked_scope, work_type=parsed_work_type, ongoing_items=ongoing,
+                    )
+                    if parsed_target and not all(
+                        PortalRuntime.auth_manager.scope_allowed(session, building)
+                        for building in PortalRuntime.service._building_codes_from_request_payload(parsed_target)
+                    ):
+                        parsed_target = None
                 payload = await asyncio.to_thread(
                     PortalRuntime.service.query_records,
                     scope=checked_scope,
@@ -1288,6 +1301,14 @@ class FastAPIPortalController:
                     ongoing_page=1,
                     ongoing_page_size=ONGOING_PAGE_SIZE,
                 )
+                parsed_active_id = ""
+                if parsed_target:
+                    parsed_target_id = canonical_target_record_id(parsed_target)
+                    parsed_active_id = str(parsed_target.get("active_item_id") or parsed_target_id)
+                    payload = {**payload, "ongoing": [parsed_target, *(
+                        item for item in (payload.get("ongoing") or [])
+                        if canonical_target_record_id(item) != parsed_target_id
+                    )]}
                 scope_options = PortalRuntime.auth_manager.filter_scope_options(
                     SCOPE_OPTIONS,
                     session,
@@ -1300,6 +1321,7 @@ class FastAPIPortalController:
                     work_type=parsed_work_type,
                     month=month or _current_month_label(),
                     manual=True,
+                    active_item_id=parsed_active_id,
                     scope_options=scope_options,
                     parsed_draft=parsed_draft,
                     parsed_action=parsed_action,
@@ -7732,6 +7754,9 @@ class FastAPIPortalController:
                 lookup_context = str(
                     payload.get("lookup_context") or "target_table"
                 ).strip()
+                if lookup_context == "scoped_active_target_table":
+                    from lan_bitable_template_portal.module_access import require_module
+                    require_module(PortalRuntime.auth_manager, session, payload.get("work_type") or "maintenance")
                 lookup_scope = (
                     "ALL"
                     if lookup_context == "target_table"
@@ -13672,6 +13697,10 @@ class FastAPIPortalController:
             scheduler.add_job(
                 self._zhihang_data.tick, "interval", minutes=1,
                 id="zhihang_data_refresh", replace_existing=True, max_instances=1, coalesce=True,
+            )
+            scheduler.add_job(
+                self._zhihang_data.h_duty_drills.tick, "interval", minutes=1,
+                id="zhihang_h_duty_drill_refresh", replace_existing=True, max_instances=1, coalesce=True,
             )
         scheduler.add_job(
             self._run_scheduled_water_consumption_refresh,

@@ -1,7 +1,7 @@
 <template>
   <section v-if="view==='tasks'" class="v2-todo-standalone"><NAlert v-if="error" type="warning" :bordered="false">{{error}}<NButton v-if="todoPending" text :disabled="saving" @click="saveTodoSelection">重试保存选择</NButton><NButton text :disabled="saving" @click="reload">重新读取布局</NButton></NAlert><BusinessTodos :widget-id="primaryTodo?.id||'workspace-tasks'" :selection="primaryTodo?.taskKinds" :user="user" :scopes="scopes" :scope="scope" :preferences-busy="!ready||loading||saving" @selection="chooseTodos(primaryTodo?.id||'', $event)" /></section>
   <TaskWorkspace v-else-if="view!=='home'" v-bind="props" :initial-kind="initialKind" @open="$emit('open',$event)" />
-  <WorkbenchHome v-else :user="user" :scopes="scopes" :scope="scope" :explicit-scope="explicitScope" @open="$emit('open',$event)" />
+  <WorkbenchHome v-else :user="user" :scopes="scopes" :scope="scope" :explicit-scope="explicitScope" :search-links="searchLinks" @open="$emit('open',$event)" />
 </template>
 
 <script setup lang="ts">
@@ -16,7 +16,7 @@ import { defaults, sanitize, layoutKey, widget, type Layout } from './dashboard/
 import { useLayoutSync } from './useLayoutSync';
 import WorkbenchHome from './workbench/WorkbenchHome.vue';
 
-const props=withDefaults(defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;initialKind?:string;explicitScope?:boolean}>(),{explicitScope:true});
+const props=withDefaults(defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;initialKind?:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[]}>(),{explicitScope:true});
 defineEmits<{open:[url:string]}>();
 
 const dialog=useDialog(), message=useMessage();

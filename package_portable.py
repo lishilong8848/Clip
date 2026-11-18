@@ -219,6 +219,7 @@ FORCE_PATCH_INCLUDE_FILES = {
     Path("bin/resources/assistant_tools/MERMAID-LICENSE.txt"),
     Path("bin/lan_bitable_template_portal/lighthouse_routes.py"),
     Path("bin/lan_bitable_template_portal/lighthouse_icon_weather.py"),
+    Path("bin/lan_bitable_template_portal/workbench_calendar.py"),
     Path("bin/lan_bitable_template_portal/pre_shift_photo.py"),
     Path("bin/lan_bitable_template_portal/pre_shift_location.py"),
     Path("bin/lan_bitable_template_portal/pre_shift_location_distribution.py"),
@@ -452,6 +453,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.zhihang_data_routes",
     "lan_bitable_template_portal.zhihang_data_sync",
     "lan_bitable_template_portal.zhihang_data_sources",
+    "lan_bitable_template_portal.zhihang_h_drill",
     "lan_bitable_template_portal.zhihang_data_cards",
     "lan_bitable_template_portal.tool_workspace",
     "lan_bitable_template_portal.tool_review_cards",
@@ -2086,6 +2088,7 @@ def _run_packaging_preflight_tests_once() -> None:
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_bridge.py")
     py_targets.extend(sorted((PROJECT_ROOT / "bin/lan_bitable_template_portal").glob("feishu_workpartner*.py")))
     py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/lighthouse_icon_weather.py")
+    py_targets.append(PROJECT_ROOT / "bin/lan_bitable_template_portal/workbench_calendar.py")
     py_targets.append(PROJECT_ROOT / "packaging_preflight.py")
     py_targets.extend(path for path in _iter_project_files(PROJECT_ROOT, exclude_venv=True) if path.suffix == ".py")
     py_targets.extend(PROJECT_ROOT / (name.replace(".", "/") + ".py")

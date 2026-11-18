@@ -39,6 +39,8 @@ _ENDPOINTS = {
     "change_detail": ("POST", "change2", "/api/change/changeDetails/getBasicInformation"),
     "drill_list": ("POST", "emergencydrill", "/api/emergencydrill/exercisePlan/queryExercisePlanList"),
     "drill_evaluation": ("POST", "emergencydrill", _EVENT_PATH),
+    "h_drill_list": ("POST", "emergencydrill", _EVENT_PATH),
+    "h_drill_buildings": ("GET", "emergencydrill", "/api/event/eventOrder/selBuildingOptionByAuth"),
     "drill_detail": ("GET", "emergencydrill", "/api/emergencydrill/exerciseEvaluation/selExerciseEvaluationTemplate"),
     "event_list": ("POST", "event-live", _EVENT_PATH),
     "inspection_list": ("GET", "inspect2", "/api/inspect/inspection/job/list"),
@@ -65,10 +67,35 @@ def _incomplete(label, detail):
     return ZhihangSourceError("incomplete", f"智航 {label}：{detail}")
 
 
+class _RepeatedPageRecord(ZhihangSourceError):
+    def __init__(self, endpoint, first_page, page):
+        super().__init__("incomplete", f"智航 {endpoint}：第 {page} 页出现重复记录"
+                         f"（首次见于第 {first_page} 页），无法确认是否漏页。")
+
+
+class _InspectionShortBatch(ZhihangSourceError):
+    def __init__(self, rows, total):
+        super().__init__("incomplete", f"智航巡检应有 {total} 张工单，去重后仅 {len(rows)} 张。")
+        self.rows = rows
+        self.total = total
+
+
+class _EventRangeMismatch(ZhihangSourceError):
+    def __init__(self, label):
+        super().__init__("incomplete", f"智航 event_list：{label}返回了区间外事件，无法确认日期筛选生效。")
+
+
+def _inspection_source_key(row):
+    work_id = _first(row, "id", "jobId")
+    return ("id", work_id) if work_id else ("row", json.dumps(row, sort_keys=True, ensure_ascii=False))
+
+
 class _Source:
-    def __init__(self):
+    def __init__(self, report=None, *, preview=False, credentials=None):
+        self.report = report or (lambda stage, **facts: None)
+        self.preview = preview
         try:
-            self.headers, self.cookies = auth.build_auth()
+            self.headers, self.cookies = credentials if credentials is not None else auth.build_auth()
         except ValueError:
             raise ZhihangSourceError("auth_required", "请在计划收敛审查中登录智航后重试。") from None
 
@@ -104,11 +131,22 @@ class _Source:
         if code in {"401", "403"}:
             error = "auth_required" if code == "401" else "access_denied"
             raise ZhihangSourceError(error, f"智航 {host} 拒绝当前共享登录（{code}）。", status=int(code))
+        is_risk = endpoint.startswith("risk_")
+        risk_ok = _text(data.get("isOk")).casefold() in {"true", "1"}
         allowed_codes = {"", "0", "200"} if endpoint == "inspection_list" else {"", "200"}
-        if (code not in allowed_codes or data.get("success") is False
-                or (endpoint.startswith("risk_") and not data.get("isOk"))
-                or (endpoint.startswith("change_") and (code != "200" or data.get("success") is not True))):
-            raise _incomplete(endpoint, "接口报告查询失败。")
+        # AgileBPM confirms success with isOk. The other subsystems use code/success.
+        failed = not risk_ok if is_risk else (
+            code not in allowed_codes or data.get("success") is False
+            or (endpoint.startswith("change_") and (code != "200" or data.get("success") is not True))
+        )
+        if failed:
+            indicators = []
+            if re.fullmatch(r"[0-9]{1,8}", code):
+                indicators.append(f"业务码 {code}")
+            if is_risk:
+                indicators.append("isOk 缺失" if "isOk" not in data else "isOk 未确认成功")
+            context = f"（{'，'.join(indicators)}）" if indicators else ""
+            raise _incomplete(endpoint, f"接口报告查询失败{context}。")
         return data
 
 
@@ -164,6 +202,9 @@ def identity(kind, fields):
     if kind == "event":
         value = _first(fields, "事件ID", "事件编号")
         return f"event:{value}" if value else None
+    if kind == "h_duty_drill":
+        value = _first(fields, "演练编号")
+        return f"number:{value}" if value else None
     if kind == "drill":
         if value := _first(fields, "计划ID"):
             return f"id:{value}"
@@ -238,15 +279,17 @@ def _metadata(sources, keys, label):
     return None
 
 
-def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
+def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1, stage=None, probe=False,
+           expected_total=None):
     def load(page):
         params = make_request(page)
-        for attempt in range(3 if endpoint == "event_list" else 1):
+        attempts = 3 if endpoint in {"event_list", "h_drill_list"} else 1
+        for attempt in range(attempts):
             try:
                 raw = source.request(endpoint, params)
                 break
             except ZhihangSourceError as error:
-                if endpoint != "event_list" or error.code != "source_unavailable" or attempt == 2:
+                if error.code != "source_unavailable" or attempt == attempts - 1:
                     raise
                 if error.status is not None and error.status not in {408, 429, 500, 502, 503, 504}:
                     raise
@@ -259,7 +302,7 @@ def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
             names = ("list",)
         elif endpoint == "inspection_list":
             names = ("rows", "records", "list")
-        elif endpoint in ("event_list", "drill_evaluation"):
+        elif endpoint in ("event_list", "drill_evaluation", "h_drill_list"):
             names = ("dataList", "records", "list")
         else:
             names = ("records",)
@@ -267,6 +310,9 @@ def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
                      if isinstance(container.get(key), list)), None)
         if rows is None or any(not isinstance(row, dict) or not row for row in rows):
             raise _incomplete(endpoint, f"第 {page} 页缺少有效记录列表。")
+        if endpoint == "inspection_list" and (building := params.get("buildingCode")):
+            if any(_first(row, "buildingCode") != building for row in rows):
+                raise _incomplete(endpoint, f"第 {page} 页返回其他楼栋的工单，无法确认按楼过滤生效。")
         total = _metadata(containers, ("total", "count", "totalCount", "totalRecords"), endpoint)
         pages = _metadata(containers, ("pages", "totalPages", "pageCount"), endpoint)
         if endpoint in ("risk_detail", "inspection_list", "change_list", "drill_list") and total is None:
@@ -277,10 +323,57 @@ def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
             pages = 1
         return rows, total, pages
 
+    result = []
+    seen = {}
+    inspection = endpoint == "inspection_list"
+    event = endpoint in {"event_list", "h_drill_list"}
+    duplicates = 0
+
+    def collect(page, rows):
+        nonlocal duplicates
+        for row in rows:
+            if event:
+                key = _first(row, "id", "eventNumber")
+                if not key:
+                    raise _incomplete(endpoint, f"第 {page} 页缺少事件 ID。")
+            elif inspection:
+                key = _inspection_source_key(row)
+            else:
+                key = json.dumps(row, sort_keys=True, ensure_ascii=False)
+            if key not in seen:
+                seen[key] = (page, row)
+                result.append(row)
+                continue
+            first_page, first_row = seen[key]
+            if not (inspection or event):
+                raise _RepeatedPageRecord(endpoint, first_page, page)
+            duplicates += 1
+            if stage:
+                source.report(stage, 重复条数=duplicates, 首次出现页=first_page, 重复出现页=page)
+            if row != first_row:
+                record_type = "事件" if event else "工单"
+                raise _incomplete(endpoint, f"第 {page} 页的{record_type} ID 与第 {first_page} 页相同，但内容不同。")
+
+    if stage:
+        source.report(stage, 每页=size)
     first, total, pages = load(1)
-    result = list(first)
+    if stage:
+        source.report(stage, 源端总数=total, 总页数=pages, 首页条数=len(first))
+    if expected_total is not None and (total != expected_total or len(first) != min(size, expected_total)
+                                       or pages != max(1, math.ceil(expected_total / size))):
+        raise _incomplete(endpoint, f"该页长的首页或总数与基准 {expected_total} 条不一致。")
+    if probe:
+        if len(first) > size or (total is not None and len(first) != min(size, total)):
+            raise _incomplete(endpoint, "诊断首页条数与请求大小或源端总数不一致。")
+        if stage and endpoint == "event_list":
+            statuses = sorted({_first(row, "orderStatus") for row in first})
+            codes = [code for code in statuses if re.fullmatch(r"[0-9]{1,3}", code)]
+            if codes:
+                source.report(stage, 样本状态编码="、".join(codes))
+        return first, total
+    collect(1, first)
     if pages is None:
-        if endpoint in ("event_list", "drill_evaluation"):
+        if endpoint in ("event_list", "drill_evaluation", "h_drill_list"):
             raise _incomplete(endpoint, "缺少总数和总页数，无法核验批次。")
         # The original list endpoints may omit totals. Read until a short page.
         page, rows = 1, first
@@ -288,10 +381,12 @@ def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
             page += 1
             if page > limit:
                 raise _incomplete(endpoint, "超过分页上限。")
+            if stage:
+                source.report(stage, 当前页=page, 已读取=len(result))
             rows, new_total, new_pages = load(page)
             if new_total is not None or new_pages is not None:
                 raise _incomplete(endpoint, "分页元数据在拉取期间改变。")
-            result.extend(rows)
+            collect(page, rows)
     else:
         if not 1 <= pages <= limit or (total is not None and total > size * pages):
             raise _incomplete(endpoint, "超过分页上限或页数无效。")
@@ -300,22 +395,26 @@ def _pages(source, endpoint, make_request, size, *, limit=1000, workers=1):
             rows, page_total, page_count = load(page)
             if not rows or (page_total, page_count) != (total, pages):
                 raise _incomplete(endpoint, f"第 {page} 页缺失或总数改变。")
+            if expected_total is not None and len(rows) != min(size, expected_total - (page - 1) * size):
+                raise _incomplete(endpoint, f"第 {page} 页条数不完整。")
             return rows
 
         if pages > 1:
             if not first:
                 raise _incomplete(endpoint, "首页为空但存在后续页。")
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                for rows in executor.map(checked, range(2, pages + 1)):
-                    result.extend(rows)
+                pending = iter(executor.map(checked, range(2, pages + 1)))
+                for page in range(2, pages + 1):
+                    if stage:
+                        source.report(stage, 当前页=page, 已读取=len(result))
+                    rows = next(pending)
+                    collect(page, rows)
+    if stage:
+        source.report(stage, 已读取=len(result))
     if total is not None and len(result) != total:
+        if inspection and duplicates and len(result) < total:
+            raise _InspectionShortBatch(result, total)
         raise _incomplete(endpoint, f"应有 {total} 条，实际读取 {len(result)} 条。")
-    seen = set()
-    for row in result:
-        serialized = json.dumps(row, sort_keys=True, ensure_ascii=False)
-        if serialized in seen:
-            raise _incomplete(endpoint, "分页返回重复记录，无法确认是否漏页。")
-        seen.add(serialized)
     return result
 
 
@@ -375,11 +474,11 @@ def _risk(source, now):
         return {"orderBy": "", "pageSize": 50, "currentPage": page, "queryData": query}
 
     try:
-        parents = _pages(source, "risk_list", params, 50, limit=10)
+        parents = _pages(source, "risk_list", params, 50, limit=10, stage="风险排查主列表")
     except ZhihangSourceError as error:
         if error.status != 404:
             raise
-        parents = _pages(source, "risk_list_alt", params, 50, limit=10)
+        parents = _pages(source, "risk_list_alt", params, 50, limit=10, stage="风险排查备用列表")
 
     candidates = defaultdict(list)
     months = (now.strftime("%Y-%m"), now.strftime("%Y/%m"))
@@ -400,14 +499,17 @@ def _risk(source, now):
         score = (date.timestamp() / 100_000_000 if date else 0) - index
         if value:
             candidates[label].append((score, value))
-    if any(not candidates[label] for label in _BUILDINGS.values()):
-        raise _incomplete("risk", "无法确认本月 A–E 楼排查记录，保留原数据。")
+    source.report("风险排查楼栋归属", **{label: len(candidates[label]) for label in _BUILDINGS.values()})
+    missing = [label for label in _BUILDINGS.values() if not candidates[label]]
+    if missing:
+        raise _incomplete("risk", f"无法确认本月{'、'.join(missing)}排查记录，保留原数据。")
     rows = []
     selected = {label: max(candidates[label], key=lambda entry: entry[0])[1] for label in _BUILDINGS.values()}
     if len(set(selected.values())) != len(selected):
         raise _incomplete("risk", "不同楼栋命中同一个排查记录，无法核验楼栋归属。")
     for label, parent in selected.items():
-        detail = _pages(source, "risk_detail", lambda page: params(page, parent), 50, limit=100, workers=2)
+        detail = _pages(source, "risk_detail", lambda page: params(page, parent), 50, limit=100, workers=2,
+                        stage=f"风险排查明细 · {label}")
         if not detail:
             raise _incomplete("risk", f"{label} 本月排查明细为空。")
         source_ids = [value for row in detail if (value := _first(row, "id_", "id", "id_$rel", "ID_"))]
@@ -426,7 +528,10 @@ def _risk(source, now):
             fields[column] = ("无" if value in {"w", "无"} else "有") if value else ""
         return fields
 
-    return {"risk": _map_rows("risk", rows, map_row)}
+    source.report("风险排查记录核验", 待核验=len(rows))
+    result = _map_rows("risk", rows, map_row)
+    source.report("风险排查记录核验", 核验通过=len(result))
+    return {"risk": result}
 
 
 _CHANGE_STATUS = dict(zip("0 1 2 3 4 5 8 13 14".split(),
@@ -567,6 +672,78 @@ def _event_fields(row, now):
     return fields | {"同步关注类型": "、".join(focus), "近30天同步范围": "是" if recent else "否"}
 
 
+def _event_pages(source, label, filters, start_key, end_key, *, endpoint="event_list"):
+    date_keys = ("creatTime", "createTime", "notificationTime") if start_key == "startDate" else ("happenTime",)
+    start, end = (_date(filters[key]) for key in (start_key, end_key))
+
+    def read_range(since, until):
+        full_range = (since, until) == (start, end)
+        prefix = f"{'近30天事件' if endpoint == 'event_list' else '当月演练'} · {label}" if full_range else f"补拉 · {label} {since:%m-%d}至{until:%m-%d}"
+        query = filters | {start_key: f"{since:%Y-%m-%d %H:%M:%S}", end_key: f"{until:%Y-%m-%d %H:%M:%S}"}
+
+        def params(page, size):
+            return query | {"pageBean": {"pageNumber": page, "pageSize": size}}
+
+        def validate_dates(rows):
+            if full_range:
+                return
+            for row in rows:
+                moment = _date(_first(row, *date_keys))
+                if moment is None or not since <= moment <= until:
+                    raise _EventRangeMismatch(prefix)
+
+        def validate(rows, total, anchor):
+            keys = {_first(row, "id", "eventNumber") for row in rows}
+            if len(keys) != total or "" in keys or (rows and anchor not in keys):
+                raise _incomplete("event_list", f"{prefix}有 {len(keys)} 个唯一事件 ID，无法与基准 {total} 条对账。")
+            validate_dates(rows)
+            return rows
+
+        stage = f"{prefix}基准"
+        first, total = _pages(source, endpoint, lambda page: params(page, 1), 1, stage=stage, probe=True)
+        if total is None:
+            raise _incomplete("event_list", f"{prefix}缺少源端总数，无法确认分页完整性。")
+        validate_dates(first)
+        anchor = _first(first[0], "id", "eventNumber") if first else ""
+        if total <= 1:
+            return validate(first, total, anchor)
+        if not anchor:
+            raise _incomplete("event_list", f"{prefix}基准样本缺少事件主键。")
+        days = (until.date() - since.date()).days
+        split = since.replace(hour=0, minute=0, second=0) + timedelta(days=(days + 1) // 2)
+        can_split = since < split < until
+        sizes = (50, 15) if endpoint == "event_list" else (15, 50)
+        for size in (sizes if can_split else (*sizes, 1)):
+            stage = f"{prefix}每页{size}条"
+            try:
+                rows = _pages(source, endpoint, lambda page: params(page, size), size, workers=5,
+                              stage=stage, expected_total=total)
+                validate(rows, total, anchor)
+                source.report(stage, 唯一事件数=len(rows))
+                return rows
+            except ZhihangSourceError as error:
+                if (size == 1 or isinstance(error, _EventRangeMismatch)
+                        or (error.code != "incomplete" and error.status not in (400, 422))):
+                    raise
+                source.report(stage, 结果=str(error))
+
+        # Both queries include midnight so events with fractional seconds are not missed.
+        left, right = read_range(since, split), read_range(split, until)
+        unique = {}
+        for row in left + right:
+            key = _first(row, "id", "eventNumber")
+            if key in unique and row != unique[key]:
+                raise _incomplete("event_list", f"{prefix}分段交界同一事件 ID 的内容不同。")
+            unique[key] = row
+        stage = f"{prefix}分段核验"
+        source.report(stage, 源端总数=total, 分段返回=len(left) + len(right), 唯一事件数=len(unique))
+        if len(unique) != total:
+            raise _incomplete("event_list", f"{prefix}分段返回 {len(unique)} 条唯一事件，与基准 {total} 条不一致。")
+        return validate(list(unique.values()), total, anchor)
+
+    return read_range(start, end)
+
+
 def _event(source, now):
     filters = _event_filters() | dict.fromkeys(
         "endDate eventAlarmStatus realEvent startDate userId".split(), "",
@@ -574,10 +751,16 @@ def _event(source, now):
     start = f"{now.date() - timedelta(days=29)} 00:00:00"
     end = f"{now.date()} 23:59:59"
     combined = {}
-    for start_key, end_key in (("startDate", "endDate"), ("startHappendDate", "endHappendDate")):
-        rows = _pages(source, "event_list", lambda page: filters | {
-            start_key: start, end_key: end, "pageBean": {"pageNumber": page, "pageSize": 300},
-        }, 300, workers=5)
+    counts = []
+    source_total = 0
+    for label, start_key, end_key in (("创建时间", "startDate", "endDate"),
+                                      ("发生时间", "startHappendDate", "endHappendDate")):
+        stage = f"近30天事件 · {label}"
+        source.report(stage, 日期范围=f"{start} 至 {end}")
+        rows = _event_pages(source, label, filters | {start_key: start, end_key: end}, start_key, end_key)
+        source.report(stage, 已读取=len(rows))
+        counts.append(f"按{label}查询返回 {len(rows)} 条")
+        source_total += len(rows)
         seen = set()
         for row in rows:
             fields = _event_fields(row, now)
@@ -590,8 +773,76 @@ def _event(source, now):
             if fields["近30天同步范围"] == "是":
                 combined.setdefault(key, fields)
     if not combined:
-        raise ZhihangSourceError("empty", "智航事件近 30 天为空，保留上次已核验数据。")
+        if source.preview and source_total == 0:
+            _diagnose_empty_event(source, filters, start, end)
+        raise ZhihangSourceError("empty", f"智航事件近 30 天无有效记录（{'，'.join(counts)}），保留上次已核验数据。")
     return {"event": combined}
+
+
+def _diagnose_empty_event(source, filters, start, end):
+    # These controls only report totals. They never feed preview or sync rows.
+    checks = (
+        ("事件诊断 · 清空日期、楼栋和状态筛选", {"domainCodeList": [], "orderStatus": ""}),
+        ("事件诊断 · 仅 A–E 楼", {"orderStatus": ""}),
+        ("事件诊断 · A–E 楼及原状态", {}),
+        ("事件诊断 · A–E 楼创建时间，原状态", {"startDate": start, "endDate": end}),
+        ("事件诊断 · A–E 楼创建时间，不限状态", {"orderStatus": "", "startDate": start, "endDate": end}),
+        ("事件诊断 · A–E 楼发生时间，原状态", {"startHappendDate": start, "endHappendDate": end}),
+        ("事件诊断 · A–E 楼发生时间，不限状态",
+         {"orderStatus": "", "startHappendDate": start, "endHappendDate": end}),
+    )
+    for stage, overrides in checks:
+        params = filters | overrides | {"pageBean": {"pageNumber": 1, "pageSize": 1}}
+        start_at = params["startDate"] or params["startHappendDate"]
+        end_at = params["endDate"] or params["endHappendDate"]
+        source.report(stage, 楼栋筛选编码="、".join(params["domainCodeList"]) or "空",
+                      状态筛选编码=params["orderStatus"] or "空",
+                      日期范围=f"{start_at} 至 {end_at}" if start_at else "空")
+        try:
+            _pages(source, "event_list", lambda page: params, 1, stage=stage, probe=True)
+        except ZhihangSourceError as error:
+            source.report(stage, 结果=str(error))
+            if error.code in {"auth_required", "access_denied", "source_unavailable"}:
+                break
+    source.report("事件近30天结果核验", 有效记录=0)
+
+
+def _inspection_rows(source, filters):
+    def read(size, stage, *, building=""):
+        return _pages(source, "inspection_list",
+                      lambda page: filters | {"pageNum": page, "pageSize": size, "buildingCode": building},
+                      size, workers=5 if size == 15 else 1, stage=stage)
+
+    try:
+        return read(15, "巡检首次分页")
+    except _InspectionShortBatch as first:
+        try:
+            return read(50, "巡检换页重拉")
+        except _InspectionShortBatch as second:
+            source.report("巡检按楼分批核验", 源端总数=second.total)
+            if first.total != second.total:
+                raise _incomplete("inspection_list", "两次分页的源端总数不同，请重新预览。") from None
+            observed = first.rows + second.rows
+            buildings = sorted({_first(row, "buildingCode") for row in observed} - {""})
+            if not buildings:
+                # The source client supports larger pages; still require exact coverage.
+                return read(500, "巡检扩大页长重拉")
+            combined = {}
+            for index, building in enumerate(buildings, 1):
+                label = next((_building(row.get("buildingName")) for row in observed
+                              if _first(row, "buildingCode") == building), "")
+                batch = read(50, f"巡检分楼 {index} · {label or '未识别楼栋'}", building=building)
+                for row in batch:
+                    key = _inspection_source_key(row)
+                    if key in combined:
+                        raise _incomplete("inspection_list", "同一工单 ID 出现在不同楼栋。") from None
+                    combined[key] = row
+            source.report("巡检按楼分批核验", 唯一工单数=len(combined))
+            if (len(combined) != second.total or
+                    any(_inspection_source_key(row) not in combined for row in observed)):
+                raise _incomplete("inspection_list", f"按楼拉取后有 {len(combined)} 张唯一工单，"
+                                  f"无法与源端 {second.total} 张完整对账。") from None
+            return list(combined.values())
 
 
 def _inspection(source, now):
@@ -603,8 +854,7 @@ def _inspection(source, now):
         "planStartDatetime": f"{now:%Y-%m}-01 00:00:00",
         "planEndDatetime": f"{now:%Y-%m}-{calendar.monthrange(now.year, now.month)[1]:02d} 23:59:59",
     }
-    rows = _pages(source, "inspection_list", lambda page: filters | {"pageNum": page, "pageSize": 15},
-                  15, workers=5)
+    rows = _inspection_rows(source, filters)
 
     def map_row(row):
         start, end = (_date(row.get(key)) for key in ("planStartDatetime", "planEndDatetime"))
@@ -644,7 +894,10 @@ def _inspection(source, now):
 
     # The original target has no source ID column. Sequence is display-only.
     numbered = (row | {"_sequence": str(index)} for index, row in enumerate(rows, 1))
-    return {"inspection": _map_rows("inspection", numbered, map_row)}
+    source.report("巡检工单核验", 待核验=len(rows))
+    result = _map_rows("inspection", numbered, map_row)
+    source.report("巡检工单核验", 核验通过=len(result))
+    return {"inspection": result}
 
 
 _DRILL_PLAN_FIELDS = {
@@ -881,7 +1134,7 @@ def _drill(source, now):
         return {"drill": dict(zip(plans, executor.map(enrich, plans.values())))}
 
 
-def pull(kind, now):
+def pull(kind, now, *, report=None, preview=False):
     """Return a complete batch as {target_key: {identity: Feishu fields}}.
 
     Naive datetimes use Beijing time. A failed pull returns no partial data.
@@ -891,4 +1144,4 @@ def pull(kind, now):
         raise ZhihangSourceError("invalid_kind", "未知的智航数据类别。")
     if not isinstance(now, datetime):
         raise _incomplete(kind, "拉取时间必须是有效的日期时间。")
-    return adapters[kind](_Source(), _local(now))
+    return adapters[kind](_Source(report, preview=preview), _local(now))

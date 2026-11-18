@@ -66,7 +66,7 @@
         </div>
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="v2-notice-edit-surface">
         <div class="v2-notice-context-row" :class="{'has-tags':form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired}"><div class="v2-notice-context-controls">
-        <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations :key="formKey" :form="form" :locked="locked" @busy="busy=$event" @bound="associationBound"><template #context><div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div></template></NoticeRelations></div>
+        <div data-notice-section="relations" class="v2-notice-field-section"><NoticeRelations ref="relations" :key="formKey" :form="form" :action="action" :locked="locked" @busy="busy=$event" @bound="associationBound"><template #context><div class="v2-notice-editor-context"><NTag :bordered="false">{{ typeLabel(form.values.work_type) }}</NTag><span>{{ selectedBuildingLabel }}</span></div></template></NoticeRelations></div>
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
           <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
         </div><aside v-if="form.values.target_record_id||form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-top-tags" aria-label="通告推荐标签"><NoticeAlertTags v-if="form.values.target_record_id" :record-id="form.values.target_record_id" :work-type="form.values.work_type" /><section v-if="form.values.work_type==='repair'&&form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section></aside></div>
@@ -97,6 +97,7 @@
           <div v-if="form&&!job&&!ambiguous" class="v2-notice-submit-group" data-notice-section="action">
             <NRadioGroup v-if="!confirming" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
             <NButton v-if="confirming" type="primary" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton>
+            <NButton v-else-if="needsOriginalNotice(form,action)" type="primary" :disabled="locked" @click="locateOriginal"><Search :size="16" />查找原通告</NButton>
             <NButton v-else type="primary" :disabled="locked||!form.actions.length||!form.values.dingtalk_robot_ids?.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton>
           </div>
         </div>
@@ -120,7 +121,7 @@ import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
 import { trackButtonRequest } from './actionMotion';
-import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,noticeCacheKey,type NoticeForm } from './noticeForm';
+import { parseNoticeForm,noticeCommand,noticePreview,validateNotice,needsOriginalNotice,endProgress,normalizePastedNotice,noticeDraftContext,restoreNoticeEdits,noticeCacheKey,type NoticeForm } from './noticeForm';
 import { noticeCycleWarnings } from '../noticeCycleWarnings';
 import NoticePlanBinding from './NoticePlanBinding.vue';
 import NoticeFields from './NoticeFields.vue';
@@ -216,6 +217,7 @@ const pendingPhotos=computed(()=>Number(siteUpload.value?.pending||0)+Number(ali
 function uploadBusy(value:boolean){uploading.value=value;}
 function persistAfterUpload(){void nextTick(persist);}
 const verifyBeforeStart=ref(false);
+const relations=ref<InstanceType<typeof NoticeRelations>>();
 const action=ref('start'),sop=ref<Dict>({}),sopField=ref<Dict>({}),photos=ref<Dict[]>([]),aliPhotos=ref<Dict[]>([]),job=ref<Dict|null>(null);
 const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string;title?:string;building?:string;cycle?:string}[]>([]),sourceLoading=ref(false),sourceExpanded=ref(false);
 function toggleSource(){sourceExpanded.value=!sourceExpanded.value;if(sourceExpanded.value)void loadSources();}
@@ -304,7 +306,10 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   detailAbort?.abort();const c=new AbortController();detailAbort=c;editing.value=true;detailLoading.value=true;detailError.value='';form.value=null;job.value=null;ambiguous.value=false;frozen=null;operationId='';draftVersion=0;photos.value=[];aliPhotos.value=[];sop.value={};sopField.value={};formKey='';
   const work=row?.work_type||manualType||kind.value;
   const q=new URLSearchParams({scope:row?._request_scope||props.scope,work_type:work,month:applied.value.month});
-  if(row)q.set(row.active_item_id?'active_item_id':'record_id',rowKey(row));else if(initial){for(const key of ['active_item_id','record_id','prefill_context_id','prefill_source_record_id','prefill_target_record_id','prefill_action'])if(params.value.has(key))q.set(key,params.value.get(key)!);}else q.set('manual','1');
+  if(row){
+    const activeId=row.active_item_id||row.target_record_id;
+    q.set(activeId?'active_item_id':'record_id',activeId||rowKey(row));
+  }else if(initial){for(const key of ['active_item_id','record_id','prefill_context_id','prefill_source_record_id','prefill_target_record_id','prefill_action'])if(params.value.has(key))q.set(key,params.value.get(key)!);}else q.set('manual','1');
   try{
     const result=parsedHtml?{fragments:{detail:parsedHtml}}:await requestJson('/api/workbench/lite-detail?'+q,{signal:c.signal,cache:'no-store'});if(c.signal.aborted)return;
     const next=parseNoticeForm(result.fragments?.detail||'');
@@ -412,6 +417,7 @@ function preview(){
   if(!form.value||locked.value)return;
   attempted.value=true;issueTarget.value=null;detailError.value=validateNotice(form.value,action.value,sop.value,photos.value);
   if(verifyBeforeStart.value&&action.value==='start'){detailError.value='请先核验原目标通告，不能重复发送开始。';issueTarget.value={target:'relations',label:'核验关联'};}
+  if(needsOriginalNotice(form.value,action.value)){locateOriginal();return;}
   if(pendingPhotos.value){detailError.value='还有图片未上传成功，请重试或移除后再预览。';issueTarget.value={target:siteUpload.value?.pending?'photos':'ali',label:'处理未上传图片'};}
   if(!detailError.value&&action.value==='end'&&form.value.groupId){
     const state=sopStatus.value;issueTarget.value={target:'workorder',label:'核验工单状态'};
@@ -425,6 +431,12 @@ function preview(){
     return;
   }
   issueTarget.value=null;confirming.value=true;void nextTick(()=>document.querySelector('.v2-notice-editor>.n-card-content')?.scrollTo({top:0}));
+}
+function locateOriginal(){
+  detailError.value='请核对原通告的楼栋、名称和时间后选择记录。若首条刚发送，请在办理记录中核对同步状态。';
+  issueTarget.value={target:'relations',label:'核验关联'};
+  focusIssue();
+  void relations.value?.openTarget();
 }
 function focusIssue(){
   if(!issueTarget.value)return;const target=issueTarget.value.target;
@@ -518,7 +530,28 @@ function pastePhotos(event:ClipboardEvent){if(event.clipboardData?.files.length&
 let sourceTimer=0,sourceSequence=0;
 function searchSources(q:string){clearTimeout(sourceTimer);sourceTimer=window.setTimeout(()=>loadSources(q),300);}
 async function loadSources(q=''){if(!form.value)return;const current=form.value,sequence=++sourceSequence;sourceLoading.value=true;try{const value=await requestJson('/api/workbench/source-options?'+new URLSearchParams({scope:current.values.scope,work_type:current.values.work_type,month:applied.value.month,q}));if(form.value===current&&sequence===sourceSequence){sourceOptions.value=(value.items||[]).map((r:Dict)=>({label:[r.title,r.maintenance_cycle,r.building,r.progress].filter(Boolean).join(' · '),value:r.source_record_id,title:r.title,building:r.building,cycle:r.maintenance_cycle}));if(current.values.source_record_id&&!sourceOptions.value.some(o=>o.value===current.values.source_record_id))sourceOptions.value.unshift({label:'已绑定源表事项',value:current.values.source_record_id});}}catch(e){if(form.value===current&&sequence===sourceSequence)detailError.value=(e as Error).message;}finally{if(form.value===current&&sequence===sourceSequence)sourceLoading.value=false;}}
-async function associationBound(result:Dict){const v=form.value?.values;if(!v)return;const selectedAction=['update','end'].includes(action.value)?action.value:'update';try{sessionStorage.removeItem(formKey);}catch{/* Server identity is authoritative. */}saved.value=snapshot();editing.value=false;busy.value=false;window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,record_id:result.target_record_id||v.target_record_id,_request_scope:v.scope},false,selectedAction);}
+async function associationBound(result:Dict){
+  const current=form.value;if(!current)return;
+  const v=current.values,selectedAction=['update','end'].includes(action.value)?action.value:'update';
+  const restoring=needsOriginalNotice(current,action.value);
+  const carried=restoring?Object.fromEntries(current.fields.filter(field=>
+    !field.readonly&&!['title','name','start_time','end_time','fault_time','expected_time'].includes(field.key)&&String(v[field.key]??'').trim()
+  ).map(field=>[field.key,v[field.key]])):{};
+  const previousKey=formKey;
+  if(restoring)persist();
+  else try{sessionStorage.removeItem(previousKey);}catch{/* Read the canonical association again. */}
+  saved.value=snapshot();editing.value=false;busy.value=false;
+  window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);
+  const target=result.target_record_id||v.target_record_id;
+  await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,target_record_id:target,_request_scope:v.scope},false,selectedAction);
+  const reopened=form.value;
+  if(!reopened||reopened===current||reopened.values.target_record_id!==target||action.value!==selectedAction)return;
+  if(restoring&&!job.value&&!ambiguous.value){
+    for(const field of reopened.fields)if(!field.readonly&&field.key in carried)reopened.values[field.key]=carried[field.key];
+    if(!persist())return;
+  }
+  if(previousKey!==formKey)try{sessionStorage.removeItem(previousKey);}catch{/* Only remove the superseded local copy. */}
+}
 function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;
   const current=form.value,selected=sourceChoice.value;

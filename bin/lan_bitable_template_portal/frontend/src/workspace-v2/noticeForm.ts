@@ -109,6 +109,7 @@ export function noticeCommand(form:NoticeForm,action:string,operationId:string,d
 }
 export function validateNotice(form:NoticeForm,action:string,sop:Dict,photos:Dict[]):string {
   if(!form.actions.includes(action))return '该通告当前不支持此操作，请刷新后核对。';
+  if(needsOriginalNotice(form,action))return '请先查找并核验原通告，再发送更新或结束。';
   if(!Array.isArray(form.values.dingtalk_robot_ids)||!form.values.dingtalk_robot_ids.length)return '钉钉群推送为必选项，请至少选择一个钉钉机器人。';
   const cycleIssues=Object.values(noticeCycleWarnings(form.values,form.cycleRules));
   if(cycleIssues.length)return cycleIssues.join('\n');
@@ -132,4 +133,9 @@ export function validateNotice(form:NoticeForm,action:string,sop:Dict,photos:Dic
   if(form.sop&&action==='start'&&!sop.exempt&&(!sop.sop_id||!(sop.operator_record_ids??(sop.operator_record_id?[sop.operator_record_id]:[])).length||!sop.reviewer_record_id))return '请完成本次工单、操作人及审核人选择，或确认本次不使用工单。';
   if(form.sop&&action==='start'&&!sop.exempt&&(sop.operator_record_ids??[sop.operator_record_id]).includes(sop.reviewer_record_id))return '操作人与现场审核人不能是同一人。';
   return '';
+}
+
+export function needsOriginalNotice(form:NoticeForm,action:string):boolean {
+  const values=form.values;
+  return ['update','end'].includes(action) && !values.target_record_id && !values.active_item_id && !values.source_record_id;
 }

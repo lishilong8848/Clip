@@ -61,8 +61,10 @@ def request_token(message):
 
 
 class BrowserLogin:
-    def __init__(self, store):
+    def __init__(self, store, *, save_token=None, profile_dir='plan_convergence_auth'):
         self.store = store
+        self.save_token = save_token or self._save_shared_token
+        self.profile_dir = profile_dir
         self._lock = threading.RLock()
         self._thread = None
         self._stop = threading.Event()
@@ -107,6 +109,11 @@ class BrowserLogin:
             if self._state['job_id'] == job_id and not self._stop.is_set():
                 self._state.update(status=status, message=message)
 
+    def _save_shared_token(self, token):
+        owner = str(auth._jwt(token).get('UserName') or '')
+        auth.save_config({'token': token, 'login_name': owner, 'token_owner_note': owner,
+                          'display_name': ''}, self.store)
+
     def _run(self, job_id, stop):
         lower_current_thread_priority()
         tokens = self._tokens(stop, time.monotonic() + LOGIN_TIMEOUT)
@@ -129,9 +136,7 @@ class BrowserLogin:
                 with self._lock:
                     if stop.is_set() or job_id != self._state['job_id']:
                         return
-                    owner = str(auth._jwt(token).get('UserName') or '')
-                    auth.save_config({'token': token, 'login_name': owner, 'token_owner_note': owner,
-                                      'display_name': ''}, self.store)
+                    self.save_token(token)
                     self._state.update(status='success', message='智航认证成功，已自动保存')
                 return
             if not stop.is_set():
@@ -147,7 +152,7 @@ class BrowserLogin:
 
     def _tokens(self, stop, deadline):
         import websocket
-        profile = Path(get_data_file_path('plan_convergence_auth')) / 'browser_profile'
+        profile = Path(get_data_file_path(self.profile_dir)) / 'browser_profile'
         profile.mkdir(parents=True, exist_ok=True)
         port_file = profile / 'DevToolsActivePort'
         port_file.unlink(missing_ok=True)

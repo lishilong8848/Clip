@@ -23,9 +23,12 @@ import {NAlert,NButton,NSelect,NTag,useDialog} from 'naive-ui';
 import {Search,X} from 'lucide-vue-next';
 import {requestJson,type Dict} from './client';
 import type {NoticeForm} from './noticeForm';
-const props=defineProps<{form:NoticeForm;locked:boolean}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
+import {needsOriginalNotice} from './noticeForm';
+const props=defineProps<{form:NoticeForm;locked:boolean;action?:string}>(),emit=defineEmits<{bound:[result:Dict];busy:[value:boolean]}>(),dialog=useDialog();
 const mode=ref(''),search=ref(''),selected=ref<string|null>(null),items=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref(''),pendingNotice=ref('');
 const targetBound=computed(()=>!!props.form.values.target_record_id);
+const recovering=computed(()=>needsOriginalNotice(props.form,props.action||''));
+const ongoingTarget=computed(()=>recovering.value||props.form.detailMode==='ongoing');
 const projectId=computed(()=>props.form.values.repair_management_record_id||props.form.repairRelation?.projectId||props.form.values.source_record_id||'');
 const eventId=computed(()=>props.form.repairRelation?.eventId||'');
 const eventBound=computed(()=>!!eventId.value&&!!projectId.value);
@@ -55,6 +58,7 @@ async function refreshWaiting(){
 }
 watch(()=>[props.form.values.scope,props.form.values.work_type,props.form.values.source_record_id],()=>{pendingNotice.value='';void refreshWaiting();},{immediate:true});
 function toggle(next:string){if(busy.value||props.locked)return;clearTimeout(searchTimer);if(mode.value===next){controller?.abort();mode.value='';loading.value=false;error.value='';}else void lookup(next);}
+defineExpose({openTarget:()=>mode.value==='target'&&(loading.value||items.value.length)?undefined:lookup('target')});
 function searchCandidates(value:string){search.value=value;clearTimeout(searchTimer);if(mode.value==='event')searchTimer=window.setTimeout(()=>lookup('event'),300);}
 async function lookup(next:string){
   if(busy.value||props.locked)return;
@@ -63,7 +67,7 @@ async function lookup(next:string){
   mode.value=next;selected.value=null;items.value=[];loading.value=true;error.value='';
   const v=props.form.values;
   try{
-    const data=next==='event'?await requestJson('/api/workbench/repair-event-candidates?'+new URLSearchParams({scope:v.scope,q:search.value,limit:'100'}),{signal:c.signal,cache:'no-store'}):await requestJson('/api/notice-target-candidates',{method:'POST',signal:c.signal,body:JSON.stringify({scope:v.scope,lookup_context:props.form.detailMode==='ongoing'?'target_table':'planned_target_table',work_type:v.work_type,title:v.title,start_time:v.start_time,end_time:v.end_time,action:'update',content:v.content,reason:v.reason,impact:v.impact,progress:v.progress})});
+    const data=next==='event'?await requestJson('/api/workbench/repair-event-candidates?'+new URLSearchParams({scope:v.scope,q:search.value,limit:'100'}),{signal:c.signal,cache:'no-store'}):await requestJson('/api/notice-target-candidates',{method:'POST',signal:c.signal,body:JSON.stringify({scope:v.scope,lookup_context:recovering.value?'scoped_active_target_table':ongoingTarget.value?'target_table':'planned_target_table',work_type:v.work_type,title:v.title,start_time:v.start_time,end_time:v.end_time,action:props.action==='end'?'end':'update',content:v.content,reason:v.reason,impact:v.impact,progress:v.progress})});
     if(c.signal.aborted)return;
     items.value=(next==='event'?data.records||[]:data.candidates||[]).filter((i:Dict)=>candidateId(i));
     if(next==='target'&&items.value.some(i=>candidateId(i)===v.target_record_id))selected.value=v.target_record_id;
@@ -73,7 +77,7 @@ async function lookup(next:string){
   }catch(e){if(!c.signal.aborted)error.value=(e as Error).message;}
   finally{if(controller===c)loading.value=false;}
 }
-function confirm(){const item=items.value.find(i=>candidateId(i)===selected.value);if(!item||busy.value||props.locked)return;dialog.warning({title:'确认保存关联',content:'将关联“'+(item.title||item.project_title||item.event_title)+'”，并重新读取通告。当前未保存的填写将重置，请先核对。',positiveText:'确认关联并重新读取',negativeText:'返回',onPositiveClick:async()=>{busy.value=true;emit('busy',true);error.value='';clearTimeout(waitTimer);waitController?.abort();pendingNotice.value='';const v=props.form.values;try{const result=mode.value==='event'?await requestJson('/api/workbench/repair-event-bind',{method:'POST',body:JSON.stringify({scope:v.scope,source_record_id:v.repair_management_record_id||v.source_record_id||'',event_record_id:item.event_record_id,candidate_project_record_id:item.repair_management_record_id,active_item_id:v.active_item_id||'',target_record_id:v.target_record_id||''})}):await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:props.form.detailMode==='ongoing'?'ongoing':'planned',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id||item.active_item_id||'',source_record_id:v.source_record_id||'',target_record_id:candidateId(item),record_id:candidateId(item),title:v.title||item.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time,status:item.status||''})});if(result.binding_pending){pendingNotice.value=String(result.message||'关联请求已保存，等待飞书同步后自动核验绑定。');waitTimer=window.setTimeout(refreshWaiting,30000);return;}emit('busy',false);emit('bound',result);}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;emit('busy',false);}}});}
+function confirm(){const item=items.value.find(i=>candidateId(i)===selected.value);if(!item||busy.value||props.locked)return;dialog.warning({title:'确认保存关联',content:'将关联“'+(item.title||item.project_title||item.event_title)+'”，并重新读取通告。'+(recovering.value?'请核对原通告时间，已填正文会保留。':'请先核对当前未保存的填写。'),positiveText:'确认关联并重新读取',negativeText:'返回',onPositiveClick:async()=>{busy.value=true;emit('busy',true);error.value='';clearTimeout(waitTimer);waitController?.abort();pendingNotice.value='';const v=props.form.values;try{const result=mode.value==='event'?await requestJson('/api/workbench/repair-event-bind',{method:'POST',body:JSON.stringify({scope:v.scope,source_record_id:v.repair_management_record_id||v.source_record_id||'',event_record_id:item.event_record_id,candidate_project_record_id:item.repair_management_record_id,active_item_id:v.active_item_id||'',target_record_id:v.target_record_id||''})}):await requestJson('/api/notice-identity/bind',{method:'POST',body:JSON.stringify({scope:v.scope,binding_context:ongoingTarget.value?'ongoing':'planned',work_type:v.work_type,notice_type:v.notice_type,active_item_id:v.active_item_id||item.active_item_id||'',source_record_id:v.source_record_id||'',target_record_id:candidateId(item),record_id:candidateId(item),title:v.title||item.title,reason:v.reason,start_time:v.start_time,end_time:v.end_time,status:item.status||''})});if(result.binding_pending){pendingNotice.value=String(result.message||'关联请求已保存，等待飞书同步后自动核验绑定。');waitTimer=window.setTimeout(refreshWaiting,30000);return;}emit('busy',false);emit('bound',result);}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;emit('busy',false);}}});}
 onBeforeUnmount(()=>{controller?.abort();waitController?.abort();clearTimeout(searchTimer);clearTimeout(waitTimer);});
 </script>
 <style>

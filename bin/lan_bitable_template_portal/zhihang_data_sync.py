@@ -113,6 +113,13 @@ def matches(expected, actual):
     return True
 
 
+_INSPECTION_ROW_METADATA = {"序号", "自动编码", "创建时间"}
+
+
+def _inspection_business_fields(fields):
+    return {name: value for name, value in fields.items() if name not in _INSPECTION_ROW_METADATA}
+
+
 def credential_revision(store):
     return hashlib.sha256(auth.load_config(store)["token"].encode()).hexdigest()
 
@@ -139,10 +146,13 @@ def describe_error(exc):
 
 
 class ZhihangSync:
+    namespace = NS
+    tasks = TASKS
+
     def __init__(self, store, *, cloud=None, pull=None, notify=None):
         self.store = store
         self.cloud = cloud or (lambda table: ZhihangBitable(table, BASE))
-        self.pull = pull or self._pull
+        self.pull = pull
         self.notify = notify
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ZhihangData")
@@ -150,24 +160,24 @@ class ZhihangSync:
         self.closing = threading.Event()
 
     @staticmethod
-    def _pull(kind, now):
+    def _pull(kind, now, **options):
         from .zhihang_data_sources import pull
-        return pull(kind, now)
+        return pull(kind, now, **options)
 
     def close(self):
         self.closing.set()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
     def read(self, key):
-        return self.store.get_document(NS, key) or {}
+        return self.store.get_document(self.namespace, key) or {}
 
     def save(self, key, value):
-        self.store.put_document(NS, key, value)
+        self.store.put_document(self.namespace, key, value)
 
     def settings(self, kind):
-        if kind not in TASKS:
+        if kind not in self.tasks:
             raise SyncError("未知智航数据类型。")
-        return {"enabled": False, "confirmed": False, "notify": False, "times": TASKS[kind][1],
+        return {"enabled": False, "confirmed": False, "notify": False, "times": self.tasks[kind][1],
                 **self.read("settings:" + kind)}
 
     def configure(self, kind, payload):
@@ -199,7 +209,7 @@ class ZhihangSync:
         return {key: run[key] for key in keys if key in run}
 
     def history(self):
-        return sorted((doc["payload"] for doc in self.store.list_documents(NS, key_prefix="run:")),
+        return sorted((doc["payload"] for doc in self.store.list_documents(self.namespace, key_prefix="run:")),
                       key=lambda run: run["created_at"], reverse=True)
 
     def prune(self):
@@ -212,7 +222,7 @@ class ZhihangSync:
             if counts[key] <= 20:
                 continue
             for prefix in ("rows:", "journal:", "card:", "run:"):
-                self.store.delete_document(NS, prefix + run["id"])
+                self.store.delete_document(self.namespace, prefix + run["id"])
 
     def overview(self):
         from .zhihang_data_cards import notification_targets
@@ -220,7 +230,7 @@ class ZhihangSync:
         history = self.history()
         now = dt.datetime.now(TZ)
         tasks = []
-        for kind, (label, _, (table, view)) in TASKS.items():
+        for kind, (label, _, (table, view)) in self.tasks.items():
             cfg = self.settings(kind)
             runs = [run for run in history if run["kind"] == kind]
             next_at = min((slot for slot in self.slots(cfg, now) if slot > now), default=None)
@@ -242,7 +252,8 @@ class ZhihangSync:
             raise FileNotFoundError("执行记录不存在。")
         rows = list(self.read("rows:" + run_id).values())
         start = (page - 1) * 50
-        return dict(self.public(run), rows=rows[start:start + 50], total=len(rows), page=page, page_size=50)
+        return dict(self.public(run), stage=run.get("stage"), checks=run.get("checks", {}),
+                    rows=rows[start:start + 50], total=len(rows), page=page, page_size=50)
 
     @staticmethod
     def slots(cfg, now):
@@ -292,14 +303,17 @@ class ZhihangSync:
             if not self.closing.is_set() and (self.worker is None or self.worker.done()):
                 self.worker = self.executor.submit(self.drain)
 
+    def config_revision(self):
+        return credential_revision(self.store)
+
     def tick(self):
         now = dt.datetime.now(TZ)
-        for kind in TASKS:
+        for kind in self.tasks:
             cfg = self.settings(kind)
             if not cfg["enabled"] or not cfg["confirmed"]:
                 continue
             paused = self.read("pause:" + kind)
-            if paused and paused.get("revision") == credential_revision(self.store):
+            if paused and paused.get("revision") == self.config_revision():
                 continue
             eligible = [slot for slot in self.slots(cfg, now)
                         if cfg.get("changed_at", "") <= slot.isoformat() and slot <= now]
@@ -325,13 +339,13 @@ class ZhihangSync:
                 if run is None:
                     self.worker = None
                     return
-                run.update(status="running", error="")
+                run.update(status="running", error="", stage="", checks={})
                 run["attempts"] = run.get("attempts", 0) + 1
                 self.persist(run)
             try:
                 self.execute(run)
                 run.update(status="success", finished_at=dt.datetime.now(TZ).isoformat())
-                self.store.delete_document(NS, "pause:" + run["kind"])
+                self.store.delete_document(self.namespace, "pause:" + run["kind"])
             except Exception as exc:
                 has_journal = bool(self.read("journal:" + run["id"]))
                 transient = (isinstance(exc, httpx.TransportError) or
@@ -344,7 +358,7 @@ class ZhihangSync:
                 else:
                     run["next_attempt"] = (dt.datetime.now(TZ) + dt.timedelta(minutes=2)).isoformat()
                 if isinstance(exc, ZhihangSourceError) and exc.code in {"auth_required", "access_denied"}:
-                    self.save("pause:" + run["kind"], {"revision": credential_revision(self.store)})
+                    self.save("pause:" + run["kind"], {"revision": self.config_revision()})
             with self.lock:
                 self.persist(run)
                 self.prune()
@@ -355,7 +369,13 @@ class ZhihangSync:
         kind = run["kind"]
         target_kind = "change_basic" if kind == "change" else kind
         reference = date_value(run["created_at"])
-        client = self.cloud(TASKS[kind][2][0])
+
+        def report(stage, **facts):
+            run["stage"] = stage
+            if facts:
+                run.setdefault("checks", {}).setdefault(stage, {}).update(
+                    {key: value for key, value in facts.items() if value is not None})
+
         row_key = "rows:" + run["id"]
         rows = self.read(row_key)
         if not rows:
@@ -364,7 +384,9 @@ class ZhihangSync:
                 rows = self.read("rows:" + preview["id"])
                 reference = date_value(preview["created_at"])
             else:
-                batches = self.pull(kind, reference)
+                report("读取智航源数据")
+                batches = (self.pull(kind, reference) if self.pull is not None else
+                           self._pull(kind, reference, report=report, preview=run["mode"] == "preview"))
                 rows = batches.get(target_kind, {})
                 if kind == "change" and set(rows) != set(batches.get("change_workorder", {})):
                     raise SyncError("变更工单及基础信息数量不一致，保留上次数据。")
@@ -373,8 +395,10 @@ class ZhihangSync:
             if not rows:
                 raise SyncError("本轮没有可核验的完整记录，保留上次数据。")
             run["reference_at"] = reference.isoformat()
-            self.store.put_documents(NS, {"run:" + run["id"]: run, row_key: rows})
+            self.store.put_documents(self.namespace, {"run:" + run["id"]: run, row_key: rows})
         reference = date_value(run.get("reference_at") or run["created_at"])
+        report("读取飞书原表", 源数据已核验=len(rows))
+        client = self.cloud(self.tasks[kind][2][0])
         remote = {}
         for item in client.list_all():
             if item["record_id"] in remote:
@@ -382,14 +406,19 @@ class ZhihangSync:
             remote[item["record_id"]] = item["fields"]
         saved = self.read("journal:" + run["id"])
         if not saved:
+            report("核对飞书表结构与变更", 原表记录=len(remote))
             schema = {field["field_name"]: field["type"] for field in client.list_all("fields")}
-            journal, counts, expected = self.diff(kind, target_kind, rows, remote, schema, reference, source)
+            schema = self.prepare_schema(run, client, schema)
+            journal, counts, expected = self.diff(kind, target_kind, rows, remote, schema, reference, source, report=report)
             run["counts"] = counts
             if run["mode"] == "preview":
+                report("预览核验完成")
                 return
             saved = {"items": journal, "expected": expected}
-            self.store.put_documents(NS, {"run:" + run["id"]: run, "journal:" + run["id"]: saved})
+            self.store.put_documents(self.namespace, {"run:" + run["id"]: run, "journal:" + run["id"]: saved})
+        report("同步飞书原表")
         self.publish(run, client, remote, saved, target_kind)
+        report("回读核验")
         self.verify_batch(client, target_kind, saved["expected"])
         if self.settings(kind)["notify"] and self.notify and not run.get("notification"):
             try:
@@ -398,7 +427,10 @@ class ZhihangSync:
                 run["notification"] = {"status": "failed", "error": describe_error(exc)}
             self.persist(run)
 
-    def diff(self, kind, target_kind, rows, remote, schema, reference, source):
+    def prepare_schema(self, run, client, schema):
+        return schema
+
+    def diff(self, kind, target_kind, rows, remote, schema, reference, source, *, report=None):
         managed = self.managed(kind)
         by_key = {}
         for record_id, fields in remote.items():
@@ -408,20 +440,37 @@ class ZhihangSync:
         journal = []
         counts = {"total": len(rows), "create": 0, "update": 0, "delete": 0, "unchanged": 0, "unmanaged": 0}
         expected = {}
+        equivalent_duplicates = 0
         for raw in rows.values():
             key = source.identity(target_kind, raw)
-            if not key or key in expected or len(by_key.get(key, [])) > 1:
-                raise SyncError("源数据或原表存在缺失、重复的业务键，请先核对。")
+            if not key or key in expected:
+                raise SyncError("源数据存在缺失或重复的业务键，请先核对。")
+            ids = by_key.get(key, [])
+            if len(ids) > 1:
+                if target_kind != "inspection":
+                    raise SyncError("飞书原表存在重复的业务键，请先核对。")
+                first = _inspection_business_fields(remote[ids[0]])
+                if any(_inspection_business_fields(remote[record_id]) != first for record_id in ids[1:]):
+                    if report:
+                        report("核对飞书业务键", 冲突工单=source._first(raw, "工单名称"),
+                               计划区间=source._first(raw, "计划区间"), 同键原表记录=len(ids))
+                    raise SyncError("飞书原表的同一巡检工单有不同的业务内容，请核对执行详情。")
+                equivalent_duplicates += len(ids) - 1
             fields = coerce(raw, schema)
+            if len(ids) > 1:
+                # Keep each legacy copy and retain its own display sequence.
+                fields = _inspection_business_fields(fields)
             expected[key] = fields
-            record_id = (by_key.get(key) or [""])[0]
-            if record_id and matches(fields, remote[record_id]):
-                counts["unchanged"] += 1
-                continue
-            action = "update" if record_id else "create"
-            counts[action] += 1
-            journal.append({"action": action, "id": record_id, "key": key, "fields": fields,
-                            "before": remote[record_id] if record_id else {}})
+            for record_id in ids or [""]:
+                if record_id and matches(fields, remote[record_id]):
+                    counts["unchanged"] += 1
+                    continue
+                action = "update" if record_id else "create"
+                counts[action] += 1
+                journal.append({"action": action, "id": record_id, "key": key, "fields": fields,
+                                "before": remote[record_id] if record_id else {}})
+        if report and target_kind == "inspection":
+            report("核对飞书业务键", 业务相同的额外原表记录=equivalent_duplicates)
         for record_id, owned in managed.items():
             fields = remote.get(record_id)
             if (fields and owned["key"] not in expected and fields == owned["fields"]
@@ -438,7 +487,7 @@ class ZhihangSync:
     def managed(self, kind):
         prefix = "owned:" + kind + ":"
         return {doc["key"].removeprefix(prefix): doc["payload"]
-                for doc in self.store.list_documents(NS, key_prefix=prefix) if doc["payload"]}
+                for doc in self.store.list_documents(self.namespace, key_prefix=prefix) if doc["payload"]}
 
     def publish(self, run, client, remote, journal, target_kind):
         from .zhihang_data_sources import identity
@@ -499,7 +548,7 @@ class ZhihangSync:
                 ):
                     self.save(ownership_key, {"key": item["key"], "fields": actual})
             elif self.read(ownership_key):
-                self.store.delete_document(NS, ownership_key)
+                self.store.delete_document(self.namespace, ownership_key)
             item["done"] = True
             self.save("journal:" + run["id"], journal)
 
@@ -507,13 +556,16 @@ class ZhihangSync:
     def verify_batch(client, kind, expected):
         from .zhihang_data_sources import identity
 
-        seen = set()
+        seen = {}
         for row in client.list_all():
             fields = row["fields"]
             key = identity(kind, fields)
             if key in expected:
-                if key in seen or not matches(expected[key], fields):
+                if not matches(expected[key], fields):
                     raise Pending("目标表本批数据尚未完整读回，保留待核验任务。")
-                seen.add(key)
-        if seen != expected.keys():
+                if key in seen and (kind != "inspection" or
+                                    _inspection_business_fields(fields) != _inspection_business_fields(seen[key])):
+                    raise Pending("目标表本批数据存在同键业务冲突，保留待核验任务。")
+                seen[key] = fields
+        if seen.keys() != expected.keys():
             raise Pending("目标表本批数据尚未完整读回，保留待核验任务。")

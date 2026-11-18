@@ -16,7 +16,8 @@ const task = { kind: 'inspection', label: '巡检', times: ['07:00', '11:00'], e
 const auth = { has_token: false, expired: false };
 const calls = [];
 const exceptions = [];
-const history = [];
+const history = [{ id: 'fixture-failed', kind: 'inspection', mode: 'preview', status: 'failed',
+  created_at: stamp, error: '智航 inspection_list：分页返回重复记录，无法确认是否漏页。' }];
 const detailReads = new Map();
 let login = { status: 'idle' };
 let loginReads = 0;
@@ -84,6 +85,10 @@ async function install(context, user) {
       const id = path.slice('/runs/'.length);
       const item = history.find(row => row.id === id);
       assert(item);
+      if (id === 'fixture-failed') return ok({
+        ...item, stage: '巡检换页重拉', checks: { 巡检换页重拉: { 每页: 50, 源端总数: 120, 已读取: 50, 当前页: 2 } },
+        rows: [], total: 0, page: 1, page_size: 50,
+      });
       const reads = (detailReads.get(id) || 0) + 1;
       detailReads.set(id, reads);
       if (id === 'fixture-sync' && reads === 1) Object.assign(item, { status: 'pending_verify', error: '回读核验中' });
@@ -121,10 +126,17 @@ try {
   assert.equal(new URL(page.url()).searchParams.get('__page'), '/zhihang-data');
   assert.equal(new URL(page.url()).searchParams.has('scope'), false);
   await page.getByRole('link', { name: '原巡检表' }).waitFor();
+  await page.locator('.run-failure').getByText(history[0].error, { exact: true }).waitFor();
+  await page.getByRole('button', { name: '查看巡检执行详情' }).click();
+  const runDialog = page.getByRole('dialog');
+  await runDialog.getByText('失败阶段', { exact: true }).waitFor();
+  await runDialog.getByText('每页 50 · 源端总数 120 · 已读取 50 · 当前页 2', { exact: true }).waitFor();
+  assert.equal(await runDialog.getByRole('button', { name: '同步原表', exact: true }).count(), 0);
+  await page.keyboard.press('Escape');
+  await runDialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '刷新', exact: true }).hover();
   await page.getByRole('button', { name: '拉取预览', exact: true }).click();
   await page.getByText('隔离巡检数据 1', { exact: true }).waitFor();
-  const runDialog = page.getByRole('dialog');
   await runDialog.getByText('成功', { exact: true }).waitFor();
   assert(await runDialog.getByRole('button', { name: '同步原表', exact: true }).isDisabled());
   await runDialog.getByRole('button', { name: '下一页', exact: true }).click();
