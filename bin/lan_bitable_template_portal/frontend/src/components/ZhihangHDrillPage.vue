@@ -89,7 +89,7 @@ let timer: ReturnType<typeof setTimeout> | undefined;
 let closed = false;
 let loaded = false;
 const controller = new AbortController();
-const running = computed(() => ['queued', 'running', 'pending_verify'].includes(status.value?.latest?.status || ''));
+const running = computed(() => ['queued', 'running', 'pending_verify', 'retry_wait'].includes(status.value?.latest?.status || ''));
 const loggingIn = computed(() => ['starting', 'waiting', 'verifying'].includes(status.value?.login_job?.status || ''));
 const confirmedPreview = computed(() => preview.value?.status === 'success' && !!preview.value.total
   && Date.now() - Date.parse(preview.value.created_at) < 60 * 60 * 1000 ? preview.value : undefined);
@@ -104,7 +104,7 @@ function formatTime(value: string) {
   return Number.isNaN(time.valueOf()) ? value : time.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
 }
 function stateLabel(value: string) {
-  return ({ queued: '等待执行', running: '执行中', success: '成功', failed: '失败', pending_verify: '等待核验' } as Record<string,string>)[value] || value;
+  return ({ queued: '等待恢复', running: '执行中', success: '成功', failed: '失败', pending_verify: '等待核验', retry_wait: '等待重试' } as Record<string,string>)[value] || value;
 }
 function runLabel(run: Run) {
   return run.mode === 'preview' ? '拉取预览' : run.mode === 'scheduled' ? '定时同步' : '手动同步';

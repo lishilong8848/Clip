@@ -248,6 +248,23 @@ class ProxyTests(unittest.IsolatedAsyncioTestCase):
         self.proxy.active = SETTINGS.max_requests
         self.assertEqual((await self.client.get('/')).status_code, 503)
 
+    async def test_busy_mobile_entry_uses_utf8_html_and_apis_keep_utf8_json(self):
+        self.proxy.active = SETTINGS.max_requests
+        message = '公网访问繁忙，请稍后继续原任务。'
+        for page in ('/learning?view=practice&date=2026-11-19', '/repair-management'):
+            response = await self.client.get(page)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.headers['content-type'], 'text/html; charset=utf-8')
+            self.assertEqual(response.headers['cache-control'], 'no-store')
+            self.assertIn(message, response.content.decode('utf-8'))
+            self.assertIn('<a href="">重试</a>', response.text)
+        response = await self.client.get('/api/learning/bootstrap')
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.headers['content-type'], 'application/json; charset=utf-8')
+        self.assertEqual(response.json()['error'], message)
+        self.proxy.active = 0
+        self.assertEqual((await self.client.get('/api/workbench')).status_code, 200)
+
     async def test_network_error_does_not_replay_submission(self):
         calls = []
         async def fail(request):

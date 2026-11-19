@@ -7,7 +7,7 @@ function nodes(source, predicate) {
   walk(template.ast);return found;
 }
 const hasClass=(node,name)=>node.props?.some(prop=>prop.name==='class'&&prop.value?.content.split(/\s+/).includes(name));
-function one(source,predicate,label){const found=nodes(source,predicate);if(found.length!==1)throw new Error('Cabinet audit anchor changed: '+label);return found[0];}
+function one(source,predicate,label){const found=nodes(source,predicate);if(found.length!==1)throw new Error('Cabinet audit anchor changed: '+label+' ('+found.length+')');return found[0];}
 const body=node=>node.loc.source.replace(/^<[^>]+>/,'').replace(/<\/[^>]+>$/,'');
 
 // V2-only presentation; reuse the original actions, permission gates and count bindings.
@@ -20,10 +20,7 @@ export function adaptCabinetAudit(source,kind){
   if(kind==='page'){
     const heading=one(code,node=>node.tag==='header'&&hasClass(node,'heading'),'heading');
     const actions=one(heading.loc.source,node=>hasClass(node,'actions'),'actions');
-    const children=actions.children.filter(node=>node.type===1);
-    const secondary=children.filter(node=>/loadServerStorage|showExports|openExportSchedule/.test(node.loc.source));
-    const primary=children.filter(node=>!secondary.includes(node));
-    code=code.replace(actions.loc.source,`<div class="actions v2-cabinet-actions"><template v-if="!scope">${body(actions)}</template><template v-else>${primary.map(node=>node.loc.source).join('\n')}<details class="v2-cabinet-more"><summary>更多工具</summary><div>${secondary.map(node=>node.loc.source).join('\n')}</div></details></template></div>`);
+    code=code.replace(actions.loc.source,actions.loc.source.replace('class="actions"', 'class="actions v2-cabinet-actions"'));
     const summary=one(code,node=>node.tag==='section'&&node.props.some(prop=>prop.name==='if'&&prop.exp?.content==="tab === 'overview'"),'room summary');
     code=code.replace('</script>',`function v2RoomRate(room: Dict): string {
   const powered=v2CabinetKnownSum([room.counts?.formal,room.counts?.test]);

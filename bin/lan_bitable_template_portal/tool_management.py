@@ -14,6 +14,7 @@ from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from .risk_inspection import RiskError, RiskInspections, can_scope as risk_can_scope, digest, text
 from .tool_management_lifecycle import ToolManagementLifecycle
+from . import tool_result_notices
 from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
 from .tool_template_library import ToolTemplateLibrary
 from .tool_workspace import ToolWorkspaceMixin
@@ -779,7 +780,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             return True
         return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row, leaders=leaders)
                  or self.owns_workspace_item(actor, row)
-                 or actor['id'] == row['manager'] and actor.get('category') == 'manager')
+                 or actor['id'] == row['manager'] and actor.get('category') == 'manager'
+                 or tool_result_notices.current_participant(db, row['id'], actor))
 
     @staticmethod
     def owns_workspace_item(actor, row):
@@ -818,6 +820,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         awaiting_review = bool(review and review['status'] == 'pending')
         mine = self.owns_workspace_item(actor, row) or eligible and (
             row['owner'] == actor['id'] or full_access(actor) and bool(row['owner']))
+        refill = bool(review and review['status'] == 'rejected' and can_scope(actor, row['scope'])
+                      and tool_result_notices.current_participant(db, row['id'], actor, refill=True))
         result = {key: row[key] for key in ('id', 'month', 'scope', 'kind', 'due', 'revision', 'owner_name', 'submitted_at',
                                             'outcome', 'report_name', 'actual', 'reason', 'resolution', 'scrap_qty',
                                             'repair_started_at', 'resolved_at')}
@@ -853,7 +857,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                                         and row['month'] == clock().strftime('%Y-%m')
                                         and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor))),
                          'can_claim': open_order and not awaiting_review and not row['owner'] and eligible,
-                         'can_edit': open_order and not awaiting_review and mine,
+                         'can_edit': open_order and not awaiting_review and (mine or refill),
                          'can_release': open_order and not awaiting_review and not workspace and bool(row['owner']) and self.administrator(actor),
                          'can_repair': row['outcome'] == 'repair' and (self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)),
                          'can_approve': row['outcome'] == 'scrap' and any(
@@ -938,6 +942,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             review = db.execute('SELECT * FROM tool_work_reviews WHERE order_id=?', (identity,)).fetchone()
             draft = json.loads(review['payload']) if review and review['status']=='pending' else json.loads(row['draft'])
             return self.work_info(db, actor, row) | {'records': records, 'actor_name': actor['name'],
+                                                   'result_notice': tool_result_notices.pending_labels(db, [identity]).get(identity, ''),
                                                    'history': history, 'draft': draft}
 
     @staticmethod
@@ -1021,6 +1026,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     draft={key:saved.get(key) for key in ('outcome','reason','quantity')}
                     db.execute('UPDATE tool_work_orders SET draft=?,revision=revision+1 WHERE id=?', (dumps(draft),identity))
                     self.audit(db, identity, actor, '驳回自检审核', note)
+                    tool_result_notices.queue_result(db, row, 'rejected', actor, now, note)
                     return self.work_info(db, actor, self._work(db, actor, identity))
                 body = json.loads(pending['payload'])
                 action = 'submit'
@@ -1119,6 +1125,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 db.execute("UPDATE tool_work_reviews SET status='approved',reviewer=?,reviewed_at=?,note=? WHERE order_id=?", (actor['id'],now,note,identity))
                 self.audit(db, identity, actor, '通过自检审核', note)
             self.enqueue(db, identity, *dests)
+            if reviewing:
+                tool_result_notices.queue_result(db, row, updates['outcome'], actor, now, note)
             if row['submitted_at'] or updates.get('submitted_at'):
                 db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
             return self.work_info(db, actor, self._work(db, actor, identity))
@@ -1152,7 +1160,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         return {'outcome': 'scrap', 'scrap_qty': quantity, 'scrap_reason': reason, 'scrap_photos': dumps(photos),
                 'scrap_status': 'pending_pair', 'resolved_at': ''}
 
-    def _decide_scrap(self, db, row, actor, action, body):
+    def _decide_scrap(self, db, row, actor, action, body, *, result_batch=None):
         votes = self._scrap_votes(db, row['id'])
         vote = next((item for item in votes if item['employee_no'] == self.scrap_approver(actor)), None)
         if vote is None:
@@ -1174,6 +1182,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             WHERE order_id=? AND request_revision=? AND employee_no=?''',
             (action, now, note, row['id'], vote['request_revision'], vote['employee_no']))
         self._finish_scrap(db, row, actor, action, now)
+        tool_result_notices.queue_result(db, row, 'manager_' + action, actor, now, note, result_batch)
         self.audit(db, row['id'], actor, '通过报废审批' if action == 'approve' else '驳回报废审批', note)
         updated = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (row['id'],)).fetchone()
         return self.work_info(db, actor, updated)
@@ -1225,6 +1234,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         if not approver:
             raise RiskError('只有指定的两位经理可处理报废审批。', 403)
         results = []
+        result_batch = uuid.uuid4().hex
         with self.connect(True) as db:
             for entry in entries:
                 row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (entry['order'],)).fetchone()
@@ -1238,7 +1248,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 if vote['decision'] != action and (row['outcome'] != 'scrap' or vote['decision']):
                     continue
                 results.append(self._decide_scrap(db, row, actor, action,
-                                                 {'approval_round': entry['revision'], 'reason': note}))
+                                                 {'approval_round': entry['revision'], 'reason': note}, result_batch=result_batch))
         return results
 
     def sync_one(self):

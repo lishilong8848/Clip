@@ -24898,6 +24898,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(client.get("/api/jobs/missing").status_code, 401)
 
     def test_fastapi_recent_jobs_returns_compact_admin_summary(self):
+        # Bind the fixture's administrator to this test's modules rather than the host directory.
+        original_profile = PortalRuntime.auth_manager.account_profile
+        def fixture_profile(identity):
+            profile = original_profile(identity)
+            return (profile | {'role':'admin', 'level':'L0', 'modules':['accounts','maintenance'], 'scope_rules':['ALL']}
+                    if identity == LI_SHILONG_OPEN_ID else profile)
+        self.enterContext(patch.object(PortalRuntime.auth_manager, 'account_profile', side_effect=fixture_profile))
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         original_service = PortalRuntime.service
         original_state_store = PortalRuntime.state_store

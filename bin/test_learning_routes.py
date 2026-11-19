@@ -100,6 +100,17 @@ class LearningRouteTests(unittest.TestCase):
         self.client = TestClient(self.app)
         self.addCleanup(self.client.close)
 
+    def test_direct_entry_returns_readable_html_if_identity_is_invalid(self):
+        self.session = {"user": {"open_id": ""}, "role": "building"}
+        response = self.client.get("/learning?view=practice")
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.headers["content-type"], "text/html; charset=utf-8")
+        self.assertIn("登录身份不完整，请重新登录。", response.text)
+        api = self.client.get("/api/learning/bootstrap")
+        self.assertEqual(api.status_code, 401)
+        self.assertEqual(api.headers["content-type"], "application/json; charset=utf-8")
+        self.assertEqual(api.json()["error"], "登录身份不完整，请重新登录。")
+
     def test_every_api_rejects_anonymous_and_guest_sessions(self):
         for session, status in (
             (None, 401),
@@ -143,7 +154,7 @@ class LearningRouteTests(unittest.TestCase):
         self.auth.scope_allowed.assert_not_called()
 
     def test_workbench_summary_respects_role_module_and_authorized_buildings(self):
-        from lan_bitable_template_portal import learning_completion
+        learning_completion = importlib.import_module("lan_bitable_template_portal.learning_completion")
 
         profile = {"category": "supervisor", "home_scope": "A", "role": "building", "modules": ["learning"]}
         self.auth.public_user = lambda session: profile

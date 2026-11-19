@@ -140,7 +140,12 @@ const server = createServer(async (request, response) => {
             const entry = session.items.find(item => item.id === patch.asset_id); assert(entry);
             const sheet = entry.template.sheets.find(sheet => sheet.name === entry.template.schema.sheet);
             const allowed = flag => new Set(sheet.rows.flatMap(row => row.cells.filter(cell => cell[flag]).map(cell => sheet.name + '!' + cell.address)));
-            for (const key of Object.keys(patch.values)) assert(allowed('editable').has(key), key);
+            const allowedValues = new Set(entry.template.sheets.flatMap(tab => [
+              ...tab.rows.flatMap(row => row.cells.filter(cell => cell.text_editable || cell.editable && !cell.check)
+                .map(cell => tab.name + '!' + cell.address)),
+              ...(tab.titles || []).map(title => tab.name + '!' + title.key),
+            ]));
+            for (const key of Object.keys(patch.values)) assert(allowedValues.has(key), key);
             for (const [key, value] of Object.entries(patch.checks)) { assert(allowed('check').has(key), key); assert(['是', '否'].includes(value)); }
             Object.assign(entry, patch);
           }
@@ -154,14 +159,17 @@ const server = createServer(async (request, response) => {
         }
         if (action === 'submit') {
           assert.equal(body.revision, session.revision);
-          if (session.kind === 'self') for (const entry of session.items) {
+          const submitted = session.items.filter(entry => !body.resubmit_asset_id || entry.id === body.resubmit_asset_id);
+          if (session.kind === 'self') for (const entry of submitted) {
             assert.equal(entry.outcome, 'normal');
             assert.equal(Object.keys(entry.checks).length, entry.template.schema.checks.length);
             Object.assign(entry, {can_edit: false, can_review: true, order_revision: 2, archive_status: 'review_pending'});
           }
           else { assert(session.report_name && body.actual); session.items.forEach(entry => { entry.can_edit = false; }); }
           session.status = session.kind === 'self' ? 'review_pending' : 'pending';
-          session.can_edit = false; session.revision++; state.polls = 0; return ok(session);
+          session.can_edit = session.items.some(entry => entry.can_edit);
+          if (session.can_edit) session.status = 'draft';
+          session.revision++; state.polls = 0; return ok(session);
         }
         if (action === 'review') {
           assert.equal(body.action, 'approve');
@@ -212,7 +220,7 @@ const origin = 'http://127.0.0.1:' + server.address().port;
 const legacy = origin + '/risk-inspections?frontend=legacy&view=tool-self-check';
 const v2 = origin + '/assets/workspace-v2/index.html?__page=/risk-inspections&view=tool-self-check';
 const results = [], errors = [], blocked = [];
-let browser, page;
+let browser, page, verified = false;
 const button = name => page.getByRole('button', { name, exact: true });
 const radio = name => page.getByRole('radio', { name, exact: true });
 const chooseRadio = name => radio(name).locator('xpath=ancestor::label[1]').click();
@@ -352,12 +360,20 @@ try {
     await button('封面').click();
     assert.equal(await page.locator('.sheet-frame > img').count(), layouts.electrical.sheets[0].images.length);
     await button(layouts.electrical.schema.sheet).click();
+    const titleKey = layouts.electrical.schema.sheet + '!' + layouts.electrical.sheets[1].titles[0].key;
+    await button('编辑表格标题').click();
+    await page.getByRole('textbox',{name:'填写表格标题'}).fill('逐台复核标题');
+    const professional = layouts.electrical.schema.sheet + '!G3';
+    await page.getByRole('button',{name:'编辑 ' + professional + ' 电气', exact:true}).click();
+    await page.getByRole('textbox',{name:'填写 ' + professional, exact:true}).fill('电气检修');
     await page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', { exact: true }).fill('草稿保留内容');
     const select = page.locator('.sheet-table select').first();
     await select.selectOption('是'); await select.selectOption('');
     await button('保存草稿').click();
     await page.getByText('草稿已保存', { exact: true }).waitFor();
     assert.deepEqual(actions('save').at(-1).body.items[0].checks, {});
+    assert.equal(actions('save').at(-1).body.items[0].values[titleKey], '逐台复核标题');
+    assert.equal(actions('save').at(-1).body.items[0].values[professional], '电气检修');
   });
   await check('failed save keeps all edits; repeat save guarded; switching tools and canceling exit retain data', async () => {
     const note = page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', { exact: true });
@@ -642,7 +658,35 @@ try {
       assert.equal(state.removedOrder, id);
     }
   });
+  await check('rejection card link opens the specified editable item in both workspaces', async () => {
+    for (const location of [legacy, v2]) {
+      reset();
+      const session = createSession({ asset_ids: ['e', 'h'], kind: 'self' });
+      state.sessions.delete(session.id);
+      session.id = 'a'.repeat(32);
+      state.sessions.set(session.id, session);
+      const target = session.items[1];
+      target.id = target.asset_id = target.asset.id = 'recSecondTool';
+      target.review_note = '请重新核对第二台工具';
+      target.review_status = 'rejected';
+      target.result_notice = '结果通知待重试 · 飞书未确认送达，将自动重试。';
+      await page.goto(location + '&scope=B&tool_session=' + session.id + '&tool_asset=' + target.id);
+      await page.getByText(target.review_note, { exact: true }).waitFor();
+      assert.equal(await button('温湿度仪 · B楼').getAttribute('aria-pressed'), 'true');
+      await page.getByText(target.result_notice, { exact: true }).waitFor();
+      await button('一键正常').click();
+      const [submitted] = await Promise.all([
+        page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/submit') && r.request().method() === 'POST'),
+        submit('重新提交本台'),
+      ]);
+      assert.equal(submitted.status(), 200);
+      await button('重新提交本台').waitFor({state:'hidden'});
+      assert.equal(actions('submit').at(-1).body.resubmit_asset_id, target.id);
+      assert.equal(session.items[0].can_edit, true);
+    }
+  });
   assert.deepEqual(errors, []); assert.deepEqual(serverErrors, []); assert.deepEqual(blocked, []);
+  verified = true;
   console.log('PASS all tool workspace browser checks');
 } catch (error) {
   if (page) {
@@ -653,7 +697,7 @@ try {
 } finally {
   await writeFile(path.join(output, 'browser-results.json'), JSON.stringify({ passed: results, errors, serverErrors, blocked, legacy, v2 }, null, 2));
   await browser?.close();
-  if (process.env.TOOL_WORKSPACE_KEEP_PREVIEW === '1' && results.length === 12) {
+  if (process.env.TOOL_WORKSPACE_KEEP_PREVIEW === '1' && verified) {
     reset();
     await writeFile(path.join(output, 'preview-server.json'), JSON.stringify({ pid: process.pid, legacy, v2, fixturesOnly: true }, null, 2));
     console.log('Fixture preview remains available: ' + v2);

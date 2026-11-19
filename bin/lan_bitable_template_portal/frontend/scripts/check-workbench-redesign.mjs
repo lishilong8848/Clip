@@ -56,6 +56,7 @@ try {
   page.on('pageerror',error=>errors.push(error.stack||error.message));
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
   let dailyDesk=false;
+  let repairTrial=false, historyClosed=false;
   let mopDelayed=false, riskDenied=false;
   let embeddedTest=false;
   let waterTrial=false,waterSaved=false;
@@ -85,10 +86,17 @@ try {
     });
     if(url.pathname==='/api/personal-calendar')return ok({
       month:url.searchParams.get('month'),unavailable:[],
-      days:dailyDesk&&scope==='A'?{'2026-11-18':{
-        items:[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'}],
-        staff:[{scope:'A',shift:'白班',names:['验收值班员']}],
-      }}:{},
+      roster_dates:dailyDesk&&url.searchParams.get('month')==='2026-11'?['2026-11-18']:[],
+      days:dailyDesk&&url.searchParams.get('month')==='2026-11'?{'2026-11-18':{
+        items:scope==='A'?[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'}]:[],
+        staff:scope==='A'||scope==='ALL'?[
+          {scope:'A',shift:'白班',names:['验收值班员']},
+          {scope:'A',shift:'白',names:['验收值班员','白班第二人']},
+          {scope:'A',shift:'night',names:['夜班验收人']},
+          {scope:'A',shift:'长白',names:['长白验收人']},
+          ...(scope==='ALL'?[{scope:'B',shift:'夜班',names:['B楼当晚值班员']}]:[]),
+        ]:[{scope:'B',shift:'夜班',names:['B楼当晚值班员']}],
+      },'2026-11-19':{items:[],staff:[{scope:'A',shift:'白班',names:['明日值班员']}]} }:{},
     });
     if(url.pathname==='/api/personal-calendar/weather')return ok({
       warning_ready:true,
@@ -148,7 +156,18 @@ try {
         records:planPage===1?[plan('linked','计划和进行中同一条','未开始'),plan('first','本月计划通告','未开始'),plan('completed','已结束的计划','已结束')]:[plan('second','下一页计划通告','未开始')],
         records_pagination:{total_pages:2}});
     }
-    if(url.pathname==='/api/repair-management/status')return ok({total:1,records:[{record_id:'repair-'+scope,title:scope+'楼隔离维修',building:scope,workflow:'维修中'}]});
+    if(url.pathname==='/api/repair-management/status'){
+      const records=[{record_id:'repair-'+scope,title:scope+'楼隔离维修',building:scope,workflow:'维修中',repair_start_time:'2026-10-26 09:29'}];
+      if(repairTrial&&scope==='A'){
+        assert.equal(url.searchParams.get('period'),'all');
+        assert.equal(url.searchParams.get('state'),'all');
+        for(let i=1;i<=6;i++)records.push({record_id:'new-'+i,title:'今日测试维修'+i,building:'A',state:'in_progress',
+          repair_start_time:String(Date.parse('2026-11-18T09:30:00+08:00')),workflow:'维修中'});
+        records.push({record_id:'old-repair',title:'跨月待跟进项目',building:'A',state:historyClosed?'completed':'in_progress',
+          repair_start_time:'2026-10-26 09:29',latest_followup_time:'2026-11-18 12:20',workflow:'维修完成待回访'});
+      }
+      return ok({total:records.length,records});
+    }
     if(url.pathname==='/api/critical-guard/tasks')return ok({tasks:scope==='A'
       ? [{task_id:'guard-live',title:'本楼重保任务',complete:false,status:'published'},{task_id:'guard-done',title:'已完成重保',complete:true,status:'published'}] : []});
     if(url.pathname==='/api/risk-inspections')return riskDenied || scope==='CAMPUS'
@@ -447,8 +466,12 @@ try {
   await page.getByRole('button',{name:'天气详情'}).click();
   await page.getByText(/16°C.*湿度 62%/).waitFor();
   await page.keyboard.press('Escape');
+  const roster=agenda.getByRole('region',{name:'今日排班'});
+  await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
+  await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
   await agenda.getByLabel('日程楼栋').selectOption('B');
   await agenda.getByRole('button',{name:/2026-11-18.*项日程/}).waitFor();
+  await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
   await agenda.getByLabel('日程楼栋').selectOption('A');
   const futureDate=agenda.getByRole('button',{name:/^2026-11-20/});
   await futureDate.hover();
@@ -458,6 +481,18 @@ try {
   assert.equal(await futureDate.getAttribute('aria-pressed'),'false');
   await agenda.getByRole('button',{name:/^2026-11-19/}).click();
   await agenda.getByLabel('选中日期天气').getByText('10～18°C').waitFor();
+  const aRoster=roster.getByRole('row').filter({has:page.getByRole('rowheader',{name:'A楼',exact:true})});
+  await aRoster.getByRole('cell').nth(0).getByText('验收值班员',{exact:true}).waitFor();
+  assert.equal(await aRoster.getByText('验收值班员',{exact:true}).count(),1);
+  await aRoster.getByRole('cell').nth(1).getByText('夜班验收人',{exact:true}).waitFor();
+  assert.equal(await roster.getByText(/明日值班员|B楼当晚值班员/).count(),0);
+  await agenda.getByRole('button',{name:'上个月',exact:true}).click();
+  await agenda.getByRole('button',{name:/^2026-10-01/}).waitFor();
+  await aRoster.getByText('验收值班员',{exact:true}).waitFor();
+  await agenda.getByLabel('日程楼栋').selectOption('B');
+  await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
+  assert.equal(await roster.getByText('验收值班员',{exact:true}).count(),0);
+  await agenda.getByLabel('日程楼栋').selectOption('A');
   await agenda.getByRole('button',{name:'今天',exact:true}).click();
   await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
   await agenda.getByText('验收值班员',{exact:true}).waitFor();
@@ -465,6 +500,8 @@ try {
   await agenda.getByLabel('选中日期天气').getByText('16°C').waitFor();
   await agenda.getByText('大风预警',{exact:true}).waitFor();
   await agenda.getByText('戒备等级 三级',{exact:true}).waitFor();
+  await agenda.getByLabel('日程楼栋').selectOption('');
+  await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'workbench fits a phone viewport');
   await page.mouse.move(0,0);
@@ -480,6 +517,7 @@ try {
   await page.screenshot({path:path.join(output,'daily-desktop.png'),animations:'disabled'});
   await page.evaluate(()=>{document.querySelector('#app').style.padding='';});
   await page.setViewportSize({width:1440,height:1000});
+  await agenda.getByLabel('日程楼栋').selectOption('A');
   await page.locator('.wb-scope select').selectOption('B');
   assert.equal(await agenda.getByLabel('日程楼栋').inputValue(),'A','agenda scope is independent');
   await page.getByRole('navigation',{name:'常用业务'}).getByRole('button',{name:'维修项目',exact:true}).click();
@@ -540,6 +578,28 @@ try {
   await closeTask('工作台验收水表');
   await task('工作台验收水表').waitFor({state:'hidden'});
   waterTrial=false;
+  repairTrial=true;
+  await set(account('repair-desk','engineer',['repair_management']),['A']);
+  await task('今日测试维修6').waitFor();
+  const todayRepairs=todo.getByRole('list',{name:'今日维修',exact:true});
+  const oldRepairs=todo.getByRole('list',{name:'历史未完维修',exact:true});
+  assert.equal(await todayRepairs.getByRole('button',{name:/办理 今日测试维修/}).count(),6);
+  await oldRepairs.getByRole('button',{name:'办理 跨月待跟进项目'}).waitFor();
+  await todo.getByRole('button',{name:/^今日待办/}).click();
+  assert.equal(await task('跨月待跟进项目').count(),0);
+  await todo.getByRole('button',{name:/^历史未完维修/}).click();
+  assert.equal(await task('今日测试维修1').count(),0);
+  embeddedTest=true;
+  const oldProjectRequest=page.waitForRequest(request=>{
+    const url=new URL(request.url());
+    return url.pathname==='/api/repair-management/records'&&url.searchParams.get('focus_record_id')==='old-repair';
+  });
+  await task('跨月待跟进项目').click();
+  assert.equal(new URL((await oldProjectRequest).url()).searchParams.get('scope'),'A');
+  historyClosed=true;
+  await closeTask('跨月待跟进项目');
+  await task('跨月待跟进项目').waitFor({state:'hidden'});
+  repairTrial=false;
   await set(account('visual-check','manager'),['A','B']);
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');

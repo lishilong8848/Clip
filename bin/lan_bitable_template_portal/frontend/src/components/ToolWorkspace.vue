@@ -119,6 +119,7 @@
                 <div><strong>{{ tool.asset_name }}</strong><small v-if="tool.model || tool.location" class="workspace-muted">{{ [tool.model, tool.location].filter(Boolean).join(' · ') }}</small>
                   <small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small>
                   <small v-if="tool.tool_status_label" class="workspace-muted">{{ tool.result_label }} · {{ tool.tool_status_label }}</small>
+                  <small v-if="tool.result_notice" role="status">{{ tool.result_notice }}</small>
                   <small v-if="tool.deletion_pending" role="status">{{ tool.deletion_error || '等待飞书确认删除' }}</small>
                 </div>
                 <div class="workspace-actions record-actions">
@@ -154,6 +155,7 @@
               <NButton v-if="item?.can_edit && activeSheet?.name === item.template?.schema?.sheet" size="small" :disabled="!!busy" @click="normalFill">一键正常</NButton>
             </div>
             <template v-if="item">
+              <p v-if="item.result_notice" role="status">{{ item.result_notice }}</p>
               <div v-if="item.can_edit || item.can_reassign || item.can_release || item.can_withdraw" class="workspace-actions item-actions">
                 <label v-if="item.can_edit" class="workspace-actions">完成情况
                   <select data-native-select aria-label="填写完成情况" :value="item.completion || ''" :disabled="!!busy" @change="setCompletion">
@@ -235,12 +237,29 @@
                             </span>
                             <span v-else>{{ reviewText(cell) }}</span>
                           </template>
-                          <span v-else>{{ cell.value }}</span>
+                          <textarea v-else-if="cell.text_editable && item.can_edit && editingText === item.id + ':' + cellKey(cell)"
+                            v-focus-cell class="sheet-text-editor" :value="String(inputCellValue(cell))" :aria-label="'填写 ' + cellKey(cell)"
+                            :disabled="!!busy" @input="setCell(cell, $event)" @blur="editingText = ''" @keydown.esc.stop="editingText = ''" />
+                          <button v-else-if="cell.text_editable && item.can_edit" type="button" class="sheet-text-button"
+                            :aria-label="'编辑 ' + cellKey(cell) + ' ' + inputCellValue(cell)" :disabled="!!busy"
+                            @click="editingText = item.id + ':' + cellKey(cell)">{{ inputCellValue(cell) }}</button>
+                          <span v-else>{{ item.values[cellKey(cell)] ?? cell.value }}</span>
                         </td>
                       </tr>
                     </tbody>
                   </table>
                   <img v-for="image in sheetImages" :key="image.key" :src="image.src" :style="image.style" alt="" />
+                  <div v-for="title in activeSheet.titles" :key="title.key" class="form-title-box"
+                    :style="{ left:title.x+'px', top:title.y+'px', width:title.width+'px', height:title.height+'px', fontSize:title.size+'px',
+                              color:title.color || undefined, backgroundColor:title.background || undefined }">
+                    <textarea v-if="item.can_edit && editingText === item.id + ':' + title.key" v-focus-cell
+                      class="sheet-text-editor" :aria-label="'填写表格标题'" :disabled="!!busy"
+                      :value="item.values[activeSheet.name+'!'+title.key] ?? title.text" @input="setCell({address:title.key}, $event)"
+                      @blur="editingText = ''" @keydown.esc.stop="editingText = ''" />
+                    <button v-else-if="item.can_edit" type="button" class="sheet-text-button" aria-label="编辑表格标题" :disabled="!!busy"
+                      @click="editingText = item.id + ':' + title.key">{{ item.values[activeSheet.name+'!'+title.key] ?? title.text }}</button>
+                    <span v-else>{{ item.values[activeSheet.name+'!'+title.key] ?? title.text }}</span>
+                  </div>
                 </div>
               </div>
               <NAlert v-else type="warning" :bordered="false">未读取到该工具的原表，请刷新记录核对。</NAlert>
@@ -304,10 +323,10 @@
           <footer class="workspace-actions editor-footer">
             <span v-if="editable" class="workspace-muted" role="status">{{ dirty ? '有未保存修改' : '草稿已保存' }}</span>
             <NButton v-if="editable && session.kind === 'self'" size="small" :disabled="!!busy || !dirty" :loading="busy === 'save'" @click="saveDraft">保存草稿</NButton>
-            <NPopconfirm v-if="editable && session.status !== 'opening'" positive-text="确认提交" negative-text="取消" @positive-click="submit">
+            <NPopconfirm v-if="editable && session.status !== 'opening' && (session.kind !== 'self' || item?.can_edit)" positive-text="确认提交" negative-text="取消" @positive-click="submit">
               <template #trigger><NButton size="small" type="primary" :loading="busy === 'submit'"
-                :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !inspectionReady(reportCheck, reportAssets, actualDate)))">{{ session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
-              {{ session.kind === 'self' ? '提交待填写工具，由楼长或授权人员审核。' : '提交送检报告归档。' }}
+                :disabled="!!busy || !!report || (session.kind === 'external' && (!session.report_name || !inspectionReady(reportCheck, reportAssets, actualDate)))">{{ resubmitAsset ? '重新提交本台' : session.kind === 'self' ? '提交审核' : '提交归档' }}</NButton></template>
+              {{ resubmitAsset ? '将「' + item?.asset.name + '」重新提交审核。' : session.kind === 'self' ? '提交待填写工具，由楼长或授权人员审核。' : '提交送检报告归档。' }}
             </NPopconfirm>
             <span v-if="session.status === 'opening'" class="workspace-muted">本批模板核验完成后可提交审核</span>
             <NButton v-if="session.status === 'archived' && session.report_available !== false" tag="a" size="small" :href="sessionUrl + '/download'">下载归档</NButton>
@@ -365,8 +384,9 @@ type Asset = { id: string; name: string; scope: string; model?: string; brand?: 
   disabled_reason?: string };
 type Template = { id: string; name?: string; label?: string };
 type Cell = { address: string; value: string | number | boolean | null; rowspan: number; colspan: number;
-  style?: Record<string, string | number>; editable?: boolean; check?: boolean };
+  style?: Record<string, string | number>; editable?: boolean; text_editable?: boolean; check?: boolean };
 type Sheet = { name: string; columns: number[]; rows: { index: number; height: number; cells: Cell[] }[];
+  titles?: {key:string;text:string;x:number;y:number;width:number;height:number;size:number;color?:string;background?:string}[];
   review?: { reviewer_address: string; reviewed_at_address: string; signature_address: string };
   images?: { address: string; src: string; offsetX: number; offsetY: number; width: number; height: number }[] };
 type Review = { reviewer: string; reviewed_at: string; signature: string };
@@ -375,11 +395,11 @@ type Layout = { sheets: Sheet[]; schema?: { sheet: string; layout?: string; revi
 type Item = Review & { id: string; asset_id: string; asset: Asset; template?: Layout | null; layout_key?: string;
   values: Record<string, string>; checks: Record<string, string>; qualified: boolean | null; archive_status?: string; archive_error?: string;
   outcome?: string; reason?: string; quantity?: number; scrap_photos?: string[]; order_revision?: number; can_edit?: boolean; can_review?: boolean;
-  can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean;
-  review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
+  can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean; result_notice?: string;
+  review_note?: string; review_status?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
 type HistoryItem = { id: string; order_id?: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
   binding_pending?: boolean; binding_error?: string; result_label?: string; tool_status_label?: string;
-  location?: string; model?: string; deletion_pending?: boolean; deletion_error?: string;
+  location?: string; model?: string; deletion_pending?: boolean; deletion_error?: string; result_notice?: string;
   order_revision?: number; can_release?: boolean; can_delete?: boolean };
 type Summary = { id: string; kind: Kind; status: string; revision?: number; items?: Item[]; history_items?: HistoryItem[];
   created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
@@ -419,6 +439,8 @@ const selected = computed(() => new Set(selectedIds.value));
 const assigned = reactive<Record<string, string>>({});
 const itemId = ref('');
 const sheetName = ref('');
+const editingText = ref('');
+const vFocusCell = { mounted: (element: HTMLTextAreaElement) => element.focus() };
 const zoom = ref(100);
 const error = ref('');
 const sourceWarnings = computed(() => [...new Set(
@@ -499,6 +521,7 @@ const sessionOptions = computed(() => (board.value?.sessions || []).filter(entry
   .map(entry => ({ value: entry.id, label: `${sessionStatus(entry)} · ${entry.item_count ?? entry.items?.length ?? 0} 台 · ${entry.created_at?.slice(0, 16).replace('T', ' ') || entry.id.slice(0, 8)}` })));
 const sessionUrl = computed(() => api + '/' + encodeURIComponent(session.value?.id || ''));
 const item = computed(() => session.value?.items.find(entry => entry.id === itemId.value));
+const resubmitAsset = computed(() => item.value?.can_edit && item.value.review_status === 'rejected' ? item.value.id : '');
 const reviewerOptions = computed(() => reviewers.value?.[item.value?.asset.scope || ''] || []);
 const sheets = computed(() => item.value?.template?.sheets || []);
 const canAddScrapPhoto = computed(() => (item.value?.scrap_photos?.length || 0) < scrapPhotoLimit);
@@ -616,7 +639,7 @@ function toggleVisible(checked: boolean) {
   }
   selectedIds.value = selection;
 }
-function cellKey(cell: Cell) {
+function cellKey(cell: Pick<Cell,'address'>) {
   return activeSheet.value?.name + '!' + cell.address;
 }
 function reviewCell(cell: Cell) {
@@ -699,7 +722,7 @@ function normalFill() {
   current.completion = 'completed';
   current.outcome = 'normal';
 }
-function setCell(cell: Cell, event: Event) {
+function setCell(cell: Pick<Cell,'address'>, event: Event) {
   if (item.value && editable.value) item.value.values[cellKey(cell)] = (event.target as HTMLInputElement).value;
 }
 function setCheck(cell: Cell, event: Event) {
@@ -1011,8 +1034,10 @@ function uploadReport() {
 function submit() {
   if (!editable.value || report.value) return;
   return perform('submit', async () => {
+    const target = resubmitAsset.value;
     if (session.value?.kind === 'self') {
-      for (const entry of session.value.items.filter(entry => entry.can_edit)) {
+      if (!item.value?.can_edit) return;
+      for (const entry of session.value.items.filter(entry => entry.can_edit && (!target || entry.id === target))) {
         const missing = !entry.outcome;
         const incomplete = !entry.template?.sheets.length || entry.template.sheets.some(sheet => sheet.rows.some(row =>
           row.cells.some(cell => cell.check && !['是', '否'].includes(entry.checks[sheet.name + '!' + cell.address] || ''))));
@@ -1026,6 +1051,7 @@ function submit() {
     if (session.value?.kind === 'self') await save();
     if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', {
       revision: session.value.revision, actual: actualDate.value, inspection: reportCheck.value,
+      ...(target ? { resubmit_asset_id: target } : {}),
     }) as Session);
   });
 }
@@ -1033,7 +1059,7 @@ function schedulePoll(delay = 3000) {
   clearTimeout(pollTimer);
   const current = session.value;
   if (!current || lifetime.signal.aborted || (!current.binding_pending && !['pending', 'review_pending'].includes(current.status)
-      && !current.items.some(entry => ['review_pending', 'verifying', 'retrying'].includes(entry.archive_status || '')
+      && !current.items.some(entry => entry.result_notice || ['review_pending', 'verifying', 'retrying'].includes(entry.archive_status || '')
         || entry.order_status === 'submitted' && entry.archive_status === 'pending'))) return;
   pollTimer = setTimeout(async () => {
     if (busy.value) return schedulePoll();
@@ -1310,6 +1336,11 @@ onBeforeUnmount(() => {
 .sheet-table td { border: 1px solid #cbd1d8; vertical-align: middle; white-space: pre-wrap; overflow-wrap: anywhere; }
 .sheet-table input, .sheet-table select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 22px; padding: 1px 3px; border: 1px solid #9ab6e7; border-radius: 2px !important; color: #182333; background: #eff6ff; font: inherit; }
 .sheet-frame > img { position: absolute; object-fit: contain; pointer-events: none; }
+.form-title-box { position:absolute;display:grid;align-items:center;text-align:center;white-space:pre-wrap;line-height:1.2;font-weight:700;color:#171717; }
+.sheet-text-button,.sheet-text-editor { display:block;box-sizing:border-box;width:100%;min-width:0;min-height:1.4em;padding:0 2px;font:inherit;color:inherit;text-align:inherit;white-space:pre-wrap;overflow-wrap:anywhere; }
+.sheet-text-button { border:0;background:transparent;cursor:text; }
+.sheet-text-button:hover,.sheet-text-button:focus-visible { outline:1px solid #85a7de;outline-offset:-1px; }
+.sheet-text-editor { min-height:3em;background:#fff;color:#182333;border:1px solid #7298d6;resize:vertical; }
 .signed-cell { display: flex; align-items: center; gap: 3px; min-width: 0; }
 .signed-cell > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .signature-in-cell { display: block; max-width: 55%; height: 35px; object-fit: contain; }

@@ -400,6 +400,7 @@ def install_risk_inspection_routes(app, controller, runtime):
 
     def run_tools():
         from upload_event_module.services.robot_webhook import send_interactive_to_open_ids
+        from .tool_result_notices import send_result_card
 
         def reminder_link(scope):
             from public_access.links import deployment
@@ -427,7 +428,7 @@ def install_risk_inspection_routes(app, controller, runtime):
                 if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
                     run_tool_jobs(get_tool_checks(), stop, deliver_review=deliver_review,
                                   review_link=review_link, resolve_leader=actor_for,
-                                  scrap_review_link=scrap_review_link)
+                                  scrap_review_link=scrap_review_link, deliver_result=send_result_card)
                     return
             except Exception:
                 logging.exception('Tool management initialization deferred')

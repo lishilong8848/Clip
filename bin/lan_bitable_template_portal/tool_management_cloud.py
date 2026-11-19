@@ -781,8 +781,10 @@ class ToolCloud:
         return True
 
 
-def run_tool_jobs(service, stop, *, deliver_review=None, review_link=None, resolve_leader=None, scrap_review_link=None):
+def run_tool_jobs(service, stop, *, deliver_review=None, review_link=None, resolve_leader=None, scrap_review_link=None,
+                  deliver_result=None):
     from .tool_review_cards import send_scrap_review_one
+    from .tool_result_notices import result_notice_one
     next_inventory = next_ledger_check = 0
     while not stop.is_set():
         now = time.monotonic()
@@ -807,6 +809,10 @@ def run_tool_jobs(service, stop, *, deliver_review=None, review_link=None, resol
             for _ in range(4):
                 if stop.is_set() or not service.sync_one():
                     break
+            if deliver_review and review_link and scrap_review_link:
+                for _ in range(4):
+                    if stop.is_set() or not result_notice_one(service, deliver_result or deliver_review, review_link, scrap_review_link):
+                        break
             for _ in range(4):
                 if stop.is_set() or not service.workspace_sync_one():
                     break

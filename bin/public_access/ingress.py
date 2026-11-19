@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from lan_bitable_template_portal.module_access import PREFIXES
+from lan_bitable_template_portal.page_errors import page_error
 
 MARKER = b'x-clipflow-public-ingress'
 HOP = {b'connection', b'keep-alive', b'proxy-authenticate', b'proxy-authorization',
@@ -51,8 +52,19 @@ SIGNED = {
 
 
 async def reject(scope, receive, send, status, message):
-    await JSONResponse({'ok': False, 'error': message, **({'auth_required': True} if status == 401 else {})},
-                       status_code=status, headers={'Cache-Control': 'no-store'})(scope, receive, send)
+    path = scope['path']
+    headers = dict(scope['headers'])
+    document = (scope['method'] in {'GET', 'HEAD'} and not path.startswith(('/api/', '/assets/'))
+                and (b'text/html' in headers.get(b'accept', b'') or headers.get(b'sec-fetch-dest') == b'document'
+                     or '.' not in path.rsplit('/', 1)[-1]))
+    if document:
+        response = page_error(status, message)
+    else:
+        response = JSONResponse(
+            {'ok': False, 'error': message, **({'auth_required': True} if status == 401 else {})},
+            status_code=status, media_type='application/json; charset=utf-8', headers={'Cache-Control': 'no-store'},
+        )
+    await response(scope, receive, send)
 
 
 def clean_headers(headers):
@@ -130,6 +142,8 @@ class PublicGuard:
                 for key, value in message.get('headers', []):
                     if key.lower() == b'set-cookie' and b'; secure' not in value.lower():
                         value += b'; Secure'
+                    if key.lower() == b'content-type' and value.strip().lower() == b'application/json':
+                        value = b'application/json; charset=utf-8'
                     safe.append((key, value))
                 message = {**message, 'headers': safe + [(b'x-content-type-options', b'nosniff')]}
             await send(message)

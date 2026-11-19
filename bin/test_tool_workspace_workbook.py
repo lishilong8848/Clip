@@ -66,6 +66,30 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
         return fill(content, {} if values is None else values, '审核人甲', '2026-11-13T15:30', self.signature,
                     answers(description) if checks is None else checks, ASSET, **kwargs)
 
+    def test_title_and_general_cells_round_trip_with_original_signature(self):
+        from lan_bitable_template_portal.tool_form_titles import restore_titles, title_anchors
+        for content in (self.electrical, self.hvac):
+            form = sheet_model(describe(content))
+            name = form['name']
+            box, = form['titles']
+            self.assertIn('自检记录', box['text'])
+            for edits in ({}, {name + '!' + box['key']: '本次工具复核记录', '封面!C3': '本次封面',
+                                name + '!B4': '逐台修改的项目名称'}):
+                result = self.export(content, edits)
+                anchor, = title_anchors(result, name).values()
+                self.assertEqual(len(title_anchors(restore_titles(content, result, name, edits), name)), 1)
+                runs = [node.text or '' for node in anchor.findall('.//{*}t')]
+                self.assertEqual(''.join(runs).strip(), edits.get(name + '!' + box['key'], box['text']).replace('\n', ''))
+                with io.BytesIO(result) as stream:
+                    book = load_workbook(stream)
+                    try:
+                        if edits:
+                            self.assertEqual(book['封面']['C3'].value, '本次封面')
+                            self.assertEqual(book[name]['B4'].value, '逐台修改的项目名称')
+                        self.assertGreaterEqual(len(book[name]._images), 2)
+                    finally:
+                        book.close()
+
     def test_inspector_defaults_to_the_text_in_the_original_workbook(self):
         before = describe(self.electrical)
         sheet = before['schema']['sheet']
@@ -219,9 +243,10 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
         check_map = answers(description)
         review = description['schema']['review_row']
         for key in ('C3', f'{name}!$C$3', f'{name}!c3', f'{name}!I14', f'{name}!D3', f'{name}!XFD1',
-                    f'{name}!E{review}', f'{name}!G{review}', '封面!C3', f'{name}!E14', f'{name}!C03'):
+                    f'{name}!E{review}', f'{name}!G{review}', '不存在!C3', f'{name}!C03'):
             with self.subTest(key=key), self.assertRaises(RiskError):
                 validate_inputs(self.hvac, {key: 'x'}, {})
+        validate_inputs(self.hvac, {'封面!C3': '封面备注', f'{name}!E14': '更新检查说明'}, {})
         for value in ('=1+1', ' \n=1+1', '\x01', '\ud800', 45, 'x' * 1501):
             with self.subTest(value=repr(value)[:30]), self.assertRaises(RiskError):
                 validate_inputs(self.hvac, {f'{name}!C3': value}, {})

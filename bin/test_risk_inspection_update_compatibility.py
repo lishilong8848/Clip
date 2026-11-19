@@ -274,9 +274,23 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
         self.assertEqual(draft['status'], 'draft')
         draft_values = {item['id']: item['values'] for item in draft['items']}
         old_write_count = len(workflow.cloud.writes)
+        from bin.lan_bitable_template_portal.tool_result_notices import result_notice_one
+        checker = workflow.filler
+        with workflow.service.connect() as db:
+            name = db.execute("SELECT name FROM tool_result_targets WHERE role='检查人' LIMIT 1").fetchone()[0]
+        checker = checker | {'name':name}
+        workflow.service.workspace_directory = lambda: [dict(record_id=checker['id'],selectable=True,**checker)]
+        workflow.service.person_for = {checker['id']:checker}.__getitem__
+        attempted = []
+        link = lambda *_: 'https://fixture.invalid/record'
+        self.assertTrue(result_notice_one(workflow.service, lambda *args: attempted.append(args) or False, link, link))
+        self.assertEqual(len(attempted), 1)
+        settings = self.client / 'bin/data/feishu_assistant.json'
+        settings.write_bytes(b'{"app_id":"fixture-existing"}')
 
         tool_sources = set((ROOT / PORTAL).glob('tool_*.py')) | {
             ROOT / PORTAL / 'drill_management.py', ROOT / PORTAL / 'signature_print.py',
+            ROOT / PORTAL / 'daily_inspection_template_art.py',
         }
         for source in tool_sources:
             shutil.copy2(source, self.source / PORTAL / source.name)
@@ -291,6 +305,7 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
 
         payload = self.build()
         self.assertTrue((payload / PORTAL / 'tool_review_cards.py').is_file())
+        self.assertTrue((payload / PORTAL / 'tool_result_notices.py').is_file())
         for relative in (archive_rel, alternate_archive):
             self.assertFalse((payload / relative).exists())
             # Older packers can still send such files. The updater protects local copies as well.
@@ -311,6 +326,14 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
         self.assertTrue(callable(review.callback))
         reopened = management.ToolManagement(installed.RiskInspections(workflow.path, lambda _: workflow.admin),
                                              workflow.cloud)
+        worker = importlib.import_module(package_name + '.tool_result_notices')
+        self.assertEqual(settings.read_bytes(), b'{"app_id":"fixture-existing"}')
+        with reopened.connect(True) as db:
+            db.execute('UPDATE tool_result_messages SET next_try=0')
+        delivered = []
+        self.assertTrue(worker.result_notice_one(reopened, lambda *args: delivered.append(args) or True, link, link))
+        self.assertEqual(delivered, attempted)
+        self.assertFalse(worker.result_notice_one(reopened, self.fail, link, link))
         result = reopened.workspace_get(workflow.filler, draft['id'])
         self.assertEqual(result['status'], 'draft')
         self.assertEqual({item['id']: item['values'] for item in result['items']}, draft_values)

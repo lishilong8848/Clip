@@ -32,6 +32,7 @@ from PIL import Image, ImageChops, UnidentifiedImageError
 from .drill_management import _theme_colors
 from .risk_inspection import RiskError, text
 from .tool_self_check import RESULTS, parse_template, timestamp
+from .tool_form_titles import display_titles, restore_titles, title_anchors
 
 
 _SIGNATURE_PREFIX = 'data:image/png;base64,'
@@ -215,31 +216,35 @@ def _images(sheet, columns, heights):
     return images
 
 
-def _describe_sheet(sheet, editable, checks, theme):
+def _grid_size(sheet):
     populated = [cell for cell in sheet._cells.values()
                  if cell.value is not None and (not isinstance(cell.value, str) or cell.value.strip())]
     max_row = max((cell.row for cell in populated), default=1)
     max_col = max((cell.column for cell in populated), default=1)
-    merges = {}
-    covered = set()
     for region in sheet.merged_cells.ranges:
-        if region.max_col > 24 or region.max_row > 113:
-            raise RiskError('模板合并单元格超出可预览范围。')
-        first = (region.min_row, region.min_col)
-        merges[first] = (region.size['rows'], region.size['columns'])
-        covered.update(point for point in region.cells if point != first)
         max_row, max_col = max(max_row, region.max_row), max(max_col, region.max_col)
     if max_row > 113 or max_col > 24:
         raise RiskError('模板数据超出可预览范围。')
+    return max_row, max_col
+
+
+def _review_cells(schema):
+    return {*_review_addresses(schema).values(), f'E{schema["result_row"]}'}
+
+
+def _describe_sheet(sheet, editable, checks, theme, reserved=()):
+    max_row, max_col = _grid_size(sheet)
+    merges = {(area.min_row, area.min_col): (area.size['rows'], area.size['columns'])
+              for area in sheet.merged_cells.ranges}
     columns = [_column_width(sheet, index) for index in range(1, max_col + 1)]
     heights = [_row_height(sheet, index) for index in range(1, max_row + 1)]
     rows = []
     for index, height in enumerate(heights, 1):
         cells = []
         for column in range(1, max_col + 1):
-            if (index, column) in covered:
-                continue
             cell = sheet.cell(index, column)
+            if isinstance(cell, MergedCell):
+                continue
             rowspan, colspan = merges.get((index, column), (1, 1))
             check = cell.coordinate in checks
             can_edit = check or cell.coordinate in editable
@@ -248,7 +253,8 @@ def _describe_sheet(sheet, editable, checks, theme):
                 style['color'] = '#000000'
             cells.append({'address': cell.coordinate, 'value': _preview_value(cell.value),
                           'rowspan': rowspan, 'colspan': colspan, 'style': style,
-                          'editable': can_edit, **({'check': True} if check else {})})
+                          'editable': can_edit, 'text_editable': not can_edit and cell.coordinate not in reserved,
+                          **({'check': True} if check else {})})
         rows.append({'index': index, 'height': height, 'cells': cells})
     return {'name': sheet.title, 'columns': columns, 'rows': rows, 'images': _images(sheet, columns, heights)}
 
@@ -270,10 +276,12 @@ def describe(content):
         sheets = []
         for sheet in book.worksheets:
             if sheet.title == schema['sheet']:
-                sheets.append(_describe_sheet(sheet, editable, checks, theme) | {'review': _review_addresses(schema)})
+                model = _describe_sheet(sheet, editable, checks, theme, _review_cells(schema))
+                model['titles'] = display_titles(title_anchors(content, sheet.title), model, theme)
+                sheets.append(model | {'review': _review_addresses(schema)})
             elif sheet.sheet_state == 'visible':
                 sheets.append(_describe_sheet(sheet, set(), set(), theme))
-        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest,
+        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest, 'editable_grid_version': 1,
                 'prefill_fields': {'assets': assets, 'inspector': inspector, 'checked_at': checked_at,
                                    'inspector_default': inspector_default}}
     finally:
@@ -324,7 +332,7 @@ def _literal(value, limit):
     return value
 
 
-def _validated_map(sheet_title, allowed, entries, *, is_check):
+def _validated_checks(sheet_title, allowed, entries):
     if not isinstance(entries, Mapping) or len(entries) > len(allowed):
         raise RiskError('自检填写项目格式或数量不正确。')
     result = {}
@@ -332,24 +340,12 @@ def _validated_map(sheet_title, allowed, entries, *, is_check):
         title, separator, address = key.rpartition('!') if isinstance(key, str) else ('', '', '')
         if not separator or title != sheet_title or not _ADDRESS.fullmatch(address) or address not in allowed:
             raise RiskError('自检数据中包含无效或不可编辑的单元格。')
-        if is_check:
-            if value == '':
-                continue
-            if value not in RESULTS:
-                raise RiskError('自检项目只能填写“是”或“否”。')
-            result[address] = value
-        else:
-            result[address] = _literal(value, 1500)
+        if value == '':
+            continue
+        if value not in RESULTS:
+            raise RiskError('自检项目只能填写“是”或“否”。')
+        result[address] = value
     return result
-
-
-def _validate_sheet(sheet, schema, values, checks, complete):
-    editable, check_cells, asset_fields = _layout(sheet, schema)
-    values = _validated_map(sheet.title, editable, values, is_check=False)
-    answers = _validated_map(sheet.title, check_cells, checks, is_check=True)
-    if complete and answers.keys() != check_cells:
-        raise RiskError('请完成表格中的所有“是／否”自检项目。')
-    return values, answers, asset_fields
 
 
 @lru_cache(maxsize=16)
@@ -357,8 +353,19 @@ def _input_layout(content, expected_sha256):
     schema, _ = _snapshot_schema(content, expected_sha256)
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
-        editable, check_cells, _ = _layout(book[schema['sheet']], schema)
-        return schema['sheet'], frozenset(editable), frozenset(check_cells)
+        _, check_cells, _ = _layout(book[schema['sheet']], schema)
+        allowed = {schema['sheet'] + '!' + key for key in title_anchors(content, schema['sheet'])}
+        for sheet in book.worksheets:
+            form = sheet.title == schema['sheet']
+            if not form and sheet.sheet_state != 'visible':
+                continue
+            reserved = check_cells | _review_cells(schema) if form else set()
+            height, width = _grid_size(sheet)
+            for row in sheet.iter_rows(max_row=height, max_col=width):
+                for cell in row:
+                    if not isinstance(cell, MergedCell) and cell.coordinate not in reserved:
+                        allowed.add(_key(sheet, cell.coordinate))
+        return schema['sheet'], frozenset(allowed), frozenset(check_cells)
     finally:
         book.close()
 
@@ -368,10 +375,14 @@ def validate_inputs(content, values, checks, *, complete=False, expected_sha256=
     if not isinstance(content, bytes):
         raise RiskError('请使用原始 XLSX 模板字节。')
     title, editable, check_cells = _input_layout(content, expected_sha256)
-    _validated_map(title, editable, values, is_check=False)
-    answers = _validated_map(title, check_cells, checks, is_check=True)
+    if not isinstance(values, Mapping) or not values.keys() <= editable:
+        raise RiskError('自检数据中包含无效或不可编辑的单元格。')
+    for value in values.values():
+        _literal(value, 1500)
+    answers = _validated_checks(title, check_cells, checks)
     if complete and answers.keys() != check_cells:
         raise RiskError('请完成表格中的所有“是／否”自检项目。')
+    return answers
 
 
 def _signature(signature):
@@ -472,10 +483,21 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
         sheet = book[schema['sheet']]
-        values, answers, asset_fields = _validate_sheet(sheet, schema, values, checks, True)
+        answers = validate_inputs(content, values, checks, complete=True, expected_sha256=expected_sha256)
+        _, _, asset_fields = _layout(sheet, schema)
         with ZipFile(io.BytesIO(content)) as package:
             theme = _theme_colors(package)
-        fields = _asset_values(asset, asset_fields) | values
+        fields = _asset_values(asset, asset_fields)
+        for key, value in values.items():
+            sheet_name, address = key.rsplit('!', 1)
+            if address.startswith('@title'):
+                continue
+            if sheet_name == sheet.title:
+                fields[address] = value
+            else:
+                cell = book[sheet_name][address]
+                cell.value = value
+                cell.data_type = 's'
         for address, answer in answers.items():
             fields[address] = '是[√]  否[ ]' if answer == '是' else '是[ ]  否[√]'
         completed = completion == 'completed' if completion else all(answer == '是' for answer in answers.values())
@@ -498,6 +520,6 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
             original_sheet.column_dimensions.max_outline = original_sheet.sheet_format.outlineLevelCol
         output = io.BytesIO()
         book.save(output)
-        return output.getvalue()
+        return restore_titles(content, output.getvalue(), sheet.title, values)
     finally:
         book.close()

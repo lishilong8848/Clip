@@ -93,7 +93,8 @@ async function install(context, user) {
       if (previewMode) assert.equal(task.confirmed, false);
       else assert.equal(task.confirmed, true);
       const item = { id: previewMode ? 'fixture-preview' : 'fixture-sync', kind: task.kind,
-        mode: previewMode ? 'preview' : 'sync', status: 'queued', created_at: stamp };
+        mode: previewMode ? 'preview' : 'sync', status: previewMode ? 'success' : 'pending_verify', created_at: stamp };
+      if (previewMode) task.last_preview = item;
       task.latest = item;
       history.unshift(item);
       return ok(item);
@@ -168,6 +169,7 @@ try {
   await page.getByRole('button', { name: '拉取预览', exact: true }).click();
   await page.getByText('隔离巡检数据 1', { exact: true }).waitFor();
   await runDialog.getByText('成功', { exact: true }).waitFor();
+  assert.equal(detailReads.get('fixture-preview'), 1, 'a synchronous preview renders on the first detail read');
   assert(await runDialog.getByRole('button', { name: '同步原表', exact: true }).isDisabled());
   await runDialog.getByRole('button', { name: '下一页', exact: true }).click();
   await runDialog.getByText('隔离巡检数据 2', { exact: true }).waitFor();

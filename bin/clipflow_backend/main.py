@@ -2148,11 +2148,15 @@ class FastAPIPortalController:
 
         @app.post("/api/jobs/{job_id}/retry")
         async def retry_job(job_id: str, request: Request):
-            admin_response, _session = self._require_admin_response(request)
-            if admin_response is not None:
-                return admin_response
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
             normalized_job_id = str(job_id or "").strip()
             try:
+                if not PortalRuntime.auth_manager.is_admin(session) and not self._can_retry_notice_job(
+                    PortalRuntime.service.get_job(normalized_job_id) or {}, session
+                ):
+                    return JSONResponse({"ok": False, "error": "仅可重试本人提交且当前仍有楼栋、通告办理权限的原任务。"}, status_code=403)
                 job = PortalRuntime.service.retry_action_job(normalized_job_id)
                 PortalRuntime.clear_payload_cache()
                 self._clear_read_cache()
@@ -2256,6 +2260,7 @@ class FastAPIPortalController:
                 payload = dict(job)
                 from lan_bitable_template_portal.event_priority import public_job
                 payload = public_job(payload, PortalRuntime.auth_manager, session)
+                self._describe_notice_retry(payload, session)
                 payload["job_id"] = str(payload.get("job_id") or job_id)
                 items.append(payload)
             self._record_job_batch_stats(
@@ -2293,6 +2298,7 @@ class FastAPIPortalController:
             job = dict(job)
             from lan_bitable_template_portal.event_priority import public_job
             job = public_job(job, PortalRuntime.auth_manager, session)
+            self._describe_notice_retry(job, session)
             job["job_id"] = str(job.get("job_id") or job_id)
             return {"ok": True, "data": job}
 
@@ -12254,6 +12260,45 @@ class FastAPIPortalController:
             warning = f"本地已开始状态清理启动失败: {exc}"
             if warning not in PortalRuntime.service._load_warnings:
                 PortalRuntime.service._load_warnings.append(warning)
+
+    @staticmethod
+    def _can_retry_notice_job(job: dict, session: dict) -> bool:
+        from lan_bitable_template_portal.module_access import allowed_modules
+        auth = PortalRuntime.auth_manager
+        if auth.is_admin(session):
+            return True
+        owner = (session.get("user") or {}).get("open_id")
+        original = job.get("request") or {}
+        retry = job.get("retry_request") or original
+        if not owner or not isinstance(original, dict) or not isinstance(retry, dict):
+            return False
+        if any(retry.get(key) != original.get(key) for key in ("_auth_open_id", "work_type", "scope", "action")):
+            return False
+        return bool((retry.get("_web_action_request") or original.get("_web_action_request")) and original.get("_auth_open_id") == owner
+                    and original.get("action") in {"start", "update", "end"}
+                    and not any(p.get("_admin_impersonation_id") or p.get("_topic_delegation_id") for p in (original, retry))
+                    and original.get("work_type") in allowed_modules(auth, session)
+                    and original.get("scope") and auth.scope_allowed(session, original["scope"]))
+
+    def _describe_notice_retry(self, job: dict, session: dict) -> None:
+        if job.get("phase") != "failed":
+            return
+        job["can_retry"] = bool(job.get("error_retryable") and self._can_retry_notice_job(job, session))
+        original = job.get("request") or {}
+        target = job.get("record_id") or original.get("target_record_id")
+        if (original.get("action") != "end" or original.get("work_type") not in {"polling", "maintenance", "adjust"}
+                or not target or all("工单" not in str(job.get(key) or "") for key in ("upload_message", "error"))):
+            return
+        try:
+            orders = PortalRuntime.polling_work_orders()
+            group = orders.get_group(target)
+            if (group.get("target_record_id") != target or group.get("work_type", "polling") != original["work_type"]
+                    or not group.get("scope") or not PortalRuntime.auth_manager.scope_allowed(session, group["scope"])):
+                return
+            if group.get("state") in {"upload_pending", "completed"} and orders.end_delay_status(group)["ready"]:
+                job["work_order_hint"] = "当前工单已完成，延时条件已满足。可重试原结束任务。"
+        except Exception:
+            return  # Reading the current work order is optional for historical job detail.
 
     @staticmethod
     def _job_visible_to_session(job: dict, session: dict) -> bool:

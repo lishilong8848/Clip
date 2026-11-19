@@ -24,6 +24,7 @@
         <NCard v-for="task in dashboard.tasks" :key="task.kind" :title="task.label" size="small" class="task-card">
           <template #header-extra><NTag size="small" :type="task.enabled ? 'success' : 'default'" :bordered="false">{{ task.enabled ? '定时已启用' : '定时已关闭' }}</NTag></template>
           <dl class="facts">
+            <template v-if="task.pull_scope"><dt>拉取范围</dt><dd>{{ task.pull_scope }}</dd></template>
             <dt>定时（北京时间）</dt><dd>{{ task.times.join('、') || '未设置' }}</dd>
             <dt>下次运行</dt><dd>{{ dateText(task.next_at) }}</dd>
             <dt>最近执行</dt>
@@ -53,7 +54,7 @@
           <NAlert v-if="taskErrors[task.kind]" type="error" role="alert">{{ taskErrors[task.kind] }}</NAlert>
           <template #footer>
             <div class="actions">
-              <NButton size="small" :loading="previewBusy === task.kind" :disabled="!!previewBusy || !!syncBusy || loginActive" @click="preview(task)">拉取预览</NButton>
+              <NButton size="small" :loading="operations[task.kind] === 'preview'" :disabled="!!operations[task.kind] || loginActive" @click="preview(task)">拉取预览</NButton>
               <NButton v-if="previewId(task)" size="small" text type="primary" @click="openRun(previewId(task))">查看预览</NButton>
               <NButton size="small" secondary @click="editSettings(task)">定时设置</NButton>
             </div>
@@ -116,7 +117,7 @@
       </form>
     </NModal>
 
-    <NModal :show="!!selectedRunId" preset="card" :title="run ? `${taskLabel(run.kind)} · ${modeText(run.mode)}` : '执行详情'" class="zhihang-run-dialog" :mask-closable="!syncBusy" :close-on-esc="!syncBusy" :closable="!syncBusy" @update:show="closeRun">
+    <NModal :show="!!selectedRunId" preset="card" :title="run ? `${taskLabel(run.kind)} · ${modeText(run.mode)}` : '执行详情'" class="zhihang-run-dialog" @update:show="closeRun">
       <NSpin :show="runLoading">
         <NAlert v-if="runError" type="error" role="alert">
           {{ runError }} <NButton text type="primary" @click="readRun(selectedRunId, run?.page || 1)">重读详情</NButton>
@@ -165,7 +166,7 @@
       <template v-if="run?.mode === 'preview' && succeeded(run.status)" #footer>
         <div class="actions dialog-actions">
           <span v-if="!runTask?.confirmed">请先在定时设置中确认接管。</span>
-          <NButton type="primary" :loading="!!syncBusy" :disabled="!runTask?.confirmed || !!syncBusy || !!previewBusy || !!runError" @click="confirmSync">同步原表</NButton>
+          <NButton type="primary" :loading="syncBusy" :disabled="!runTask?.confirmed || !!operations[run.kind] || !!runError" @click="confirmSync">同步原表</NButton>
         </div>
       </template>
     </NModal>
@@ -191,6 +192,7 @@ type Run = RunSummary & {
   stage?: string; checks?: Record<string, Record<string, number | string>>;
 };
 type Task = {
+  pull_scope?: string;
   kind: string; label: string; times: string[]; enabled: boolean; confirmed: boolean;
   notify?: boolean; targets: Target[]; latest?: RunSummary | null; next_at?: Stamp; notification_targets?: NotificationTarget[];
   last_preview?: RunSummary | null; last_sync?: RunSummary | null;
@@ -230,8 +232,8 @@ const authReady = computed(() => !!dashboard.value?.auth.has_token && !dashboard
 const authLabel = computed(() => !dashboard.value ? '读取登录状态' : authReady.value ? '智航已登录' : dashboard.value.auth.expired ? '智航登录已过期' : '智航未登录');
 const authName = computed(() => dashboard.value?.auth.display_name || dashboard.value?.auth.login_name || dashboard.value?.auth.token_owner);
 const loginActive = computed(() => ['starting', 'waiting', 'verifying'].includes(loginJob.value.status || ''));
-const previewBusy = ref('');
-const syncBusy = ref('');
+const operations = reactive<Record<string, 'preview' | 'sync' | undefined>>({});
+let previewSequence = 0;
 const previews = reactive<Record<string, string>>({});
 const taskErrors = reactive<Record<string, string>>({});
 const settings = ref<Settings>();
@@ -258,6 +260,7 @@ const run = ref<Run>();
 const runError = ref('');
 const runLoading = ref(false);
 const runTask = computed(() => dashboard.value?.tasks.find(task => task.kind === run.value?.kind));
+const syncBusy = computed(() => !!run.value && operations[run.value.kind] === 'sync');
 const pageCount = computed(() => Math.max(1, Math.ceil((run.value?.total || 0) / (run.value?.page_size || 1))));
 const rowFields = computed(() => (run.value?.rows || []).map(row =>
   row.fields && typeof row.fields === 'object' && !Array.isArray(row.fields) ? row.fields as Record<string, unknown> : row));
@@ -295,7 +298,7 @@ function previewId(task: Task) {
   return previews[task.kind] || task.last_preview?.id || '';
 }
 const statuses: Record<string, string> = {
-  pending: '等待执行', queued: '等待执行', running: '执行中', pulling: '拉取中', syncing: '同步中',
+  pending: '等待恢复', queued: '等待恢复', retry_wait: '等待重试', running: '执行中', pulling: '拉取中', syncing: '同步中',
   verifying: '正在核验', pending_verify: '待核验', pending_verification: '待核验', verification_pending: '待核验', awaiting_verification: '待核验',
   success: '成功', succeeded: '成功', completed: '成功', ready: '预览就绪', preview_ready: '预览就绪',
   failed: '失败', error: '失败', cancelled: '已取消', interrupted: '已中断', blocked: '已暂停',
@@ -308,7 +311,7 @@ function succeeded(status: string) {
   return ['success', 'succeeded', 'completed', 'ready', 'preview_ready'].includes(status);
 }
 function running(status: string) {
-  return ['queued', 'pending', 'running', 'pulling', 'syncing', 'verifying', 'pending_verify', 'pending_verification', 'verification_pending', 'awaiting_verification'].includes(status);
+  return ['queued', 'pending', 'retry_wait', 'running', 'pulling', 'syncing', 'verifying', 'pending_verify', 'pending_verification', 'verification_pending', 'awaiting_verification'].includes(status);
 }
 function statusType(status: string) {
   if (succeeded(status)) return 'success';
@@ -463,7 +466,7 @@ async function saveSettings() {
 }
 
 function closeRun(show: boolean) {
-  if (show || syncBusy.value) return;
+  if (show) return;
   clearTimeout(runTimer);
   runRead?.abort();
   selectedRunId.value = '';
@@ -500,20 +503,23 @@ async function readRun(id: string, page: number, quiet = false) {
   }
 }
 async function preview(task: Task) {
-  if (previewBusy.value || syncBusy.value) return;
-  previewBusy.value = task.kind;
+  if (operations[task.kind]) return;
+  const sequence = ++previewSequence;
+  const selection = selectedRunId.value;
+  operations[task.kind] = 'preview';
   taskErrors[task.kind] = '';
   try {
     const response = await write('/' + encodeURIComponent(task.kind) + '/preview', 'POST');
     const id = response.id || response.run_id || response.preview_id;
     if (!id) throw new Error('未收到预览编号，请在执行记录中核对。');
-    previews[task.kind] = id;
-    openRun(id);
+    if (succeeded(response.status) || running(response.status)) previews[task.kind] = id;
+    if (sequence === previewSequence && selectedRunId.value === selection) openRun(id);
+    else if (response.status === 'failed') taskErrors[task.kind] = response.error || '拉取失败，请查看执行记录。';
     void refresh(true);
   } catch (cause) {
     taskErrors[task.kind] = message(cause);
   } finally {
-    previewBusy.value = '';
+    delete operations[task.kind];
   }
 }
 function confirmSync() {
@@ -524,21 +530,24 @@ function confirmSync() {
     positiveText: '确认同步', negativeText: '取消', onPositiveClick: () => void sync(task, item.id) });
 }
 async function sync(task: Task, previewId: string) {
-  if (syncBusy.value || previewBusy.value || selectedRunId.value !== previewId || !runTask.value?.confirmed) return;
-  syncBusy.value = task.kind;
+  if (operations[task.kind] || selectedRunId.value !== previewId || !runTask.value?.confirmed) return;
+  operations[task.kind] = 'sync';
+  taskErrors[task.kind] = '';
   runError.value = '';
   try {
     const response = await write('/' + encodeURIComponent(task.kind) + '/sync', 'POST', { preview_id: previewId });
     const id = response.id || response.run_id;
     if (!id) throw new Error('未收到同步任务编号，请刷新执行记录核对。');
-    if (previews[task.kind] === previewId) delete previews[task.kind];
-    openRun(id);
+    if (succeeded(response.status) && previews[task.kind] === previewId) delete previews[task.kind];
+    if (selectedRunId.value === previewId) openRun(id);
+    else if (response.status === 'failed') taskErrors[task.kind] = response.error || '同步失败，请查看执行记录。';
     void refresh(true);
   } catch (cause) {
-    runError.value = message(cause);
+    if (selectedRunId.value === previewId) runError.value = message(cause);
+    else taskErrors[task.kind] = message(cause);
     void refresh(true);
   } finally {
-    syncBusy.value = '';
+    delete operations[task.kind];
   }
 }
 onMounted(() => {

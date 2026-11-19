@@ -32,7 +32,7 @@
     <div v-if="loading && !bootstrapActive" class="notice" role="status"><Loader2 class="spin" :size="18" />正在读取台账…</div>
     <div v-if="busy" class="notice" role="status"><Loader2 class="spin" :size="18" />{{ startingJob ? (startingKind === 'exports' ? '正在准备导出数据…' : '正在启动同步…') : job.kind === 'export' ? exportPhaseLabel(job.phase) : '正在同步飞书…' }}</div>
     <div v-if="job.status === 'failed'" class="notice danger">{{ job.error }}<button @click="startJob(job.kind === 'export' ? 'exports' : 'refresh')">重试</button></div>
-    <div v-if="exported.export_id" class="notice success"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a></div>
+    <div v-if="exported.export_id" class="notice success"><FileCheck2 :size="18" />{{ exported.filename }}<span>{{ cloudUploadLabel(exported) }}</span><span v-if="downloadError" role="alert" class="danger-text">{{ downloadError }}</span><a :href="api + '/exports/' + exported.export_id + '/download'"><Download :size="16" />下载</a></div>
     <div v-if="scope && overview.export_state?.is_stale" class="notice danger" role="status"><TriangleAlert :size="18" /><span>最近导出已过期：{{ overview.export_state.stale_reason }}。请重新导出。</span></div>
     <div v-if="storageWarning" class="notice danger" role="status">{{ storageWarning }}</div>
     <div v-if="serverStorage.evidence_bytes !== undefined" class="notice" role="status"><HardDrive :size="18" /><span>确认截图 {{ formatBytes(serverStorage.evidence_bytes) }} · 缩略图 {{ formatBytes(serverStorage.thumbnail_bytes) }} · 原确认单 {{ formatBytes(serverStorage.import_bytes) }} · 导出文件 {{ formatBytes(serverStorage.export_bytes) }}</span><button :disabled="serverStorageLoading || !serverStorage.cloud_backed_files" @click="cacheCleanupOpen = true">清理已上云图片缓存</button></div>
@@ -231,7 +231,7 @@
 import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Settings2, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
-import { invalidateReadCache, requestJson, type Dict } from '../api/client';
+import { downloadFile, invalidateReadCache, requestJson, type Dict } from '../api/client';
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { navigate, registerNavigationGuard } from '../navigation';
 import { isAssistantEvent } from '../modalState';
@@ -407,22 +407,46 @@ function allExportLabel(item: Dict): string {
   if (item.status === 'succeeded') return '文件已生成';
   return item.status === 'running' ? exportPhaseLabel(item.phase) : '等待执行';
 }
+let requestedDownloadJob = '';
+const downloadError = ref('');
+async function downloadExport(exportId: string): Promise<void> {
+  try {
+    await downloadFile(api + '/exports/' + encodeURIComponent(exportId) + '/download', { timeoutMs: 600000 });
+  } catch {
+    if (!disposed && exported.value.export_id === exportId) downloadError.value = '文件已生成，但下载未完成，请点击文件旁的「下载」重试。';
+  }
+}
 async function startJob(path: string): Promise<void> {
   if (props.readOnly && path !== 'exports') return;
   if (busy.value) return; startingJob.value = true; startingKind.value = path; error.value = '';
   let requestId = '';
   try {
     requestId = path === 'exports' ? pendingExportRequest.value || 'single_' + randomHexId() : '';
+    if (requestId) downloadError.value = '';
     if (requestId) { pendingExportRequest.value = requestId; taskStorage.setItem(exportRequestKey,JSON.stringify({id:requestId,at:Date.now()})); }
-    job.value = await write(path,requestId ? {batch_id:requestId} : {}); taskStorage.setItem(storageKey, job.value.job_id); void pollJob();
+    const started = await write(path,requestId ? {batch_id:requestId} : {});
+    if (disposed) return;
+    job.value = started;
+    requestedDownloadJob = path === 'exports' ? started.job_id : '';
+    taskStorage.setItem(storageKey, started.job_id);
+    void pollJob();
   } catch (exc: any) { if (requestId && (!exc?.status || exc.status >= 500)) error.value = '导出启动响应未确认，后台可能仍在执行。请点击“继续上次导出”核验原任务。'; else fail(exc); }
   finally { startingJob.value = false; startingKind.value = ''; }
 }
 async function pollJob(): Promise<void> {
   if (disposed) return;
   try {
-    job.value = await read('jobs/' + job.value.job_id);
-    if(job.value.kind==='export' && job.value.result?.export_id)exported.value=job.value.result;
+    const id = job.value.job_id;
+    const current = await read('jobs/' + id);
+    if (disposed || job.value.job_id !== id || current.job_id !== id) return;
+    job.value = current;
+    if (current.kind === 'export' && current.result?.export_id && !current.result.deleted) {
+      exported.value = current.result;
+      if (requestedDownloadJob === id) {
+        requestedDownloadJob = '';
+        void downloadExport(current.result.export_id);
+      }
+    }
     if (['pending', 'running'].includes(job.value.status)) { pollTimer = scheduleVisible(pollJob,1800); return; }
     taskStorage.removeItem(storageKey);
     if (job.value.kind === 'export' && job.value.status === 'succeeded') { pendingExportRequest.value = ''; taskStorage.removeItem(exportRequestKey); }

@@ -209,4 +209,9 @@ async def module_denial(request, controller, runtime):
         if await asyncio.to_thread(risk_task_access, runtime, session, rid):
             request.state.allowed_modules = allowed | {'risk_inspection'}
             return None
-    return JSONResponse({"ok": False, "error": "当前账号尚未获授该功能权限，请联系管理员。", "error_code": "module_access_denied"}, status_code=403)
+    message = "当前账号尚未获授该功能权限，请联系管理员。"
+    if request.method in {"GET", "HEAD"} and not path.startswith("/api/"):
+        from .page_errors import page_error
+        return page_error(403, message)
+    return JSONResponse({"ok": False, "error": message, "error_code": "module_access_denied"},
+                        status_code=403, media_type="application/json; charset=utf-8")

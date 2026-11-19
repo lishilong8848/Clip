@@ -138,7 +138,9 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
       return {rows:array(data.items).flatMap(item=>{
         if (!item.event_id||item.state!=='active') return [];
         const title=String(item.metadata?.summary||item.text||'事件通告').split('\n').slice(0,2).join(' ').slice(0,160);
-        return [row('event_notices',item.event_id,scope,title,'进行中',link('/workbench-lite',{scope,work_type:'event',event_id:item.event_id}),{ongoing:true,detail:'事件通告'})];
+        const created=todoTimestamp(item.created_at);
+        return [row('event_notices',item.event_id,scope,title,'进行中',link('/workbench-lite',{scope,work_type:'event',event_id:item.event_id}),
+          {ongoing:true,detail:'事件通告',time:created===undefined?'':new Date(created).toISOString()})];
       }),delayed:Boolean(data.warning)};
     });
   }
@@ -166,7 +168,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
       if(round>data.round_limit) return {rows:[]};
       return {rows:[row('inspection',data.duty.date+':'+data.duty.shift+':'+round,scope,
         scope+'楼'+data.duty.shift+'班第 '+round+' 轮巡检',active?'进行中':'待开始',url,
-        {detail:'巡检',scheduledAt:!active?data.opens_at:undefined})]};
+        {detail:'巡检',time:String(data.duty.date||''),scheduledAt:!active?data.opens_at:undefined})]};
     });
   }
   if (enabled('drills')) add('drills',link('/drill-management'),operated,async(scope,signal)=>{

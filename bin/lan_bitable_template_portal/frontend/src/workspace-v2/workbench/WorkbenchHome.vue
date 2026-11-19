@@ -36,15 +36,17 @@
           </div>
         </header>
         <div class="desk-task-tabs" aria-label="待办显示范围">
-          <button type="button" :aria-pressed="!unreadOnly && !overdueOnly" @click="setTaskView('all')">全部待办</button>
-          <button type="button" :aria-pressed="unreadOnly" @click="setTaskView('unread')">未读 <span>{{ unreadTasks.length }}</span></button>
-          <button type="button" :aria-pressed="overdueOnly" @click="setTaskView('overdue')">逾期 <span>{{ overdueCount }}</span></button>
+          <button type="button" :aria-pressed="taskView==='all'" @click="setTaskView('all')">全部待办</button>
+          <button type="button" :aria-pressed="taskView==='today'" @click="setTaskView('today')">今日待办 <span v-if="todayCount">{{ todayCount }}</span></button>
+          <button v-if="queueSources.some(source=>source.id==='repair_management')" type="button" :aria-pressed="taskView==='previous-repairs'" @click="setTaskView('previous-repairs')">历史未完维修 <span v-if="previousRepairCount">{{ previousRepairCount }}</span></button>
+          <button type="button" :aria-pressed="taskView==='unread'" @click="setTaskView('unread')">未读 <span>{{ unreadTasks.length }}</span></button>
+          <button type="button" :aria-pressed="taskView==='overdue'" @click="setTaskView('overdue')">逾期 <span>{{ overdueCount }}</span></button>
         </div>
         <div v-if="taskModules.length" class="wb-task-module-grid">
         <article v-for="module in taskModules" :key="module.id" class="wb-task-module" :class="{'desk-drill-queue':module.id==='drills'}" :data-source="module.id" :aria-label="module.label">
         <h3 v-if="module.id==='drills' && module.rows.length" class="desk-drill-heading">待完成演练 <span class="wb-task-count">{{ module.rows.length }} 项</span></h3>
         <template v-for="group in module.groups" :key="group.id">
-        <h4 v-if="group.label" class="wb-task-group">{{ group.label }} <small>显示 {{ group.rows.length }} / {{ group.total }} 项</small></h4>
+        <h4 v-if="group.label" class="wb-task-group">{{ group.label }} <small>{{ group.rows.length<group.total ? group.rows.length+' / ' : '' }}{{ group.total }} 项</small></h4>
         <ul class="wb-rows wb-task-list" :aria-label="group.label || module.label">
           <li v-for="item in group.rows" :key="item.key">
             <button type="button" class="wb-task-row" :aria-label="actionLabel(item)+' '+item.title" @click="openItem(item)">
@@ -304,7 +306,8 @@ const sourceOrder=computed(()=>[...new Set<SourceId>([
 const orderedSources=computed(()=>sourceOrder.value.flatMap(id=>sources.value.filter(source=>source.id===id)));
 const sourceLabels=computed(()=>new Map(sources.value.map(source=>[source.id,source.label])));
 watch([context,orderedSources],()=>{for(const source of orderedSources.value) void load(source.id);},{immediate:true,flush:'post'});
-const taskKind=ref<SourceId|''>(''),taskSearch=ref(''),overdueOnly=ref(false),unreadOnly=ref(false);
+type TaskView='all'|'today'|'previous-repairs'|'unread'|'overdue';
+const taskKind=ref<SourceId|''>(''),taskSearch=ref(''),taskView=ref<TaskView>('all');
 const allTasks=computed(()=>orderedSources.value
   .flatMap(source=>(states.value[source.id]?.result?.rows||[]).map(item=>source.readOnly?{...item,readOnly:true}:item))
   .filter(item=>(accountLevel.value!=='L2'||inDeskScope(item,dataScope.value))
@@ -404,24 +407,44 @@ function showUnread(){
   setTaskView('unread'); taskKind.value=''; taskSearch.value='';
   content.value?.scrollIntoView({block:'start'}); focusContent();
 }
-function setTaskView(view:'all'|'unread'|'overdue'){
-  unreadOnly.value=view==='unread';
-  overdueOnly.value=view==='overdue';
+function setTaskView(view:TaskView){
+  taskView.value=view;
+  if (view==='previous-repairs' && taskKind.value!=='repair_management') taskKind.value='';
 }
 const modulePageSize=4;
 const visibleLimits=ref<Partial<Record<SourceId,number>>>({});
 const queueSources=computed(()=>orderedSources.value.filter(source=>states.value[source.id]?.status!=='deny'));
-const sourcesForQueue=computed(()=>queueSources.value.filter(source=>!taskKind.value||source.id===taskKind.value));
+const sourcesForQueue=computed(()=>queueSources.value.filter(source=>
+  (!taskKind.value||source.id===taskKind.value) && (taskView.value!=='previous-repairs'||source.id==='repair_management')));
 const isOverdue=(row:WorkItem)=>!!row.dueAt&&row.dueAt<=clock.value;
 const overdueCount=computed(()=>allTasks.value.filter(row=>inQueueScope(row)&&isOverdue(row)).length);
+const dayStart=computed(()=>{
+  const date=new Date(clock.value+8*3600000).toISOString().slice(0,10);
+  return Date.parse(date+'T00:00:00+08:00');
+});
+const startsAt=(row:WorkItem)=>todoTimestamp(row.noticeWindow?.start||row.scheduledAt||row.time);
+const onDeskDay=(time:number|undefined)=>time!==undefined&&time>=dayStart.value&&time<dayStart.value+86400000;
+function isTodayTask(row:WorkItem) {
+  const start=startsAt(row), end=todoTimestamp(row.noticeWindow?.end);
+  return onDeskDay(start)||onDeskDay(row.dueAt)||(start!==undefined&&start<dayStart.value&&end!==undefined&&end>dayStart.value);
+}
+function isPreviousRepair(row:WorkItem) {
+  const start=startsAt(row);
+  return row.kind==='repair_management'&&!isTodayTask(row)&&start!==undefined&&start<dayStart.value;
+}
+const todayCount=computed(()=>allTasks.value.filter(row=>inQueueScope(row)&&isTodayTask(row)).length);
+const previousRepairCount=computed(()=>allTasks.value.filter(row=>inQueueScope(row)&&isPreviousRepair(row)).length);
 const taskScopeLabel=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope==='110'?'110站':scope==='ALL'||scope==='CAMPUS'?'园区':scope;
 const matchedTasks=computed(()=>{
   const terms=taskSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
   return allTasks.value
     .filter(row=>inQueueScope(row)
-      &&(!taskKind.value||row.kind===taskKind.value)&&(!unreadOnly.value||!isRead(row))&&(!overdueOnly.value||isOverdue(row))&&terms.every(term=>
+      &&(!taskKind.value||row.kind===taskKind.value)
+      &&(taskView.value!=='today'||isTodayTask(row))&&(taskView.value!=='previous-repairs'||isPreviousRepair(row))
+      &&(taskView.value!=='unread'||!isRead(row))&&(taskView.value!=='overdue'||isOverdue(row))&&terms.every(term=>
       [row.title,taskScopeLabel(row.scope),row.status,row.detail,sourceLabels.value.get(row.kind)].join(' ').toLowerCase().includes(term)))
-    .sort((a,b)=>deskActionOrder(accountLevel.value,a)-deskActionOrder(accountLevel.value,b)
+    .sort((a,b)=>Number(isTodayTask(b))-Number(isTodayTask(a))
+      ||deskActionOrder(accountLevel.value,a)-deskActionOrder(accountLevel.value,b)
       ||Number(isOverdue(b))-Number(isOverdue(a))||(a.dueAt??Infinity)-(b.dueAt??Infinity)
       ||sourceOrder.value.indexOf(a.kind)-sourceOrder.value.indexOf(b.kind));
 });
@@ -436,20 +459,26 @@ const taskModules=computed(()=>{
     const more=sources.some(source=>states.value[source.id]?.result?.more);
     const loading=sources.some(source=>!states.value[source.id] || states.value[source.id]?.status==='loading');
     if (!rows.length && !more) return [];
-    // A combined notice module shares one limit across plan and ongoing subgroups.
-    const limit=visibleLimits.value[id]??modulePageSize;
+    // Today's loaded tasks stay visible, even when the older queue needs paging.
+    const limit=visibleLimits.value[id]??(taskView.value==='previous-repairs'?3*modulePageSize:modulePageSize);
     const notices=role.value==='duty' && id==='notices';
     const subgroups=notices ? [
       {id:'plans',label:'计划通告',rows:rows.filter(row=>!row.ongoing)},
       {id:'ongoing',label:'进行中通告',rows:rows.filter(row=>row.ongoing)},
+    ] : id==='repair_management' ? [
+      {id:'repair-today',label:'今日维修',rows:rows.filter(isTodayTask)},
+      {id:'repair-history',label:'历史未完维修',rows:rows.filter(isPreviousRepair)},
+      {id:'repair-other',label:'其他未完维修',rows:rows.filter(row=>!isTodayTask(row)&&!isPreviousRepair(row))},
     ] : [{id,label:'',rows}];
     const populated=subgroups.filter(group=>group.rows.length);
     let remaining=limit;
     const groups=populated.map((group,index)=>{
       // Reserve a row for each later subgroup so both notice states stay discoverable.
-      const take=Math.min(group.rows.length,Math.max(0,remaining-(populated.length-index-1)));
-      remaining-=take;
-      return {...group,total:group.rows.length,rows:group.rows.slice(0,take)};
+      const today=group.rows.filter(isTodayTask);
+      const others=group.rows.filter(row=>!isTodayTask(row));
+      const take=Math.min(others.length,Math.max(1,remaining-(populated.length-index-1)));
+      remaining=Math.max(0,remaining-take);
+      return {...group,total:group.rows.length,rows:[...today,...others.slice(0,take)]};
     });
     const visible=groups.flatMap(group=>group.rows);
     return [{id,label:notices?'通告待办':sources[0]!.label,sources,rows,limit,more,loading,
@@ -470,20 +499,26 @@ const queueStatus=computed(()=>{
   if (canLoadMore.value) return '当前页没有匹配项，可继续查看。';
   if (queueIssues.value.length) return '部分待办暂未读取，可在读取状态中重试。';
   if (missingOwnership.value) return '暂无归属已确认的待办。';
-  if (unreadOnly.value) return '暂无匹配的未读待办。';
-  if (taskSearch.value || overdueOnly.value || taskKind.value) return '暂无匹配的待办。';
+  if (taskView.value==='today') return '今天暂无待办。';
+  if (taskView.value==='previous-repairs') return '暂无历史未完维修。';
+  if (taskView.value==='unread') return '暂无匹配的未读待办。';
+  if (taskSearch.value || taskView.value==='overdue' || taskKind.value) return '暂无匹配的待办。';
   return '当前没有未完成的待办。';
 });
 function loadMore(id?:SourceId){
   for (const module of taskModules.value.filter(module=>!id || module.id===id)) {
-    if (!module.hidden) for (const source of module.sources) {
+    for (const source of module.sources) {
       if (states.value[source.id]?.result?.more) void load(source.id,true,true);
     }
     visibleLimits.value={...visibleLimits.value,[module.id]:module.limit+modulePageSize};
   }
 }
-watch([taskKind,taskSearch,overdueOnly,unreadOnly],()=>{visibleLimits.value={};});
-watch(queueSources,list=>{if(taskKind.value&&!list.some(source=>source.id===taskKind.value))taskKind.value='';});
+watch([taskKind,taskSearch,taskView],()=>{visibleLimits.value={};});
+watch(taskKind,kind=>{if(kind&&kind!=='repair_management'&&taskView.value==='previous-repairs')setTaskView('all');});
+watch(queueSources,list=>{
+  if(taskKind.value&&!list.some(source=>source.id===taskKind.value))taskKind.value='';
+  if(taskView.value==='previous-repairs'&&!list.some(source=>source.id==='repair_management'))setTaskView('all');
+});
 function total(id:SourceId) {
   const state=states.value[id];
   return state?.status==='ok'&&state.result&&!state.result.more ? state.result.rows.length : null;
@@ -585,7 +620,7 @@ function restoreFocus(){
 }
 function closeDrawer(){if(!drawerSource.value)return;drawerSource.value=undefined;restoreFocus();}
 watch([context,selectedScope],()=>{
-  inlineNotice.value=undefined;inlineTaskShown.value=false;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';closeDrawer(); taskKind.value=''; taskSearch.value=''; overdueOnly.value=false; unreadOnly.value=false;
+  inlineNotice.value=undefined;inlineTaskShown.value=false;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';closeDrawer(); taskKind.value=''; taskSearch.value=''; taskView.value='all';
   visibleLimits.value={}; allShortcuts.value=false;
 },{flush:'sync'});
 

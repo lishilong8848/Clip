@@ -132,6 +132,7 @@ def parse_template(data):
 
 
 def fill_template(content, schema, record, scope):
+    from .tool_form_titles import restore_titles
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
         sheet = book[schema['sheet']] if schema.get('sheet') else book.active
@@ -156,7 +157,7 @@ def fill_template(content, schema, record, scope):
             sheet[address].data_type = 's'
         output = io.BytesIO()
         book.save(output)
-        return output.getvalue()
+        return restore_titles(content, output.getvalue(), sheet.title, {})
     finally:
         book.close()
 
@@ -339,6 +340,7 @@ class ToolSelfChecks:
 
     @staticmethod
     def _clone_template_content(source, body, *, stable=False):
+        from .tool_form_titles import restore_titles
         content, schema = source['content'], json.loads(source['schema'])
         checks = body.get('checks')
         if not isinstance(checks, list) or len(checks) != len(schema['checks']):
@@ -370,13 +372,14 @@ class ToolSelfChecks:
                 book.save(out)
         finally:
             book.close()
+        titled = restore_titles(content, out.getvalue(), sheet.title, {})
         if stable:
             normalized = io.BytesIO()
-            with ZipFile(out) as source_zip, ZipFile(normalized, 'w', ZIP_DEFLATED) as target:
+            with ZipFile(io.BytesIO(titled)) as source_zip, ZipFile(normalized, 'w', ZIP_DEFLATED) as target:
                 for part in source_zip.namelist():
                     target.writestr(ZipInfo(part), source_zip.read(part), compress_type=ZIP_DEFLATED)
             return normalized.getvalue()
-        return out.getvalue()
+        return titled
 
     def availability(self, actor, identity, body):
         self.access(actor)

@@ -191,6 +191,7 @@
           <div v-if="order.model"><dt>规格型号</dt><dd>{{ order.model }}</dd></div>
           <div v-if="order.location"><dt>存放位置</dt><dd>{{ order.location }}</dd></div>
         </dl>
+        <p v-if="order.result_notice" class="tool-pending tool-context" role="status">{{ order.result_notice }}</p>
         <div v-if="order.sync.length" class="tool-bar tool-context">
           <NTag v-for="item in order.sync" :key="item.label" :type="item.state === 'done' ? 'success' : 'warning'"
             :title="item.error" :bordered="false">{{ item.label }} · {{ item.state === 'done' ? '已同步' : '待同步' }}</NTag>
@@ -362,7 +363,7 @@ interface Order {
   result_label?: string; tool_status_label?: string; from_repair?: boolean;
   scrap_approvals?: { name: string; decision: string; at: string; note: string }[];
   can_restore?: boolean; inspection?: InspectionReport; inspection_expires_on?: string;
-  sync: { label: string; state: string; error: string; verifying?: boolean }[];
+  sync: { label: string; state: string; error: string; verifying?: boolean }[]; result_notice?: string;
 }
 interface Detail extends Order {
   records: Entry[]; actor_name: string; history: { action: string; at: string; name: string; detail: string }[];

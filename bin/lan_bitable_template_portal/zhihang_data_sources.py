@@ -241,14 +241,35 @@ def identity(kind, fields):
     return kind + ":" + json.dumps(parts, ensure_ascii=False, separators=(",", ":")) if all(parts) else None
 
 
+def _inspection_days(now):
+    return now.date() - timedelta(days=2), now.date()
+
+
+def _drill_months(now):
+    current = now.date().replace(day=1)
+    previous = (current - timedelta(days=1)).replace(day=1)
+    return previous, current
+
+
+def _plan_month(fields):
+    planned = _date(fields.get("计划演练时间"))
+    year = _first(fields, "演练年份") or (str(planned.year) if planned else "")
+    month = _drill_month(_first(fields, "演练月份")) or (planned.month if planned else None)
+    if year.isdecimal() and month:
+        return int(year), month
+    return None
+
+
 def in_refresh_scope(kind, fields, now):
     """Scope predicate only. Callers must separately prove row ownership."""
     if not identity(kind, fields):
         return False
     now = _local(now)
-    if kind in ("change_workorder", "change_basic", "drill"):
+    if kind in ("change_workorder", "change_basic"):
         # Original base query is not bounded by date.
         return True
+    if kind == "drill":
+        return _plan_month(fields) in {(month.year, month.month) for month in _drill_months(now)}
     if kind == "event":
         start = now.date() - timedelta(days=29)
         created = _first(fields, "创建时间", "通知时间")
@@ -263,9 +284,9 @@ def in_refresh_scope(kind, fields, now):
                 and (checked_at.year, checked_at.month) == (now.year, now.month))
     if kind == "inspection":
         times = _plan_range(fields.get("计划区间"))
-        return (len(times) == 2 and all(times)
-                and (times[0].year, times[0].month) == (now.year, now.month)
-                and times[0] <= times[1])
+        first, last = _inspection_days(now)
+        return (len(times) == 2 and all(times) and first <= times[0].date()
+                and times[0] <= times[1] and times[1].date() <= last)
     return False
 
 
@@ -879,14 +900,16 @@ def _inspection_rows(source, filters):
 
 
 def _inspection(source, now):
+    first, last = _inspection_days(now)
     filters = dict.fromkeys("""
         jobInfo jobExecuteStatus buildingCode withinDay userName executeCycle startDateTime endDateTime
         startSubmitTime endSubmitTime
     """.split(), "") | {
         "datacenterCode": "0.5.2.2.1.1",
-        "planStartDatetime": f"{now:%Y-%m}-01 00:00:00",
-        "planEndDatetime": f"{now:%Y-%m}-{calendar.monthrange(now.year, now.month)[1]:02d} 23:59:59",
+        "planStartDatetime": f"{first} 00:00:00",
+        "planEndDatetime": f"{last} 23:59:59",
     }
+    source.report("巡检计划日期范围", 开始日期=str(first), 结束日期=str(last))
     rows = _inspection_rows(source, filters)
 
     def map_row(row):
@@ -926,7 +949,14 @@ def _inspection(source, now):
         }
 
     # The original target has no source ID column. Sequence is display-only.
-    numbered = (row | {"_sequence": str(index)} for index, row in enumerate(rows, 1))
+    scoped = []
+    for row in rows:
+        start = _date(row.get("planStartDatetime"))
+        if start is None:
+            raise _incomplete("inspection", "巡检工单计划开始时间无法核对。")
+        if first <= start.date() <= last:
+            scoped.append(row)
+    numbered = (row | {"_sequence": str(index)} for index, row in enumerate(scoped, 1))
     source.report("巡检工单核验", 待核验=len(rows))
     result = _map_rows("inspection", numbered, map_row)
     source.report("巡检工单核验", 核验通过=len(result))
@@ -1114,19 +1144,27 @@ def _drill(source, now):
         exerciseCategory exerciseMonth exerciseScenarioName overdue planApprovalStatusMulti
         plannedExerciseEndTime plannedExerciseStartTime
     """.split(), "") | dict.fromkeys(("dutyGroupId", "executeStatus", "hasEop"))
-    month = _MONTHS[now.month - 1][:3]
+    previous, current = _drill_months(now)
+    last = current.replace(day=calendar.monthrange(current.year, current.month)[1])
+    source.report("演练计划月份范围", 起始月=previous.strftime("%Y-%m"), 截止月=current.strftime("%Y-%m"))
     codes = [f"{number}.1.2.3.1.1" for number in _BUILDINGS]
-    scopes = [("", "")] + [(code, month) for code in ["", *codes]] + [(code, "") for code in codes]
+    scopes = [(code, month) for month in (previous, current) for code in ["", *codes]]
     plans = {}
     for code, month_filter in scopes:
         rows = _pages(source, "drill_list", lambda page: filters | {
-            "pageNo": page, "pageSize": 100, "dcCode": code, "exerciseMonth": month_filter,
+            "pageNo": page, "pageSize": 100, "dcCode": code, "exerciseMonth": _MONTHS[month_filter.month - 1][:3],
         }, 100, workers=6)
         seen = set()
         for row in rows:
             # The original stable key checks planId and exercisePlanId as well.
             row = row | {"id": _first(row, "id", "planId", "exercisePlanId")}
-            key = identity("drill", _fields(row, _DRILL_PLAN_FIELDS))
+            fields = _fields(row, _DRILL_PLAN_FIELDS)
+            period = _plan_month(fields)
+            if period is None:
+                raise _incomplete("drill", "演练计划缺少年月及有效计划时间，保留原表数据。")
+            if period != (month_filter.year, month_filter.month):
+                continue
+            key = identity("drill", fields)
             if not key or key in seen:
                 raise _incomplete("drill", "演练计划主键缺失或重复。")
             seen.add(key)
@@ -1134,7 +1172,8 @@ def _drill(source, now):
     if not plans:
         raise ZhihangSourceError("empty", "智航演练计划为空，保留上次已核验数据。")
 
-    filters = _event_filters() | {"drill": True}
+    filters = _event_filters() | {"drill": True, "startHappendDate": f"{previous} 00:00:00",
+                                  "endHappendDate": f"{last} 23:59:59"}
     events = _pages(source, "drill_evaluation", lambda page: filters | {
         "pageBean": {"pageNumber": page, "pageSize": 100},
     }, 100, workers=6)

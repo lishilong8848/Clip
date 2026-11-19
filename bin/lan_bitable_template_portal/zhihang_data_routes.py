@@ -1,4 +1,4 @@
-"""Administrator endpoints for the Zhihang refresh queue."""
+"""Administrator endpoints for Zhihang data refresh."""
 import asyncio
 from urllib.parse import urlencode, urlsplit
 
@@ -10,8 +10,10 @@ from .module_access import allowed_modules
 from .plan_convergence_browser_login import BrowserLogin
 from .zhihang_data_cards import notify
 from .zhihang_data_digest import ZhihangDigests
-from .zhihang_data_sync import SyncError, ZhihangSync, describe_error
+from .zhihang_data_sync import SyncBusy, SyncError, ZhihangSync, describe_error
 from .zhihang_h_drill import HDutyDrillSync, KIND as H_DRILL_KIND
+
+MANUAL_RESULT_WAIT = 15
 
 
 def install_zhihang_data(app, controller, runtime, browser_login):
@@ -26,6 +28,15 @@ def install_zhihang_data(app, controller, runtime, browser_login):
     app.add_event_handler("shutdown", service.close)
     app.add_event_handler("shutdown", h_service.close)
     app.add_event_handler("shutdown", h_login.close)
+
+    async def run_now(kind, mode, preview_id=""):
+        started, future = await asyncio.to_thread(service.start_now, kind, mode, preview_id)
+        if future is None:
+            return started
+        pending = asyncio.wrap_future(future)
+        done, _ = await asyncio.wait({pending}, timeout=MANUAL_RESULT_WAIT)
+        # Long batches already have a durable execution ID and remain visible after disconnect.
+        return pending.result() if done else started
 
     def can_access(request, session):
         return bool(session and not session.get("is_guest") and not session.get("impersonation")
@@ -67,12 +78,12 @@ def install_zhihang_data(app, controller, runtime, browser_login):
             elif path.endswith("/{kind}/settings"):
                 result = await asyncio.to_thread(service.configure, params["kind"], body)
             elif path.endswith("/{kind}/preview"):
-                result = await asyncio.to_thread(service.enqueue, params["kind"], "preview")
+                result = await run_now(params["kind"], "preview")
             elif path.endswith("/{kind}/sync"):
                 preview_id = body.get("preview_id")
                 if not isinstance(preview_id, str):
                     raise SyncError("请先完成本类数据的拉取预览。")
-                result = await asyncio.to_thread(service.enqueue, params["kind"], "sync", preview_id)
+                result = await run_now(params["kind"], "sync", preview_id)
             elif "id" in params:
                 page = max(1, int(request.query_params.get("page", 1)))
                 result = await asyncio.to_thread(service.detail, params["id"], page)
@@ -84,6 +95,8 @@ def install_zhihang_data(app, controller, runtime, browser_login):
             return controller._json_response(request, session, {"ok": True, "data": result})
         except FileNotFoundError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)
+        except SyncBusy as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=409)
         except Exception as exc:
             return JSONResponse({"ok": False, "error": describe_error(exc)},
                                 status_code=400 if isinstance(exc, ValueError) else 502)

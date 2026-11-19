@@ -515,6 +515,44 @@ class PollingWorkOrderTests(unittest.TestCase):
                     target_record_id=target, work_type="polling", fields=fields,
                 ), "")
 
+    def test_ended_polling_work_can_retry_original_failed_job_as_owner(self):
+        controller = FastAPIPortalController(host="127.0.0.1", port=18766)
+        client = TestClient(controller._build_app())
+        owner = {'user': {'open_id': 'fixture_owner'}}
+        original = {'_auth_open_id':'fixture_owner','work_type':'polling','scope':'C','action':'end'}
+        job = {'job_id':'test-job','record_id':'recOriginal','phase':'failed','error_retryable':True,
+               'upload_message':'轮巡工单尚未全部完成，不能发送结束。','request':original,
+               'retry_request':dict(original, _web_action_request=True)}
+        service = MagicMock()
+        service.get_job.return_value = job
+        service.retry_action_job.return_value = dict(job, phase='accepted')
+        orders = MagicMock()
+        orders.get_group.return_value = {'target_record_id':'recOriginal','scope':'C','work_type':'polling','state':'completed'}
+        orders.end_delay_status.return_value = {'ready':True}
+        with patch.object(controller, '_current_session', return_value=owner), patch.object(PortalRuntime, 'service',service), \
+                patch.object(PortalRuntime, 'polling_work_orders',return_value=orders), \
+                patch.object(PortalRuntime.auth_manager, 'is_admin',return_value=False), \
+                patch.object(PortalRuntime.auth_manager, 'scope_allowed',side_effect=lambda session,scope: scope=='C'), \
+                patch('lan_bitable_template_portal.module_access.allowed_modules',return_value={'polling'}) as modules, \
+                patch.object(PortalRuntime, 'enqueue_initial_message_or_upload_job') as enqueue:
+            view = client.get('/api/jobs/batch?ids=test-job').json()['data']['items'][0]
+            self.assertTrue(view['can_retry'])
+            self.assertIn('当前工单已完成', view['work_order_hint'])
+            self.assertEqual(view['phase'], 'failed')
+            self.assertEqual(client.post('/api/jobs/test-job/retry',json={}).status_code,200)
+            owner['user']['open_id'] = 'fixture_other'
+            self.assertEqual(client.post('/api/jobs/test-job/retry',json={}).status_code,403)
+            owner['user']['open_id'] = 'fixture_owner'
+            job['retry_request']['scope'] = 'D'
+            self.assertEqual(client.post('/api/jobs/test-job/retry',json={}).status_code,403)
+            original['scope'] = 'D'
+            self.assertEqual(client.post('/api/jobs/test-job/retry',json={}).status_code,403)
+            job['retry_request']['scope'] = original['scope'] = 'C'
+            modules.return_value = set()
+            self.assertEqual(client.post('/api/jobs/test-job/retry',json={}).status_code,403)
+            enqueue.assert_called_once_with('test-job')
+            service.retry_action_job.assert_called_once_with('test-job')
+
     @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
     def test_workbench_delay_status_is_read_only_and_scope_checked(self, _profile) -> None:
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)

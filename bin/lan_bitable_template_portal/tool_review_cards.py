@@ -45,7 +45,7 @@ def plain(text):
 def review_elements(value, url):
     actions = []
     for decision, title, style in (
-        ('approve', '签名并通过' if value['review'] == 'self' else '同意报废', 'primary'),
+        ('approve', '签名并确认' if value['review'] == 'self' else '同意报废', 'primary'),
         ('reject', '驳回', 'danger'),
     ):
         actions.append({'tag': 'button', 'text': plain(title), 'type': style,
@@ -225,6 +225,8 @@ def apply(runtime, data, app_id):
             message += f' {len(entries) - count} 项已处理或已变更，已跳过。'
     else:
         raise RiskError('审核类型无效。')
+    if count:
+        message += ' 结果通知的投递异常可在灯塔办理记录中查看。'
     return {'ok': True, 'toast': message, 'card': {'schema': '2.0', 'header': {'template': 'grey', 'title': plain('工具管理审核')},
                                                  'body': {'elements': [{'tag': 'div', 'text': plain(message)}]}}}
 

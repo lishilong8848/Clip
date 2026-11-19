@@ -1,4 +1,4 @@
-"""Background refresh of the original Zhihang Bitable tables."""
+"""Direct and scheduled refresh of the original Zhihang Bitable tables."""
 from __future__ import annotations
 
 import datetime as dt
@@ -17,6 +17,8 @@ from .cabinet_power import CabinetFeishu, _stable_uuid4_client_token, equivalent
 NS = "zhihang_data"
 TZ = ZoneInfo("Asia/Shanghai")
 HISTORY_PAGE_SIZE = 10
+UPLOAD_BATCH_SIZE = 100
+ACTIVE_STATUSES = {"queued", "running", "pending_verify", "retry_wait"}
 BASE = "IrIibPkUOa6udGsMhu2cbOqhnWg"
 TASKS = {
     "risk": ("风险排查", ["08:30"], ("tblNddknaoXp2ASG", "vewG4XuaPu")),
@@ -25,9 +27,16 @@ TASKS = {
     "event": ("事件", ["08:37", "13:38", "16:08"], ("tbl06hMoUMdGVEvn", "vew0xMcHto")),
     "inspection": ("巡检", ["07:00", "11:00", "17:00", "23:30"], ("tblTXHrDH4Mv0971", "vewgfEzEZl")),
 }
+PULL_SCOPE = {"risk": "本月 A–E 楼排查明细", "change": "配置数据中心内的全部可见工单",
+              "drill": "上月及本月演练计划", "event": "近 30 天创建或发生的事件",
+              "inspection": "含今天的近 3 天巡检工单"}
 
 
 class SyncError(ValueError):
+    pass
+
+
+class SyncBusy(SyncError):
     pass
 
 
@@ -157,8 +166,9 @@ class ZhihangSync:
         self.notify = notify
         self.digests = None
         self.lock = threading.RLock()
-        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ZhihangData")
-        self.worker = None
+        self.executor = ThreadPoolExecutor(max_workers=len({entry[2][0] for entry in self.tasks.values()}),
+                                           thread_name_prefix="ZhihangData")
+        self.active = {}
         self.closing = threading.Event()
 
     @staticmethod
@@ -167,7 +177,8 @@ class ZhihangSync:
         return pull(kind, now, **options)
 
     def close(self):
-        self.closing.set()
+        with self.lock:
+            self.closing.set()
         if self.digests is not None:
             self.digests.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
@@ -239,6 +250,7 @@ class ZhihangSync:
             runs = [run for run in history if run["kind"] == kind]
             next_at = min((slot for slot in self.slots(cfg, now) if slot > now), default=None)
             tasks.append({"kind": kind, "label": label, **cfg,
+                          "pull_scope": PULL_SCOPE.get(kind, ""),
                           "targets": [{"label": f"智航{label}原表", "url": f"https://vnet.feishu.cn/base/{BASE}?table={table}&view={view}"}],
                           "notification_targets": notification_targets(kind),
                           "latest": self.public(runs[0]) if runs else None,
@@ -279,44 +291,96 @@ class ZhihangSync:
 
     def enqueue(self, kind, mode, preview_id="", slot=""):
         with self.lock:
-            cfg = self.settings(kind)
-            if mode != "preview" and not cfg["confirmed"]:
-                raise SyncError("请确认旧工具已停用后再同步原表。")
-            if mode == "sync":
-                if not re.fullmatch(r"[a-f0-9]{32}", preview_id):
-                    raise SyncError("请先完成本类数据的拉取预览。")
-                preview = self.read("run:" + preview_id)
-                if (preview.get("kind"), preview.get("mode"), preview.get("status")) != (kind, "preview", "success"):
-                    raise SyncError("请先完成本类数据的拉取预览。")
-                if dt.datetime.now(TZ) - date_value(preview["created_at"]) > dt.timedelta(hours=1):
-                    raise SyncError("预览已过期，请重新拉取。")
-            for old in self.history():
-                if old["kind"] != kind:
-                    continue
-                if (slot and old.get("slot") == slot) or (preview_id and old.get("preview_id") == preview_id):
-                    if old["status"] != "failed":
-                        return self.public(old)
-                    if slot:
-                        return self.public(old)
-                if old["status"] in {"queued", "running", "pending_verify"}:
-                    if old["mode"] == mode:
-                        return self.public(old)
-                    if mode == "preview" and old["status"] == "pending_verify":
-                        continue
-                    raise SyncError("该类数据已有执行或待核验任务。")
-            run = {"id": uuid.uuid4().hex, "kind": kind, "mode": mode, "status": "queued",
-                   "preview_id": preview_id, "slot": slot, "created_at": dt.datetime.now(TZ).isoformat()}
-            self.persist(run)
-            self.kick()
+            run = self.find_run(kind, mode, preview_id, slot)
+            if run is not None:
+                return self.public(run)
+            if self.tasks[kind][2][0] in self.active:
+                raise SyncBusy("该原表正在处理另一批数据，请查看执行记录。")
+            run = self.new_run(kind, mode, preview_id, slot)
+            self.submit_run(run)
             return self.public(run)
+
+    def find_run(self, kind, mode, preview_id, slot):
+        if self.closing.is_set():
+            raise SyncBusy("智航数据服务正在关闭，请稍后重试。")
+        cfg = self.settings(kind)
+        if mode != "preview" and not cfg["confirmed"]:
+            raise SyncError("请确认旧工具已停用后再同步原表。")
+        history = [run for run in self.history() if run["kind"] == kind]
+        if slot:
+            existing = next((run for run in history if run.get("slot") == slot), None)
+            if existing:
+                return existing
+        if mode == "sync":
+            if not re.fullmatch(r"[a-f0-9]{32}", preview_id):
+                raise SyncError("请先完成本类数据的拉取预览。")
+            existing = next((run for run in history if run.get("preview_id") == preview_id
+                             and run["status"] != "failed"), None)
+            if existing:
+                return existing
+            preview = self.read("run:" + preview_id)
+            if (preview.get("kind"), preview.get("mode"), preview.get("status")) != (kind, "preview", "success"):
+                raise SyncError("请先完成本类数据的拉取预览。")
+            if dt.datetime.now(TZ) - date_value(preview["created_at"]) > dt.timedelta(hours=1):
+                raise SyncError("预览已过期，请重新拉取。")
+        for old in history:
+            if old["status"] not in ACTIVE_STATUSES:
+                continue
+            if old["mode"] == mode and mode != "sync":
+                return old
+            if mode == "preview" and old["status"] in {"pending_verify", "retry_wait"}:
+                continue
+            raise SyncBusy("该类数据已有执行或待核验任务，请查看执行记录。")
+        return None
+
+    @staticmethod
+    def new_run(kind, mode, preview_id, slot=""):
+        return {"id": uuid.uuid4().hex, "kind": kind, "mode": mode, "preview_id": preview_id,
+                "slot": slot, "created_at": dt.datetime.now(TZ).isoformat()}
+
+    def start_now(self, kind, mode, preview_id=""):
+        """Claim the target immediately. An in-flight duplicate shares its receipt."""
+        with self.lock:
+            run = self.find_run(kind, mode, preview_id, "")
+            if run and run["status"] == "success":
+                return self.public(run), None
+            active = self.active.get(self.tasks[kind][2][0])
+            if active:
+                run_id, future = active
+                if run and run["id"] == run_id:
+                    return self.public(run), future
+                raise SyncBusy("该原表正在处理另一批数据，请查看执行记录。")
+            run = run or self.new_run(kind, mode, preview_id)
+            future = self.submit_run(run)
+            return self.public(run), future
 
     def persist(self, run):
         self.save("run:" + run["id"], run)
 
     def kick(self):
         with self.lock:
-            if not self.closing.is_set() and (self.worker is None or self.worker.done()):
-                self.worker = self.executor.submit(self.drain)
+            if self.closing.is_set():
+                return []
+            now = dt.datetime.now(TZ).isoformat()
+            started = []
+            for run in reversed(self.history()):
+                kind = run["kind"]
+                if (run["status"] not in ACTIVE_STATUSES
+                        or run.get("next_attempt", "") > now
+                        or self.tasks[kind][2][0] in self.active
+                        or (run["mode"] != "preview" and not self.settings(kind)["confirmed"])):
+                    continue
+                started.append(self.submit_run(run))
+            return started
+
+    def submit_run(self, run):
+        target = self.tasks[run["kind"]][2][0]
+        run.update(status="running", error="", stage="", checks={})
+        run["attempts"] = run.get("attempts", 0) + 1
+        self.persist(run)
+        future = self.executor.submit(self.run_batch, dict(run), target)
+        self.active[target] = (run["id"], future)
+        return future
 
     def config_revision(self):
         return credential_revision(self.store)
@@ -341,24 +405,10 @@ class ZhihangSync:
                     pass  # A previous batch is still active or waiting for read-back.
         self.kick()
 
-    def drain(self):
+    def run_batch(self, run, target):
         from .zhihang_data_sources import ZhihangSourceError
 
-        while True:
-            with self.lock:
-                now = dt.datetime.now(TZ).isoformat()
-                run = None if self.closing.is_set() else next((
-                    item for item in reversed(self.history())
-                    if item["status"] in {"queued", "running", "pending_verify"}
-                    and item.get("next_attempt", "") <= now
-                    and (item["mode"] == "preview" or self.settings(item["kind"])["confirmed"])
-                ), None)
-                if run is None:
-                    self.worker = None
-                    return
-                run.update(status="running", error="", stage="", checks={})
-                run["attempts"] = run.get("attempts", 0) + 1
-                self.persist(run)
+        try:
             try:
                 self.execute(run)
                 run.update(status="success", finished_at=dt.datetime.now(TZ).isoformat())
@@ -368,7 +418,7 @@ class ZhihangSync:
                 transient = (isinstance(exc, httpx.TransportError) or
                              isinstance(exc, ZhihangSourceError) and exc.code == "source_unavailable")
                 retry = transient and run["mode"] == "scheduled" and run["attempts"] < 3
-                run.update(status="pending_verify" if has_journal else "queued" if retry else "failed",
+                run.update(status="pending_verify" if has_journal else "retry_wait" if retry else "failed",
                            error=describe_error(exc))
                 if run["status"] == "failed":
                     run["finished_at"] = dt.datetime.now(TZ).isoformat()
@@ -379,6 +429,10 @@ class ZhihangSync:
             with self.lock:
                 self.persist(run)
                 self.prune()
+                return self.public(run)
+        finally:
+            with self.lock:
+                self.active.pop(target, None)
 
     def execute(self, run):
         from . import zhihang_data_sources as source
@@ -395,9 +449,14 @@ class ZhihangSync:
 
         row_key = "rows:" + run["id"]
         rows = self.read(row_key)
+        limited = kind in {"inspection", "drill"}
+        if limited and rows and not run.get("recent_window") and not self.read("journal:" + run["id"]):
+            raise SyncError("拉取范围已调整，请重新预览本类数据。")
         if not rows:
             if run["preview_id"]:
                 preview = self.read("run:" + run["preview_id"])
+                if limited and not preview.get("recent_window"):
+                    raise SyncError("这份预览使用旧日期范围，请重新拉取预览。")
                 rows = self.read("rows:" + preview["id"])
                 reference = date_value(preview["created_at"])
             else:
@@ -412,6 +471,8 @@ class ZhihangSync:
             if not rows:
                 raise SyncError("本轮没有可核验的完整记录，保留上次数据。")
             run["reference_at"] = reference.isoformat()
+            if limited:
+                run["recent_window"] = True
             self.store.put_documents(self.namespace, {"run:" + run["id"]: run, row_key: rows})
         reference = date_value(run.get("reference_at") or run["created_at"])
         report("读取飞书原表", 源数据已核验=len(rows))
@@ -432,6 +493,8 @@ class ZhihangSync:
                 report("预览核验完成")
                 return
             saved = {"items": journal, "expected": expected}
+            if kind in TASKS:
+                saved["batch_size"] = UPLOAD_BATCH_SIZE
             self.store.put_documents(self.namespace, {"run:" + run["id"]: run, "journal:" + run["id"]: saved})
         report("同步飞书原表")
         self.publish(run, client, remote, saved, target_kind)
@@ -474,8 +537,8 @@ class ZhihangSync:
                     raise SyncError("飞书原表的同一巡检工单有不同的业务内容，请核对执行详情。")
                 equivalent_duplicates += len(ids) - 1
             fields = coerce(raw, schema)
-            if len(ids) > 1:
-                # Keep each legacy copy and retain its own display sequence.
+            if target_kind == "inspection" and ids:
+                # A rolling source window must not renumber existing inspection records.
                 fields = _inspection_business_fields(fields)
             expected[key] = fields
             for record_id in ids or [""]:
@@ -506,20 +569,134 @@ class ZhihangSync:
         return {doc["key"].removeprefix(prefix): doc["payload"]
                 for doc in self.store.list_documents(self.namespace, key_prefix=prefix) if doc["payload"]}
 
-    def publish(self, run, client, remote, journal, target_kind):
+    def check_upload_enabled(self, kind):
+        if self.closing.is_set() or not self.settings(kind)["confirmed"]:
+            raise Pending("同步已暂停，保留已受理批次等待核验。")
+
+    @staticmethod
+    def read_upload_rows(client, ids):
+        rows = client.batch_get(ids)
+        result = {row["record_id"]: row["fields"] for row in rows}
+        if len(rows) != len(ids) or set(result) != set(ids):
+            raise Pending("飞书批量回读尚未返回全部记录，保留原批次等待核验。")
+        return result
+
+    def create_upload_group(self, run, client, group, journal, target_kind, by_key, remote):
         from .zhihang_data_sources import identity
+
+        existing = {}
+        missing = {}
+        for item in group:
+            key = item["key"]
+            candidates = by_key.get(key, [])
+            if len(candidates) > 1 or (candidates and not matches(item["fields"], remote[candidates[0]])):
+                raise Pending("飞书原表有同键冲突，保留原批次等待核验。")
+            if candidates:
+                existing[key] = candidates[0]
+            else:
+                missing[key] = item["fields"]
+
+        journal_key = "journal:" + run["id"]
+        attempt = journal.get("create_batch")
+        if missing and not attempt:
+            attempt = {"keys": list(missing), "at": dt.datetime.now(TZ).isoformat(),
+                       "token": _stable_uuid4_client_token(f"zhihang:batch:{run['id']}:{group[0]['key']}")}
+            journal["create_batch"] = attempt
+            self.save(journal_key, journal)
+        receipts = attempt.get("ids", []) if attempt else []
+        if missing and not receipts:
+            if list(missing) != attempt["keys"] or dt.datetime.now(TZ) - date_value(attempt["at"]) > dt.timedelta(minutes=10):
+                raise Pending("批量新增回执尚未核实，等待原批次回读。")
+            self.check_upload_enabled(run["kind"])
+            response = client.request("POST", "records/batch_create",
+                                      {"records": [{"fields": fields} for fields in missing.values()]},
+                                      params={"client_token": attempt["token"]})
+            receipts = [row["record_id"] for row in response["records"]]
+            if len(receipts) != len(missing) or len(set(receipts)) != len(receipts) or not all(receipts):
+                raise Pending("飞书批量新增回执不完整，等待原批次回读。")
+            attempt["ids"] = receipts
+            self.save(journal_key, journal)
+
+        ids = list(dict.fromkeys([*existing.values(), *receipts]))
+        if len(ids) != len(group):
+            raise Pending("飞书新增回执与原表记录不一致，等待核验。")
+        actual = self.read_upload_rows(client, ids)
+        confirmed = {identity(target_kind, fields): record_id for record_id, fields in actual.items()}
+        if (set(confirmed) != {item["key"] for item in group}
+                or any(confirmed[key] != record_id for key, record_id in existing.items())
+                or (receipts and {identity(target_kind, actual[rid]) for rid in receipts} != set(attempt["keys"]))):
+            raise Pending("飞书新增回读的业务键与本批不一致，等待核验。")
+        for item in group:
+            item["id"] = confirmed[item["key"]]
+        return actual, set(receipts)
+
+    def update_upload_group(self, run, client, group):
+        ids = [item["id"] for item in group]
+        actual = self.read_upload_rows(client, ids)
+        changes = []
+        for item in group:
+            record_id = item["id"]
+            if matches(item["fields"], actual[record_id]):
+                continue
+            if actual[record_id] != item["before"]:
+                raise Pending("原表数据在同步期间被修改，请核对冲突。")
+            changes.append({"record_id": record_id, "fields": item["fields"]})
+        if changes:
+            self.check_upload_enabled(run["kind"])
+            client.batch_update(changes)
+            actual = self.read_upload_rows(client, ids)
+        return actual
+
+    def publish_groups(self, run, client, remote, journal, target_kind, by_key):
+        kind = run["kind"]
+        size = journal["batch_size"]
+        owned = self.managed(kind)
+        for action in ("create", "update"):
+            items = [item for item in journal["items"] if item["action"] == action]
+            for start in range(0, len(items), size):
+                group = items[start:start + size]
+                if all(item.get("done") for item in group):
+                    continue
+                self.check_upload_enabled(kind)
+                receipt_ids = set()
+                if action == "create":
+                    actual, receipt_ids = self.create_upload_group(run, client, group, journal, target_kind, by_key, remote)
+                else:
+                    actual = self.update_upload_group(run, client, group)
+                documents = {}
+                for item in group:
+                    rid = item["id"]
+                    if not matches(item["fields"], actual[rid]):
+                        raise Pending("飞书已受理写入，字段回读尚未一致。")
+                    if rid in receipt_ids or (rid in owned and owned[rid]["fields"] == item["before"]):
+                        documents["owned:" + kind + ":" + rid] = {"key": item["key"], "fields": actual[rid]}
+                for item in group:
+                    item["done"] = True
+                journal.pop("create_batch", None)
+                facts = run.setdefault("checks", {}).setdefault("同步飞书原表", {})
+                facts["已核验新增" if action == "create" else "已核验更新"] = start + len(group)
+                documents.update({"run:" + run["id"]: run, "journal:" + run["id"]: journal})
+                self.store.put_documents(self.namespace, documents)
+
+    def publish(self, run, client, remote, journal, target_kind):
+        from .zhihang_data_sources import identity, in_refresh_scope
 
         kind = run["kind"]
         by_key = {}
         for record_id, fields in remote.items():
             by_key.setdefault(identity(target_kind, fields), []).append(record_id)
+        # Older interrupted creates must retain their original single-record idempotency tokens.
+        if journal.get("batch_size"):
+            self.publish_groups(run, client, remote, journal, target_kind, by_key)
         verified = False
         for index, item in enumerate(journal["items"]):
-            if self.closing.is_set() or not self.settings(kind)["confirmed"]:
-                raise Pending("同步已暂停，保留已受理批次等待核验。")
             if item.get("done"):
                 continue
+            self.check_upload_enabled(kind)
             action, record_id = item["action"], item["id"]
+            if (action == "delete" and kind in {"drill", "inspection"} and
+                    not in_refresh_scope(target_kind, item["before"], date_value(run.get("reference_at") or run["created_at"]))):
+                continue
             ownership_key = "owned:" + kind + ":" + record_id
             if action == "delete" and not verified:
                 self.verify_batch(client, target_kind, journal["expected"])

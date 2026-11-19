@@ -216,6 +216,7 @@ class ZhihangSourcesTests(unittest.TestCase):
         fields = self.pull("drill", respond)["drill"]["id:D1"]
         self.assertEqual(len(scopes), 12)
         self.assertIn(("9.1.2.3.1.1", "Nov"), scopes)
+        self.assertEqual({month for _, month in scopes}, {"Oct", "Nov"})
         self.assertEqual((fields["实施区域"], fields["演练类别"], fields["演练评分"], fields["评估事件状态"]),
                          ("A楼", "计划演练", "25", "完成"))
 
@@ -225,6 +226,19 @@ class ZhihangSourcesTests(unittest.TestCase):
             return respond(method, host, path, kwargs)
 
         self.assert_error("drill", no_detail, "incomplete")
+
+    def test_recent_window_boundaries_across_new_year(self):
+        now = datetime(2027, 1, 1, 3, 0, tzinfo=timezone.utc)
+        def job(day):
+            return {"工单ID": 1, "计划区间": day + " 08:00-" + day + " 09:00"}
+        self.assertTrue(sources.in_refresh_scope("inspection", job("2026/12/30"), now))
+        self.assertFalse(sources.in_refresh_scope("inspection", job("2026/12/29"), now))
+        self.assertFalse(sources.in_refresh_scope("inspection", job("2027/01/02"), now))
+        plan = {"计划ID": "example", "演练年份": "2026", "演练月份": "Dec"}
+        self.assertTrue(sources.in_refresh_scope("drill", plan, now))
+        self.assertFalse(sources.in_refresh_scope("drill", plan | {"演练年份": "2025"}, now))
+        self.assertFalse(sources.in_refresh_scope("drill", plan | {"演练月份": "Nov"}, now))
+        self.assertTrue(sources.in_refresh_scope("drill", {"计划ID": "example", "计划演练时间": "2027-01-31"}, now))
 
     def test_event_two_30_day_filters_merging_and_historical_exclusion(self):
         queries = []
@@ -393,13 +407,13 @@ class ZhihangSourcesTests(unittest.TestCase):
             self.assertEqual(h_drill._credentials({"token": "fixture"}, "h-login"), ({}, {}))
             build.assert_called_once()
 
-    def test_inspection_original_month_query_and_stable_natural_identity(self):
+    def test_inspection_recent_three_days_and_stable_natural_identity(self):
         def respond(method, host, path, kwargs):
             self.assertEqual((method, host, path), ("GET", "inspect2.meta42.indc.vnet.com", "/api/inspect/inspection/job/list"))
             params = kwargs["params"]
             self.assertEqual((params["datacenterCode"], params["pageNum"], params["pageSize"]), ("0.5.2.2.1.1", 1, 15))
             self.assertEqual((params["planStartDatetime"], params["planEndDatetime"]),
-                             ("2026-11-01 00:00:00", "2026-11-30 23:59:59"))
+                             ("2026-11-11 00:00:00", "2026-11-13 23:59:59"))
             return {"code": 0, "total": 1, "rows": [{
                 "id": "J1", "planName": "配电巡检", "buildingName": "南通D栋", "executeCycle": "day",
                 "planStartDatetime": "2026-11-13 08:00:00", "planEndDatetime": "2026-11-13 09:00:00",
@@ -412,6 +426,7 @@ class ZhihangSourcesTests(unittest.TestCase):
         self.assertEqual(sources.identity("inspection", legacy), key)
         self.assertEqual(sources.identity("inspection", legacy | {"工单ID": 23.0}), "id:23")
         self.assertTrue(sources.in_refresh_scope("inspection", legacy, NOW))
+        self.assertFalse(sources.in_refresh_scope("inspection", fields | {"计划区间": "2026/11/10 08:00-2026/11/10 09:00"}, NOW))
         self.assertFalse(sources.in_refresh_scope("inspection", fields | {"计划区间": "2026/10/31 21:00-2026/11/01 09:00"}, NOW))
         self.assert_error("inspection", lambda *args: {"code": 0, "rows": []}, "incomplete")
 

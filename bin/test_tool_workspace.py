@@ -266,7 +266,7 @@ class WorkspaceTests(unittest.TestCase):
         other = actor('B', 'other')
         self.service.person_for = {selected['id']: selected}.__getitem__
         default_leaders = {self.leader['open_id']: self.leader, other['open_id']: other}
-        draft = self.complete(self.open())
+        draft = self.complete(self.open(), outcomes=('normal', 'repair'))
         second = dict(draft['items'][1], reviewer_id=selected['id'])
         saved = self.service.workspace_save(self.filler, draft['id'], {
             'revision': draft['revision'], 'items': [second]})
@@ -289,6 +289,11 @@ class WorkspaceTests(unittest.TestCase):
         for recipient, scope, asset in ((self.leader['open_id'], 'A', 'recTool0'), (selected['open_id'], 'B', 'recTool1')):
             content = by_recipient[recipient][1]['body']['elements']
             self.assertIn(scope + '楼', content[1]['text']['content'])
+            result = next(element['content'] for element in content if element['tag'] == 'markdown')
+            self.assertIn('<font color="green">合格</font>' if scope == 'A'
+                          else '**<font color="red">不合格·转检修</font>**', result)
+            approve = next(element for element in content if element.get('text', {}).get('content') == '签名并确认')
+            self.assertEqual(approve['behaviors'][0]['value']['decision'], 'approve')
             self.assertEqual(content[-1]['behaviors'][0]['default_url'], link(scope, draft['id'], asset))
         with self.service.connect(True) as db:
             db.execute('UPDATE tool_workspace_review_notices SET next_try=0')
@@ -317,6 +322,208 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(notify())
         self.assertFalse(notify())
         self.assertEqual(calls, [selected['open_id']])
+
+    def result_fixture(self, outcomes, *, inspector=None):
+        inspector = inspector or actor(identity='checker') | {'name': '检查员甲', 'level': 'L4'}
+        self.result_people = [inspector, self.leader]
+        self.service.workspace_directory = lambda: [dict(record_id=p['id'], selectable=True, **p) for p in self.result_people]
+        self.service.person_for = lambda identity: next(p for p in self.result_people if p['id'] == identity)
+        draft = self.open()
+        for item in draft['items']:
+            template = item['template']
+            item['values'][template['schema']['sheet']+'!'+template['prefill_fields']['inspector']] = inspector['name']
+        saved = self.complete(draft, outcomes)
+        return inspector, self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
+
+    def result_deliveries(self, *, accepted=True):
+        from bin.lan_bitable_template_portal.tool_result_notices import result_notice_one
+        calls = []
+        for _ in range(15):
+            worked = result_notice_one(self.service, lambda *args: calls.append(args) or accepted,
+                lambda scope, session, asset: f'https://fixture.test/{scope}?tool_session={session}&tool_asset={asset}',
+                lambda scope, order: f'https://fixture.test/{scope}?tool_order={order}')
+            if not worked:
+                return calls
+        self.fail('通知队列应在退避前完成本轮处理')
+
+    def test_rejected_results_link_each_original_asset_and_retry_same_private_card(self):
+        inspector, pending = self.result_fixture(('normal', 'repair'))
+        entries = [{'revision': i['order_revision'], 'asset_id': i['id']} for i in pending['items']]
+        review = {'action': 'reject', 'note': '请补充测量值', 'items': entries}
+        self.service.workspace_review(self.leader, pending['id'], review)
+        self.assertEqual(self.service.workspace_review(self.leader, pending['id'], review, from_card=True)['card_review_count'], 0)
+        failed = self.result_deliveries(accepted=False)
+        self.assertEqual([c[0] for c in failed], [inspector['open_id']])
+        card = failed[0][1]['body']['elements']
+        self.assertEqual([e['behaviors'][0]['default_url'] for e in card if e['tag']=='button'],
+            [f"https://fixture.test/A?tool_session={pending['id']}&tool_asset={i['id']}" for i in pending['items']])
+        self.assertIn('重新填写', card[0]['text']['content'])
+        self.assertIn('请补充测量值', card[0]['text']['content'])
+        detail = self.service.workspace_get(inspector, pending['id'])
+        self.assertTrue(all(i['can_edit'] and '飞书未确认送达' in i['result_notice'] for i in detail['items']))
+        with self.assertRaises(RiskError):
+            self.service.workspace_get(inspector | {'home_scope':'B','scope_rules':['B']}, pending['id'])
+        self.service = self.restart()
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_result_messages SET next_try=0')
+        self.assertEqual(self.result_deliveries(), failed)
+        self.assertEqual(self.result_deliveries(), [])
+        draft = self.service.workspace_save(inspector, detail['id'], {'revision':detail['revision'],'items':detail['items']})
+        first, second = draft['items']
+        request = {'revision':draft['revision'], 'resubmit_asset_id':second['id']}
+        again = self.service.workspace_submit(inspector, draft['id'], request)
+        self.assertEqual([(i['id'], i['review_status']) for i in again['items']],
+                         [(first['id'], 'rejected'), (second['id'], 'pending')])
+        self.assertEqual(self.service.workspace_submit(inspector, draft['id'], request)['revision'], again['revision'])
+        with self.assertRaises(RiskError):
+            self.service.workspace_submit(inspector, draft['id'], request | {'resubmit_asset_id':first['id']})
+
+    def test_normal_waits_for_verified_archive_repair_can_notify_immediately(self):
+        inspector, pending = self.result_fixture(('normal','repair'))
+        self.approve(pending)
+        self.cloud.failures.add('recTool0')
+        while self.service.sync_one():
+            pass
+        sent = self.result_deliveries()
+        self.assertEqual([c[0] for c in sent], [inspector['open_id']])
+        self.assertIn('后续检修', sent[0][1]['body']['elements'][0]['text']['content'])
+        self.assertNotIn('已归档', str(sent))
+        self.cloud.failures.clear()
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_work_sync SET next_try=0')
+        self.assertTrue(self.service.sync_one())
+        sent = self.result_deliveries()
+        self.assertEqual(len(sent), 1)
+        self.assertIn('检查记录已归档', sent[0][1]['body']['elements'][0]['text']['content'])
+
+    def test_batch_rejection_keeps_inspectors_and_record_links_separate(self):
+        from bin.lan_bitable_template_portal.tool_result_notices import result_notice_one
+        people = [actor(identity='first') | {'name':'甲检查员','level':'L4'},
+                  actor(identity='second') | {'name':'乙检查员','level':'L4'}]
+        self.service.workspace_directory = lambda: [dict(record_id=p['id'], selectable=True, **p) for p in people]
+        self.service.person_for = {p['id']:p for p in people}.__getitem__
+        draft = self.open()
+        for item, person in zip(draft['items'], people):
+            form = item['template']
+            item['values'][form['schema']['sheet']+'!'+form['prefill_fields']['inspector']] = person['name']
+        saved = self.complete(draft, ('scrap','repair'))
+        submitted = self.service.workspace_submit(self.filler, draft['id'], {'revision': saved['revision']})
+        self.service.workspace_review(self.leader, draft['id'], {'action':'reject','note':'重新填写',
+            'items':[{'revision':i['order_revision'],'asset_id':i['id']} for i in submitted['items']]})
+        no_link = lambda *_: ''
+        self.assertTrue(result_notice_one(self.service, self.fail, no_link, no_link))
+        self.assertIn('链接暂不可用', self.service.workspace_get(self.filler, draft['id'])['items'][0]['result_notice'])
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_result_targets SET next_try=0')
+        calls = {recipient: card for recipient, card, _ in self.result_deliveries()}
+        for person, original in zip(people, submitted['items']):
+            detail = self.service.workspace_get(person, draft['id'])
+            self.assertEqual([i['id'] for i in detail['items']], [original['id']])
+            card = calls[person['open_id']]['body']['elements']
+            self.assertEqual(len(card), 2)
+            self.assertIn('已被驳回', card[0]['text']['content'])
+            self.assertTrue(card[1]['behaviors'][0]['default_url'].endswith('tool_asset='+original['id']))
+
+    def test_manager_results_private_to_inspector_and_actual_reviewer_with_shared_role_dedup(self):
+        inspector, pending = self.result_fixture(('scrap','scrap'), inspector=self.leader)
+        self.approve(pending)
+        delegated = self.result_deliveries()
+        self.assertEqual(len(delegated), 1)
+        self.assertIn('移交园区经理', str(delegated))
+        manager = actor(identity='manager') | {'name':'梅冰冰','employee_no':'14258'}
+        with self.service.connect() as db:
+            entries = [dict(order=i['order_id'], revision=self.service._scrap_votes(db,i['order_id'])[0]['request_revision'])
+                       for i in pending['items']]
+        for decision, entry in zip(('approve','reject'), entries):
+            self.service.scrap_review_batch(manager, [entry], decision, '本次审批意见')
+            self.service.scrap_review_batch(manager, [entry], decision, '本次审批意见')
+            sent = self.result_deliveries()
+            self.assertEqual([c[0] for c in sent], [inspector['open_id']])
+            detail = sent[0][1]['body']['elements'][0]['text']['content']
+            for part in (entry['order'], '已通过' if decision=='approve' else '已驳回', '梅冰冰', '审批时间',
+                         '本次审批意见', '测试型号', '数量：1'):
+                self.assertIn(part, detail)
+
+    def test_same_inspector_gets_one_archive_card_when_worker_finishes_at_different_ticks(self):
+        inspector, pending = self.result_fixture(('normal','normal'))
+        self.approve(pending)
+        self.assertTrue(self.service.sync_one())
+        self.assertEqual(self.result_deliveries(), [])
+        self.assertTrue(self.service.sync_one())
+        sent = self.result_deliveries()
+        self.assertEqual([c[0] for c in sent], [inspector['open_id']])
+        self.assertEqual(len(sent[0][1]['body']['elements']), 4)
+
+    def test_manager_card_uses_signer_after_one_tool_is_reassigned(self):
+        inspector, pending = self.result_fixture(('scrap','scrap'))
+        deputy = actor(identity='deputy') | {'name':'代审人员','_tool_management_full_access':True}
+        self.result_people.append(deputy)
+        first, second = pending['items']
+        changed = self.service.workspace_manage_item(self.leader, pending['id'], {
+            'asset_id':second['id'], 'revision':second['order_revision'], 'action':'reassign', 'reviewer_id':deputy['id']})
+        for entry, signer in zip(changed['items'], (self.leader, deputy)):
+            self.service.workspace_review(signer, pending['id'], {'action':'approve','signature':self.signature(),
+                'items':[{'asset_id':entry['id'],'revision':entry['order_revision']}]})
+        self.result_deliveries()
+        reviewed = self.service.workspace_get(self.filler, pending['id'])
+        manager = actor(identity='manager') | {'name':'马进宇','employee_no':'18871'}
+        self.service.scrap_review_batch(manager, [dict(order=i['order_id'],revision=i['order_revision'])
+                                                 for i in reviewed['items']], 'approve', '')
+        sent = {recipient: card['body']['elements'] for recipient,card,_ in self.result_deliveries()}
+        self.assertEqual(set(sent), {p['open_id'] for p in (inspector,self.leader,deputy)})
+        for recipient, items in [(inspector,[first,second]),(self.leader,[first]),(deputy,[second])]:
+            self.assertEqual({part['behaviors'][0]['default_url'].split('tool_asset=')[1]
+                              for part in sent[recipient['open_id']] if part['tag']=='button'}, {i['id'] for i in items})
+
+    def test_result_card_restart_recovers_real_sender_receipt_without_another_post(self):
+        from bin.test_feishu_delivery import qt_credentials_fixture, TARGET_APP_ID
+        from lan_bitable_template_portal.feishu_delivery import PublicFeishuSender
+        from lan_bitable_template_portal.state_store import LanPortalStateStore
+        from upload_event_module.services import robot_webhook as robot
+        from bin.lan_bitable_template_portal.tool_result_notices import result_notice_one, send_result_card
+        inspector, pending = self.result_fixture(('repair','repair'))
+        self.approve(pending)
+        link = lambda *_: 'https://fixture.invalid/tool'
+        store_path = self.path.with_name('sender.sqlite3')
+        store = LanPortalStateStore(db_path=store_path)
+        store.put_document('feishu_assistant_sender', TARGET_APP_ID+':'+inspector['open_id'],
+                           {'open_id':inspector['open_id'],'matched_by':'record_id'})
+        self.enterContext(qt_credentials_fixture())
+        self.enterContext(patch.object(robot, '_AGENT_SENDER', None))
+        self.enterContext(patch.object(robot.token_manager, 'get_tenant_token', return_value='fixture-token'))
+        wire = self.enterContext(patch.object(robot, '_request_json', return_value={
+            'code':0,'data':{'message_id':'om_receipt','chat_id':'oc_checker'}}))
+        factory = self.enterContext(patch('lan_bitable_template_portal.feishu_delivery.standalone_sender',
+            return_value=PublicFeishuSender(SimpleNamespace(state_store=store))))
+        def crash_after_delivery(*args):
+            self.assertTrue(send_result_card(*args))
+            raise SystemExit('模拟飞书收件后、业务回执落盘前重启')
+        with self.assertRaises(SystemExit):
+            result_notice_one(self.service, crash_after_delivery, link, link)
+        self.service = self.restart()
+        factory.return_value = PublicFeishuSender(SimpleNamespace(state_store=LanPortalStateStore(db_path=store_path)))
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_result_messages SET next_try=0')
+        self.assertTrue(result_notice_one(self.service, send_result_card, link, link))
+        self.assertFalse(result_notice_one(self.service, send_result_card, link, link))
+        wire.assert_called_once()
+
+    def test_ambiguous_inspector_is_not_sent_to_submitter_and_late_resolution_notifies_only_missing_person(self):
+        inspector, pending = self.result_fixture(('scrap','scrap'))
+        self.result_people.append(inspector | {'id':'duplicate','open_id':'ou_duplicate'})
+        reviewed = self.approve(pending)
+        self.assertEqual(self.result_deliveries(), [])
+        self.assertIn('同名', self.service.workspace_get(self.filler, pending['id'])['items'][0]['result_notice'])
+        manager = actor(identity='manager') | {'name':'马进宇','employee_no':'18871'}
+        entries = [dict(order=i['order_id'],revision=i['order_revision']) for i in reviewed['items']]
+        self.service.scrap_review_batch(manager, entries, 'reject','材料待补')
+        self.assertEqual([c[0] for c in self.result_deliveries()], [self.leader['open_id']])
+        self.result_people.pop()
+        with self.service.connect(True) as db:
+            db.execute("UPDATE tool_result_targets SET next_try=0 WHERE open_id=''")
+        sent = self.result_deliveries()
+        self.assertEqual([c[0] for c in sent], [inspector['open_id']]*2)
+        self.assertEqual(len(sent[-1][1]['body']['elements']), 4)
 
     def test_two_tools_share_one_card_per_manager_and_first_approval_finishes_both(self):
         from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant

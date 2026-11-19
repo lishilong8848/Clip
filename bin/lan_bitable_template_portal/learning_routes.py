@@ -8,6 +8,7 @@ from urllib.parse import quote, urlencode, urlsplit
 
 from fastapi import Request
 from fastapi.responses import FileResponse, JSONResponse, Response
+from .page_errors import page_error
 try:
     from python_multipart import FormParser
     from python_multipart.exceptions import MultipartParseError
@@ -293,14 +294,19 @@ def install_learning_routes(app, controller, runtime):
         finally:
             await asyncio.to_thread(cleanup.close)
 
-    def error_response(exc):
+    def error_response(exc, *, page=False):
         if isinstance(exc, LearningError):
             status = getattr(exc, "status", 400)
             if not isinstance(status, int) or not 400 <= status <= 599:
                 status = 400
-            return JSONResponse({"ok": False, "error": str(getattr(exc, "message", str(exc)))}, status_code=status)
-        logging.getLogger(__name__).exception("Learning request failed")
-        return JSONResponse({"ok": False, "error": "画像学练服务暂时不可用，请稍后重试。"}, status_code=500)
+            message = str(getattr(exc, "message", str(exc)))
+        else:
+            logging.getLogger(__name__).exception("Learning request failed")
+            status, message = 500, "画像学练服务暂时不可用，请稍后重试。"
+        if page:
+            return page_error(status, message)
+        return JSONResponse({"ok": False, "error": message}, status_code=status,
+                            media_type="application/json; charset=utf-8")
 
     async def endpoint(request: Request):
         try:
@@ -377,7 +383,7 @@ def install_learning_routes(app, controller, runtime):
 
             return await asyncio.to_thread(static_page)
         except Exception as exc:
-            return error_response(exc)
+            return error_response(exc, page=True)
 
     for path, methods in ROUTES.items():
         app.add_api_route("/api/learning/" + path, endpoint, methods=list(methods), name="learning_" + path.replace("/", "_"))

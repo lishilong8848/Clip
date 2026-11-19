@@ -36,6 +36,7 @@ function title(row:Dict) { const f=row.display_fields||row.fields||{};return tex
 export function todoTimestamp(value:unknown):number|undefined {
   if(typeof value==='number')return Number.isFinite(value)&&value>0?(value<1e12?value*1000:value):undefined;
   const t=text(value).trim().replace(/\//g,'-').replace(' ','T');if(!t)return;
+  if(/^\d{10}(?:\d{3})?$/.test(t))return todoTimestamp(Number(t));
   const parsed=Date.parse(/(?:Z|[+-]\d{2}:?\d{2})$/.test(t)?t:t+(t.includes('T')?'':'T00:00:00')+'+08:00');return Number.isFinite(parsed)?parsed:undefined;
 }
 export function sortTodos(input:TodoRow[], now=Date.now()):TodoRow[] {
@@ -91,12 +92,20 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
     return {rows:pending,more:page<number(data.records_pagination?.total_pages),partial:data.records_pagination?.partial===true};
   })] : [])]);
   if(kind==='repair_management')return [source(kind,async(page,signal)=>{
-    const data=await read('/api/repair-management/status',{scope:ctx.scope,state:'all',period:'all',limit:50,offset:(page-1)*50},signal);
-    const result=rows(data.records).filter(row=>row.is_completed!==true&&!ended(text(row.workflow||row.status||row.state))).map(row=>{
+    const limit=ctx.home?200:50, offset=(page-1)*limit;
+    const data=await read('/api/repair-management/status',{scope:ctx.scope,state:'all',period:'all',limit,offset},signal);
+    const list=rows(data.records);
+    const result=list.filter(row=>row.is_completed!==true&&row.state!=='completed'
+      &&(row.state==='in_progress'||row.state==='without_followup'||!ended(text(row.workflow||row.status||row.state)))).map(row=>{
       if(!row.record_id)throw new Error('维修项目缺少记录标识。');
-      return {...ownership(row),key:'repair:'+row.record_id,kind,module:kind,title:title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time:text(row.fault_time||row.latest_followup_time||row.updated_at),detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
+      const time=ctx.home
+        ? [row.repair_start_time,row.fault_time,row.project_created_time,row.latest_followup_time,row.updated_at].map(text).find(value=>todoTimestamp(value)!==undefined)||''
+        : text(row.fault_time||row.latest_followup_time||row.updated_at);
+      return {...ownership(row),key:'repair:'+row.record_id,kind,module:kind,title:title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.status_label||row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time,detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
     });
-    return {rows:result,more:(page-1)*50+rows(data.records).length<number(data.total)};
+    const more=offset+list.length<number(data.total);
+    if(ctx.home&&more&&list.length!==limit)throw new Error('维修项目分页未完整返回。');
+    return {rows:result,more};
   })];
   if(kind==='critical_guard')return buildings('ABCDE').map(scope=>source(kind+scope,async(_page,signal)=>{
     const data=await read('/api/critical-guard/tasks',{scope},signal);
