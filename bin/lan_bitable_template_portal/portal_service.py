@@ -37598,7 +37598,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         return candidates, warnings, settings
 
     def engineer_mop_bootstrap(
-        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None, month: str = ""
+        self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None, month: str = "",
+        todo_only: bool = False,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         selected_month = self._engineer_mop_month(month)
@@ -37607,8 +37608,6 @@ class MaintenancePortalService(RepairOperationsMixin):
             ongoing_items=ongoing_items,
             month=selected_month if month else "",
         )
-        mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
-        self._maybe_start_daily_attachment_cache_refresh()
         bindings = self._state_store.list_mop_notice_bindings(
             scope=scope,
             notice_keys=[item["notice_key"] for item in notices],
@@ -37624,6 +37623,22 @@ class MaintenancePortalService(RepairOperationsMixin):
             template_key = str(binding.get("template_key") or "").strip()
             if template_key and template_key not in bindings_by_template:
                 bindings_by_template[template_key] = binding
+        if todo_only:
+            rows = []
+            for notice in notices:
+                binding = bindings_by_notice.get(notice["notice_key"]) or bindings_by_template.get(
+                    str(notice.get("mop_template_key") or "")
+                )
+                if self._engineer_notice_is_ended_status(notice.get("status")) or (binding and notice.get("mop_uploaded")):
+                    continue
+                rows.append({
+                    **{key: notice.get(key) for key in ("notice_key", "title", "building", "status", "mop_uploaded", "mop_attachment_count")},
+                    "mop_binding": bool(binding),
+                })
+            return {"scope": scope, "month": selected_month, "notices": rows,
+                    "snapshot_pending": not self._source_snapshot_exists(scope)}
+        mop_candidates, warnings, settings = self._load_engineer_mop_candidates()
+        self._maybe_start_daily_attachment_cache_refresh()
         local_candidate_by_id: dict[str, dict[str, Any]] = {}
         for binding in bindings:
             payload = binding.get("payload") if isinstance(binding.get("payload"), dict) else {}

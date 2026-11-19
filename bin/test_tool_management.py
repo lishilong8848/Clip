@@ -22,6 +22,7 @@ class LedgerFixture:
                        for index in range(4)]
         self.writes = []
         self.files = []
+        self.deletions = []
 
     def inventory(self):
         return self.assets, {'A': ['ou_leader']}
@@ -32,9 +33,12 @@ class LedgerFixture:
             self.files.append((dest,job['record_name'],job['record_content']))
         return job['remote_id'] or 'rec' + dest
 
+    def delete_ledger_record(self, dest, identity, key):
+        self.deletions.append((dest, identity, key))
+
 
 class ToolManagementTest(TestCase):
-    def test_completed_followup_can_be_removed_from_worklist_without_erasing_ledger(self):
+    def test_completed_followup_waits_for_verified_ledger_delete(self):
         scrap = self.submit_self(next(row for row in self.orders if row['kind'] == 'self'), 'scrap')
         identity = scrap['id']
         with self.assertRaises(RiskError):
@@ -48,13 +52,16 @@ class ToolManagementTest(TestCase):
         with self.assertRaises(RiskError):
             self.svc.action(actor(scope='B', identity='outsider'), identity, 'remove-followup', body)
         self.assertTrue(next(row for row in self.svc.list(self.leader)['followups'] if row['id'] == identity)['can_remove_followup'])
-        self.assertTrue(self.svc.action(self.leader, identity, 'remove-followup', body)['deleted'])
+        self.assertTrue(self.svc.action(self.leader, identity, 'remove-followup', body)['deletion_pending'])
+        self.assertIn(identity, {row['id'] for row in self.svc.list(self.leader)['followups']})
+        self.assertTrue(self.svc.tool_ledger_delete_one())
         self.assertTrue(self.svc.action(self.leader, identity, 'remove-followup', body)['deleted'])
         self.assertNotIn(identity, {row['id'] for row in self.svc.list(self.leader)['followups']})
         detail = self.svc.detail(self.leader, identity)
         self.assertEqual(detail['outcome'], 'scrapped')
-        self.assertTrue(all(item['state'] == 'done' for item in detail['sync']))
-        self.assertEqual(sum(row['action'] == '删除已归档处置记录' for row in detail['history']), 1)
+        self.assertEqual(self.cloud.deletions, [('maintenance', 'recmaintenance', identity + '/maintenance')])
+        self.assertFalse(detail['sync'])
+        self.assertEqual(sum(row['action'] == '核验飞书工具台账已删除' for row in detail['history']), 1)
 
     def full_actor(self,name):
         return actor(scope='H',identity=name) | {'name':name,'level':'L4','category':'engineer',

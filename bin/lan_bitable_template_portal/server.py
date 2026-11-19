@@ -1808,6 +1808,7 @@ class PortalRuntime:
                 "error": "工单附件正在上传，请稍后刷新。",
             }
         try:
+            group = manager.get_group(target_record_id)
             group_state = str(group.get("state") or "")
             if group_state not in {"upload_pending", "completed"}:
                 return {"ok": False, "state": str(group.get("state") or ""), "error": "工单步骤尚未全部完成。"}
@@ -1849,9 +1850,10 @@ class PortalRuntime:
                 cls.service.ensure_adjust_work_order_schema()
             workbook = manager.build_execution_workbook(target_record_id)
             uploaded_by_hash = dict(group.get("uploaded_by_sha256") or {})
+            step_attachment_tokens = dict(group.get("uploaded_step_attachment_by_sha256") or {})
             previous_generated_tokens = {
                 str(token or "").strip()
-                for token in uploaded_by_hash.values()
+                for token in (*uploaded_by_hash.values(), *step_attachment_tokens.values())
                 if str(token or "").strip()
             }
             workbook_digest = str(workbook.get("sha256") or "").strip()
@@ -1874,6 +1876,23 @@ class PortalRuntime:
                     workbook_name=workbook_name,
                 )
             new_tokens = [workbook_token]
+            for attachment in workbook.get("attachments") or []:
+                digest = attachment["sha256"]
+                file_token = str(step_attachment_tokens.get(digest) or "").strip()
+                if not file_token:
+                    file_token = cls.service._upload_bitable_file(
+                        file_path=attachment["path"],
+                        file_name=attachment["name"],
+                        app_token=str(config.app_token or ""),
+                    )
+                    step_attachment_tokens[digest] = file_token
+                    manager.mark_upload_progress(
+                        target_record_id,
+                        token_by_sha256=uploaded_by_hash,
+                        workbook_name=workbook_name,
+                        step_attachment_token_by_sha256=step_attachment_tokens,
+                    )
+                new_tokens.append(file_token)
             existing_tokens = cls._change_confirmation_attachment_tokens(
                 fields.get(field_config["work_order_attachments"])
             )
@@ -4550,6 +4569,7 @@ class PortalRuntime:
                     scope=scope,
                     ongoing_items=ongoing,
                     month=(qs.get("month") or [""])[0],
+                    todo_only=(qs.get("view") or [""])[0] == "todos",
                 )
                 return self._send_json(
                     200,
@@ -6818,8 +6838,10 @@ class PortalRuntime:
             notice_type = str(notice.get("notice_type") or "")
             text = str(notice.get("text") or notice.get("content") or "")
             handler = get_notice_handler(notice_type)
-            cabinet = str(notice.get("cabinet") or "") or handler._extract_section(text, "柜号")
-            quantity = str(notice.get("quantity") or "") or handler._extract_section(text, "数量")
+            from .cabinet_power_batches import notice_field_text
+
+            cabinet = notice_field_text(notice.get("cabinet")) or handler._extract_section(text, "柜号")
+            quantity = notice_field_text(notice.get("quantity")) or handler._extract_section(text, "数量")
             time_range = handler._extract_section(text, "时间")
             start_dt, end_dt = parse_time_range(time_range) if time_range else (None, None)
             operation_key = str(notice.get("operation_id") or job_id or notice.get("response_time") or notice_type)

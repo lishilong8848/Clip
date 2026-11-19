@@ -16,7 +16,7 @@ from upload_event_module.services.http_client import FeishuHTTPError
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 
 from .risk_inspection import RiskError
-from .risk_inspection_cloud import API
+from .risk_inspection_cloud import API, CloudRejected
 from .tool_management import DESTINATIONS, MAX_REPORT, OUTCOMES, SCRAP_APPROVERS, inspection_end, tool_ledger_status
 from .tool_self_check import BUILDINGS, MAX_FILE, TZ
 
@@ -201,6 +201,52 @@ class ToolCloud:
                 or not isinstance(row.get('fields'), dict)):
             raise RiskError('飞书未完整返回指定工具记录，请稍后重试。', 503)
         return row
+
+    def ledger_exists(self, dest, identity, key):
+        path = self.cloud.table_path(BASE, TABLES[dest])
+        try:
+            fields = self._read_record(path, identity)['fields']
+        except CloudRejected as exc:
+            if exc.provider_code == 1254043:
+                return False
+            raise
+        if plain(fields.get(KEY)) != key:
+            raise RiskError('飞书台账记录的工单流水号已变化，已暂停删除，请核对原记录。', 409)
+        return True
+
+    def delete_ledger_record(self, dest, identity, key):
+        with self.workspace_lock:
+            if not self.ledger_exists(dest, identity, key):
+                return
+            path = self.cloud.table_path(BASE, TABLES[dest])
+            try:
+                self.cloud.request('DELETE', f'{path}/records/{identity}')
+            except CloudRejected as exc:
+                if exc.provider_code != 1254043:
+                    raise
+            if self.ledger_exists(dest, identity, key):
+                raise RiskError('飞书尚未确认删除，后台将重试核验。', 503)
+
+    def ledger_record_ids(self, dest):
+        path = self.cloud.table_path(BASE, TABLES[dest]) + '/records/search'
+        params, seen, records = {'page_size': 500}, set(), set()
+        for _ in range(100):
+            page = self.cloud.request('POST', path, params=params, json={'field_names': [KEY]})
+            if not isinstance(page.get('items'), list) or type(page.get('has_more')) is not bool:
+                raise RiskError('工具台账读取不完整，暂缓核验删除。', 503)
+            for row in page['items']:
+                identity = record_id(row.get('record_id'))
+                if not identity or identity in records:
+                    raise RiskError('工具台账分页出现无效或重复的记录。', 503)
+                records.add(identity)
+            if not page['has_more']:
+                return records
+            cursor = page.get('page_token')
+            if not cursor or cursor in seen:
+                break
+            seen.add(cursor)
+            params['page_token'] = cursor
+        raise RiskError('工具台账分页未读完，暂缓核验删除。', 503)
 
     def _inventory_template_id(self, path, asset_id):
         value = _template_text(self._read_record(path, asset_id)['fields'].get(TEMPLATE_LINK)).strip()
@@ -735,10 +781,9 @@ class ToolCloud:
         return True
 
 
-def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None,
-                  deliver_review=None, review_link=None, resolve_leader=None, scrap_review_link=None):
+def run_tool_jobs(service, stop, *, deliver_review=None, review_link=None, resolve_leader=None, scrap_review_link=None):
     from .tool_review_cards import send_scrap_review_one
-    next_inventory = next_reminder = 0
+    next_inventory = next_ledger_check = 0
     while not stop.is_set():
         now = time.monotonic()
         try:
@@ -768,11 +813,15 @@ def run_tool_jobs(service, stop, *, deliver_reminder=None, reminder_link=None,
             bind_pending = getattr(service, 'workspace_binding_tick', None)
             if callable(bind_pending) and not stop.is_set():
                 bind_pending()
-            if deliver_reminder and not stop.is_set() and now >= next_reminder:
-                next_reminder = now + 60
-                result = service.send_building_reminders(deliver_reminder, link_for_scope=reminder_link)
-                if result['failed']:
-                    logging.warning('Tool reminder delivery deferred for buildings: %s', ', '.join(result['failed']))
+            delete_record = getattr(service, 'tool_ledger_delete_one', None)
+            if callable(delete_record):
+                for _ in range(4):
+                    if stop.is_set() or not delete_record():
+                        break
+            reconcile_deleted = getattr(service, 'reconcile_tool_ledger_deletions', None)
+            if callable(reconcile_deleted) and not stop.is_set() and now >= next_ledger_check:
+                next_ledger_check = now + 60
+                reconcile_deleted()
         except Exception:
             logging.exception('Tool management background work deferred')
         stop.wait(5)

@@ -14,10 +14,15 @@ const task = { kind: 'inspection', label: '巡检', times: ['07:00', '11:00'], e
   targets: [{ label: '原巡检表', url: 'https://vnet.feishu.cn/base/sample' }], notification_targets: ['原巡检群'],
   latest: null, next_at: null };
 const auth = { has_token: false, expired: false };
+const inspectionCardSetting = '参与日报并发送独立巡检异常提醒';
 const calls = [];
 const exceptions = [];
 const history = [{ id: 'fixture-failed', kind: 'inspection', mode: 'preview', status: 'failed',
   created_at: stamp, error: '智航 inspection_list：分页返回重复记录，无法确认是否漏页。' }];
+for (let index = 1; index <= 11; index++) {
+  history.push({ id: 'history-' + index, kind: 'risk', mode: 'scheduled', status: 'success',
+    created_at: `2026-11-12T08:${String(59-index).padStart(2, '0')}:00+08:00` });
+}
 const detailReads = new Map();
 let login = { status: 'idle' };
 let loginReads = 0;
@@ -39,7 +44,19 @@ async function install(context, user) {
     const method = request.method();
     calls.push([user.open_id, method, path]);
     const payload = method === 'GET' ? undefined : request.postDataJSON();
-    if (path === '') return ok({ auth, tasks: [task], history });
+    if (path === '') {
+      const pageSize = 10;
+      const page = Math.min(Number(searchParams.get('history_page') || 1), Math.max(1, Math.ceil(history.length / pageSize)));
+      return ok({ auth, tasks: [task], history: history.slice((page - 1) * pageSize, page * pageSize),
+        notification_digests: [
+          { kind: 'daily', label: '智航数据同步', times: ['08:00'], prepare_at: '00:10',
+            modules: ['inspection', 'change', 'event'], enabled_modules: task.notify ? ['inspection'] : [],
+            target: { label: '汇总通知群' }, latest: {} },
+          { kind: 'month_end', label: '风险排查与演练推进同步', times: ['09:00', '15:00'], start_day: 25,
+            modules: ['risk', 'drill'], enabled_modules: [], target: { label: '汇总通知群' }, latest: {} },
+        ],
+        history_pagination: { page, page_size: pageSize, total: history.length } });
+    }
     if (path === '/login' && method === 'GET') {
       if (login.status === 'waiting' && ++loginReads === 2) {
         login = { ...login, status: 'success', message: '智航浏览器登录成功' };
@@ -126,6 +143,19 @@ try {
   assert.equal(new URL(page.url()).searchParams.get('__page'), '/zhihang-data');
   assert.equal(new URL(page.url()).searchParams.has('scope'), false);
   await page.getByRole('link', { name: '原巡检表' }).waitFor();
+  const historyPager = page.getByRole('navigation', { name: '执行记录分页' });
+  await historyPager.getByText('共 12 条 · 第 1 / 2 页').waitFor();
+  assert(await historyPager.getByRole('button', { name: '上一页', exact: true }).isDisabled());
+  assert.equal(await page.locator('tbody tr').count(), 10);
+  await historyPager.getByRole('button', { name: '下一页', exact: true }).click();
+  await historyPager.getByText('共 12 条 · 第 2 / 2 页').waitFor();
+  assert.equal(await page.locator('tbody tr').count(), 2);
+  const pageTwoRefresh = page.waitForResponse(response => new URL(response.url()).searchParams.get('history_page') === '2');
+  await page.getByRole('button', { name: '刷新', exact: true }).click();
+  await pageTwoRefresh;
+  assert(await historyPager.getByRole('button', { name: '下一页', exact: true }).isDisabled());
+  await historyPager.getByRole('button', { name: '上一页', exact: true }).click();
+  await historyPager.getByText('共 12 条 · 第 1 / 2 页').waitFor();
   await page.locator('.run-failure').getByText(history[0].error, { exact: true }).waitFor();
   await page.getByRole('button', { name: '查看巡检执行详情' }).click();
   const runDialog = page.getByRole('dialog');
@@ -144,12 +174,13 @@ try {
   await page.keyboard.press('Escape');
   await runDialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '定时设置' }).click();
-  assert.equal(await runDialog.getByRole('checkbox', { name: '同步成功后发送原有卡片通知' }).getAttribute('aria-checked'), 'false');
+  assert.equal(await runDialog.getByRole('checkbox', { name: inspectionCardSetting }).getAttribute('aria-checked'), 'false');
+  await runDialog.getByText(/每日 00:10 准备，08:00 发送昨日汇总/).waitFor();
   await runDialog.getByLabel('运行时间（北京时间）').fill('25:01');
   await runDialog.getByRole('button', { name: '保存设置' }).click();
   await runDialog.getByRole('alert').getByText('请输入 1 至 24 个运行时间，格式为 HH:mm。').waitFor();
   await runDialog.getByLabel('运行时间（北京时间）').fill('11:00、07:00、11:00');
-  for (const name of ['确认旧工具已停止写入，由灯塔同步原表', '启用定时同步', '同步成功后发送原有卡片通知']) {
+  for (const name of ['确认旧工具已停止写入，由灯塔同步原表', '启用定时同步', inspectionCardSetting]) {
     await runDialog.getByRole('checkbox', { name }).click();
   }
   await runDialog.getByRole('button', { name: '保存设置' }).click();

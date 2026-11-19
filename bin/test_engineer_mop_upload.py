@@ -56,6 +56,8 @@ class FakeMopUploadService(MaintenancePortalService):
         self.patch_calls = []
         self.external_image_calls = []
         self._state_store = LanPortalStateStore(self.tmpdir / "state.sqlite3")
+        self._records = [{**self._find_record_by_id('src-1', WORK_TYPE_MAINTENANCE),
+                          'work_type': WORK_TYPE_MAINTENANCE}]
 
     def ensure_snapshot_loaded(self, *, refresh_if_expired: bool = False) -> None:
         return None
@@ -898,6 +900,13 @@ class EngineerMopUploadTests(unittest.TestCase):
             uploaded_index = notices.index(uploaded)
             self.assertLess(notices.index(ended), uploaded_index)
             self.assertLess(notices.index(delayed), uploaded_index)
+            with patch.object(service, '_load_engineer_mop_candidates') as load_candidates, \
+                 patch.object(service, '_maybe_start_daily_attachment_cache_refresh') as refresh_attachments:
+                summary = service.engineer_mop_bootstrap(scope='A', ongoing_items=[], todo_only=True)
+            self.assertEqual([row['notice_key'] for row in summary['notices']], [pending['notice_key']])
+            self.assertFalse(summary['notices'][0]['mop_binding'])
+            load_candidates.assert_not_called()
+            refresh_attachments.assert_not_called()
 
 
 if __name__ == "__main__":

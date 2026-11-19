@@ -15,6 +15,9 @@
         </select>
       </label>
       <span v-else>{{ scopeOptions[0]?.label }}</span>
+      <nav v-if="quickActions.length" class="desk-quick-actions" aria-label="常用业务">
+        <button v-for="entry in quickActions" :key="entry.id" type="button" class="wb-link" data-v2-navigation @click="openShortcut(entry)">{{ entry.label }}</button>
+      </nav>
       <button v-if="mainAction" type="button" class="wb-primary" data-v2-navigation @click="act(mainAction)">
         {{ mainAction.label }} <ArrowRight :size="16" aria-hidden="true" />
       </button>
@@ -22,41 +25,40 @@
 
     <div id="wb-content" ref="content" class="wb-grid wb-module-grid" tabindex="-1">
       <section class="wb-todo-panel desk-queue wb-panel" aria-labelledby="wb-todo-title">
-        <header class="wb-panel wb-todo-toolbar">
-          <h2 id="wb-todo-title">待办阅览 <span v-if="matchedTasks.length" class="wb-task-count">已显示 {{ visibleTaskCount }} / {{ matchedTasks.length }} 项{{ incomplete ? '（已读取）' : '' }}</span></h2>
-          <div class="wb-task-filters">
-            <label><span class="wb-sr-only">业务分类</span><select v-model="taskKind">
-              <option value="">全部业务</option><option v-for="source in orderedSources" :key="source.id" :value="source.id">{{ source.label }}</option>
-            </select></label>
-            <label><span class="wb-sr-only">搜索待办</span><input v-model.trim="taskSearch" type="search" placeholder="搜索待办" /></label>
-            <button type="button" class="wb-filter-toggle" :aria-pressed="overdueOnly" @click="overdueOnly = !overdueOnly">只看逾期</button>
-          </div>
+        <header class="wb-todo-toolbar">
+          <h2 id="wb-todo-title">待办阅览 <span v-if="matchedTasks.length" class="wb-task-count">{{ incomplete ? '已读取 ' : '' }}{{ matchedTasks.length }} 项</span></h2>
           <button type="button" class="wb-link" :disabled="allLoading" @click="refreshHome"><RefreshCw :size="15" aria-hidden="true" />刷新</button>
+          <div class="wb-task-filters">
+            <label class="desk-task-search"><Search :size="15" aria-hidden="true" /><span class="wb-sr-only">搜索待办</span><input v-model.trim="taskSearch" type="search" placeholder="搜索名称、楼栋或状态" /></label>
+            <label><span class="wb-sr-only">业务分类</span><select v-model="taskKind">
+              <option value="">全部业务</option><option v-for="source in queueSources" :key="source.id" :value="source.id">{{ source.label }}</option>
+            </select></label>
+          </div>
         </header>
         <div class="desk-task-tabs" aria-label="待办显示范围">
-          <button type="button" :aria-pressed="!unreadOnly" @click="unreadOnly=false">全部待办</button>
-          <button type="button" :aria-pressed="unreadOnly" @click="unreadOnly=true">未读 <span>{{ unreadTasks.length }}</span></button>
+          <button type="button" :aria-pressed="!unreadOnly && !overdueOnly" @click="setTaskView('all')">全部待办</button>
+          <button type="button" :aria-pressed="unreadOnly" @click="setTaskView('unread')">未读 <span>{{ unreadTasks.length }}</span></button>
+          <button type="button" :aria-pressed="overdueOnly" @click="setTaskView('overdue')">逾期 <span>{{ overdueCount }}</span></button>
         </div>
         <div v-if="taskModules.length" class="wb-task-module-grid">
-        <article v-for="module in taskModules" :key="module.id" class="wb-task-module" :data-source="module.id" :aria-label="module.label">
+        <article v-for="module in taskModules" :key="module.id" class="wb-task-module" :class="{'desk-drill-queue':module.id==='drills'}" :data-source="module.id" :aria-label="module.label">
+        <h3 v-if="module.id==='drills' && module.rows.length" class="desk-drill-heading">待完成演练 <span class="wb-task-count">{{ module.rows.length }} 项</span></h3>
         <template v-for="group in module.groups" :key="group.id">
         <h4 v-if="group.label" class="wb-task-group">{{ group.label }} <small>显示 {{ group.rows.length }} / {{ group.total }} 项</small></h4>
         <ul class="wb-rows wb-task-list" :aria-label="group.label || module.label">
           <li v-for="item in group.rows" :key="item.key">
-            <component :is="readOnly(item) ? 'div' : 'button'" :type="readOnly(item) ? undefined : 'button'" class="wb-task-row" :class="{'wb-read-only':readOnly(item)}"
-              :aria-label="readOnly(item) ? undefined : actionLabel(item)+' '+item.title" @click="openItem(item)">
+            <button type="button" class="wb-task-row" :aria-label="actionLabel(item)+' '+item.title" @click="openItem(item)">
               <span class="desk-module-pill">{{ item.detail && item.kind==='notices' ? item.detail : sourceLabels.get(item.kind) }}</span>
               <span class="wb-row-copy">
                 <strong><i v-if="!isRead(item)" class="desk-unread" role="img" aria-label="未读"></i>{{ item.title }}</strong>
                 <small>{{ taskScopeLabel(item.scope) }}<template v-if="item.detail && item.kind!=='notices'"> · {{ item.detail }}</template> · <span :class="{'wb-overdue':isOverdue(item)}">{{ isOverdue(item) ? '已逾期 · ' : '' }}{{ item.status }}</span></small>
               </span>
-              <span class="wb-task-action"><span>{{ item.dueAt ? '截止 '+deadline(item.dueAt) : item.time || item.noticeWindow?.start || '—' }}</span><span v-if="!readOnly(item)">{{ actionLabel(item) }} <ChevronRight :size="15" aria-hidden="true" /></span></span>
-            </component>
+              <span class="wb-task-action"><span v-if="taskWhen(item)">{{ taskWhen(item) }}</span><span>{{ actionLabel(item) }} <ChevronRight :size="15" aria-hidden="true" /></span></span>
+            </button>
             <button v-if="canOpenNoticeDeletion(item)" class="wb-link desk-delete" type="button" @click="openItem(item)">删除单据</button>
           </li>
         </ul>
         </template>
-        <p v-if="!module.rows.length" class="wb-note wb-queue-status">{{ module.incomplete ? '明细尚未读全，请核对读取状态或显示更多。' : '没有符合筛选条件的待办。' }}</p>
         <div v-if="module.hidden || module.more" class="wb-list-footer">
           <button type="button" class="wb-link" :disabled="module.loading && !module.hidden" @click="loadMore(module.id)">显示更多{{ module.label }}</button>
         </div>
@@ -66,12 +68,19 @@
         <div v-if="hiddenTasks || canLoadMore" class="wb-list-footer">
           <button type="button" class="wb-link" :disabled="!taskModules.some(module=>module.hidden || module.more && !module.loading)" @click="loadMore()">显示更多待办</button>
         </div>
+        <details v-if="queueIssues.length || missingOwnership" class="desk-queue-health">
+          <summary>读取状态 <span v-if="queueIssues.length">{{ queueIssues.length }} 类待重试</span></summary>
+          <ul v-if="queueIssues.length">
+            <li v-for="source in queueIssues" :key="source.id"><span>{{ source.label }}<small>{{ states[source.id]?.result?.rows.length ? '上次已读取的记录仍可查看' : '暂未读取到明细' }}</small></span>
+              <button type="button" class="wb-link" :aria-label="'重试'+source.label" :disabled="states[source.id]?.retrying" @click="load(source.id,true)">{{ states[source.id]?.retrying ? '读取中…' : '重试' }}</button></li>
+          </ul>
+          <p v-if="missingOwnership" class="wb-note">部分记录的归属待核对。</p>
+        </details>
       </section>
     </div>
     <template #overview>
       <div class="wb-dashboard">
       <PeriodOverview v-if="!accountLevel" :role="role" :user="user" :scope="selectedScope" :scopes="scopeOptions" :read-scopes="readScopes" @open="emit('open',$event)" />
-      <WorkbenchColdStatus v-if="(role==='manager'||accountLevel==='duty') && user.modules?.includes('daily')" :scope="selectedScope" :scopes="authorizedScopes" :user-id="accessKey" />
       <section v-if="!accountLevel && focusSources.length" class="wb-panel wb-focus" aria-labelledby="wb-focus-title">
         <header class="wb-section-heading"><h2 id="wb-focus-title">{{ recipe.focusTitle }}</h2><span class="wb-note">业务概览</span></header>
         <div class="wb-focus-grid">
@@ -113,7 +122,7 @@
           <ul class="wb-rows">
             <li v-for="item in states[selectedSource.id]?.result?.rows || []" :key="item.key">
               <span class="wb-row-copy"><strong>{{ item.title }}</strong><small>{{ item.scope }} · {{ item.status }}</small></span>
-              <button v-if="!readOnly(item)" type="button" class="wb-link" :aria-label="actionLabel(item)+' '+item.title" @click="openItem(item)">{{ actionLabel(item) }}</button>
+              <button type="button" class="wb-link" :aria-label="actionLabel(item)+' '+item.title" @click="openItem(item)">{{ actionLabel(item) }}</button>
             </li>
           </ul>
           <NButton v-if="states[selectedSource.id]?.result?.more" size="small" :disabled="states[selectedSource.id]?.status==='loading'" @click="load(selectedSource.id,true,true)">读取更多明细</NButton>
@@ -121,15 +130,25 @@
         </template>
       </NDrawerContent>
     </NDrawer>
+    <NModal v-if="readOnlyTask" :show="true" preset="card" class="wb-readonly-dialog" :title="readOnlyTask.title"
+      :mask-closable="true" @update:show="value=>{if(!value)closeReadOnlyTask()}">
+      <dl class="wb-detail">
+        <dt>业务</dt><dd>{{ readOnlyTask.detail || sourceLabels.get(readOnlyTask.kind) }}</dd>
+        <dt>楼栋</dt><dd>{{ taskScopeLabel(readOnlyTask.scope) }}</dd>
+        <dt>状态</dt><dd>{{ readOnlyTask.status }}</dd>
+        <template v-if="readOnlyTask.noticeWindow?.start || readOnlyTask.time"><dt>开始时间</dt><dd>{{ readOnlyTask.noticeWindow?.start || readOnlyTask.time }}</dd></template>
+        <template v-if="readOnlyTask.noticeWindow?.end"><dt>结束时间</dt><dd>{{ readOnlyTask.noticeWindow.end }}</dd></template>
+      </dl>
+    </NModal>
     <NoticeWorkspace v-if="inlineNotice && inlineNotice.work!=='event'" :key="inlineNotice.url" :url="inlineNotice.url" :scope="inlineNotice.scope"
       :scopes="authorizedScopes" :user="user" active record-only @record-close="closeInlineNotice" />
     <NModal v-if="inlineNotice?.work==='event'" :show="true" preset="card" title="办理事件通告" class="wb-inline-event"
       :mask-closable="false" @update:show="value=>{if(!value)closeInlineNotice()}">
       <EventNoticeBoard :scope="inlineNotice.scope" :focus-event-id="inlineNotice.eventId" active />
     </NModal>
-    <NoticeChangeConfirmations v-if="aliFocus" scope="ALL" :focus-id="aliFocus" @close="aliFocus=''; refresh()" @changed="refresh" />
-    <NModal v-if="inlineTask" :show="true" preset="card" :title="inlineTask.item.title" class="wb-inline-task" :closable="false"
-      :mask-closable="false" :close-on-esc="false" @update:show="value=>{if(!value)closeInlineTask()}">
+    <NoticeChangeConfirmations v-if="aliFocus" scope="ALL" :focus-id="aliFocus" @close="aliFocus=''; refresh(['ali_confirmation'])" @changed="refresh(['ali_confirmation'])" />
+    <NModal v-if="inlineTask" :show="inlineTaskShown" preset="card" :title="inlineTask.item.title" class="wb-inline-task" :closable="false"
+      :mask-closable="false" :close-on-esc="false" @update:show="value=>{if(!value)closeInlineTask()}" @after-leave="finishInlineTask">
       <template #header-extra><NButton text aria-label="关闭待办办理" @click="closeInlineTask"><X :size="20" /></NButton></template>
       <ModuleWidget :key="inlineTask.item.key" :item="inlineTask.widget" :initial-url="inlineTask.url"
         :scope="inlineTask.scope" :scopes="authorizedScopes" :user="user" fixed-scope @close="closeInlineTask" />
@@ -140,14 +159,13 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NButton, NDrawer, NDrawerContent, NModal } from 'naive-ui';
-import { ArrowRight, ChevronRight, RefreshCw, X } from 'lucide-vue-next';
+import { ArrowRight, ChevronRight, RefreshCw, Search, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../client';
 import { moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
 import { mandatoryCheck, widget, type Widget } from '../dashboard/layout';
 import { requestEmbeddedChange, runNavigationAction } from '../navigation';
 import PreShiftCheck from '../dashboard/PreShiftCheck.vue';
 import PeriodOverview from './PeriodOverview.vue';
-import WorkbenchColdStatus from './WorkbenchColdStatus.vue';
 import WorkbenchDailyLayout from './WorkbenchDailyLayout.vue';
 import AsyncPageState from '../../components/AsyncPageState.vue';
 import { recipes, workbenchModules, workbenchRole, workbenchScopes, type ScopeOption } from './recipes';
@@ -207,6 +225,8 @@ const NoticeChangeConfirmations=lazy(()=>import('../NoticeChangeConfirmations.vu
 const ModuleWidget=lazy(()=>import('../ModuleWidget.vue'));
 const inlineNotice=ref<{url:string;scope:string;work:string;eventId:string}>();
 const inlineTask=ref<{item:WorkItem;widget:Widget;url:string;scope:string}>();
+const inlineTaskShown=ref(false);
+const readOnlyTask=ref<WorkItem>();
 const aliFocus=ref('');
 
 const {layout,state:layoutState,load:readLayout}=useReadOnlyLayout(()=>props.user,accessKey);
@@ -232,7 +252,8 @@ const shortcuts=computed(()=>{
     const entry=entries.get(id);
     if (!entry) return [];
     const scope=entry.id==='daily_inspection'&&selectedScope.value==='CAMPUS'
-      ?concreteScopes.value.find(option=>['D','E'].includes(option.value))?.value||'':readScopes.value?.[0]||selectedScope.value;
+      ?concreteScopes.value.find(option=>['D','E'].includes(option.value))?.value||''
+      :composite(selectedScope.value)?readScopes.value?.[0]||selectedScope.value:selectedScope.value;
     return [{...entry,url:moduleUrl(entry,scope)}];
   });
 });
@@ -247,6 +268,7 @@ const mainAction=computed<Action|undefined>(()=>{
   }
   return shortcuts.value[0];
 });
+const quickActions=computed(()=>accountLevel.value?shortcuts.value.filter(entry=>entry.id!==mainAction.value?.id).slice(0,2):[]);
 function act(action:Action) {
   if (action.url) openShortcut({id:action.id||'',url:action.url});
   else {
@@ -274,11 +296,11 @@ const allShortcuts=ref(false);
 // Completed sources collapse; unavailable or partial reads must stay distinguishable from zero.
 const focusSources=computed(()=>orderedSources.value.filter(source=>{
   const state=states.value[source.id];
-  return !state || state.status!=='ok' || state.result?.rows.length || state.result?.more;
+  return !!state?.result?.rows.length;
 }));
 const sourceOrder=computed(()=>[...new Set<SourceId>([
   ...(pendingSources.value||[]),...(Array.isArray(preferredTasks.value)?preferredTasks.value:[]),...sources.value.map(source=>source.id),
-])]);
+])].sort((a,b)=>Number(a==='drills')-Number(b==='drills')));
 const orderedSources=computed(()=>sourceOrder.value.flatMap(id=>sources.value.filter(source=>source.id===id)));
 const sourceLabels=computed(()=>new Map(sources.value.map(source=>[source.id,source.label])));
 watch([context,orderedSources],()=>{for(const source of orderedSources.value) void load(source.id);},{immediate:true,flush:'post'});
@@ -304,6 +326,8 @@ watch([context,()=>week.value.start,weeklyRevision],async(_value,_old,onCleanup)
   const controller=new AbortController();
   onCleanup(()=>controller.abort());
   const currentWeek=week.value;
+  await nextTick();
+  if(controller.signal.aborted)return;
   try {
     const batches=await Promise.all((readScopes.value||[dataScope.value]).flatMap(scope=>currentWeek.months.flatMap(month=>types.map(async work_type=>{
       const batch=await requestJson(scopedUrl('/api/history-summary',{scope,month,work_type}),{signal:controller.signal,timeoutMs:12000});
@@ -363,7 +387,8 @@ const readStorageKey=computed(()=>{
 const readKeys=ref(new Set<string>());
 const readIdentity=(item:WorkItem)=>JSON.stringify([item.kind,item.scope,item.key,item.status,item.time,item.dueAt,item.noticeWindow?.start,item.noticeWindow?.end]);
 const isRead=(item:WorkItem)=>readKeys.value.has(readIdentity(item));
-const unreadTasks=computed(()=>allTasks.value.filter(item=>!isRead(item)));
+const inQueueScope=(row:WorkItem)=>dataScope.value===selectedScope.value||inDeskScope(row,selectedScope.value);
+const unreadTasks=computed(()=>allTasks.value.filter(item=>inQueueScope(item)&&!isRead(item)));
 watch(context,()=>{
   let keys:unknown;
   try { if(readStorageKey.value) keys=JSON.parse(localStorage.getItem(readStorageKey.value)||'[]'); } catch { /* Storage may be disabled. */ }
@@ -376,18 +401,24 @@ function markRead(item:WorkItem) {
   try { if(readStorageKey.value) localStorage.setItem(readStorageKey.value,JSON.stringify(keys)); } catch { /* Keep session state. */ }
 }
 function showUnread(){
-  unreadOnly.value=true; taskKind.value=''; taskSearch.value=''; overdueOnly.value=false;
+  setTaskView('unread'); taskKind.value=''; taskSearch.value='';
   content.value?.scrollIntoView({block:'start'}); focusContent();
+}
+function setTaskView(view:'all'|'unread'|'overdue'){
+  unreadOnly.value=view==='unread';
+  overdueOnly.value=view==='overdue';
 }
 const modulePageSize=4;
 const visibleLimits=ref<Partial<Record<SourceId,number>>>({});
-const sourcesForQueue=computed(()=>orderedSources.value.filter(source=>!taskKind.value||source.id===taskKind.value));
+const queueSources=computed(()=>orderedSources.value.filter(source=>states.value[source.id]?.status!=='deny'));
+const sourcesForQueue=computed(()=>queueSources.value.filter(source=>!taskKind.value||source.id===taskKind.value));
 const isOverdue=(row:WorkItem)=>!!row.dueAt&&row.dueAt<=clock.value;
+const overdueCount=computed(()=>allTasks.value.filter(row=>inQueueScope(row)&&isOverdue(row)).length);
 const taskScopeLabel=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope==='110'?'110站':scope==='ALL'||scope==='CAMPUS'?'园区':scope;
 const matchedTasks=computed(()=>{
   const terms=taskSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
   return allTasks.value
-    .filter(row=>(dataScope.value===selectedScope.value||inDeskScope(row,selectedScope.value))
+    .filter(row=>inQueueScope(row)
       &&(!taskKind.value||row.kind===taskKind.value)&&(!unreadOnly.value||!isRead(row))&&(!overdueOnly.value||isOverdue(row))&&terms.every(term=>
       [row.title,taskScopeLabel(row.scope),row.status,row.detail,sourceLabels.value.get(row.kind)].join(' ').toLowerCase().includes(term)))
     .sort((a,b)=>deskActionOrder(accountLevel.value,a)-deskActionOrder(accountLevel.value,b)
@@ -404,8 +435,7 @@ const taskModules=computed(()=>{
     const rows=matchedTasks.value.filter(row=>sources.some(source=>source.id===row.kind));
     const more=sources.some(source=>states.value[source.id]?.result?.more);
     const loading=sources.some(source=>!states.value[source.id] || states.value[source.id]?.status==='loading');
-    const incomplete=more || sources.some(source=>states.value[source.id]?.status!=='ok');
-    if (!rows.length && !incomplete) return [];
+    if (!rows.length && !more) return [];
     // A combined notice module shares one limit across plan and ongoing subgroups.
     const limit=visibleLimits.value[id]??modulePageSize;
     const notices=role.value==='duty' && id==='notices';
@@ -422,23 +452,27 @@ const taskModules=computed(()=>{
       return {...group,total:group.rows.length,rows:group.rows.slice(0,take)};
     });
     const visible=groups.flatMap(group=>group.rows);
-    return [{id,label:notices?'通告待办':sources[0]!.label,sources,rows,visible,limit,more,loading,incomplete,
+    return [{id,label:notices?'通告待办':sources[0]!.label,sources,rows,limit,more,loading,
       hidden:rows.length>visible.length,groups}];
   });
 });
-const visibleTaskCount=computed(()=>taskModules.value.reduce((count,module)=>count+module.visible.length,0));
 const hiddenTasks=computed(()=>taskModules.value.some(module=>module.hidden));
 const allLoading=computed(()=>sourcesForQueue.value.some(source=>!states.value[source.id]||states.value[source.id]?.status==='loading'));
 const canLoadMore=computed(()=>sourcesForQueue.value.some(source=>states.value[source.id]?.result?.more));
 const incomplete=computed(()=>canLoadMore.value||sourcesForQueue.value.some(source=>states.value[source.id]?.status!=='ok'));
+const queueIssues=computed(()=>sourcesForQueue.value.filter(source=>{
+  const state=states.value[source.id];
+  return state?.retrying||state?.status==='stale'||state?.status==='down';
+}));
 const queueStatus=computed(()=>{
-  if (allLoading.value) return '正在读取待办…';
-  const unavailable=sourcesForQueue.value.filter(source=>['stale','down','deny'].includes(states.value[source.id]?.status||''));
-  if (unavailable.length) return unavailable.map(source=>source.label+' '+sourceStatus(source.id)).join(' · ');
-  if (missingOwnership.value) return '仅显示归属已核实的待办。';
   if (matchedTasks.value.length) return '';
-  if (canLoadMore.value) return '当前已读取的记录中没有匹配待办。';
-  return unreadOnly.value?'没有符合筛选条件的未读待办。':taskSearch.value||overdueOnly.value?'没有符合筛选条件的待办。':'当前没有未完成的待办。';
+  if (allLoading.value) return '正在读取待办…';
+  if (canLoadMore.value) return '当前页没有匹配项，可继续查看。';
+  if (queueIssues.value.length) return '部分待办暂未读取，可在读取状态中重试。';
+  if (missingOwnership.value) return '暂无归属已确认的待办。';
+  if (unreadOnly.value) return '暂无匹配的未读待办。';
+  if (taskSearch.value || overdueOnly.value || taskKind.value) return '暂无匹配的待办。';
+  return '当前没有未完成的待办。';
 });
 function loadMore(id?:SourceId){
   for (const module of taskModules.value.filter(module=>!id || module.id===id)) {
@@ -449,6 +483,7 @@ function loadMore(id?:SourceId){
   }
 }
 watch([taskKind,taskSearch,overdueOnly,unreadOnly],()=>{visibleLimits.value={};});
+watch(queueSources,list=>{if(taskKind.value&&!list.some(source=>source.id===taskKind.value))taskKind.value='';});
 function total(id:SourceId) {
   const state=states.value[id];
   return state?.status==='ok'&&state.result&&!state.result.more ? state.result.rows.length : null;
@@ -463,12 +498,19 @@ function sourceStatus(id:SourceId) {
   return state.result?.more?'仅显示已读取明细':state.result?.rows.length?'待处理':'暂无待处理';
 }
 const deadline=(time:number)=>new Date(time).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+function taskWhen(item:WorkItem){
+  if(item.dueAt)return '截止 '+deadline(item.dueAt);
+  const raw=item.time||item.noticeWindow?.start;
+  const stamp=todoTimestamp(raw);
+  return stamp&&raw&&!/^\d{4}-\d{2}-\d{2}$/.test(raw)?deadline(stamp):raw;
+}
 const drawerSource=ref<SourceId>(), drawerWidth=ref(Math.min(window.innerWidth,480));
 const selectedSource=computed(()=>sources.value.find(source=>source.id===drawerSource.value));
 let trigger:HTMLElement|null=null;
 function openSource(source:Source){trigger=document.activeElement as HTMLElement;drawerSource.value=source.id;void load(source.id);}
 const readOnly=(item:WorkItem)=>sources.value.some(source=>source.id===item.kind&&source.readOnly);
 function actionLabel(item:WorkItem) {
+  if (readOnly(item)) return '查看';
   if (item.kind==='accounts'&&globalDesk.value) return '授权审核';
   if (item.kind==='ali_confirmation') return '确认截图';
   if (role.value!=='duty'||item.kind!=='notices') return '办理';
@@ -479,7 +521,13 @@ function canOpenNoticeDeletion(item:WorkItem){
     && item.kind==='notices'&&item.ongoing===true&&!readOnly(item);
 }
 function openItem(item:WorkItem){
-  if (readOnly(item)) {markRead(item);return;}
+  if (readOnly(item)) {
+    markRead(item);
+    if(!drawerSource.value)trigger=document.activeElement as HTMLElement;
+    drawerSource.value=undefined;
+    readOnlyTask.value=item;
+    return;
+  }
   const url=new URL(item.url,location.origin);
   const explicitScope=url.searchParams.get('scope');
   if(url.origin!==location.origin || explicitScope&&!authorizedScopes.value.some(option=>option.value===explicitScope))return;
@@ -498,16 +546,30 @@ function openItem(item:WorkItem){
       url.searchParams.set('workbench_return',selectedScope.value);
       inlineTask.value={item,scope,url:url.pathname+url.search,
         widget:widget('module',props.user,{id:'workbench-inline-task',module,title:item.title})};
+      inlineTaskShown.value=true;
     }
   });
 }
-function closeInlineNotice(){inlineNotice.value=undefined;refresh();restoreFocus();}
+function closeReadOnlyTask(){readOnlyTask.value=undefined;restoreFocus();}
+function closeInlineNotice(){
+  const events=inlineNotice.value?.work==='event';
+  inlineNotice.value=undefined;
+  refresh(events?['event_notices','events']:['notices','engineer_mop','repair_management']);
+  restoreFocus();
+}
 function closeInlineTask(){
   const current=inlineTask.value;
   if(current)requestEmbeddedChange(current.widget.id,()=>{
-    if(inlineTask.value!==current)return;
-    inlineTask.value=undefined;refresh();restoreFocus();
+    if(inlineTask.value===current)inlineTaskShown.value=false;
   });
+}
+async function finishInlineTask(){
+  const current=inlineTask.value;
+  await nextTick();
+  if(!current||inlineTask.value!==current||inlineTaskShown.value)return;
+  inlineTask.value=undefined;
+  refresh(current.item.kind==='repair_management'?['repair_management','notices']:[current.item.kind]);
+  restoreFocus();
 }
 function openShortcut(entry:{id:string;url:string}){
   if (role.value==='duty'&&entry.id==='notices') {
@@ -523,7 +585,7 @@ function restoreFocus(){
 }
 function closeDrawer(){if(!drawerSource.value)return;drawerSource.value=undefined;restoreFocus();}
 watch([context,selectedScope],()=>{
-  inlineNotice.value=undefined;inlineTask.value=undefined;aliFocus.value='';closeDrawer(); taskKind.value=''; taskSearch.value=''; overdueOnly.value=false; unreadOnly.value=false;
+  inlineNotice.value=undefined;inlineTaskShown.value=false;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';closeDrawer(); taskKind.value=''; taskSearch.value=''; overdueOnly.value=false; unreadOnly.value=false;
   visibleLimits.value={}; allShortcuts.value=false;
 },{flush:'sync'});
 

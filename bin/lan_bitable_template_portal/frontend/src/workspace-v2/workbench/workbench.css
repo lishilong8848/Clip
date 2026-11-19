@@ -29,6 +29,8 @@
 .wb-identity-copy { flex:1 1 200px;min-width:0; }
 .wb-identity-copy p,.wb-note { color:var(--wb-muted);overflow-wrap:anywhere; }
 .wb-identity-copy p { margin-top:4px; }
+.desk-quick-actions { display:flex;flex-wrap:wrap;gap:4px; }
+.wb-identity .desk-quick-actions .wb-link { padding-inline:8px; }
 .wb-scope { display:flex;align-items:center;gap:8px;white-space:nowrap; }
 .wb-scope select { max-width:100%;min-height:var(--wb-control-height);font:inherit;color:var(--wb-ink);background:var(--wb-surface);border:1px solid var(--wb-border);border-radius:var(--wb-radius);padding:4px 8px; }
 .wb-home .wb-primary { min-height:var(--wb-control-height);display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:4px 10px;background:var(--wb-accent);color:var(--wb-on-primary);border:1px solid transparent;border-radius:var(--wb-radius);font-weight:650; }
@@ -52,13 +54,13 @@
 .wb-task-row { display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;box-sizing:border-box;min-height:48px;padding:6px 0;text-align:left;border:0;background:transparent;color:var(--wb-ink); }
 .wb-task-row .wb-row-copy { flex:1; }
 .wb-task-row:hover { background:color-mix(in srgb,var(--wb-primary) 6%,transparent); }
-.wb-task-row.wb-read-only:hover { background:transparent; }
 .wb-home .wb-task-group { padding:7px 0 0;font-size:13px;line-height:1.4; }
 .wb-task-group small,.wb-cold-list small { color:var(--wb-muted);font-weight:400; }
 .wb-cold-list { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,188px),1fr));gap:6px;margin:4px 0 0;padding:0;list-style:none; }
 .wb-cold-list li { display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 8px;padding:6px;border:1px solid var(--wb-border);border-radius:var(--wb-radius); }
 .wb-cold-list li span { overflow-wrap:anywhere; }
 .wb-inline-event { width:min(1080px,calc(100vw - 20px));max-height:calc(100dvh - 32px);overflow:auto; }
+.wb-readonly-dialog { width:min(440px,calc(100vw - 24px)); }
 .wb-inline-task { width:min(1340px,calc(100vw - 24px));height:calc(100dvh - 32px);display:flex;flex-direction:column;overflow:hidden; }
 .wb-inline-task > .n-card__content { min-height:0;overflow:auto;overscroll-behavior:contain; }
 @media(max-width:760px) { .wb-inline-task { width:100vw;height:100dvh;border-radius:0; } }

@@ -1,6 +1,7 @@
 """Local cabinet-power batch inbox and text-PDF recognition."""
 from __future__ import annotations
 
+import ast
 import copy
 import datetime as dt
 import hashlib
@@ -53,6 +54,7 @@ NOTICE_RACK_RE = re.compile(
     r"(?<![A-Z0-9])([A-Z])\s*[-_－—]?\s*(\d{1,2})(?!\d)",
     re.IGNORECASE,
 )
+NOTICE_RICH_TEXT_RE = re.compile(r"\[\s*\{[^{}]*\}(?:\s*,\s*\{[^{}]*\})*\s*\]")
 EDITABLE_FIELDS = {
     "scope", "room", "rack", "supplier_rack", "rack_type", "type_detail",
     "action", "expected", "actual", "result", "failure_reason", "type_resolution",
@@ -68,6 +70,36 @@ def now():
 
 def _json(value):
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def notice_field_text(value):
+    def parts(nodes):
+        if isinstance(nodes, dict):
+            nodes = [nodes]
+        if isinstance(nodes, list) and nodes and all(
+            isinstance(node, dict) and isinstance(node.get("text"), str)
+            and node.get("type", "text") == "text" for node in nodes
+        ):
+            return "".join(node["text"] for node in nodes)
+        return None
+
+    if isinstance(value, (dict, list)):
+        normalized = parts(value)
+        return normalized.strip() if normalized is not None else str(value).strip()
+    text = str(value or "").strip()
+    if len(text) > 12_000 or "{" not in text:
+        return text
+
+    def unwrap(match):
+        try:
+            raw = ast.literal_eval(match[0])
+        except (ValueError, SyntaxError, RecursionError):
+            return match[0]
+        normalized = parts(raw)
+        return normalized if normalized is not None else match[0]
+
+    # Old queued notices have serialized Feishu segments mixed into ordinary text.
+    return NOTICE_RICH_TEXT_RE.sub(unwrap, text).strip()
 
 
 class CabinetBatchStore:
@@ -1126,12 +1158,12 @@ class CabinetBatchService:
 
     @staticmethod
     def _notice_quantity(value):
-        match = re.search(r"\d+", str(value or "").replace(",", ""))
+        match = re.search(r"\d+", notice_field_text(value).replace(",", ""))
         return int(match.group()) if match else None
 
     @staticmethod
     def _parse_notice_cabinets(value):
-        text = str(value or "").strip().upper()
+        text = notice_field_text(value).upper()
         anchors = list(NOTICE_ROOM_RE.finditer(text))
         if not anchors:
             return [], {
@@ -1911,8 +1943,8 @@ class CabinetBatchService:
             "scope": scope,
             "start_time": self._notice_datetime(source.get("start_time")),
             "end_time": self._notice_datetime(source.get("end_time")),
-            "cabinet": str(source.get("cabinet") or ""),
-            "quantity": str(source.get("quantity") or ""),
+            "cabinet": notice_field_text(source.get("cabinet")),
+            "quantity": notice_field_text(source.get("quantity")),
             "declared_quantity": self._notice_quantity(source.get("quantity")),
             "sender_open_id": str(source.get("sender_open_id") or ""),
             "sender_name": str(source.get("sender_name") or ""),
@@ -1952,7 +1984,7 @@ class CabinetBatchService:
         return self._change(batch["batch_id"], lambda _batch: None, validate=not deleting)
 
     def _sync_notice_rows(self, batch, source):
-        cabinet_text = str(source.get("cabinet") or (batch.get("source_notice") or {}).get("cabinet") or "")
+        cabinet_text = notice_field_text(source.get("cabinet") or (batch.get("source_notice") or {}).get("cabinet"))
         parsed, diagnostics = self._parse_notice_cabinets(cabinet_text)
         if not parsed:
             raise CabinetError("最新通告柜号无法识别，待办保留原明细", 409)
@@ -1970,7 +2002,7 @@ class CabinetBatchService:
                 notice["scope"] = str(source["scope"]).upper().replace("楼", "")
             if source.get("title"):
                 notice["title"] = str(source["title"])
-            quantity = str(source.get("quantity") or notice.get("quantity") or "")
+            quantity = notice_field_text(source.get("quantity") or notice.get("quantity"))
             notice.update(cabinet=cabinet_text, quantity=quantity,
                           declared_quantity=self._notice_quantity(quantity),
                           start_time=self._notice_datetime(source.get("start_time")) or notice.get("start_time", ""),
@@ -2117,6 +2149,26 @@ class CabinetBatchService:
             self._refresh_summary(batch)
         if batch.get("source") == "notice" and batch.get("status") != "cancelled":
             source = batch.get("source_notice") or {}
+            raw_cabinet = source.get("cabinet") or ""
+            normalized = notice_field_text(raw_cabinet)
+            if normalized != raw_cabinet:
+                parsed, diagnostics = self._parse_notice_cabinets(normalized)
+                fields = ("scope", "room", "rack")
+                known = {tuple((row.get("original") or row).get(key) for key in fields)
+                         for row in batch.get("rows", []) if not row.get("notice_removed")}
+                missing = [item for item in parsed if tuple(item[key] for key in fields) not in known]
+                if missing:
+                    diagnostics["unparsed_fragments"].append(
+                        "通告中的柜号未进入原待办：" +
+                        "、".join(f"{item['scope']}-{item['room']} {item['rack']}" for item in missing[:5]))
+
+                def normalize_source(current):
+                    current["source_notice"]["cabinet"] = normalized
+                    current["parse_diagnostics"] = diagnostics
+                    self._refresh_notice_warnings(current)
+
+                batch = self._change(batch_id, normalize_source, expected_version=batch["version"])
+                source = batch["source_notice"]
             direction = "up" if source.get("notice_type") == "上电通告" else "down"
             cutoff = self._notice_datetime(source.get("sent_at")) or self._notice_datetime(source.get("start_time"))
             snapshots = {}

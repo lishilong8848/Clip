@@ -116,13 +116,15 @@
             </div>
             <ul class="record-tools">
               <li v-for="tool in batch.history_items" :key="tool.id">
-                <div><strong>{{ tool.asset_name }}</strong><small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small>
+                <div><strong>{{ tool.asset_name }}</strong><small v-if="tool.model || tool.location" class="workspace-muted">{{ [tool.model, tool.location].filter(Boolean).join(' · ') }}</small>
+                  <small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small>
                   <small v-if="tool.tool_status_label" class="workspace-muted">{{ tool.result_label }} · {{ tool.tool_status_label }}</small>
+                  <small v-if="tool.deletion_pending" role="status">{{ tool.deletion_error || '等待飞书确认删除' }}</small>
                 </div>
                 <div class="workspace-actions record-actions">
-                  <NButton size="small" :disabled="!!busy" @click="openSaved(batch.id, tool.id)">查看记录</NButton>
+                  <NButton size="small" :disabled="!!busy || tool.deletion_pending" @click="openSaved(batch.id, tool.id)">查看记录</NButton>
                   <NButton v-if="tool.can_release" size="small" :disabled="!!busy" @click="manageRecord(batch, tool, 'release')">取消办理</NButton>
-                  <NButton v-if="tool.can_delete" size="small" type="error" secondary :disabled="!!busy" @click="manageRecord(batch, tool, 'delete')">删除记录</NButton>
+                  <NButton v-if="tool.can_delete && !tool.deletion_pending" size="small" type="error" secondary :disabled="!!busy" @click="manageRecord(batch, tool, 'delete')">删除</NButton>
                 </div>
               </li>
             </ul>
@@ -377,6 +379,7 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: La
   review_note?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
 type HistoryItem = { id: string; order_id?: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
   binding_pending?: boolean; binding_error?: string; result_label?: string; tool_status_label?: string;
+  location?: string; model?: string; deletion_pending?: boolean; deletion_error?: string;
   order_revision?: number; can_release?: boolean; can_delete?: boolean };
 type Summary = { id: string; kind: Kind; status: string; revision?: number; items?: Item[]; history_items?: HistoryItem[];
   created_at?: string; owner_name?: string; item_count?: number; archived_count?: number; operation_id?: string };
@@ -436,6 +439,9 @@ const pad = ref<HTMLCanvasElement>();
 const signed = ref(false);
 const lifetime = new AbortController();
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let recordsTimer: ReturnType<typeof setInterval> | undefined;
+let recordRequest = 0;
+let loadedRecordPages = 1;
 let pollVersion = '';
 let boardRead: AbortController | undefined;
 let openOperation: { key: string; id: string } | undefined;
@@ -855,14 +861,25 @@ function loadMoreHistory() {
       sessions: [...board.value.sessions, ...page.sessions.filter(entry => !known.has(entry.id))] };
   });
 }
-async function fetchRecords(more = false) {
+async function fetchRecords(more = false, preservePages = false) {
   const cursor = more ? recordCursor.value : null;
   if (more && !cursor) return;
+  const request = ++recordRequest;
   const query = new URLSearchParams(cursor || {});
   if (recordAsset.value) query.set('asset_id', recordAsset.value.id);
-  const page = await read(api + '/history?' + query) as HistoryPage;
-  const known = new Set(recordSessions.value.map(batch => batch.id));
-  recordSessions.value = more ? [...recordSessions.value, ...page.sessions.filter(batch => !known.has(batch.id))] : page.sessions;
+  let page = await read(api + '/history?' + query) as HistoryPage;
+  const entries = new Map((more ? recordSessions.value : []).map(batch => [batch.id, batch]));
+  let pages = 1;
+  while (true) {
+    if (request !== recordRequest || lifetime.signal.aborted) return;
+    for (const batch of page.sessions) entries.set(batch.id, batch);
+    if (!preservePages || !page.history_cursor || pages >= loadedRecordPages) break;
+    for (const [key, value] of Object.entries(page.history_cursor)) query.set(key, value);
+    page = await read(api + '/history?' + query) as HistoryPage;
+    pages += 1;
+  }
+  loadedRecordPages = more ? loadedRecordPages + 1 : pages;
+  recordSessions.value = [...entries.values()];
   recordCursor.value = page.history_cursor;
 }
 function loadRecords(more = false) {
@@ -883,7 +900,7 @@ function showRecords(asset?: Asset) {
 function manageRecord(batch: Summary, tool: HistoryItem, action: 'release' | 'delete') {
   const removing = action === 'delete';
   const description = !removing ? '取消办理后仍可查看原草稿。' :
-    tool.archive_status === 'archived' ? '将从办理列表移除，已同步的飞书台账和归档文件会保留。' :
+    tool.archive_status === 'archived' ? '将删除本次办理及对应的飞书台账记录。' :
       '将取消这笔办理并从列表移除，原草稿会保留。';
   ask(removing ? '删除这笔办理记录？' : '取消本台工具办理？', `「${tool.asset_name}」${description}`,
     () => void perform('manage', async () => {
@@ -1212,12 +1229,18 @@ onMounted(() => {
   if (props.sessionId) openSaved(props.sessionId);
   if (props.recordsOnly) void loadRecords();
   else void readBoard();
+  recordsTimer = setInterval(() => {
+    if (!recordsOpen.value || session.value || busy.value || document.hidden) return;
+    if (props.recordsOnly) emit('records-refresh');
+    void fetchRecords(false, true).catch(() => { /* Keep the last successful list until the next refresh. */ });
+  }, 20_000);
 });
 onBeforeUnmount(() => {
   lifetime.abort();
   boardRead?.abort();
   reviewerRequest?.abort();
   clearTimeout(pollTimer);
+  clearInterval(recordsTimer);
 });
 </script>
 

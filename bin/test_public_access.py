@@ -80,6 +80,8 @@ def make_app():
     @app.api_route('/api/risk-inspections', methods=['GET', 'POST'])
     @app.get('/api/work-handovers/people')
     @app.get('/api/workspace-layouts/page')
+    @app.api_route('/api/personal-calendar', methods=['GET', 'POST'])
+    @app.get('/api/personal-calendar/weather')
     @app.get('/api/feishu-workpartner/people')
     @app.get('/api/pre-shift-checks/history')
     @app.get('/api/daily-inspection')
@@ -143,6 +145,17 @@ class GuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.get('/api/auth/status')).status_code, 200)
         self.session = {'role': 'guest'}
         self.assertEqual((await self.client.get('/api/workbench')).status_code, 403)
+
+    async def test_personal_calendar_public_paths_require_real_session_and_are_read_only(self):
+        for path in ('/api/personal-calendar', '/api/personal-calendar/weather'):
+            self.session = {'user': {'open_id': 'alice'}}
+            self.assertEqual((await self.client.get(path)).status_code, 200, path)
+            self.session = None
+            self.assertEqual((await self.client.get(path)).status_code, 401, path)
+            self.session = {'role': 'guest'}
+            self.assertEqual((await self.client.get(path)).status_code, 403, path)
+        self.session = {'user': {'open_id': 'alice'}}
+        self.assertEqual((await self.client.post('/api/personal-calendar', headers={'Origin': SETTINGS.public_url})).status_code, 403)
 
     async def test_signed_link_still_verifies_original_token(self):
         self.session = None

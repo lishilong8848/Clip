@@ -1,4 +1,4 @@
-"""Post-verification cards for the original Zhihang standalone notifications."""
+"""Zhihang Feishu card formatting and post-verification standalone delivery."""
 from __future__ import annotations
 
 from collections import Counter, defaultdict
@@ -42,11 +42,17 @@ def _chat_id(*keys):
     return next((value for key in keys if re.fullmatch(r"oc_[A-Za-z0-9_-]+", value := _setting(key))), "")
 
 
-def _standalone_enabled(kind):
+def _combined_enabled(kind):
     if kind in {"risk", "drill"}:
-        return not _enabled("MONTH_END_PROGRESS_NOTIFY_ENABLED", False)
-    if kind in {"change", "event"} and _enabled("DAILY_COMBINED_NOTIFY_ENABLED", False):
+        return _enabled("MONTH_END_PROGRESS_NOTIFY_ENABLED")
+    return kind in {"change", "event"} and _enabled("DAILY_COMBINED_NOTIFY_ENABLED")
+
+
+def _standalone_enabled(kind):
+    if _combined_enabled(kind):
         return False
+    if kind in {"risk", "drill"}:
+        return True
     return _enabled(PREFIXES[kind] + "AUTO_SYNC_NOTIFY_ENABLED")
 
 
@@ -88,12 +94,15 @@ def _detail(lines, limit):
     return "\n".join(result)
 
 
-def _card(kind, title, color, lines, sections):
+def _table_url(kind):
     from .zhihang_data_sync import BASE, TASKS
 
     table, view = TASKS[kind][2]
-    url = f"https://vnet.feishu.cn/base/{BASE}?" + urlencode({"table": table, "view": view})
-    elements = [{"tag": "markdown", "content": "\n".join([*lines, f"[打开多维表]({url})"])}]
+    return f"https://vnet.feishu.cn/base/{BASE}?" + urlencode({"table": table, "view": view})
+
+
+def _report_card(title, color, lines, sections):
+    elements = [{"tag": "markdown", "content": "\n".join(lines)}]
     for heading, content in sections:
         if content:
             elements.extend(({"tag": "hr"}, {"tag": "markdown", "content": f"**{heading}**\n{content}"}))
@@ -102,7 +111,11 @@ def _card(kind, title, color, lines, sections):
             "elements": elements}
 
 
-def _inspection_card(rows, scheduled, observed):
+def _card(kind, title, color, lines, sections):
+    return _report_card(title, color, [*lines, f"[打开多维表]({_table_url(kind)})"], sections)
+
+
+def _inspection_details(rows, scheduled, observed, *, report_day=None):
     details = []
     invalid = 0
     for row in rows:
@@ -115,7 +128,10 @@ def _inspection_card(rows, scheduled, observed):
             invalid += 1
             continue
         start, end = times
-        if not start <= scheduled < end:
+        if report_day is not None:
+            if start.date() > report_day or end <= datetime.combine(report_day, datetime.min.time(), BEIJING):
+                continue
+        elif not start <= scheduled < end:
             continue
         reasons = []
         if match := re.search(r"异常\s*[:：]\s*(\d+(?:\.\d+)?)", _text(row.get("巡检结果"))):
@@ -132,6 +148,8 @@ def _inspection_card(rows, scheduled, observed):
             due = start.replace(hour=hour, minute=0, second=0, microsecond=0)
         if not submitted and observed >= due:
             reasons.append("逾班未提交")
+        if report_day is not None and (submitted_at := _date(submitted)) and submitted_at > due:
+            reasons.append("提交晚于下一班")
         if overdue_reason:
             reasons.append(_plain(overdue_reason))
         if not reasons and _text(row.get("异常标")) == "异常":
@@ -142,9 +160,13 @@ def _inspection_card(rows, scheduled, observed):
                 f"{start:%Y-%m-%d %H:%M}-{end:%Y-%m-%d %H:%M}", _plain(status) or "无状态",
                 "，".join(dict.fromkeys(reasons)),
             ])))
-    if not details:
+    return [line for _, line in sorted(details)], invalid
+
+
+def _inspection_card(rows, scheduled, observed):
+    lines, invalid = _inspection_details(rows, scheduled, observed)
+    if not lines:
         return None, 0, invalid
-    lines = [line for _, line in sorted(details)]
     card = _card("inspection", f"巡检异常提醒（{scheduled:%H:%M}班次）", "red", [
         f"**班次时刻**：{scheduled:%Y-%m-%d %H:%M}", f"**异常数量**：{len(lines)} 单",
     ], [("本班异常明细", _detail(lines, _INSPECTION_LIMIT))])
@@ -198,10 +220,9 @@ def _drill_summary(rows, observed):
     return sections, bool(overdue)
 
 
-def _change_summary(rows, observed):
+def _change_focus(rows, observed):
     statuses = Counter()
-    focus = []
-    important = False
+    important, tips = [], []
     for row in rows:
         status = _text(row.get("状态")) or "未知状态"
         if any(value in status for value in ("终止", "实施成功", "关闭")):
@@ -211,21 +232,28 @@ def _change_summary(rows, observed):
         delayed = row.get("计划延时结束时间") or row.get("延迟结束时间")
         deadline = _date(delayed or row.get("计划结束时间"))
         reasons = []
+        urgent = False
         if "客服审核" in node:
             reasons.append("客服审核待处理")
-            important = True
+            urgent = True
         if deadline and not _date(row.get("实际结束时间")):
             days = (deadline.date() - observed.date()).days
             if days <= 3:
                 label = "延迟结束" if delayed else "计划结束"
                 remaining = f"已超期 {-days} 天" if days < 0 else "今天到期" if days == 0 else f"还剩 {days} 天"
                 reasons.append(label + remaining)
-                important = important or days <= 1
+                urgent = urgent or days <= 1
         if reasons:
             title = _plain(row.get("标题") or row.get("工单号")) or "未命名工单"
-            focus.append(f"{title}｜{_plain(status)}｜{'，'.join(reasons)}")
+            (important if urgent else tips).append(f"{title}｜{_plain(status)}｜{'，'.join(reasons)}")
+    return statuses, important, tips
+
+
+def _change_summary(rows, observed):
+    statuses, important, tips = _change_focus(rows, observed)
+    focus = important + tips
     return [("状态分布", "、".join(f"{_plain(status)} {count}" for status, count in statuses.items())),
-            ("需要跟进", _detail(focus, 20))], important, bool(focus)
+            ("需要跟进", _detail(focus, 20))], bool(important), bool(focus)
 
 
 def _event_summary(rows):
@@ -381,7 +409,8 @@ def notify(kind, rows, slot, run_id, *, store=None):
         raise ValueError("智航通知缺少有效的类型、数据或执行编号。")
     targets = notification_targets(kind)
     if not targets:
-        return {"status": "skipped", "message": "卡片通知已关闭。", "targets": []}
+        return {"status": "skipped", "message": "使用定时汇总规则。" if _combined_enabled(kind)
+                else "卡片通知已关闭。", "targets": []}
     scheduled = _date(slot)
     if slot and scheduled is None:
         raise ValueError("智航通知的定时时点无效。")

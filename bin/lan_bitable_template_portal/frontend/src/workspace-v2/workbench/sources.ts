@@ -7,7 +7,7 @@ import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
 export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
 export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean };
-export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; note?: string };
+export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
 export type Source = {
   id: SourceId;
   label: string;
@@ -30,6 +30,7 @@ const sections: Record<SourceId,Source['section']> = {
   event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',
 };
 const managerNoticeTypes = ['change','repair','power'];
+const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
 type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string};
 const array = (value: unknown): Dict[] => {
   if (!Array.isArray(value)) throw new Error('待办数据未完整返回。');
@@ -54,7 +55,10 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     if (!scoped && ['critical_guard','water'].includes(id)) return [];
     if (id==='signatures' && ctx.user.impersonation) return [];
     const readOnly=ctx.role==='manager'&&id==='notices'&&!ctx.accessLevel;
-    const available = todoSources(id,{...ctx,home:true,noticeTypes:readOnly?managerNoticeTypes:undefined},get);
+    const selectedScopes=id==='risk_inspection'&&ctx.scope==='CAMPUS'
+      ? ctx.scopes.map(option=>option.value).filter(scope=>/^[A-EH]$/.test(scope))
+      : ctx.selectedScopes;
+    const available = todoSources(id,{...ctx,selectedScopes,home:true,noticeTypes:readOnly?managerNoticeTypes:undefined},get);
     if (!available.length) return [];
     return [{
       id,label:readOnly?'通告信息':labels[id],section:sections[id],url:urls[id],readOnly,
@@ -68,7 +72,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
             signal.throwIfAborted();
             try { result = await source.load(page,signal); }
             catch(error) {
-              if (!result||signal.aborted||[401,403].includes((error as {status?:number})?.status||0)) throw error;
+              if (!result||signal.aborted||accessDenied(error)) throw error;
               partial=true;
               break;
             }
@@ -81,11 +85,12 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
         const lists = settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
         if (!lists.length) throw (settled[0] as PromiseRejectedResult).reason;
         const rows = sortTodos(lists.flatMap(list=>list.rows));
+        const denied = settled.filter(result=>result.status==='rejected'&&accessDenied(result.reason)).length;
         const matches = (row: TodoRow) => id!=='signatures' || ['ALL','CAMPUS'].includes(ctx.scope)
           || row.scope.replace(/楼|栋|站/g,'').trim()===ctx.scope;
         return {
           rows:rows.filter(matches),more:lists.some(list=>list.more),
-          delayed:lists.length!==available.length||lists.some(list=>list.partial),
+          delayed:lists.length+denied!==available.length||lists.some(list=>list.partial),restricted:denied>0,
           note:lists.length===1 ? lists[0]?.note : undefined,
         };
       },
@@ -175,8 +180,8 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     })};
   });
   if (enabled('engineer_mop')) add('engineer_mop',link('/engineer/mop'),buildings,async(scope,signal)=>{
-    const data=await get(link('/api/engineer/mop/bootstrap',{scope,month}),signal);
-    return {rows:array(data.notices).flatMap(item=>{
+    const data=await get(link('/api/engineer/mop/bootstrap',{scope,month,view:'todos'}),signal);
+    return {delayed:data.snapshot_pending===true,rows:array(data.notices).flatMap(item=>{
       if (!item.notice_key||noticeIsEnded(item)||!mopNoticeNeedsAction(item)) return [];
       return [row('engineer_mop',item.notice_key,scope,item.title||item.name||'通告维护单',item.mop_binding?'待上传':'待绑定',
         link('/engineer/mop',{scope,month,notice_key:item.notice_key}))];
@@ -241,8 +246,10 @@ async function byScope(scopes:string[], read:(scope:string)=>Promise<SourceResul
   const settled=await Promise.allSettled(scopes.map(read));
   const results=settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
   if (!results.length) throw (settled[0] as PromiseRejectedResult).reason;
+  const denied=settled.filter(result=>result.status==='rejected'&&accessDenied(result.reason)).length;
   return {
     rows:[...new Map(results.flatMap(result=>result.rows).map(row=>[row.key,row])).values()],
-    more:results.some(result=>result.more), delayed:results.length!==scopes.length||results.some(result=>result.delayed),
+    more:results.some(result=>result.more), delayed:results.length+denied!==scopes.length||results.some(result=>result.delayed),
+    restricted:denied>0||results.some(result=>result.restricted),
   };
 }

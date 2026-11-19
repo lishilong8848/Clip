@@ -37,6 +37,10 @@ STATUS = {'pending': '未提交', 'submitted': '待审核', 'approved': '审核�
 class CloudRejected(RiskError):
     """A definitive rejection, unlike an unknown transport or response outcome."""
 
+    def __init__(self, message, status=400, *, provider_code=None):
+        super().__init__(message, status)
+        self.provider_code = provider_code
+
 
 class _ReminderObsolete(Exception):
     """The assignment no longer needs this queued reminder."""
@@ -218,7 +222,8 @@ class RiskCloud:
                          1254291: '数据表写入冲突，原任务会稍后重试。',
                          99991400: '请求频率受限，原任务会稍后重试。'}
                 raise CloudRejected(f'{stage}失败（HTTP {response.status_code}' + (f'，飞书代码 {code}' if code else '') + '）。' +
-                                    hints.get(code, '请核对飞书智能体的应用权限和目标表字段；保留原任务重试，不要重新发布。'), 503)
+                                    hints.get(code, '请核对飞书智能体的应用权限和目标表字段；保留原任务重试，不要重新发布。'),
+                                    503, provider_code=code)
             response.raise_for_status()
             data = result.get('data', {} if method == 'DELETE' else None)
             if not isinstance(data, dict):

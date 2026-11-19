@@ -2,6 +2,8 @@
 
 import datetime as dt
 import json
+import logging
+import time
 import uuid
 from collections import Counter, defaultdict
 
@@ -126,7 +128,7 @@ def _legacy_workspace_history(service, db, actor, asset_id):
     entries = []
     for row in db.execute("""SELECT s.id,s.kind,s.status,s.created_at,s.submitted_at,s.owner_name,s.report_name,i.asset
         FROM tool_workspace_items i JOIN tool_workspace_sessions s ON s.id=i.session_id
-        WHERE i.asset_id=? AND i.order_id='' AND s.status IN ('pending','archived')
+        WHERE i.asset_id=? AND i.order_id='' AND i.deleted_at='' AND s.status IN ('pending','archived')
         ORDER BY s.created_at DESC""", (asset_id,)):
         try:
             service._workspace_session(db, actor, row['id'], status_only=True)
@@ -168,6 +170,104 @@ def _reminder_card(scope, day, sections):
 
 
 class ToolManagementLifecycle:
+    @staticmethod
+    def _tool_ledger_receipts(db, key=''):
+        return db.execute("""SELECT * FROM (
+            SELECT w.id AS receipt_key, w.id AS order_id, '' AS session_id, w.asset_id,
+                   s.dest, s.remote_id, w.id || '/' || s.dest AS flow_key, s.revision
+            FROM tool_work_orders w JOIN tool_work_sync s ON s.order_id=w.id
+            WHERE w.ledger_deleted_at='' AND s.dest='maintenance' AND s.remote_id<>''
+              AND s.synced=s.revision AND s.lease_until=0
+            UNION ALL
+            SELECT i.session_id || ':' || i.asset_id, '', i.session_id, i.asset_id,
+                   CASE WHEN i.ledger_table='unified' OR b.kind='self' THEN 'maintenance' ELSE 'inspection' END,
+                   i.remote_id, 'workspace:' || i.session_id || ':' || i.asset_id, b.revision
+            FROM tool_workspace_items i JOIN tool_workspace_sessions b ON b.id=i.session_id
+            WHERE i.order_id='' AND i.remote_id<>'' AND i.deleted_at='' AND b.status='archived'
+              AND b.lease_until=0
+            ) WHERE (?='' OR receipt_key=?)""", (key, key)).fetchall()
+
+    @staticmethod
+    def _tool_delete_job(db, key):
+        return db.execute('SELECT * FROM tool_ledger_deletions WHERE receipt_key=?', (key,)).fetchone()
+
+    def _queue_tool_ledger_delete(self, db, actor, key):
+        if not self._tool_delete_job(db, key):
+            receipts = self._tool_ledger_receipts(db, key)
+            if len(receipts) != 1:
+                raise RiskError('尚未取得唯一的飞书台账回执，请先核对归档状态。', 409)
+            db.execute('''INSERT INTO tool_ledger_deletions(receipt_key,receipt,actor,name)
+                VALUES(?,?,?,?)''', (key, dumps(dict(receipts[0])), actor['id'], actor['name']))
+        return {'deleted': False, 'deletion_pending': True}
+
+    def _confirm_tool_ledger_deleted(self, db, receipt, actor):
+        from .tool_management import clock
+
+        at = clock().isoformat(timespec='seconds')
+        order, batch, asset = (receipt[field] for field in ('order_id', 'session_id', 'asset_id'))
+        if order:
+            updated = db.execute("""UPDATE tool_work_orders SET ledger_deleted_at=?,revision=revision+1
+                WHERE id=? AND ledger_deleted_at=''""", (at, order))
+            if not updated.rowcount:
+                return
+            db.execute('DELETE FROM tool_work_sync WHERE order_id=?', (order,))
+            db.execute("""UPDATE tool_work_archives SET needs_refresh=1 WHERE month=
+                (SELECT month FROM tool_work_orders WHERE id=?)""", (order,))
+            items = db.execute("SELECT session_id,asset_id FROM tool_workspace_items WHERE order_id=?", (order,)).fetchall()
+        else:
+            items = [{'session_id': batch, 'asset_id': asset}]
+        for item in items:
+            update = db.execute("""UPDATE tool_workspace_items SET deleted_at=?
+                WHERE session_id=? AND asset_id=? AND deleted_at=''""", (at, item['session_id'], item['asset_id']))
+            if update.rowcount:
+                self._workspace_bump(db, item['session_id'])
+        self.audit(db, order or batch, actor, '核验飞书工具台账已删除', asset)
+
+    def tool_ledger_delete_one(self):
+        now, lease = int(time.time()), uuid.uuid4().hex
+        with self.connect(True) as db:
+            job = db.execute('''SELECT * FROM tool_ledger_deletions
+                WHERE next_try<=? AND lease_until<=? ORDER BY next_try,receipt_key LIMIT 1''', (now, now)).fetchone()
+            if not job:
+                return False
+            key = job['receipt_key']
+            receipt = json.loads(job['receipt'])
+            db.execute('UPDATE tool_ledger_deletions SET lease=?,lease_until=? WHERE receipt_key=?',
+                       (lease, now + 300, key))
+        try:
+            self.cloud.delete_ledger_record(receipt['dest'], receipt['remote_id'], receipt['flow_key'])
+        except Exception as exc:
+            error = str(exc) if isinstance(exc, RiskError) else '飞书删除暂未确认，后台将重试原记录。'
+            with self.connect(True) as db:
+                db.execute("""UPDATE tool_ledger_deletions SET error=?,next_try=?,lease='',lease_until=0
+                    WHERE receipt_key=? AND lease=?""", (error, int(time.time()) + 60, key, lease))
+        else:
+            with self.connect(True) as db:
+                if db.execute('DELETE FROM tool_ledger_deletions WHERE receipt_key=? AND lease=?', (key, lease)).rowcount:
+                    self._confirm_tool_ledger_deleted(db, receipt, {'id': job['actor'], 'name': job['name']})
+        return True
+
+    def reconcile_tool_ledger_deletions(self):
+        with self.connect() as db:
+            by_table = defaultdict(list)
+            for row in self._tool_ledger_receipts(db):
+                by_table[row['dest']].append(dict(row))
+        for dest, receipts in by_table.items():
+            try:
+                live = self.cloud.ledger_record_ids(dest)
+                for receipt in receipts:
+                    if receipt['remote_id'] in live:
+                        continue
+                    if self.cloud.ledger_exists(dest, receipt['remote_id'], receipt['flow_key']):
+                        continue
+                    with self.connect(True) as db:
+                        key = receipt['receipt_key']
+                        current = self._tool_ledger_receipts(db, key)
+                        if len(current) == 1 and dict(current[0]) == receipt and not self._tool_delete_job(db, key):
+                            self._confirm_tool_ledger_deleted(db, receipt, {'id': 'system', 'name': '飞书台账'})
+            except Exception:
+                logging.exception('Tool ledger deletion read-back deferred for %s', dest)
+
     def tool_history(self, actor, asset_id):
         """Return a capped history, with current scope and per-order permissions enforced."""
         from .tool_management import can_scope, clock, configured_kind
@@ -186,7 +286,8 @@ class ToolManagementLifecycle:
                 work.reason,work.resolution,work.scrap_reason,work.scrap_status,work.report_name,work.inspection_meta,
                 review.status AS review_status,review.note AS review_note
                 FROM tool_work_orders work LEFT JOIN tool_work_reviews review ON review.order_id=work.id
-                WHERE work.asset_id=? ORDER BY work.month DESC,COALESCE(work.submitted_at,work.due) DESC,work.id DESC''', (asset_id,))
+                WHERE work.asset_id=? AND work.ledger_deleted_at=''
+                ORDER BY work.month DESC,COALESCE(work.submitted_at,work.due) DESC,work.id DESC''', (asset_id,))
                 if self.visible(db, actor, row)]
             if asset:
                 scope = asset['scope']
@@ -226,13 +327,13 @@ class ToolManagementLifecycle:
                      'external' if row['kind'] == 'external' else 'self_draft' if row['workspace_direct'] else 'late')
             pending[row['scope']][group].append((row['due'], json.loads(row['asset']).get('name') or ''))
         history, scrapped, blocked = defaultdict(list), defaultdict(int), set()
-        for row in db.execute('''SELECT id,asset_id,scope,kind,due,actual,submitted_at,outcome,scrap_qty,inspection_meta
+        for row in db.execute('''SELECT id,asset_id,scope,kind,due,actual,submitted_at,outcome,scrap_qty,inspection_meta,ledger_deleted_at
                 FROM tool_work_orders WHERE submitted_at IS NOT NULL OR outcome IN ('repair','scrap','scrapped')'''):
-            if row['outcome'] in ('repair', 'scrap'):
+            if row['outcome'] in ('repair', 'scrap') and not row['ledger_deleted_at']:
                 blocked.add(row['asset_id'])
             elif row['outcome'] == 'scrapped':
                 scrapped[row['asset_id']] += row['scrap_qty']
-            if row['kind'] == 'external' and row['submitted_at'] and row['outcome'] != 'cancelled':
+            if row['kind'] == 'external' and row['submitted_at'] and row['outcome'] != 'cancelled' and not row['ledger_deleted_at']:
                 history[(row['scope'], row['asset_id'])].append(row)
         for row in db.execute('SELECT source,config FROM tool_inventory WHERE active=1'):
             asset = self._workspace_inventory_asset(row)

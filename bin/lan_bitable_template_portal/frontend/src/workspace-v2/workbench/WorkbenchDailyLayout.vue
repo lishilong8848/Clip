@@ -90,11 +90,6 @@
               <small>{{ selectedWeather?.description || (weatherBusy ? '正在读取天气…' : '暂无天气预报') }}</small>
             </div>
           </div>
-          <section class="desk-hourly" aria-labelledby="desk-hourly-title">
-            <h3 id="desk-hourly-title">未来 12 小时气温</h3>
-            <WorkbenchWeatherTrend v-if="temperaturePoints.length" :points="temperaturePoints" />
-            <p v-else class="wb-note" role="status">{{ calendarWeatherBusy ? '正在读取气温趋势…' : calendarWeather?.hourly_note || '气温趋势暂不可用' }}</p>
-          </section>
         </div>
         <div class="desk-month">
           <strong>{{ monthDate.getUTCFullYear() }} 年 {{ monthDate.getUTCMonth()+1 }} 月</strong>
@@ -132,14 +127,14 @@
             <span v-else class="desk-day desk-other" aria-hidden="true">{{ day.number }}</span>
           </template>
         </div>
-        <p v-if="calendarNotice" class="desk-calendar-note" role="status">{{ calendarNotice }}</p>
+        <p v-if="calendarNotice" class="desk-calendar-note" role="status">{{ calendarNotice }} <button v-if="calendarFailed" type="button" class="wb-link" @click="calendarRevision++">重试日程</button></p>
         <div class="desk-schedule-head"><h3>{{ selected.slice(5).replace('-',' 月 ') }} 日安排</h3><span>{{ dayCount(selected) }} 项</span></div>
         <ul v-if="dayCount(selected)" class="desk-schedule">
           <li v-for="entry in agenda" :key="entry.key">
             <span class="desk-event-time">{{ entry.time }}</span>
             <span class="desk-event-dot" :class="entry.type" aria-hidden="true"></span>
-            <div><small>{{ entry.label }}<template v-if="agendaScopes?.length && !agendaScope"> · {{ entry.item.scope.replace(/^([A-EH])$/,'$1楼') }}</template></small>
-              <button v-if="entry.item.url && !entry.item.readOnly" class="desk-agenda-link" type="button" data-v2-navigation @click="emit('task',entry.item)">{{ entry.item.title }}</button>
+            <div><small>{{ entry.label }}<template v-if="agendaScopes?.length && !agendaScope"> · {{ entry.item.scope.replace(/^([A-EH])$/,'$1楼') }}</template><template v-if="entry.due"> · 截止 {{ entry.due }}</template></small>
+              <button v-if="entry.item.url" class="desk-agenda-link" type="button" data-v2-navigation @click="emit('task',entry.item)">{{ entry.item.title }}</button>
               <strong v-else>{{ entry.item.title }}</strong>
             </div>
           </li>
@@ -158,7 +153,7 @@
               <dt>{{ row.scope === '110' ? '110站' : row.scope+'楼' }} · {{ row.shift || '班次待核对' }}</dt><dd>{{ row.names.join('、') || '人员待核对' }}</dd>
             </template>
           </dl>
-        <p v-else class="wb-note">{{ rosterDates.includes(selected) ? '该日暂无本楼排班人员' : '该日暂无排班快照' }}</p>
+          <p v-else class="wb-note">{{ rosterMessage }}</p>
         </section>
         <section class="desk-schedule-extra" aria-labelledby="desk-alerts-title">
           <h3 id="desk-alerts-title">预警与戒备</h3>
@@ -175,7 +170,7 @@
               <ul v-if="calendarWeather.guard_actions.length"><li v-for="action in calendarWeather.guard_actions" :key="action">{{ action }}</li></ul>
               <p v-if="calendarWeather.guard_note" class="wb-note">{{ calendarWeather.guard_note }}</p>
             </div>
-            <p v-else class="wb-note">{{ calendarWeather?.guard_note || '预警及戒备状态待核对' }}</p>
+            <p v-else class="wb-note">{{ calendarWeather?.guard_note || (guardFailed ? '重保戒备读取失败' : '重保管理尚无已确认的戒备信息') }} <button v-if="guardFailed" type="button" class="wb-link" @click="loadCalendarWeather(true)">重试</button></p>
           </template>
         </section>
       </aside>
@@ -192,7 +187,6 @@ import { todoTimestamp } from '../businessTodos';
 import { requestJson } from '../client';
 import type { WorkItem } from './sources';
 import { inDeskScope } from './deskPolicy';
-import WorkbenchWeatherTrend from './WorkbenchWeatherTrend.vue';
 import './workbench.css';
 
 type Link = {label:string; url:string};
@@ -200,7 +194,7 @@ type DayWeather = {date:string; description:string; minimum:number|null; maximum
 type AgendaEntry = {key:string; item:WorkItem; type:'plan'|'change'|'due'; label:string; time:string; stamp:number};
 type CalendarItem={kind:string;title:string;scopes?:string[];notes?:string[];start?:string;source_id?:string};
 type CalendarDay={items:CalendarItem[];staff:{scope:string;shift:string;names:string[]}[]};
-type CalendarWeather={hourly_note?:string;warning_ready:boolean;hours:{time:string;temp?:number|string|null}[];
+type CalendarWeather={warning_ready:boolean;
   alerts:{id?:string;title:string;guard_level?:string}[];guard_level?:string;guard_actions:string[];guard_note?:string};
 const props = defineProps<{name:string; avatar?:string; clock:number; links:Link[]; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
   metrics?:{label:string;value:number|null;partial?:boolean;note?:string;url?:string}[]; agendaScopes?:{label:string;value:string}[];
@@ -302,24 +296,50 @@ const byDay = computed(()=>{
   for (const entries of days.values()) entries.sort((a,b)=>a.stamp-b.stamp);
   return days;
 });
-const agenda = computed(()=>byDay.value.get(selected.value) || []);
+const mergedAgenda=computed(()=>{
+  const days=new Map<string,(AgendaEntry&{due?:string})[]>();
+  for(const [day,entries] of byDay.value){
+    const tasks=new Map<string,AgendaEntry&{due?:string}>();
+    for(const entry of entries){
+      const other=tasks.get(entry.item.key);
+      if(!other)tasks.set(entry.item.key,{...entry});
+      else if(entry.type==='due')other.due=entry.time;
+      else tasks.set(entry.item.key,{...entry,due:other.time});
+    }
+    days.set(day,[...tasks.values()].sort((a,b)=>a.stamp-b.stamp));
+  }
+  return days;
+});
+const agenda = computed(()=>mergedAgenda.value.get(selected.value) || []);
 const calendarDays=ref<Record<string,CalendarDay>>({});
 const rosterDates=ref<string[]>([]);
 const calendarNotice=ref('');
+const calendarRevision=ref(0), calendarFailed=ref(false), calendarLoading=ref(false), rosterFailed=ref(false);
 const calendarDay=computed(()=>calendarDays.value[selected.value]);
-const dayCount=(day:string)=>(byDay.value.get(day)?.length||0)+(calendarDays.value[day]?.items.length||0);
+const rosterMessage=computed(()=>{
+  if(calendarLoading.value)return '正在读取排班…';
+  if(rosterDates.value.includes(selected.value))return '当天无已确认的排班人员';
+  if(rosterFailed.value)return '排班暂未读到，可重试日程';
+  return selected.value>today.value?'该日期尚未同步排班':'当天排班暂未取得';
+});
+const dayCount=(day:string)=>(mergedAgenda.value.get(day)?.length||0)+(calendarDays.value[day]?.items.length||0);
 function scheduleTime(value?:string){
   const stamp=todoTimestamp(value);
   return stamp===undefined?'—':dayTime(stamp);
 }
-watch([month,agendaScope,()=>props.calendarScope,()=>props.calendarIdentity],async(_value,_old,onCleanup)=>{
-  calendarDays.value={};
-  rosterDates.value=[];
+watch([month,agendaScope,()=>props.calendarScope,()=>props.calendarIdentity,calendarRevision],async(value,old,onCleanup)=>{
+  if(!old || value.slice(0,4).some((key,index)=>key!==old[index])){
+    calendarDays.value={};
+    rosterDates.value=[];
+  }
   calendarNotice.value='';
+  calendarFailed.value=false;
+  calendarLoading.value=false;
+  rosterFailed.value=false;
   if(props.guest||!props.calendarScope)return;
   const controller=new AbortController();
   onCleanup(()=>controller.abort());
-  calendarNotice.value='正在读取日程…';
+  calendarLoading.value=true;
   try {
     const query=new URLSearchParams({month:month.value,scope:agendaScope.value||props.calendarScope});
     const data=await requestJson('/api/personal-calendar?'+query,{signal:controller.signal,timeoutMs:16000});
@@ -327,38 +347,44 @@ watch([month,agendaScope,()=>props.calendarScope,()=>props.calendarIdentity],asy
     if(data.month!==month.value||!data.days||!Array.isArray(data.unavailable))throw new Error('日程未完整返回');
     calendarDays.value=data.days;
     rosterDates.value=Array.isArray(data.roster_dates)?data.roster_dates:[];
-    calendarNotice.value=data.unavailable.length?data.unavailable.join('、')+'来源暂不可用':'';
+    rosterFailed.value=data.unavailable.includes('排班');
+    calendarFailed.value=data.unavailable.length>0;
+    calendarNotice.value=calendarFailed.value?data.unavailable.join('、')+'暂未更新':'';
   } catch {
-    if(!controller.signal.aborted)calendarNotice.value='日程暂不可用';
+    if(!controller.signal.aborted){calendarNotice.value='日程读取失败';calendarFailed.value=true;rosterFailed.value=true;}
+  } finally {
+    if(!controller.signal.aborted)calendarLoading.value=false;
   }
 },{immediate:true});
 const calendarWeather=ref<CalendarWeather>();
-const temperaturePoints=computed(()=>{
-  const points=new Map<number,number>();
-  for(const hour of calendarWeather.value?.hours||[]){
-    const time=Date.parse(hour.time);
-    const raw=hour.temp;
-    const temperature=typeof raw==='number'?raw:typeof raw==='string'&&raw.trim()?Number(raw):NaN;
-    if(Number.isFinite(time)&&Number.isFinite(temperature))points.set(time,temperature);
-  }
-  return [...points].sort(([a],[b])=>a-b);
-});
+const guardFailed=ref(false);
 const calendarWeatherBusy=ref(false);
 let calendarWeatherRequest:AbortController|undefined;
 let calendarWeatherAt=0;
-async function loadCalendarWeather(){
-  if(props.guest||calendarWeatherBusy.value||Date.now()-calendarWeatherAt<240000)return;
+async function loadCalendarWeather(force=false){
+  if(props.guest||calendarWeatherBusy.value||!force&&Date.now()-calendarWeatherAt<60000)return;
   calendarWeatherBusy.value=true;
   const request=calendarWeatherRequest=new AbortController();
   try{
     const data=await requestJson('/api/personal-calendar/weather',{signal:request.signal,timeoutMs:16000});
-    if(!request.signal.aborted){calendarWeather.value=data as CalendarWeather;calendarWeatherAt=Date.now();}
+    if(!request.signal.aborted){
+      calendarWeather.value=data as CalendarWeather;
+      guardFailed.value=data.guard_read_failed===true;
+    }
   } catch {
-    if(!request.signal.aborted)calendarWeather.value=undefined;
+    if(!request.signal.aborted){calendarWeather.value=undefined;guardFailed.value=true;}
   } finally {
-    if(calendarWeatherRequest===request)calendarWeatherBusy.value=false;
+    if(calendarWeatherRequest===request){calendarWeatherBusy.value=false;calendarWeatherAt=Date.now();}
   }
 }
+watch(()=>props.calendarIdentity,()=>{
+  calendarWeatherRequest?.abort();
+  calendarWeather.value=undefined;
+  calendarWeatherAt=0;
+  calendarWeatherBusy.value=false;
+  guardFailed.value=false;
+  void loadCalendarWeather();
+});
 watch(()=>props.clock,()=>{if(!document.hidden)void loadCalendarWeather();});
 const noticesByDay = computed(()=>{
   const days = new Map<string, {item:WorkItem; times:string[]}[]>();
@@ -509,22 +535,33 @@ onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weather
 .desk-staff { display:grid;grid-template-columns:auto 1fr;gap:5px 9px;margin:7px 0 0; }
 .desk-staff dt { color:var(--wb-muted); }
 .desk-staff dd { margin:0;overflow-wrap:anywhere; }
-.desk-hourly { margin:0 10px;padding:6px 0 1px;border-top:1px solid color-mix(in srgb,var(--wb-border) 65%,transparent); }
-.desk-agenda .desk-hourly h3 { font-size:12px;font-weight:550;color:var(--wb-muted); }
-.desk-hourly p { padding:7px 0 9px;font-size:12px; }
 .desk-alerts small { font-size:11px;color:var(--wb-muted); }
 .desk-alerts ul { padding-left:18px;margin:5px 0; }
 .desk-main :deep(.desk-queue) { display:block;padding:0;border-radius:12px; }
-.desk-main :deep(.wb-todo-toolbar) { border:0;border-radius:12px;padding:12px 14px; }
+.desk-main :deep(.wb-todo-toolbar) { grid-template-columns:minmax(0,1fr) auto;border:0;padding:12px 14px 8px; }
+.desk-main :deep(.wb-todo-toolbar h2) { min-width:0; }
+.desk-main :deep(.wb-task-filters) { grid-column:1/-1;grid-template-columns:minmax(0,1fr) minmax(118px,auto);justify-content:stretch; }
+.desk-main :deep(.desk-task-search) { position:relative;align-items:center; }
+.desk-main :deep(.desk-task-search svg) { position:absolute;left:9px;color:var(--wb-muted);pointer-events:none; }
+.desk-main :deep(.desk-task-search input) { width:100%;padding-left:30px; }
 .desk-main :deep(.wb-task-module-grid) { display:block; }
 .desk-main :deep(.wb-task-list > li) { padding:0 14px; }
 .desk-main :deep(.wb-task-row) { min-height:60px; }
 .desk-main :deep(.wb-task-action) { max-width:36%;text-align:right;white-space:normal;overflow-wrap:anywhere; }
 .desk-main :deep(.wb-task-action > span:first-child) { white-space:normal;color:var(--wb-muted); }
 .desk-main :deep(.wb-task-group),.desk-main :deep(.wb-queue-status) { margin:0;padding:5px 14px; }
+.desk-main :deep(.wb-queue-status) { padding-block:13px; }
 .desk-main :deep(.desk-task-tabs) { display:flex;gap:16px;border-bottom:1px solid var(--wb-border);padding:0 14px; }
 .desk-main :deep(.desk-task-tabs button) { padding:8px 3px;border:0;border-bottom:2px solid transparent;background:none;color:var(--wb-muted); }
 .desk-main :deep(.desk-task-tabs button[aria-pressed=true]) { border-color:var(--wb-primary);color:var(--wb-primary);font-weight:650; }
+.desk-main :deep(.desk-task-tabs button span) { margin-left:2px;font-variant-numeric:tabular-nums; }
+.desk-main :deep(.desk-drill-heading) { padding:9px 14px;background:var(--desk-tint);border-block:1px solid var(--wb-border); }
+.desk-main :deep(.desk-queue-health) { padding:5px 14px;border-top:1px solid var(--wb-border);font-size:12px;color:var(--wb-muted); }
+.desk-main :deep(.desk-queue-health summary) { min-height:32px;align-content:center;cursor:pointer; }
+.desk-main :deep(.desk-queue-health summary span) { margin-left:8px; }
+.desk-main :deep(.desk-queue-health ul) { margin:0;padding:0;list-style:none; }
+.desk-main :deep(.desk-queue-health li) { display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--wb-border); }
+.desk-main :deep(.desk-queue-health li small) { display:block;color:var(--wb-muted); }
 .desk-main :deep(.desk-module-pill) { background:var(--desk-tint);color:var(--wb-primary);border-radius:20px;width:88px;max-width:30%;flex:none;text-align:center;padding:4px 3px;font-size:12px; }
 .desk-main :deep(.desk-unread) { display:inline-block;width:6px;height:6px;margin-right:5px;vertical-align:2px;border-radius:50%;background:var(--wb-primary); }
 .desk-overview :deep(.wb-dashboard) { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px; }
@@ -541,6 +578,7 @@ onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weather
   .desk-actions > .desk-anchor { position:static; }
   .desk-actions .desk-popover { min-width:0;max-width:100%;width:min(300px,100%); }
   .desk-main :deep(.wb-task-list > li) { padding:0 8px; }
+  .desk-main :deep(.desk-task-tabs button) { min-height:44px; }
   .desk-main :deep(.desk-module-pill) { width:auto;max-width:27%; }
 }
 </style>

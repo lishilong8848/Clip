@@ -26,6 +26,7 @@ API_ROOTS = frozenset(('auth assistant admin bootstrap scope-overview records wo
 API_ROOTS |= frozenset(prefix.split('/')[2] for prefix, _ in PREFIXES
                        if prefix.startswith('/api/') and not prefix.endswith('-'))
 API_ROOTS |= {'alarm-scan'}
+WORKBENCH_READS = {('GET', '/api/personal-calendar'), ('GET', '/api/personal-calendar/weather')}
 # Only these two endpoints bypass portal login. Event submission validates the QR signature.
 ALARM_SCAN_PUBLIC = {('GET', '/api/alarm-scan/health'), ('POST', '/api/alarm-scan/events')}
 ANONYMOUS = {
@@ -92,7 +93,7 @@ class PublicGuard:
                                       headers={'Cache-Control': 'no-store'})(scope, receive, send)
         if not any(regex.fullmatch(path) and method in methods for regex, methods in self.routes):
             return await reject(scope, receive, send, 404, '公网入口不存在。')
-        if path.startswith('/api/') and path.split('/')[2] not in API_ROOTS:
+        if path.startswith('/api/') and path.split('/')[2] not in API_ROOTS and (method, path) not in WORKBENCH_READS:
             return await reject(scope, receive, send, 403, '此模块尚未开放公网访问。')
         if method not in {'GET', 'HEAD', 'OPTIONS'}:
             source = headers.get(b'origin') or headers.get(b'referer') or b''

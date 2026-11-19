@@ -98,9 +98,8 @@ const server = createServer(async (request, response) => {
       if (pathname.endsWith('/remove-followup')) {
         const order = state.followups.find(row => pathname.includes(row.id));
         assert(order?.can_remove_followup && body.revision === order.revision);
-        state.removedOrder = order.id;
-        state.followups = state.followups.filter(row => row.id !== order.id);
-        return ok({ deleted: true });
+        order.deletion_pending = true;
+        return ok({ deleted: false, deletion_pending: true });
       }
       if (pathname === api && request.method === 'GET') return ok(board());
       if (pathname === api + '/refresh') {
@@ -615,7 +614,7 @@ try {
     assert.equal(await button('批量工具200 · A楼').getAttribute('aria-pressed'), 'true');
     assert.equal(await page.locator('.sheet-scroll').evaluate(element => element.scrollTop), 0);
   });
-  await check('one records page deduplicates repair/scrap and removes only a completed record', async () => {
+  await check('one records page deduplicates repair/scrap and waits for deletion confirmation', async () => {
     for (const [location, width] of [[legacy, 1440], [v2, 390]]) {
       reset();
       const id = 'archived-followup';
@@ -631,8 +630,13 @@ try {
       await page.locator('.record-tools').getByText('未关联工具', { exact: true }).waitFor();
       assert.equal(await page.locator('.record-tools').getByText('电能质量分析仪', { exact: true }).count(), 0);
       await noOverflow();
-      await followups.getByRole('button', { name: '删除记录', exact: true }).click();
-      await page.locator('.n-popover').getByRole('button', { name: '删除记录', exact: true }).click();
+      await followups.getByRole('button', { name: '删除', exact: true }).click();
+      await page.locator('.n-popover').getByRole('button', { name: '删除', exact: true }).click();
+      await followups.getByText('等待飞书确认删除', { exact: true }).waitFor();
+      await followups.getByText('电能质量分析仪', { exact: true }).waitFor();
+      state.removedOrder = id;
+      state.followups = [];
+      await page.getByRole('button', { name: '刷新记录', exact: true }).click();
       await followups.waitFor({ state: 'hidden' });
       await page.locator('.record-tools').getByText('未关联工具', { exact: true }).waitFor();
       assert.equal(state.removedOrder, id);

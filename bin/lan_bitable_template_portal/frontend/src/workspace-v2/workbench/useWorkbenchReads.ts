@@ -3,7 +3,7 @@ import { requestJson, type Dict } from '../client';
 import { layoutKey } from '../dashboard/layout';
 import type { Source, SourceId, SourceResult } from './sources';
 
-type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult; pages?:number };
+type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult; pages?:number; retrying?:boolean };
 const statusOf = (error: unknown) => (error as {status?:number})?.status;
 
 export function useWorkbenchReads(context: Ref<string>, sources: Ref<Source[]>) {
@@ -26,11 +26,11 @@ export function useWorkbenchReads(context: Ref<string>, sources: Ref<Source[]>) 
     const controller=new AbortController(), key=context.value, old=states.value[id], previous=old?.result;
     const pages=(old?.pages ?? 1) + (more ? 1 : 0);
     active.set(id,controller);
-    update(id,{status:'loading',result:previous,pages:old?.pages});
+    update(id,{status:'loading',result:previous,pages:old?.pages,retrying:old?.retrying||old?.status==='stale'||old?.status==='down'});
     const current=()=>!controller.signal.aborted&&active.get(id)===controller&&key===context.value;
     try {
       const result=await source.load(controller.signal,pages);
-      if (current()) update(id,{status:result.delayed?'stale':'ok',result:result.delayed&&!result.rows.length?previous||result:result,pages});
+      if (current()) update(id,{status:result.delayed?'stale':'ok',result:result.delayed&&!result.restricted&&!result.rows.length?previous||result:result,pages});
     } catch (error) {
       if (!current()) return;
       if ([401,403].includes(statusOf(error)||0)) update(id,{status:'deny'});
@@ -40,16 +40,17 @@ export function useWorkbenchReads(context: Ref<string>, sources: Ref<Source[]>) 
       if (active.get(id)===controller) active.delete(id);
     }
   }
-  function refresh() {
-    if (!document.hidden) for (const id of wanted) void load(id,true);
+  function refresh(ids?:SourceId[]) {
+    if (!document.hidden) for (const id of ids||wanted) if(wanted.has(id)) void load(id,true);
   }
+  const refreshAll=()=>refresh();
   watch(context,reset,{flush:'sync'});
-  window.addEventListener('clipflow-business-changed',refresh);
-  document.addEventListener('visibilitychange',refresh);
+  window.addEventListener('clipflow-business-changed',refreshAll);
+  document.addEventListener('visibilitychange',refreshAll);
   onBeforeUnmount(()=>{
     reset();
-    window.removeEventListener('clipflow-business-changed',refresh);
-    document.removeEventListener('visibilitychange',refresh);
+    window.removeEventListener('clipflow-business-changed',refreshAll);
+    document.removeEventListener('visibilitychange',refreshAll);
   });
   return {states,load,refresh};
 }

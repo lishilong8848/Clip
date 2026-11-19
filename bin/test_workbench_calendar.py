@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.workbench_calendar import (
-    install_workbench_calendar, public_schedule,
+    install_workbench_calendar, public_schedule, read_roster, TZ,
 )
 
 
@@ -37,6 +37,22 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
                          [('封网', '封网窗口'), ('冲突', 'A楼窗口')])
         self.assertEqual(projected(dt.date(2026, 11, 18))['items'][-1]['kind'], '提醒')
 
+    def test_roster_fallback_reuses_only_verified_same_day_records(self):
+        from lan_bitable_template_portal.personnel_source import TABLE_ID
+        from upload_event_module.config import config
+
+        now = dt.datetime.now(TZ)
+        day = now.date().isoformat()
+        snapshot = {'date': day, 'app_id': config.app_id, 'source': TABLE_ID, 'complete': True,
+                    'observed_at': now.timestamp(), 'people': [{'name': '甲', 'scope': 'A', 'shift': '白'}]}
+        service = SimpleNamespace(_state_store=SimpleNamespace(get_document=lambda namespace, date: snapshot))
+        with patch('lan_bitable_template_portal.workbench_calendar.daily_roster', side_effect=OSError):
+            rows, covered = read_roster(service, day[:7], now.date())
+            self.assertEqual(covered, [day])
+            self.assertEqual(rows[0]['dutyStaffActual'], ['甲'])
+            snapshot['observed_at'] -= 86400
+            self.assertEqual(read_roster(service, day[:7], now.date()), ([], []))
+
     async def test_calendar_projects_only_current_user_scopes(self):
         auth = SimpleNamespace(session_scopes=lambda session: ['A', 'B'],
                                account_profile=lambda _: {'level':'L3', 'home_scope':'A', 'modules':['change']},
@@ -58,7 +74,7 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row['scope'] for row in body['staff']], ['A'])
         self.assertEqual([row['title'] for row in body['items']], ['封网窗口','A楼窗口'])
 
-    async def test_weather_shows_current_guard_even_if_forecast_or_latest_guard_query_failed(self):
+    async def test_guard_reads_the_last_verified_state_without_fetching_forecast(self):
         guard_state = {
             'current_warnings': [{'id':'current','title':'当前大风预警','guard_level':'三级'}],
             'current_guard_level': '三级',
@@ -74,8 +90,6 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         install_workbench_calendar(app, controller, SimpleNamespace(service=SimpleNamespace(_state_store=store)))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
             received = (await client.get('/api/personal-calendar/weather')).json()['data']
-            self.assertFalse(received['hourly_ready'])
-            self.assertEqual(received['hourly_note'], '暂时无法读取气温预报')
             self.assertTrue(received['warning_ready'])
             self.assertEqual(received['alerts'], guard_state['current_warnings'])
             self.assertEqual(received['guard_level'], '三级')
@@ -88,19 +102,12 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(cleared['warning_ready'])
             self.assertEqual((cleared['alerts'], cleared['guard_level'], cleared['guard_note']), ([], '', ''))
 
-            tz = dt.timezone(dt.timedelta(hours=8))
-            first = dt.datetime.now(tz).replace(minute=0, second=0, microsecond=0) + dt.timedelta(hours=1)
-            later = first + dt.timedelta(hours=3)
-            app.state.lighthouse_icon_weather.get = AsyncMock(return_value={'available': True, 'hourly': [
-                {'time': int(later.timestamp() * 1000), 'temp': 2}, None,
-                {'time': first.isoformat(), 'temp': 0}, {'time': '', 'temp': 9},
-            ]})
             with patch.object(store, 'get_critical_guard_weather_state', side_effect=OSError('store unavailable')):
-                forecast = (await client.get('/api/personal-calendar/weather')).json()['data']
-            self.assertEqual(forecast['hours'], [{'time': first.isoformat(), 'temp': 0},
-                                                {'time': later.isoformat(), 'temp': 2}])
-            self.assertFalse(forecast['warning_ready'])
-            self.assertEqual(forecast['guard_note'], '暂时无法读取重保管理状态')
+                unavailable = (await client.get('/api/personal-calendar/weather')).json()['data']
+            self.assertFalse(unavailable['warning_ready'])
+            self.assertTrue(unavailable['guard_read_failed'])
+            self.assertEqual(unavailable['guard_note'], '暂时无法读取重保管理状态')
+        app.state.lighthouse_icon_weather.get.assert_not_awaited()
         await app.router.shutdown()
 
 

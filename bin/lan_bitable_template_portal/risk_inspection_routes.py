@@ -399,15 +399,7 @@ def install_risk_inspection_routes(app, controller, runtime):
             stop.wait(.25 if job else 5)
 
     def run_tools():
-        from .tool_management_lifecycle import building_reminder_uuid
-        from .portal_service import BUILDING_CHAT_ID_MAP
-        from upload_event_module.services.robot_webhook import send_interactive_to_chat_id, send_interactive_to_open_ids
-
-        def deliver(scope, day, card):
-            chat_id = BUILDING_CHAT_ID_MAP.get(scope)
-            if not chat_id or stop.is_set():
-                return False
-            return send_interactive_to_chat_id(card, chat_id, message_uuid=building_reminder_uuid(scope, day))
+        from upload_event_module.services.robot_webhook import send_interactive_to_open_ids
 
         def reminder_link(scope):
             from public_access.links import deployment
@@ -433,8 +425,8 @@ def install_risk_inspection_routes(app, controller, runtime):
         while not stop.is_set():
             try:
                 if getattr(runtime, 'state_store', None) and getattr(runtime, 'service', None):
-                    run_tool_jobs(get_tool_checks(), stop, deliver_reminder=deliver, reminder_link=reminder_link,
-                                  deliver_review=deliver_review, review_link=review_link, resolve_leader=actor_for,
+                    run_tool_jobs(get_tool_checks(), stop, deliver_review=deliver_review,
+                                  review_link=review_link, resolve_leader=actor_for,
                                   scrap_review_link=scrap_review_link)
                     return
             except Exception:

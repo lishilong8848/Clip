@@ -88,6 +88,21 @@ class ZhihangSyncTests(unittest.TestCase):
         self.worker.drain()
         return self.worker.detail(run["id"])
 
+    def test_overview_pages_all_retained_runs_without_changing_task_summary(self):
+        self.assertEqual(self.worker.overview(history_page=9)["history_pagination"],
+                         {"page": 1, "page_size": 10, "total": 0})
+        for index in range(54, -1, -1):
+            self.worker.persist({"id": f"{index:032x}", "kind": "event", "mode": "preview",
+                                 "status": "success", "created_at": TODAY + f"T08:{index:02d}:00+08:00"})
+        first = self.worker.overview(history_page=1)
+        last = self.worker.overview(history_page=7)
+        self.assertEqual(first["history"][0]["id"], f"{54:032x}")
+        self.assertEqual(len(first["history"]), 10)
+        self.assertEqual(last["history_pagination"], {"page": 6, "page_size": 10, "total": 55})
+        self.assertEqual([row["id"] for row in last["history"]], [f"{index:032x}" for index in range(4, -1, -1)])
+        self.assertEqual(next(task for task in last["tasks"] if task["kind"] == "event")["last_preview"], first["history"][0])
+        self.assertEqual(len(self.worker.overview()["history"]), 50)
+
     def test_preview_is_read_only_and_confirmed_sync_uses_preview(self):
         preview = self.enqueue("preview")
         self.assertEqual(preview["counts"]["create"], 1)

@@ -25,7 +25,6 @@ POLLING_RELAY_GROUP_NAMESPACE = "polling_work_order_relay_group"
 POLLING_RELAY_COMMAND_NAMESPACE = "polling_work_order_relay_command"
 POLLING_RELAY_RUNTIME_KEY = "connector"
 POLLING_RELAY_MAX_JSON_BYTES = 2 * 1024 * 1024
-POLLING_RELAY_MAX_PHOTO_BYTES = 8 * 1024 * 1024
 POLLING_RELAY_REMOTE_VERIFY_SECONDS = 5 * 60
 POLLING_RELAY_PROTOCOL_VERSION = 1
 POLLING_PUBLIC_SERVICE_NAME = "public_polling_work_order"
@@ -1249,6 +1248,8 @@ class PollingWorkOrderRelayConnector:
         public_group_id: str,
         step_key: str,
     ) -> tuple[bytes, str, str]:
+        from .polling_work_orders import POLLING_STEP_ATTACHMENT_MAX_BYTES
+
         upload_id = str(upload.get("upload_id") or "").strip()
         expected_sha = str(upload.get("sha256") or "").strip().lower()
         expected_mime = str(
@@ -1258,15 +1259,15 @@ class PollingWorkOrderRelayConnector:
         if (
             not re.fullmatch(r"[A-Za-z0-9_-]{8,160}", upload_id)
             or not re.fullmatch(r"[0-9a-f]{64}", expected_sha)
-            or not expected_mime.startswith("image/")
+            or not re.fullmatch(r"[a-z0-9][a-z0-9._+-]*/[a-z0-9][a-z0-9._+-]*", expected_mime)
             or expected_size <= 0
-            or expected_size > POLLING_RELAY_MAX_PHOTO_BYTES
+            or expected_size > POLLING_STEP_ATTACHMENT_MAX_BYTES
         ):
             raise PollingRelayProtocolError("公网照片元数据无效。")
         response = self._request(
             "GET",
             f"/api/v1/internal/uploads/{urllib.parse.quote(upload_id, safe='')}/content",
-            max_bytes=POLLING_RELAY_MAX_PHOTO_BYTES,
+            max_bytes=POLLING_STEP_ATTACHMENT_MAX_BYTES,
             **self._authority_request_kwargs(),
         )
         headers = {
@@ -1278,7 +1279,6 @@ class PollingWorkOrderRelayConnector:
             len(response.body) != expected_size
             or _body_sha256(response.body) != expected_sha
             or (content_length and int(content_length) != expected_size)
-            or not content_type.startswith("image/")
             or content_type != expected_mime
             or (
                 headers.get("x-content-sha256")
@@ -1554,7 +1554,7 @@ class PollingWorkOrderRelayConnector:
                 step
                 and expected_sha
                 and any(
-                    str(photo.get("sha256") or "").strip().lower() == expected_sha
+                    expected_sha in (photo.get("sha256"), photo.get("source_sha256"))
                     for photo in step.get("photos") or []
                     if isinstance(photo, dict)
                 )

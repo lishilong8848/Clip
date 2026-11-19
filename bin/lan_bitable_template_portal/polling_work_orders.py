@@ -51,6 +51,8 @@ POLLING_SOP_MAX_STEPS = 30
 POLLING_WORK_ORDER_MAX_EXPANDED_STEPS = 100
 POLLING_STEP_MAX_SECONDS = 24 * 60 * 60
 POLLING_STEP_PHOTO_MAX_BYTES = 8 * 1024 * 1024
+POLLING_STEP_ATTACHMENT_MAX_BYTES = 20 * 1024 * 1024
+STEP_ATTACHMENT_MIME = "application/octet-stream"
 POLLING_STEP_MAX_PHOTOS = 5
 POLLING_WORK_ORDER_MAX_PHOTOS = 100
 POLLING_WORK_ORDER_MAX_PHOTO_BYTES = 200 * 1024 * 1024
@@ -59,6 +61,52 @@ POLLING_STEP_PHOTO_MAX_DIMENSION = 12_000
 POLLING_STEP_PHOTO_MIME_TYPES = frozenset(
     {"image/jpeg", "image/png", "image/webp"}
 )
+
+
+def _prepare_step_photo(content: bytes, file_name: str, mime_type: str) -> tuple[bytes, str, str]:
+    from PIL import Image, ImageOps, UnidentifiedImageError
+
+    mime_type = str(mime_type or "").strip().lower()
+    if mime_type not in {"", "application/octet-stream"} and not mime_type.startswith("image/"):
+        raise PortalError("只能上传图片作为操作照片。")
+    heif_brands = {b"heic", b"heix", b"hevc", b"hevx", b"mif1", b"msf1", b"heif"}
+    brands = {content[index:index + 4] for index in range(8, min(len(content), 48), 4)}
+    heif = ((content[4:8] == b"ftyp" and bool(brands & heif_brands) and not brands & {b"avif", b"avis"})
+            or Path(file_name or "").suffix.lower() in {".heic", ".heif", ".hif"}
+            or mime_type in {"image/heic", "image/heif", "image/heic-sequence", "image/heif-sequence"})
+    if heif:
+        from .pre_shift_photo import register_heif_opener
+
+        if register_heif_opener is None:
+            raise PortalError("当前程序的 HEIC 解码组件不可用，请将操作照片转为 JPG 或 PNG 后上传。")
+
+    try:
+        with Image.open(io.BytesIO(content)) as image:
+            width, height = image.size
+            if (width > POLLING_STEP_PHOTO_MAX_DIMENSION or height > POLLING_STEP_PHOTO_MAX_DIMENSION
+                    or width * height > POLLING_STEP_PHOTO_MAX_PIXELS):
+                raise PortalError("操作照片像素或尺寸超过限制。")
+            detected = Image.MIME.get(image.format, "")
+            convert = image.format in {"HEIF", "AVIF"}
+            if not convert and detected not in POLLING_STEP_PHOTO_MIME_TYPES:
+                raise PortalError("此操作照片格式不受支持，请上传 JPG、PNG、WebP、HEIC 或 AVIF 照片。")
+            image.load()
+            if convert:
+                with ImageOps.exif_transpose(image) as oriented, oriented.convert("RGB") as rgb:
+                    rgb.thumbnail((4096, 4096))
+                    buffer = io.BytesIO()
+                    rgb.save(buffer, format="JPEG", quality=90, optimize=True)
+                converted = buffer.getvalue()
+                if len(converted) > POLLING_STEP_PHOTO_MAX_BYTES:
+                    raise PortalError("转换后的操作照片超过 8MB，请缩小后重试。")
+                return converted, str(Path(file_name or "step_photo").with_suffix(".jpg")), "image/jpeg"
+    except Image.DecompressionBombError as exc:
+        raise PortalError("操作照片像素或尺寸超过限制。") from exc
+    except (UnidentifiedImageError, OSError, ValueError, SyntaxError) as exc:
+        raise PortalError("操作照片无法解码，请从相册重新导出后上传。") from exc
+    return content, file_name, detected
+
+
 POLLING_WORK_ORDER_TEMPLATE_NAME = "轮巡操作流程.xlsx"
 POLLING_WORK_ORDER_CACHE_NAME = "轮巡操作流程.v3.xlsx"
 POLLING_WORK_ORDER_MAX_BYTES = 20 * 1024 * 1024
@@ -2580,33 +2628,17 @@ class PollingWorkOrderService:
     ) -> dict:
         content = bytes(content or b"")
         if not content:
-            raise PortalError("操作照片内容为空。")
-        if len(content) > POLLING_STEP_PHOTO_MAX_BYTES:
-            raise PortalError("单张操作照片不能超过 8MB。")
-        if not str(mime_type or "").startswith("image/"):
-            raise PortalError("只能上传图片作为操作照片。")
-        try:
-            from PIL import Image
-
-            with Image.open(io.BytesIO(content)) as image:
-                detected_mime_type = str(Image.MIME.get(image.format) or "")
-                width, height = image.size
-                if (
-                    width <= 0
-                    or height <= 0
-                    or width > POLLING_STEP_PHOTO_MAX_DIMENSION
-                    or height > POLLING_STEP_PHOTO_MAX_DIMENSION
-                    or width * height > POLLING_STEP_PHOTO_MAX_PIXELS
-                ):
-                    raise PortalError("操作照片像素或尺寸超过限制。")
-                image.verify()
-            if detected_mime_type not in POLLING_STEP_PHOTO_MIME_TYPES:
-                raise ValueError("unsupported image format")
-        except PortalError:
-            raise
-        except Exception as exc:
-            raise PortalError("操作照片内容损坏，无法保存。") from exc
-        mime_type = detected_mime_type
+            raise PortalError("操作照片或附件内容为空。")
+        if len(content) > POLLING_STEP_ATTACHMENT_MAX_BYTES:
+            raise PortalError("单个工单附件不能超过 20MB。")
+        source_digest = hashlib.sha256(content).hexdigest()
+        if len(content) <= POLLING_STEP_PHOTO_MAX_BYTES:
+            try:
+                content, file_name, mime_type = _prepare_step_photo(content, file_name, mime_type)
+            except PortalError:
+                mime_type = STEP_ATTACHMENT_MIME
+        else:
+            mime_type = STEP_ATTACHMENT_MIME
         with self._lock:
             group, role = self._resolve_token(token)
             if str(group.get("state") or "") != "active":
@@ -2632,14 +2664,14 @@ class PollingWorkOrderService:
             digest = hashlib.sha256(content).hexdigest()
             existing_photos = list(step.get("photos") or [])
             if any(
-                str(photo.get("sha256") or "") == digest
+                str(photo.get("sha256") or "") == digest or photo.get("source_sha256") == source_digest
                 for photo in existing_photos
                 if isinstance(photo, dict)
             ):
                 return self.session(token)
             if len(existing_photos) >= POLLING_STEP_MAX_PHOTOS:
                 raise PortalError(
-                    f"每个步骤最多上传 {POLLING_STEP_MAX_PHOTOS} 张操作照片。"
+                    f"每个步骤最多上传 {POLLING_STEP_MAX_PHOTOS} 个操作照片或附件。"
                 )
             total_photos = sum(
                 len(item.get("photos") or [])
@@ -2648,7 +2680,7 @@ class PollingWorkOrderService:
             )
             if total_photos >= POLLING_WORK_ORDER_MAX_PHOTOS:
                 raise PortalError(
-                    f"整个工单组最多上传 {POLLING_WORK_ORDER_MAX_PHOTOS} 张操作照片。"
+                    f"整个工单组最多上传 {POLLING_WORK_ORDER_MAX_PHOTOS} 个操作照片或附件。"
                 )
             total_photo_bytes = sum(
                 int(photo.get("size") or 0)
@@ -2658,7 +2690,7 @@ class PollingWorkOrderService:
                 if isinstance(photo, dict)
             )
             if total_photo_bytes + len(content) > POLLING_WORK_ORDER_MAX_PHOTO_BYTES:
-                raise PortalError("整个工单组操作照片总大小不能超过 200MB。")
+                raise PortalError("整个工单组的照片和附件总大小不能超过 200MB。")
             directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
             group_directory = self._group_directory(
                 str(group.get("target_record_id") or "")
@@ -2667,7 +2699,8 @@ class PollingWorkOrderService:
                 raise PortalError("操作照片路径无效。")
             directory.mkdir(parents=True, exist_ok=True)
             photo_id = uuid.uuid4().hex
-            safe_name = _safe_file_name(file_name or "step_photo.png")
+            default_name = "step_attachment.bin" if mime_type == STEP_ATTACHMENT_MIME else "step_photo.png"
+            safe_name = _safe_file_name(file_name or default_name)
             path = (directory / f"{photo_id}_{safe_name}").resolve()
             if not path.is_relative_to(directory):
                 raise PortalError("操作照片路径无效。")
@@ -2681,6 +2714,7 @@ class PollingWorkOrderService:
                     "mime_type": str(mime_type or "image/png"),
                     "size": len(content),
                     "sha256": digest,
+                    **({"source_sha256": source_digest} if source_digest != digest else {}),
                     "path": str(path),
                     "uploaded_role": role,
                     "uploaded_at": self._now_text(),
@@ -2756,6 +2790,24 @@ class PollingWorkOrderService:
             raise PortalError("工单模板中的Logo无法读取。") from exc
         directory = self._group_directory(target_record_id)
         directory.mkdir(parents=True, exist_ok=True)
+        photo_root = (directory / "photos").resolve()
+        steps = [item for item in group.get("steps") or [] if isinstance(item, dict)]
+        attachments = {}
+        for step in steps:
+            for photo in step.get("photos") or []:
+                if not isinstance(photo, dict) or photo.get("mime_type") != STEP_ATTACHMENT_MIME:
+                    continue
+                attachment_path = Path(str(photo.get("path") or "")).resolve()
+                if not attachment_path.is_relative_to(photo_root) or not attachment_path.is_file():
+                    raise PortalError(f"工单操作附件不存在：{photo.get('name') or '-'}。")
+                if not 0 < attachment_path.stat().st_size <= POLLING_STEP_ATTACHMENT_MAX_BYTES:
+                    raise PortalError(f"工单操作附件大小无效：{photo.get('name') or '-'}。")
+                digest = str(photo.get("sha256") or "")
+                if digest != _file_sha256(attachment_path):
+                    raise PortalError(f"工单操作附件内容已变化：{photo.get('name') or '-'}。")
+                attachments.setdefault(digest, {
+                    "name": _safe_file_name(photo.get("name")), "path": str(attachment_path), "sha256": digest
+                })
         path = (directory / POLLING_WORK_ORDER_CACHE_NAME).resolve()
         if path.is_file():
             size = path.stat().st_size
@@ -2766,6 +2818,7 @@ class PollingWorkOrderService:
                 "path": str(path),
                 "size": size,
                 "sha256": _file_sha256(path),
+                "attachments": list(attachments.values()),
             }
         runs = [item for item in group.get("runs") or [] if isinstance(item, dict)]
         if not runs:
@@ -2783,8 +2836,6 @@ class PollingWorkOrderService:
         sheets = [template_sheet]
         for _ in runs[1:]:
             sheets.append(workbook.copy_worksheet(template_sheet))
-        steps = [item for item in group.get("steps") or [] if isinstance(item, dict)]
-        photo_root = (directory / "photos").resolve()
         image_handles: list[Any] = []
         try:
             for run_index, (run, sheet) in enumerate(zip(runs, sheets), start=1):
@@ -2886,6 +2937,14 @@ class PollingWorkOrderService:
                             f"工单{run_index}第{step_offset + 1}步缺少操作照片。"
                         )
                     for photo_index, photo in enumerate(photos):
+                        anchor_column = "A" if photo_index == 0 else get_column_letter(5 + photo_index)
+                        if photo.get("mime_type") == STEP_ATTACHMENT_MIME:
+                            cell = sheet[f"{anchor_column}{row_number}"]
+                            cell.value = f"附件：{_safe_file_name(photo.get('name'))}"
+                            alignment = copy.copy(cell.alignment)
+                            alignment.wrap_text = True
+                            cell.alignment = alignment
+                            continue
                         photo_path = Path(str(photo.get("path") or "")).resolve()
                         if (
                             not photo_path.is_file()
@@ -2932,7 +2991,6 @@ class PollingWorkOrderService:
                         excel_photo = ExcelImage(photo_buffer)
                         excel_photo.width = target_width
                         excel_photo.height = target_height
-                        anchor_column = "A" if photo_index == 0 else get_column_letter(5 + photo_index)
                         sheet.add_image(excel_photo, f"{anchor_column}{row_number}")
                         image_handles.extend((photo_buffer, excel_photo))
 
@@ -2965,6 +3023,7 @@ class PollingWorkOrderService:
             "path": str(path),
             "size": path.stat().st_size,
             "sha256": _file_sha256(path),
+            "attachments": list(attachments.values()),
         }
 
     def pending_upload_groups(self) -> list[dict]:
@@ -3074,6 +3133,7 @@ class PollingWorkOrderService:
         token_by_sha256: dict[str, str],
         workbook_name: str = "",
         photo_token_by_sha256: dict[str, str] | None = None,
+        step_attachment_token_by_sha256: dict[str, str] | None = None,
         error: str = "",
     ) -> dict:
         with self._lock:
@@ -3091,6 +3151,8 @@ class PollingWorkOrderService:
                     for key, value in photo_token_by_sha256.items()
                     if str(key).strip() and str(value).strip()
                 }
+            if step_attachment_token_by_sha256 is not None:
+                group["uploaded_step_attachment_by_sha256"] = dict(step_attachment_token_by_sha256)
             group["last_error"] = str(error or "")
             group["updated_at"] = self._now_text()
             self.state_store.put_document(

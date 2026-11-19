@@ -89,7 +89,8 @@ def send_scrap_review_one(service, deliver, link):
     with service.connect(True) as db:
         candidates = """FROM tool_scrap_votes v JOIN tool_work_orders w ON w.id=v.order_id
             LEFT JOIN tool_workspace_items i ON i.order_id=w.id
-            WHERE w.outcome='scrap' AND v.sent=0 AND v.decision='' AND v.next_try<=?
+            WHERE w.outcome='scrap' AND w.ledger_deleted_at='' AND v.sent=0 AND v.decision='' AND v.next_try<=?
+              AND NOT EXISTS (SELECT 1 FROM tool_ledger_deletions d WHERE d.receipt_key=w.id)
               AND v.request_revision=(SELECT MAX(request_revision) FROM tool_scrap_votes WHERE order_id=v.order_id)"""
         seed = db.execute(f"""SELECT v.employee_no,COALESCE(i.session_id,w.id) batch {candidates}
             ORDER BY v.next_try,v.order_id,v.employee_no LIMIT 1""", (now,)).fetchone()
@@ -158,7 +159,8 @@ def send_scrap_review_group(service, deliver, link, open_id, votes, delivery):
     with service.connect() as db:
         if not any(db.execute("""SELECT 1 FROM tool_scrap_votes v JOIN tool_work_orders w ON w.id=v.order_id
             WHERE v.order_id=? AND v.request_revision=? AND v.employee_no=? AND v.decision=''
-              AND v.sent=0 AND w.outcome='scrap'
+              AND v.sent=0 AND w.outcome='scrap' AND w.ledger_deleted_at=''
+              AND NOT EXISTS (SELECT 1 FROM tool_ledger_deletions d WHERE d.receipt_key=w.id)
               AND v.request_revision=(SELECT MAX(request_revision) FROM tool_scrap_votes WHERE order_id=v.order_id)
               """, key).fetchone() for key in keys):
             return

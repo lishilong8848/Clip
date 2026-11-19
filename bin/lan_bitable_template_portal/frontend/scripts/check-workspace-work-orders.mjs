@@ -25,12 +25,20 @@ try{
   if(!url.pathname.startsWith('/api/'))return route.continue();
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(url.pathname==='/api/auth/status')return ok({logged_in:false,user:{},scope_options:[]});
+  if(url.pathname.startsWith('/api/polling-work-orders/photos/file'))
+   return route.fulfill({contentType:'application/octet-stream',headers:{'Content-Disposition':'attachment; filename="review.png"'},body:'review fixture'});
   if(url.pathname.startsWith('/api/polling-work-orders/photos/'))return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aZQAAAABJRU5ErkJggg==','base64')});
   if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend'}});
   if(url.pathname==='/api/polling-work-orders/session')return ok(state);
   if(req.method()==='POST'){
    writes.push(url.pathname);
-   if(url.pathname.endsWith('/photo')){assert.equal(url.searchParams.get('expected_version'),String(state.version));state.version++;state.steps[0].photos.push({photo_id:'fixture_photo'+state.version,name:'操作照片',preview_url:'/api/polling-work-orders/photos/fixture'+state.version});return ok(state);}
+   if(url.pathname.endsWith('/photo')){
+    assert.equal(url.searchParams.get('expected_version'),String(state.version));state.version++;
+    const fallback=url.searchParams.get('file_name')==='review.png';
+    state.steps[0].photos.push({photo_id:'fixture_photo'+state.version,name:fallback?'review.png':'操作照片',
+     mime_type:fallback?'application/octet-stream':'image/png',preview_url:'/api/polling-work-orders/photos/'+(fallback?'file':'fixture')+state.version});
+    return ok(state);
+   }
    const data=req.postDataJSON();assert.equal(data.token,'fixture_token');assert.equal(data.expected_version,state.version);state.version++;
    if(url.pathname.endsWith('/activate')){state.current_run_index=1;state.can_release_selection=true;state.steps=[step()];return ok(state);}
    if(url.pathname.endsWith('/confirm')){assert.equal(data.step_key,'step_fixture');assert.equal(state.steps[0].photos.length,1);state.steps[0].operator_confirmed=true;state.can_release_selection=false;return ok({session:state});}
@@ -56,6 +64,9 @@ try{
   const input=page.locator(surface==='new'?'.v2-order-upload input':'.photo-upload input');
   await input.waitFor({state:'attached'});assert(await input.isEnabled(),'reviewer can add photos after operator confirmation');assert(await input.locator('..').isVisible());
   const chooser=page.waitForEvent('filechooser'),response=page.waitForResponse(r=>r.url().includes('/api/polling-work-orders/photo?'));await input.locator('..').click();await (await chooser).setFiles({name:'review.png',mimeType:'image/png',buffer:Buffer.from('review fixture')});await response;
+  const attachment=page.getByRole('link',{name:'附件 · review.png',exact:true}).last();
+  await attachment.waitFor();assert.equal(await attachment.getAttribute('download'),'review.png');
+  assert.equal(await attachment.locator('img').count(),0);
   await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-order-photos img,.photos img')).every(img=>img.complete&&img.naturalWidth>0));
   for(const width of [1440,402,440]){await page.setViewportSize({width,height:width===402?874:width===440?956:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.screenshot({path:path.join(output,`${surface}-${width}.png`)});}
  }

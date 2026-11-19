@@ -29,6 +29,7 @@ class FakeFeishu:
         self.uploads = []
         self.creates = []
         self.updates = []
+        self.deletions = []
         self.downloads = []
         self.created_hook = None
         self.updated_hook = None
@@ -88,6 +89,8 @@ class FakeFeishu:
             if table == INVENTORY:
                 assert '品牌' in kwargs['json']['field_names'] and TEMPLATE_LINK in kwargs['json']['field_names']
                 return {'items': self.rows(table), 'has_more': False}
+            if 'filter' not in kwargs['json']:
+                return {'items': self.rows(table), 'has_more': False}
             key = kwargs['json']['filter']['conditions'][0]['value'][0]
             rows = [row for row in self.rows(table) if row['fields'].get(KEY) == key]
             return {'items': [] if self.hide_search else rows, 'has_more': False}
@@ -95,7 +98,15 @@ class FakeFeishu:
             table = path.split('/')[-3]
             if self.read_hook:
                 self.read_hook(table, endpoint)
+            if (table, endpoint) not in self.records:
+                from bin.lan_bitable_template_portal.risk_inspection_cloud import CloudRejected
+                raise CloudRejected('record not found', 503, provider_code=1254043)
             return {'record': {'record_id': endpoint, 'fields': deepcopy(self.records[(table, endpoint)])}}
+        if method == 'DELETE' and table == 'records':
+            table = path.split('/')[-3]
+            self.deletions.append((table, endpoint))
+            self.records.pop((table, endpoint), None)
+            return {'deleted': True}
         if method == 'PUT' and table == 'records':
             table = path.split('/')[-3]
             fields = kwargs['json']['fields']
@@ -121,6 +132,19 @@ class FakeFeishu:
 
 
 class ToolWorkspaceCloudTests(unittest.TestCase):
+    def test_cloud_delete_verifies_identity_and_retries_without_second_delete(self):
+        remote = FakeFeishu()
+        ledger = ToolCloud(remote)
+        table = TABLES['maintenance']
+        remote.records[(table, 'recTarget')] = {KEY: 'wanted/maintenance'}
+        remote.records[(table, 'recOther')] = {KEY: 'other/maintenance'}
+        with self.assertRaises(RiskError):
+            ledger.delete_ledger_record('maintenance', 'recOther', 'wanted/maintenance')
+        ledger.delete_ledger_record('maintenance', 'recTarget', 'wanted/maintenance')
+        ledger.delete_ledger_record('maintenance', 'recTarget', 'wanted/maintenance')
+        self.assertEqual(remote.deletions, [(table, 'recTarget')])
+        self.assertEqual(ledger.ledger_record_ids('maintenance'), {'recOther'})
+
     def setUp(self):
         self.transport = FakeFeishu()
         self.tool = ToolCloud(self.transport)

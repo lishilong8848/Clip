@@ -29,6 +29,7 @@ from lan_bitable_template_portal.polling_work_orders import (
     PollingSopCloudStore,
     PollingWorkOrderService,
     PollingWorkOrderTokenError,
+    _prepare_step_photo,
 )
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 import lan_bitable_template_portal.server as portal_server
@@ -1522,17 +1523,36 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertEqual(create.call_count, 1)
         self.assertEqual(create.call_args.kwargs["json_payload"]["type"], 17)
 
-    def test_polling_step_photo_rejects_oversized_dimensions_before_storage(self) -> None:
-        service = object.__new__(PollingWorkOrderService)
+    def test_polling_step_photo_detects_oversized_dimensions(self) -> None:
         with self.assertRaisesRegex(Exception, "像素或尺寸超过限制"):
-            service.add_step_photo(
-                "unused-token",
-                step_key="1:1",
-                expected_version=1,
-                file_name="too-wide.png",
-                mime_type="image/png",
-                content=_png_bytes(size=(12001, 1)),
-            )
+            _prepare_step_photo(_png_bytes(size=(12001, 1)), "too-wide.png", "image/png")
+
+    def test_step_photo_reports_unsupported_and_invalid_formats_separately(self) -> None:
+        from PIL import Image
+
+        png = _png_bytes()
+        self.assertEqual(_prepare_step_photo(png, 'camera.png', 'application/octet-stream'),
+                         (png, 'camera.png', 'image/png'))
+        gif = io.BytesIO()
+        Image.new('RGB', (4, 4)).save(gif, format='GIF')
+        with self.assertRaisesRegex(Exception, '格式不受支持'):
+            _prepare_step_photo(gif.getvalue(), 'camera.gif', 'image/gif')
+        with self.assertRaisesRegex(Exception, '无法解码'):
+            _prepare_step_photo(b'not an image', 'camera.jpg', 'image/jpeg')
+
+    def test_step_photo_accepts_real_heic_and_converts_for_excel(self) -> None:
+        try:
+            from pillow_heif import from_pillow
+        except ImportError:
+            self.skipTest('pillow-heif is not installed')
+        from PIL import Image
+
+        original = io.BytesIO()
+        from_pillow(Image.new('RGB', (80, 60), 'red')).save(original)
+        content, name, mime = _prepare_step_photo(original.getvalue(), '手机照片.heic', 'application/octet-stream')
+        self.assertEqual((name, mime), ('手机照片.jpg', 'image/jpeg'))
+        with Image.open(io.BytesIO(content)) as image:
+            self.assertEqual((image.format, image.size), ('JPEG', (80, 60)))
 
     def test_polling_sop_rejects_more_than_thirty_steps(self) -> None:
         with self.assertRaisesRegex(Exception, "SOP 步骤不能超过 30 条"):
@@ -1642,7 +1662,8 @@ class PollingWorkOrderTests(unittest.TestCase):
         self.assertIn("浏览器返回不会取消当前选择", steps)
         self.assertIn("拍照/上传操作照片", steps)
         self.assertIn("继续添加照片", steps)
-        self.assertIn("操作照片 ${photoCount} 张", steps)
+        self.assertIn("操作凭据 ${photoCount} 项", steps)
+        self.assertIn("link.download=photo.name", steps)
         self.assertIn("操作照片待拍", steps)
         self.assertIn("无需拍照", steps)
         self.assertIn("photoRequired=step.photo_required!==false", steps)
@@ -1766,6 +1787,24 @@ const navigator={},setLiteStatus=text=>message=text;
             manager.add_step_photo.call_args.kwargs["expected_version"], 1
         )
         self.assertEqual(manager.add_step_photo.call_args.kwargs["content"], b"photo-bytes")
+
+    def test_work_order_file_fallback_download_is_octet_stream_with_larger_limit(self) -> None:
+        manager = MagicMock()
+        manager.add_step_photo.return_value = {"version": 2, "steps": []}
+        manager.step_photo_content.return_value = (b"<html>sample</html>", "application/octet-stream", "source.html")
+        client = TestClient(FastAPIPortalController(host="127.0.0.1", port=18766)._build_app())
+        path = "/api/polling-work-orders/photo?token=role-token&step_key=1%3A1&expected_version=1&file_name=source.html"
+        with patch.object(PortalRuntime, "polling_work_orders", return_value=manager):
+            response = client.post(path, content=b"a" * (8 * 1024 * 1024 + 1), headers={"Content-Type": "text/html"})
+            rejected = client.post(path, content=b"a", headers={"Content-Length": str(20 * 1024 * 1024 + 1)})
+            download = client.get("/api/polling-work-orders/photos/file-id?token=role-token")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(rejected.status_code, 400, rejected.text)
+        manager.add_step_photo.assert_called_once()
+        self.assertEqual(len(manager.add_step_photo.call_args.kwargs["content"]), 8 * 1024 * 1024 + 1)
+        self.assertEqual(download.headers["content-type"], "application/octet-stream")
+        self.assertTrue(download.headers["content-disposition"].startswith("attachment;"))
+        self.assertEqual(download.headers["x-content-type-options"], "nosniff")
 
     def test_polling_work_order_activate_api_starts_selected_run(self) -> None:
         manager = MagicMock()
@@ -3179,15 +3218,6 @@ const navigator={},setLiteStatus=text=>message=text;
                     step_key="1:1",
                     expected_version=activated_session["version"],
                 )
-            with self.assertRaisesRegex(Exception, "内容损坏"):
-                service.add_step_photo(
-                    operator_token,
-                    step_key="1:1",
-                    expected_version=activated_session["version"],
-                    file_name="损坏.png",
-                    mime_type="image/png",
-                    content=b"not-an-image",
-                )
             photo_bytes = _png_bytes()
             photo_session = service.add_step_photo(
                 operator_token,
@@ -3252,7 +3282,7 @@ const navigator={},setLiteStatus=text=>message=text;
             with patch(
                 "lan_bitable_template_portal.polling_work_orders.POLLING_STEP_MAX_PHOTOS",
                 2,
-            ), self.assertRaisesRegex(Exception, "最多上传 2 张"):
+            ), self.assertRaisesRegex(Exception, "最多上传 2 个"):
                 service.add_step_photo(
                     operator_token,
                     step_key="1:1",
@@ -3264,7 +3294,7 @@ const navigator={},setLiteStatus=text=>message=text;
             with patch(
                 "lan_bitable_template_portal.polling_work_orders.POLLING_WORK_ORDER_MAX_PHOTOS",
                 2,
-            ), self.assertRaisesRegex(Exception, "整个工单组最多上传 2 张"):
+            ), self.assertRaisesRegex(Exception, "整个工单组最多上传 2 个"):
                 service.add_step_photo(
                     operator_token,
                     step_key="1:1",
@@ -3273,6 +3303,15 @@ const navigator={},setLiteStatus=text=>message=text;
                     mime_type="image/png",
                     content=_png_bytes("#00ff00"),
                 )
+            files = {"无法解码.png": b"not-an-image", "超过照片上限.png": b"x" * (8 * 1024 * 1024 + 1)}
+            for name, original in files.items():
+                multi_photo_session = service.add_step_photo(
+                    operator_token, step_key="1:1", expected_version=multi_photo_session["version"],
+                    file_name=name, mime_type="image/png", content=original,
+                )
+                attachment = multi_photo_session["steps"][0]["photos"][-1]
+                self.assertEqual(service.step_photo_content(operator_token, photo_id=attachment["photo_id"]),
+                                 (original, "application/octet-stream", name))
             group = service.get_group("recTimerPhoto")
             group["steps"][0]["activated_at_ts"] = time.time() - 3
             store.put_document("polling_work_order", "recTimerPhoto", group)
@@ -3308,8 +3347,12 @@ const navigator={},setLiteStatus=text=>message=text;
             self.assertEqual(sheet["D9"].value, "将1#切换到2#")
             self.assertEqual(len(sheet._images), 3)
             self.assertIn(5, [image.anchor._from.col for image in sheet._images])
-            self.assertIn("$A$1:$F$9", str(sheet.print_area))
+            self.assertEqual(sheet["G9"].value, "附件：无法解码.png")
+            self.assertEqual(sheet["H9"].value, "附件：超过照片上限.png")
+            self.assertIn("$A$1:$H$9", str(sheet.print_area))
             workbook.close()
+            self.assertEqual({item["name"] for item in workbook_info["attachments"]}, set(files))
+            self.assertEqual(service.build_execution_workbook("recTimerPhoto")["attachments"], workbook_info["attachments"])
             self.assertIn("倒计时拍照 SOP · 1#→2#", values)
             self.assertIn("将1#切换到2#", values)
             self.assertRegex(
@@ -3649,24 +3692,35 @@ const navigator={},setLiteStatus=text=>message=text;
                 portal_server, "query_record_by_id", side_effect=lambda *a: (True, {"fields": dict(fields)})
             ), patch.object(
                 manager, "build_execution_workbook",
-                return_value={"path": "unused.xlsx", "name": "工单.xlsx", "sha256": "test-digest"},
+                return_value={
+                    "path": "unused.xlsx", "name": "工单.xlsx", "sha256": "test-digest",
+                    "attachments": [
+                        {"path": "first.raw", "name": "first.raw", "sha256": "first-digest"},
+                        {"path": "second.raw", "name": "second.raw", "sha256": "second-digest"},
+                    ],
+                },
             ), patch.object(
-                PortalRuntime.service, "_upload_bitable_file", side_effect=[RuntimeError("fixture timeout"), "new-file"]
+                PortalRuntime.service, "_upload_bitable_file",
+                side_effect=["new-file", "first-token", RuntimeError("fixture timeout"), "second-token"],
             ) as upload, patch.object(
                 portal_server, "update_bitable_record_fields", side_effect=patch_fields
             ) as update:
                 first = PortalRuntime.finalize_polling_work_order_group(target)
                 self.assertFalse(first["ok"])
                 self.assertEqual(manager.get_group(target)["state"], "upload_pending")
+                self.assertEqual(manager.get_group(target)["uploaded_step_attachment_by_sha256"],
+                                 {"first-digest": "first-token"})
                 update.assert_not_called()
                 retry = PortalRuntime.finalize_polling_work_order_group(target)
                 self.assertTrue(retry["ok"], retry)
                 self.assertEqual(manager.get_group(target)["state"], "completed")
                 self.assertTrue(PortalRuntime.finalize_polling_work_order_group(target)["ok"])
-                self.assertEqual(upload.call_count, 2)
+                self.assertEqual([call.kwargs["file_name"] for call in upload.call_args_list],
+                                 ["工单.xlsx", "first.raw", "second.raw", "second.raw"])
                 update.assert_called_once()
                 self.assertEqual(fields["轮巡状态"], "结束")
-                self.assertEqual(fields["工单附件"], [{"file_token": "old-file"}, {"file_token": "new-file"}])
+                self.assertEqual(fields["工单附件"], [{"file_token": token} for token in
+                                                     ("old-file", "new-file", "first-token", "second-token")])
 
     def test_finalize_does_not_upload_for_invalidated_notice(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

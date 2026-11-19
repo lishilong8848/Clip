@@ -704,6 +704,14 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             with self.assertRaises(PollingRelayProtocolError):
                 connector.process_command(tampered)
 
+            original = b"x" * (8 * 1024 * 1024 + 1)
+            transport.uploads["generic_upload"] = (original, "application/octet-stream")
+            self.assertEqual(connector._download_photo({
+                "upload_id": "generic_upload", "filename": "original.bin", "content_type": "application/octet-stream",
+                "size": len(original), "sha256": hashlib.sha256(original).hexdigest(),
+            }, public_group_id=registration["public_group_id"], step_key="1:1"),
+                (original, "application/octet-stream", "original.bin"))
+
     def test_stale_pending_projection_is_rebuilt_after_photo_is_saved(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")

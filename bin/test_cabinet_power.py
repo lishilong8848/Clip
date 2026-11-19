@@ -1275,6 +1275,33 @@ class CabinetPowerTests(unittest.TestCase):
         changed=service.apply_notice_event({**source,"event_action":"update","notice_type":"下电通告"})
         self.assertNotEqual(changed["rows"][0]["action"],"上正式电")
 
+    def test_existing_notice_unwraps_feishu_fragments_without_rewriting_rows(self):
+        service = self.service.batches
+        batch = service.create_from_notice({
+            "target_record_id": "rec-notice-rich", "notice_type": "上电通告", "scope": "B",
+            "cabinet": [{"type": "text", "text": "B-216运营商机房B04"}, {"type": "text", "text": "、B05"}],
+            "quantity": [{"type": "text", "text": "2"}], "owner_id": "owner",
+        })
+        self.assertEqual([row["rack"] for row in batch["rows"]], ["B04", "B05"])
+        stored = service.store.get(batch["batch_id"])
+        stored["source_notice"]["cabinet"] = "B-216运营商机房B04[{'text': '；B05', 'type': 'text'}]"
+        stored["parse_diagnostics"]["unparsed_fragments"] = ["[{'TEXT': '；B05', 'TYPE': 'TEXT'}]"]
+        stored["rows"][0].update(status="completed", record_id="rec-previous", operation_started=True)
+        service._refresh_notice_warnings(stored)
+        old_rows = stored["rows"]
+        service.store.save(stored, stored["version"])
+        current = service.get(batch["batch_id"])
+        self.assertEqual(current["source_notice"]["cabinet"], "B-216运营商机房B04；B05")
+        self.assertFalse(current["blocking_warnings"])
+        self.assertEqual(current["rows"], old_rows)
+        self.assertEqual(service.get(batch["batch_id"])["version"], current["version"])
+
+    def test_unknown_cabinet_content_remains_a_warning_after_unwrap(self):
+        rows, diagnostics = CabinetBatchService._parse_notice_cabinets(
+            "B-216运营商机房B04[{'text': '；B05、柜号待定', 'type': 'text'}]")
+        self.assertEqual([row["rack"] for row in rows], ["B04", "B05"])
+        self.assertTrue(diagnostics["unparsed_fragments"])
+
     def test_power_notice_count_warning_requires_fresh_acknowledgement(self):
         batch=self.service.batches.create_from_notice({
             "job_id":"job-notice-warning","target_record_id":"rec-notice-warning","notice_type":"上电通告","scope":"B",

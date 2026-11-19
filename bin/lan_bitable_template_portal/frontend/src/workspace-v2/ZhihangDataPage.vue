@@ -47,7 +47,7 @@
             <dt>接管</dt><dd>{{ task.confirmed ? '已确认' : '待确认' }}</dd>
             <dt>卡片通知</dt><dd>{{ task.notify ? '已开启' : '已关闭' }}</dd>
             <template v-if="task.notification_targets?.length">
-              <dt>原通知对象</dt><dd>{{ targetText(task.notification_targets) }}</dd>
+              <dt>单独通知对象</dt><dd>{{ targetText(task.notification_targets) }}</dd>
             </template>
           </dl>
           <NAlert v-if="taskErrors[task.kind]" type="error" role="alert">{{ taskErrors[task.kind] }}</NAlert>
@@ -62,12 +62,25 @@
       </div>
     </NSpin>
 
+    <NCard v-if="dashboard?.notification_digests?.length" title="飞书汇总卡片" size="small">
+      <dl class="facts">
+        <template v-for="digest in dashboard.notification_digests" :key="digest.kind">
+          <dt>{{ digest.label }}</dt>
+          <dd>
+            <div>{{ digestSchedule(digest) }}（北京时间）</div>
+            <div>{{ digest.enabled_modules.length ? digest.enabled_modules.map(taskLabel).join('、') : '暂无参与汇总的任务' }} · {{ digest.target.label }}</div>
+            <div v-if="digest.latest.status">{{ dateText(digest.latest.slot) }} · {{ digest.latest.message || statusText(digest.latest.status) }}</div>
+          </dd>
+        </template>
+      </dl>
+    </NCard>
+
     <NCard v-if="dashboard" title="执行记录" size="small">
-      <div v-if="dashboard.history.length" class="table-scroll">
+      <div v-if="historyRows.length" class="table-scroll">
         <table>
           <thead><tr><th scope="col">任务</th><th scope="col">执行时间</th><th scope="col">状态</th><th scope="col">卡片通知</th><th scope="col">操作</th></tr></thead>
           <tbody>
-            <tr v-for="item in dashboard.history" :key="item.id">
+            <tr v-for="item in historyRows" :key="item.id">
               <td>{{ taskLabel(item.kind) }} · {{ modeText(item.mode) }}</td>
               <td>{{ dateText(item.created_at) }}</td>
               <td>
@@ -81,6 +94,11 @@
         </table>
       </div>
       <NEmpty v-else description="暂无执行记录" />
+      <nav v-if="historyTotal" class="actions pagination history-pagination" aria-label="执行记录分页">
+        <span role="status">共 {{ historyTotal }} 条 · 第 {{ historyPage }} / {{ historyPageCount }} 页</span>
+        <NButton size="small" :disabled="refreshing || historyPage <= 1" @click="refresh(false, historyPage - 1)">上一页</NButton>
+        <NButton size="small" :disabled="refreshing || historyPage >= historyPageCount" @click="refresh(false, historyPage + 1)">下一页</NButton>
+      </nav>
     </NCard>
 
     <NModal :show="!!settings" preset="card" title="定时设置" class="zhihang-settings-dialog" :mask-closable="!saving" :close-on-esc="!saving" :closable="!saving" @update:show="closeSettings">
@@ -90,8 +108,9 @@
         <NInput v-model:value="settings.times" placeholder="例如 08:30、13:30" :input-props="{ id: 'zhihang-times' }" :disabled="saving" />
         <NCheckbox v-model:checked="settings.confirmed" :disabled="saving" @update:checked="clearApproval">确认旧工具已停止写入，由灯塔同步原表</NCheckbox>
         <NCheckbox v-model:checked="settings.enabled" :disabled="saving || !settings.confirmed">启用定时同步</NCheckbox>
-        <NCheckbox v-model:checked="settings.notify" :disabled="saving">同步成功后发送原有卡片通知</NCheckbox>
-        <p v-if="settings.targets.length" class="settings-targets">原通知对象 {{ targetText(settings.targets) }}</p>
+        <NCheckbox v-model:checked="settings.notify" :disabled="saving">{{ cardSettingLabel(settings.kind) }}</NCheckbox>
+        <p v-if="settingsDigest" class="settings-targets">启用定时同步和卡片通知后，参与「{{ settingsDigest.label }}」。{{ digestSchedule(settingsDigest) }}（北京时间）。</p>
+        <p v-if="settings.targets.length" class="settings-targets">单独通知对象 {{ targetText(settings.targets) }}</p>
         <NAlert v-if="settingsError" type="error" role="alert">{{ settingsError }}</NAlert>
         <div class="actions dialog-actions"><NButton :disabled="saving" @click="closeSettings(false)">取消</NButton><NButton type="primary" attr-type="submit" :loading="saving" :disabled="saving">保存设置</NButton></div>
       </form>
@@ -177,7 +196,13 @@ type Task = {
   last_preview?: RunSummary | null; last_sync?: RunSummary | null;
 };
 type Auth = { has_token?: boolean; expired?: boolean; expires_at?: Stamp; display_name?: string; login_name?: string; token_owner?: string };
-type Dashboard = { auth: Auth; tasks: Task[]; history: RunSummary[] };
+type Digest = {
+  kind: string; label: string; times: string[]; prepare_at?: string; start_day?: number;
+  modules: string[]; enabled_modules: string[]; target: Target; latest: { slot?: Stamp; status?: string; message?: string };
+};
+type Dashboard = { auth: Auth; tasks: Task[]; history: RunSummary[];
+  notification_digests?: Digest[];
+  history_pagination?: { page: number; page_size: number; total: number } };
 type LoginJob = { job_id?: string; status?: string; message?: string };
 type Settings = { kind: string; times: string; confirmed: boolean; enabled: boolean; notify: boolean; targets: NotificationTarget[] };
 
@@ -185,6 +210,17 @@ const base = '/api/zhihang-data';
 const dialog = useDialog();
 const lifetime = new AbortController();
 const dashboard = ref<Dashboard>();
+const initialHistoryPageSize = 10;
+const historyPage = ref(1);
+const historyTotal = computed(() => dashboard.value?.history_pagination?.total ?? dashboard.value?.history.length ?? 0);
+const historyPageCount = computed(() => Math.max(1, Math.ceil(historyTotal.value /
+  (dashboard.value?.history_pagination?.page_size || initialHistoryPageSize))));
+const historyRows = computed(() => {
+  if (!dashboard.value) return [];
+  if (dashboard.value.history_pagination) return dashboard.value.history;
+  const start = (historyPage.value - 1) * initialHistoryPageSize;
+  return dashboard.value.history.slice(start, start + initialHistoryPageSize);
+});
 const refreshing = ref(false);
 const error = ref('');
 const connection = reactive({ ok: false, message: '' });
@@ -199,6 +235,22 @@ const syncBusy = ref('');
 const previews = reactive<Record<string, string>>({});
 const taskErrors = reactive<Record<string, string>>({});
 const settings = ref<Settings>();
+const settingsDigest = computed(() => dashboard.value?.notification_digests?.find(
+  (digest) => !!settings.value && digest.modules.includes(settings.value.kind),
+));
+
+function digestSchedule(digest: Digest) {
+  const [first, second] = digest.times;
+  if (digest.kind === 'month_end') {
+    return `每月 ${digest.start_day} 日起 ${first}${second ? `，月末最后一天加发 ${second}` : ''}`;
+  }
+  return `每日 ${digest.prepare_at} 准备，${first} 发送昨日汇总`;
+}
+
+function cardSettingLabel(kind: string) {
+  if (!settingsDigest.value) return '同步成功后发送原有卡片通知';
+  return kind === 'inspection' ? '参与日报并发送独立巡检异常提醒' : '参与定时汇总卡片';
+}
 const settingsError = ref('');
 const saving = ref(false);
 const selectedRunId = ref('');
@@ -294,7 +346,7 @@ function countEntries(counts?: Record<string, unknown>) {
   return Object.entries(counts || {}).filter(([, value]) => typeof value === 'number')
     .map(([key, value]) => [countLabels[key] || key, value] as const);
 }
-async function refresh(quiet = false) {
+async function refresh(quiet = false, page = historyPage.value) {
   if (lifetime.signal.aborted || quiet && refreshing.value) return;
   overviewRead?.abort();
   const controller = new AbortController();
@@ -302,9 +354,10 @@ async function refresh(quiet = false) {
   refreshing.value = true;
   if (!quiet) error.value = '';
   try {
-    const data = await read('', controller.signal) as Dashboard;
+    const data = await read('?history_page=' + page, controller.signal) as Dashboard;
     if (controller.signal.aborted) return;
     dashboard.value = data;
+    historyPage.value = data.history_pagination?.page ?? Math.min(page, historyPageCount.value);
     error.value = '';
   } catch (cause) {
     if (!quiet && !controller.signal.aborted) error.value = message(cause);
@@ -520,6 +573,7 @@ h1 { margin: 0 0 8px; font-size: 24px; }
 .settings-form, .run-details { display: grid; gap: 12px; min-width: 0; }
 .settings-targets { margin: 0; }
 .dialog-actions, .pagination { justify-content: flex-end; }
+.history-pagination { margin-top: 12px; font-size: 13px; }
 .table-scroll { overflow: auto; min-width: 0; }
 .run-failure { margin-top: 4px; max-width: 36ch; white-space: normal; overflow-wrap: anywhere; font-size: 12px; }
 .preview-table { max-height: 46vh; }

@@ -337,7 +337,8 @@ class _SmokePortalService:
             "loaded_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
 
-    def engineer_mop_bootstrap(self, *, scope: str = "ALL", ongoing_items: list[dict] | None = None) -> dict:
+    def engineer_mop_bootstrap(self, *, scope: str = "ALL", ongoing_items: list[dict] | None = None,
+                               month: str = "", todo_only: bool = False) -> dict:
         return {
             "scope": self._normalize_scope(scope),
             "scope_label": f"{self._normalize_scope(scope)}楼",

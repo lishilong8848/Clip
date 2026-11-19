@@ -2,9 +2,12 @@ import json
 import os
 import unittest
 from copy import deepcopy
+from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from lan_bitable_template_portal import zhihang_data_cards as cards
+from lan_bitable_template_portal import zhihang_data_digest as digest
 
 
 class Store:
@@ -24,9 +27,157 @@ def inspection(name, status, start="2026/11/12 09:00", end="2026/11/13 00:00", *
             "异常标": "异常", "巡检结果": "总:40 正常:38 异常:2", "提交时间": "2026-11-12 10:00", **fields}
 
 
-class ZhihangDataCardsTests(unittest.TestCase):
+class ZhihangDigestTests(unittest.TestCase):
     def setUp(self):
         env = patch.dict(os.environ, clear=True)
+        env.start()
+        self.addCleanup(env.stop)
+        self.store = Store()
+        self.settings = {}
+        self.batches = {}
+        self.pulls = []
+        self.deliveries = []
+        self.result = {"ok": True, "message_id": "om_isolated"}
+        self.sync = SimpleNamespace(store=self.store, settings=lambda name: self.settings.get(name, {}))
+        self.service = self.new_service()
+
+    def new_service(self):
+        service = digest.ZhihangDigests(self.sync, pull=self.pull, deliver=self.deliver, clock=lambda: self.now)
+        self.addCleanup(service.close)
+        return service
+
+    def enable(self, *names):
+        for name in names:
+            self.settings[name] = {"enabled": True, "confirmed": True, "notify": True}
+
+    def run_at(self, stamp):
+        self.now = datetime.fromisoformat(stamp + "+08:00")
+        self.service.run()
+
+    def pull(self, kind, reference):
+        self.pulls.append((kind, reference.date().isoformat()))
+        result = self.batches[kind]
+        if isinstance(result, Exception):
+            raise result
+        return deepcopy(result)
+
+    def deliver(self, card, chat_id, message_uuid):
+        self.deliveries.append((deepcopy(card), chat_id, message_uuid))
+        return {"chat_id": chat_id, **self.result}
+
+    def test_daily_prepares_yesterday_and_sends_one_card_after_restart(self):
+        self.enable("inspection", "change", "event")
+        self.batches = {
+            "inspection": {
+                "normal": inspection("正常用户", "正常完成"),
+                "late": inspection("逾期用户", "逾期完成"),
+            },
+            "change": {"change": {"标题": "变更样例", "当前节点": "客服审核"}},
+            "event": {
+                "previous": {"事件标题": "恢复样例", "告警状态": "已恢复", "事件状态": "待解决",
+                             "发生时间": "2026-11-09 10:00:00", "恢复时间": "2026-11-12 11:00:00"},
+                "today": {"事件标题": "今日事件", "当前等级": "I2", "发生时间": "2026-11-13 00:00:00"},
+            },
+        }
+        self.run_at("2026-11-13T00:09:00")
+        self.assertFalse(self.pulls)
+        self.run_at("2026-11-13T00:10:00")
+        self.assertEqual(self.pulls, [(kind, "2026-11-12") for kind in ("inspection", "change", "event")])
+        self.assertFalse(self.deliveries)
+        self.service = self.new_service()
+        self.run_at("2026-11-13T08:00:00")
+        self.run_at("2026-11-13T08:30:00")
+        self.assertEqual(len(self.deliveries), 1)
+        self.assertEqual(len(self.pulls), 3)
+        card = json.dumps(self.deliveries[0][0], ensure_ascii=False)
+        for text in ("智航数据同步", "2026-11-12", "逾期用户", "变更样例", "恢复样例"):
+            self.assertIn(text, card)
+        self.assertNotIn("正常用户", card)
+        self.assertNotIn("今日事件", card)
+        self.assertEqual(self.service.status()[0]["latest"]["status"], "sent")
+
+    def test_daily_single_failed_source_and_stable_delivery_identity(self):
+        self.enable("event")
+        self.settings["change"] = {"confirmed": True, "notify": True}
+        self.batches["event"] = digest.SyncError("模拟源端失败")
+        self.result = {"ok": False, "failure_kind": "uncertain"}
+        self.run_at("2026-11-13T08:02:00")
+        first = self.deliveries[0]
+        self.assertEqual(first[0]["header"]["template"], "yellow")
+        self.assertIn("数据待核对", json.dumps(first[0], ensure_ascii=False))
+        self.assertNotIn("变更", json.dumps(first[0], ensure_ascii=False))
+        self.assertEqual(self.service.status()[0]["latest"]["status"], "pending")
+        self.service = self.new_service()
+        self.run_at("2026-11-13T08:03:00")
+        self.assertEqual(len(self.deliveries), 1)
+        self.result = {"ok": True, "message_id": "om_isolated"}
+        self.run_at("2026-11-13T08:12:00")
+        self.assertEqual(self.deliveries, [first, first])
+
+    def test_month_end_final_slot_and_completion_stop(self):
+        self.enable("risk", "drill")
+        self.batches["risk"] = {b: {"楼栋": b, "排查时间": "已填写", "审核时间": ""} for b in digest.BUILDINGS}
+        self.batches["drill"] = {"plan": {"演练年份": "2026", "演练月份": "11", "实施区域": "A楼、B楼", "演练状态": "完成"}}
+        self.run_at("2026-11-24T09:00:00")
+        self.assertFalse(self.pulls)
+        self.run_at("2026-11-25T09:00:00")
+        self.run_at("2026-11-25T15:00:00")
+        self.assertEqual(len(self.deliveries), 1)
+        card = json.dumps(self.deliveries[0][0], ensure_ascii=False)
+        self.assertIn("2026-11-30", card)
+        self.assertIn("风险排查：完成 0/1", card)
+        self.assertIn("演练：完成 1/1", card)
+        self.run_at("2026-11-30T09:00:00")
+        for row in self.batches["risk"].values():
+            row["审核时间"] = "已填写"
+        self.run_at("2026-11-30T15:00:00")
+        self.assertEqual(len(self.deliveries), 3)
+        self.assertEqual(self.deliveries[-1][0]["header"]["template"], "green")
+        self.service = self.new_service()
+        self.run_at("2026-11-30T15:10:00")
+        self.assertEqual(len(self.deliveries), 3)
+
+    def test_month_end_waits_when_selected_data_is_incomplete(self):
+        self.enable("risk", "drill")
+        self.batches["risk"] = {b: {"楼栋": b} for b in digest.BUILDINGS}
+        self.batches["drill"] = {}
+        self.run_at("2026-11-25T09:00:00")
+        self.assertFalse(self.deliveries)
+        self.assertEqual(self.service.status()[1]["latest"]["status"], "failed")
+        self.batches["drill"] = {"plan": {"演练年份": "2026", "演练月份": "11", "实施区域": "C楼", "演练状态": "待演练"}}
+        self.result = {"ok": False, "failure_kind": "uncertain"}
+        self.run_at("2026-11-25T09:10:00")
+        self.service = self.new_service()
+        self.run_at("2026-11-25T09:20:00")
+        self.assertEqual(len(self.deliveries), 1)
+        self.assertEqual(self.service.status()[1]["latest"]["status"], "delivery_unknown")
+        self.assertEqual([kind for kind, _ in self.pulls], ["risk", "drill", "drill"])
+
+    def test_combined_defaults_suppress_standalone_except_inspection(self):
+        for kind in ("risk", "drill", "event", "change"):
+            self.assertFalse(cards.notification_targets(kind))
+        self.assertTrue(cards.notification_targets("inspection"))
+
+    def test_daily_event_queries_use_three_scopes_and_merge_same_id(self):
+        day = datetime.fromisoformat("2026-11-12T23:59:59+08:00")
+        event = {"id": "new", "creatTime": "2026-11-12 02:00:00", "happenTime": "2026-11-12 01:00:00"}
+        recovered = {"id": "old", "happenTime": "2026-10-20 02:00:00", "incidentRecoveryTime": "2026-11-12 23:59:59"}
+        with (patch.object(digest.sources, "_Source"),
+              patch.object(digest.sources, "_event_pages", side_effect=[[event], [event], [recovered]]) as pages):
+            rows = digest.sources.pull_daily_report_events(day)["event"]
+        self.assertEqual(set(rows), {"event:new", "event:old"})
+        for call in pages.call_args_list:
+            _, _, filters, start_key, end_key = call.args
+            self.assertEqual(filters["orderStatus"], "1,2,3,4,5,6")
+            self.assertEqual(filters[start_key], "2026-11-12 00:00:00")
+            self.assertEqual(filters[end_key], "2026-11-12 23:59:59")
+        self.assertEqual(pages.call_args.args[-2], "startIncidentRecoveryDate")
+
+
+class ZhihangDataCardsTests(unittest.TestCase):
+    def setUp(self):
+        env = patch.dict(os.environ, {"DAILY_COMBINED_NOTIFY_ENABLED": "false",
+                                      "MONTH_END_PROGRESS_NOTIFY_ENABLED": "false"}, clear=True)
         env.start()
         self.addCleanup(env.stop)
         sender = patch("upload_event_module.services.robot_webhook.send_interactive_to_chat_id", return_value=(True, "ok"))

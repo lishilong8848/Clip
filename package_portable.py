@@ -455,6 +455,7 @@ SMOKE_IMPORT_MODULES = [
     "lan_bitable_template_portal.zhihang_data_sources",
     "lan_bitable_template_portal.zhihang_h_drill",
     "lan_bitable_template_portal.zhihang_data_cards",
+    "lan_bitable_template_portal.zhihang_data_digest",
     "lan_bitable_template_portal.tool_workspace",
     "lan_bitable_template_portal.tool_review_cards",
     "lan_bitable_template_portal.tool_workspace_workbook",

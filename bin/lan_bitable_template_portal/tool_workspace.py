@@ -20,7 +20,7 @@ ARCHIVE_RETRY_SECONDS = 60
 ARCHIVE_LEASE_SECONDS = 600
 EDIT_FIELDS = ("values", "checks", "completion", "reviewer_id", "outcome", "reason", "quantity", "actual", "scrap_photos")
 ORDER_STATUS_FIELDS = """id,month,scope,kind,due,revision,owner,owner_name,submitted_at,outcome,
-    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct,repair_started_at"""
+    report_name,actual,reason,resolution,scrap_qty,asset,supervisor,manager,inspection_meta,workspace_direct,repair_started_at,ledger_deleted_at"""
 WORKSPACE_SESSION_SUMMARY_FIELDS = "id,revision,kind,status,owner,owner_name,created_at,updated_at,submitted_at,report_name"
 WORKSPACE_ITEM_STATUS_FIELDS = "asset_id,asset,template_key,order_id,binding_error,binding_pending,remote_id,attempted_at,archive_error,deleted_at"
 CHECKED_AT = re.compile(r'[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2}(?:\.[0-9]{1,6})?)?)?')
@@ -129,11 +129,11 @@ class ToolWorkspaceMixin:
         if any(item["order_id"] for item in items):
             orders = self._workspace_orders(db, items)
             leaders = json.loads(self.state(db, 'leaders') or '{}')
-            return [item for item in items if (order := orders.get(item['order_id']))
+            return [item for item in items if (order := orders.get(item['order_id'])) and not order['ledger_deleted_at']
                     and self.visible(db, actor, order, leaders=leaders)]
         if (session["owner"] == actor["id"] or self.administrator(actor)) and all(
                 can_scope(actor, json.loads(item["asset"])["scope"]) for item in items):
-            return items
+            return [item for item in items if not (item['remote_id'] and item['deleted_at'])]
         return []
 
     @staticmethod
@@ -493,12 +493,15 @@ class ToolWorkspaceMixin:
             can_release = bool(order and not order['submitted_at'] and not order['outcome'] and (can_manage or owner))
             if status_only:
                 asset = json.loads(item['asset'])
+                deletion = self._tool_delete_job(db, item['order_id'] or f"{row['id']}:{item['asset_id']}")
                 if order:
                     can_delete = order['outcome'] not in {'repair', 'scrap'} and (owner or manager) and (
                         archive_status == 'archived' or (not order['submitted_at'] and order['outcome'] in ('', 'cancelled')))
                 else:
                     can_delete = row['status'] == 'archived' and archive_status == 'archived'
                 result.append(status | {'asset_name': asset['name'], 'scope': asset['scope'],
+                                        'location': asset.get('location', ''), 'model': asset.get('model', ''),
+                                        'deletion_pending': bool(deletion), 'deletion_error': deletion['error'] if deletion else '',
                                         'can_release': can_release, 'can_delete': can_delete})
                 continue
             draft = json.loads(item["draft"])
@@ -1386,13 +1389,12 @@ class ToolWorkspaceMixin:
                     self.check_revision(order if order else row, body.get('revision'))
                     from .tool_management import clock
 
+                    if not order or order['submitted_at']:
+                        return self._queue_tool_ledger_delete(db, actor, item['order_id'] or f"{identity}:{asset_id}")
                     if order and not order['submitted_at'] and not order['outcome']:
                         self._workspace_release_order(db, actor, order, identity, '删除办理记录，保留原草稿。')
                     else:
                         self._workspace_bump(db, identity)
-                        if order and order['outcome'] in {'repaired', 'scrapped', 'rejected'}:
-                            from .tool_management import HIDE_FOLLOWUP
-                            self.audit(db, order['id'], actor, HIDE_FOLLOWUP, '保留飞书台账与归档文件')
                     db.execute("UPDATE tool_workspace_items SET deleted_at=? WHERE session_id=? AND asset_id=?",
                                (clock().isoformat(timespec='seconds'), identity, asset_id))
                     self.audit(db, order['id'] if order else identity, actor, '删除工作台办理记录', asset_id)

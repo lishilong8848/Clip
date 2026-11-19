@@ -673,7 +673,10 @@ def _event_fields(row, now):
 
 
 def _event_pages(source, label, filters, start_key, end_key, *, endpoint="event_list"):
-    date_keys = ("creatTime", "createTime", "notificationTime") if start_key == "startDate" else ("happenTime",)
+    date_keys = {
+        "startDate": ("creatTime", "createTime", "notificationTime"),
+        "startIncidentRecoveryDate": ("incidentRecoveryTime",),
+    }.get(start_key, ("happenTime",))
     start, end = (_date(filters[key]) for key in (start_key, end_key))
 
     def read_range(since, until):
@@ -744,10 +747,14 @@ def _event_pages(source, label, filters, start_key, end_key, *, endpoint="event_
     return read_range(start, end)
 
 
-def _event(source, now):
-    filters = _event_filters() | dict.fromkeys(
+def _event_sync_filters():
+    return _event_filters() | dict.fromkeys(
         "endDate eventAlarmStatus realEvent startDate userId".split(), "",
     ) | {"eventSourceList": [], "orderStatus": "1,2,3,4,5,6"}
+
+
+def _event(source, now):
+    filters = _event_sync_filters()
     start = f"{now.date() - timedelta(days=29)} 00:00:00"
     end = f"{now.date()} 23:59:59"
     combined = {}
@@ -776,6 +783,32 @@ def _event(source, now):
         if source.preview and source_total == 0:
             _diagnose_empty_event(source, filters, start, end)
         raise ZhihangSourceError("empty", f"智航事件近 30 天无有效记录（{'，'.join(counts)}），保留上次已核验数据。")
+    return {"event": combined}
+
+
+def pull_daily_report_events(now):
+    """Fetch yesterday's created, occurred and recovered events without writing Bitable."""
+    now = _local(now)
+    source = _Source()
+    start, end = f"{now:%Y-%m-%d} 00:00:00", f"{now:%Y-%m-%d} 23:59:59"
+    combined = {}
+    for label, start_key, end_key, date_field in (
+        ("创建时间", "startDate", "endDate", "创建时间"),
+        ("发生时间", "startHappendDate", "endHappendDate", "发生时间"),
+        ("恢复时间", "startIncidentRecoveryDate", "endIncidentRecoveryDate", "恢复时间"),
+    ):
+        rows = _event_pages(source, label, _event_sync_filters() | {start_key: start, end_key: end}, start_key, end_key)
+        seen = set()
+        for row in rows:
+            fields = _event_fields(row, now)
+            fields["日报等级"] = _first(row, "eventHighestLevelName", "eventCurrentLevelName", "eventFirstLevelName",
+                                         "previousLevelName", "eventHighestLevel", "eventCurrentLevel", "eventFirstLevel")
+            key = identity("event", fields)
+            moment = _date(fields.get(date_field) or (fields.get("通知时间") if date_field == "创建时间" else None))
+            if not key or key in seen or not moment or moment.date() != now.date():
+                raise _incomplete("event", f"日报按{label}查询的事件主键或日期无法核验。")
+            seen.add(key)
+            combined.setdefault(key, fields)
     return {"event": combined}
 
 

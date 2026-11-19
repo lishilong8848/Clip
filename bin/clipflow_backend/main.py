@@ -34,7 +34,11 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
-from lan_bitable_template_portal.polling_work_orders import POLLING_SOP_MAX_FILE_BYTES
+from lan_bitable_template_portal.polling_work_orders import (
+    POLLING_SOP_MAX_FILE_BYTES,
+    POLLING_STEP_ATTACHMENT_MAX_BYTES,
+    STEP_ATTACHMENT_MIME,
+)
 
 from clipflow_backend.preflight import (
     build_backend_preflight_report as _build_backend_preflight_report,
@@ -2715,6 +2719,7 @@ class FastAPIPortalController:
                     scope=scope,
                     ongoing_items=ongoing,
                     month=str(request.query_params.get("month") or ""),
+                    todo_only=request.query_params.get("view") == "todos",
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -6464,20 +6469,11 @@ class FastAPIPortalController:
             try:
                 content_type = str(
                     request.headers.get("content-type") or ""
-                ).split(";", 1)[0].strip()
-                if not content_type.startswith("image/"):
-                    raise PortalError("只能上传图片作为操作照片。")
+                ).split(";", 1)[0].strip().lower()
                 try:
-                    raw_length = int(request.headers.get("content-length") or 0)
+                    content = await self._read_bounded_body(request, POLLING_STEP_ATTACHMENT_MAX_BYTES)
                 except ValueError as exc:
-                    raise PortalError("操作照片大小无效。") from exc
-                if raw_length > MAX_SITE_PHOTO_BYTES:
-                    raise PortalError("单张操作照片不能超过 8MB。")
-                content = await request.body()
-                if not content:
-                    raise PortalError("操作照片内容为空。")
-                if len(content) > MAX_SITE_PHOTO_BYTES:
-                    raise PortalError("单张操作照片不能超过 8MB。")
+                    raise PortalError("操作照片或附件大小无效，单个文件最多 20MB。") from exc
                 try:
                     expected_version = int(
                         request.query_params.get("expected_version") or 0
@@ -6491,7 +6487,7 @@ class FastAPIPortalController:
                     expected_version=expected_version,
                     file_name=str(
                         request.query_params.get("file_name")
-                        or "step_photo.png"
+                        or ""
                     ),
                     mime_type=content_type,
                     content=content,
@@ -6508,13 +6504,14 @@ class FastAPIPortalController:
                     str(request.query_params.get("token") or ""),
                     photo_id=photo_id,
                 )
+                disposition = "attachment" if content_type == STEP_ATTACHMENT_MIME else "inline"
                 return Response(
                     content=content,
                     media_type=content_type,
                     headers={
                         "Cache-Control": "private, max-age=300",
                         "Content-Disposition": (
-                            f"inline; filename*=UTF-8''{quote(file_name, safe='')}"
+                            f"{disposition}; filename*=UTF-8''{quote(file_name, safe='')}"
                         ),
                         "X-Content-Type-Options": "nosniff",
                     },

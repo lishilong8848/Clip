@@ -44,7 +44,8 @@ WORK_ORDER_SCHEMA = """
         reason TEXT NOT NULL DEFAULT '', resolution TEXT NOT NULL DEFAULT '',
         scrap_reason TEXT NOT NULL DEFAULT '', scrap_status TEXT NOT NULL DEFAULT '', resolved_at TEXT NOT NULL DEFAULT '',
         inspection_meta TEXT NOT NULL DEFAULT '{}', workspace_direct INTEGER NOT NULL DEFAULT 0,
-        repair_started_at TEXT NOT NULL DEFAULT '', scrap_photos TEXT NOT NULL DEFAULT '[]')
+        repair_started_at TEXT NOT NULL DEFAULT '', scrap_photos TEXT NOT NULL DEFAULT '[]',
+        ledger_deleted_at TEXT NOT NULL DEFAULT '')
 """
 
 def tool_ledger_status(order):
@@ -209,6 +210,10 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     PRIMARY KEY(order_id,dest));
                 CREATE TABLE IF NOT EXISTS tool_work_archives(
                     month TEXT PRIMARY KEY, created_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS tool_ledger_deletions(
+                    receipt_key TEXT PRIMARY KEY, receipt TEXT NOT NULL, actor TEXT NOT NULL, name TEXT NOT NULL,
+                    next_try INTEGER NOT NULL DEFAULT 0, lease TEXT NOT NULL DEFAULT '',
+                    lease_until INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '');
                 CREATE TABLE IF NOT EXISTS tool_work_reviews(
                     order_id TEXT PRIMARY KEY, status TEXT NOT NULL, payload TEXT NOT NULL,
                     submitted_by TEXT NOT NULL, submitted_at TEXT NOT NULL,
@@ -248,7 +253,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             else:
                 db.execute(WORK_ORDER_SCHEMA)
             current = {column['name'] for column in db.execute('PRAGMA table_info(tool_work_orders)')}
-            for name, default in (('repair_started_at', ''), ('scrap_photos', '[]')):
+            for name, default in (('repair_started_at', ''), ('scrap_photos', '[]'), ('ledger_deleted_at', '')):
                 if name not in current:
                     db.execute(f"ALTER TABLE tool_work_orders ADD COLUMN {name} TEXT NOT NULL DEFAULT '{default}'")
             if not self.state(db, 'unified_ledger_v1'):
@@ -700,7 +705,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     @staticmethod
     def tool_available(db, asset):
         state = db.execute("""SELECT COALESCE(SUM(CASE WHEN outcome='scrapped' THEN scrap_qty END),0),
-            MAX(outcome IN ('repair','scrap')) FROM tool_work_orders WHERE asset_id=?""", (asset['id'],)).fetchone()
+            MAX(ledger_deleted_at='' AND outcome IN ('repair','scrap')) FROM tool_work_orders WHERE asset_id=?""", (asset['id'],)).fetchone()
         return not asset.get('retired') and not state[1] and state[0] < asset['quantity']
 
     @staticmethod
@@ -708,9 +713,10 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         month = today.strftime('%Y-%m')
         first_day = today.replace(day=1)
         end = month_offset(first_day, 1)
-        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty,resolution,scope,inspection_meta
+        history = db.execute('''SELECT month,kind,actual,outcome,submitted_at,scrap_qty,resolution,scope,inspection_meta,ledger_deleted_at
             FROM tool_work_orders WHERE asset_id=?''', (asset['id'],)).fetchall()
         scrapped = sum(entry['scrap_qty'] for entry in history if entry['outcome'] == 'scrapped')
+        history = [entry for entry in history if not entry['ledger_deleted_at']]
         if asset.get('retired') or scrapped >= asset['quantity'] or any(
                 entry['outcome'] in {'repair', 'scrap'} for entry in history):
             count('unavailable')
@@ -827,6 +833,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             meta['confirmed_asset_ids'] = [asset['id']]
         admin = self.is_building_leader(db, actor, row['scope']) or self.administrator(actor)
         workspace = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
+        deletion = self._tool_delete_job(db, row['id'])
         return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
                          'result_label': result_label, 'tool_status_label': tool_status_label,
                          'from_repair': bool(row['repair_started_at']),
@@ -839,6 +846,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                          'inspection_expires_on': inspection_end(asset, row['actual'], meta) if row['kind'] == 'external' else '',
                          'review_note': review['note'] if review else '',
                          'workspace_id': workspace['session_id'] if workspace else '',
+                         'deletion_pending': bool(deletion), 'deletion_error': deletion['error'] if deletion else '',
                          'asset_id': asset['id'],
                          'can_review': awaiting_review and self.workspace_can_review(db, actor, row),
                          'can_delete': (open_order and not row['outcome'] and not awaiting_review and not sync
@@ -852,28 +860,23 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                              vote['employee_no'] == voter and not vote['decision'] for vote in votes), 'sync': sync}
 
     def _can_remove_followup(self, db, actor, row, sync):
-        return (row['outcome'] in {'repaired', 'scrapped', 'rejected'} and row['submitted_at']
-                and not any(job['state'] != 'done' for job in sync)
+        manager = self.administrator(actor) or self.is_building_leader(db, actor, row['scope'])
+        closed = row['outcome'] in {'repaired', 'scrapped', 'rejected'}
+        return (row['outcome'] in {'repair', 'scrap', 'repaired', 'scrapped', 'rejected'} and row['submitted_at']
+                and bool(sync) and all(job['state'] == 'done' for job in sync)
                 and can_scope(actor, row['scope'])
-                and (self.administrator(actor) or self.is_building_leader(db, actor, row['scope'])
-                     or self.owns_workspace_item(actor, row)))
+                and (manager or closed and self.owns_workspace_item(actor, row)))
 
     def remove_followup(self, actor, identity, revision):
         with self._workspace_open_lock, self.connect(True) as db:
             row = self._work(db, actor, identity)
+            if row['ledger_deleted_at']:
+                return {'deleted': True}
             info = self.work_info(db, actor, row)
             if not self._can_remove_followup(db, actor, row, info['sync']):
-                raise RiskError('仅可删除获授权、已处理完成且没有待同步任务的办理记录。', 409)
-            if db.execute('SELECT 1 FROM tool_work_audit WHERE order_id=? AND action=?', (identity, HIDE_FOLLOWUP)).fetchone():
-                return {'deleted': True}
+                raise RiskError('仅可删除已核验归档且获授权的办理记录。', 409)
             self.check_revision(row, revision)
-            sessions = db.execute("SELECT session_id FROM tool_workspace_items WHERE order_id=? AND deleted_at=''", (identity,)).fetchall()
-            db.execute("UPDATE tool_workspace_items SET deleted_at=? WHERE order_id=? AND deleted_at=''",
-                       (clock().isoformat(timespec='seconds'), identity))
-            for session in sessions:
-                self._workspace_bump(db, session['session_id'])
-            self.audit(db, identity, actor, HIDE_FOLLOWUP, '保留飞书台账与归档文件')
-            return {'deleted': True}
+            return self._queue_tool_ledger_delete(db, actor, identity)
 
     def list(self, actor, month=''):
         self.access(actor)
@@ -885,8 +888,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             rows = db.execute("""SELECT id,month,scope,kind,due,asset,supervisor,owner,owner_name,revision,actual,outcome,
                 submitted_at,manager,scrap_qty,reason,resolution,report_name,inspection_meta,
                 repair_started_at,resolved_at,workspace_direct FROM tool_work_orders
-                WHERE month=? OR outcome IN('repair','scrap','scrapped','rejected') OR repair_started_at<>'' OR
-                    (?=? AND month<? AND submitted_at IS NULL AND outcome='')
+                WHERE ledger_deleted_at='' AND (month=? OR outcome IN('repair','scrap','scrapped','rejected')
+                    OR repair_started_at<>'' OR (?=? AND month<? AND submitted_at IS NULL AND outcome=''))
                 ORDER BY month DESC,scope,due,kind""", (month, month, current, current)).fetchall()
             hidden_followups = {row[0] for row in db.execute('SELECT order_id FROM tool_work_audit WHERE action=?', (HIDE_FOLLOWUP,))}
             visible, followups = [], []
@@ -984,6 +987,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             return self.remove_followup(actor, identity, body.get('revision'))
         with self.connect(True) as db:
             row = self._work(db, actor, identity)
+            if row['ledger_deleted_at'] or self._tool_delete_job(db, identity):
+                raise RiskError('该办理记录正在删除或已从飞书台账移除。', 409)
             if action in {'approve', 'reject'}:
                 return self._decide_scrap(db, row, actor, action, body)
             info = self.work_info(db, actor, row)
@@ -1196,7 +1201,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         with self.connect(True) as db:
             waiting = db.execute("""SELECT w.*, v.employee_no, v.at AS vote_at FROM tool_work_orders w
                 JOIN tool_scrap_votes v ON v.order_id=w.id
-                WHERE w.outcome='scrap' AND v.decision='approve'
+                WHERE w.outcome='scrap' AND w.ledger_deleted_at='' AND v.decision='approve'
+                  AND NOT EXISTS (SELECT 1 FROM tool_ledger_deletions d WHERE d.receipt_key=w.id)
                   AND v.request_revision=(SELECT MAX(request_revision) FROM tool_scrap_votes WHERE order_id=w.id)
                 ORDER BY v.at,w.id""").fetchall()
             for row in waiting:
@@ -1222,7 +1228,8 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         with self.connect(True) as db:
             for entry in entries:
                 row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (entry['order'],)).fetchone()
-                if not row or not self.visible(db, actor, row):
+                if (not row or row['ledger_deleted_at'] or self._tool_delete_job(db, row['id'])
+                        or not self.visible(db, actor, row)):
                     continue
                 vote = next((vote for vote in self._scrap_votes(db, row['id'])
                              if vote['employee_no'] == approver), None)
@@ -1240,6 +1247,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         with self.connect(True) as db:
             task = db.execute("""SELECT sync.* FROM tool_work_sync sync
                 WHERE dest='maintenance' AND synced<revision AND next_try<=? AND lease_until<=?
+                  AND NOT EXISTS (SELECT 1 FROM tool_ledger_deletions d WHERE d.receipt_key=sync.order_id)
                   AND NOT EXISTS (SELECT 1 FROM tool_workspace_items own
                     JOIN tool_workspace_items sibling ON sibling.session_id=own.session_id
                     JOIN tool_work_sync active ON active.order_id=sibling.order_id
@@ -1311,6 +1319,20 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                     job['record_name']='自检记录单.zip';job['record_content']=output.getvalue()
             remote_id = self.cloud.write(dest, row, json.loads(row['asset']), job, self.person_for, save_file)
         except Exception as exc:
+            from .risk_inspection_cloud import CloudRejected
+
+            if isinstance(exc, CloudRejected) and exc.provider_code == 1254043 and job['remote_id']:
+                try:
+                    exists = self.cloud.ledger_exists(dest, job['remote_id'], f'{identity}/{dest}')
+                except Exception:
+                    exists = True
+                if not exists:
+                    with self.connect(True) as db:
+                        if db.execute('SELECT 1 FROM tool_work_sync WHERE order_id=? AND dest=? AND lease=?',
+                                      (identity, dest, lease)).fetchone():
+                            self._confirm_tool_ledger_deleted(db, {'order_id': identity, 'session_id': '',
+                                'asset_id': row['asset_id']}, {'id': 'system', 'name': '飞书台账'})
+                    return True
             error = str(exc) if isinstance(exc, RiskError) else '飞书同步结果未确认，将重试原工单。'
             with self.connect(True) as db:
                 db.execute("""UPDATE tool_work_sync SET lease='',lease_until=0,

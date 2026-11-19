@@ -9,6 +9,7 @@ from . import plan_convergence_auth as auth
 from .module_access import allowed_modules
 from .plan_convergence_browser_login import BrowserLogin
 from .zhihang_data_cards import notify
+from .zhihang_data_digest import ZhihangDigests
 from .zhihang_data_sync import SyncError, ZhihangSync, describe_error
 from .zhihang_h_drill import HDutyDrillSync, KIND as H_DRILL_KIND
 
@@ -19,6 +20,7 @@ def install_zhihang_data(app, controller, runtime, browser_login):
 
     auth.bind_store(runtime.state_store)
     service = ZhihangSync(runtime.state_store, notify=lambda *args: notify(*args, store=runtime.state_store))
+    service.digests = ZhihangDigests(service)
     service.h_duty_drills = h_service = HDutyDrillSync(runtime.state_store)
     h_login = BrowserLogin(runtime.state_store, save_token=h_service.save_login, profile_dir="zhihang_h_drill_auth")
     app.add_event_handler("shutdown", service.close)
@@ -75,7 +77,10 @@ def install_zhihang_data(app, controller, runtime, browser_login):
                 page = max(1, int(request.query_params.get("page", 1)))
                 result = await asyncio.to_thread(service.detail, params["id"], page)
             else:
-                result = await asyncio.to_thread(service.overview)
+                history_page = request.query_params.get("history_page")
+                result = await asyncio.to_thread(
+                    service.overview, history_page=int(history_page) if history_page is not None else None,
+                )
             return controller._json_response(request, session, {"ok": True, "data": result})
         except FileNotFoundError as exc:
             return JSONResponse({"ok": False, "error": str(exc)}, status_code=404)

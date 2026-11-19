@@ -31,6 +31,8 @@ class WorkspaceCloud:
                        for i in range(4)]
         self.bindings, self.writes, self.tokens = [], {}, []
         self.failures = set()
+        self.removed_records = set()
+        self.delete_failure = False
 
     def inventory(self):
         return copy.deepcopy(self.assets), {'A': ['ou_leader'], 'B': ['ou_other']}
@@ -79,6 +81,18 @@ class WorkspaceCloud:
             raise RiskError('临时网络失败', 503)
         self.writes.setdefault(key, (dict(order), name, report, order['actual'], token))
         return 'recArchive' + asset['id']
+
+    def delete_ledger_record(self, dest, identity, key):
+        if self.delete_failure:
+            raise RiskError('模拟飞书删除失败', 503)
+        self.removed_records.add(identity)
+
+    def ledger_record_ids(self, dest):
+        return {'recArchive' + item[0]['asset_id'] for key, item in self.writes.items()
+                if key[1] == dest} - self.removed_records
+
+    def ledger_exists(self, dest, identity, key):
+        return identity not in self.removed_records
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -135,7 +149,7 @@ class WorkspaceTests(unittest.TestCase):
             pass
         order = self.service.list(self.leader)['followups'][0]
         self.assertEqual(order['workspace_id'], saved['id'])
-        self.assertFalse(order['can_remove_followup'])
+        self.assertTrue(order['can_remove_followup'])
         repairing = next(item for item in self.service.workspace_history(self.leader)['sessions'][0]['history_items']
                          if item['order_id'] == order['id'])
         self.assertFalse(repairing['can_delete'])
@@ -144,10 +158,46 @@ class WorkspaceTests(unittest.TestCase):
             pass
         self.service.action(self.leader, order['id'], 'remove-followup', {'revision': result['revision']})
         self.service = self.restart()
+        self.assertTrue(self.service.tool_ledger_delete_one())
         self.assertFalse(self.service.list(self.leader)['followups'])
         history = self.service.workspace_history(self.leader)['sessions'][0]['history_items']
         self.assertEqual([item['id'] for item in history], ['recTool1'])
         self.assertEqual(self.service.detail(self.leader, order['id'])['outcome'], 'repaired')
+
+    def test_remote_delete_reconciles_only_the_confirmed_missing_tool(self):
+        saved = self.complete(self.open())
+        submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
+        self.approve(submitted)
+        while self.service.sync_one():
+            pass
+        self.cloud.removed_records.add('recArchiverecTool0')
+        self.service.reconcile_tool_ledger_deletions()
+        batch, = self.service.workspace_history(self.filler)['sessions']
+        self.assertEqual([item['id'] for item in batch['history_items']], ['recTool1'])
+        self.assertEqual(len(self.service.workspace_get(self.filler, saved['id'])['items']), 1)
+
+    def test_pending_ledger_delete_keeps_row_until_retry_is_confirmed(self):
+        saved = self.complete(self.open(), ('repair', 'normal'))
+        submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
+        self.approve(submitted)
+        while self.service.sync_one():
+            pass
+        row, = self.service.list(self.leader)['followups']
+        self.service.action(self.leader, row['id'], 'remove-followup', {'revision': row['revision']})
+        self.cloud.delete_failure = True
+        self.assertTrue(self.service.tool_ledger_delete_one())
+        pending, = self.service.list(self.leader)['followups']
+        self.assertTrue(pending['deletion_pending'])
+        self.assertIn('删除失败', pending['deletion_error'])
+        with self.assertRaisesRegex(RiskError, '正在删除'):
+            self.service.action(self.leader, row['id'], 'repaired', {'revision': row['revision'], 'reason': 'done'})
+        self.service = self.restart()
+        self.cloud.delete_failure = False
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_ledger_deletions SET next_try=0')
+        self.assertTrue(self.service.tool_ledger_delete_one())
+        self.assertFalse(self.service.list(self.leader)['followups'])
+        self.assertEqual(self.cloud.removed_records, {'recArchiverecTool0'})
 
     def test_inventory_refresh_does_not_block_or_replace_existing_history(self):
         saved = self.complete(self.open())
@@ -697,9 +747,12 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(set(self.cloud.writes), {
             (session['items'][0]['order_id'], 'maintenance') for session in pending})
         first = self.service.workspace_get(self.filler, first['id'])
-        self.service.workspace_manage_item(self.filler, first['id'], remove | {'revision': first['items'][0]['order_revision']})
+        result = self.service.workspace_manage_item(self.filler, first['id'], remove | {'revision': first['items'][0]['order_revision']})
+        self.assertTrue(result['deletion_pending'])
+        self.assertTrue(self.service.tool_ledger_delete_one())
         self.assertEqual([row['id'] for row in self.service.workspace_history(self.filler)['sessions']], [pending[1]['id']])
-        self.assertTrue(self.service.workspace_download(self.filler, first['id']))
+        with self.assertRaisesRegex(RiskError, '不存在或无权'):
+            self.service.workspace_get(self.filler, first['id'])
         self.assertEqual(len(self.cloud.writes), 2)
 
     def test_module_holder_can_fill_and_select_completion_without_review_permission(self):

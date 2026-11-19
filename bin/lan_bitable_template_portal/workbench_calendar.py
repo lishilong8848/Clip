@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 
 from .cabinet_guest import is_cabinet_guest
 from .module_access import allowed_modules
-from .personnel_source import daily_roster
+from .personnel_source import ROSTER_NAMESPACE, TABLE_ID as PERSONNEL_TABLE, daily_roster, observed_on_day
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 BUILDINGS = frozenset((*'ABCDEH', '110'))
@@ -184,14 +184,18 @@ class CalendarReads:
 def read_roster(service, month, today):
     first = dt.date.fromisoformat(month+'-01')
     rows, covered = [], []
-    for day in (first-dt.timedelta(days=1), *month_dates(month)):
-        if day > today:
-            break
+    dates = [day for day in (first-dt.timedelta(days=1), *month_dates(month)) if day <= today]
+    for day in reversed(dates):
         date = day.isoformat()
         try:
             snapshot = daily_roster(service, date)
         except Exception:
-            continue
+            if day != today:
+                continue
+            from upload_event_module.config import config
+            snapshot = service._state_store.get_document(ROSTER_NAMESPACE, date) or {}
+            if snapshot.get('source') != PERSONNEL_TABLE or snapshot.get('app_id') != config.app_id or not observed_on_day(snapshot.get('observed_at'), date):
+                continue
         if snapshot.get('date') != date or snapshot.get('complete') is not True:
             continue
         covered.append(date)
@@ -297,8 +301,12 @@ def install_workbench_calendar(app, controller, runtime):
             return_exceptions=True)
         if isinstance(changes, Exception):
             changes = None
-        roster, covered = staff_data or ([], [])
-        missing = [label for label, value in [('排班', staff_data), ('封网', seals), ('计划变更', changes)] if value is None]
+        roster, covered = staff_data if isinstance(staff_data, tuple) else ([], [])
+        if isinstance(seals, Exception):
+            seals = None
+        missing = [label for label, value in [('封网', seals), ('计划变更', changes)] if value is None]
+        if staff_data is None or isinstance(staff_data, Exception) or (month == today.strftime('%Y-%m') and today.isoformat() not in covered):
+            missing.append('排班')
         return JSONResponse({'ok': True, 'data': {'month': month, 'days': public_schedule(month, scopes, roster, seals, changes, today),
                                                 'unavailable': missing, 'roster_dates':covered}},
                             headers={'Cache-Control': 'private, no-store'})
@@ -308,26 +316,16 @@ def install_workbench_calendar(app, controller, runtime):
         session = await asyncio.to_thread(controller._current_session, request)
         if not session:
             return controller._auth_required_response()
-        if is_cabinet_guest(session):
+        if not (session.get('user') or {}).get('open_id') or is_cabinet_guest(session):
             return JSONResponse({'ok': False, 'error': '需要工作台权限。'}, status_code=403)
-        weather_service = getattr(app.state, 'lighthouse_icon_weather', None)
-        weather_result, snapshot_state = await asyncio.gather(
-            weather_service.get('南通', detail=True) if weather_service else asyncio.sleep(0),
-            asyncio.to_thread(runtime.service._state_store.get_critical_guard_weather_state),
-            return_exceptions=True)
-        hourly_available = isinstance(weather_result, dict) and weather_result.get('available') is True
-        hourly = weather_result.get('hourly') if hourly_available else None
-        guard_read_failed = isinstance(snapshot_state, Exception)
-        snapshot_state = snapshot_state if isinstance(snapshot_state, dict) else {}
-        now = dt.datetime.now(TZ)
-        hour_start = now.replace(minute=0, second=0, microsecond=0)
-        hours = []
-        for row in hourly if isinstance(hourly, list) else ():
-            if not isinstance(row, dict):
-                continue
-            at = timestamp(row.get('time'))
-            if at and hour_start <= at < hour_start + dt.timedelta(hours=12):
-                hours.append({**row, 'time': at.isoformat()})
+        try:
+            snapshot_state = await asyncio.to_thread(runtime.service._state_store.get_critical_guard_weather_state)
+            guard_read_failed = not isinstance(snapshot_state, dict)
+        except Exception:
+            snapshot_state = None
+            guard_read_failed = True
+        if guard_read_failed:
+            snapshot_state = {}
         snapshot = snapshot_state.get('snapshot') or {}
         snapshot = snapshot if isinstance(snapshot, dict) else {}
         # 重保管理保留上次权威识别结果，即使接下来的天气查询失败或降级。
@@ -345,10 +343,8 @@ def install_workbench_calendar(app, controller, runtime):
         if warning_ready and (snapshot_state.get('last_error') or (snapshot and not authoritative)):
             guard_notes.append('显示上次识别结果')
         return JSONResponse({'ok': True, 'data': {
-            'hours': sorted(hours, key=lambda row: row['time']), 'hourly_ready': bool(hours),
-            'hourly_note': '' if hours else ('暂无逐时气温预报' if hourly_available else '暂时无法读取气温预报'),
             'alerts': alerts, 'warning_ready': warning_ready, 'guard_level': guard_level,
-            'guard_note': '，'.join(guard_notes),
+            'guard_note': '，'.join(guard_notes), 'guard_read_failed': guard_read_failed,
             'guard_actions': strings(snapshot.get('actions')) if authoritative and (alerts or guard_level) else []}},
             headers={'Cache-Control': 'private, no-store'})
 

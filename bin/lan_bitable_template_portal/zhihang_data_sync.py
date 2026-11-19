@@ -16,6 +16,7 @@ from .cabinet_power import CabinetFeishu, _stable_uuid4_client_token, equivalent
 
 NS = "zhihang_data"
 TZ = ZoneInfo("Asia/Shanghai")
+HISTORY_PAGE_SIZE = 10
 BASE = "IrIibPkUOa6udGsMhu2cbOqhnWg"
 TASKS = {
     "risk": ("风险排查", ["08:30"], ("tblNddknaoXp2ASG", "vewG4XuaPu")),
@@ -154,6 +155,7 @@ class ZhihangSync:
         self.cloud = cloud or (lambda table: ZhihangBitable(table, BASE))
         self.pull = pull
         self.notify = notify
+        self.digests = None
         self.lock = threading.RLock()
         self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="ZhihangData")
         self.worker = None
@@ -166,6 +168,8 @@ class ZhihangSync:
 
     def close(self):
         self.closing.set()
+        if self.digests is not None:
+            self.digests.close()
         self.executor.shutdown(wait=False, cancel_futures=True)
 
     def read(self, key):
@@ -224,7 +228,7 @@ class ZhihangSync:
             for prefix in ("rows:", "journal:", "card:", "run:"):
                 self.store.delete_document(self.namespace, prefix + run["id"])
 
-    def overview(self):
+    def overview(self, *, history_page=None):
         from .zhihang_data_cards import notification_targets
 
         history = self.history()
@@ -241,8 +245,19 @@ class ZhihangSync:
                           "last_preview": next((self.public(r) for r in runs if r["mode"] == "preview" and r["status"] == "success"), None),
                           "last_sync": next((self.public(r) for r in runs if r["mode"] in {"sync", "scheduled"} and r["status"] == "success"), None),
                           "next_at": next_at.isoformat() if cfg["enabled"] and next_at else ""})
-        return {"auth": auth.settings_view(self.store), "tasks": tasks,
-                "history": [self.public(run) for run in history[:50]]}
+        result = {"auth": auth.settings_view(self.store), "tasks": tasks}
+        if self.digests is not None:
+            result["notification_digests"] = self.digests.status()
+        if history_page is None:
+            result["history"] = [self.public(run) for run in history[:50]]
+            return result
+        total = len(history)
+        last_page = max(1, (total + HISTORY_PAGE_SIZE - 1) // HISTORY_PAGE_SIZE)
+        page = min(max(1, history_page), last_page)
+        start = (page - 1) * HISTORY_PAGE_SIZE
+        result["history"] = [self.public(run) for run in history[start:start + HISTORY_PAGE_SIZE]]
+        result["history_pagination"] = {"page": page, "page_size": HISTORY_PAGE_SIZE, "total": total}
+        return result
 
     def detail(self, run_id, page=1):
         if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -307,6 +322,8 @@ class ZhihangSync:
         return credential_revision(self.store)
 
     def tick(self):
+        if self.digests is not None:
+            self.digests.tick()
         now = dt.datetime.now(TZ)
         for kind in self.tasks:
             cfg = self.settings(kind)

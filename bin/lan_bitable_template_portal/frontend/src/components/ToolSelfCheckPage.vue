@@ -136,6 +136,12 @@
                   <strong>{{ row.tool_name }}</strong>
                   <small v-if="row.model || row.location">{{ [row.model, row.location].filter(Boolean).join(' · ') }}</small>
                   <NButton v-if="row.asset_id" text size="tiny" :disabled="busy" @click="historyAsset = row.asset_id || ''">履历</NButton>
+                  <NPopconfirm v-if="row.can_remove_followup && !row.deletion_pending" positive-text="删除" negative-text="取消"
+                    :positive-button-props="{ type: 'error' }" @positive-click="removeFollowup(row)">
+                    <template #trigger><NButton size="small" type="error" text :disabled="busy">删除</NButton></template>
+                    删除「{{ row.tool_name }}」的本次办理及对应飞书台账记录？
+                  </NPopconfirm>
+                  <small v-if="row.deletion_pending" class="tool-pending" role="status">{{ row.deletion_error || '等待飞书确认删除' }}</small>
                 </div>
               </div>
               <div class="tool-order-kind" role="cell"><strong>{{ row.scope }}楼</strong><small>{{ kindLabel(row) }}工单</small></div>
@@ -153,15 +159,10 @@
               </div>
               <div class="tool-order-actions" role="cell">
                 <NButton size="small" :type="row.can_claim || row.can_edit || row.can_approve || row.can_repair ? 'primary' : 'default'"
-                  :disabled="busy" @click="openOrder(row, row.can_claim)">{{ orderAction(row) }}</NButton>
+                  :disabled="busy || row.deletion_pending" @click="openOrder(row, row.can_claim)">{{ orderAction(row) }}</NButton>
                 <NPopconfirm v-if="row.can_release" @positive-click="release(row)">
                   <template #trigger><NButton size="small" :disabled="busy">释放领取</NButton></template>
                   草稿将保留，工单可重新领取。
-                </NPopconfirm>
-                <NPopconfirm v-if="row.can_remove_followup" positive-text="删除记录" negative-text="取消"
-                  :positive-button-props="{ type: 'error' }" @positive-click="removeFollowup(row)">
-                  <template #trigger><NButton size="small" type="error" secondary :disabled="busy">删除记录</NButton></template>
-                  从办理记录移除「{{ row.tool_name }}」？飞书台账与归档文件将保留。
                 </NPopconfirm>
               </div>
             </article>
@@ -356,7 +357,7 @@ interface Order {
   submitted_at: string | null; can_claim: boolean; can_edit: boolean; can_release: boolean;
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
   supervisor_assigned: boolean; assigned_to_me: boolean; can_approve: boolean; can_repair: boolean; can_review: boolean; can_delete:boolean;
-  can_remove_followup?: boolean;
+  can_remove_followup?: boolean; deletion_pending?: boolean; deletion_error?: string;
   actual: string; outcome: string; reason: string; resolution: string; report_name: string;
   result_label?: string; tool_status_label?: string; from_repair?: boolean;
   scrap_approvals?: { name: string; decision: string; at: string; note: string }[];
@@ -545,10 +546,10 @@ async function action(row: Order, kind: string, data: object = {}) {
 }
 async function removeFollowup(row: Order) {
   await mutate(async () => {
-    await action(row, 'remove-followup');
+    const result = await action(row, 'remove-followup') as { deleted?: boolean };
     await loadBoard();
     await workspace.value?.reloadRecords();
-    message.value = '办理记录已删除。';
+    message.value = result.deleted ? '办理记录已删除。' : '已提交删除，飞书核验通过后自动移除。';
   });
 }
 async function openOrder(row: Order, claim = false) {
