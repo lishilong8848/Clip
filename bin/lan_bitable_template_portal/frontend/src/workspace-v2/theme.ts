@@ -16,13 +16,44 @@ export const mineral={
     onAccentText:'#102e2c',selection:'#314e50'},
 };
 export const nightMode=ref(false);
-const activeColors=computed(()=>nightMode.value?mineral.dark:mineral.light);
+export const palettes={
+  mineral,
+  ocean:{
+    light:{...mineral.light,bg:'#f1f5fb',surface:'#f9fbff',soft:'#eaf0f8',header:'#203c60',sidebar:'#f1f5fb',sidebarEnd:'#f1f5fb',
+      accent:'#255db2',accentText:'#214f97',hover:'#204e98',pressed:'#173e7b',selection:'#deebfc',navSelected:'#deebfc',navHover:'#eaf1fb'},
+    dark:{...mineral.dark,bg:'#182538',surface:'#23334a',soft:'#1d2c41',header:'#23334a',sidebar:'#162238',sidebarEnd:'#121d30',
+      accent:'#91bbfc',accentText:'#accdff',hover:'#adcdff',pressed:'#82aff1',onAccent:'#152943',onAccentText:'#152943',
+      selection:'#2c4568',navSelected:'#2c4568',navHover:'#233750'},
+  },
+  violet:{
+    light:{...mineral.light,bg:'#f5f2fa',surface:'#fcfaff',soft:'#efebf6',header:'#473160',sidebar:'#f5f2fa',sidebarEnd:'#f5f2fa',
+      accent:'#6a459e',accentText:'#5f3b91',hover:'#5b378c',pressed:'#4c2e78',selection:'#eee4fa',navSelected:'#eee4fa',navHover:'#f0eaf7'},
+    dark:{...mineral.dark,bg:'#221d32',surface:'#302641',soft:'#2a223a',header:'#302641',sidebar:'#211a31',sidebarEnd:'#191427',
+      accent:'#c6a8f5',accentText:'#d5bbff',hover:'#d7bdfc',pressed:'#b698e7',onAccent:'#2c1a47',onAccentText:'#2c1a47',
+      selection:'#48345f',navSelected:'#48345f',navHover:'#36294b'},
+  },
+};
+export type PaletteId=keyof typeof palettes;
+export const paletteId=ref<PaletteId>('mineral');
+const activeColors=computed(()=>palettes[paletteId.value][nightMode.value?'dark':'light']);
 const modeKey=(id:string)=>'clipflow:workspace-night-mode:'+(id||'visitor');
+const paletteKey=(id:string)=>'clipflow:workspace-color-palette:'+(id||'visitor');
 export function applyNightMode(value:boolean) { nightMode.value=value; }
 export function loadNightMode(userId:string) {
   let dark=false;
   try { dark=localStorage.getItem(modeKey(userId))==='dark'; } catch { /* Switching remains available without storage. */ }
   applyNightMode(dark);
+}
+export function loadPalette(userId:string) {
+  paletteId.value='mineral';
+  try {
+    const value=localStorage.getItem(paletteKey(userId));
+    if(value&&Object.prototype.hasOwnProperty.call(palettes,value))paletteId.value=value as PaletteId;
+  } catch { /* Use the default when storage is unavailable. */ }
+}
+export function savePalette(userId:string,value:PaletteId):boolean {
+  paletteId.value=value;
+  try {localStorage.setItem(paletteKey(userId),value);return true;} catch {return false;}
 }
 export function saveNightMode(userId:string,value:boolean):boolean {
   applyNightMode(value);
@@ -32,7 +63,7 @@ export function saveNightMode(userId:string,value:boolean):boolean {
 watchEffect(()=>{
   const root=document.documentElement,colors=activeColors.value;
   root.dataset.v2Theme=nightMode.value?'dark':'light';
-  root.dataset.v2Palette='mineral';
+  root.dataset.v2Palette=paletteId.value;
   for(const [name,value] of Object.entries(colors))root.style.setProperty('--v2-palette-'+name.replace(/[A-Z]/g,c=>'-'+c.toLowerCase()),value);
 });
 
@@ -42,7 +73,7 @@ const controls:GlobalThemeOverrides = {
   Switch:{railWidthMedium:'48px',railHeightMedium:'28px',buttonWidthMedium:'22px',buttonHeightMedium:'22px',buttonWidthPressedMedium:'30.8px',railWidthSmall:'36px',railHeightSmall:'20px',buttonWidthSmall:'14px',buttonHeightSmall:'14px',buttonWidthPressedSmall:'17px'},
 };
 function overrides(dark:boolean):GlobalThemeOverrides {
-  const c=dark?mineral.dark:mineral.light;
+  const c=palettes[paletteId.value][dark?'dark':'light'];
   return {common:{...controls.common,primaryColor:c.accentText,primaryColorHover:c.accentText,primaryColorPressed:c.accentText,primaryColorSuppl:c.accentText,
       infoColor:dark?'#83baff':'#155bb8',successColor:dark?'#65cda9':'#0a735c',warningColor:dark?'#efbd70':'#92520a',errorColor:dark?'#f38f99':'#b5263a',
       textColorBase:c.text,textColor1:c.text,textColor2:c.muted,textColor3:c.muted,placeholderColor:c.muted,

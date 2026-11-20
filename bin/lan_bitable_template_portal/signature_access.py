@@ -150,7 +150,7 @@ class SignatureAccess:
             raise SignatureManagementError('当前账号无权查看或请求此人员签名，请由其所属管理人员处理。', 403)
         return person
 
-    def account(self, identity=''):
+    def account(self, identity='', *, refresh=False):
         if 'signatures' not in self.profile.get('modules', []):
             raise SignatureManagementError('当前账号没有查看签名的权限。', 403)
         identity = str(identity or self.actor).strip()
@@ -163,9 +163,14 @@ class SignatureAccess:
             return {'person': None, 'reason': '值班账号为共享账号，没有个人签名。请使用本人账号签名。'}
         if self.auth.directory_block_reason(identity):
             return {'person': None, 'reason': '该人员已停用、离职或身份待核对。'}
-        self.ensure_directory()
-        if any(not source['ok'] for source in self.data['sources'].values()):
-            raise SignatureManagementError('签名目录读取失败，请稍后重试。', 503)
+        if refresh:
+            self.bind(self.manager.directory(refresh=True))
+        else:
+            self.ensure_directory()
+        unavailable = [label for key, label in (('staff', '正式人员'), ('external', '临时人员'))
+                       if not self.data['sources'][key]['ok']]
+        if unavailable:
+            raise SignatureManagementError('、'.join(unavailable) + '签名目录暂不可用，请重试。', 503)
         candidates = {row['person_key']: row for row in self.data['resolved'].values()
                       if self.owners.get(row['person_key']) == {identity}}
         if len(candidates) != 1:

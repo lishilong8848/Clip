@@ -96,7 +96,7 @@ import { personaFor } from './persona';
 import { sidebarGroups, sidebarRole } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack, registerNavigationGuard, runNavigationAction } from './navigation';
-import { theme,nightTheme,nightMode,loadNightMode } from './theme';
+import { theme,nightTheme,nightMode,loadNightMode,loadPalette } from './theme';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import TopNavigation from './TopNavigation.vue';
@@ -170,7 +170,7 @@ const impersonationSession=computed(()=>JSON.stringify([user.value.open_id,imper
 watch(impersonationSession,()=>{impersonationExpired.value=false;impersonationLeaving.value=false;},{flush:'sync'});
 watch(user,value=>setImpersonationContext(value.impersonation?.id||''),{immediate:true,flush:'sync'});
 
-watch(()=>String(user.value.open_id||''),id=>{loadNightMode(id);},{immediate:true,flush:'sync'});
+watch(()=>String(user.value.open_id||''),id=>{loadNightMode(id);loadPalette(id);},{immediate:true,flush:'sync'});
 const printMedia=window.matchMedia('print'),printing=ref(printMedia.matches);
 const syncPrinting=()=>{printing.value=printMedia.matches;};
 onMounted(()=>printMedia.addEventListener('change',syncPrinting));

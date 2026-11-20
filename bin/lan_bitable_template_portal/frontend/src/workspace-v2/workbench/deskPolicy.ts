@@ -12,10 +12,10 @@ export function deskRole(user:Dict):DeskRole|undefined {
 const common:SourceId[]=['notices','events','engineer_mop','repair_management','critical_guard','risk_inspection','drills','accounts','cabinet','water','tool_management'];
 export const deskSources:Record<DeskRole,SourceId[]> = {
   L0:[...common,'ali_confirmation'], L1:[...common,'ali_confirmation'],
-  L2:['notices','repair_management','events','engineer_mop'],
-  L3:['events','critical_guard','risk_inspection','notices','engineer_mop','repair_management'],
-  L4:['notices','repair_management'],
-  duty:['ali_confirmation','inspection','notices','event_notices','events','critical_guard','drills','engineer_mop','water'],
+  L2:['notices','repair_management','events','engineer_mop','water'],
+  L3:['events','critical_guard','risk_inspection','notices','engineer_mop','repair_management','water'],
+  L4:['notices','events','repair_management','water'],
+  duty:['ali_confirmation','inspection','notices','event_notices','events','repair_management','critical_guard','drills','engineer_mop','water'],
 };
 const owned = (user:Dict,item:WorkItem) =>
   [user.open_id,user.union_id].some(id=>typeof id==='string'&&id&&item.actorIds?.includes(id));
@@ -24,6 +24,16 @@ export function inDeskScope(item:WorkItem,scope:string) {
     .some(value=>value.replace(/[楼栋站]/g,'')===scope);
 }
 export function deskTaskVisible(role:DeskRole|undefined,user:Dict,item:WorkItem,ownScope:string) {
+  if ((role==='L3'||role==='L4'||role==='duty')&&(!ownScope||!inDeskScope(item,ownScope))) return false;
+  if (['notices','events','repair_management'].includes(item.kind)) {
+    if (role==='L0'||role==='L1'||['operator','shift_leader','duty','supervisor','manager','administrator'].includes(user.category)) return true;
+    if (user.category==='engineer'||role==='L2') {
+      return Array.isArray(user.specialties)&&user.specialties.some(specialty=>
+        typeof specialty==='string'&&specialty&&item.specialty?.includes(specialty));
+    }
+    if (item.kind==='repair_management') return true;
+  }
+  if (item.kind==='water') return true;
   if (role==='L4') return !!ownScope&&inDeskScope(item,ownScope)&&owned(user,item);
   if (role==='L3') return !!ownScope&&inDeskScope(item,ownScope)
     && (['events','critical_guard','risk_inspection'].includes(item.kind)||item.ownerLevel==='L4');

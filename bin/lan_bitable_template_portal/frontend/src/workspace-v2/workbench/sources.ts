@@ -1,5 +1,6 @@
 import { eventI2OrHigher, eventStatusTone, isHighLevelEvent } from '../../eventManagementUtils';
 import { beijingDate } from '../modules';
+import { noticeListSpecialty } from '../noticeListMeta';
 import { todoOptions, todoSources, sortTodos, todoTimestamp, type TodoContext, type TodoRead, type TodoRow } from '../businessTodos';
 import type { Dict } from '../client';
 import type { Role, Section } from './recipes';
@@ -8,13 +9,14 @@ import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
 export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean; urgentEvent?:string };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
+type Publish = (partial:SourceResult)=>void;
 export type Source = {
   id: SourceId;
   label: string;
   section: Exclude<Section, 'urgent'>;
   url: string;
   readOnly?: boolean;
-  load: (signal: AbortSignal, pages: number) => Promise<SourceResult>;
+  load: (signal: AbortSignal, pages: number, publish?:Publish) => Promise<SourceResult>;
 };
 export const scopedUrl = (path: string, args: Record<string,string>) => path+'?'+new URLSearchParams(args);
 const labels = {
@@ -29,7 +31,6 @@ const sections: Record<SourceId,Source['section']> = {
   critical_guard:'operations', risk_inspection:'business', water:'operations', learning:'people', signatures:'people',
   event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',
 };
-const managerNoticeTypes = ['change','repair','power'];
 const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
 type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string};
 const array = (value: unknown): Dict[] => {
@@ -58,12 +59,14 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     const selectedScopes=id==='risk_inspection'&&ctx.scope==='CAMPUS'
       ? ctx.scopes.map(option=>option.value).filter(scope=>/^[A-EH]$/.test(scope))
       : ctx.selectedScopes;
-    const available = todoSources(id,{...ctx,selectedScopes,home:true,noticeTypes:readOnly?managerNoticeTypes:undefined},get);
+    const available = todoSources(id,{...ctx,selectedScopes,home:true},get);
     if (!available.length) return [];
     return [{
       id,label:readOnly?'通告信息':labels[id],section:sections[id],url:urls[id],readOnly,
-      async load(signal: AbortSignal, pages: number): Promise<SourceResult> {
-        const settled = await Promise.allSettled(available.map(async source => {
+      async load(signal, pages, publish) {
+        const matches = (row: TodoRow) => id!=='signatures' || ['ALL','CAMPUS'].includes(ctx.scope)
+          || row.scope.replace(/楼|栋|站/g,'').trim()===ctx.scope;
+        return readParts(available.map(source=>async()=>{
           const rows: TodoRow[] = [];
           let result;
           let partial=false;
@@ -80,19 +83,8 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
             rows.push(...result.rows);
             if (!result.more) break;
           }
-          return {rows,more:result?.more,note:result?.note,partial};
-        }));
-        const lists = settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
-        if (!lists.length) throw (settled[0] as PromiseRejectedResult).reason;
-        const rows = sortTodos(lists.flatMap(list=>list.rows));
-        const denied = settled.filter(result=>result.status==='rejected'&&accessDenied(result.reason)).length;
-        const matches = (row: TodoRow) => id!=='signatures' || ['ALL','CAMPUS'].includes(ctx.scope)
-          || row.scope.replace(/楼|栋|站/g,'').trim()===ctx.scope;
-        return {
-          rows:rows.filter(matches),more:lists.some(list=>list.more),
-          delayed:lists.length+denied!==available.length||lists.some(list=>list.partial),restricted:denied>0,
-          note:lists.length===1 ? lists[0]?.note : undefined,
-        };
+          return {rows:sortTodos(rows.filter(matches)),more:result?.more,note:result?.note,delayed:partial};
+        }),signal,publish);
       },
     }];
   });
@@ -100,10 +92,9 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     const url=link('/',{mode:'events',detail:'1'});
     sources.unshift({
       id:'events',label:labels.events,section:sections.events,url,
-      async load(signal) {
-        return byScope(requestScopes, async scope=>{
+      async load(signal,_pages,publish) {
+        return readParts(requestScopes.map(scope=>async()=>{
           const data = await get(link('/api/events/monthly',{scope,month:beijingDate().slice(0,7)}),signal);
-          if (data.snapshot_exists!==true) return {rows:[],delayed:true};
           if (data.scope!==scope || !Array.isArray(data.records)) throw new Error('事件范围或明细未确认');
           const rows: WorkItem[] = data.records.flatMap((record: Dict) => {
           if (eventStatusTone(record.status)!=='processing') return [];
@@ -113,20 +104,20 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
           return [{
             key:'event:'+id,kind:'events',module:'event',title,
             scope:typeof record.building==='string'&&record.building?record.building:scope,status:'处理中',
-            time:String(record.occurrence_time||''),dueAt:todoTimestamp(record.deadline),
+            time:String(record.occurrence_time||''),dueAt:todoTimestamp(record.deadline),specialty:noticeListSpecialty(record),
             urgentEvent:eventI2OrHigher(record)||isHighLevelEvent(record)?String(record.level||'高等级').trim()||'高等级':undefined,
             url:link('/',{scope,mode:'events',detail:'1',event_id:String(id)}),
           }];
         });
-          return {rows,delayed:!!data.config_missing||!!Object.keys(data.last_failed||{}).length};
-        });
+          return {rows,delayed:data.snapshot_exists!==true||!!data.config_missing||!!Object.keys(data.last_failed||{}).length};
+        }),signal,publish);
       },
     });
   }
 
   function add(id:SourceId, url:string, scopes:string[], read:(scope:string,signal:AbortSignal,pages:number)=>Promise<SourceResult>) {
     if (scopes.length) sources.push({id,label:labels[id],section:sections[id],url,
-      load:(signal,pages)=>byScope(scopes,scope=>read(scope,signal,pages))});
+      load:(signal,pages,publish)=>readParts(scopes.map(scope=>()=>read(scope,signal,pages)),signal,publish)});
   }
   const buildings = ctx.scopes.map(option=>option.value).filter(scope=>/^[A-EH]$/.test(scope)
     && (['ALL','CAMPUS'].includes(ctx.scope)||scope===ctx.scope));
@@ -245,14 +236,20 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
   return sources;
 }
 
-async function byScope(scopes:string[], read:(scope:string)=>Promise<SourceResult>): Promise<SourceResult> {
-  const settled=await Promise.allSettled(scopes.map(read));
-  const results=settled.flatMap(result=>result.status==='fulfilled'?[result.value]:[]);
-  if (!results.length) throw (settled[0] as PromiseRejectedResult).reason;
-  const denied=settled.filter(result=>result.status==='rejected'&&accessDenied(result.reason)).length;
-  return {
+async function readParts(reads:(()=>Promise<SourceResult>)[], signal:AbortSignal, publish?:Publish):Promise<SourceResult> {
+  const results:SourceResult[]=[], errors:unknown[]=[];
+  const combine=(pending=false):SourceResult=>({
     rows:[...new Map(results.flatMap(result=>result.rows).map(row=>[row.key,row])).values()],
-    more:results.some(result=>result.more), delayed:results.length+denied!==scopes.length||results.some(result=>result.delayed),
-    restricted:denied>0||results.some(result=>result.restricted),
-  };
+    more:results.some(result=>result.more),
+    delayed:pending||errors.some(error=>!accessDenied(error))||results.some(result=>result.delayed),
+    restricted:errors.some(accessDenied)||results.some(result=>result.restricted),
+    note:results.length===1?results[0]?.note:undefined,
+  });
+  for(const [index,read] of reads.entries()){
+    signal.throwIfAborted();
+    try {results.push(await read());} catch(error){errors.push(error);}
+    if(publish&&index<reads.length-1)publish(combine(true));
+  }
+  if(!results.length)throw errors.find(error=>!accessDenied(error))??errors[0];
+  return combine();
 }

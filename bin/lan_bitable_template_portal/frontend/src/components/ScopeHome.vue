@@ -280,7 +280,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ClipboardCheck, FolderOpen, Library, ShieldCheck, Wrench } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
 import { canViewInspectionHistory } from '../inspectionAccess';
-import { preShiftScopes, preShiftSummary } from '../preShiftUtils';
+import { preShiftHomeAccount, preShiftHomeVisible, preShiftScopes, preShiftSummary } from '../preShiftUtils';
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
   SCOPE_HOME_CAPACITY_ENTRIES as capacityEntries,
@@ -345,31 +345,32 @@ function entryMode(value: unknown): EntryKey {
 }
 
 const activeMode = ref<EntryKey>(entryMode(props.initialMode));
-const checkScopes = computed(() => preShiftScopes(props.currentUser || {}));
+const checkScope = computed(() => {
+  const user = props.currentUser || {};
+  return preShiftHomeAccount(user) && preShiftScopes(user).includes(user.home_scope) ? user.home_scope : '';
+});
 const checkSummary = ref<{ pending: number; completed: number }>();
 const checkError = ref(''), checkLoading = ref(false);
+const showCheck = computed(() => !!checkScope.value && (props.currentUser?.category === 'duty' || !!checkSummary.value));
 let checkController: AbortController | undefined, checkTimer: number | undefined, disposed = false;
 
 async function refreshChecks(): Promise<void> {
-  if (disposed || document.hidden || activeMode.value || checkLoading.value || !checkScopes.value.length) return;
+  if (disposed || document.hidden || activeMode.value || checkLoading.value || !checkScope.value) return;
   const read = new AbortController(); checkController = read; checkLoading.value = true;
   try {
-    const total = { pending: 0, completed: 0 }, scopes = [...checkScopes.value];
-    for (let index = 0; index < scopes.length; index += 3) {
-      const states = await Promise.all(scopes.slice(index, index + 3).map(scope =>
-        requestJson('/api/pre-shift-checks?scope=' + encodeURIComponent(scope), { signal: read.signal, cache: 'no-store' })));
-      for (const state of states) {
-        const summary = preShiftSummary(state); total.pending += summary.pending; total.completed += summary.completed;
-      }
-    }
-    if (!read.signal.aborted && !disposed) { checkSummary.value = total; checkError.value = ''; }
+    const scope = checkScope.value;
+    const state = await requestJson('/api/pre-shift-checks?scope=' + encodeURIComponent(scope), { signal: read.signal, cache: 'no-store' });
+    if (read.signal.aborted || disposed) return;
+    if (state.scope !== scope) throw new Error('检查楼栋未确认');
+    checkSummary.value = preShiftHomeVisible(props.currentUser || {}, state) ? preShiftSummary(state) : undefined;
+    checkError.value = '';
   } catch {
     if (!read.signal.aborted && !disposed) checkError.value = '状态读取失败，点击查看或稍后重试';
   } finally {
     if (checkController === read) checkLoading.value = false;
   }
 }
-watch([() => props.currentUser?.open_id, () => checkScopes.value.join(','), () => activeMode.value], () => {
+watch([() => props.currentUser?.open_id, () => props.currentUser?.category, checkScope, activeMode], () => {
   checkController?.abort(); checkLoading.value = false; checkSummary.value = undefined; checkError.value = '';
   void refreshChecks();
 }, { immediate: true });
@@ -438,7 +439,7 @@ const filteredModuleCards = computed(() =>
   moduleCards
     .map((card) => {
       if (card.key === 'pre_shift') {
-        if (!checkScopes.value.length) return null;
+        if (!showCheck.value) return null;
         return { ...card, attention: Boolean(checkSummary.value?.pending),
           tags: [checkError.value || (checkSummary.value ? checkSummary.value.pending ? '本班待检查' : checkSummary.value.completed ? '本班已完成' : '暂无待检查清单' : '正在读取检查状态')] };
       }
@@ -761,7 +762,7 @@ function activateBroadcastItem(item: ScopeHomeBroadcastItem): void {
 function selectEntry(key: EntryKey): void {
   if (!(key==='special' && props.currentUser?.tool_management_enabled===true) && (key === 'risk' || key === 'special' ? !cardModules[key].some(hasModule) : !isEntryAllowed(key))) return;
   if (key === 'work_handover') { emit('work-handover'); return; }
-  if (key === 'pre_shift') { emit('pre-shift'); return; }
+  if (key === 'pre_shift') { if (showCheck.value) emit('pre-shift'); return; }
   if (key === "learning") { emit("learning"); return; }
   if (key === "knowledge") { emit("knowledge"); return; }
   if (key === "documents") { emit("documents"); return; }

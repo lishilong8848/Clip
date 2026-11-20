@@ -156,9 +156,10 @@ class SignatureManagement:
                 ("external", self.s._load_external_signature_people, "_external_signature_people_cache"),
             ):
                 error = ""
+                before = getattr(self.s, cache_name, None)
                 try:
                     rows[source] = loader(force=force)
-                    if force:
+                    if force or getattr(self.s, cache_name, None) is not before:
                         self._refresh_errors.pop(source, None)
                     error = self._refresh_errors.get(source, "")
                 except Exception as exc:
@@ -884,7 +885,7 @@ def dispatch(manager, method, operation, payload, *, actor="", is_admin=False, b
             return manager.people({**payload, **({'refresh': True} if operation == 'refresh' else {})}, access=access)
     access = SignatureAccess(manager, auth, actor)
     if operation == 'account':
-        return access.account(payload.get('open_id'))
+        return access.account(payload.get('open_id'), refresh=str(payload.get('refresh', '')).lower() in {'1', 'true'})
     if operation == 'self-start':
         if payload:
             raise SignatureManagementError('本人签名不接受指定他人身份。', 400)

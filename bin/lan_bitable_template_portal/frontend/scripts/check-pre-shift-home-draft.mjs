@@ -38,7 +38,7 @@ try{
     if(await layouts.handle(route,owner))return;
     if(p==='/api/auth/status')return ok({logged_in:true,user:{open_id:owner,name:'隔离验收人员',role:'building',level:'L4',category:'operator',home_scope:'A',modules:['maintenance','polling','adjust']},scope_options:[{value:'A',label:'A楼'}],default_scope:'A'});
     if(p==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'isolated'}});
-    if(p===api)return ok({scope:'A',scopes:['A'],definition:{version:3,items},server_time:now,roster_ready:true,tasks});
+    if(p===api)return ok({scope:'A',scopes:['A'],definition:{version:3,items},server_time:now,roster_ready:true,viewer_on_roster:true,viewer_active_shift:'白',tasks});
     if(p===api+'/history')return ok({scope:'A',page:1,page_size:20,total:0,items:[]});
     return ok({items:[],records:[],stats:{},summary:{}});
   });

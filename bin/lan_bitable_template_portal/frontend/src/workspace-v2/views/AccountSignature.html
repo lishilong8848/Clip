@@ -3,8 +3,10 @@
     <span v-if="person">{{ person.name }} · {{ buildingLabel(person.building) }} · {{ signatureStatusLabel(person.signature_status) }}</span></div>
     <div class="serenity-actions"><button v-if="canViewSignature" type="button" :disabled="busy" @click="togglePreview">{{ showPreview?'收起签名':'查看签名' }}</button>
       <button v-if="canSelfResign" type="button" class="decision-submit" :disabled="busy" @click="startSelf">{{ selfButtonLabel }}</button>
-      <button v-else-if="canRequestOther" type="button" :disabled="busy" @click="openConfirm">发起签名请求</button><button type="button" :disabled="busy" aria-label="刷新签名信息" @click="load()"><RefreshCw :size="15"/></button></div></header>
-  <p v-if="loading" role="status">正在读取签名信息…</p><p v-else-if="error || actionError" role="alert">{{ error || actionError }}</p>
+      <button v-else-if="canRequestOther" type="button" :disabled="busy" @click="openConfirm">发起签名请求</button><button v-if="!error" type="button" :disabled="busy||loading" aria-label="刷新签名信息" @click="load({refresh:true})"><RefreshCw :size="15"/></button></div></header>
+  <p v-if="loading" role="status">正在读取签名信息…</p>
+  <p v-else-if="error" role="alert" data-v2-inline-feedback>{{ error }} <button type="button" @click="load({refresh:true})">重试</button></p>
+  <p v-else-if="actionError" role="alert">{{ actionError }}</p>
   <p v-else-if="!person" role="status">{{ reason || '该账号暂无个人签名' }}</p>
   <template v-if="person"><p v-if="person.signature_reason">{{ person.signature_reason }}</p>
     <p v-if="person.request">最近请求 · {{ requestStatusLabel(person.request.status) }} · {{ formatTime(person.request.created_at) }}

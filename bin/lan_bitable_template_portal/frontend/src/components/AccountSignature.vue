@@ -6,7 +6,7 @@
         <strong>个人签名</strong>
         <span>{{ openId ? '查看该账号签名状态' : '当前登录账号签名状态' }}</span>
       </div>
-      <button v-if="!loading && !error" type="button" class="as-refresh" :disabled="busy" @click="load()">
+      <button v-if="!loading && !error" type="button" class="as-refresh" :disabled="busy" @click="load({refresh:true})">
         <RefreshCw :size="14" :class="{ spin: loading }" />刷新
       </button>
     </header>
@@ -15,7 +15,7 @@
 
     <div v-else-if="error" class="as-state error" role="alert">
       <CircleAlert :size="17" /><span>{{ error }}</span>
-      <button type="button" class="as-link" @click="load()"><RefreshCw :size="14" />重试</button>
+      <button type="button" class="as-link" @click="load({refresh:true})"><RefreshCw :size="14" />重试</button>
     </div>
 
     <template v-else-if="person">
@@ -175,7 +175,7 @@ function formatTime(value: unknown) {
 
 function resetPreview() { showPreview.value = false; previewSrc.value = ''; previewLoading.value = false; previewError.value = ''; }
 
-async function load(options: { preserveNotice?: boolean } = {}) {
+async function load(options: { preserveNotice?: boolean; refresh?: boolean } = {}) {
   const preserveNotice = options.preserveNotice === true;
   active?.abort();
   const controller = new AbortController();
@@ -186,8 +186,11 @@ async function load(options: { preserveNotice?: boolean } = {}) {
   if (!preserveNotice) notice.value = '';
   loading.value = true; error.value = '';
   try {
-    const qs = props.openId ? `?open_id=${encodeURIComponent(props.openId)}` : '';
-    const data = await requestJson(`/api/signatures/management/account${qs}`, { signal: controller.signal, cache: 'no-store' });
+    const params = new URLSearchParams();
+    if (props.openId) params.set('open_id', props.openId);
+    if (options.refresh) params.set('refresh', '1');
+    const qs = params.toString();
+    const data = await requestJson(`/api/signatures/management/account${qs ? '?' + qs : ''}`, { signal: controller.signal, cache: 'no-store' });
     if (disposed || controller.signal.aborted || n !== seq) return;
     person.value = data.person || null;
     reason.value = String(data.reason || '');

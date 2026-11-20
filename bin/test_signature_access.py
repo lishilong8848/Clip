@@ -152,6 +152,22 @@ class SignatureAccessTests(unittest.TestCase):
         for key in ('raw_fields', 'signature_file_token', 'signature_version', 'signature_preview_url'):
             self.assertNotIn(key, person)
 
+    def test_account_recovers_from_directory_outage_using_refreshed_sources(self):
+        self.assertEqual(self.call('account')['person']['record_id'], 'recoperatorE')
+        self.service.external_error = True
+        with self.assertRaisesRegex(SignatureManagementError, '临时人员签名目录') as error:
+            self.call('account', {'refresh':'1'})
+        self.assertEqual(error.exception.status, 503)
+        self.service.external_error = False
+        self.service._external_signature_people_cache = None
+        self.assertEqual(self.call('account')['person']['record_id'], 'recoperatorE')
+        self.service.external_error = True
+        with self.assertRaises(SignatureManagementError):
+            self.call('account', {'refresh':'1'})
+        self.service.external_error = False
+        self.assertEqual(self.call('account', {'refresh':'1'})['person']['record_id'], 'recoperatorE')
+        self.sender.assert_not_called()
+
     def test_supervisor_sees_all_people_but_manages_only_own_lower_level_people(self):
         listing = self.call('people', actor='supervisorE')
         self.assertEqual({p['record_id'] for p in listing['people'] if not p['directory_only']},
@@ -490,6 +506,8 @@ class MopSignatureInvitationTests(unittest.TestCase):
         self.service._engineer_month_maintenance_notices = Mock(return_value=[
             {'notice_key': 'noticeE', 'building': 'E楼', 'building_codes': ['E']},
             {'notice_key': 'noticeA', 'building': 'A楼', 'building_codes': ['A']}])
+        self.service._engineer_mop_month = lambda: '11月'
+        self.service._recent_month_pairs = lambda: [('2026', '11月'), ('2026', '10月')]
         self.modules = ['engineer_mop']
         self.blocked = set()
         self.auth = SimpleNamespace(account_profile=lambda actor: {'modules': self.modules, 'scope_rules': ['E']},

@@ -316,6 +316,23 @@ class CheckService:
                   if p.get('scope') == scope and p.get('shift') == shift]
         return list({p['open_id']: p for p in people if p.get('open_id')}.values())
 
+    def _viewer_roster(self, conn, actor, scope, current, people):
+        if actor.get('category') not in {'operator', 'shift_leader'} or actor.get('home_scope') != scope:
+            return False, ''
+        identity = actor['id']
+        day = current.date().isoformat()
+        shifts = {person.get('shift') for person in people
+                  if person.get('scope') == scope and person.get('open_id') == identity}
+        if current.time() < dt.time(8):
+            previous_day = (current.date() - dt.timedelta(days=1)).isoformat()
+            if any(person['open_id'] == identity for person in self._people_for(conn, previous_day, scope, '夜')):
+                return True, '夜'
+        for shift in ('夜', '白'):
+            start, end = windows(day, shift)
+            if shift in shifts and start <= current < end:
+                return True, shift
+        return bool({'白', '夜'} & shifts), ''
+
     def _clear_open_tasks(self, conn, current, scope):
         rows = [r['id'] for r in conn.execute(
             "SELECT id FROM tasks WHERE scope=? AND submitted='' AND items!='[]' AND deadline>?",
@@ -548,13 +565,24 @@ class CheckService:
         with self.connection() as conn:
             definition = self.definition(scope, conn)
             tasks = []
+            duty_names = {}
             for row in conn.execute("SELECT * FROM tasks WHERE scope=? AND (submitted!='' OR items!='[]') AND (submitted='' OR deadline>?) ORDER BY due,id",
                                     (scope, current.timestamp())):
                 if not row['submitted'] and not definition['items'] and row['deadline'] > current.timestamp():
                     continue
-                tasks.append(self._public_task(conn, actor, row, current))
+                task = self._public_task(conn, actor, row, current)
+                shift_key = (row['day'], row['shift'])
+                if shift_key not in duty_names:
+                    duty_names[shift_key] = list(dict.fromkeys(
+                        person['name'] for person in self._people_for(conn, row['day'], scope, row['shift'])
+                        if person.get('name')
+                    ))
+                task['duty_names'] = duty_names[shift_key]
+                tasks.append(task)
             roster = conn.execute('SELECT people,error FROM rosters WHERE day=?', (day,)).fetchone()
-            roster_ready = bool(roster and roster['people'] and any(p.get('scope') == scope for p in json.loads(roster['people'])))
+            people = json.loads(roster['people'] or '[]') if roster else []
+            roster_ready = any(p.get('scope') == scope for p in people)
+            viewer_on_roster, viewer_active_shift = self._viewer_roster(conn, actor, scope, current, people)
             roster_error = roster['error'] if roster else ''
             if roster_error.startswith('{'):
                 roster_error = json.loads(roster_error).get(scope, '')
@@ -570,6 +598,7 @@ class CheckService:
             errors.extend(self._reminder_errors(conn, active, current))
             return {'scope': scope, 'scopes': scopes_for(actor), 'can_manage': can_manage(actor),
                     'definition': definition, 'tasks': tasks,
+                    'viewer_on_roster': viewer_on_roster, 'viewer_active_shift': viewer_active_shift,
                     'roster_ready': roster_ready, 'roster_error': '；'.join(dict.fromkeys(e for e in errors if e)) if definition['items'] else '',
                     'overview': self._overview(actor, conn, current) if can_manage(actor) else None,
                     'server_time': current.isoformat()}

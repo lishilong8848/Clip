@@ -60,6 +60,21 @@ class CheckTests(unittest.TestCase):
         self.assertEqual(self.service.state(self.worker, 'A', self.current)['tasks'][0]['actor_name'], '值班长二')
         self.assertEqual(self.cloud.upsert.call_count, 1)
 
+    def test_workbench_uses_roster_identity_and_previous_night(self):
+        self.service.prepare(self.current)
+        state = self.service.state(self.worker, 'A', self.current)
+        self.assertTrue(state['viewer_on_roster'])
+        self.assertEqual(state['viewer_active_shift'], '白')
+        self.assertEqual(state['tasks'][0]['duty_names'], ['人员1', '人员2'])
+        off = {**self.worker, 'id':'ou_off', 'name':'人员1'}
+        self.assertFalse(self.service.state(off, 'A', self.current)['viewer_on_roster'])
+        with self.assertRaises(CheckError) as denied:
+            self.service.state({**self.worker,'home_scope':'B'}, 'A', self.current)
+        self.assertEqual(denied.exception.status, 403)
+        after_midnight = self.current.replace(hour=1) + dt.timedelta(days=1)
+        self.assertEqual(self.service.state(self.worker,'A',after_midnight)['viewer_active_shift'],'夜')
+        self.assertFalse(self.service.state(self.worker,'A',after_midnight.replace(hour=8))['viewer_on_roster'])
+
     def test_night_prealert_groups_items_and_does_not_repeat_at_due_or_restart(self):
         due = at(DAY + 'T17:50:00')
         self.service.prepare(due)

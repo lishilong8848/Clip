@@ -1,5 +1,5 @@
 <template>
-  <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention,'ps-desk':compact}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing||recordId?'true':undefined">
+  <section v-if="showCheck" class="v2-shift-check" :class="{'has-pending-checks':needsAttention,'ps-desk':compact}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing||recordId?'true':undefined">
     <Teleport v-if="headerTarget&&!historyOpen" :to="headerTarget"><NButton data-v2-navigation size="small" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></Teleport>
     <header v-if="compact" class="ps-heading" data-v2-navigation>
       <div class="ps-context"><strong>{{ overviewOpen && !historyOpen?'楼栋检查进度':historyOpen?'历史记录':(scope==='110'?'110站':scope+'楼')+'班前检查' }}</strong>
@@ -31,12 +31,12 @@
           <div><strong>{{ task.shift }}班 · <span>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</span></strong>
             <small>{{ shortDate(task.due*1000) }} 至 {{ shortDate(task.deadline*1000) }}</small></div>
           <span v-if="task.submitted">{{ completionLabel(task) }} · {{ task.actor_name }} · {{ dateLabel(task.submitted) }}</span>
-          <details v-else class="v2-check-people"><summary>本楼任意一名有权限人员提交即可</summary>{{ task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员' }}</details>
+          <span v-else-if="task.duty_names?.length" class="v2-check-people" aria-label="当班人员">{{ task.duty_names.join('、') }}</span>
           <NButton v-if="task.submitted && task.can_edit" size="small" secondary @click="recordId=task.id">修改记录</NButton>
         </header>
         <div v-else class="v2-check-status" :class="{'is-complete':task.submitted}">
           <CheckCircle2 v-if="task.submitted" :size="20" /><ClipboardCheck v-else :size="20" />
-          <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small v-if="task.submitted||!compact">{{ task.submitted ? completionLabel(task) + ' · ' + task.actor_name + ' · ' + dateLabel(task.submitted) : (task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员') + ' · 任意一人提交即可' }}</small><details v-else class="v2-check-people"><summary>本楼任意一名有权限人员提交即可</summary><small>{{ task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员' }}</small></details></div>
+          <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small v-if="task.submitted">{{ completionLabel(task) }} · {{ task.actor_name }} · {{ dateLabel(task.submitted) }}</small><small v-else-if="task.duty_names?.length" aria-label="当班人员">{{ task.duty_names.join('、') }}</small></div>
           <span v-if="!task.submitted">{{ answered }} / {{ task.items.length }}</span>
           <NButton v-else-if="task.can_edit" secondary size="small" @click="recordId=task.id"><template #icon><Pencil :size="15" /></template>修改记录</NButton>
         </div>
@@ -97,7 +97,7 @@ import { CheckCircle2,ClipboardCheck,History,Paperclip,Pencil,Plus,RefreshCw,Set
 import { requestJson,type Dict } from '../client';
 import { randomHexId } from '../../browserStorage';
 import { registerNavigationGuard } from '../navigation';
-import { preShiftSummary } from '../../preShiftUtils';
+import { preShiftHomeVisible, preShiftSummary } from '../../preShiftUtils';
 import PreShiftCheckForm from './PreShiftCheckForm.vue';
 import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
@@ -105,11 +105,12 @@ import CheckOverview from './CheckOverview.vue';
 import CheckHistory from './CheckHistory.vue';
 import CheckRecordEditor from './CheckRecordEditor.vue';
 import PhotoLocationSettings from './PhotoLocationSettings.vue';
-const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;workbench?:boolean;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
 const emit=defineEmits<{snapshot:[data:Dict]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
+const showCheck=computed(()=>!props.workbench||preShiftHomeVisible(props.user,state.value));
 const editing=ref(false),saving=ref(false),locationSaving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict;fixed_recipients:string[]}[]>([]),version=ref(0);
 const recipientOptions=ref<{value:string;label:string}[]>([]),recipientsLoading=ref(false),recipientError=ref('');let recipientController:AbortController|undefined;
 const overviewOpen=ref(false);let firstState=true;
@@ -148,7 +149,8 @@ async function load(force=false){
   try{
     const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:force?'reload':'no-store'});
     if(disposed||read.signal.aborted)return;
-    if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');
+    if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes)
+      ||props.workbench&&result.scope!==scope.value)throw new Error('检查数据不完整，请重试。');
     preShiftSummary(result);
     for(const id of Object.keys(drafts.value)){
       const next=result.tasks.find((t:Dict)=>t.id===id);
@@ -186,8 +188,8 @@ async function submit(){
   const row=task.value;busy.value=true;error.value='';
   try{const result=await requestJson('/api/pre-shift-checks/submit',{method:'POST',body:JSON.stringify({task_id:row.id,version:row.definition_version,answers:row.items.map((item:Dict)=>({id:item.id,...answer(item.id)}))})});delete drafts.value[row.id];message.success(result.already_completed?'本次清单已由'+result.actor_name+'提交，无需重复提交':'本次清单已提交，飞书后台同步');window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);}catch(e){error.value=e instanceof Error?e.message:'提交暂未确认，请重试；不会重复新增。';}finally{busy.value=false;}
 }
-const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
-function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value||uploading.value){event.preventDefault();event.returnValue='';}}
+const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!showCheck.value||!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
+function beforeUnload(event:BeforeUnloadEvent){if(busy.value||saving.value||uploading.value||showCheck.value&&(dirty.value||editing.value)){event.preventDefault();event.returnValue='';}}
 let activeView=true, loadedAt=0;
 function refresh(){if(activeView&&!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value&&!recordId.value)void load();}
 onActivated(()=>{activeView=true;if(Date.now()-loadedAt>=30000)refresh();});
@@ -225,7 +227,6 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 .workspace-v2 .v2-check-choice small{font-size:11px;line-height:1.45}
 .workspace-v2 .v2-check-workspace>.v2-check-shifts{grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr));gap:6px;align-items:stretch}
 .workspace-v2 .v2-check-people{font-size:12px;line-height:1.6;color:var(--v2-muted);margin-top:2px}
-.workspace-v2 .v2-check-people summary{cursor:pointer}
 .workspace-v2 .v2-check-form>footer{position:sticky;bottom:0;z-index:3;padding:8px 0;border-top:1px solid var(--v2-border);background:var(--n-color,var(--v2-bg));gap:8px}
 .workspace-v2 .v2-check-form>footer .n-button{min-height:42px;flex:none}
 .workspace-v2 .v2-check-form{scroll-margin-bottom:64px}

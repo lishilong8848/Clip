@@ -47,6 +47,7 @@ def reader(fields, directory=None):
             people.append({'name':name, 'scope':scope, 'shift':entry['班次'],
                            'duty_kind': entry['班次'], 'open_id':users[0]['id'] if len(users)==1 else ''})
     snapshot = {'source':personnel_source.TABLE_ID,'app_id':config.app_id,'complete':True,
+                'date':DAY,'observed_at':NOW.timestamp(),'parser_version':personnel_source.ROSTER_PARSER_VERSION,
                 'people':people,'issues':issues}
     return SimpleNamespace(_state_store=SimpleNamespace(get_document=Mock(return_value=snapshot)),
         _request_json=Mock(),

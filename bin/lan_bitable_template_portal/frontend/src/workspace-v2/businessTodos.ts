@@ -1,7 +1,7 @@
 import type { Dict } from './client';
 import { NOTICE_IDS, beijingDate } from './modules';
 import { waterNumber, waterPhotoCount, waterRecordState } from './water';
-import { noticeListStatus, noticePlanWindow } from './noticeListMeta';
+import { noticeListSpecialty, noticeListStatus, noticePlanWindow } from './noticeListMeta';
 
 export const todoCatalog = [
   { value:'notices', label:'通告' }, { value:'repair_management', label:'维修项目' },
@@ -10,7 +10,7 @@ export const todoCatalog = [
   { value:'signatures', label:'我的签名' },
 ] as const;
 export type TodoKind = typeof todoCatalog[number]['value'];
-export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number };
+export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number; specialty?:string };
 export type TodoPage = { rows:TodoRow[]; more:boolean; note?:string; partial?:boolean };
 export type TodoSource = { id:string; page:number; more:boolean; load:(page:number, signal:AbortSignal)=>Promise<TodoPage> };
 export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[]; selectedScopes?:string[]; home?:boolean; noticeTypes?:string[] };
@@ -54,43 +54,26 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
   const read=(path:string,q:Dict,signal:AbortSignal)=>get(link(path,q),signal);
   const buildings=(supported:string)=>ctx.scopes.filter(s=>supported.includes(s.value)&&s.value.length===1&&(['ALL','CAMPUS',''].includes(ctx.scope)||ctx.scope===s.value)).map(s=>s.value);
   const allowedNotice=(type:string)=>NOTICE_IDS.includes(type)&&(ctx.user.modules||[]).includes(type)&&(!ctx.noticeTypes||ctx.noticeTypes.includes(type));
-  if(kind==='notices')return (ctx.noticeTypes?.filter(allowedNotice)??['all']).flatMap(workType=>[source('notices:'+workType,async(page,signal)=>{
+  if(kind==='notices')return (ctx.noticeTypes?.filter(allowedNotice)??['all']).map(workType=>source('notices:'+workType,async(page,signal)=>{
     const month=Number(beijingDate().slice(5,7))+'月';
-    const data=await read('/api/workbench',{scope:ctx.scope,work_type:workType,month,sections:'ongoing',ongoing_page:page,ongoing_page_size:30},signal);
-    if(data.source_snapshot_ready===false)throw new Error('通告快照尚未准备完成。');
+    const data=await read('/api/workbench',{scope:ctx.scope,work_type:workType,month,sections:'ongoing',ongoing_page:page,ongoing_page_size:ctx.home?0:30},signal);
     const result:TodoRow[]=[];
+    let partial=false;
     for(const row of rows(data.ongoing)){
       const type=String(row.work_type||'');if(!allowedNotice(type)||(workType!=='all'&&type!==workType))continue;
-      const targetStatus=text(row.status||row.status_label||row.work_summary?.status||row.workflow);
-      if(ended(targetStatus)||row.deleted||row.deleted_at)continue;
+      const targetStatus=text(row.status||row.status_label||row.work_summary?.status||row.workflow).trim();
+      if(ended(targetStatus)||row.action==='end'||row.deleted||row.deleted_at)continue;
       const status=noticeListStatus(row,'ongoing').label;
-      const id=row.active_item_id||row.record_id||row.id;if(!id)throw new Error('通告缺少记录标识，暂不能办理。');
+      const id=row.active_item_id||row.record_id||row.id;if(!id){partial=true;continue;}
       const sourceId=row.source_record_id||row.record_id;
+      const window=noticePlanWindow(row);
       result.push({...ownership(row),key:`notice:${type}:active:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
-        status,time:text(row.start_time||row.time||row.updated_at),detail:noticeTypeLabels[type],noticeWindow:noticePlanWindow(row),
-        ongoing:true,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),
+        status,time:text(row.start_time||row.time||row.updated_at),detail:noticeTypeLabels[type],noticeWindow:{...window,end:window.end||text(row.end_time)},
+        ongoing:true,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),specialty:noticeListSpecialty(row),
         url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,[row.active_item_id?'active_item_id':'record_id']:id})});
     }
-    return {rows:result,more:page<number(data.ongoing_pagination?.total_pages),note:'已发送且进行中的通告'};
-  }), ...(ctx.home ? [source('notice-plans:'+workType, async (page, signal) => {
-    const month=Number(beijingDate().slice(5,7))+'月';
-    const data=await read('/api/workbench',{scope:ctx.scope,work_type:workType,month,sections:'records',records_page:page,records_page_size:30},signal);
-    const records=rows(data.records);
-    const pending=records.flatMap((row):TodoRow[]=>{
-      const type=String(row.work_type||'');
-      if(!allowedNotice(type)||(workType!=='all'&&type!==workType)||row.deleted||row.deleted_at) return [];
-      const {label}=noticeListStatus(row,'planned');
-      if(ended(label)||label==='状态未取得') return [];
-      const id=row.source_record_id||row.record_id;
-      if(!id) return [];
-      const started=/进行中|已开始|^开始$|^更新$/.test(label);
-      const plan=noticePlanWindow(row);
-      return [{...ownership(row),key:`notice:${type}:plan:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope)||ctx.scope,
-        status:started?'待核验':label,time:plan.start,detail:noticeTypeLabels[type],noticeWindow:plan,sourceKey:`${type}:${id}`,dueAt:todoTimestamp(plan.end),
-        url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,record_id:id,notice_action:started?'verify':'start'})}];
-    });
-    return {rows:pending,more:page<number(data.records_pagination?.total_pages),partial:data.records_pagination?.partial===true};
-  })] : [])]);
+    return {rows:result,more:page<number(data.ongoing_pagination?.total_pages),partial,note:'进行中的通告'};
+  }));
   if(kind==='repair_management')return [source(kind,async(page,signal)=>{
     const limit=ctx.home?200:50, offset=(page-1)*limit;
     const data=await read('/api/repair-management/status',{scope:ctx.scope,state:'all',period:'all',limit,offset},signal);
@@ -101,7 +84,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
       const time=ctx.home
         ? [row.repair_start_time,row.fault_time,row.project_created_time,row.latest_followup_time,row.updated_at].map(text).find(value=>todoTimestamp(value)!==undefined)||''
         : text(row.fault_time||row.latest_followup_time||row.updated_at);
-      return {...ownership(row),key:'repair:'+row.record_id,kind,module:kind,title:title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.status_label||row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time,detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
+      return {...ownership(row),key:'repair:'+row.record_id,kind,module:kind,title:text(row.repair_title)||title(row),scope:text(row.building||row.building_codes||row.scope)||ctx.scope,status:text(row.status_label||row.workflow||row.status)||(row.state==='without_followup'?'未开始':'维修中'),time,specialty:text(row.specialty),detail:waterNumber(row.progress_percent)!==null?`进度 ${row.progress_percent}%`:undefined,url:link('/repair-management',{scope:ctx.scope,record_id:row.record_id,workspace_tab:'followups'})};
     });
     const more=offset+list.length<number(data.total);
     if(ctx.home&&more&&list.length!==limit)throw new Error('维修项目分页未完整返回。');
@@ -126,14 +109,13 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
     }),more:page*20<number(data.total)};
   })];
   if(kind==='water')return buildings('ABCDEH').map(scope=>source(kind+scope,async(page,signal)=>{
-    const data=await read('/api/capacity/water/records',{scope,page,page_size:50},signal);
-    if(data.snapshot?.exists===false)throw new Error(scope+'楼水耗快照尚未准备完成。');
+    const data=await read('/api/capacity/water/records',{scope,page,page_size:50,incomplete:ctx.home?'1':''},signal);
     const list=rows(data.records);
     return {rows:list.flatMap(row=>{
       if(waterNumber(row.meter_value)!==null&&(waterPhotoCount(row)??0)>0)return [];
       if(!row.record_id)throw new Error('水耗记录标识未返回。');
       return [{key:`water:${scope}:${row.record_id}`,kind,module:kind,title:text(row.meter)||'水表未填写',scope,status:waterRecordState(row).label,time:text(row.statistic_date||row.statistic_date_key),detail:[row.frequency,row.shift&&row.shift+'班'].filter(Boolean).join(' · '),url:link('/water-management',{scope,water_view:'records',record_id:row.record_id})}];
-    }),more:(page-1)*50+list.length<number(data.total)};
+    }),more:(page-1)*50+list.length<number(data.total),partial:data.snapshot?.exists===false};
   }));
   if(kind==='learning'){
     let self:Dict|undefined;

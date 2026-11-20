@@ -3,16 +3,16 @@ import { mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
-import { createServer } from 'vite';
+import { createServer, preview } from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/admin-accounts');
 await mkdir(output, { recursive: true });
-// Use the on-demand dev server (not the prebuilt dist) so this isolated script always
-// verifies the current AdminAccounts source against the same origin that the app uses.
-const server = await createServer({ root, logLevel: 'error', server: { host: '127.0.0.1', port: 0 }, preview: {} });
-await server.listen();
-const origin = `http://127.0.0.1:${server.config.server.port}`;
+const buildDir = process.env.CLIPFLOW_LEGACY_BUILD_DIR;
+const server = buildDir ? await preview({ root, configFile: false, build: { outDir: buildDir }, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } })
+  : await createServer({ root, logLevel: 'error', server: { host: '127.0.0.1', port: 0 } });
+if (!buildDir) await server.listen();
+const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
 const scopeOptions = ['110', ...'ABCDEH'].map(value => ({ value, label: value === '110' ? '110站' : value + '楼' }));
 const categories = [{ value: 'shift_leader', label: '值班长' }, { value: 'operator', label: '值班员' },
@@ -36,9 +36,8 @@ let auditFixture = [];
 const errors = [];
 
 function baseItems() {
-  // 26 rows: even indices are engineers, odd indices are shift leaders. items[2] is re-tagged
-  // duty, leaving exactly 12 engineers so the category filter can assert an exact page count.
-  const items = Array.from({ length: 26 }, (_, i) => ({
+  // 36 rows, including 17 engineers after the fixed duty fixture is re-tagged.
+  const items = Array.from({ length: 36 }, (_, i) => ({
     id: 'recTest' + i, record_id: 'recTest' + i, open_id: 'ou_test' + i,
     name: '测试人员' + i, employee_no: 'TEST-' + i, kind: 'external', own_scopes: ['H'], scopes: ['H'], role: 'building',
     position: i % 2 ? '值班长' : '暖通工程师', category: i % 2 ? 'shift_leader' : 'engineer',
@@ -70,7 +69,8 @@ async function newPage() {
     const ok = data => route.fulfill({ json: { ok: true, data } });
     if (url.pathname === '/api/auth/status') return ok({
       logged_in: true,
-      user: { open_id: actor.open_id, name: actor.name, role: actor.role, can_manage_accounts: actor.can_manage_accounts, login_method: 'feishu' },
+      user: { open_id: actor.open_id, name: actor.name, role: actor.role, can_manage_accounts: actor.can_manage_accounts,
+        level: policyLevel, home_scope: actor.home_scope, modules: actor.can_manage_accounts ? ['accounts'] : [], login_method: 'feishu' },
       scope_options: scopeOptions,
     });
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-admin-accounts' } });
@@ -135,7 +135,7 @@ try {
   // ---------- Admin entry + full AdminAccounts flow ----------
   let start = apiCalls.length;
   const page = await newPage();
-  await page.goto(origin);
+  await page.goto(origin + '/?frontend=legacy');
   await page.getByRole('button', { name: '打开账号与权限设置', exact: true }).click();
   const accounts = page.locator('.accounts');
   await accounts.locator('tbody').waitFor();
@@ -145,14 +145,14 @@ try {
   assert.equal(await page.getByRole('button', { name: '其他设置', exact: true }).getAttribute('aria-expanded'), 'false');
   assert.ok(!adminReads.some(value => value.startsWith('/api/admin/')), 'opening accounts must not fetch diagnostics');
 
-  // Category filtering + pagination: 12 engineers, then 20 + 6 on the full list.
+  // Category filtering and pagination: 17 engineers, then 30 + 6 on the full list.
   const categoryNav = accounts.getByRole('navigation', { name: '岗位分类筛选' });
   const categoryNames = await categoryNav.getByRole('button').allTextContents();
   await categoryNav.getByRole('button', { name: /^工程师/ }).click();
-  assert.equal(await accounts.locator('tbody tr').count(), 12, '工程师 category shows exactly 12 rows');
+  assert.equal(await accounts.locator('tbody tr').count(), 17, '工程师 category shows exactly 17 rows');
   assert.equal(await categoryNav.getByRole('button').count(), categoryNames.length, 'category navigation stays stable');
   await categoryNav.getByRole('button', { name: /^全部/ }).click();
-  assert.equal(await accounts.locator('tbody tr').count(), 20, 'full list page 1 shows 20 rows');
+  assert.equal(await accounts.locator('tbody tr').count(), 30, 'full list page 1 shows 30 rows');
   await page.screenshot({ path: path.join(output, 'accounts-p1.png'), fullPage: true });
   await accounts.getByRole('button', { name: '下一页', exact: true }).click();
   assert.equal(await accounts.locator('tbody tr').count(), 6, 'pagination page 2 shows remaining 6 rows');
@@ -222,7 +222,7 @@ try {
   assert.equal(await dialog.getByRole('button', { name: '保存启用状态', exact: true }).isDisabled(), true, 'fixed root cannot be edited');
   assert.equal(await dialog.getByRole('combobox').count(), 0, 'fixed root drawer has no role select');
   assert.equal(await dialog.getByRole('checkbox', { name: /楼/ }).count(), 0, 'fixed root drawer has no scope checkboxes');
-  await dialog.getByText(/当前级别只能查看该账号/).waitFor();
+  await dialog.getByText(/当前账号仅可查看此人员信息/).waitFor();
   await page.keyboard.press('Escape');
 
   // ---------- Audit tab ----------
@@ -245,23 +245,24 @@ try {
   await otherToggle.click();
   assert.equal(await otherToggle.getAttribute('aria-expanded'), 'true');
   await page.getByRole('button', { name: '交接班链接', exact: true }).click();
-  await page.waitForURL('**/admin/settings?tab=handover');
-  await page.reload();
+  await page.waitForURL(url => url.pathname === '/admin/settings' && url.searchParams.get('tab') === 'handover');
+  await page.goto(origin + '/admin/settings?tab=handover&frontend=legacy');
   await page.getByRole('button', { name: '交接班链接', exact: true }).waitFor();
   assert.equal(await page.getByRole('button', { name: '其他设置', exact: true }).getAttribute('aria-expanded'), 'true');
   await page.getByRole('button', { name: '返回首页', exact: true }).click();
-  await page.waitForURL(origin + '/');
+  await page.waitForURL(url => url.origin === origin && url.pathname === '/');
 
   // ---------- L4 denied: no accounts mount, no account API loads ----------
   start = apiCalls.length;
   actor = actors.denied;
   policyLevel = 'L4';
-  await page.goto(origin + '/admin/settings');
-  await page.locator('.settings-denied').waitFor();
+  await page.goto(origin + '/admin/settings?frontend=legacy');
+  const denied = page.locator('.module-denied, .settings-denied');
+  await denied.waitFor();
   assert.equal(await page.locator('.admin-shell').count(), 0, 'L4 has no admin shell');
   assert.equal(await page.locator('.accounts').count(), 0, 'L4 has no accounts pane');
   assert.equal(apiCalls.slice(start).filter(c => c.path.startsWith('/api/auth/accounts')).length, 0, 'L4 must not load /api/auth/accounts');
-  assert.match(await page.locator('.settings-denied').innerText(), /没有人员管理权限/);
+  assert.match(await denied.innerText(), /没有(该功能|人员管理)权限/);
   await page.screenshot({ path: path.join(output, 'admin-denied.png'), fullPage: true });
   assertNoPrivilegedCalls(start);
 
@@ -273,5 +274,6 @@ try {
   throw error;
 } finally {
   await browser.close();
-  await server.close();
+  if (buildDir) await new Promise(resolve => server.httpServer.close(resolve));
+  else await server.close();
 }

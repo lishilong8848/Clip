@@ -22,7 +22,7 @@ assert.equal(preShiftScopes({ ...user, level: 'L1', scope_rules: ['ALL'] }).leng
 const now = Date.parse('2026-10-17T01:00:00+08:00') / 1000;
 const items = [{ id: 'one', text: '核对交接班记录' }, { id: 'two', text: '检查本班设备运行状态' }];
 const task = { id: 'legacy-shift', scope: 'A', day: '2026-10-16', shift: '夜', due: now - 3600, deadline: now + 3600, items, submitted: '', people: [{ name: user.name }], can_submit: true, definition_version: 1, answers: [], files: [], can_upload_handover: true };
-const state = { server_time: '2026-10-17T01:00:00+08:00', scope: 'A', scopes: ['A'], definition: { version: 1, items }, tasks: [task], roster_ready: true, can_manage: false };
+const state = { server_time: '2026-10-17T01:00:00+08:00', scope: 'A', scopes: ['A'], definition: { version: 1, items }, tasks: [task], roster_ready: true, viewer_on_roster: true, viewer_active_shift: '夜', can_manage: false };
 assert.deepEqual(preShiftSummary(state), { pending: 1, completed: 0 }, 'overnight checks remain pending');
 for (const changed of [{ due: now + 1 }, { items: [] }]) {
   assert.deepEqual(preShiftSummary({ ...state, tasks: [{ ...task, ...changed }] }), { pending: 0, completed: 0 });

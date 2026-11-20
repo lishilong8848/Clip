@@ -11,7 +11,7 @@ from fastapi import FastAPI
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.workbench_calendar import (
-    install_workbench_calendar, public_schedule, read_roster, TZ,
+    install_workbench_calendar, public_schedule, read_roster, read_zhihang_schedule, TZ,
 )
 
 
@@ -63,6 +63,7 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         with patch('lan_bitable_template_portal.workbench_calendar.read_roster', return_value=(self.staff,['2026-11-18'])), \
              patch('lan_bitable_template_portal.workbench_calendar.read_seals', return_value=self.seals), \
              patch('lan_bitable_template_portal.workbench_calendar.read_changes', return_value=self.changes), \
+             patch('lan_bitable_template_portal.workbench_calendar.read_zhihang_schedule', return_value={}), \
              patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value={'change'}):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
                 aggregate = await client.get('/api/personal-calendar?month=2026-11')
@@ -73,6 +74,48 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         body = aggregate.json()['data']['days']['2026-11-18']
         self.assertEqual([row['scope'] for row in body['staff']], ['A'])
         self.assertEqual([row['title'] for row in body['items']], ['封网窗口','A楼窗口'])
+
+    async def test_roster_endpoint_uses_verified_today_without_reading_agenda(self):
+        today = dt.datetime.now(TZ).date().isoformat()
+        auth = SimpleNamespace(session_scopes=lambda _: ['A'], account_profile=lambda _: {'level':'L3','home_scope':'A'})
+        app = FastAPI()
+        controller = SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'isolated'}})
+        install_workbench_calendar(app, controller, SimpleNamespace(auth_manager=auth, service=object()))
+        staff = [{**row,'scheduleDate':today} for row in self.staff]
+        with patch('lan_bitable_template_portal.workbench_calendar.read_roster', return_value=(staff,[today])), \
+             patch('lan_bitable_template_portal.workbench_calendar.read_seals') as seals, \
+             patch('lan_bitable_template_portal.workbench_calendar.read_changes') as changes, \
+             patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value={'change'}):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                response = await client.get(f'/api/personal-calendar?month={today[:7]}&scope=A&view=roster')
+            self.assertEqual(response.status_code, 200)
+            body = response.json()['data']
+            self.assertEqual(body['days'][today]['staff'], [{'scope':'A','shift':'白','names':['甲']}])
+            self.assertEqual(body['unavailable'], [])
+            seals.assert_not_called()
+            changes.assert_not_called()
+        await app.router.shutdown()
+
+    def test_zhihang_uses_successful_local_rows_with_grants_and_exact_buildings(self):
+        documents = {
+            'run:success':{'id':'success','kind':'risk','status':'success','created_at':'2026-11-19'},
+            'run:failed':{'id':'failed','kind':'risk','status':'failed','created_at':'2026-11-20'},
+            'run:change':{'id':'change','kind':'change','status':'success','created_at':'2026-11-20'},
+            'run:event':{'id':'event','kind':'event','status':'success','created_at':'2026-11-20'},
+            'rows:success':{code:{'楼栋':code+'楼','排查时间':'2026-11-18 14:00:00','检查项目':code+'楼排查'} for code in 'AB'},
+            'rows:change':{
+                'same':{'工单号':'copy','标题':'A楼本地已有','计划开始时间':'2026-11-18 21:00:00'},
+                'new':{'工单号':'unique','标题':'A楼夜间变更','计划开始时间':'2026-11-18 21:00:00'},
+                'unknown':{'标题':'未标楼栋','计划开始时间':'2026-11-18 21:00:00'},
+            },
+            'rows:event':{'a':{'事件标题':'没有该模块','专业域编码':'5.1','发生时间':'2026-11-18 12:00:00'}},
+        }
+        store = SimpleNamespace(
+            list_documents=lambda _namespace, key_prefix: [{'payload':row} for key,row in documents.items() if key.startswith(key_prefix)],
+            get_document=lambda _namespace,key: documents[key])
+        result = read_zhihang_schedule(SimpleNamespace(_state_store=store),'2026-11',{'A'},{'change','risk_inspection'},{'copy'})
+        self.assertEqual({row['title'] for row in result['2026-11-18']},{'A楼夜间变更','A楼排查'})
+        self.assertTrue(all(row['source']=='智航' for row in result['2026-11-18']))
 
     async def test_guard_reads_the_last_verified_state_without_fetching_forecast(self):
         guard_state = {

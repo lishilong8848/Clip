@@ -208,8 +208,9 @@ const categoryTabs = computed(() => {
   return [all, ...options];
 });
 function categoryLabel(value: string) { return categoryOptions.value.find(x => x.value === value)?.label || value || '待分类'; }
-const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / 20)));
-const pageItems = computed(() => filtered.value.slice((page.value - 1) * 20, page.value * 20));
+const pageSize = 30;
+const pageCount = computed(() => Math.max(1, Math.ceil(filtered.value.length / pageSize)));
+const pageItems = computed(() => filtered.value.slice((page.value - 1) * pageSize, page.value * pageSize));
 function canEdit(item: Account) { return item.can_edit === true; }
 // Access grants (level/category/scopes/modules) are governed by the backend's
 // per-account `can_edit_access` flag, which already incorporates `can_edit`.

@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
+import { computed, inject, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 import { NPopover } from 'naive-ui';
-import { ArrowRight, Bell, ChevronLeft, ChevronRight, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
+import { ArrowRight, Bell, CalendarDays, ChevronLeft, ChevronRight, Cloud, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
 import { todoTimestamp } from '../businessTodos';
 import { requestJson } from '../client';
 import type { WorkItem } from './sources';
 import { inDeskScope } from './deskPolicy';
 import WorkbenchRoster from './WorkbenchRoster.vue';
+import NavThemePicker from '../NavThemePicker.vue';
 import './workbench.css';
 
 type Link = {label:string; url:string};
 type DayWeather = {date:string; description:string; minimum:number|null; maximum:number|null};
 type AgendaEntry = {key:string; item:WorkItem; type:'plan'|'change'|'due'; label:string; time:string; stamp:number};
-type CalendarItem={kind:string;title:string;scopes?:string[];notes?:string[];start?:string;source_id?:string};
+type CalendarItem={kind:string;title:string;scopes?:string[];notes?:string[];start?:string;source_id?:string;source?:string};
 type CalendarDay={items:CalendarItem[];staff:{scope:string;shift:string;names:string[]}[]};
 type CalendarResponse={month:string;days:Record<string,CalendarDay>;unavailable:string[];roster_dates?:string[]};
 type RosterSnapshot={key:string;state:'ready'|'failed';staff:CalendarDay['staff']};
@@ -20,22 +21,22 @@ type CalendarWeather={warning_ready:boolean;
   alerts:{id?:string;title:string;guard_level?:string}[];guard_level?:string;guard_actions:string[];guard_note?:string};
 const props = defineProps<{name:string; avatar?:string; clock:number; links:Link[]; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
   agendaScopes?:{label:string;value:string}[]; impersonating?:boolean;
-  calendarScope?:string; calendarIdentity?:string; queueNote?:string}>();
+  calendarScope?:string; calendarIdentity?:string; queueNote?:string; userId?:string}>();
 const emit = defineEmits<{open:[url:string]; unread:[]; task:[item:WorkItem]; 'guest-account':[]}>();
 
 const avatar=computed(()=>/^https:\/\//i.test(props.avatar||'')?props.avatar:undefined);
 const avatarFailed=ref(false);
 watch(avatar,()=>{avatarFailed.value=false;});
 const surface = ref<HTMLElement>();
-const weatherButton = ref<HTMLButtonElement>(), noticeButton = ref<HTMLButtonElement>(), searchInput = ref<HTMLInputElement>();
-const panel = ref<''|'weather'|'search'|'notices'>('');
+const mobileNavigation=inject('workspace-mobile-navigation',ref(false));
+const noticeButton = ref<HTMLButtonElement>(), searchInput = ref<HTMLInputElement>();
+const panel = ref<''|'search'|'notices'>('');
 const query = ref(''), searchIndex = ref(0);
-function toggle(next:'weather'|'notices') {
-  panel.value = panel.value === next ? '' : next;
-  if (panel.value === 'weather' && !weather.value) void readWeather();
+function toggleNotices() {
+  panel.value = panel.value === 'notices' ? '' : 'notices';
 }
 function dismiss() {
-  const trigger = panel.value === 'weather' ? weatherButton : panel.value === 'notices' ? noticeButton : searchInput;
+  const trigger = panel.value === 'notices' ? noticeButton : searchInput;
   if (panel.value) { trigger.value?.focus(); panel.value = ''; }
 }
 function escapePanel(event:KeyboardEvent) {
@@ -121,7 +122,7 @@ const byDay = computed(()=>{
     if(agendaScope.value && !inDeskScope(task,agendaScope.value)) continue;
     const start = task.kind === 'notices' ? task.noticeWindow?.start || (!task.ongoing ? task.time : '') : task.scheduledAt;
     const startAt = todoTimestamp(start);
-    const dueAt = task.dueAt ?? todoTimestamp(task.noticeWindow?.end);
+    const dueAt = task.kind==='notices'&&task.ongoing!==true ? undefined : task.dueAt ?? todoTimestamp(task.noticeWindow?.end);
     const add = (stamp:number, type:AgendaEntry['type'], label:string, raw?:string) => {
       const day=dayKey(stamp);
       const time=raw && /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(raw.trim())?'全天':dayTime(stamp);
@@ -162,7 +163,8 @@ const calendarNotice=ref(''), calendarBusy=ref(false);
 const calendarRevision=ref(0), calendarFailed=ref(false);
 const calendarDay=computed(()=>calendarDays.value[selected.value]);
 const calendarScope=computed(()=>agendaScope.value||props.calendarScope||'');
-const rosterKey=computed(()=>JSON.stringify([today.value,calendarScope.value,props.calendarIdentity,calendarRevision.value]));
+const rosterKey=computed(()=>JSON.stringify([today.value,calendarScope.value,props.calendarIdentity]));
+const rosterRevision=ref(0);
 const roster=ref<RosterSnapshot>();
 const visibleRoster=computed(()=>roster.value?.key===rosterKey.value?roster.value:undefined);
 const rosterOrder=['H','A','B','C','D','E','110'];
@@ -191,13 +193,14 @@ function scheduleTime(value?:string){
   const stamp=todoTimestamp(value);
   return stamp===undefined?'—':dayTime(stamp);
 }
-async function readCalendar(month:string,scope:string,signal:AbortSignal):Promise<CalendarResponse>{
+async function readCalendar(month:string,scope:string,signal:AbortSignal,rosterOnly=false):Promise<CalendarResponse>{
   const query=new URLSearchParams({month,scope});
-  const data=await requestJson('/api/personal-calendar?'+query,{signal,timeoutMs:16000,background:true});
+  if(rosterOnly)query.set('view','roster');
+  const data=await requestJson('/api/personal-calendar?'+query,{signal,timeoutMs:18000,background:!rosterOnly,queueTimeoutMs:45000});
   if(data.month!==month||!data.days||!Array.isArray(data.unavailable))throw new Error('日程未完整返回');
   return data as CalendarResponse;
 }
-watch([month,calendarScope,()=>props.calendarIdentity,rosterKey],async([activeMonth,scope,identity,key],old,onCleanup)=>{
+watch([month,calendarScope,()=>props.calendarIdentity,calendarRevision],async([activeMonth,scope,identity],old,onCleanup)=>{
   if(!old || activeMonth!==old[0] || scope!==old[1] || identity!==old[2])calendarDays.value={};
   calendarNotice.value='';
   calendarFailed.value=false;
@@ -206,33 +209,46 @@ watch([month,calendarScope,()=>props.calendarIdentity,rosterKey],async([activeMo
   const controller=new AbortController();
   calendarBusy.value=true;
   onCleanup(()=>controller.abort());
-  const date=today.value, currentMonth=date.slice(0,7);
-  function receiveRoster(data?:CalendarResponse) {
-    if(controller.signal.aborted)return;
-    const staff=data?.days[date]?.staff||[];
-    const ready=staff.length>0||data?.roster_dates?.includes(date);
-    roster.value={key,state:ready?'ready':'failed',staff};
-  }
-  if (activeMonth!==currentMonth && visibleRoster.value?.state!=='ready') {
-    void readCalendar(currentMonth,scope,controller.signal).then(receiveRoster,()=>receiveRoster());
-  }
   try {
     const data=await readCalendar(activeMonth,scope,controller.signal);
     if(controller.signal.aborted)return;
     calendarDays.value=data.days;
-    if(activeMonth===currentMonth) receiveRoster(data);
     calendarFailed.value=data.unavailable.length>0;
     calendarNotice.value=calendarFailed.value?data.unavailable.join('、')+'暂未更新':'';
   } catch {
     if(!controller.signal.aborted){
       calendarNotice.value='日程读取失败';
       calendarFailed.value=true;
-      if(activeMonth===currentMonth && visibleRoster.value?.state!=='ready')receiveRoster();
     }
   } finally {
     if(!controller.signal.aborted) calendarBusy.value=false;
   }
 },{immediate:true});
+let rosterReadAt=0;
+const rosterReading=ref(false);
+watch([rosterKey,rosterRevision],async([key],_old,onCleanup)=>{
+  const scope=calendarScope.value, date=today.value;
+  if(props.guest||!scope)return;
+  const controller=new AbortController();
+  rosterReading.value=true;
+  onCleanup(()=>{controller.abort();rosterReading.value=false;});
+  try {
+    const data=await readCalendar(date.slice(0,7),scope,controller.signal,true);
+    if(controller.signal.aborted)return;
+    const staff=data.days[date]?.staff||[];
+    if(staff.length||data.roster_dates?.includes(date)) roster.value={key,state:'ready',staff};
+    else if(visibleRoster.value?.state!=='ready')roster.value={key,state:'failed',staff:[]};
+  } catch(error){
+    if(!controller.signal.aborted&&([401,403].includes((error as {status?:number})?.status||0)||visibleRoster.value?.state!=='ready'))
+      roster.value={key,state:'failed',staff:[]};
+  } finally {
+    if(!controller.signal.aborted){rosterReading.value=false;rosterReadAt=Date.now();}
+  }
+},{immediate:true});
+watch(()=>props.clock,()=>{
+  if(!props.guest&&!document.hidden&&!rosterReading.value&&Date.now()-rosterReadAt>(visibleRoster.value?.state==='ready'?120000:45000))
+    rosterRevision.value++;
+});
 const calendarWeather=ref<CalendarWeather>();
 const guardFailed=ref(false);
 const calendarWeatherBusy=ref(false);
@@ -278,7 +294,7 @@ const noticesByDay = computed(()=>{
   return days;
 });
 
-const weather = ref<{temp:number|null;humidity:number|null;description:string;days:DayWeather[]}>();
+const weather = ref<{temp:number|null;humidity:number|null;description:string;days:DayWeather[];hourly:{stamp:number;temp:number}[]}>();
 const weatherBusy = ref(false);
 const selectedWeekday = computed(()=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,weekday:'long'}).format(new Date(selected.value+'T12:00:00+08:00')));
 const selectedWeather = computed(()=>{
@@ -292,11 +308,28 @@ const selectedWeather = computed(()=>{
     temperature:temp!=null?temp+'°C':low!=null&&high!=null?low+'～'+high+'°C':high!=null?high+'°C':low!=null?low+'°C':'',
   };
 });
-const weatherIcon = computed(()=>{
-  const description=selectedWeather.value?.description||'';
-  return description.includes('雪')?CloudSnow:/雨|雷/.test(description)?CloudRain:description==='晴'?Sun:CloudSun;
+const condition=(description:string)=>description.includes('雪')?'snow':/雨|雷/.test(description)?'rain':
+  /多云|晴间/.test(description)?'partly':/晴/.test(description)?'sun':'cloud';
+const icons={snow:CloudSnow,rain:CloudRain,partly:CloudSun,sun:Sun,cloud:Cloud};
+const weatherIcon=computed(()=>icons[condition(selectedWeather.value?.description||'')]);
+const currentCondition=computed(()=>condition(weather.value?.description||''));
+const weatherTrend=computed(()=>{
+  if(!weather.value)return;
+  const hourly=weather.value.hourly;
+  const daily=hourly.length<2;
+  const samples=daily?weather.value.days.flatMap(day=>day.maximum===null?[]:[{
+    stamp:Date.parse(day.date+'T00:00:00+08:00'),temp:day.maximum,
+  }]):hourly;
+  if(samples.length<2)return;
+  const min=Math.min(...samples.map(point=>point.temp)),max=Math.max(...samples.map(point=>point.temp));
+  const first=samples[0].stamp,last=samples[samples.length-1].stamp;
+  const points=samples.map(({stamp,temp})=>`${3+138*(stamp-first)/(last-first)},${25-20*(temp-min+1)/(max-min+2)}`).join(' ');
+  const label=daily?'未来几天最高温':'今日气温趋势';
+  const time=(stamp:number)=>daily?dayKey(stamp).slice(5):dayTime(stamp);
+  return {points,label,start:time(first),end:time(last),details:samples.map(({stamp,temp})=>time(stamp)+' '+temp+'°C').join('，')};
 });
 let weatherAbort:AbortController|undefined;
+let weatherAt=0;
 async function readWeather() {
   if (props.impersonating || (weatherBusy.value&&!weatherAbort?.signal.aborted)) return;
   weatherBusy.value=true;
@@ -314,13 +347,22 @@ async function readWeather() {
       if(typeof day?.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(day.date)&&typeof day.description==='string')
         days.push({date:day.date,description:day.description,minimum:temperature(day.minimum),maximum:temperature(day.maximum)});
     });
-    weather.value={temp:temperature(data.temperature),humidity:temperature(data.humidity),description:data.current_description||data.description,days};
+    const hourly=new Map<number,number>();
+    if(Array.isArray(data.hourly)) for(const point of data.hourly){
+      const stamp=todoTimestamp(point?.time),temp=temperature(point?.temp);
+      if(stamp!==undefined&&temp!==null&&dayKey(stamp)===today.value)hourly.set(stamp,temp);
+    }
+    weather.value={temp:temperature(data.temperature),humidity:temperature(data.humidity),description:data.current_description||data.description,
+      days:[...new Map(days.map(day=>[day.date,day])).values()].sort((a,b)=>a.date.localeCompare(b.date)),
+      hourly:[...hourly].sort(([a],[b])=>a-b).map(([stamp,temp])=>({stamp,temp}))};
   } catch {
-    if(!controller.signal.aborted)weather.value=undefined;
+    // Keep verified readings until the date changes.
   } finally {
-    if(weatherAbort===controller)weatherBusy.value=false;
+    if(weatherAbort===controller){weatherAt=Date.now();weatherBusy.value=false;}
   }
 }
+watch(()=>props.clock,()=>{if(!props.guest&&!document.hidden&&Date.now()-weatherAt>(weather.value?600000:60000))void readWeather();});
+watch(()=>props.calendarIdentity,()=>{weatherAbort?.abort();weather.value=undefined;weatherAt=0;if(!props.guest)void readWeather();});
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest){void readWeather();void loadCalendarWeather();}});
 onDeactivated(()=>{panel.value='';});
 onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weatherAbort?.abort();calendarWeatherRequest?.abort();});
@@ -349,7 +391,7 @@ const itinerary=computed(()=>{
     const related=task && mergedAgenda.value.get(selected.value)?.find(entry=>entry.item.key===task.key);
     const due=related?.type==='due'?related.time:related?.due;
     return {key:'schedule:'+index,stamp:todoTimestamp(record.start),time:scheduleTime(record.start),label:record.kind,title:record.title,
-      meta:[...(record.scopes||[]),...(record.notes||[]),due?'截止 '+due:''].filter(Boolean).join(' · '),task};
+      meta:[record.source,...(record.scopes||[]),...(record.notes||[]),due?'截止 '+due:''].filter(Boolean).join(' · '),task};
   });
   const entries=separateTasks(selected.value).map(entry=>({key:entry.key,stamp:entry.stamp,time:entry.time,label:entry.label,title:entry.item.title,
     meta:[entry.item.scope,entry.item.status,entry.due?'截止 '+entry.due:''].filter(Boolean).join(' · '),task:entry.item}));
@@ -359,7 +401,7 @@ const itinerary=computed(()=>{
 
 <template>
   <div ref="surface" class="daily-desk" @keydown.esc="escapePanel">
-    <header class="desk-head masthead" :class="{folio:!guest}">
+    <header class="desk-head masthead" :class="{folio:!guest&&!impersonating}">
       <div class="desk-title">
         <span v-if="guest" class="desk-avatar" aria-hidden="true">
           <img v-if="avatar && !avatarFailed" :src="avatar" alt="" @error="avatarFailed=true">
@@ -375,7 +417,21 @@ const itinerary=computed(()=>{
           </div>
         </div>
       </div>
-      <div class="desk-tools">
+      <section v-if="!guest&&!impersonating" class="desk-weather" :data-condition="currentCondition" aria-label="今日天气">
+        <component :is="icons[currentCondition]" :size="28" class="weather-mark" aria-hidden="true" />
+        <div class="weather-current">
+          <strong>{{ weather?.temp!=null?weather.temp+'°C':(weatherBusy?'读取中…':'天气待更新') }}</strong>
+          <small v-if="weather">{{ [weather.description,weather.humidity!=null?'湿度 '+weather.humidity+'%':''].filter(Boolean).join(' · ') }}</small>
+        </div>
+        <div v-if="weatherTrend" class="weather-chart">
+          <svg viewBox="0 0 144 28" role="img" :aria-label="weatherTrend.label+'，'+weatherTrend.details">
+            <polygon :points="'3,28 '+weatherTrend.points+' 141,28'" fill="currentColor" opacity=".13"/>
+            <polyline :points="weatherTrend.points" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+          </svg>
+          <div><span>{{ weatherTrend.start }}</span><span>{{ weatherTrend.label }}</span><span>{{ weatherTrend.end }}</span></div>
+        </div>
+      </section>
+      <div class="mast-actions"><div class="desk-tools">
         <button v-if="!guest" class="small-key agenda-jump" aria-label="跳到日历" title="日历" @click="showAgenda"><CalendarDays :size="16" aria-hidden="true" /></button>
         <div class="desk-anchor search-anchor" @focusout="leaveSearch">
           <label class="search-field"><Search :size="16" />
@@ -389,17 +445,8 @@ const itinerary=computed(()=>{
           </section>
         </div>
         <template v-if="!guest">
-          <div v-if="!impersonating" class="desk-anchor">
-            <button ref="weatherButton" class="tool-key" aria-label="天气详情" :title="weather?.temp!=null?'今日气温 '+weather.temp+'°C':'天气详情'" :aria-expanded="panel==='weather'" @click="toggle('weather')"><CloudSun :size="19" aria-hidden="true" /></button>
-            <section v-if="panel==='weather'" class="floating forecast" aria-label="天气详情">
-              <div class="line-head"><h3>天气预报</h3><button class="small-key" :disabled="weatherBusy" @click="readWeather">更新天气</button></div>
-              <p>{{ [weather?.description,weather?.temp!=null?weather.temp+'°C':'',weather?.humidity!=null?'湿度 '+weather.humidity+'%':''].filter(Boolean).join(' · ') || (weatherBusy?'天气读取中…':'当前天气暂未提供') }}</p>
-              <ul v-if="weather?.days.length"><li v-for="day in weather.days" :key="day.date"><time>{{ day.date.slice(5) }}</time><span>{{ day.description }}</span><b>{{ day.minimum ?? '—' }} / {{ day.maximum ?? '—' }}°C</b></li></ul>
-
-            </section>
-          </div>
           <div class="desk-anchor">
-            <button ref="noticeButton" class="tool-key" :aria-label="'消息通知，'+(!unread.length && queueNote?queueNote:unread.length+' 项未读')" :aria-expanded="panel==='notices'" @click="toggle('notices')">
+            <button ref="noticeButton" class="tool-key" :aria-label="'消息通知，'+(!unread.length && queueNote?queueNote:unread.length+' 项未读')" :aria-expanded="panel==='notices'" @click="toggleNotices">
               <Bell :size="18" aria-hidden="true" /><span v-if="unread.length" class="notice-count" aria-hidden="true">{{ unread.length>99?'99+':unread.length }}</span>
             </button>
             <section v-if="panel==='notices'" class="floating notification" aria-label="未读消息">
@@ -413,9 +460,11 @@ const itinerary=computed(()=>{
               <p v-if="!unread.length">{{ queueNote || '暂无未读' }}</p>
             </section>
           </div>
+          <NavThemePicker v-if="mobileNavigation" :user-id="userId||''" palette-only />
         </template>
       </div>
       <div v-if="!guest && $slots.focus" class="command-line"><slot name="focus" /></div>
+      </div>
     </header>
 
     <div :class="{'working-grid':!guest}">
@@ -454,7 +503,7 @@ const itinerary=computed(()=>{
           <div v-if="calendarNotice" class="retry-note" role="status">{{ calendarNotice }} <button class="text-key" @click="calendarRevision++">重试日程</button></div>
         </section>
         </div>
-        <WorkbenchRoster class="rail-module roster-module" :rows="rosterRows" :message="rosterMessage" :can-retry="visibleRoster?.state==='failed'" @retry="calendarRevision++" />
+        <WorkbenchRoster class="rail-module roster-module" :rows="rosterRows" :message="rosterMessage" :can-retry="visibleRoster?.state==='failed'&&!rosterReading" @retry="rosterRevision++" />
         <section class="weather-guard rail-module" aria-label="天气预警与戒备">
           <div class="line-head"><h3><ShieldCheck :size="16" /> 今日预警与戒备</h3><button class="text-key" :disabled="calendarWeatherBusy" @click="loadCalendarWeather(true)">刷新</button></div>
           <div class="guard-summary" role="status">
@@ -525,10 +574,28 @@ const itinerary=computed(()=>{
 .search-results button:hover,.pointed,.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
 .notice-row { display:grid; gap:2px }
 .notice-row span,.muted,.itinerary h3 small,.timeline small,.timeline p { color:var(--desk-muted); font-size:12px; font-weight:normal }
-.forecast p,.forecast ul,.notification>.text-key { margin-top:8px }
-.forecast ul,.timeline { list-style:none; padding:0 }
-.forecast li { display:flex; justify-content:space-between; padding:5px 0; border-top:1px solid var(--desk-line) }
+.timeline { list-style:none; padding:0 }
 .masthead { justify-content:flex-start;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
+.mast-actions { display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:5px;min-width:0;margin-inline-start:auto }
+.desk-weather {
+  --weather-hue:var(--desk-blue); --weather-tint:#9dbee1;
+  display:flex;align-items:center;gap:8px;min-width:0;width:min(100%,340px);padding:6px 10px;border:1px solid var(--desk-line);
+  border-radius:14px;background:linear-gradient(110deg,color-mix(in srgb,var(--weather-tint) 29%,var(--desk-paper)),var(--desk-paper) 82%);
+}
+.desk-weather[data-condition="sun"] { --weather-tint:#f3bd67 }
+.desk-weather[data-condition="partly"] { --weather-tint:#c9cedf }
+.desk-weather[data-condition="rain"] { --weather-tint:#73a7c6 }
+.desk-weather[data-condition="snow"] { --weather-tint:#b8cbe6 }
+.weather-mark { flex:none;color:var(--weather-hue) }
+.desk-weather[data-condition="sun"] .weather-mark { color:#974e06 }
+[data-v2-theme="dark"] .desk-weather[data-condition="sun"] .weather-mark { color:#ffc978 }
+.weather-current { display:grid;gap:1px;min-width:0;flex:none;max-width:53% }
+.weather-current strong { font-size:21px;line-height:1.14;font-variant-numeric:tabular-nums }
+.weather-current small,.weather-chart div { font-size:10px;color:var(--desk-muted);line-height:1.25 }
+.weather-chart { flex:1 1 auto;min-width:0;color:var(--weather-hue) }
+.weather-chart svg { display:block;width:100%;height:25px }
+.weather-chart div { display:flex;justify-content:space-between;gap:3px;font-variant-numeric:tabular-nums }
+.weather-chart div span { white-space:nowrap }
 .mast-identity { min-width:0 }
 .title-line { display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap }
 .title-line h1 { font-size:21px;letter-spacing:-.03em;line-height:1.25 }
@@ -579,6 +646,7 @@ const itinerary=computed(()=>{
 .warning { display:flex; justify-content:space-between; padding:6px 9px; background:var(--desk-blue-wash); border-radius:8px }
 .agenda-jump { display:inline-flex }
 @container daily-desk (min-width:980px) {
+  .masthead.folio { display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,340px) minmax(0,1fr) }
   .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
   .agenda-jump { display:none }
 }
@@ -594,6 +662,8 @@ const itinerary=computed(()=>{
 }
 @media(max-width:540px) {
   .desk-title { width:100% }
+  .mast-actions { width:100%;margin-inline-start:0 }
+  .desk-weather { width:100% }
   .mast-identity { display:flex;align-items:center;flex-wrap:wrap;gap:2px 10px }
   .identity-line { margin-top:0 }
   .masthead .desk-tools { width:100%;flex-wrap:nowrap }

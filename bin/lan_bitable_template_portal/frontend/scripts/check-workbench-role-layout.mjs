@@ -91,7 +91,7 @@ try {
         const completed=partial && (i>0 || offset===2*limit);
         return {record_id:'repair-'+scope+(offset+i?'-'+(offset+i):''),
           title:offset===limit&&i===0?'隔离维修下一页':'隔离维修待办'+(i?' '+(i+1):''),
-          building:scope,workflow:completed?'已完成':'维修中',is_completed:completed};
+          building:scope,specialty:'电气',workflow:completed?'已完成':'维修中',is_completed:completed};
       });
       return ok({total,records:truncatedRepairPage?records.slice(0,1):records});
     }
@@ -122,7 +122,8 @@ try {
   await page.goto(origin+'/fixture',{waitUntil:'domcontentloaded',timeout:60_000});
   await page.waitForFunction(()=>!!window.setAccount,undefined,{timeout:60_000});
   const full=['event','repair_management','learning','maintenance','change','repair','power','risk_inspection','critical_guard','cabinet','drills','engineer_mop','daily','water','accounts','signatures'];
-  const actor=(id,category,modules=full,extra={})=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true,...extra});
+  const actor=(id,category,modules=full,extra={})=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true,
+    ...(category==='engineer'?{specialties:['电气']}:{}),...extra});
   const settle=()=>page.waitForFunction(()=>{
     const home=document.querySelector('.wb-home');
     return home&&!home.querySelector('.wb-todo-panel[aria-busy="true"]')&&!/正在读取|待加载/.test(home.textContent);
@@ -202,20 +203,19 @@ try {
   assert.ok(!requests.slice(dutyStart).some(([,url])=>url.startsWith('/api/learning/')));
   assert.equal(await page.getByText('隔离已完成演练',{exact:true}).count(),0);
   assert.equal(await rowsOf('drills').count(),0);
-  await open('notices:维保');
+  await open('notices:变更');
   assert.deepEqual((await tiles.evaluateAll(items=>items.map(item=>item.dataset.group))).slice(0,3),['events','critical_guard','notices:变更'],'one event tile leads the duty desk');
   assert.equal(await tile('event_notices').count(),0);
   liveGuard=false;
-  await rowsOf('notices').getByRole('button',{name:'开始 隔离维保计划',exact:true}).waitFor();
-  await open('notices:变更');
+  assert.equal(await tile('notices:维保').count(),0,'plans alone do not create ongoing todos');
   await rowsOf('notices').getByRole('button',{name:'更新／结束 隔离变更只读项',exact:true}).waitFor();
   checks.push('shared duty hides learning including saved preferences and retains both notice actions in their own tiles');
 
   for (const [category,scopes,expected] of [
     ['manager',['A','B'],['事件管理','维修项目','画像学练','重保管理','专项排查']],
     ['supervisor',['A'],['事件管理','维修项目','机柜管理','画像学练','重保管理','专项排查']],
-    ['engineer',['A'],['维修项目','专项排查']],
-    ['engineer',['A','B'],['维修项目','专项排查','事件管理']],
+    ['engineer',['A'],['维修项目','专项排查','通告办理','事件管理']],
+    ['engineer',['A','B'],['维修项目','专项排查','事件管理','通告办理']],
     ['duty',['A'],['通告办理','演练管理','维护单管理','水耗管理']],
     ['administrator',['A'],['账号与权限','签名管理']],
   ]) {
@@ -247,7 +247,7 @@ try {
   }
   checks.push('six role/scope combinations at five widths: one tile grid, no overlaps or horizontal overflow, compact controls');
 
-  await set(actor('engineer-restricted','engineer',['event','learning','cabinet','accounts']));
+  await set(actor('engineer-restricted','engineer',['learning','cabinet','accounts']));
   assert.equal(await page.locator('.wb-shortcut').count(),0,'job recommendations cannot create module grants');
   assert.equal(await todo.count(),0);
   await set(actor('engineer-action','engineer',['repair_management','risk_inspection']));
@@ -297,18 +297,18 @@ try {
 
   noticeSize=7;
   const beforeDuty=requests.length;
-  await set(actor('combined-notices','duty'));await counts(15,true);
+  await set(actor('combined-notices','duty'));await counts(21,true);
   const noticeReads=requests.length;
   await open('events');await rowsOf('events').getByRole('button',{name:'办理 隔离处理中事件'}).waitFor();
   assert.equal(await tile('events').getAttribute('data-count'),'2');
   await rowsOf('event_notices').getByRole('button',{name:'办理 隔离事件通告'}).waitFor();
-  await open('notices:维保');assert.equal(await rowsOf('notices').count(),13);
+  await open('notices:维保');assert.equal(await rowsOf('notices').count(),7);
   assert.equal(await rowsOf('notices').getByText('隔离维保计划',{exact:true}).count(),1,'linked plan and active notice appear once');
   await close();
   assert.equal(requests.length,noticeReads);
   assert.equal(await more.count(),0);
   assert.ok(!requests.slice(beforeDuty).some(([,url])=>url.startsWith('/api/learning/')));
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(15,true);
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(21,true);
   await todo.getByLabel('搜索待办').fill('事件通告'); await counts(1,true);
   await open('events');assert.equal(await rowsOf('event_notices').count(),1);
   checks.push('both event sources appear under one tile, linked notices deduplicate, duty grants and module keyword search preserved');
@@ -323,7 +323,9 @@ try {
   await counts(9);
   assert.ok(requests.filter(([,url])=>url==='/api/repair-management/status').length>repairPages);
   assert.equal(requests.filter(([,url])=>url==='/api/risk-inspections').length,riskPages,'another group makes no extra API reads');
-  await close();await more.click();await more.waitFor({state:'detached'});
+  await dialog.getByRole('button',{name:'继续读取'}).click();
+  await dialog.getByRole('button',{name:'继续读取'}).waitFor({state:'detached'});
+  assert.equal(await more.count(),0);
   checks.push('open-group remote pagination and globally discoverable remaining pages');
   riskSize=1;
   truncatedRepairPage=true;

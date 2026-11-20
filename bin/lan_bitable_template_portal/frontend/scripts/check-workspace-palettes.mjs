@@ -16,12 +16,18 @@ function readable(text,bg){
   const [high,low]=[luminance(text),luminance(bg)].sort((a,b)=>b-a);
   assert((high+.05)/(low+.05)>=4.5,text+' on '+bg);
 }
-for(const c of Object.values(api.mineral)){
+for(const c of Object.values(api.palettes).flatMap(Object.values)){
   for(const bg of [c.bg,c.surface,c.soft,c.selection])for(const text of [c.text,c.muted,c.accentText])readable(text,bg);
   for(const bg of [c.accent,c.hover,c.pressed])readable(c.onAccent,bg);
 }
 api.saveNightMode('a',true);api.loadNightMode('b');assert.equal(api.nightMode.value,false);
 api.loadNightMode('a');assert.equal(api.nightMode.value,true);
+api.savePalette('a','violet');
+assert.equal(api.theme.value.Button.colorPrimary,api.palettes.violet.light.accent);
+api.loadPalette('b');assert.equal(api.paletteId.value,'mineral');
+api.loadPalette('a');assert.equal(api.paletteId.value,'violet');
+values.set('clipflow:workspace-color-palette:c','__proto__');
+api.loadPalette('c');assert.equal(api.paletteId.value,'mineral');
 sandbox.localStorage.setItem=()=>{throw Error('blocked');};
 assert.equal(api.saveNightMode('a',false),false);assert.equal(api.nightMode.value,false);
 console.log('PASS: light and dark contrast, per-account display preferences and storage errors.');

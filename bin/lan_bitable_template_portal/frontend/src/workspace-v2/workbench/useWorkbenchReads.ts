@@ -1,13 +1,13 @@
 import { onActivated, onBeforeUnmount, onDeactivated, ref, shallowRef, watch, type Ref } from 'vue';
-import { requestJson, type Dict } from '../client';
+import { JSON_REQUEST_TIMEOUT_MS, requestJson, type Dict } from '../client';
 import { layoutKey } from '../dashboard/layout';
 import type { Source, SourceId, SourceResult } from './sources';
 
-type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult; pages?:number; retrying?:boolean };
+type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult; pages?:number };
 const statusOf = (error: unknown) => (error as {status?:number})?.status;
 
 export async function readWorkbenchRequest(path: string, signal: AbortSignal) {
-  const read=()=>requestJson(path,{signal,cache:'no-store',timeoutMs:18000,background:true});
+  const read=()=>requestJson(path,{signal,cache:'no-store',timeoutMs:18000,queueTimeoutMs:JSON_REQUEST_TIMEOUT_MS,background:true});
   try {
     return await read();
   } catch (error) {
@@ -42,18 +42,21 @@ export function useWorkbenchReads(context: Ref<string>, sources: Ref<Source[]>) 
     const controller=new AbortController(), key=context.value, old=states.value[id], previous=old?.result;
     const pages=(old?.pages ?? 1) + (more ? 1 : 0);
     active.set(id,controller);
-    update(id,{status:'loading',result:previous,pages:old?.pages,retrying:old?.retrying||old?.status==='stale'||old?.status==='down'});
+    update(id,{status:'loading',result:previous,pages:old?.pages});
     const current=()=>!controller.signal.aborted&&active.get(id)===controller&&key===context.value;
     try {
-      const result=await source.load(controller.signal,pages);
+      const result=await source.load(controller.signal,pages,partial=>{
+        if (current()&&((partial.rows.length&&!previous?.rows.length)||partial.restricted)) {
+          update(id,{status:'loading',result:partial,pages:old?.pages});
+        }
+      });
       if (current()) {
-        const keepPrevious = result.delayed && !result.restricted && !!previous;
+        const keepPrevious = result.delayed && !result.restricted && !result.rows.length && !!previous?.rows.length;
         update(id,{status:result.delayed?'stale':'ok',result:keepPrevious?previous:result,pages:keepPrevious?old?.pages:pages});
       }
     } catch (error) {
       if (!current()) return;
       if ([401,403].includes(statusOf(error)||0)) update(id,{status:'deny'});
-      else if ((error as {message?:string})?.message==='workbench-source-delayed') update(id,{status:'stale',result:previous,pages:old?.pages});
       else update(id,previous?{status:'stale',result:previous,pages:old?.pages}:{status:'down'});
     } finally {
       if (active.get(id)===controller) {

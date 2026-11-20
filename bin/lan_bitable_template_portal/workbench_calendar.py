@@ -10,6 +10,7 @@ import time
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from upload_event_module.building_normalizer import extract_building_codes
 
 from .cabinet_guest import is_cabinet_guest
 from .module_access import allowed_modules
@@ -153,13 +154,17 @@ class CalendarReads:
         self.cache = {}
         self.pending = {}
 
-    async def read(self, key, loader):
+    def refresh(self, key, loader):
         cached = self.cache.get(key)
         if cached and cached[0] > time.monotonic():
-            return cached[1]
+            return
         if key not in self.pending:
             self.pending[key] = asyncio.create_task(self._read(key, loader))
-        return await asyncio.shield(self.pending[key])
+        return self.pending[key]
+
+    async def read(self, key, loader):
+        task = self.refresh(key, loader)
+        return await asyncio.shield(task) if task else self.cache[key][1]
 
     async def _read(self, key, loader):
         result = None
@@ -181,18 +186,21 @@ class CalendarReads:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-def read_roster(service, month, today):
+def read_roster(service, month, today, *, cached_only=False, today_only=False):
+    from upload_event_module.config import config
+
     first = dt.date.fromisoformat(month+'-01')
     rows, covered = [], []
-    dates = [day for day in (first-dt.timedelta(days=1), *month_dates(month)) if day <= today]
+    dates = [day for day in (first-dt.timedelta(days=1), *month_dates(month)) if day <= today and (not today_only or day == today)]
     for day in reversed(dates):
         date = day.isoformat()
-        try:
-            snapshot = daily_roster(service, date)
-        except Exception:
-            if day != today:
-                continue
-            from upload_event_module.config import config
+        snapshot = None
+        if day == today and not cached_only:
+            try:
+                snapshot = daily_roster(service, date)
+            except Exception:
+                pass
+        if snapshot is None:
             snapshot = service._state_store.get_document(ROSTER_NAMESPACE, date) or {}
             if snapshot.get('source') != PERSONNEL_TABLE or snapshot.get('app_id') != config.app_id or not observed_on_day(snapshot.get('observed_at'), date):
                 continue
@@ -252,10 +260,70 @@ def read_changes(service):
         start,end,_ = service._change_time_range(record)
         rows.append({'title':service._change_title(record),'buildings':service._change_record_building_codes(record),
                      'source_id':record.get('record_id'),'startDate':start,'endDate':end,
+                     'order_number':service._repair_management_plain_text(fields.get('智航工单编号') or fields.get('工单号')),
                      'plannedDelayStartDate':fields.get('计划延迟开始日期'),'plannedDelayEndDate':fields.get('计划延迟结束日期'),
                      'actualStartDate':fields.get('实际开始时间'),'actualEndDate':fields.get('实际结束时间'),
                      'level':service._repair_management_plain_text(fields.get('变更等级') or fields.get('变更级别'))})
     return rows
+
+
+ZHIHANG_CALENDAR = {
+    'change': ('change', '变更', '标题', ('实际开始时间', '计划延时开始时间', '计划开始时间'), '状态'),
+    'risk': ('risk_inspection', '风险排查', '检查项目', ('排查时间', '审核时间'), '排查状态'),
+    'drill': ('drills', '演练', '演练场景', ('实际演练时间', '计划演练时间'), '执行状态'),
+    'event': ('event', '事件', '事件标题', ('发生时间', '创建时间'), '处理状态'),
+    'inspection': ('daily', '巡检', '工单名称', (), '工单状态'),
+}
+
+
+def read_zhihang_schedule(service, month, scopes, modules, native_numbers):
+    from .zhihang_data_sources import _BUILDINGS, _date, _plan_range
+    from .zhihang_data_sync import NS
+
+    kinds = {kind for kind, (grant, *_columns) in ZHIHANG_CALENDAR.items() if grant in modules}
+    if not kinds:
+        return {}
+    store = service._state_store
+    runs = [doc['payload'] for doc in store.list_documents(NS, key_prefix='run:')
+            if doc['payload'].get('status') == 'success' and doc['payload'].get('kind') in kinds]
+    days = defaultdict(list)
+    for run in sorted(runs, key=lambda run: (run.get('reference_at') or run.get('created_at', ''), run.get('finished_at', '')), reverse=True):
+        kind = run['kind']
+        if kind not in kinds:
+            continue
+        _, label, title_field, date_fields, status_field = ZHIHANG_CALENDAR[kind]
+        rows = store.get_document(NS, 'rows:' + run['id']) or {}
+        found_month = False
+        for fields in rows.values():
+            if not isinstance(fields, dict):
+                continue
+            if kind == 'inspection':
+                stamp = next(iter(_plan_range(fields.get('计划区间'))), None)
+            else:
+                stamp = next((value for field in date_fields if (value := _date(fields.get(field))) is not None), None)
+            if not stamp or stamp.strftime('%Y-%m') != month:
+                continue
+            found_month = True
+            if kind == 'change' and fields.get('工单号') in native_numbers:
+                continue
+            place = fields.get('楼栋') or fields.get('实施区域') or fields.get('数据中心')
+            codes = extract_building_codes(place or (fields.get(title_field) if kind == 'change' else ''))
+            if kind == 'event' and not codes:
+                for raw in (fields.get('数据中心编码'), fields.get('专业域编码')):
+                    if match := re.match(r'^([5-9])(?:\.|$)', str(raw or '')):
+                        codes = [building(_BUILDINGS[match[1]])]
+                        break
+            authorized = sorted(scopes.intersection(codes))
+            title = str(fields.get(title_field) or '').strip()
+            if title and authorized:
+                status = str(fields.get(status_field) or '').strip()
+                days[stamp.date().isoformat()].append({'kind':label,'title':title[:240],'scopes':authorized,
+                    'start':stamp.isoformat(),'source':'智航','notes':[status[:60]] if status else []})
+        if found_month or kind == 'change':
+            kinds.remove(kind)
+        if not kinds:
+            break
+    return dict(days)
 
 
 def install_workbench_calendar(app, controller, runtime):
@@ -290,12 +358,26 @@ def install_workbench_calendar(app, controller, runtime):
         if not scopes:
             return JSONResponse({'ok': False, 'error': '当前楼栋没有日历权限。'}, status_code=403)
         service = runtime.service
-        include_changes = 'change' in modules and (level != 'L4' or profile.get('category') == 'duty')
+        include_shared = level != 'L4' or profile.get('category') == 'duty'
+        include_changes = 'change' in modules and include_shared
         sealing_app = os.getenv('CLIPFLOW_CALENDAR_SEALING_APP_TOKEN', '').strip()
         sealing_table = os.getenv('CLIPFLOW_CALENDAR_SEALING_TABLE_ID', '').strip()
         today = dt.datetime.now(TZ).date()
+        if request.query_params.get('view') == 'roster':
+            from upload_event_module.config import config
+            roster, covered = await asyncio.to_thread(read_roster, service, month, today, cached_only=True, today_only=True)
+            key = ('roster', today, config.app_id)
+            loader = lambda: read_roster(service, month, today, today_only=True)
+            if month == today.strftime('%Y-%m'):
+                if today.isoformat() in covered:
+                    reads.refresh(key, loader)
+                else:
+                    roster, covered = await reads.read(key, loader) or ([], [])
+            return JSONResponse({'ok':True,'data':{'month':month,'days':public_schedule(month, scopes, roster, [], [], today),
+                'unavailable':[] if today.isoformat() in covered else ['排班'],'roster_dates':covered}},
+                headers={'Cache-Control':'private, no-store'})
         staff_data, seals, changes = await asyncio.gather(
-            reads.read(('roster', month, today), lambda: read_roster(service, month, today)),
+            asyncio.to_thread(read_roster, service, month, today, cached_only=True),
             reads.read(('seals', sealing_app, sealing_table), lambda: read_seals(service, sealing_app, sealing_table)),
             asyncio.to_thread(read_changes, service) if include_changes else asyncio.sleep(0, result=[]),
             return_exceptions=True)
@@ -305,9 +387,18 @@ def install_workbench_calendar(app, controller, runtime):
         if isinstance(seals, Exception):
             seals = None
         missing = [label for label, value in [('封网', seals), ('计划变更', changes)] if value is None]
-        if staff_data is None or isinstance(staff_data, Exception) or (month == today.strftime('%Y-%m') and today.isoformat() not in covered):
-            missing.append('排班')
-        return JSONResponse({'ok': True, 'data': {'month': month, 'days': public_schedule(month, scopes, roster, seals, changes, today),
+        days = public_schedule(month, scopes, roster, seals, changes, today)
+        if include_shared:
+            try:
+                native_ids = {item['source_id'] for day in days.values() for item in day['items'] if item.get('source_id')}
+                native_numbers = {row['order_number'] for row in (changes or [])
+                                  if row.get('source_id') in native_ids and row.get('order_number')}
+                zhihang = await asyncio.to_thread(read_zhihang_schedule, service, month, scopes, modules, native_numbers)
+                for day, items in zhihang.items():
+                    days.setdefault(day, {'items':[], 'staff':[]})['items'].extend(items)
+            except Exception:
+                missing.append('智航日程')
+        return JSONResponse({'ok': True, 'data': {'month': month, 'days': days,
                                                 'unavailable': missing, 'roster_dates':covered}},
                             headers={'Cache-Control': 'private, no-store'})
 

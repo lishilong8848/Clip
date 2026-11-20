@@ -19152,6 +19152,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         query: str = "",
         page: int = 1,
         page_size: int = 50,
+        incomplete: bool = False,
     ) -> dict[str, Any]:
         scope_code = self._water_scope_code(scope)
         if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
@@ -19168,6 +19169,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             frequency=frequency,
             shift=shift,
             query=query,
+            incomplete=incomplete,
             limit=page_size,
             offset=(page - 1) * page_size,
         )

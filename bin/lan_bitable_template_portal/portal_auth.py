@@ -702,6 +702,10 @@ class PortalAuthManager:
             "is_fixed_superuser": fixed_superuser,
             "enabled": enabled,
             "category": category,
+            "specialties": person.get("specialties") or [
+                specialty for specialty in ("电气", "暖通", "消防", "弱电")
+                if specialty in str(person.get("position") or "")
+            ],
             "home_scope": home,
             "role": role,
             "modules": modules,

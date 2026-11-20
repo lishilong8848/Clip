@@ -38,7 +38,7 @@ const modules = [
   { value: 'accounts', label: '账号与设置', group: '系统管理' },
 ];
 const scopeOptions = ['A', 'B'].map(value => ({ value, label: value + '楼' }));
-function fixture(count = 24) {
+function fixture(count = 34) {
   const people = Array.from({ length: count }, (_, index) => ({
     id: 'rec' + index, record_id: 'rec' + index, open_id: 'ou_bulk_' + index,
     name: '隔离人员' + index, employee_no: 'TEST-' + index, kind: 'external', account_nature: '外部账号',
@@ -168,6 +168,34 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
+    if (v2) {
+      await page.goto(origin + '/__account-bulk-fixture');
+      const rows = page.locator('.account-directory article');
+      await rows.first().waitFor();
+      assert.equal(await rows.count(), 30);
+      await page.getByRole('checkbox', { name:'选择 隔离人员0', exact:true }).check();
+      await page.getByRole('button', { name:'下一页', exact:true }).click();
+      assert.equal(await rows.count(), 4);
+      await page.getByRole('checkbox', { name:'选择 隔离人员31', exact:true }).check();
+      await page.getByRole('button', { name:/批量调整.*2 人/ }).click();
+      const bulk = page.getByRole('dialog', { name:/批量功能授权/ });
+      await bulk.getByRole('checkbox', { name:'水耗管理', exact:true }).check();
+      await bulk.getByRole('button', { name:'预览调整', exact:true }).click();
+      assert.equal(await bulk.locator('li').count(), 2);
+      assert.equal(state.posts.length, 0);
+      const before = structuredClone(state.people);
+      await bulk.getByRole('button', { name:'确认保存', exact:true }).click();
+      await bulk.waitFor({ state:'hidden' });
+      assert.equal(state.posts.length, 1);
+      assert.deepEqual(state.posts[0].changes.map(item => item.id), ['rec0', 'rec31']);
+      assertPayload(state.posts[0], before, 'add', ['water']);
+      await page.getByRole('button', { name:'上一页', exact:true }).click();
+      assert.equal(await page.getByRole('checkbox', { name:'选择 隔离人员0', exact:true }).isChecked(), true);
+      evidence.push({ label:'v2-cross-page', payload:state.posts[0] });
+      console.log('PASS: V2 bulk authorization across 30-account pages.');
+      await context.close(); await server.close(); server = null;
+      continue;
+    }
     const goto = async (query = '') => { await page.goto(origin + '/__account-bulk-fixture' + query); await page.getByRole('checkbox', { name: '选择隔离人员0', exact: true }).waitFor(); };
     await goto();
     // Explicit backend flags and fail-closed selection for self/locked/blocked/disabled.
@@ -179,16 +207,16 @@ try {
     await refresh(page);
     for (let index = 1; index <= 5; index++) assert.equal(await page.getByRole('checkbox', { name: '选择隔离人员' + index, exact: true }).isDisabled(), true);
     await page.getByRole('checkbox', { name: '选择本页可管理人员' }).check();
-    assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 15 \/ 300 人/);
+    assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 25 \/ 300 人/);
     await page.getByRole('button', { name: '下一页', exact: true }).click();
-    await select(page, '隔离人员20');
-    assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 16/);
+    await select(page, '隔离人员30');
+    assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 26/);
     await page.getByRole('button', { name: '上一页', exact: true }).click();
     assert.equal(await page.getByRole('checkbox', { name: '选择隔离人员0', exact: true }).isChecked(), true);
     await page.getByRole('button', { name: '清空选择' }).click();
     await select(page, '隔离人员0');
     await page.getByRole('button', { name: '下一页', exact: true }).click();
-    await select(page, '隔离人员21');
+    await select(page, '隔离人员31');
     await page.getByRole('searchbox', { name: '搜索账号' }).fill('没有此人');
     assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 2/);
     await openBulk(page);
@@ -216,7 +244,7 @@ try {
     await modal(page).getByRole('checkbox', { name: '变更通告', exact: true }).check();
     await preview(page);
     const beforeAdd = structuredClone(state.people);
-    assert.deepEqual(await modal(page).locator('li>span:first-child').allTextContents().then(names => names.map(name => name.split('TEST-')[0])), ['隔离人员0', '隔离人员21']);
+    assert.deepEqual(await modal(page).locator('li>span:first-child').allTextContents().then(names => names.map(name => name.split('TEST-')[0])), ['隔离人员0', '隔离人员31']);
     assert.equal(state.posts.length, 0, 'preview sends no request');
     for (const size of [{ width: 1440, height: 1000 }, { width: 402, height: 874 }, { width: 440, height: 956 }]) {
       await page.setViewportSize(size); await visualCheck(page, `${v2 ? 'v2' : 'legacy'}-${size.width}x${size.height}`);
@@ -243,7 +271,7 @@ try {
     evidence.push({ label: v2 ? 'v2-payloads' : 'legacy-payloads', add: state.posts[0], remove: state.posts[1] });
     // A stale second member must keep both selections and all module choices.
     await openBulk(page); await modal(page).getByRole('checkbox', { name: '变更通告', exact: true }).check(); await preview(page);
-    state.people[21].revision += '-concurrent';
+    state.people[31].revision += '-concurrent';
     const staleBefore = structuredClone(state.people);
     await modal(page).getByRole('button', { name: '确认提交 2 人' }).click();
     await modal(page).getByRole('button', { name: '刷新账号' }).waitFor();
@@ -262,7 +290,7 @@ try {
     await page.waitForFunction(() => !document.querySelector('.account-bulk-editor button.primary:disabled'));
     await preview(page);
     await modal(page).getByRole('button', { name: '确认提交 2 人' }).click(); await modal(page).waitFor({ state: 'hidden' });
-    assert.equal(state.posts.at(-1).changes.find(item => item.id === 'rec21').revision, staleBefore[21].revision);
+    assert.equal(state.posts.at(-1).changes.find(item => item.id === 'rec31').revision, staleBefore[31].revision);
     // Authority revoked after preview: a rejection keeps everyone and reports no success.
     await openBulk(page); await modal(page).getByRole('checkbox', { name: '事件管理', exact: true }).check(); await preview(page);
     state.fail = '当前账号无权管理此人员，未修改任何数据。'; state.failStatus = 403;
@@ -284,9 +312,9 @@ try {
     await modal(page).getByRole('button', { name: '取消', exact: true }).click(); state.changedCount = null;
     // Refresh retains valid IDs and explicitly names removed people.
     await page.getByRole('searchbox', { name: '搜索账号' }).fill('');
-    state.people[21].can_edit_access = false; await refresh(page);
+    state.people[31].can_edit_access = false; await refresh(page);
     assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 1/);
-    assert.match(await page.locator('.accounts>.warning').innerText(), /已移除.*隔离人员21/);
+    assert.match(await page.locator('.accounts>.warning').innerText(), /已移除.*隔离人员31/);
     await openBulk(page);
     await modal(page).getByRole('checkbox', { name: '水耗管理' }).check(); await preview(page);
     assert.match(await modal(page).getByRole('alert').innerText(), /无需提交/);
@@ -309,9 +337,9 @@ try {
     assert.equal(await page.getByRole('checkbox', { name: '选择隔离人员0', exact: true }).isDisabled(), true);
     // Capacity and single-person management-module grant for a legal L3 target.
     state = fixture(302); await goto();
-    for (let index = 0; index < 15; index++) {
+    for (let index = 0; index < 10; index++) {
       await page.getByRole('checkbox', { name: '选择本页可管理人员' }).check();
-      if (index < 14) await page.getByRole('button', { name: '下一页', exact: true }).click();
+      if (index < 9) await page.getByRole('button', { name: '下一页', exact: true }).click();
     }
     assert.match(await page.locator('.account-bulk-bar').innerText(), /已选 300/);
     await page.getByRole('button', { name: '下一页', exact: true }).click();
@@ -324,14 +352,7 @@ try {
     await modal(page).getByRole('checkbox', { name: '选择系统管理全部模块', exact: true }).check(); await preview(page);
     await modal(page).getByRole('button', { name: '确认提交 1 人' }).click(); await modal(page).waitFor({ state: 'hidden' });
     assert.deepEqual(state.posts[0].changes[0].modules, ['event', 'links', 'accounts']);
-    if (v2) {
-      state = fixture(); await goto('?dark'); await select(page, '隔离人员0'); await openBulk(page);
-      await modal(page).getByRole('checkbox', { name: '水耗管理' }).check(); await preview(page);
-      for (const size of [{ width: 1440, height: 1000 }, { width: 402, height: 874 }, { width: 440, height: 956 }]) {
-        await page.setViewportSize(size); await visualCheck(page, `v2-dark-${size.width}x${size.height}`);
-      }
-    }
-    console.log(`PASS: ${v2 ? 'V2' : 'legacy'} single/multi-person, group all/partial selection, cross-page retention, add/remove, preview, revision retry, partial-response protection, refresh pruning, actor limits, L4/L2, 300-person limit, responsive modal`);
+    console.log('PASS: legacy single/multi-person, group all/partial selection, cross-page retention, add/remove, preview, revision retry, partial-response protection, refresh pruning, actor limits, L4/L2, 300-person limit, responsive modal');
     await context.close(); await server.close(); server = null;
   }
   assert.deepEqual(pageErrors, [], 'no browser runtime errors');

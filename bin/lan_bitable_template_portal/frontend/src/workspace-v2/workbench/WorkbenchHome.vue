@@ -4,7 +4,8 @@ import { NModal, NPopover } from 'naive-ui';
 import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Droplets, FileCheck2, KeyRound, Layers3, ListChecks, Package, PenLine, Route, ScanLine, Search, ShieldCheck, Siren, SlidersHorizontal, Wrench, X, Zap } from 'lucide-vue-next';
 import type { Dict } from '../client';
 import { canReviewHandover, moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
-import { mandatoryCheck, widget, type Widget } from '../dashboard/layout';
+import { widget, type Widget } from '../dashboard/layout';
+import { preShiftHomeAccount } from '../../preShiftUtils';
 import { requestEmbeddedChange, runNavigationAction } from '../navigation';
 import PreShiftCheck from '../dashboard/PreShiftCheck.vue';
 import PeriodOverview from './PeriodOverview.vue';
@@ -23,18 +24,18 @@ const content=ref<HTMLElement>();
 const clock=ref(Date.now());
 const authorizedScopes=computed(()=>workbenchScopes(props.scopes));
 const accessKey=computed(()=>JSON.stringify([props.user.open_id,props.user.union_id,props.user.level,props.user.role,
-  props.user.category,props.user.home_scope,props.user.modules,props.user.scope_rules,props.user.impersonation,
+  props.user.category,props.user.specialties,props.user.home_scope,props.user.modules,props.user.scope_rules,props.user.impersonation,
   props.user.tool_management_enabled,props.user.tool_management_full_access,props.user.can_manage_accounts,props.user.enabled,props.scopes]));
 const concreteScopes=computed(()=>authorizedScopes.value.filter(option=>/^[A-EH]$|^110$/.test(option.value)));
 const ownScope=computed(()=>concreteScopes.value.find(option=>option.value===props.user.home_scope)?.value
   || (concreteScopes.value.length===1?concreteScopes.value[0]?.value:'' )||'');
-const checkScope=computed(()=>mandatoryCheck(props.user)?ownScope.value||concreteScopes.value[0]?.value||'':'');
+const checkScope=computed(()=>preShiftHomeAccount(props.user)?ownScope.value:'');
 const checkUser=computed(()=>props.user.home_scope===checkScope.value?props.user:{...props.user,home_scope:checkScope.value});
 const shift=ref('');
 const accountLevel=computed(()=>deskRole(props.user));
 const globalDesk=computed(()=>accountLevel.value==='L0'||accountLevel.value==='L1');
 const role=computed(()=>globalDesk.value?'manager':accountLevel.value==='L2'?'engineer':accountLevel.value==='L3'?'supervisor':
-  accountLevel.value==='L4'?'personal':accountLevel.value==='duty'?'duty':workbenchRole(props.user,authorizedScopes.value,Boolean(shift.value)));
+  accountLevel.value==='duty'?'duty':workbenchRole(props.user,authorizedScopes.value,Boolean(shift.value)));
 const recipe=computed(()=>recipes[role.value]);
 const roleLabel=computed(()=>accountLevel.value
   ? {L0:'超级管理员',L1:'全楼管理员',L2:'工程师编辑',L3:'本楼主管',L4:'本楼基础账号',duty:'固定值班账号'}[accountLevel.value]
@@ -106,13 +107,10 @@ function switchScope(event:Event){
     emit('open',composite(scope)&&!authorizedScopes.value.some(option=>option.value===scope)?'/':scopedUrl('/',{scope}));
 }
 
-const pendingSources=computed(()=>accountLevel.value?deskSources[accountLevel.value]:recipe.value.pending);
+const pendingSources=computed(()=>accountLevel.value
+  ?deskSources[accountLevel.value==='L4'&&role.value==='duty'?'duty':accountLevel.value]:recipe.value.pending);
 const sources=computed(()=>workbenchSources({user:props.user,scope:dataScope.value,scopes:authorizedScopes.value,
-  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value},async(path,signal)=>{
-  const data=await readWorkbenchRequest(path,signal);
-  if (data.source_snapshot_ready===false || data.snapshot?.exists===false) throw new Error('workbench-source-delayed');
-  return data;
-}));
+  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value},readWorkbenchRequest));
 const {states,load,refresh,refreshExpired}=useWorkbenchReads(context,sources);
 const allShortcuts=ref(false);
 const sourceOrder=computed(()=>[...new Set<SourceId>([
@@ -128,7 +126,7 @@ const allTasks=computed(()=>orderedSources.value
   .filter(item=>(accountLevel.value!=='L2'||inDeskScope(item,dataScope.value))
     &&deskTaskVisible(accountLevel.value,props.user,item,ownScope.value)));
 const missingOwnership=computed(()=>['L2','L3','L4'].includes(accountLevel.value||'')&&orderedSources.value.some(source=>
-  ['notices','engineer_mop','repair_management'].includes(source.id) && states.value[source.id]?.result?.rows.some(item=>
+  source.id==='engineer_mop' && states.value[source.id]?.result?.rows.some(item=>
     accountLevel.value==='L4' ? !item.actorIds?.length : (accountLevel.value==='L3'||!inDeskScope(item,ownScope.value))&&!item.ownerLevel)));
 const readStorageKey=computed(()=>{
   const id=props.user.open_id||props.user.union_id;
@@ -217,17 +215,24 @@ function compareRows(a:WorkItem,b:WorkItem){
 }
 const taskGroups=computed(()=>{
   const groups=new Map<string,{key:string;label:string;source:SourceId;icon:typeof Layers3;hue:number;rows:WorkItem[]}>();
+  function groupFor(key:string,label:string,source:SourceId) {
+    const existing=groups.get(key);
+    if(existing)return existing;
+    const [icon,hue]=tileStyles[key]||[ClipboardList,205];
+    const group={key,label,source,icon,hue,rows:[] as WorkItem[]};
+    groups.set(key,group);
+    return group;
+  }
   for(const item of matchedTasks.value){
     const source=item.kind==='event_notices'?'events':item.kind;
     const label=(source==='notices' && item.detail)||taskModuleLabel(source)||source;
     const key=source==='notices'?'notices:'+label:source;
-    let group=groups.get(key);
-    if(!group){
-      const [icon,hue]=tileStyles[key]||[ClipboardList,205];
-      group={key,label,source,icon,hue,rows:[]};
-      groups.set(key,group);
-    }
-    group.rows.push(item);
+    groupFor(key,label,source).rows.push(item);
+  }
+  const represented=new Set([...groups.values()].map(group=>group.source));
+  for(const source of sourcesForQueue.value){
+    if(!represented.has(source.id)&&states.value[source.id]?.result?.more)
+      groupFor(source.id,taskModuleLabel(source.id)||source.label,source.id);
   }
   const ordered=[...groups.values()];
   for(const group of ordered)group.rows.sort(compareRows);
@@ -235,7 +240,7 @@ const taskGroups=computed(()=>{
     const rankA=groupPriority[a.key]??4, rankB=groupPriority[b.key]??4;
     if(rankA!==rankB)return rankA-rankB;
     if(rankA===4){
-      const roleOrder=deskActionOrder(accountLevel.value,a.rows[0]!)-deskActionOrder(accountLevel.value,b.rows[0]!);
+      const roleOrder=a.rows[0]&&b.rows[0]?deskActionOrder(accountLevel.value,a.rows[0])-deskActionOrder(accountLevel.value,b.rows[0]):0;
       const sourceRank=sourceOrder.value.indexOf(a.source)-sourceOrder.value.indexOf(b.source);
       if(roleOrder||sourceRank)return roleOrder||sourceRank;
     }
@@ -276,16 +281,10 @@ watch(taskGroups,groups=>{
 });
 const allLoading=computed(()=>sourcesForQueue.value.some(({id})=>!states.value[id]||
   (states.value[id]?.status==='loading'&&!states.value[id]?.result)));
-const moreSources=computed(()=>sourcesForQueue.value.filter(({id})=>states.value[id]?.result?.more));
-const canLoadMore=computed(()=>moreSources.value.length>0);
-const queueIssues=computed(()=>sourcesForQueue.value.filter(source=>{
-  const state=states.value[source.id];
-  return state?.retrying||state?.status==='stale'||state?.status==='down';
-}));
+const queueIssues=computed(()=>sourcesForQueue.value.filter(({id})=>['stale','down'].includes(states.value[id]?.status||'')));
 const queueStatus=computed(()=>{
-  if (matchedTasks.value.length) return '';
+  if (taskGroups.value.length) return '';
   if (allLoading.value) return '正在读取…';
-  if (canLoadMore.value) return '当前页无匹配';
   if (queueIssues.value.length) return '';
   if (missingOwnership.value) return '待办归属待核对';
   if (taskSearch.value.trim()) return '未找到待办';
@@ -294,21 +293,14 @@ const queueStatus=computed(()=>{
   if (taskView.value==='unread') return '暂无未读待办';
   return '暂无待办';
 });
-function loadMore(){
-  for(const {id} of moreSources.value) void load(id,true,true);
-}
 watch([taskSearch,taskView],()=>{activeGroup.value='';});
 watch(queueSources,list=>{
   if(taskView.value==='previous-repairs'&&!list.some(source=>source.id==='repair_management'))taskView.value='all';
 });
 function sourceStatus(id:SourceId) {
   const state=states.value[id];
-  if (!state) return '待加载';
-  if (state.status==='loading') return '正在读取…';
-  if (state.status==='deny') return '当前无权查看';
-  if (state.status==='down') return '读取失败';
-  if (state.status==='stale') return state.result?.rows.length?'数据待更新':'等待同步';
-  return state.result?.more?'仅显示已读取明细':state.result?.rows.length?'待处理':'暂无待处理';
+  if (state?.status==='down') return '读取失败';
+  return state?.result?.rows.length?'部分数据待读取':'源数据未就绪';
 }
 const deadline=(time:number)=>new Date(time).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 function taskWhen(item:WorkItem){
@@ -324,7 +316,7 @@ function actionLabel(item:WorkItem) {
   if (item.kind==='accounts'&&globalDesk.value) return '授权审核';
   if (item.kind==='ali_confirmation') return '确认截图';
   if (role.value!=='duty'||item.kind!=='notices') return '办理';
-  return item.ongoing?'更新／结束':item.status==='待核验'?'核验':'开始';
+  return '更新／结束';
 }
 function canOpenNoticeDeletion(item:WorkItem){
   return !props.user.impersonation&&props.user.can_delete_business===true&&['L0','L3'].includes(accountLevel.value||'')
@@ -396,14 +388,6 @@ function focusCasePanel(){
   });
 }
 watch([inlineTask,readOnlyTask],([task,detail])=>{if(task||detail)focusCasePanel();});
-function openShortcut(entry:{id:string;url:string}){
-  if (role.value==='duty'&&entry.id==='notices') {
-    content.value?.scrollIntoView({block:'start'});
-    content.value?.focus({preventScroll:true});
-    return;
-  }
-  emit('open',entry.url);
-}
 function restoreFocus(){
   const last=trigger;trigger=null;
   void nextTick(()=>{(last?.isConnected?last:content.value)?.focus({preventScroll:true});});
@@ -414,21 +398,8 @@ watch([context,selectedScope],()=>{
 },{flush:'sync'});
 
 function readDuty(data:Dict){
-  if (props.user.category==='duty'||data.scope!==checkScope.value||!data.roster_ready) {
-    shift.value='';
-    return;
-  }
-  const rosterItems=new Set(data.definition.items.filter((item:Dict)=>item.frequency?.kind==='shift'&&!item.fixed_recipients?.length).map((item:Dict)=>item.id));
-  const now=Date.parse(data.server_time);
-  const latest=data.tasks.filter((task:Dict)=>{
-    const start=Date.parse(task.day+(task.shift==='夜'?'T17:50:00':'T08:00:00')+'+08:00');
-    return ['白','夜'].includes(task.shift)&&start<=now&&now<task.deadline*1000
-      && task.definition_version===data.definition.version
-      && Array.isArray(task.people)&&task.people.some((person:Dict)=>person.open_id===props.user.open_id)
-      && Array.isArray(task.items)&&task.items.some((item:Dict)=>rosterItems.has(item.id)
-        && (!Array.isArray(item.recipient_ids)||item.recipient_ids.includes(props.user.open_id)));
-  }).sort((a:Dict,b:Dict)=>b.due-a.due)[0];
-  shift.value=latest?.shift||'';
+  const assigned=data.viewer_active_shift;
+  shift.value=data.scope===checkScope.value&&data.viewer_on_roster===true&&['白','夜'].includes(assigned)?assigned:'';
 }
 let dutyTimer:ReturnType<typeof setInterval>|undefined;
 watch(accessKey,()=>{shift.value='';},{flush:'sync'});
@@ -492,7 +463,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
   <div class="wb-home task-desk">
     <WorkbenchDailyLayout :name="accountName" :avatar="user.avatar_url || user.avatar" :clock="clock" :links="deskLinks"
       :tasks="allTasks" :unread="unreadTasks" :agenda-scopes="agendaScopes" :calendar-scope="dataScope" :impersonating="!!user.impersonation"
-      :calendar-identity="accessKey" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
+      :calendar-identity="accessKey" :user-id="String(user.open_id||'')" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
       <template #context><span class="wb-identity role-context">{{ [roleLabel,scopeOptions.length<=1?currentScopeLabel:'',shift?shift+'班':''].filter(Boolean).join(' · ') }}</span></template>
       <template v-if="scopeOptions.length>1" #focus>
         <label class="wb-scope scope-choice"><select data-native-select :value="selectedScope" aria-label="工作台楼栋" @change="switchScope"><option v-for="opt in scopeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></label>
@@ -500,7 +471,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
       <template #shortcuts>
         <nav v-if="shortcuts.length" class="wb-shortcuts business-strip" aria-label="常用业务">
           <strong>常用业务</strong>
-          <button v-for="entry in visibleShortcuts" :key="entry.id" class="wb-shortcut business-key" @click="openShortcut(entry)"><component :is="shortcutIcon(entry.icon)" :size="15" />{{ entry.label }}</button>
+          <button v-for="entry in visibleShortcuts" :key="entry.id" class="wb-shortcut business-key" @click="emit('open',entry.url)"><component :is="shortcutIcon(entry.icon)" :size="15" />{{ entry.label }}</button>
           <button v-if="shortcuts.length>6" class="more-key" :aria-expanded="allShortcuts" @click="allShortcuts=!allShortcuts">{{ allShortcuts?'收起入口':'全部入口 ('+shortcuts.length+')' }}</button>
         </nav>
       </template>
@@ -533,7 +504,6 @@ function closeAli(){aliFocus.value='';restoreFocus();}
         <header class="queue-toolbar">
           <div class="queue-title"><h2 id="workbench-queue-title">待办办理</h2>
             <span v-if="showQueueCount" class="wb-task-count" :title="queueNote" :aria-label="'已读取 '+matchedTasks.length+' 项'">{{ matchedTasks.length }}</span>
-            <button v-if="canLoadMore" type="button" class="queue-more" aria-label="读取更多待办" title="读取下一页待办" :disabled="allLoading || moreSources.some(({id})=>states[id]?.status==='loading')" @click="loadMore">更多<ChevronRight :size="13" aria-hidden="true" /></button>
           </div>
           <div class="queue-switches" role="group" aria-label="待办筛选">
             <button v-for="view in viewButtons" :key="view.view" :aria-pressed="taskView===view.view" @click="taskView=view.view">
@@ -545,7 +515,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
           </div>
         </header>
         <details v-if="queueIssues.length" class="desk-queue-health queue-health"><summary>{{ queueIssues.length }} 类待办待更新</summary>
-          <div v-for="source in queueIssues" :key="source.id"><span>{{ source.label }} · {{ sourceStatus(source.id) }}</span><button :aria-label="'重试'+source.label" :disabled="states[source.id]?.status==='loading'" @click="load(source.id,true)">重试</button></div>
+          <div v-for="source in queueIssues" :key="source.id"><span>{{ source.label }} · {{ sourceStatus(source.id) }}</span><button :aria-label="'重试'+source.label" @click="load(source.id,true)">重试</button></div>
         </details>
         <p v-if="queueStatus" class="quiet-message" role="status">{{ queueStatus }}</p>
         <ul v-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
@@ -554,10 +524,10 @@ function closeAli(){aliFocus.value='';restoreFocus();}
               :animated="false" :show="activeGroup===group.key" @update:show="show=>setGroup(group.key,show)">
               <template #trigger>
                 <button type="button" class="wb-task-tile" :data-source="group.source" :data-group="group.key" :data-count="group.rows.length"
-                  aria-haspopup="dialog" :aria-expanded="activeGroup===group.key" :aria-label="group.label+'，'+group.rows.length+' 项'"
+                  aria-haspopup="dialog" :aria-expanded="activeGroup===group.key" :aria-label="group.label+'，'+(group.rows.length?group.rows.length+' 项':'有待核对页')"
                   @click="anchorGroup">
                   <component :is="group.icon" class="tile-icon" :size="20" aria-hidden="true" />
-                  <b class="tile-count">{{ group.rows.length }}</b>
+                  <b class="tile-count">{{ group.rows.length || '…' }}</b>
                   <strong class="tile-label">{{ group.label }}</strong>
                 </button>
               </template>
@@ -565,7 +535,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
                 :style="groupMaxHeight === undefined ? undefined : {'--tile-available':groupMaxHeight+'px'}"
                 @vue:mounted="(node:VNode)=>node.el?.focus({preventScroll:true})" @keydown.esc.stop.prevent="closeGroup">
                 <header><component :is="group.icon" :size="17" aria-hidden="true" /><h3>{{ group.label }}</h3>
-                  <span>{{ group.rows.length }} 项</span>
+                  <span>{{ group.rows.length ? (group.source==='notices'?'进行中 ':'')+group.rows.length+' 项' : '暂无已读明细' }}</span>
                   <button v-if="states[group.source]?.result?.more" type="button" class="tile-more" :disabled="states[group.source]?.status==='loading'" @click="load(group.source,true,true)">继续读取</button>
                   <button type="button" class="tile-close" aria-label="关闭待办条目" @click="closeGroup"><X :size="16" /></button>
                 </header>
@@ -587,9 +557,8 @@ function closeAli(){aliFocus.value='';restoreFocus();}
           </li>
         </ul>
       </section>
-      <section v-if="checkScope" class="wb-check-panel shift-check" aria-label="班前检查">
-        <PreShiftCheck :key="accessKey+checkScope" :user="checkUser" :fixed-scope="checkScope" @snapshot="readDuty" />
-      </section>
+      <PreShiftCheck v-if="checkScope" :key="accessKey+checkScope" class="wb-check-panel shift-check"
+        :user="checkUser" :fixed-scope="checkScope" workbench @snapshot="readDuty" />
       <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
     </WorkbenchDailyLayout>
 
@@ -676,7 +645,6 @@ function closeAli(){aliFocus.value='';restoreFocus();}
 .task-meta { flex-wrap:wrap;gap:2px 7px;color:var(--desk-muted);font-size:11px;line-height:1.35 }
 .late .due,.delete-key { color:#99441d }
 .delete-key { min-height:34px;border:0;background:transparent;font-size:12px }
-.task-desk .queue-more { display:inline-flex;align-items:center;gap:2px;min-height:32px;padding:2px 5px;border:0;border-radius:7px;background:transparent;color:var(--desk-blue);font-size:12px }
 [data-v2-theme="dark"] :is(.wb-task-tile,.tile-popover) { --tile-accent:hsl(var(--tile-hue) 65% 73%) }
 @media(max-width:600px){
   .task-tiles { grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }

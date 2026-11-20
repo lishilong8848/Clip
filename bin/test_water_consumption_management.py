@@ -133,6 +133,21 @@ class WaterConsumptionStateStoreTests(unittest.TestCase):
             page["records"][0]["photos"][0],
         )
 
+    def test_incomplete_records_filter_before_pagination_and_keep_zero_readings(self):
+        base = _record("zero", "A", "2026-07-28", usage=0)
+        self.store.replace_water_consumption_snapshot(
+            app_token="app", table_id="table", fields=[], options={}, records=[
+                {**base, "meter_value":0},
+                {**base, "record_id":"missing-value", "meter_value":None},
+                {**base, "record_id":"missing-photo", "meter_value":0, "photo_count":0, "photos":[]},
+                {**base, "record_id":"elsewhere", "scope_code":"B", "meter_value":None},
+            ])
+        first = self.store.query_water_consumption_records(scope="A", incomplete=True, limit=1)
+        second = self.store.query_water_consumption_records(scope="A", incomplete=True, limit=1, offset=1)
+        self.assertEqual(first['total'], 2)
+        self.assertEqual({first['records'][0]['record_id'], second['records'][0]['record_id']},
+                         {'missing-value','missing-photo'})
+
     def test_operation_checkpoint_is_replayed(self) -> None:
         started = self.store.begin_water_consumption_operation(
             operation_id="water-op-1",

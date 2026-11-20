@@ -58,6 +58,7 @@ try {
   const errors=[], requests=[], unexpected=[];
   page.on('pageerror',error=>errors.push(error.stack||error.message));
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
+  let currentAccount={}, holdAgenda=false, releaseAgenda;
   let dailyDesk=false;
   let repairTrial=false, historyClosed=false;
   let mopDelayed=false, riskDenied=false, mopRetryFailures=0;
@@ -84,14 +85,18 @@ try {
     if(req.method()!=='GET') {unexpected.push(req.method()+' '+url.pathname);return route.abort();}
     if(url.pathname==='/api/assistant/icon-weather')return ok({
       available:true,date:'2026-11-18',temperature:16,humidity:62,description:'多云',
+      hourly:[{time:'2026-11-18T09:00:00+08:00',temp:14},{time:'2026-11-18T12:00:00+08:00',temp:16},{time:'2026-11-18T15:00:00+08:00',temp:19}],
       forecast:[{date:'2026-11-18',minimum:9,maximum:19,description:'多云'},
         {date:'2026-11-19',minimum:10,maximum:18,description:'小雨'}],
     });
-    if(url.pathname==='/api/personal-calendar')return ok({
+    if(url.pathname==='/api/personal-calendar'){
+      if(holdAgenda&&url.searchParams.get('view')!=='roster')await new Promise(resolve=>releaseAgenda=resolve);
+      return ok({
       month:url.searchParams.get('month'),unavailable:[],
       roster_dates:dailyDesk&&url.searchParams.get('month')==='2026-11'?['2026-11-18']:[],
       days:dailyDesk&&url.searchParams.get('month')==='2026-11'?{'2026-11-18':{
-        items:scope==='A'?[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'}]:[],
+        items:scope==='A'?[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'},
+          {kind:'风险排查',source:'智航',title:'隔离智航风险',start:'2026-11-18T09:30:00+08:00'}]:[],
         staff:scope==='A'||scope==='ALL'?[
           {scope:'A',shift:'白班',names:['验收值班员']},
           {scope:'A',shift:'白',names:['验收值班员','白班第二人']},
@@ -100,7 +105,7 @@ try {
           ...(scope==='ALL'?[{scope:'B',shift:'夜班',names:['B楼当晚值班员']}]:[]),
         ]:[{scope:'B',shift:'夜班',names:['B楼当晚值班员']}],
       },'2026-11-19':{items:[],staff:[{scope:'A',shift:'白班',names:['明日值班员']}]} }:{},
-    });
+    });}
     if(url.pathname==='/api/personal-calendar/weather')return ok({
       warning_ready:true,
       alerts:[{id:'yellow',title:'大风预警',guard_level:'三级'}],guard_level:'三级',guard_actions:['关注临时设施'],
@@ -124,7 +129,9 @@ try {
       }
       if(hold&&scope==='A'&&!url.searchParams.has('date_field'))await new Promise(resolve=>release=resolve);
       if(failure&&scope==='B'&&!url.searchParams.has('date_field'))return route.fulfill({status:Number(failure),json:{ok:false,error:'fixture'}});
-      return ok({scope,month,snapshot_exists:true,records:[{id:'event-'+scope,title:scope+'楼隔离事件',status:'处理中'}]});
+      return ok({scope,month,snapshot_exists:true,records:[
+        {id:'event-'+scope,title:scope+'楼隔离事件',specialty:'电气',status:'处理中'},
+        ...(dailyDesk?[{id:'hvac-'+scope,title:scope+'楼暖通事件',specialty:'暖通',status:'处理中'}]:[])]});
     }
     if(url.pathname==='/api/history-summary'){
       assert.ok(['maintenance','change','repair','all'].includes(url.searchParams.get('work_type')));
@@ -141,19 +148,26 @@ try {
         return ok({ongoing:[{work_type:type,active_item_id:scope+type,scope,title:scope+'楼隔离'+title,status:'开始',start_time:'2026-11-18 09:30'}],records:[],
           ongoing_pagination:{total_pages:1},records_pagination:{total_pages:1}});
       }
+      if(currentAccount.category==='manager'&&!currentAccount.level&&!dailyDesk){
+        return ok({ongoing:Object.entries({change:'变更',repair:'检修',power:'上下电',maintenance:'维保'}).map(([work_type,title])=>({
+          work_type,active_item_id:scope+work_type,scope,title:scope+'楼隔离'+title,status:'开始',
+        })),ongoing_pagination:{total_pages:1}});
+      }
       if(dailyDesk){
         const plan=(id,title,work_type,plan_time,owner_level,created_by_open_id)=>({
           record_id:scope+'-'+id,source_record_id:scope+'-'+id,scope,title,work_type,source_progress:'未开始',
+          active_item_id:scope+'-active-'+id,status:'开始',specialty:work_type==='change'?'暖通':'电气',
           start_time:plan_time,planned_start_time:plan_time,
           planned_end_time:plan_time.slice(0,10)+' 17:30',
           owner_level,created_by_open_id,
         });
-        return ok({ongoing:[],ongoing_pagination:{total_pages:1},records:[
+        return ok({ongoing_pagination:{total_pages:1},ongoing:[
           plan('adjust','隔离设备调整','adjust','2026-11-18 15:30','L4','basic-desk'),
           plan('power','UPS 支路上电确认','power','2026-11-18 15:30','L4','basic-desk'),
           plan('change','冷冻水系统运行参数调整','change','2026-11-18 10:00','L4','basic-desk'),
           plan('maintenance','配电柜保护定值复核','maintenance','2026-11-20 09:30','L2','other-person'),
-        ],records_pagination:{total_pages:1}});
+          {...plan('closed','已结束的通告','maintenance','2026-11-20 11:00','L2','other-person'),status:'结束'},
+        ],source_snapshot_ready:false});
       }
       const plan=(id,title,source_progress)=>({record_id:id,source_record_id:id,title,work_type:'maintenance',source_progress});
       return ok({ongoing:[{...plan('linked','计划和进行中同一条','未开始'),active_item_id:'active-1',status:'开始'}],ongoing_pagination:{total_pages:1},
@@ -161,14 +175,14 @@ try {
         records_pagination:{total_pages:2}});
     }
     if(url.pathname==='/api/repair-management/status'){
-      const records=[{record_id:'repair-'+scope,title:scope+'楼隔离维修',building:scope,workflow:'维修中',repair_start_time:'2026-10-26 09:29'}];
+      const records=[{record_id:'repair-'+scope,title:scope+'楼隔离维修',building:scope,workflow:'维修中',specialty:'电气',repair_start_time:'2026-10-26 09:29'}];
       if(repairTrial&&scope==='A'){
         assert.equal(url.searchParams.get('period'),'all');
         assert.equal(url.searchParams.get('state'),'all');
         for(let i=1;i<=6;i++)records.push({record_id:'new-'+i,title:'今日测试维修'+i,building:'A',state:'in_progress',
-          repair_start_time:String(Date.parse('2026-11-18T09:30:00+08:00')),workflow:'维修中'});
+          repair_start_time:String(Date.parse('2026-11-18T09:30:00+08:00')),workflow:'维修中',specialty:'电气'});
         records.push({record_id:'old-repair',title:'跨月待跟进项目',building:'A',state:historyClosed?'completed':'in_progress',
-          repair_start_time:'2026-10-26 09:29',latest_followup_time:'2026-11-18 12:20',workflow:'维修完成待回访'});
+          repair_start_time:'2026-10-26 09:29',latest_followup_time:'2026-11-18 12:20',workflow:'维修完成待回访',specialty:'电气'});
       }
       return ok({total:records.length,records});
     }
@@ -212,10 +226,11 @@ try {
     if(url.pathname==='/api/pre-shift-checks'){
       const item={id:'check-1',text:'隔离检查项目'},server_time='2026-11-18T10:00:00+08:00';
       return ok({scope,scopes:['A'],can_manage:false,roster_ready:!!checkMember,server_time,
+        viewer_on_roster:checkMember===currentAccount.open_id,viewer_active_shift:checkMember===currentAccount.open_id?'白':'',
         definition:{items:checkMember?[{...item,frequency:{kind:'shift'}}]:[],version:1},
         tasks:checkMember?[{id:'check',scope,shift:'白',day:'2026-11-18',definition_version:1,
           due:Date.parse(server_time)/1000,deadline:Date.parse('2026-11-18T18:00:00+08:00')/1000,
-          items:[item],people:[{open_id:checkMember,name:'隔离值班人员'}],can_submit:true,can_upload_handover:false,submitted:''}]:[]});
+          items:[item],people:[{open_id:checkMember,name:'隔离值班人员'}],duty_names:['隔离值班人员'],can_submit:true,can_upload_handover:false,submitted:''}]:[]});
     }
     if(url.pathname==='/api/learning/bootstrap')return ok({self_scope:'A',self_person:selfPerson,can_answer:true,today:periodDates[0],...(exempt?{daily_exemption:{status:'exempt',resume_date:'2026-12-17'}}:{})});
     if(url.pathname==='/api/learning/papers')return ok({total:3,page_size:20,items:[
@@ -237,9 +252,14 @@ try {
   });
   await page.goto(origin+'/fixture',{timeout:60000});
   await page.waitForFunction(()=>!!window.setAccount);
-  const account=(id,category,modules=['event','repair_management','learning'])=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true});
+  const account=(id,category,modules=['event','repair_management','learning'])=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true,
+    ...(category==='engineer'?{specialties:['电气']}:{}),
+  });
   const options=ids=>ids.map(value=>({value,label:value+'楼'}));
-  const set=(actor,ids,explicit=true)=>page.evaluate(([user,scopes,explicit])=>window.setAccount(user,scopes,explicit),[actor,options(ids),explicit]);
+  const set=(actor,ids,explicit=true)=>{
+    currentAccount=actor;
+    return page.evaluate(([user,scopes,explicit])=>window.setAccount(user,scopes,explicit),[actor,options(ids),explicit]);
+  };
   await page.evaluate(()=>{
     localStorage.setItem('clipflow:workspace-layout:v1:engineer',JSON.stringify({version:1,widgets:[
       {id:'main',kind:'shortcuts',links:['learning','accounts','learning'],x:0,y:0},
@@ -314,24 +334,21 @@ try {
   await marker('事件','1');
   await marker('通告办理记录','2');
   await reveal('notices:维保');
-  await task('本月计划通告').waitFor();
+  await task('计划和进行中同一条').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
   await absent('notices:维保','已结束的计划');
+  await absent('notices:维保','本月计划通告');
   embeddedTest=true;
-  const noticeDetail=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('record_id')==='first');
+  const noticeDetail=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('active_item_id')==='active-1');
   await reveal('notices:维保');
-  await task('本月计划通告').click();
+  await task('计划和进行中同一条').click();
   assert.equal(new URL((await noticeDetail).url()).searchParams.get('scope'),'A');
   assert.equal(new URL(page.url()).pathname,'/fixture');
   await page.getByRole('button',{name:'关闭',exact:true}).first().click();
   embeddedTest=false;
   await reveal('notices:维保');
-  await task('本月计划通告').waitFor();
-  await todo.getByLabel('搜索待办').fill('下一页');
-  await todo.getByRole('button',{name:'读取更多待办'}).click();
-  await reveal('notices:维保');
-  await task('下一页计划通告').waitFor();
-  await todo.getByLabel('搜索待办').fill('');
+  await task('计划和进行中同一条').waitFor();
+  assert.equal(await todo.getByRole('button',{name:'读取更多待办'}).count(),0);
   assert.equal(await card('每日任务').locator('meter[aria-label="已完成"]').getAttribute('value'),'3');
   const dailyReads=()=>requests.filter(([,url])=>url==='/api/daily-tasks').length;
   const initialDaily=dailyReads();
@@ -375,11 +392,16 @@ try {
   failure='';
 
   checkMember='operator';
+  const hRosterRead=page.waitForResponse(response=>response.url().includes('/api/pre-shift-checks?')&&new URL(response.url()).searchParams.get('scope')==='H');
+  await set({...account('h-off','operator',['maintenance']),home_scope:'H',level:'L4'},['H']);
+  await hRosterRead;
+  assert.equal(await page.locator('.wb-check-panel').count(),0,'an off-duty H operator has no pre-shift card');
   await set(account('operator','operator',['learning','water']),['A']);
   await page.getByText('值班人员 · A楼 · 白班',{exact:true}).waitFor();
   await page.setViewportSize({width:393,height:852});
   const shiftArea=page.locator('.wb-check-panel');
   await shiftArea.getByRole('button',{name:'提交检查'}).waitFor();
+  assert.equal(await shiftArea.getByLabel('当班人员').innerText(),'隔离值班人员');
   assert(await shiftArea.evaluate(area=>area.getBoundingClientRect().width>=innerWidth-40 &&
     area.querySelector('.v2-check-task').getBoundingClientRect().width>=innerWidth-70),
     'Mobile shift checks and form body use the available width');
@@ -457,12 +479,12 @@ try {
   await task('隔离专项排查').waitFor();
   await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
-  assert.equal(await tiles.evaluateAll(items=>items.reduce((total,item)=>total+Number(item.dataset.count),0)),2);
+  await reveal('events');await task('A楼隔离事件').waitFor();
 
   const dutyReadStart=requests.length;
   await set(account('shared-desk','duty',full),['A']);
   await reveal('notices:维保');
-  await pop.getByRole('button',{name:'开始 本月计划通告',exact:true}).waitFor();
+  await pop.getByRole('button',{name:'更新／结束 计划和进行中同一条',exact:true}).waitFor();
   await reveal('events');
   await todo.getByText('进行中事件通告甲',{exact:true}).waitFor();
   await reveal('notices:维保');
@@ -518,9 +540,13 @@ try {
     }
   }
   dailyDesk=true;
+  holdAgenda=true;
   mopDelayed=true; riskDenied=true;
   await page.setViewportSize({width:1440,height:1000});
   await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B'],false);
+  await page.getByRole('region',{name:'今日上班人员'}).getByRole('rowheader',{name:'B楼'}).waitFor();
+  holdAgenda=false;
+  releaseAgenda?.();
   const health=todo.locator('.desk-queue-health');
   await health.getByText(/类待办待更新/).waitFor();
   assert.equal(await health.getAttribute('open'),null);
@@ -551,9 +577,10 @@ try {
   await page.getByRole('region',{name:'搜索结果'}).getByRole('button',{name:'维修项目'}).waitFor();
   await search.press('Enter');
   assert.match(await page.evaluate(()=>window.opened),/^\/repair-management/);
-  await page.getByRole('button',{name:'天气详情'}).click();
-  await page.getByText(/16°C.*湿度 62%/).waitFor();
-  await page.keyboard.press('Escape');
+  const weather=page.getByRole('region',{name:'今日天气'});
+  await weather.getByText('16°C',{exact:true}).waitFor();
+  await weather.getByRole('img',{name:/今日气温趋势.*09:00 14°C/}).waitFor();
+  assert.equal(await page.getByRole('button',{name:'天气详情'}).count(),0);
   const roster=agenda.getByRole('region',{name:'今日上班人员'});
   await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
@@ -572,6 +599,7 @@ try {
   await futureDate.hover();
   const preview=page.getByRole('region',{name:'2026-11-20 通告预览'});
   await preview.getByText('配电柜保护定值复核',{exact:true}).waitFor();
+  assert.equal(await preview.getByText('已结束的通告').count(),0);
   assert.equal(await preview.getByText(/B楼/).count(),0);
   assert.equal(await futureDate.getAttribute('aria-pressed'),'false');
   await agenda.getByRole('button',{name:/^2026-11-19/}).click();
@@ -591,6 +619,7 @@ try {
   await agenda.getByLabel('日程楼栋').selectOption('A');
   await agenda.getByRole('button',{name:'今天',exact:true}).click();
   await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
+  await agenda.getByText('隔离智航风险',{exact:true}).waitFor();
   await agenda.getByText('验收值班员',{exact:true}).waitFor();
   assert.equal(await agenda.getByText(/未来 12 小时气温/).count(),0);
   await agenda.getByLabel('选中日期天气').getByText('16°C').waitFor();
@@ -647,15 +676,20 @@ try {
   await set({...account('engineer-desk','engineer',full),level:'L2'},['A','B'],false);
   await reveal('notices:维保');
   await todo.getByText('配电柜保护定值复核',{exact:true}).waitFor();
-  await page.locator('.wb-scope select').selectOption('B');
+  await absent('notices:变更','冷冻水系统运行参数调整');
+  await reveal('events');await task('A楼隔离事件').waitFor();
+  await absent('events','A楼暖通事件');
+  await set({...account('hvac-engineer','engineer',full),level:'L2',specialties:['暖通']},['A','B'],false);
   await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   await absent('notices:维保','配电柜保护定值复核');
+  await reveal('events');await task('A楼暖通事件').waitFor();
+  await absent('events','A楼隔离事件');
   await set({...account('supervisor-desk','supervisor',full),level:'L3'},['A','B'],false);
   await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
-  await absent('notices:维保','配电柜保护定值复核');
+  await reveal('notices:维保');await task('配电柜保护定值复核').waitFor();
   await absent('repair_management','B楼隔离维修');
   await set({...account('manager-desk','manager',full),level:'L1',can_manage_accounts:true},['A','B'],false);
   await overview.getByRole('heading',{name:'画像学练情况汇总'}).waitFor();
@@ -671,7 +705,7 @@ try {
   await todo.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
   waterTrial=true;
-  await set(account('water-desk','other',['water']),['A']);
+  await set({...account('water-desk','other',['water']),level:'L4'},['A']);
   await reveal('water');
   await task('工作台验收水表').click();
   const input=dialog('工作台验收水表').getByLabel('本次水表读数',{exact:true});

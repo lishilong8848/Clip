@@ -5920,6 +5920,7 @@ class LanPortalStateStore:
         frequency: str = "",
         shift: str = "",
         query: str = "",
+        incomplete: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -5928,6 +5929,8 @@ class LanPortalStateStore:
             raise ValueError("水耗查询仅支持 A、B、C、D、E、H 楼。")
         clauses = ["scope_code=?"]
         params: list[Any] = [scope_code]
+        if incomplete:
+            clauses.append("(meter_value IS NULL OR photo_count=0)")
         normalized_month = self._text(month)
         if normalized_month:
             if not re.fullmatch(r"\d{4}-\d{2}", normalized_month):

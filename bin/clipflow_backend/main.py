@@ -2544,7 +2544,6 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                await asyncio.to_thread(self._ensure_source_snapshot_background)
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
@@ -2587,6 +2586,8 @@ class FastAPIPortalController:
                 if payload_key == "records":
                     work_type = ""
                     sections = ()
+                if sections != ("ongoing",):
+                    await asyncio.to_thread(self._ensure_source_snapshot_background)
                 payload = await asyncio.to_thread(
                     self._cached_service_payload,
                     (
@@ -3540,6 +3541,7 @@ class FastAPIPortalController:
                     query=str(request.query_params.get("q") or "").strip(),
                     page=int(request.query_params.get("page") or 1),
                     page_size=int(request.query_params.get("page_size") or 50),
+                    incomplete=request.query_params.get("incomplete") == "1",
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
