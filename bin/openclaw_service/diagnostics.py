@@ -54,7 +54,7 @@ DETAIL_ENUMS = {
         'error', 'aborted', 'missing', 'other'}),
     'response_type': frozenset({'event_stream', 'json', 'html', 'other'}),
     'model_family': frozenset({'deepseek', 'minimax', 'glm', 'qwen', 'other'}),
-    'startup_stage': frozenset({'port_unavailable', 'handshake_timeout', 'UNAVAILABLE', 'DISCONNECTED',
+    'startup_stage': frozenset({'port_unavailable', 'handshake_timeout', 'handshake_invalid', 'UNAVAILABLE', 'DISCONNECTED',
         'HANDSHAKE_TIMEOUT', 'TIMEOUT', 'process_exited', 'config_anomaly', 'runtime_unavailable',
         'module_missing', 'port_conflict', 'plugin_load_failed', 'unknown'}),
 }

@@ -28,6 +28,14 @@ class StartupLogTests(unittest.TestCase):
         self.assertIn('正在启动共享常驻网关', rendered)
         self.assertIn('pid=123', rendered)
 
+    def test_listener_wait_and_recovery_are_distinct_from_final_failure(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            logs.emit('gateway_waiting_listener', last_stage='port_unavailable')
+            logs.emit('gateway_retrying', port=43210, last_stage='port_conflict')
+        waiting, retry = [logs.render(line) for line in output.getvalue().splitlines()]
+        self.assertIn('等待本地端口监听', waiting)
+        self.assertIn('更换本地端口重试', retry)
+
     def test_raw_errors_and_credentials_are_never_forwarded(self):
         for value in (
             'Exception: synthetic-password',
@@ -137,10 +145,10 @@ server.serve_forever(poll_interval=.1);server.server_close()
                 try:
                     controller.start()
                     deadline = time.monotonic() + 4
-                    while '等待登录账号' not in output.getvalue() and time.monotonic() < deadline:
+                    while logs.STAGES['awaiting_login'] not in output.getvalue() and time.monotonic() < deadline:
                         time.sleep(.05)
                     self.assertIn('运行环境已就绪',output.getvalue())
-                    self.assertIn('等待登录账号',output.getvalue())
+                    self.assertIn(logs.STAGES['awaiting_login'],output.getvalue())
                     self.assertNotIn('synthetic-private-line',output.getvalue())
                     self.assertIn('synthetic-private-line',log_path.read_text(encoding='utf-8'))
                 finally:

@@ -19,6 +19,8 @@ const queuedAbort=new AbortController(),queued=client.requestJson('/api/slow/que
 queuedAbort.abort();assert.equal(await queued,'AbortError');assert.equal(started.length,3);
 const auth=client.requestJson('/api/auth/status');assert.equal(started.at(-1),'/api/auth/status','authentication is not blocked by the business queue');
 pending.at(-1).resolve({logged_in:true});await auth;
+await assert.rejects(client.requestJson('/api/slow/queued-timeout',{timeoutMs:1000}), /请求超时/);
+assert(!started.includes('/api/slow/queued-timeout'),'a stalled queue expires without starting the request');
 for(const row of pending.slice(0,3))row.resolve({ok:true});await Promise.all(slow);await next();
 assert(!started.includes('/api/slow/queued'));assert(timers.includes(45000),'reads retain the shared timeout instead of a shorter V2 limit');
 
@@ -39,4 +41,18 @@ assert.equal(started.filter(url=>url.endsWith('search=incomplete')).length,2,'in
 const independent=client.requestJson(path,{cache:'no-store'});await next();pending.at(-1).resolve({records:[]});await independent;
 const fresh=client.requestJson(path,{fresh:true});await next();pending.at(-1).resolve({records:[{id:'fresh'}]});await fresh;
 const before=started.length,afterFresh=client.requestJson(path);await next();assert.equal(started.length,before+1,'explicit refresh invalidates the earlier quick snapshot');pending.at(-1).resolve({records:[{id:'fresh'}]});await afterFresh;
-console.log('PASS: auth priority, bounded reads, prompt queue cancellation, single-flight isolation, cloned short-lived cache, write/account invalidation, incomplete snapshot rejection and explicit fresh read.');
+await next();
+const start=started.length;
+const background=[1,2,3].map(i=>client.requestJson('/api/background/'+i,{background:true}));
+assert.deepEqual(started.slice(start),['/api/background/1','/api/background/2']);
+const visible=client.requestJson('/api/current-page-data');
+assert.equal(started.at(-1),'/api/current-page-data','a new page must get a slot while background reads are held');
+assert.equal(pending.at(-1).options.background,undefined,'queue scheduling is never forwarded to fetch');
+pending.at(-1).resolve({ready:true});
+await visible;
+pending.find(row=>row.url==='/api/background/1').resolve({});
+await next();
+assert.equal(started.at(-1),'/api/background/3','background work eventually resumes');
+pending.filter(row=>/\/background\/[23]$/.test(row.url)).forEach(row=>row.resolve({}));
+await Promise.all(background);
+console.log('PASS: auth priority, bounded foreground and background reads, queue cancellation/timeout, single-flight isolation, cloned short-lived cache, write/account invalidation, incomplete snapshot rejection and explicit fresh read.');

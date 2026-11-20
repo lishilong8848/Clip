@@ -1,6 +1,6 @@
 """Offline learning routes, real-core wiring, and packaging regressions."""
 import asyncio
-import importlib
+import importlib.util
 import json
 import sys
 import tempfile
@@ -20,7 +20,7 @@ BIN = Path(__file__).resolve().parent
 if str(BIN) not in sys.path:
     sys.path.insert(0, str(BIN))
 
-from lan_bitable_template_portal import learning_routes as routes
+from lan_bitable_template_portal import learning, learning_routes as routes
 
 
 class LearningError(Exception):
@@ -167,14 +167,13 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(review.call_count,2)
 
     def test_workbench_summary_respects_role_module_and_authorized_buildings(self):
-        learning_completion = importlib.import_module("lan_bitable_template_portal.learning_completion")
-
         profile = {"category": "supervisor", "home_scope": "A", "role": "building", "modules": ["learning"]}
         self.auth.public_user = lambda session: profile
         self.auth.session_scopes = lambda session: ["A", "B"]
         path = "/api/learning/workbench-summary"
-        with patch.object(learning_completion, "workbench_summary",
-                          side_effect=lambda service, scopes, query: {"scopes": scopes, "summary": {}}) as summary:
+        summary = Mock(side_effect=lambda service, scopes, query: {"scopes": scopes, "summary": {}})
+        with patch.dict(sys.modules, {"lan_bitable_template_portal.learning_completion":
+                                      SimpleNamespace(workbench_summary=summary)}):
             self.assertEqual(self.client.get(path + "?scope=A").json()["data"]["scopes"], ["A"])
             self.assertEqual(self.client.get(path + "?scope=B").status_code, 403)
             self.assertEqual(self.client.get(path + "?scope=ALL").status_code, 403)
@@ -186,7 +185,15 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
             profile.update(modules=["learning"], category="duty")
             self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
-            self.assertEqual(summary.call_count, 2)
+            self.session = {"user": {"open_id": "fixture-person"}, "role": "admin"}
+            for level in ("L0", "L1"):
+                profile.update(role="admin", level=level, category="engineer")
+                self.assertEqual(self.client.get(path + "?scope=ALL").json()["data"]["scopes"], ["A", "B"])
+                self.assertEqual(self.client.get(path + "?scope=E").status_code, 403)
+            profile["impersonation"] = {"active": True}
+            self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
+            self.assertEqual(summary.call_count, 4)
+            self.assertFalse(any(name == "resolve_self" for name, _ in self.events))
 
     def test_personnel_password_session_uses_virtual_directory_resolver(self):
         # A personnel-password session carries a real Feishu open id + HR record id.
@@ -469,7 +476,7 @@ class LearningRouteTests(unittest.TestCase):
 
 class LearningSourceContractTests(unittest.TestCase):
     def test_real_core_dispatch_and_binary_return_contracts_offline(self):
-        core = importlib.import_module("lan_bitable_template_portal.learning")
+        core = learning
         self.assertEqual(Path(core.__file__).resolve(), BIN / "lan_bitable_template_portal/learning.py")
         admin = {"id": "administrator", "name": "Admin", "is_admin": True, "scope": "",
                  "shared_account": False, "person_id": "", "can_answer": False, "identity_issue": ""}
@@ -555,7 +562,7 @@ class LearningSourceContractTests(unittest.TestCase):
             self.assertEqual(cloud.mock_calls, [])
 
     def test_real_disabled_service_start_waits_without_cloud_io(self):
-        core = importlib.import_module("lan_bitable_template_portal.learning")
+        core = learning
         with tempfile.TemporaryDirectory(prefix="learning_idle_") as folder:
             cloud = Mock()
             service = core.LearningService(root=folder, cloud=cloud)
@@ -582,7 +589,7 @@ class LearningWireTests(unittest.TestCase):
     def test_real_service_http_answer_issue_and_admin_correction(self):
         from bin.test_learning import CURRENT, DAY, FakeCloud, FakeSender
 
-        core = importlib.import_module("lan_bitable_template_portal.learning")
+        core = learning
         cloud, sender = FakeCloud(enabled=False), FakeSender()
         sessions = {
             "floor": {"user": {"open_id": "oid-learner-A", "name": "A learner"}},
@@ -773,8 +780,6 @@ class LearningPackagingTests(unittest.TestCase):
         self.assertEqual(package.RUNTIME_MODULE_TO_PACKAGE["multipart"], "python-multipart==0.0.22")
 
     def test_route_module_import_does_not_import_core_or_runtime(self):
-        import importlib.util
-
         spec = importlib.util.spec_from_file_location("lan_bitable_template_portal.isolated_learning_routes", BIN / "lan_bitable_template_portal/learning_routes.py")
         module = importlib.util.module_from_spec(spec)
         with patch("socket.create_connection", side_effect=AssertionError("Network at import")):

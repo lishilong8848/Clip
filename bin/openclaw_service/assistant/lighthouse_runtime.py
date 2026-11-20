@@ -72,10 +72,11 @@ def runtime_files(root=None):
     raise AssistantError("缺少灯塔助手运行环境，请将 lighthouse_openclaw 文件夹放到程序的 bin/runtime 目录。", 503)
 
 
-def free_port():
+def free_port(previous_port=None):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
         listener.bind(("127.0.0.1", 0))
-        return listener.getsockname()[1]
+        port = listener.getsockname()[1]
+        return free_port() if port == previous_port else port
 
 
 def agent_id(identity):
@@ -419,64 +420,86 @@ class OpenClawRuntime:
         await asyncio.sleep(.1)
         process, log, gateway, probe = None, None, None, None
         try:
-            async with self.lock:
-                root = self.root / 'shared-gateway'
-                (root / 'workspace').mkdir(parents=True, exist_ok=True)
-                (root / 'native-skills').mkdir(exist_ok=True)
-                shared_plugin = root / 'plugin'
-                shared_plugin.mkdir(parents=True, exist_ok=True)
-                if plugin:
-                    for file in Path(plugin).iterdir():
-                        if file.is_file():
-                            shutil.copyfile(file, shared_plugin / file.name)
-                port, token = free_port(), secrets.token_urlsafe(32)
-                # Load the existing allowlist explicitly, not the unused bundled inventory.
-                gateway = {'root': root, 'plugin': shared_plugin,
-                           'port': port, 'token': token, 'bridge_url': bridge_url}
-                self.gateway = gateway
-                first_key = next(iter(self.accounts))
-                bootstrap = {first_key: self.accounts[first_key]}
-                await self._write_configuration(tool_names, bootstrap)
-                authored = {first_key: self.accounts[first_key]['config_fingerprint']}
-                # The pinned launcher still enables its versioned cache; keep this PID as the gateway.
-                environment = {**os.environ, "OPENCLAW_STATE_DIR": str(self.root), "OPENCLAW_CONFIG_PATH": str(root / 'openclaw.json'),
-                               "OPENCLAW_HOME": str(root), "OPENCLAW_NO_RESPAWN": "1", "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
-                               "OPENCLAW_PACKAGED_COMPILE_CACHE_RESPAWNED": "1",
-                               "OPENCLAW_DISABLE_BUNDLED_PLUGINS": "1",
-                               "OPENCLAW_DISABLE_BONJOUR": "1", "OPENCLAW_SKIP_CHANNELS": "1",
-                               "OPENCLAW_SKIP_CANVAS_HOST": "1", "OPENCLAW_SKIP_STARTUP_MODEL_PREWARM": "1",
-                               "OPENCLAW_BUNDLED_SKILLS_DIR": str(root / 'native-skills'),
-                               "GIT_CEILING_DIRECTORIES": str(self.root),
-                               "NODE_COMPILE_CACHE": str(root / 'node-compile-cache'),
-                               "LIGHTHOUSE_GATEWAY_TOKEN": token, "LIGHTHOUSE_BRIDGE_TOKEN": self.bridge_token,
-                               'LIGHTHOUSE_SDK_ROOT': str(entry.parent),
-                               'LIGHTHOUSE_PYTHON': sys.executable,
-                               'LIGHTHOUSE_PLUGIN_DIR': str(shared_plugin),
-                               "LIGHTHOUSE_BRIDGE_URL": bridge_url, "NO_COLOR": "1", "NODE_OPTIONS": "--max-old-space-size=2048"}
-                environment.pop('LIGHTHOUSE_MODEL_KEY', None)
-                from openclaw_service.diagnostics import capture_gateway_line
-                log = GatewayLog(root / 'gateway.log', secrets=environment, on_line=capture_gateway_line)
-                flags = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
+            started = None
+            port = None
+            for attempt in range(2):
+                async with self.lock:
+                    root = self.root / 'shared-gateway'
+                    (root / 'workspace').mkdir(parents=True, exist_ok=True)
+                    (root / 'native-skills').mkdir(exist_ok=True)
+                    shared_plugin = root / 'plugin'
+                    shared_plugin.mkdir(parents=True, exist_ok=True)
+                    if plugin and attempt == 0:
+                        for file in Path(plugin).iterdir():
+                            if file.is_file():
+                                shutil.copyfile(file, shared_plugin / file.name)
+                    port, token = free_port(port), secrets.token_urlsafe(32)
+                    # Load the existing allowlist explicitly, not the unused bundled inventory.
+                    gateway = {'root': root, 'plugin': shared_plugin,
+                               'port': port, 'token': token, 'bridge_url': bridge_url}
+                    self.gateway = gateway
+                    first_key = next(iter(self.accounts))
+                    bootstrap = {first_key: self.accounts[first_key]}
+                    await self._write_configuration(tool_names, bootstrap)
+                    authored = {first_key: self.accounts[first_key]['config_fingerprint']}
+                    # The pinned launcher still enables its versioned cache; keep this PID as the gateway.
+                    environment = {**os.environ, "OPENCLAW_STATE_DIR": str(self.root), "OPENCLAW_CONFIG_PATH": str(root / 'openclaw.json'),
+                                   "OPENCLAW_HOME": str(root), "OPENCLAW_NO_RESPAWN": "1", "OPENCLAW_EXEC_SHELL_SNAPSHOT": "0",
+                                   "OPENCLAW_PACKAGED_COMPILE_CACHE_RESPAWNED": "1",
+                                   "OPENCLAW_DISABLE_BUNDLED_PLUGINS": "1",
+                                   "OPENCLAW_DISABLE_BONJOUR": "1", "OPENCLAW_SKIP_CHANNELS": "1",
+                                   "OPENCLAW_SKIP_CANVAS_HOST": "1", "OPENCLAW_SKIP_STARTUP_MODEL_PREWARM": "1",
+                                   "OPENCLAW_BUNDLED_SKILLS_DIR": str(root / 'native-skills'),
+                                   "GIT_CEILING_DIRECTORIES": str(self.root),
+                                   "NODE_COMPILE_CACHE": str(root / 'node-compile-cache'),
+                                   "LIGHTHOUSE_GATEWAY_TOKEN": token, "LIGHTHOUSE_BRIDGE_TOKEN": self.bridge_token,
+                                   'LIGHTHOUSE_SDK_ROOT': str(entry.parent),
+                                   'LIGHTHOUSE_PYTHON': sys.executable,
+                                   'LIGHTHOUSE_PLUGIN_DIR': str(shared_plugin),
+                                   "LIGHTHOUSE_BRIDGE_URL": bridge_url, "NO_COLOR": "1", "NODE_OPTIONS": "--max-old-space-size=2048"}
+                    environment.pop('LIGHTHOUSE_MODEL_KEY', None)
+                    from openclaw_service.diagnostics import capture_gateway_line
+                    log = GatewayLog(root / 'gateway.log', secrets=environment, on_line=capture_gateway_line)
+                    flags = (subprocess.CREATE_NO_WINDOW | subprocess.BELOW_NORMAL_PRIORITY_CLASS) if os.name == "nt" else 0
+                    try:
+                        preload = Path(__file__).parent / 'openclaw/native-paths.mjs'
+                        # Bound native compilation workers, not the twenty asynchronous account sessions.
+                        gateway_entry = preload.with_name('gateway-start.mjs')
+                        process = subprocess.Popen([str(node), '--v8-pool-size=2', '--import', preload.resolve().as_uri(), str(gateway_entry), str(port)],
+                                                   cwd=root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
+                    except OSError:
+                        raise AssistantStartupError('助手进程未能启动，原消息已保留。', 503) from None
+                    if os.name == "nt":
+                        from upload_event_module.services.process_lifetime import register_child_process
+                        if not register_child_process(process.pid):
+                            raise AssistantStartupError("助手进程生命周期绑定失败，未启动。", 503)
+                    log.attach(process.stdout)
+                    gateway.update(process=process, output=log)
+                    for item in self.accounts.values():
+                        item.update(process=process, port=port, token=token)
+                    probe = next(iter(self.accounts.values()))
+                if started is None:
+                    started = time.monotonic()
+                deadline = started + self.startup_timeout
+                listener_deadline = started + min(120, self.startup_timeout * 2 / 3) if attempt == 0 else deadline
+                probe.pop('startup_stage', None)
+                startup_log('gateway_starting', pid=process.pid, port=port)
                 try:
-                    preload = Path(__file__).parent / 'openclaw/native-paths.mjs'
-                    # Bound native compilation workers, not the twenty asynchronous account sessions.
-                    gateway_entry = preload.with_name('gateway-start.mjs')
-                    process = subprocess.Popen([str(node), '--v8-pool-size=2', '--import', preload.resolve().as_uri(), str(gateway_entry), str(port)],
-                                               cwd=root, env=environment, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, creationflags=flags)
-                except OSError:
-                    raise AssistantStartupError('助手进程未能启动，原消息已保留。', 503) from None
-                if os.name == "nt":
-                    from upload_event_module.services.process_lifetime import register_child_process
-                    if not register_child_process(process.pid):
-                        raise AssistantStartupError("助手进程生命周期绑定失败，未启动。", 503)
-                log.attach(process.stdout)
-                gateway.update(process=process, output=log)
-                for item in self.accounts.values():
-                    item.update(process=process, port=port, token=token)
-                probe = next(iter(self.accounts.values()))
-            started = time.monotonic()
-            startup_log('gateway_starting', pid=process.pid, port=port)
-            await self._ready(probe, started + self.startup_timeout, GatewayClient, GatewayError)
+                    await self._ready(probe, deadline, GatewayClient, GatewayError, listener_deadline)
+                except AssistantStartupError as exc:
+                    if (attempt or self.closing or time.monotonic() >= deadline
+                            or exc.category not in {'port_unavailable', 'port_conflict'}):
+                        raise
+                    await asyncio.to_thread(self._terminate_startup_process, process)
+                    if process.poll() is None:
+                        raise
+                    await asyncio.to_thread(log.close)
+                    if time.monotonic() >= deadline:
+                        raise
+                    startup_log('gateway_retrying', port=port, last_stage=exc.category)
+                    process, log = None, None
+                else:
+                    break
             gateway['protocol'] = probe.get('protocol', 4)
             for key, item in self.accounts.items():
                 item['protocol'] = gateway['protocol']
@@ -496,7 +519,9 @@ class OpenClawRuntime:
                 stage = 'process_exited'
             capture('startup', 'startup_failed', category=getattr(exc, 'category', '') or stage, error=exc,
                     details={'startup_stage': stage} if stage else None)
-            startup_log('startup_failed', error=type(exc).__name__, last_stage=stage or 'unknown')
+            exit_code = process.poll() if process is not None else None
+            startup_log('startup_failed', error=type(exc).__name__, last_stage=stage or 'unknown',
+                        **({'exit_code': exit_code} if exit_code is not None else {}))
             await asyncio.to_thread(self._terminate_startup_process, process)
             if log:
                 await asyncio.to_thread(log.close)
@@ -655,47 +680,50 @@ class OpenClawRuntime:
         except OSError:
             LOGGER.warning('Gateway auto-recovery could not clear the compile cache')
 
-    async def _ready(self, item, deadline, GatewayClient, GatewayError):
+    async def _ready(self, item, deadline, GatewayClient, GatewayError, listener_deadline):
         from websockets.exceptions import InvalidHandshake
         process, port, token = item['process'], item['port'], item['token']
         started = time.monotonic()
         last_phase = ''
         while not self.closing and time.monotonic() < deadline:
             if process.poll() is not None:
-                item["startup_stage"] = "process_exited"
-                raise AssistantStartupError("助手运行环境启动失败，请查看本机助手诊断。", 503)
+                # A listener left behind by an exited child belongs to another process.
+                try:
+                    _, writer = await asyncio.wait_for(asyncio.open_connection('127.0.0.1', port), .3)
+                except (OSError, asyncio.TimeoutError):
+                    item['startup_stage'] = 'process_exited'
+                else:
+                    writer.close()
+                    item['startup_stage'] = 'port_conflict'
+                raise AssistantStartupError("助手运行环境启动失败，请查看本机助手诊断。", 503,
+                                            category=item['startup_stage'])
             try:
                 async with asyncio.timeout(min(15, max(.01, deadline - time.monotonic()))):
                     async with GatewayClient("ws://127.0.0.1:" + str(port), token) as client:
-                        # hello-ok can precede agent readiness. This local, read-only
-                        # RPC shares the Gateway's startup gate with the agent RPC.
+                        # The authenticated hello can precede readiness of the gateway RPCs.
                         await client.request("models.list", {"preparedOnly": True}, timeout=5)
                         item["protocol"] = client.protocol
                         return item
-            except (OSError, InvalidHandshake):
-                item["startup_stage"] = "port_unavailable"
-                if last_phase != 'port_unavailable':
-                    startup_log('gateway_starting', last_stage='port_unavailable',
-                                elapsed_ms=round((time.monotonic() - started) * 1000))
-                    last_phase = 'port_unavailable'
-                await asyncio.sleep(.2)
-            except asyncio.TimeoutError:
-                item["startup_stage"] = "handshake_timeout"
-                if last_phase != 'handshake_timeout':
-                    startup_log('gateway_starting', last_stage='handshake_timeout',
-                                elapsed_ms=round((time.monotonic() - started) * 1000))
-                    last_phase = 'handshake_timeout'
-                await asyncio.sleep(.2)
             except GatewayError as exc:
-                item["startup_stage"] = exc.code
-                if last_phase != exc.code:
-                    startup_log('gateway_starting', last_stage=exc.code,
-                                elapsed_ms=round((time.monotonic() - started) * 1000))
-                    last_phase = exc.code
-                if exc.code in {"UNAVAILABLE", "DISCONNECTED", "HANDSHAKE_TIMEOUT", "TIMEOUT"}:
-                    await asyncio.sleep(.3)
-                else:
-                    raise AssistantStartupError("助手网关握手未通过（" + exc.code + "），未启动会话。", 503) from None
+                phase = exc.code
+                listener_deadline = deadline
+                if phase not in {"UNAVAILABLE", "DISCONNECTED", "HANDSHAKE_TIMEOUT", "TIMEOUT"}:
+                    item['startup_stage'] = phase
+                    raise AssistantStartupError("助手网关握手未通过（" + phase + "），未启动会话。", 503,
+                                                category=phase) from None
+            except (InvalidHandshake, asyncio.TimeoutError) as exc:
+                phase = 'handshake_invalid' if isinstance(exc, InvalidHandshake) else 'handshake_timeout'
+                listener_deadline = deadline
+            except OSError:
+                phase = 'port_unavailable'
+            item['startup_stage'] = phase
+            if phase != last_phase:
+                startup_log('gateway_waiting_listener' if phase == 'port_unavailable' else 'gateway_starting',
+                            last_stage=phase, elapsed_ms=round((time.monotonic() - started) * 1000))
+                last_phase = phase
+            if phase == 'port_unavailable' and time.monotonic() >= listener_deadline:
+                break
+            await asyncio.sleep(.3)
         raise AssistantStartupError("助手启动超时，原消息已保留，可继续。", 503,
                                     category=item.get("startup_stage", ""))
 

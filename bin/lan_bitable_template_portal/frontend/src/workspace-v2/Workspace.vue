@@ -46,7 +46,12 @@
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
-            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :search-links="workbenchSearchLinks" :menu-groups="menuGroups" :initial-kind="route.searchParams.get('kind')||undefined" @select-menu="selectMenu" @open="openWorkspaceModule($event,view==='home')" />
+            <KeepAlive :key="identityKey">
+              <WorkbenchHome v-if="workbenchActive" :user="user" :scopes="scopes" :scope="currentScope"
+                :explicit-scope="route.searchParams.has('scope')" :search-links="workbenchSearchLinks" @open="openWorkspaceModule($event,true)" />
+            </KeepAlive>
+            <template v-if="workbenchActive" />
+            <HomePage v-else-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :menu-groups="menuGroups" :initial-kind="route.searchParams.get('kind')||undefined" @select-menu="selectMenu" />
             <AccountHome v-else-if="view==='my' && route.pathname==='/'" :user="user" :scopes="scopes" :level="levelLabel" :category="categoryLabel"
               :groups="menuGroups" :mobile="!desktopNavigation" :settings="!!visibleSettings.length" @open="navigate" @settings="selectAccountAction('settings')">
               <template #tools>
@@ -110,6 +115,7 @@ import AccountSignature from '../components/AccountSignature.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
 const AccountHome=lazy(()=>import('./AccountHome.vue'));
 const HomePage = lazy(() => import('./HomePage.vue'));
+const WorkbenchHome = lazy(() => import('./workbench/WorkbenchHome.vue'));
 const GuestWorkbenchHeader = lazy(() => import('./workbench/WorkbenchDailyLayout.vue'));
 const HandoverReviewDialog = lazy(() => import('./workbench/HandoverReviewDialog.vue'));
 const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
@@ -181,6 +187,7 @@ const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? use
 const inspectionHistory = computed(()=>canViewInspectionHistory(user.value));
 const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
+const workbenchActive = computed(() => route.value.pathname === '/' && view.value === 'home' && !route.value.searchParams.get('mode'));
 const homeViews = ['home', 'tasks', 'functions'];
 const mobileActive = computed(() => route.value.pathname === '/' && (route.value.searchParams.get('account') === 'password' || ['my', 'permission'].includes(view.value)) ? 'my' : route.value.pathname === '/' && !route.value.searchParams.get('mode') && homeViews.includes(view.value) ? view.value : 'functions');
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
@@ -387,7 +394,11 @@ async function loadAuth() {
   try {
     const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
     if (disposed || controller.signal.aborted || authRead!==controller) return;
-    loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
+    loggedIn.value = !!data.logged_in;
+    const nextUser = data.user || {}, nextScopes = data.scope_options || [];
+    if (JSON.stringify(user.value) !== JSON.stringify(nextUser)) user.value = nextUser;
+    if (JSON.stringify(scopes.value) !== JSON.stringify(nextScopes)) scopes.value = nextScopes;
+    authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
     diagnosticsAvailable.value = data.backend_diagnostics_available !== false;
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
     if (loggedIn.value && !user.value.impersonation && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
@@ -429,17 +440,6 @@ onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('pops
 </script>
 <style scoped>
 .v2-shell.has-impersonation>.impersonation-banner{margin:0 10px}
-@media(min-width:761px){
-  .v2-shell.has-impersonation:not(.is-print){grid-template-rows:var(--head-height) auto minmax(0,1fr)}
-  .v2-shell.has-impersonation:not(.is-print)>.impersonation-banner{grid-area:2 / 1 / 3 / -1}
-  .v2-shell.has-impersonation:not(.is-print)>.v2-sidebar{grid-area:3 / 1}
-  .v2-shell.has-impersonation:not(.is-print)>.v2-main{grid-area:3 / 2}
-}
-@media(max-width:760px){
-  .v2-shell.has-impersonation:not(.is-print){display:flex;flex-direction:column;height:100dvh;overflow:hidden}
-  .v2-shell.has-impersonation:not(.is-print)>.v2-header{position:static;flex:none}
-  .v2-shell.has-impersonation:not(.is-print)>.v2-main{flex:1;min-height:0;overflow:auto;--v2-content-sticky-top:0px}
-}
 .v2-my-signatures { margin-top: 28px; }
 @media (max-width: 760px) { .v2-my-signatures { margin-top: 20px; } }
 </style>

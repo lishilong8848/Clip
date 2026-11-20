@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 import { NPopover } from 'naive-ui';
-import { Activity, ArrowRight, Bell, CalendarDays, ClipboardList, Clock3, FileText, KeyRound, ListChecks, Wrench, ChevronLeft, ChevronRight, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
+import { ArrowRight, Bell, ChevronLeft, ChevronRight, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
 import { todoTimestamp } from '../businessTodos';
 import { requestJson } from '../client';
 import type { WorkItem } from './sources';
@@ -19,22 +19,9 @@ type RosterSnapshot={key:string;state:'ready'|'failed';staff:CalendarDay['staff'
 type CalendarWeather={warning_ready:boolean;
   alerts:{id?:string;title:string;guard_level?:string}[];guard_level?:string;guard_actions:string[];guard_note?:string};
 const props = defineProps<{name:string; avatar?:string; clock:number; links:Link[]; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
-  metrics?:{label:string;value:number|null;partial?:boolean;note?:string;url?:string}[]; agendaScopes?:{label:string;value:string}[];
+  agendaScopes?:{label:string;value:string}[]; impersonating?:boolean;
   calendarScope?:string; calendarIdentity?:string; queueNote?:string}>();
 const emit = defineEmits<{open:[url:string]; unread:[]; task:[item:WorkItem]; 'guest-account':[]}>();
-
-function metricIcon(label:string) {
-  if (label.includes('事件')) return Activity;
-  if (label.includes('权限')) return KeyRound;
-  if (label.includes('审核') || label.includes('排查')) return ShieldCheck;
-  if (label.includes('维修')) return Wrench;
-  if (label.includes('截止')) return Clock3;
-  if (label.includes('本周')) return CalendarDays;
-  if (label.includes('通告') || label.includes('单据')) return FileText;
-  if (label.includes('未读')) return Bell;
-  if (label.includes('确认') || label.includes('巡检')) return ListChecks;
-  return ClipboardList;
-}
 
 const avatar=computed(()=>/^https:\/\//i.test(props.avatar||'')?props.avatar:undefined);
 const avatarFailed=ref(false);
@@ -206,7 +193,7 @@ function scheduleTime(value?:string){
 }
 async function readCalendar(month:string,scope:string,signal:AbortSignal):Promise<CalendarResponse>{
   const query=new URLSearchParams({month,scope});
-  const data=await requestJson('/api/personal-calendar?'+query,{signal,timeoutMs:16000});
+  const data=await requestJson('/api/personal-calendar?'+query,{signal,timeoutMs:16000,background:true});
   if(data.month!==month||!data.days||!Array.isArray(data.unavailable))throw new Error('日程未完整返回');
   return data as CalendarResponse;
 }
@@ -256,7 +243,7 @@ async function loadCalendarWeather(force=false){
   calendarWeatherBusy.value=true;
   const request=calendarWeatherRequest=new AbortController();
   try{
-    const data=await requestJson('/api/personal-calendar/weather',{signal:request.signal,timeoutMs:16000});
+    const data=await requestJson('/api/personal-calendar/weather',{signal:request.signal,timeoutMs:16000,background:true});
     if(!request.signal.aborted){
       calendarWeather.value=data as CalendarWeather;
       guardFailed.value=data.guard_read_failed===true;
@@ -311,7 +298,7 @@ const weatherIcon = computed(()=>{
 });
 let weatherAbort:AbortController|undefined;
 async function readWeather() {
-  if (weatherBusy.value&&!weatherAbort?.signal.aborted) return;
+  if (props.impersonating || (weatherBusy.value&&!weatherAbort?.signal.aborted)) return;
   weatherBusy.value=true;
   const controller=weatherAbort=new AbortController();
   try {
@@ -335,6 +322,7 @@ async function readWeather() {
   }
 }
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest){void readWeather();void loadCalendarWeather();}});
+onDeactivated(()=>{panel.value='';});
 onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weatherAbort?.abort();calendarWeatherRequest?.abort();});
 
 
@@ -401,7 +389,7 @@ const itinerary=computed(()=>{
           </section>
         </div>
         <template v-if="!guest">
-          <div class="desk-anchor">
+          <div v-if="!impersonating" class="desk-anchor">
             <button ref="weatherButton" class="tool-key" aria-label="天气详情" :title="weather?.temp!=null?'今日气温 '+weather.temp+'°C':'天气详情'" :aria-expanded="panel==='weather'" @click="toggle('weather')"><CloudSun :size="19" aria-hidden="true" /></button>
             <section v-if="panel==='weather'" class="floating forecast" aria-label="天气详情">
               <div class="line-head"><h3>天气预报</h3><button class="small-key" :disabled="weatherBusy" @click="readWeather">更新天气</button></div>
@@ -430,15 +418,6 @@ const itinerary=computed(()=>{
       <div v-if="!guest && $slots.focus" class="command-line"><slot name="focus" /></div>
     </header>
 
-    <section v-if="!guest && metrics?.length" class="digest" aria-label="工作台指标">
-      <article v-for="(metric,i) in metrics" :key="metric.label" class="metric-pill" :class="{'digest-lead':i===0}" :data-unknown="metric.value==null">
-        <span class="metric-symbol"><component :is="metricIcon(metric.label)" :size="17" aria-hidden="true" /></span>
-        <div class="metric-copy"><h3>{{ metric.label }}</h3>
-          <div class="metric-value"><strong>{{ metric.value ?? '—' }}</strong><small :title="metric.note">{{ metric.value==null?'待核实':metric.note || (metric.partial?'已读取':'项') }}</small></div>
-        </div>
-        <button v-if="metric.url" class="icon-key metric-open" :aria-label="'打开'+metric.label" @click="emit('open',metric.url)"><ArrowRight :size="14" /></button>
-      </article>
-    </section>
     <div :class="{'working-grid':!guest}">
       <div class="desk-content"><slot /></div>
       <aside v-if="!guest" ref="agendaPanel" class="day-planner" tabindex="-1" aria-label="我的日程">
@@ -493,8 +472,8 @@ const itinerary=computed(()=>{
         </section>
       </aside>
       <div v-if="$slots.shortcuts || $slots.overview" class="desk-supplement">
-        <slot v-if="!guest" name="shortcuts" />
         <slot name="overview" />
+        <slot v-if="!guest" name="shortcuts" />
       </div>
     </div>
   </div>
@@ -506,7 +485,7 @@ const itinerary=computed(()=>{
   --desk-ink:var(--v2-ink,#20373b); --desk-muted:var(--v2-muted); --desk-line:var(--soft-edge);
   --desk-green:var(--v2-palette-accent-text); --desk-green-wash:var(--v2-palette-selection);
   --desk-blue:#266288; --desk-blue-wash:#dcedf8; --desk-shadow:var(--soft-key);
-  display:grid; gap:14px; min-width:0; color:var(--desk-ink); font:inherit;
+  display:grid; gap:14px; width:100%; min-width:0; container:daily-desk / inline-size; color:var(--desk-ink); font:inherit;
 }
 [data-v2-theme="dark"] .daily-desk {
   --desk-blue:#aad5ee; --desk-blue-wash:#243e4f;
@@ -520,7 +499,7 @@ const itinerary=computed(()=>{
 .daily-desk button { cursor:pointer }
 .daily-desk button:disabled { cursor:wait; opacity:.65 }
 .daily-desk :is(button,select,input):focus-visible,.day-planner:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
-.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.metric-heading,.metric-line,.selected-weather,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
+.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.selected-weather,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
 .desk-head,.line-head,.month-tools { justify-content:space-between }
 .desk-head { flex-wrap:wrap; gap:10px 16px }
 .desk-title { gap:12px; min-width:0 }
@@ -545,12 +524,12 @@ const itinerary=computed(()=>{
 .search-results button { display:flex; justify-content:space-between; align-items:center }
 .search-results button:hover,.pointed,.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
 .notice-row { display:grid; gap:2px }
-.notice-row span,.muted,.metric-line small,.itinerary h3 small,.timeline small,.timeline p { color:var(--desk-muted); font-size:12px; font-weight:normal }
+.notice-row span,.muted,.itinerary h3 small,.timeline small,.timeline p { color:var(--desk-muted); font-size:12px; font-weight:normal }
 .forecast p,.forecast ul,.notification>.text-key { margin-top:8px }
 .forecast ul,.timeline { list-style:none; padding:0 }
 .forecast li { display:flex; justify-content:space-between; padding:5px 0; border-top:1px solid var(--desk-line) }
 .masthead { justify-content:flex-start;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
-.mast-identity,.metric-copy { min-width:0 }
+.mast-identity { min-width:0 }
 .title-line { display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap }
 .title-line h1 { font-size:21px;letter-spacing:-.03em;line-height:1.25 }
 .folio-date { color:var(--desk-muted);white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums }
@@ -559,26 +538,14 @@ const itinerary=computed(()=>{
 .masthead .desk-tools { gap:5px; margin-inline-start:auto }
 .command-line { display:flex;align-items:center;flex-wrap:wrap;min-width:0;max-width:100% }
 .command-line :slotted(*) { max-width:100%;flex-wrap:wrap }
-.digest { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px }
-.metric-pill { display:flex;align-items:center;gap:9px;position:relative;min-width:0;padding:8px 13px;border:1px solid var(--desk-line);border-radius:22px;background:var(--desk-paper);box-shadow:var(--desk-shadow) }
-.metric-pill.digest-lead { background:linear-gradient(105deg,var(--desk-green-wash),var(--desk-paper) 82%);border-color:color-mix(in srgb,var(--desk-green) 24%,var(--desk-line)) }
-.metric-symbol { flex:none;width:31px;height:31px;border-radius:50%;display:grid;place-items:center;background:var(--desk-blue-wash);color:var(--desk-blue) }
-.digest-lead .metric-symbol { background:var(--v2-palette-accent);color:var(--v2-palette-on-accent) }
-.metric-pill[data-unknown="true"] .metric-symbol { background:var(--desk-well);color:var(--desk-muted) }
-.digest h3 { font-size:12px;line-height:1.25;font-weight:550;overflow-wrap:anywhere }
-.metric-value { display:flex;align-items:baseline;gap:5px;line-height:1.15 }
-.metric-value strong { font-size:22px;font-variant-numeric:tabular-nums }
-.digest-lead strong { color:var(--desk-green) }
-.metric-value small { font-size:11px;color:var(--desk-muted) }
-.metric-open { margin-left:auto;flex:none }
 .month-mode { display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;padding:4px 0;color:var(--desk-ink);font-weight:650!important }
 .month-mode span { color:var(--desk-blue);font-size:11px }
-.working-grid { display:grid;align-items:start;gap:12px;grid-template-columns:minmax(0,1fr) clamp(310px,24vw,350px);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
+.working-grid { display:grid;align-items:start;gap:12px;min-width:0;grid-template-columns:minmax(0,1fr);grid-template-areas:"tasks" "agenda" "supplement" }
 .desk-content { grid-area:tasks;min-width:0 }
 .desk-supplement { grid-area:supplement;display:grid;gap:10px;min-width:0 }
 .day-planner { grid-area:agenda;display:grid;align-items:start;gap:9px;min-width:0;scroll-margin-top:72px }
 .rail-module { min-width:0;padding:11px 13px;border:1px solid var(--desk-line);border-radius:15px;background:var(--desk-paper);box-shadow:var(--desk-shadow) }
-.day-planner .roster-module { padding:6px 9px }
+.day-planner .roster-module { padding:0 }
 .planner-module { background:linear-gradient(155deg,color-mix(in srgb,var(--desk-blue-wash) 55%,var(--desk-paper)),var(--desk-paper) 58%) }
 .weather-guard h3 { font-size:14px;font-weight:680 }
 .itinerary { margin-top:8px;padding-top:8px;border-top:1px solid var(--desk-line) }
@@ -610,13 +577,12 @@ const itinerary=computed(()=>{
 .retry-note,.weather-guard>*+* { margin-top:6px }
 .weather-guard ul { padding-left:18px }
 .warning { display:flex; justify-content:space-between; padding:6px 9px; background:var(--desk-blue-wash); border-radius:8px }
-.agenda-jump { display:none }
-@media(max-width:1000px) {
-  .working-grid { grid-template-columns:minmax(0,1fr);grid-template-areas:"tasks" "agenda" "supplement";grid-template-rows:auto }
-  .agenda-jump { display:inline-flex }
-  .day-planner { scroll-margin-top:65px }
+.agenda-jump { display:inline-flex }
+@container daily-desk (min-width:980px) {
+  .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
+  .agenda-jump { display:none }
 }
-@media(min-width:701px) and (max-width:1000px){
+@container daily-desk (min-width:700px) and (max-width:979px){
   .day-planner { grid-template-columns:repeat(2,minmax(0,1fr)) }
   .planner-module { grid-row:span 2 }
 }
@@ -624,9 +590,6 @@ const itinerary=computed(()=>{
   .daily-desk { gap:9px }
   .masthead { gap:6px 10px;padding:0 }
   .masthead .desk-tools { flex:1 1 auto;flex-wrap:wrap;margin-inline-start:0 }
-  .digest { grid-template-columns:repeat(2,minmax(0,1fr));gap:6px }
-  .metric-pill { padding:6px 9px;gap:7px;border-radius:17px }
-  .metric-value strong { font-size:19px }
   .day-cell,.today-key,.masthead .small-key,.masthead .tool-key { min-height:40px }
 }
 @media(max-width:540px) {
@@ -638,7 +601,6 @@ const itinerary=computed(()=>{
   .search-anchor { flex:1 }
   .masthead .search-field { width:100%;height:40px }
   .floating { left:0;width:100% }
-  .metric-symbol { width:26px;height:26px }
 }
 .month-mode,.today-key { white-space:nowrap }
 </style>

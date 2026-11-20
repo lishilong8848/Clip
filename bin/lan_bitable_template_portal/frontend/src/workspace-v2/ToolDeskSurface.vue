@@ -31,7 +31,7 @@
 .tool-desk textarea{resize:vertical;min-height:4.3rem}.tool-desk input[type=checkbox]{width:17px;height:17px;accent-color:var(--td-green)}
 .tool-desk .td-page,.tool-desk .td-stack,.tool-desk .td-field{display:grid;gap:1rem;min-width:0}
 .tool-desk .td-field{align-content:start;gap:.35rem;font-size:.88rem;font-weight:600}
-.tool-desk .td-page{max-width:1440px;margin-inline:auto;padding:clamp(8px,2cqi,32px)}
+.tool-desk .td-page{width:100%;padding-block:clamp(5px,.7cqi,14px)}
 .tool-desk .td-panel,.tool-desk.td-dialog{padding:clamp(14px,2.3cqi,26px);border:1px solid var(--td-line);border-radius:20px;
   background:var(--td-face);box-shadow:var(--soft-raised,-3px -3px 10px #ffffffa0,4px 5px 12px #3a5a5012)}
 .tool-desk .td-panel{display:grid;align-content:start;gap:1rem;min-width:0}
@@ -58,6 +58,6 @@
 .tool-desk .td-record-grid>article{min-width:0;padding:.8rem;border:1px solid var(--td-line);border-radius:12px;overflow-wrap:anywhere}
 .tool-desk .td-divider{border:0;border-top:1px solid var(--td-line);margin:0}
 .tool-desk img{max-width:100%;object-fit:contain}
-@container(max-width:700px){.tool-desk .td-cols{grid-template-columns:minmax(0,1fr)}.tool-desk .td-page{padding:4px}.tool-desk .td-panel{border-radius:15px}}
+@container(max-width:700px){.tool-desk .td-cols{grid-template-columns:minmax(0,1fr)}.tool-desk .td-panel{border-radius:15px}}
 @container(max-width:420px){.tool-desk .td-row{align-items:flex-start}.tool-desk .td-actions{gap:.35rem}.tool-desk .td-grid{grid-template-columns:minmax(0,1fr)}}
 </style>

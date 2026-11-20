@@ -23,7 +23,8 @@ class PackagingTests(unittest.TestCase):
                     'check-document-library-all-scopes.mjs', 'check-document-library-resilience.mjs',
                     'check-learning-sharing-types.mjs', 'check-learning-sharing-resilience.mjs',
                     'check-learning-question-import.mjs', 'check-learning-daily-entry.mjs', 'check-pre-shift-edits.mjs',
-                    'check-repair-plan-binding.mjs', 'check-notice-convergence-confirmation.mjs']
+                    'check-repair-plan-binding.mjs', 'check-notice-convergence-confirmation.mjs',
+                    'check-notice-draft-scope.mjs', 'check-inspection-live-start.mjs', 'check-workbench-role-layout.mjs']
         frontend = ROOT / 'bin/lan_bitable_template_portal/frontend'
         with patch.object(package, 'PREFLIGHT_WORKERS', 2), \
                 patch.object(package.shutil, 'which', return_value='fixture-node'), \

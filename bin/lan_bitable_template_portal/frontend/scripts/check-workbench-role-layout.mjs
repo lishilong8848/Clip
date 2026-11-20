@@ -144,9 +144,11 @@ try {
   async function close(){
     await dialog.getByRole('button',{name:'关闭待办条目'}).click();await dialog.waitFor({state:'hidden'});
   }
-  async function counts(total){
+  async function counts(total,showAggregate=false){
     assert.equal(await tiles.evaluateAll(items=>items.reduce((n,item)=>n+Number(item.dataset.count),0)),total);
-    assert.equal(await todo.locator('.queue-title .wb-task-count').getAttribute('aria-label'),'已读取 '+total+' 项');
+    const badge=todo.locator('.queue-title .wb-task-count');
+    if(showAggregate)assert.equal(await badge.getAttribute('aria-label'),'已读取 '+total+' 项');
+    else assert.equal(await badge.count(),0,'Unfiltered views can rely on the individual tile counts');
   }
   async function checkInlineRepair(scope){
     await open('repair_management');
@@ -268,7 +270,7 @@ try {
   await lastCase.locator('[data-module-widget=repair_management]').waitFor();
   await page.getByRole('button',{name:'关闭维修项目',exact:true}).click();
   await lastCase.getByRole('button',{name:'关闭待办办理',exact:true}).click();await settle();
-  await todo.getByLabel('搜索待办').fill('维修 7');await counts(1);
+  await todo.getByLabel('搜索待办').fill('维修 7');await counts(1,true);
   await open('repair_management');assert.equal(await rowsOf('repair_management').count(),1);await close();
   await todo.getByLabel('搜索待办').fill('');await counts(19);
   assert.equal(await more.count(),0);
@@ -295,7 +297,7 @@ try {
 
   noticeSize=7;
   const beforeDuty=requests.length;
-  await set(actor('combined-notices','duty'));await counts(15);
+  await set(actor('combined-notices','duty'));await counts(15,true);
   const noticeReads=requests.length;
   await open('events');await rowsOf('events').getByRole('button',{name:'办理 隔离处理中事件'}).waitFor();
   assert.equal(await tile('events').getAttribute('data-count'),'2');
@@ -306,8 +308,8 @@ try {
   assert.equal(requests.length,noticeReads);
   assert.equal(await more.count(),0);
   assert.ok(!requests.slice(beforeDuty).some(([,url])=>url.startsWith('/api/learning/')));
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(15);
-  await todo.getByLabel('搜索待办').fill('事件通告'); await counts(1);
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(15,true);
+  await todo.getByLabel('搜索待办').fill('事件通告'); await counts(1,true);
   await open('events');assert.equal(await rowsOf('event_notices').count(),1);
   checks.push('both event sources appear under one tile, linked notices deduplicate, duty grants and module keyword search preserved');
   noticeSize=1; repairSize=1; partial=true;
@@ -321,7 +323,7 @@ try {
   await counts(9);
   assert.ok(requests.filter(([,url])=>url==='/api/repair-management/status').length>repairPages);
   assert.equal(requests.filter(([,url])=>url==='/api/risk-inspections').length,riskPages,'another group makes no extra API reads');
-  await close();await more.click();await settle();assert.equal(await more.count(),0);
+  await close();await more.click();await more.waitFor({state:'detached'});
   checks.push('open-group remote pagination and globally discoverable remaining pages');
   riskSize=1;
   truncatedRepairPage=true;
@@ -333,9 +335,9 @@ try {
   await health.getByRole('button',{name:'重试待跟进维修',exact:true}).click();
   await open('repair_management');await dialog.getByText('隔离维修待办',{exact:true}).waitFor();
   partial=false; empty=true;
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
-  assert.equal(await queue.count(),0);
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
   await todo.getByRole('status').filter({hasText:'暂无待办'}).waitFor();
+  assert.equal(await queue.count(),0);
   checks.push('truncated pages cannot create tasks and are retryable; empty queue is compact');
 
   empty=false; failure=500;
@@ -344,7 +346,8 @@ try {
   failure=0; await health.getByRole('button',{name:'重试处理中事件',exact:true}).click();
   await open('events');await dialog.getByText('隔离处理中事件',{exact:true}).waitFor();
   failure=403;
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
+  await tile('events').waitFor({state:'detached'});
   assert.equal(await health.count(),0,'revoked source no longer offers retry');
   assert.equal(await todo.getByText('隔离处理中事件',{exact:true}).count(),0);
   checks.push('failed sources remain visible with retry; permission denial clears stale rows and removes the details action');

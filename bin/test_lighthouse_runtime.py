@@ -685,6 +685,51 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
                 await self.runtime.prepare()
             self.assertEqual(install.call_count, 2)
 
+    async def test_listener_failure_retries_once_with_fresh_port_and_same_pending_accounts(self):
+        failed, recovered = _FakeProcess(1234), _FakeProcess(4321)
+        entered, resume = asyncio.Event(), asyncio.Event()
+        self.popen.side_effect = [failed, recovered]
+
+        async def ready(item, *_):
+            if item['process'] is failed:
+                entered.set()
+                await resume.wait()
+                raise lrt.AssistantStartupError('fixture listener failure', category='port_unavailable')
+            self.assertEqual(failed.terminate_count, 1)
+            self.assertEqual(failed.wait_count, 1)
+            item['protocol'] = 4
+
+        with patch.object(self.runtime, '_ready', side_effect=ready), patch.object(
+                lrt, 'free_port', side_effect=[51100, 51101]) as select_port:
+            first = asyncio.create_task(self.acquire('first'))
+            await entered.wait()
+            second = asyncio.create_task(self.acquire('second'))
+            async with asyncio.timeout(2):
+                while account_key('second') not in self.runtime.accounts:
+                    await asyncio.sleep(.01)
+            resume.set()
+            for item in await asyncio.gather(first, second):
+                self.assertIs(item['process'], recovered)
+                self.assertEqual(item['port'], 51101)
+                self.assertTrue(item['configured'])
+            self.assertEqual(select_port.call_args.args, (51100,))
+            self.assertEqual(self.popen.call_count, 2)
+            self.assertEqual(self.runtime._gateway_failure_count, 0)
+
+    async def test_repeated_port_failure_stops_both_children_and_applies_backoff_once(self):
+        children = [_FakeProcess(), _FakeProcess()]
+        self.popen.side_effect = children
+        with patch.object(self.runtime, '_ready', side_effect=lrt.AssistantStartupError(
+                'fixture listener failure', category='port_conflict')):
+            with self.assertRaises(lrt.AssistantStartupError):
+                await self.acquire()
+            with self.assertRaisesRegex(lrt.AssistantStartupError, '正在恢复'):
+                await self.acquire()
+        self.assertEqual(self.popen.call_count, 2)
+        self.assertEqual([child.wait_count for child in children], [1, 1])
+        self.assertEqual(self.runtime._gateway_failure_count, 1)
+        self.assertFalse(self.runtime.accounts)
+
     async def test_gateway_cooldown_expires_and_recovers_without_reinstall(self):
         self.popen.side_effect = [_FakeProcess() for _ in range(4)]
         gateway = self.runtime.root / 'shared-gateway'

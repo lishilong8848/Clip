@@ -10,6 +10,11 @@ const writable=computed(()=>props.r.editable && !!props.r.item?.can_edit);
 const external=computed(()=>props.r.session.kind==='external');
 const ready=computed(()=>!external.value || (!!props.r.session.report_name && !props.r.report && inspectionReady(props.r.reportCheck,props.r.reportAssets,props.r.actualDate)));
 const submitLabel=computed(()=>external.value?'提交送检报告':props.r.resubmitAsset?'重新提交本台审核':'提交自检审核');
+const workbookControls=computed(()=>{
+  const sheet=props.r.sheets.find((entry:{name:string})=>entry.name===props.r.item?.template?.schema?.sheet);
+  return new Set(sheet?.rows.flatMap((row:{cells:{address:string}[]})=>
+    row.cells.map(cell=>props.r.reviewCell(cell,sheet)))||[]);
+});
 </script>
 <template>
   <section class="td-panel">
@@ -48,13 +53,13 @@ const submitLabel=computed(()=>external.value?'提交送检报告':props.r.resub
       <ToolInspectionReportFields :model="r.reportCheck" :asset-ids="r.reportAssets" :assets="tools" :actual="r.actualDate" :expires-on="r.session.inspection_expires_on" :editable="r.editable" :disabled="!!r.busy"/>
     </template>
   </section>
-  <template v-else-if="r.item">
+  <div v-else-if="r.item" class="td-workbook-editor">
     <ToolDeskSheet :r="r"/>
-    <section class="td-panel"><div class="td-heading"><h2>填写结果</h2><small>{{ r.item.asset.name }}</small></div>
-      <fieldset class="td-grid" :disabled="!writable">
-        <label class="td-field">完成情况<select data-native-select :value="r.item.completion || ''" @change="r.setCompletion"><option value="">按检查项判断</option><option value="completed">已完成</option><option value="incomplete">未完成</option></select></label>
+    <section class="td-panel td-editor-outcome"><div class="td-heading"><h2>处理结论</h2></div>
+      <fieldset class="td-stack" :disabled="!writable">
+        <label v-if="!workbookControls.has('result')" class="td-field">完成情况<select data-native-select :value="r.item.completion || ''" @change="r.setCompletion"><option value="">按检查项判断</option><option value="completed">已完成</option><option value="incomplete">未完成</option></select></label>
         <label class="td-field">检查结果<select data-native-select v-model="r.item.outcome"><option value="">请选择</option><option value="normal">正常</option><option value="repair">转检修</option><option value="scrap">申请报废</option></select></label>
-        <label class="td-field">审核人<select data-native-select :value="r.item.reviewer_id || ''" @focus="r.loadReviewers()" @change="r.setReviewer">
+        <label v-if="!workbookControls.has('reviewer')" class="td-field">审核人<select data-native-select :value="r.item.reviewer_id || ''" @focus="r.loadReviewers()" @change="r.setReviewer">
           <option value="">本楼有权限的审核人</option><option v-if="r.item.reviewer_id && !r.reviewerOptions.some((p:any)=>p.id===r.item.reviewer_id)" :value="r.item.reviewer_id">{{ r.item.reviewer_name || r.item.reviewer }}</option>
           <option v-for="p in r.reviewerOptions" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
       </fieldset>
@@ -63,18 +68,24 @@ const submitLabel=computed(()=>external.value?'提交送检报告':props.r.resub
         <label v-if="writable" class="td-field">报废现场照片（最多 3 张，每张 1 MB）<input type="file" accept="image/jpeg,image/png" multiple :disabled="!r.canAddScrapPhoto" @change="r.pickScrapPhotos(r.item,$event)"/></label>
         <div class="td-actions"><span v-for="(photo,i) in r.item.scrap_photos" :key="i"><button @click="r.photoPreview=photo"><img :src="photo" width="72" height="52" alt="报废现场照片"/></button><button v-if="writable" @click="r.removeScrapPhoto(r.item,i)">移除</button></span></div>
       </template>
+      <div v-if="writable" class="td-actions">
+        <button @click="r.saveDraft()">保存草稿</button>
+        <button class="td-primary" @click="r.ask(submitLabel+'？',r.resubmitAsset?r.item.asset.name:'请核对本批工具及填写结果。',r.submit)">{{ submitLabel }}</button>
+      </div>
     </section>
-  </template>
-  <section v-if="r.editable && (external || writable)" class="td-panel"><div class="td-row">
-    <p>{{ external ? '确认报告、结论与覆盖工具后提交。' : r.dirty?'本批有未保存的填写内容。':'本批填写内容已同步。' }}</p>
-    <div class="td-actions"><button v-if="!external" @click="r.saveDraft()">保存草稿</button>
-      <button class="td-primary" :disabled="!ready" @click="r.ask(submitLabel+'？',r.resubmitAsset?r.item.asset.name:'请核对本批工具及填写结果。',r.submit)">{{ submitLabel }}</button></div>
+  </div>
+  <section v-if="r.editable && external" class="td-panel"><div class="td-row">
+    <p>确认报告、结论与覆盖工具后提交。</p>
+    <button class="td-primary" :disabled="!ready" @click="r.ask(submitLabel+'？','请核对本批工具及填写结果。',r.submit)">{{ submitLabel }}</button>
   </div></section>
   <ToolDeskReview :r="r"/>
   <ToolDeskDialog v-if="r.photoPreview" title="报废现场照片" @close="r.photoPreview=''"><img :src="r.photoPreview" alt="报废现场照片大图"/></ToolDeskDialog>
 </template>
 
 <style scoped>
+.td-workbook-editor{display:grid;grid-template-columns:minmax(0,1fr) minmax(235px,19rem);gap:.7rem;align-items:start;min-width:0}
+.tool-desk .td-editor-outcome{padding:.75rem;gap:.65rem}
+@container(max-width:1050px){.td-workbook-editor{grid-template-columns:minmax(0,1fr)}}
 .td-report-inputs {display:flex;align-items:end;flex-wrap:wrap;gap:.45rem .8rem;min-width:0;max-width:100%}
 .td-report-inputs .td-field,.td-report-inputs input {min-width:0;max-width:100%}
 .td-report-attachment {flex-wrap:nowrap}

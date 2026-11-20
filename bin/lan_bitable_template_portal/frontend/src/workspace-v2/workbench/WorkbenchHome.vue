@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch, type VNode } from 'vue';
+import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type VNode } from 'vue';
 import { NModal, NPopover } from 'naive-ui';
 import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Droplets, FileCheck2, KeyRound, Layers3, ListChecks, Package, PenLine, Route, ScanLine, Search, ShieldCheck, Siren, SlidersHorizontal, Wrench, X, Zap } from 'lucide-vue-next';
-import { requestJson, type Dict } from '../client';
+import type { Dict } from '../client';
 import { canReviewHandover, moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
 import { mandatoryCheck, widget, type Widget } from '../dashboard/layout';
 import { requestEmbeddedChange, runNavigationAction } from '../navigation';
@@ -12,10 +12,9 @@ import WorkbenchDailyLayout from './WorkbenchDailyLayout.vue';
 import AsyncPageState from '../../components/AsyncPageState.vue';
 import { recipes, workbenchModules, workbenchRole, workbenchScopes, type ScopeOption } from './recipes';
 import { scopedUrl, workbenchSources, type SourceId, type WorkItem } from './sources';
-import { useReadOnlyLayout, useWorkbenchReads } from './useWorkbenchReads';
+import { readWorkbenchRequest, useReadOnlyLayout, useWorkbenchReads } from './useWorkbenchReads';
 import { deskActionOrder, deskRole, deskSources, deskTaskVisible, inDeskScope } from './deskPolicy';
 import { todoTimestamp } from '../businessTodos';
-import { eventPeriodRange } from '../eventPeriod';
 import { eventLevelTone } from '../../eventManagementUtils';
 
 const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[]}>(),{explicitScope:true});
@@ -110,11 +109,11 @@ function switchScope(event:Event){
 const pendingSources=computed(()=>accountLevel.value?deskSources[accountLevel.value]:recipe.value.pending);
 const sources=computed(()=>workbenchSources({user:props.user,scope:dataScope.value,scopes:authorizedScopes.value,
   selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value},async(path,signal)=>{
-  const data=await requestJson(path,{signal,cache:'no-store',timeoutMs:12000});
+  const data=await readWorkbenchRequest(path,signal);
   if (data.source_snapshot_ready===false || data.snapshot?.exists===false) throw new Error('workbench-source-delayed');
   return data;
 }));
-const {states,load,refresh}=useWorkbenchReads(context,sources);
+const {states,load,refresh,refreshExpired}=useWorkbenchReads(context,sources);
 const allShortcuts=ref(false);
 const sourceOrder=computed(()=>[...new Set<SourceId>([
   ...(pendingSources.value||[]),...(Array.isArray(preferredTasks.value)?preferredTasks.value:[]),...sources.value.map(source=>source.id),
@@ -131,72 +130,6 @@ const allTasks=computed(()=>orderedSources.value
 const missingOwnership=computed(()=>['L2','L3','L4'].includes(accountLevel.value||'')&&orderedSources.value.some(source=>
   ['notices','engineer_mop','repair_management'].includes(source.id) && states.value[source.id]?.result?.rows.some(item=>
     accountLevel.value==='L4' ? !item.actorIds?.length : (accountLevel.value==='L3'||!inDeskScope(item,ownScope.value))&&!item.ownerLevel)));
-const week=computed(()=>eventPeriodRange('week','',clock.value));
-const inWeek=(stamp:number|undefined)=>stamp!==undefined&&stamp>=week.value.start&&stamp<week.value.end;
-const weeklyNotices=ref<number|null>(null);
-const weeklyRevision=ref(0);
-const refreshWeekly=()=>{weeklyRevision.value++;};
-watch([context,()=>week.value.start,weeklyRevision],async(_value,_old,onCleanup)=>{
-  weeklyNotices.value=null;
-  if(!['L0','L1','L2'].includes(accountLevel.value||'')||!dataScope.value) return;
-  const types=['maintenance','change'].filter(type=>props.user.modules?.includes(type));
-  if(!types.length)return;
-  const controller=new AbortController();
-  onCleanup(()=>controller.abort());
-  const currentWeek=week.value;
-  await nextTick();
-  if(controller.signal.aborted)return;
-  try {
-    const batches=await Promise.all((readScopes.value||[dataScope.value]).flatMap(scope=>currentWeek.months.flatMap(month=>types.map(async work_type=>{
-      const batch=await requestJson(scopedUrl('/api/history-summary',{scope,month,work_type}),{signal:controller.signal,timeoutMs:12000});
-      if(batch.scope!==scope||batch.month!==month||!Array.isArray(batch.days)||batch.config_missing||batch.warnings?.length) throw new Error('通告统计暂不可用');
-      return batch.days.reduce((sum:number,day:Dict)=>{
-        if(!inWeek(todoTimestamp(day.date))) return sum;
-        const started=day.stats?.started;
-        if(!Number.isSafeInteger(started)||started<0) throw new Error('通告统计未核验');
-        return sum+started;
-      },0) as number;
-    }))));
-    if(!controller.signal.aborted) weeklyNotices.value=batches.reduce((sum,value)=>sum+value,0);
-  } catch { /* The metric remains unavailable when any applicable scope cannot be verified. */ }
-},{immediate:true});
-const metrics=computed(()=>{
-  const metric=(label:string,kinds:SourceId[],predicate:(item:WorkItem)=>boolean=()=>true)=>{
-    const available=orderedSources.value.filter(source=>kinds.includes(source.id));
-    const loaded=available.some(source=>!!states.value[source.id]?.result);
-    const value=allTasks.value.filter(item=>kinds.includes(item.kind)&&predicate(item)).length;
-    const unknown=missingOwnership.value&&kinds.some(kind=>['notices','engineer_mop','repair_management'].includes(kind));
-    const partial=unknown||available.some(source=>states.value[source.id]?.status!=='ok'||states.value[source.id]?.result?.more);
-    return {label,value:loaded&&(value>0||!partial)?value:null,partial};
-  };
-  const all=orderedSources.value.map(source=>source.id);
-  const weekly={label:globalDesk.value?'本周变更／维保通告':'本周本楼维保／变更通告',value:accountLevel.value==='L2'&&selectedScope.value!==ownScope.value?null:weeklyNotices.value};
-  const handover={label:'交接待审',value:null};
-  switch(accountLevel.value){
-    case 'L0': return [{...metric('全域待办总数',all),partial:true},metric('全域未闭环事件',['events']),weekly,metric('账号权限待审批',['accounts'])];
-    case 'L1': return [{...metric('全域待办总数',all),partial:true},metric('全域未闭环事件',['events']),weekly,handover];
-    case 'L2': return [metric('本楼待办总数',all),metric('本楼未闭环事件',['events']),weekly,metric('在途维修单',['repair_management'])];
-    case 'L3': return [metric('本楼待办审核数',all,item=>/待审核|待审批/.test(item.status)),metric('本楼未闭环事件',['events']),
-      metric('本楼重保／专项排查进行中',['critical_guard','risk_inspection']),handover];
-    case 'L4': return [metric('我的待办任务',all),metric('我参与的在途单据',all,item=>item.ongoing===true||item.kind==='repair_management'),
-      metric('我本周轮巡计划',['notices'],item=>item.detail==='轮巡'&&!item.ongoing&&inWeek(todoTimestamp(item.noticeWindow?.start||item.time))),
-      metric('我的截止临近事项',all,item=>!!item.dueAt&&item.dueAt>=clock.value&&item.dueAt<=clock.value+3*86400000)];
-    case 'duty': return [metric('当班待办确认项',all,item=>item.kind==='ali_confirmation'||/待确认|待核验/.test(item.status)),
-      metric('本楼未闭环事件',['events']),metric('当班上下电／检修通告',['notices'],item=>['上下电','检修'].includes(item.detail||'')&&onShift(item)),metric('当班巡检任务',['inspection'])];
-    default: return [metric('待办任务',all),metric('未读任务',all,item=>!isRead(item)),metric('未闭环事件',['events']),metric('待跟进维修',['repair_management'])];
-  }
-});
-function onShift(item:WorkItem) {
-  const at=new Date(clock.value+8*3600000);
-  const hour=at.getUTCHours();
-  if(hour<9)at.setUTCDate(at.getUTCDate()-1);
-  const day=at.toISOString().slice(0,10), dayShift=hour>=9&&hour<18;
-  const start=Date.parse(day+(dayShift?'T09:00:00+08:00':'T18:00:00+08:00'));
-  const end=start+(dayShift?9:15)*3600000;
-  const time=todoTimestamp(item.noticeWindow?.start||item.time);
-  const until=todoTimestamp(item.noticeWindow?.end);
-  return time!==undefined&&time<end&&(time>=start||until!==undefined&&until>start);
-}
 const readStorageKey=computed(()=>{
   const id=props.user.open_id||props.user.union_id;
   return id&&!props.user.impersonation?'clipflow:workbench-read:'+id+':'+dataScope.value:'';
@@ -341,8 +274,10 @@ function openGroupItem(item:WorkItem){
 watch(taskGroups,groups=>{
   if(activeGroup.value&&!groups.some(group=>group.key===activeGroup.value))activeGroup.value='';
 });
-const allLoading=computed(()=>sourcesForQueue.value.some(source=>!states.value[source.id]||states.value[source.id]?.status==='loading'));
-const canLoadMore=computed(()=>sourcesForQueue.value.some(source=>states.value[source.id]?.result?.more));
+const allLoading=computed(()=>sourcesForQueue.value.some(({id})=>!states.value[id]||
+  (states.value[id]?.status==='loading'&&!states.value[id]?.result)));
+const moreSources=computed(()=>sourcesForQueue.value.filter(({id})=>states.value[id]?.result?.more));
+const canLoadMore=computed(()=>moreSources.value.length>0);
 const queueIssues=computed(()=>sourcesForQueue.value.filter(source=>{
   const state=states.value[source.id];
   return state?.retrying||state?.status==='stale'||state?.status==='down';
@@ -360,9 +295,7 @@ const queueStatus=computed(()=>{
   return '暂无待办';
 });
 function loadMore(){
-  for(const source of sourcesForQueue.value){
-    if(states.value[source.id]?.result?.more)void load(source.id,true,true);
-  }
+  for(const {id} of moreSources.value) void load(id,true,true);
 }
 watch([taskSearch,taskView],()=>{activeGroup.value='';});
 watch(queueSources,list=>{
@@ -480,45 +413,44 @@ watch([context,selectedScope],()=>{
   taskSearch.value=''; taskView.value='all'; activeGroup.value='';tileTrigger=null; allShortcuts.value=false;
 },{flush:'sync'});
 
-let dutyRead:AbortController|undefined;
-async function readDuty(){
-  dutyRead?.abort();
-  const category=props.user.category;
-  const canRead=mandatoryCheck(props.user)||['manager','supervisor'].includes(category)||['L0','L1'].includes(props.user.level);
-  if (!ownScope.value || !props.user.open_id || ['guest','temporary'].includes(props.user.role) || category==='duty'||!canRead) return;
-  const controller=dutyRead=new AbortController(), key=accessKey.value;
-  try {
-    const data=await requestJson(scopedUrl('/api/pre-shift-checks',{scope:ownScope.value}),{cache:'no-store',signal:controller.signal,timeoutMs:8000});
-    if (controller.signal.aborted||key!==accessKey.value) return;
-    if (data.scope!==ownScope.value||!data.roster_ready||!Array.isArray(data.tasks)||!Array.isArray(data.definition?.items)) {
-      shift.value='';
-      return;
-    }
-    const rosterItems=new Set(data.definition.items.filter((item:Dict)=>item.frequency?.kind==='shift'&&!item.fixed_recipients?.length).map((item:Dict)=>item.id));
-    const now=Date.parse(data.server_time);
-    const latest=data.tasks.filter((task:Dict)=>{
-      const start=Date.parse(task.day+(task.shift==='夜'?'T17:50:00':'T08:00:00')+'+08:00');
-      return ['白','夜'].includes(task.shift)&&start<=now&&now<task.deadline*1000
-        && task.definition_version===data.definition.version
-        && Array.isArray(task.people)&&task.people.some((person:Dict)=>person.open_id===props.user.open_id)
-        && Array.isArray(task.items)&&task.items.some((item:Dict)=>rosterItems.has(item.id)
-          && (!Array.isArray(item.recipient_ids)||item.recipient_ids.includes(props.user.open_id)));
-    }).sort((a:Dict,b:Dict)=>b.due-a.due)[0];
-    shift.value=latest?.shift||'';
-  } catch {
-    if (!controller.signal.aborted&&key===accessKey.value) shift.value='';
+function readDuty(data:Dict){
+  if (props.user.category==='duty'||data.scope!==checkScope.value||!data.roster_ready) {
+    shift.value='';
+    return;
   }
+  const rosterItems=new Set(data.definition.items.filter((item:Dict)=>item.frequency?.kind==='shift'&&!item.fixed_recipients?.length).map((item:Dict)=>item.id));
+  const now=Date.parse(data.server_time);
+  const latest=data.tasks.filter((task:Dict)=>{
+    const start=Date.parse(task.day+(task.shift==='夜'?'T17:50:00':'T08:00:00')+'+08:00');
+    return ['白','夜'].includes(task.shift)&&start<=now&&now<task.deadline*1000
+      && task.definition_version===data.definition.version
+      && Array.isArray(task.people)&&task.people.some((person:Dict)=>person.open_id===props.user.open_id)
+      && Array.isArray(task.items)&&task.items.some((item:Dict)=>rosterItems.has(item.id)
+        && (!Array.isArray(item.recipient_ids)||item.recipient_ids.includes(props.user.open_id)));
+  }).sort((a:Dict,b:Dict)=>b.due-a.due)[0];
+  shift.value=latest?.shift||'';
 }
 let dutyTimer:ReturnType<typeof setInterval>|undefined;
-watch(accessKey,()=>{shift.value='';void readDuty();},{immediate:true,flush:'post'});
-onMounted(()=>{
-  window.addEventListener('clipflow-business-changed',refreshWeekly);
-  dutyTimer=setInterval(()=>{if(!document.hidden){clock.value=Date.now();void readDuty();}},60000);
+watch(accessKey,()=>{shift.value='';},{flush:'sync'});
+function updateClock(){
+  if(!document.hidden){clock.value=Date.now();refreshExpired();}
+}
+onMounted(()=>{dutyTimer=setInterval(updateClock,60000);});
+onActivated(()=>{
+  updateClock();
+  if(!dutyTimer)dutyTimer=setInterval(updateClock,60000);
+  for(const source of orderedSources.value)void load(source.id);
 });
-onBeforeUnmount(()=>{
-  dutyRead?.abort(); clearInterval(dutyTimer);
-  window.removeEventListener('clipflow-business-changed',refreshWeekly);
+function pause(){
+  clearInterval(dutyTimer);
+  dutyTimer=undefined;
+}
+onDeactivated(()=>{
+  pause();
+  inlineNotice.value=undefined;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';
+  activeGroup.value='';trigger=null;tileTrigger=null;
 });
+onBeforeUnmount(pause);
 
 
 const currentScopeLabel=computed(()=>scopeOptions.value.find(option=>option.value===selectedScope.value)?.label || '');
@@ -546,11 +478,11 @@ function showQueue(view:TaskView){
   content.value?.scrollIntoView({block:'start'});
   content.value?.focus({preventScroll:true});
 }
-const viewButtons=computed<{view:TaskView;label:string}[]>(()=>[
+const viewButtons=computed<{view:TaskView;label:string;count?:number}[]>(()=>[
   {view:'all',label:'全部'},
-  {view:'today',label:'今日'},
-  {view:'unread',label:'未读'},
-  ...(hasPreviousRepairs.value||taskView.value==='previous-repairs'?[{view:'previous-repairs' as const,label:'历史未完维修'}]:[]),
+  {view:'today',label:'今日',count:queueTasks.value.filter(isTodayTask).length},
+  {view:'unread',label:'未读',count:unreadTasks.value.length},
+  ...(hasPreviousRepairs.value||taskView.value==='previous-repairs'?[{view:'previous-repairs' as const,label:'历史未完维修',count:queueTasks.value.filter(isPreviousRepair).length}]:[]),
 ]);
 function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof moduleIcons]||Layers3;}
 function closeAli(){aliFocus.value='';restoreFocus();}
@@ -559,8 +491,8 @@ function closeAli(){aliFocus.value='';restoreFocus();}
 <template>
   <div class="wb-home task-desk">
     <WorkbenchDailyLayout :name="accountName" :avatar="user.avatar_url || user.avatar" :clock="clock" :links="deskLinks"
-      :tasks="allTasks" :unread="unreadTasks" :metrics="metrics" :agenda-scopes="agendaScopes" :calendar-scope="dataScope"
-      :calendar-identity="context" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
+      :tasks="allTasks" :unread="unreadTasks" :agenda-scopes="agendaScopes" :calendar-scope="dataScope" :impersonating="!!user.impersonation"
+      :calendar-identity="accessKey" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
       <template #context><span class="wb-identity role-context">{{ [roleLabel,scopeOptions.length<=1?currentScopeLabel:'',shift?shift+'班':''].filter(Boolean).join(' · ') }}</span></template>
       <template v-if="scopeOptions.length>1" #focus>
         <label class="wb-scope scope-choice"><select data-native-select :value="selectedScope" aria-label="工作台楼栋" @change="switchScope"><option v-for="opt in scopeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></label>
@@ -601,18 +533,18 @@ function closeAli(){aliFocus.value='';restoreFocus();}
         <header class="queue-toolbar">
           <div class="queue-title"><h2 id="workbench-queue-title">待办办理</h2>
             <span v-if="showQueueCount" class="wb-task-count" :title="queueNote" :aria-label="'已读取 '+matchedTasks.length+' 项'">{{ matchedTasks.length }}</span>
-            <button v-if="canLoadMore" type="button" class="queue-more" aria-label="读取更多待办" title="读取下一页待办" :disabled="allLoading" @click="loadMore">更多<ChevronRight :size="13" aria-hidden="true" /></button>
+            <button v-if="canLoadMore" type="button" class="queue-more" aria-label="读取更多待办" title="读取下一页待办" :disabled="allLoading || moreSources.some(({id})=>states[id]?.status==='loading')" @click="loadMore">更多<ChevronRight :size="13" aria-hidden="true" /></button>
           </div>
           <div class="queue-switches" role="group" aria-label="待办筛选">
             <button v-for="view in viewButtons" :key="view.view" :aria-pressed="taskView===view.view" @click="taskView=view.view">
-              {{ view.label }}
+              {{ view.label }}<b v-if="view.count" class="queue-filter-count" aria-hidden="true">{{ view.count }}</b>
             </button>
           </div>
           <div class="queue-filters">
             <label><Search :size="15" aria-hidden="true" /><input v-model="taskSearch" type="search" aria-label="搜索待办" placeholder="搜索待办"></label>
           </div>
         </header>
-        <details v-if="queueIssues.length" class="desk-queue-health queue-health"><summary>读取异常 · {{ queueIssues.length }}</summary>
+        <details v-if="queueIssues.length" class="desk-queue-health queue-health"><summary>{{ queueIssues.length }} 类待办待更新</summary>
           <div v-for="source in queueIssues" :key="source.id"><span>{{ source.label }} · {{ sourceStatus(source.id) }}</span><button :aria-label="'重试'+source.label" :disabled="states[source.id]?.status==='loading'" @click="load(source.id,true)">重试</button></div>
         </details>
         <p v-if="queueStatus" class="quiet-message" role="status">{{ queueStatus }}</p>
@@ -656,7 +588,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
         </ul>
       </section>
       <section v-if="checkScope" class="wb-check-panel shift-check" aria-label="班前检查">
-        <PreShiftCheck :key="accessKey+checkScope" :user="checkUser" :fixed-scope="checkScope" />
+        <PreShiftCheck :key="accessKey+checkScope" :user="checkUser" :fixed-scope="checkScope" @snapshot="readDuty" />
       </section>
       <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
     </WorkbenchDailyLayout>
@@ -775,6 +707,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
   .record-key { gap:2px; padding-inline:6px }
 }
 .priority-board { margin:0 0 12px }
+.queue-filter-count { margin-inline-start:4px;font-size:11px;font-variant-numeric:tabular-nums }
 .priority-board>header,.priority-board h2 { display:flex;align-items:center;gap:6px }
 .priority-board>header { justify-content:space-between;margin-bottom:6px }
 .priority-board h2 { font-size:17px;color:var(--priority-red,#a82c3e) }

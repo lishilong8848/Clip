@@ -145,6 +145,7 @@ try {
   try {
     globalThis.XMLHttpRequest = class {
       open() {}
+      setRequestHeader() {}
       send() { queueMicrotask(() => this.onerror()); }
       abort() { this.onabort?.(); }
     };

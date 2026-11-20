@@ -26084,6 +26084,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     origin="qt",
                 )
             session_id = "workbench-current-qt-session"
+            account_profile = patch.object(
+                PortalRuntime.auth_manager,
+                "account_profile",
+                return_value={"modules": ["maintenance"], "role": "admin", "level": "L0", "can_delete_business": True},
+            )
+            account_profile.start()
+            self.addCleanup(account_profile.stop)
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions[session_id] = {
                     "session_id": session_id,
@@ -26119,6 +26126,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 set(timings),
                 {"ongoing_ms", "query_ms", "render_ms", "total_ms"},
             )
+            for query in ("sections=ongoing", "sections=records,ongoing&search=不存在的计划"):
+                page = {"records": [], "ongoing": payload["ongoing"],
+                        "records_pagination": {"total": 0}, "record_type_counts": {"maintenance": 7}}
+                with patch.object(service, "query_records", return_value=page) as read:
+                    response = client.get(
+                        "/api/workbench?scope=C&work_type=maintenance&" + query,
+                        headers={"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"},
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["data"]["records"], [])
+                    read.assert_called_once()
         finally:
             service._state_store.shutdown_write_worker()
             PortalRuntime.service = original_service

@@ -56,9 +56,11 @@ for(const account of [
   assert.equal(sanitize(savedCheck,account,['A']).widgets.length,0);
 }
 const fixed={...user,role:'admin',level:'L0',category:'manager',is_fixed_superuser:true};
-assert.equal(defaults(fixed).widgets[0].kind,'pre_shift');
-assert.equal(sanitize({version:1,widgets:[]},fixed,['A']).widgets[0].kind,'pre_shift');
-assert.equal(sanitize(savedCheck,fixed,['A']).widgets.length,1);
+assert.equal(defaults(fixed).widgets.some(widget=>widget.kind==='pre_shift'),false);
+assert.equal(sanitize(savedCheck,fixed,['A']).widgets.length,0);
+assert.equal(allowedKind('pre_shift',{...fixed,category:'operator'}),true);
+assert.equal(allowedKind('pre_shift',{...fixed,category:'shift_leader'}),true);
+assert.equal(allowedKind('pre_shift',{...fixed,category:'duty'}),true);
 assert.equal(allowedKind('pre_shift',{...fixed,role:'guest'}),false);
 assert.equal(allowedKind('pre_shift',{...user,category:'duty',modules:[]}),false);
 const revoked = sanitize(base,{...user,modules:[]},['A']).widgets;

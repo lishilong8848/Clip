@@ -1,5 +1,5 @@
 <template>
-  <section v-if="sources.length" class="wb-period" aria-label="工作状态">
+  <section v-if="shownSources.length" class="wb-period" aria-label="工作状态">
     <header class="wb-period-header">
       <h2 :title="dateLabel+' · '+scopeLabel">工作状态</h2>
       <div class="wb-period-select" role="group" aria-label="统计周期">
@@ -8,40 +8,48 @@
       </div>
     </header>
     <div class="wb-period-grid" aria-live="polite">
-      <article v-for="source in sources" :key="source.id" class="wb-period-card">
-        <header><h3>{{ source.label }}</h3><button v-if="source.url && !results[source.id]?.denied" type="button" :aria-label="`打开${source.label}`"
-          @click="$emit('open', source.url)"><ArrowUpRight :size="18" /></button></header>
+      <article v-for="source in shownSources" :key="source.id" class="wb-period-card">
+        <header>
+          <div class="wb-period-topic"><component :is="icons[source.id]" :size="16" aria-hidden="true" /><h3>{{ source.label }}</h3></div>
+          <div v-if="results[source.id]?.metric" class="wb-period-value"><strong>{{ results[source.id]?.metric?.value }}</strong><span>{{ results[source.id]?.metric?.unit }}</span></div>
+          <button v-if="source.url" type="button" :aria-label="`打开${source.label}`"
+            @click="$emit('open', source.url)"><ArrowUpRight :size="17" /></button>
+        </header>
         <template v-if="results[source.id]?.metric">
-          <div class="wb-period-value"><strong>{{ results[source.id]?.metric?.value }}</strong><span>{{ results[source.id]?.metric?.unit }}</span></div>
-          <div v-for="bar in results[source.id]?.metric?.bars" :key="bar.label" class="wb-period-bar" :class="bar.tone">
-            <span>{{ bar.label }}</span><meter :value="bar.value" :max="bar.max || 1" :aria-label="bar.label" /><b>{{ bar.value }}</b>
+          <div v-if="results[source.id]?.metric?.bars.length" class="wb-period-stats">
+            <div v-for="bar in results[source.id]?.metric?.bars" :key="bar.label" class="wb-period-bar" :class="bar.tone">
+              <span>{{ bar.label }}</span><b>{{ bar.value }}</b>
+              <meter :value="bar.value" :max="bar.max || 1" :aria-label="bar.label" />
+            </div>
           </div>
           <p v-if="results[source.id]?.metric?.note">{{ results[source.id]?.metric?.note }}</p>
         </template>
-        <p v-else-if="results[source.id]?.error" class="wb-period-message">{{ results[source.id]?.error }}
-          <button v-if="!results[source.id]?.denied" type="button" @click="load(source)">重试</button>
+        <p v-if="results[source.id]?.error" class="wb-period-message">{{ results[source.id]?.error }}
+          <button type="button" @click="load(source)">重试</button>
         </p>
-        <p v-else class="wb-period-message" role="status">正在读取</p>
+        <p v-else-if="!results[source.id]" class="wb-period-message" role="status">正在读取…</p>
       </article>
     </div>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
-import { ArrowUpRight } from 'lucide-vue-next';
+import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
+import { ArrowUpRight, BookOpenCheck, ClipboardList, Radio, Siren } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../client';
 import { beijingDate, eventCalendarRange, eventPeriodRange, mergeEventMonths } from '../eventPeriod';
 import { eventStatusTone } from '../../eventManagementUtils';
 import type { Role, ScopeOption } from './recipes';
+import { readWorkbenchRequest } from './useWorkbenchReads';
 
 const props = defineProps<{ user: Dict; scope: string; scopes: ScopeOption[]; role: Role; readScopes?:string[] }>();
 defineEmits<{ open: [url: string] }>();
 const periods = [{ id: 'day', label: '今日' }, { id: 'week', label: '本周' }, { id: 'month', label: '本月' }] as const;
+const icons={daily:ClipboardList, events:Siren, notices:Radio, learning:BookOpenCheck};
 type Period = typeof periods[number]['id'];
 type Bar = { label: string; value: number; max: number; tone?: 'ok' | 'warn' };
 type Metric = { value: number | string; unit?: string; bars: Bar[]; note?: string };
-type Source = { id: string; label: string; url?: string; read: (signal: AbortSignal) => Promise<Metric> };
+type Source = { id: keyof typeof icons; label: string; url?: string; read: (signal: AbortSignal) => Promise<Metric> };
 const period = ref<Period>('day');
 const today = ref(beijingDate());
 const range = computed(() => {
@@ -57,7 +65,7 @@ const count = (value: unknown): number => {
   return value;
 };
 const read = (path: string, query: Record<string, string>, signal: AbortSignal) =>
-  requestJson(path + '?' + new URLSearchParams(query), { signal, timeoutMs: 12_000 });
+  readWorkbenchRequest(path + '?' + new URLSearchParams(query), signal);
 
 const sources = computed<Source[]>(() => {
   const grants: string[] = Array.isArray(props.user.modules) ? props.user.modules : [];
@@ -124,7 +132,7 @@ const sources = computed<Source[]>(() => {
       ] };
     },
   });
-  if (team && scoped && grants.includes('learning') && !props.user.impersonation) rows.push({
+  if (team && scoped && /^(?:[A-EH]|ALL|CAMPUS)$/.test(scope) && grants.includes('learning') && !props.user.impersonation) rows.push({
     id:'learning',label:'画像学练情况汇总',
     async read(signal) {
       const data=await read('/api/learning/workbench-summary',{scope,from:beijingDate(activeRange.start),to:date},signal);
@@ -160,12 +168,14 @@ const sources = computed<Source[]>(() => {
     : props.role === 'duty' ? ['daily', 'notices', 'events', 'learning'] : ['learning', 'daily', 'notices', 'events'];
   return rows.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
 });
+const shownSources=computed(()=>sources.value.filter(source=>!results.value[source.id]?.denied));
+let activeView=true, refreshPending=false, refreshedAt=0;
 
 async function load(source: Source) {
-  requests.get(source.id)?.abort();
+  if(!activeView||requests.has(source.id))return;
   const controller = new AbortController();
   requests.set(source.id, controller);
-  delete results.value[source.id];
+  const previous=results.value[source.id]?.metric;
   try {
     const metric = await source.read(controller.signal);
     if (!controller.signal.aborted) results.value[source.id] = { metric };
@@ -173,30 +183,51 @@ async function load(source: Source) {
     if (!controller.signal.aborted) {
       const denied = [401,403].includes((error as { status?: number })?.status || 0);
       const label = error instanceof Error && /待(同步|核验)/.test(error.message) ? error.message : '读取失败';
-      results.value[source.id] = { denied, error: denied ? '当前无权查看' : label };
+      results.value[source.id] = {denied, metric:denied?undefined:previous, error:previous?'汇总待更新':label};
     }
   } finally {
-    if (requests.get(source.id) === controller) requests.delete(source.id);
+    if (requests.get(source.id) === controller) {
+      requests.delete(source.id);
+      if(!requests.size&&refreshPending)refresh();
+    }
   }
 }
-function refresh() {
-  requests.forEach(request => request.abort());
-  requests.clear();
-  results.value = {};
-  sources.value.forEach(source => void load(source));
+function refresh(){
+  if(!activeView||document.hidden||requests.size){refreshPending=true;return;}
+  refreshPending=false;
+  refreshedAt=Date.now();
+  shownSources.value.forEach(source=>void load(source));
 }
-watch(() => [sources.value, props.user.open_id, props.user.id], refresh, { immediate: true });
-const dateTimer = window.setInterval(() => { today.value = beijingDate(); }, 60_000);
-onMounted(() => window.addEventListener('clipflow-business-changed', refresh));
+watch(()=>JSON.stringify([range.value.start,range.value.end,props.scope,props.readScopes,props.role,
+  props.scopes,props.user.open_id,props.user.modules,props.user.level,props.user.category,props.user.impersonation]),()=>{
+  requests.forEach(request=>request.abort());
+  requests.clear();
+  results.value={};
+  refresh();
+},{immediate:true});
+function resume(){
+  if(!activeView||document.hidden)return;
+  const next=beijingDate();
+  if(next!==today.value){today.value=next;return;}
+  if(refreshPending||Date.now()-refreshedAt>=120000)refresh();
+}
+const dateTimer = window.setInterval(resume,60000);
+onActivated(()=>{activeView=true;resume();});
+onDeactivated(()=>{activeView=false;});
+onMounted(()=>{
+  window.addEventListener('clipflow-business-changed',refresh);
+  document.addEventListener('visibilitychange',resume);
+});
 onBeforeUnmount(() => {
   requests.forEach(request => request.abort());
   window.clearInterval(dateTimer);
   window.removeEventListener('clipflow-business-changed', refresh);
+  document.removeEventListener('visibilitychange',resume);
 });
 </script>
 
 <style scoped>
-.wb-period { display:grid;gap:7px;min-width:0 }
+.wb-period { display:grid;gap:9px;min-width:0;padding:11px;border:1px solid var(--soft-edge);border-radius:14px;background:var(--soft-face) }
 .wb-period-header { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 9px }
 .wb-period h2, .wb-period h3, .wb-period p { margin: 0; }
 .wb-period h2 { font-size: 16px; }
@@ -206,19 +237,23 @@ onBeforeUnmount(() => {
 .wb-period button:focus-visible { outline: 2px solid var(--wb-primary,var(--v2-blue)); outline-offset: -2px; }
 .wb-period-select button { min-height:30px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600 }
 .wb-period-select button[aria-pressed='true'] { color: var(--wb-primary,var(--v2-blue)); background: color-mix(in srgb,var(--wb-primary,var(--v2-blue)) 12%,transparent); }
-.wb-period-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:8px;align-items:start }
-.wb-period-card { display:grid;align-content:start;gap:4px;min-width:0;padding:8px 10px;background:var(--soft-face);border:1px solid var(--soft-edge);border-radius:12px }
-.wb-period-card header { display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px }
-.wb-period-card h3 { font-size: 14px; }
+.wb-period-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,235px),1fr));gap:8px;align-items:start }
+.wb-period-card { display:grid;align-content:start;gap:8px;min-width:0;padding:9px 11px;background:var(--soft-field);border:1px solid var(--soft-edge);border-radius:10px }
+.wb-period-card header { display:flex;align-items:center;gap:7px;min-height:28px }
+.wb-period-topic { display:flex;align-items:center;gap:6px;min-width:0;margin-inline-end:auto }
+.wb-period-topic svg { color:var(--v2-palette-accent-text);flex:none }
+.wb-period-card h3 { font-size: 13px; }
 .wb-period-card header button { display:grid;place-items:center;min-width:28px;min-height:28px;color:var(--wb-primary,var(--v2-blue)) }
-.wb-period-value { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; line-height: 1.12; }
-.wb-period-value strong { font-size: clamp(24px,2vw,30px); font-variant-numeric: tabular-nums; }
+.wb-period-value { display:flex;align-items:baseline;gap:4px;white-space:nowrap;line-height:1.12 }
+.wb-period-value strong { font-size:clamp(16px,1.6vw,21px);font-variant-numeric:tabular-nums }
 .wb-period-value span { color: var(--v2-muted); font-size: 12px; }
-.wb-period-bar { --bar-color: var(--wb-primary,var(--v2-blue)); display: grid; grid-template-columns: 5em minmax(24px,1fr) auto; align-items: center; gap: 8px; font-size: 12px; }
+.wb-period-stats { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,68px),1fr));gap:6px 9px }
+.wb-period-bar { --bar-color:var(--wb-primary,var(--v2-blue));display:grid;grid-template-columns:minmax(0,1fr) auto;
+  align-items:center;gap:2px 4px;font-size:12px }
 .wb-period-bar.ok { --bar-color: var(--v2-green,#18835a); }
 .wb-period-bar.warn { --bar-color: var(--v2-amber,#b66b24); }
 .wb-period-bar b { min-width: 2ch; text-align: right; font-variant-numeric: tabular-nums; }
-.wb-period-bar meter { width: 100%; height: 8px; appearance: none; }
+.wb-period-bar meter { grid-column:1/-1;width:100%;height:5px;appearance:none }
 .wb-period-bar meter::-webkit-meter-bar { border: 0; background: var(--v2-border); }
 .wb-period-bar meter::-webkit-meter-optimum-value { background: var(--bar-color); }
 .wb-period-bar meter::-moz-meter-bar { background: var(--bar-color); }
@@ -226,6 +261,5 @@ onBeforeUnmount(() => {
 @media(max-width:560px) {
   .wb-period-select button,.wb-period-card header button,.wb-period-message button { min-height: 44px; }
   .wb-period-card { padding-inline: 10px; }
-  .wb-period-bar { grid-template-columns: 5em minmax(12px,1fr) auto; gap: 4px; }
 }
 </style>

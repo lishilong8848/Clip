@@ -37,7 +37,7 @@ async function setup(actor, mobile = false, keepSibling = false) {
   const page = await context.newPage();
   page.setDefaultTimeout(12000);
   await page.clock.setFixedTime(new Date(date + 'T03:00:00Z'));
-  const state = { closed: false, submissions: [], retries: 0, details: [], errors: [], outside: [] };
+  const state = { closed: false, submissions: [], retries: 0, details: [], errors: [], outside: [], queueReads: 0 };
   page.on('pageerror', error => state.errors.push(error.message));
   await context.route('**/*', async route => {
     const request = route.request(), url = new URL(request.url());
@@ -54,6 +54,7 @@ async function setup(actor, mobile = false, keepSibling = false) {
       allowed_scopes: ['A', 'B'], default_scope: 'A' });
     }
     if (url.pathname === '/api/workbench') {
+      if (url.searchParams.get('sections') === 'ongoing') state.queueReads++;
       const ongoing = items.filter(item => item.scope === scope && !(state.closed && item === target))
         .map(item=>keepSibling && item===items[1]?{...item,created_by_open_id:actor.open_id}:item);
       return ok({ ongoing, records: [], ongoing_pagination: { total_pages: 1 }, records_pagination: { total_pages: 1 } });
@@ -125,6 +126,24 @@ try {
         await button(pop,'关闭待办条目').click();
       }
       await check(expected);
+      if (actor.level === 'L0') {
+        const navigation = page.getByRole('navigation',{name:'功能导航'});
+        const home = button(navigation,'个人工作台');
+        assert.equal(await home.count(),1);
+        assert.equal(await home.getAttribute('aria-current'),'page');
+        const notices=button(navigation,'通告中心');
+        const hasSubmenu=await notices.getAttribute('aria-controls');
+        await notices.click();
+        if(hasSubmenu) await button(navigation,'通告办理').click();
+        await queue.waitFor({state:'detached'});
+        await page.waitForURL(url=>url.searchParams.get('__page')==='/workbench-lite'||url.pathname==='/workbench-lite');
+        const previousReads=state.queueReads;
+        await home.click();
+        await tile.waitFor();
+        await check(expected);
+        assert.equal(await home.getAttribute('aria-current'),'page');
+        assert.equal(state.queueReads,previousReads,'workspace navigation should reuse the initial queue snapshot');
+      }
       if (testBuilding) {
         await page.getByRole('combobox', { name: '工作台楼栋' }).selectOption(testBuilding);
         await priorities.getByText(items.find(item => item.scope === testBuilding).title, { exact: true }).waitFor();

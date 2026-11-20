@@ -1,100 +1,81 @@
 <script setup lang="ts">
-const props = defineProps<{
-  rows: {
-    scope: string
-    day: Set<string>
-    night: Set<string>
-    other: Map<string, Set<string>>
-  }[]
-  message: string
-  canRetry: boolean
-}>()
+import { Moon, Sun, UsersRound } from 'lucide-vue-next';
 
-const emit = defineEmits<{ retry: [] }>()
-
-/** 楼栋标签：A → A楼，110 → 110站，已带单位或空值原样保留 */
-function scopeLabel(scope: string): string {
-  const s = (scope ?? '').trim()
-  if (!s) return '未提供'
-  if (/[楼栋站区室]$/.test(s)) return s
-  if (/^\d+$/.test(s)) return `${s}站`
-  if (/^[A-Za-z]$/.test(s)) return `${s}楼`
-  return s
-}
+defineProps<{
+  rows: {scope:string;day:Set<string>;night:Set<string>;other:Map<string,Set<string>>}[];
+  message: string;
+  canRetry: boolean;
+}>();
+defineEmits<{ retry: [] }>();
 </script>
 
 <template>
-  <section class="workbench-roster" aria-label="今日排班">
-    <div v-if="props.rows.length > 0" class="table-wrap">
-      <table class="roster-table">
-        <caption class="sr-only">今日排班：楼栋、白班与夜班人员</caption>
-        <thead>
-          <tr>
-            <th scope="col" class="col-scope">楼栋</th>
-            <th scope="col">白班</th>
-            <th scope="col">夜班</th>
+  <section class="workbench-roster" aria-labelledby="roster-heading">
+    <header class="roster-head">
+      <span class="roster-icon"><UsersRound :size="17" aria-hidden="true" /></span>
+      <h3 id="roster-heading">今日上班人员</h3>
+    </header>
+    <table v-if="rows.length" class="roster-table">
+      <thead>
+        <tr><th scope="col">楼栋</th>
+          <th scope="col" class="day-header"><span class="shift-label"><Sun :size="14" aria-hidden="true" />白班</span></th>
+          <th scope="col" class="night-header"><span class="shift-label"><Moon :size="13" aria-hidden="true" />夜班</span></th>
+        </tr>
+      </thead>
+      <tbody>
+        <template v-for="row in rows" :key="row.scope">
+          <tr class="building-row">
+            <th scope="row"><span class="building-key">{{ row.scope==='110'?'110站':row.scope+'楼' }}</span></th>
+            <td class="day-staff"><ul v-if="row.day.size" class="names"><li v-for="name in row.day" :key="name">{{ name }}</li></ul>
+              <span v-else class="no-staff">暂无</span></td>
+            <td class="night-staff"><ul v-if="row.night.size" class="names"><li v-for="name in row.night" :key="name">{{ name }}</li></ul>
+              <span v-else class="no-staff">暂无</span></td>
           </tr>
-        </thead>
-        <tbody>
-          <template v-for="row in props.rows" :key="row.scope">
-            <tr class="main-row">
-              <th scope="row" class="scope-cell">{{ scopeLabel(row.scope) }}</th>
-              <td class="day-cell">
-                <span v-for="name in row.day" :key="name" class="name-chip day-chip">{{
-                  name
-                }}</span>
-                <span v-if="row.day.size === 0" class="empty" aria-label="未提供">—</span>
-              </td>
-              <td class="night-cell">
-                <span v-for="name in row.night" :key="name" class="name-chip night-chip">{{
-                  name
-                }}</span>
-                <span v-if="row.night.size === 0" class="empty" aria-label="未提供">—</span>
-              </td>
-            </tr>
-            <tr v-if="row.other.size > 0" class="other-row">
-              <th scope="row" class="other-label">其它班次</th>
-              <td colspan="2" class="other-cell">
-                <ul class="other-list">
-                  <li v-for="[shift, people] in row.other" :key="shift" class="other-item">
-                    <span class="other-shift">{{ shift || '未命名班次' }}</span>
-                    <span v-for="name in people" :key="name" class="name-chip other-chip">{{
-                      name
-                    }}</span>
-                    <span v-if="people.size === 0" class="empty">未提供</span>
-                  </li>
-                </ul>
-              </td>
-            </tr>
-          </template>
-        </tbody>
-      </table>
-    </div>
-
+          <tr v-if="row.other.size" class="extra-shifts">
+            <td></td><td colspan="2">
+              <dl><div v-for="[shift, people] in row.other" :key="shift">
+                <dt>{{ shift }}</dt><dd>{{ [...people].join('、') }}</dd>
+              </div></dl>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
     <div v-else class="empty-state" role="status">
-      <p class="empty-message">{{ props.message || '暂无排班数据' }}</p>
-      <button v-if="props.canRetry" type="button" class="retry-btn" @click="emit('retry')">
-        重试
-      </button>
+      <p>{{ message || '暂无排班' }}</p>
+      <button v-if="canRetry" type="button" @click="$emit('retry')">重试排班</button>
     </div>
   </section>
 </template>
 
 <style scoped>
-.workbench-roster { min-width:0; padding:6px 9px; color:var(--desk-ink) }
-.empty-state { display:flex; justify-content:space-between; gap:8px; align-items:center }
-.empty-message { margin:0 }
-.roster-table { width:100%; table-layout:fixed; border-collapse:collapse; font-size:12px }
-.roster-table th,.roster-table td { text-align:left; vertical-align:top; padding:2px 3px; line-height:1.45; overflow-wrap:anywhere; border-bottom:1px solid var(--desk-line) }
-.roster-table thead { color:var(--desk-muted) }
-.col-scope { width:20% }
-.roster-table tr:last-child>* { border-bottom:0 }
-.name-chip { display:inline-block; max-width:100%; margin:1px 3px 1px 0; padding:0 4px; border-radius:5px }
-.day-chip { color:var(--desk-blue); background:var(--desk-blue-wash) }
-.night-chip,.other-chip { color:var(--desk-green); background:var(--desk-green-wash) }
-.other-list { list-style:none; padding:0; margin:0 }
-.other-shift { margin-right:5px }
-.empty,.empty-state,.other-label { color:var(--desk-muted); font-size:12px }
-.retry-btn { min-height:32px; border:1px solid var(--desk-line); border-radius:8px; padding:3px 9px; background:var(--desk-well); color:var(--desk-blue); cursor:pointer }
-.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap }
+.workbench-roster { min-width:0;overflow:hidden;color:var(--desk-ink) }
+.roster-head { display:flex;align-items:center;gap:8px;padding:9px 12px 6px }
+.roster-head h3 { font-size:14px;font-weight:730 }
+.roster-icon { display:grid;place-items:center;width:29px;height:29px;border-radius:8px;background:var(--desk-green-wash);color:var(--desk-green) }
+.roster-table { width:calc(100% - 18px);margin:0 9px 8px;border-collapse:separate;border-spacing:3px 3px;
+  table-layout:fixed;font-size:13px;line-height:1.4 }
+.roster-table thead th:first-child { width:48px;color:var(--desk-muted);text-align:center;font-size:12px }
+.roster-table :is(th,td) { padding:4px 6px;border-radius:5px;text-align:left;vertical-align:middle;overflow-wrap:anywhere }
+.building-row th { background:var(--desk-well);text-align:center }
+.day-staff { background:color-mix(in srgb,var(--v2-amber,#a76712) 9%,var(--desk-paper)) }
+.night-staff { background:color-mix(in srgb,var(--desk-blue) 11%,var(--desk-paper)) }
+.day-header { background:color-mix(in srgb,var(--v2-amber,#a76712) 16%,var(--desk-paper)) }
+.night-header { background:color-mix(in srgb,var(--desk-blue) 19%,var(--desk-paper)) }
+.shift-label,.names,.extra-shifts dl>div { display:flex;align-items:center;flex-wrap:wrap;gap:3px 8px }
+.shift-label { font-weight:700 }
+.day-header svg { color:var(--v2-amber,#a76712) }
+.night-header svg { color:var(--desk-blue) }
+.building-key { display:inline-block;white-space:nowrap;min-width:34px;text-align:center;
+  border-radius:6px;padding:1px 3px;background:var(--desk-green-wash);color:var(--desk-green);font-weight:680 }
+.names { list-style:none;padding:0;margin:0;font-weight:600 }
+.names li { min-width:0;max-width:100% }
+.extra-shifts td { padding-top:0 }
+.extra-shifts :is(dl,dd) { margin:0 }
+.extra-shifts dt,.no-staff { color:var(--desk-muted);font-size:12px }
+.empty-state { display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 12px;
+  color:var(--desk-muted);font-size:12px }
+.empty-state button { min-height:36px;border:1px solid var(--desk-line);border-radius:7px;
+  padding:3px 8px;background:var(--desk-well);color:var(--desk-green);white-space:nowrap }
+@media (pointer:coarse) { .empty-state button { min-height:44px } }
 </style>

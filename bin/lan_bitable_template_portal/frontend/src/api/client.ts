@@ -68,6 +68,7 @@ export type ApiRequestOptions = RequestInit & {
 };
 
 export const AUTH_EXPIRED_EVENT = "clipflow-auth-expired";
+export const JSON_REQUEST_TIMEOUT_MS = 45_000;
 const AUTH_REDIRECT_FLAG = "__clipflowAuthRedirecting";
 let loginMethod = 'feishu';
 try { loginMethod = new URLSearchParams(window.location.search).get('login') === 'password' ? 'password' : window.sessionStorage.getItem('clipflow-login-method') || 'feishu'; } catch { /* Storage can be disabled by browser policy. */ }
@@ -196,7 +197,7 @@ export async function requestJson(
     throw new ApiError('临时代登录只能查看布局，不能修改或自动迁移该人员的个人布局。', { status: 403 });
   }
   if (method !== 'GET' && method !== 'HEAD' && (!path.startsWith('/api/assistant/') || /\/plans\/[^/]+\/confirm/.test(path))) invalidateReadCache();
-  const key = method === 'GET' && request.credentials !== 'omit' && !new Headers(request.headers).has('Authorization')
+  const key = method === 'GET' && request.cache !== 'no-store' && request.credentials !== 'omit' && !new Headers(request.headers).has('Authorization')
     ? readCacheKey(path, window.location.origin) : '';
   // Explicit refresh also invalidates older in-flight reads before they return.
   if (key && (fresh || request.cache === 'reload')) invalidateReadCache();
@@ -246,7 +247,7 @@ async function requestResponseJson(
   hooks: ApiClientHooks,
   headers?: HeadersInit,
 ): Promise<Dict> {
-  const { timeoutMs = 45_000, ...fetchOptions } = options;
+  const { timeoutMs = JSON_REQUEST_TIMEOUT_MS, ...fetchOptions } = options;
   const requestSignal = requestSignalWithTimeout(fetchOptions.signal, timeoutMs);
   try {
     const response = await fetch(path, {

@@ -2544,7 +2544,7 @@ class FastAPIPortalController:
             if session is None:
                 return self._auth_required_response()
             try:
-                self._ensure_source_snapshot_background()
+                await asyncio.to_thread(self._ensure_source_snapshot_background)
                 scope = self._authorized_scope_or_error(
                     session, request.query_params.get("scope") or "ALL"
                 )
@@ -2637,7 +2637,9 @@ class FastAPIPortalController:
                     type_count = 0
                     with suppress(Exception):
                         type_count = int(float((payload.get("record_type_counts") or {}).get(work_type, 0)))
-                    if not filtered_payload["records"] and type_count > 0:
+                    pagination = payload.get("records_pagination") or {}
+                    if ((not sections or "records" in sections) and not filtered_payload["records"]
+                            and type_count > 0 and pagination.get("total") != 0):
                         broad_payload = await asyncio.to_thread(
                             PortalRuntime.service.query_records,
                             month=month,

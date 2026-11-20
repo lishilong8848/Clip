@@ -1,5 +1,4 @@
 <script setup lang="ts">
-import { computed } from 'vue';
 import { NPopconfirm } from 'naive-ui';
 import { ArrowLeft, RefreshCw } from 'lucide-vue-next';
 import ToolWorkspace from '../components/ToolWorkspace.vue';
@@ -9,7 +8,6 @@ import ToolDeskDialog from './ToolDeskDialog.vue';
 import ToolDeskLibrary from './ToolDeskLibrary.vue';
 import ToolDeskOrder from './ToolDeskOrder.vue';
 const props=defineProps<{r:Record<string,any>}>();
-const title=computed(()=>props.r.order?'办理详情':props.r.view==='settings'?'工具与模板':props.r.view==='followups'?'办理记录':'工具办理台');
 function goBack() {
   if(props.r.order) props.r.leave(props.r.closeOrder);
   else props.r.back();
@@ -17,13 +15,16 @@ function goBack() {
 </script>
 <template>
   <ToolDeskSurface><section :ref="el=>r.root=el" class="td-page">
-    <header class="td-heading td-page-title"><div><h1>{{ title }}</h1>
+    <header class="td-heading td-page-title"><div><h1>{{ r.order?'办理详情':'工具管理' }}</h1>
       <small v-if="r.order">{{ [r.order.tool_name,r.order.model,r.assignment(r.order)].filter(Boolean).join(' · ') }}</small></div>
+      <nav v-if="!r.order" class="td-tabs td-section-nav" aria-label="工具管理分区">
+        <button :aria-current="r.view==='workspace'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy" @click="r.selectView('workspace')">工作台</button>
+        <button :aria-current="r.view==='followups'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy" @click="r.selectView('followups')">办理记录</button>
+        <button v-if="r.board?.can_manage_templates" :aria-current="r.view==='settings'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy"
+          @click="r.selectView('settings')">工具与模板</button>
+      </nav>
       <div class="td-actions">
         <button v-if="r.order || !r.props.embedded" class="td-link" @click="goBack"><ArrowLeft :size="15"/>{{ r.order?'返回列表':'返回' }}</button>
-        <button v-if="!r.order && r.view!=='workspace'" class="td-link" @click="r.selectView('workspace')">返回办理台</button>
-        <button v-if="!r.order && r.view!=='followups'" class="td-link" @click="r.selectView('followups')">办理记录</button>
-        <button v-if="!r.order && r.view!=='settings' && r.board?.can_manage_templates" class="td-link" @click="r.selectView('settings')">工具与模板</button>
         <button :disabled="r.busy || r.loading || !!r.workspace?.busy" @click="r.refresh()"><RefreshCw :size="15"/>刷新</button>
         <button v-if="r.board?.can_create_orders && !r.order && r.view==='workspace'" :disabled="r.busy" @click="r.openNewTool()">新增工具</button>
       </div>
@@ -68,3 +69,8 @@ function goBack() {
     </ToolDeskDialog>
   </section></ToolDeskSurface>
 </template>
+
+<style scoped>
+.td-section-nav{flex:1 1 auto;min-width:0}
+@media(max-width:680px){.td-section-nav{order:1;flex-basis:100%}}
+</style>

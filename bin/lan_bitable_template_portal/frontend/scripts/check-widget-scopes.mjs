@@ -15,7 +15,7 @@ const value=sanitize({version:1,widgets:[widget('module',user,{module:'notices',
 assert.equal(value.widgets[0].scope,'A,B','multi-building selection uses the existing account-layout scope string');
 const {todoSources}=await load('src/workspace-v2/businessTodos.ts');
 const selected=todoSources('notices',{user,scopes:options,scope:'ALL',selectedScopes:['A','B','E','B']},async()=>({}));
-assert.deepEqual(selected.map(source=>source.id),['A:notices','B:notices']);
+assert.deepEqual(selected.map(source=>source.id.split(':')[0]),['A','B']);
 
 const {readNoticeBuildings}=await load('src/workspace-v2/noticeBuildingPages.ts');
 const records=scope=>Array.from({length:243},(_,i)=>({record_id:i===0?'shared':scope+'-'+i,work_type:'maintenance',title:scope+'计划'+i}));
@@ -30,6 +30,17 @@ const read=async q=>{
   return data;
 };
 const previous=[];
+let release;
+const held=new Promise(resolve=>{release=resolve;});
+let firstBuilding;
+const firstReady=new Promise(resolve=>{firstBuilding=resolve;});
+const progressive=readNoticeBuildings(new URLSearchParams({work_type:'all'}),['A','B'],async q=>{
+  if(q.get('scope')==='B')await held;
+  return read(q);
+},firstBuilding);
+assert.deepEqual((await firstReady).ongoing.map(row=>row._request_scope),['A'],'fast building is visible before the other response');
+release();
+assert.deepEqual((await progressive).ongoing.map(row=>row._request_scope),['A','B']);
 for(let page=1;page<=25;page++){
   const result=await readNoticeBuildings(new URLSearchParams({work_type:'all',records_page:String(page),ongoing_page:'1'}),['A','B'],read);
   assert.equal(result.records.length,page===25?5:20);

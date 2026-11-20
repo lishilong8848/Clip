@@ -1,12 +1,17 @@
 <template>
   <nav ref="nav" class="v2-topnav" aria-label="功能导航" @keydown.esc="escape" @focusout="onFocusOut">
-    <button type="button" class="topnav-brand" aria-label="个人工作台" data-nav-entry="home" data-group="home"
-      :aria-current="selected==='home'?'page':undefined" @click="choose('home')">
-      <span class="topnav-mark" aria-hidden="true"><svg width="30" height="30" viewBox="10 9 44 52" fill="currentColor">
-        <path d="M20 18h24l-3 9H23l-3-9ZM27 28h10l5 22H22l5-22ZM16 51h32v5H16z"/>
-        <circle cx="32" cy="22.5" r="3.5" fill="#dffbed"/>
-      </svg></span><strong>灯塔</strong>
-    </button>
+    <div class="topnav-start">
+      <span class="topnav-brand">
+        <span class="topnav-mark" aria-hidden="true"><svg width="30" height="30" viewBox="10 9 44 52" fill="currentColor">
+          <path d="M20 18h24l-3 9H23l-3-9ZM27 28h10l5 22H22l5-22ZM16 51h32v5H16z"/>
+          <circle cx="32" cy="22.5" r="3.5" fill="#dffbed"/>
+        </svg></span><strong>灯塔</strong>
+      </span>
+      <button v-if="hasHome" type="button" class="topnav-home" data-nav-entry="home" data-group="home"
+        :aria-current="selected==='home'?'page':undefined" @click="choose('home')">
+        <LayoutDashboard :size="17" aria-hidden="true" />个人工作台
+      </button>
+    </div>
     <div class="topnav-tabs">
       <template v-for="group in sections" :key="group.key">
         <button type="button" class="topnav-tab" :data-group="group.key" :data-nav-entry="group.direct?.key" :aria-label="group.label"
@@ -38,13 +43,14 @@
 </template>
 <script setup lang="ts">
 import {computed,nextTick,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
-import {ChevronDown} from 'lucide-vue-next';
+import {ChevronDown, LayoutDashboard} from 'lucide-vue-next';
 import type {SidebarGroup} from './sidebarSections';
 const props=defineProps<{groups:SidebarGroup[];selected:string}>();
 const emit=defineEmits<{select:[key:string]}>();
 const nav=ref<HTMLElement>(), opened=ref(''), anchor=ref(0), branches=reactive(new Set<string>());
 const visited=new Set<string>();
 const sections=computed(()=>props.groups.filter(group=>group.key!=='home'));
+const hasHome=computed(()=>props.groups.some(group=>group.key==='home'));
 const currentGroup=computed(()=>sections.value.find(group=>group.direct?.key===props.selected ||
   group.branches?.some(branch=>branch.entries.some(entry=>entry.key===props.selected)))?.key);
 function groupButton(key:string){

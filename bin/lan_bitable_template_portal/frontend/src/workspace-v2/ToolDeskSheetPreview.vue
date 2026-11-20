@@ -8,6 +8,7 @@ type Row={index:number;height:number;cells:Cell[]};
 const group=useId();
 const selected=ref<{address:string;value:unknown;check?:boolean}>();
 const writable=computed(()=>!!props.r.editable && !!props.r.item?.can_edit && !props.r.busy);
+const selectedIsReviewer=computed(()=>selected.value&&props.r.reviewCell(selected.value)==='reviewer');
 watch(()=>[props.r.item?.id,props.r.activeSheet?.name,writable.value],()=>{selected.value=undefined;});
 const sheet=computed(()=>props.r.activeSheet as {name:string;columns:number[];rows:Row[];titles?:{key:string;text:string;x:number;y:number;width:number;height:number;size:number;font?:string;left?:number;top?:number;color?:string;background?:string}[]});
 const tracks=computed(()=>({
@@ -31,6 +32,10 @@ function content(cell:Cell) {
   if(review==='time' && r.reviewDates[r.item.id])return r.reviewDates[r.item.id].replace('T',' ');
   return review?r.reviewText(cell):r.sheetText(cell);
 }
+function openCell(cell:Cell){
+  selected.value=cell;
+  if(props.r.reviewCell(cell)==='reviewer')void props.r.loadReviewers();
+}
 function checked(cell:Cell,value:string){
   if(props.r.item.completion)return props.r.item.completion===value;
   return String(props.r.reviewText(cell)).includes(value==='completed'?'已完成[√]':'未完成[√]');
@@ -45,8 +50,10 @@ function checked(cell:Cell,value:string){
           <div v-if="r.reviewCell(c)==='result' && r.editable && r.item.can_edit" class="paper-choices" role="radiogroup" aria-label="原表完成情况">
             <label v-for="choice in choices" :key="choice.value"><input type="radio" :name="group" :value="choice.value" :checked="checked(c,choice.value)" :disabled="!!r.busy" @click="r.setCompletion($event)"/>{{ choice.label }}</label>
           </div>
-          <button v-else-if="writable && !r.reviewCell(c) && (c.check || c.editable || c.text_editable)" type="button"
-            class="paper-edit" :aria-label="'编辑 '+r.cellKey(c)" @click="selected=c">{{ content(c) }}</button>
+          <button v-else-if="writable && r.reviewCell(c)==='reviewer'" type="button" class="paper-edit"
+            :aria-label="'选择审核人 '+r.cellKey(c)" @click="openCell(c)">{{ r.item.reviewer_name || content(c) || '选择审核人' }}</button>
+          <button v-else-if="writable && !r.reviewCell(c) && (c.check || c.editable || c.text_editable || r.specialCell(c))" type="button"
+            class="paper-edit" :aria-label="'编辑 '+r.cellKey(c)" @click="openCell(c)">{{ content(c) }}</button>
           <template v-else><span>{{ content(c) }}</span><img v-if="r.isSignatureCell(c) && r.isPng(signature || '')" class="paper-signature" :src="signature" alt="审核签名"/></template>
         </div>
       </div>
@@ -57,7 +64,14 @@ function checked(cell:Cell,value:string){
     </div>
   </div>
   <ToolDeskDialog v-if="selected && writable" :title="'填写 '+r.cellKey(selected)" @close="selected=undefined">
-    <select v-if="selected.check" data-native-select :aria-label="'检查 '+r.cellKey(selected)" :value="r.item.checks[r.cellKey(selected)] || ''" @change="r.setCheck(selected,$event)">
+    <label v-if="selectedIsReviewer" class="td-field">审核人
+      <select data-native-select aria-label="审核人" :value="r.item.reviewer_id || ''" @change="r.setReviewer">
+        <option value="">本楼有权限的审核人</option>
+        <option v-if="r.item.reviewer_id && !r.reviewerOptions.some((p:any)=>p.id===r.item.reviewer_id)" :value="r.item.reviewer_id">{{ r.item.reviewer_name || r.item.reviewer }}</option>
+        <option v-for="person in r.reviewerOptions" :key="person.id" :value="person.id">{{ person.name }}</option>
+      </select>
+    </label>
+    <select v-else-if="selected.check" data-native-select :aria-label="'检查 '+r.cellKey(selected)" :value="r.item.checks[r.cellKey(selected)] || ''" @change="r.setCheck(selected,$event)">
       <option value="">待确认</option><option>是</option><option>否</option>
     </select>
     <ToolWorkbookInput v-else :kind="r.cellDateKind(selected)" :label="'填写 '+r.cellKey(selected)" :original="String(selected.value ?? '')"
@@ -67,7 +81,8 @@ function checked(cell:Cell,value:string){
 <style scoped>
 .tool-desk button.paper-edit{display:block;pointer-events:auto;width:100%;height:100%;min-height:0;padding:0;border:0;border-radius:0;background:transparent;color:inherit;box-shadow:none;line-height:inherit;font:inherit;text-align:inherit;white-space:inherit;overflow:hidden;overflow-wrap:anywhere}
 .tool-desk button.paper-edit:focus-visible{outline:2px solid #166f50;outline-offset:-2px}
-.paper-scroll{width:fit-content;max-width:100%;min-width:0;max-height:68vh;overflow:auto;overscroll-behavior:contain;background:var(--td-field);border:1px solid var(--td-line)}
+.tool-desk button.paper-edit:hover,.tool-desk button.paper-edit:focus-visible{background:color-mix(in srgb,#229773 13%,transparent)}
+.paper-scroll{width:100%;max-width:100%;min-width:0;max-height:72dvh;overflow:auto;overscroll-behavior:contain;background:var(--td-field);border:1px solid var(--td-line)}
 .paper{position:relative;display:grid;background:white;color:#151515;font:13px/1.15 "Microsoft YaHei",sans-serif}
 .paper-row{display:contents}.paper-cell{min-height:0;min-width:0;overflow:hidden;display:flex;flex-direction:column;padding:1px 3px;box-sizing:border-box}
 .paper-cell>span{overflow-wrap:anywhere;flex-shrink:1;min-height:0}.paper-cell .paper-signature{align-self:center;min-height:0;max-height:68%;max-width:95%;object-fit:contain}

@@ -134,12 +134,16 @@ async function checkPairing() {
       if (req.method==='GET') {
         if (pathname===api) return ok({month:'2026-11',followups:[],templates:[],can_manage_templates:true,inventory_error:''});
         if (pathname===workspace) return ok({assets,templates,sessions:session?[{id:'signed',kind:'self',status:'archived',item_count:1}]:[]});
+        if (pathname===workspace+'/history') return ok({history_cursor:null,sessions:session?[{
+          id:'signed',kind:'self',status:'archived',history_items:[{id:assets[0].id,scope:'D',asset_name:assets[0].name,
+            model:assets[0].model,archive_status:'archived'}],
+        }]:[]});
         if (pathname===workspace+'/signed' && session) {
           const item=session.items[0];
           return ok({...session,id:'signed',status:'archived',can_edit:false,items:[{...item,can_edit:false,reviewer:'隔离审核员',
             reviewed_at:'2026-11-19T08:30',signature:fixtureSignature}]});
         }
-        if (pathname===workspace+'/pairing/people') return ok({D:[],E:[]});
+        if (pathname===workspace+'/pairing/people') return ok({D:[{id:'fixture-reviewer',name:'测试楼长'}],E:[]});
         if (pathname===workspace+'/pairing') return ok(session);
       }
       const chunks=[];for await(const chunk of req)chunks.push(chunk);
@@ -187,10 +191,21 @@ async function checkPairing() {
       pen.quadraticCurveTo(95,34,144,18);pen.stroke();
       return pad.toDataURL();
     });
+    const catalog = page.getByRole('region',{name:'可用自检模板',exact:true});
+    const filter = page.getByRole('searchbox',{name:'筛选可用模板'});
+    await catalog.getByRole('button',{name:'配对至'+templates[1].name}).waitFor();
+    await filter.fill('暖通 确认单');
+    await catalog.getByRole('button',{name:'配对至'+templates[0].name}).waitFor({state:'detached'});
+    assert.equal(await catalog.getByRole('button').count(),1);
+    await filter.fill('没有匹配的测试词');
+    await page.getByText('没有匹配的模板',{exact:true}).waitFor();
     for(const t of templates) {
       const group=assets.filter(a=>expected[a.id]===t.id);
       for(const a of group)await page.getByRole('checkbox',{name:'选择'+a.name,exact:true}).check();
+      await filter.fill(t.name);
       await button('配对至'+t.name).click();
+      assert.equal(await filter.inputValue(),'');
+      assert.equal(await catalog.getByRole('button').count(),templates.length);
       const basket=page.locator('[data-group="'+t.id+'"]');
       for(const a of group)await basket.getByRole('button',{name:'移除'+a.name,exact:true}).waitFor();
       for(const a of assets.filter(a=>expected[a.id]!==t.id))assert(!(await basket.innerText()).includes(a.name));
@@ -208,35 +223,35 @@ async function checkPairing() {
     }
     await page.setViewportSize({width:1440,height:880});
     await button('开始填写自检').click();
-    await page.getByRole('heading',{name:'表单确认行'}).waitFor();
+    const paper=page.getByRole('region',{name:'表格预览',exact:true});
+    await paper.waitFor();
+    assert.equal(await button('字段填写').count(),0);
+    const at=address=>paper.locator('[data-address="'+address+'"]');
+    async function edit(label,act){
+      await button(label).click();
+      const modal=page.getByRole('dialog');
+      await act(modal);
+      await modal.getByRole('button',{name:'关闭弹窗'}).click();
+    }
     assert.equal(opening.asset_ids.length,4);
     for(const [i,a] of assets.entries()){
       await page.getByLabel('当前工具').selectOption(a.id);
       const sheetName=templates.find(t=>t.id===expected[a.id]).name;
       assert.equal(await page.getByLabel('工作表',{exact:true}).inputValue(),sheetName);
-      const reading=page.locator('.sheet-fields input[type=text]').first();
-      assert.equal(await reading.inputValue(),'','Values must start independent even within one template');
-      await reading.fill(String(101+i));
-      await page.getByLabel('检查确认 · B2').selectOption('是');
+      assert.equal(await at('B1').innerText(),'','Values must start independent even within one template');
+      const editCell=(address,act)=>edit('编辑 '+sheetName+'!'+address,act);
+      await editCell('B1', modal=>modal.getByRole('textbox').fill(String(101+i)));
+      await editCell('B2', modal=>modal.getByRole('combobox').selectOption('是'));
       await page.getByLabel('检查结果').selectOption('normal');
-      await page.getByLabel('表内标题',{exact:true}).fill(sheetName+' · 核对');
-      const result = i%2?'incomplete':'completed';
-      const fieldCompletion = page.locator('label').filter({hasText:/^完成情况/}).locator('select');
-      await fieldCompletion.selectOption(result);
-      await button('表格预览').click();
-      const paper=page.getByRole('region',{name:'表格预览',exact:true});
-      const at=address=>paper.locator('[data-address="'+address+'"]');
+      await edit('编辑表格标题 @title0', modal=>modal.getByRole('textbox').fill(sheetName+' · 核对'));
       assert.equal(await at('B1').innerText(),String(101+i));
       assert.equal(await at('B2').innerText(),'是[√]　否[ ]');
       if (i===0) {
-        const edit=async(address,act)=>{
-          await button('编辑 '+sheetName+'!'+address).click();
-          const modal=page.getByRole('dialog',{name:'填写 '+sheetName+'!'+address,exact:true});
-          await act(modal);await modal.getByRole('button',{name:'关闭弹窗'}).click();
-        };
-        await edit('C1', modal=>modal.getByRole('textbox').fill('合并表头'));
-        await edit('A5', modal=>modal.getByRole('textbox').fill('空白锚点'));
-        await edit('C2', async modal=>{
+        await editCell('C1', modal=>modal.getByRole('textbox').fill('合并表头'));
+        await editCell('A5', modal=>modal.getByRole('textbox').fill('空白锚点'));
+        await edit('选择审核人 '+sheetName+'!E4', modal=>modal.getByLabel('审核人',{exact:true}).selectOption('fixture-reviewer'));
+        assert.equal(await at('E4').innerText(),'测试楼长');
+        await editCell('C2', async modal=>{
           const boxes=modal.getByRole('checkbox');
           assert.equal(await boxes.count(),4);
           await boxes.nth(1).check();assert(!(await boxes.nth(0).isChecked()));
@@ -245,13 +260,10 @@ async function checkPairing() {
           await boxes.nth(1).uncheck();
           assert(await boxes.nth(0).isChecked() && await boxes.nth(2).isChecked());
         });
-        for(const addr of ['F2','G2']) await edit(addr, modal=>modal.locator('input[type=datetime-local]').fill('2026-11-20T14:37'));
-        await edit('F2',async modal=>assert.equal(await modal.locator('input').inputValue(),'2026-11-20T14:37'));
+        for(const addr of ['F2','G2']) await editCell(addr, modal=>modal.locator('input[type=datetime-local]').fill('2026-11-20T14:37'));
+        await editCell('F2',async modal=>assert.equal(await modal.locator('input').inputValue(),'2026-11-20T14:37'));
         assert.equal(await at('F2').innerText(),'2026年11月20日14时37分');
         assert.equal(await at('G2').innerText(),'2026年11月20日14时37分');
-        await button('编辑表格标题 @title0').click();
-        const titleEditor=page.getByRole('dialog');await titleEditor.getByRole('textbox').fill(sheetName+' · 核对');
-        await titleEditor.getByRole('button',{name:'关闭弹窗'}).click();
         const sheetPicker=page.getByLabel('工作表',{exact:true});
         await sheetPicker.selectOption('封面');
         await button('编辑 封面!A1').click();
@@ -272,8 +284,7 @@ async function checkPairing() {
         await at('E3').getByRole('radio',{name:'已完成',exact:true}).check();
         await page.setViewportSize({width:1440,height:880});
       }
-      assert.equal(saved,undefined,'Switching views never submits or persists a separate draft');
-      assert.equal(await at('E3').getByRole('radio',{name:i%2?'未完成':'已完成',exact:true}).isChecked(),true);
+      assert.equal(saved,undefined,'Sheet edits do not submit automatically');
       // Both original completion choices must update the item, including an explicit override of the computed result.
       await at('E3').getByRole('radio',{name:'未完成',exact:true}).check();
       await at('E3').getByRole('radio',{name:'已完成',exact:true}).check();
@@ -284,11 +295,7 @@ async function checkPairing() {
       assert.equal(picture.x-origin.x,220);assert.equal(picture.y-origin.y,33);
       assert.equal(title.y-origin.y,160);assert.equal(await paper.locator('.paper-title').innerText(),sheetName+' · 核对');
       if(i===0)await paper.screenshot({path:join(output,'原表填写预览.png')});
-      await button('字段填写').click();
-      assert.equal(await fieldCompletion.inputValue(),result);
-      assert.equal(await reading.inputValue(),String(101+i));
-      assert.equal(await page.getByLabel('检查确认 · B2').inputValue(),'是');
-
+      assert.equal(await at('E3').getByRole('radio',{name:i%2?'未完成':'已完成',exact:true}).isChecked(),true);
     }
     await Promise.all([page.waitForResponse(resp=>resp.url().includes('/pairing/save')),button('保存草稿').click()]);
     assert.equal(saved.length,4);
@@ -300,13 +307,15 @@ async function checkPairing() {
       assert.deepEqual(item.values,{[sheetName+'!B1']:String(101+i),[sheetName+'!@title0']:sheetName+' · 核对',...extra});
       assert.deepEqual(item.checks,{[sheetName+'!B2']:'是'});
       assert.equal(item.outcome,'normal');assert.equal(item.completion,i%2?'incomplete':'completed');
+      if(i===0)assert.equal(item.reviewer_id,'fixture-reviewer');
       await page.getByLabel('当前工具').selectOption(a.id);
-      assert.equal(await page.locator('.sheet-fields input[type=text]').first().inputValue(),String(101+i));
+      assert.equal(await at('B1').innerText(),String(101+i));
       if(i===0 || i===2) await page.locator('.td-page').screenshot({path:join(output,sheetName+'填写.png')});
     }
     await button('← 返回工具选择').click();
-    await page.getByLabel('继续已有批次').selectOption('signed');
-    await button('表格预览').click();
+    await button('办理记录').click();
+    await button('打开办理').click();
+    await paper.waitFor();
     const signCell=page.locator('.paper-cell[data-address="E4"]');
     assert.match(await signCell.innerText(),/隔离审核员/);
     assert(await signCell.getByRole('img',{name:'审核签名'}).isVisible());

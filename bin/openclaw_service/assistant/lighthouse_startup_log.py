@@ -23,6 +23,8 @@ STAGES = {
     'skills_ready': '技能目录已加载',
     'awaiting_login': '等待业务请求，按需准备独立 Agent',
     'gateway_starting': '正在启动共享常驻网关',
+    'gateway_waiting_listener': '共享网关正在等待本地端口监听',
+    'gateway_retrying': '共享网关将更换本地端口重试',
     'gateway_ready': '共享常驻网关已就绪',
     'startup_failed': '助手准备或启动失败',
     'warmup_skipped': '当前账号没有可用模型，未启动网关',

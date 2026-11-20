@@ -543,10 +543,13 @@ try {
     assert([...state.sessions.values()][0].items.every(entry => entry.template.schema.layout === 'hvac'));
   });
   await check('V2 desktop and mobile selection/editor; multiple templates remain separate', async () => {
-    reset(); await page.goto(v2);
-    await page.getByRole('heading', { name: '工具办理台', exact: true }).waitFor();
+    reset(); await page.setViewportSize({ width: 1920, height: 1000 }); await page.goto(v2);
+    await page.getByRole('heading', { name: '工具管理', exact: true }).waitFor();
     await page.getByRole('heading', { name: /^工具清单/ }).waitFor();
     await noOverflow('.td-page');
+    assert(await page.locator('.pair-desk').evaluate(node => node.getBoundingClientRect().width > innerWidth * .9),
+      'Tool management should use the available page width');
+    assert.equal(await page.getByRole('combobox', { name: '继续已有批次' }).count(),0);
     await page.screenshot({ path: path.join(output, 'v2-desktop-selection.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     await noOverflow('.td-page');
@@ -566,7 +569,8 @@ try {
     const sheet = page.getByRole('combobox', { name: '工作表', exact: true });
     assert.equal(await sheet.inputValue(), layouts.electrical.schema.sheet);
     const cellKey = layouts.electrical.schema.sheet + '!C6';
-    await button('表格预览').click();
+    await page.getByRole('region', { name: '表格预览', exact: true }).waitFor();
+    assert.equal(await button('字段填写').count(),0);
     await button('编辑 ' + cellKey).click();
     const cellEditor = page.getByRole('dialog', { name: '填写 ' + cellKey, exact: true });
     const note = cellEditor.getByLabel('填写 ' + cellKey, { exact: true });
@@ -577,13 +581,17 @@ try {
     await noOverflow('.td-page');
     await page.screenshot({ path: path.join(output, 'mobile-editor.png'), fullPage: true });
     await page.setViewportSize({ width: 320, height: 700 });
-    const completion = page.getByRole('combobox', { name: '完成情况', exact: true });
-    const reviewer = page.getByRole('combobox', { name: '审核人', exact: true });
-    await completion.selectOption('completed');
-    await reviewer.focus();
+    const completion = page.getByRole('radiogroup', { name: '原表完成情况', exact: true })
+      .getByRole('radio', { name: '已完成', exact: true });
+    await completion.check();
+    const reviewerKey = layouts.electrical.schema.sheet + '!E' + layouts.electrical.schema.review_row;
+    await button('选择审核人 ' + reviewerKey).click();
+    const reviewerEditor = page.getByRole('dialog', { name: '填写 ' + reviewerKey, exact: true });
+    const reviewer = reviewerEditor.getByRole('combobox', { name: '审核人', exact: true });
     await reviewer.selectOption('leaderA');
-    assert.equal(await completion.inputValue(), 'completed');
     assert.equal(await reviewer.inputValue(), 'leaderA');
+    await reviewerEditor.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    assert.equal(await completion.isChecked(), true);
     await noOverflow('.td-page');
     const submitV2 = button('提交自检审核');
     await submitV2.scrollIntoViewIfNeeded();

@@ -40,7 +40,7 @@ export function useLayoutSync<T>(options:Options<T>){
     const controller=reader=new AbortController();loading.value=true;
     const current=()=>!disposed&&run===generation&&key===context.value&&!controller.signal.aborted;
     try{
-      let record=checked(await requestJson(url(),{signal:controller.signal,cache:'no-store',timeoutMs:10000}));
+      let record=checked(await requestJson(url(),{signal:controller.signal,cache:'no-store',timeoutMs:10000,background:true}));
       if(!current())return;
       if(record.revision===0&&fallback.candidate){
         try{

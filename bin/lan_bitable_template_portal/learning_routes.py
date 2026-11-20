@@ -118,7 +118,7 @@ def install_learning_routes(app, controller, runtime):
     app.add_event_handler("startup", startup)
     app.add_event_handler("shutdown", shutdown)
 
-    def identity(request):
+    def identity(request, *, summary=False):
         session = controller._current_session(request)
         if not session:
             return None, None
@@ -129,6 +129,8 @@ def install_learning_routes(app, controller, runtime):
         role = str(session.get("role") or user.get("role") or "").strip().lower()
         if session.get("is_guest") or role == "guest":
             raise LearningError("游客无法使用画像学练，请先登录。", 403)
+        if summary:
+            return session, None
         admin = bool(runtime.auth_manager.is_admin(session))
         personnel = str(session.get("source") or "").strip() == "personnel_password"
         personnel_rid = str(user.get("personnel_record_id") or session.get("personnel_record_id") or "").strip()
@@ -170,15 +172,16 @@ def install_learning_routes(app, controller, runtime):
         auth = runtime.auth_manager
         user = auth.public_user(session)
         category = user.get("category")
-        if (category not in {"manager", "supervisor"} or "learning" not in user.get("modules", ())
+        global_view = user.get("level") in {"L0", "L1"} or category == "manager"
+        if ((not global_view and category != "supervisor") or "learning" not in user.get("modules", ())
                 or user.get("impersonation") or user.get("role") in {"guest", "temporary"}):
             raise LearningError("当前账号无权查看楼栋学练汇总。", 403)
         assigned = set(auth.session_scopes(session))
         allowed = sorted(SCOPES if 'ALL' in assigned else SCOPES & assigned)
-        if category == "supervisor":
+        if not global_view:
             home = user.get("home_scope") or (allowed[0] if len(allowed) == 1 else "")
             allowed = [scope for scope in allowed if scope == home]
-        if requested in {"", "ALL", "CAMPUS"} and category == "manager" and allowed:
+        if requested in {"", "ALL", "CAMPUS"} and global_view and allowed:
             return allowed
         if requested in allowed:
             return [requested]
@@ -313,11 +316,11 @@ def install_learning_routes(app, controller, runtime):
 
     async def endpoint(request: Request):
         try:
-            session, actor = await asyncio.to_thread(identity, request)
-            if session is None:
-                return controller._auth_required_response()
             path = request.scope["route"].path.removeprefix("/api/learning/")
             action = ROUTES[path][request.method]
+            session, actor = await asyncio.to_thread(identity, request, summary=action == "workbench_summary")
+            if session is None:
+                return controller._auth_required_response()
             query = dict(request.query_params)
             if action == "workbench_summary":
                 from .learning_completion import workbench_summary

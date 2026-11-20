@@ -65,8 +65,8 @@ export function widget(kind:WidgetKind,user:Dict,overrides:Partial<Widget>={}):W
   return {id:randomHexId(),kind,title:catalog.find(c=>c.kind===kind)!.title,module,scope:'current',display:'bar',period:kind==='events'&&overrides.display==='calendar'?'year':'week',metric:'ongoing',presentation:'default',links:navigationModules(user.modules||[],false,canViewInspectionHistory(user)).slice(0,4).map(m=>m.id),x:0,y:0,w:kind==='module'?12:6,h:kind==='module'?12:5,...(kind==='tasks'?{taskKinds:todoSelection(undefined,user)}:{}),...overrides};
 }
 export function mandatoryCheck(user:Dict){
-  return user.role!=='guest' && (user.is_fixed_superuser===true ||
-    !!user.modules?.length && ['operator','shift_leader','duty'].includes(user.category));
+  return !['guest','temporary'].includes(user.role) && !!user.modules?.length
+    && ['operator','shift_leader','duty'].includes(user.category);
 }
 function withChecks(widgets:Widget[],user:Dict){
   if(mandatoryCheck(user)&&!widgets.some(item=>item.kind==='pre_shift')){

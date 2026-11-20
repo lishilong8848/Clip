@@ -147,28 +147,44 @@ async function checkPage(version,viewport){
   });
   const banner=()=>page.getByRole('region',{name:'管理员临时代登录'});
   const markers=()=>page.evaluate(()=>window.__documentMarker);
-  const begin=async()=>{await page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first().click();return page.getByRole('dialog',{name:'临时以测试值班员身份查看？'});};
+  const v2=version==='v2';
+  const accountCard=(name)=>page.locator('.account-directory article').filter({hasText:name});
+  const enter=v2?accountCard('测试值班员').getByRole('button',{name:'代登录',exact:true}):page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first();
+  const decision=()=>page.getByRole('dialog',{name:v2?'进入代登录':'临时以测试值班员身份办理？',exact:true});
+  const confirm=()=>decision().getByRole('button',{name:v2?'确认进入':'确认临时代登录',exact:true});
+  const begin=async()=>{await enter.click();return decision();};
   try{
-    await page.goto(host.origin+entry);await page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first().waitFor({timeout:120000});
-    assert(await page.getByRole('button',{name:'临时代登录不可代登录人员',exact:true}).isDisabled());assert.equal(await banner().count(),0);
-    let dialog=await begin();assert((await dialog.innerText()).includes('20分钟'));assert((await dialog.innerText()).includes('不能代签、代审批、代答题'));
+    await page.goto(host.origin+entry);await enter.waitFor();
+    if(v2){
+      await accountCard('不可代登录人员').waitFor();
+      assert.equal(await accountCard('不可代登录人员').getByRole('button',{name:'代登录',exact:true}).count(),0);
+    }else assert(await page.getByRole('button',{name:'临时代登录不可代登录人员',exact:true}).isDisabled());
+    assert.equal(await banner().count(),0);
+    const dialog=await begin();
+    if(v2)assert.match(await dialog.innerText(),/测试值班员/);
+    else{assert((await dialog.innerText()).includes('20分钟'));assert((await dialog.innerText()).includes('不能代签、代审批、代答题'));}
     await page.screenshot({path:path.join(output,tag+'-confirm.png'),animations:'disabled'});
     await dialog.getByRole('button',{name:'取消',exact:true}).click();assert.equal(writes.length,0,'Cancel never sends a request');
-    await page.getByRole('button',{name:'管理测试值班员',exact:true}).click();
-    const editor=page.getByRole('dialog',{name:'测试值班员',exact:true});
-    await editor.getByRole('checkbox',{name:'启用登录',exact:true}).uncheck();
-    editorFooters.push(await inspectEditorFooter(editor,viewport));
-    await editor.getByRole('button',{name:'临时代登录',exact:true}).click();
-    dialog=page.getByRole('dialog',{name:'临时以测试值班员身份查看？'});
-    const original=await markers();await dialog.getByRole('button',{name:'确认临时代登录',exact:true}).click();
-    editorFeedback.push(await verifyEditorError(page,editor,'隔离验证：目前不能代登录该人员',version));assert.equal(await markers(),original,'Rejected entry never navigates');
-    editorFooters.push(await inspectEditorFooter(editor,viewport));
+    const original=await markers(),failure='隔离验证：目前不能代登录该人员';
+    let reopen=begin;
+    if(!v2){
+      await page.getByRole('button',{name:'管理测试值班员',exact:true}).click();
+      const editor=page.getByRole('dialog',{name:'测试值班员',exact:true});
+      await editor.getByRole('checkbox',{name:'启用登录',exact:true}).uncheck();
+      editorFooters.push(await inspectEditorFooter(editor,viewport));
+      reopen=async()=>{await editor.getByRole('button',{name:'临时代登录',exact:true}).click();return decision();};
+      await reopen();await confirm().click();
+      editorFeedback.push(await verifyEditorError(page,editor,failure,version));
+      editorFooters.push(await inspectEditorFooter(editor,viewport));
+    }else{
+      await reopen();await confirm().click();
+      await page.locator('.accounts').getByRole('alert').filter({hasText:failure}).waitFor();
+    }
+    assert.equal(await markers(),original,'Rejected entry never navigates');
     await page.screenshot({path:path.join(output,tag+'-editor-error.png'),animations:'disabled'});
     enterFail=false;holdEnter=new Promise(resolve=>releaseEnter=resolve);
-    await editor.getByRole('button',{name:'临时代登录',exact:true}).click();
-    dialog=page.getByRole('dialog',{name:'临时以测试值班员身份查看？'});
-    await dialog.getByRole('button',{name:'确认临时代登录',exact:true}).click();await page.waitForTimeout(150);
-    assert.equal(await markers(),original);assert(await page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first().isDisabled());
+    await reopen();await confirm().click();await page.waitForTimeout(150);
+    assert.equal(await markers(),original);assert(await enter.isDisabled());
     await page.evaluate(()=>{window.__administratorDraft={private:'must be discarded'};});releaseEnter();holdEnter=null;
     await banner().waitFor();assert.notEqual(await markers(),original,'Successful entry is a hard navigation');
     assert.equal(await page.evaluate(()=>window.__administratorDraft),undefined);
@@ -177,15 +193,16 @@ async function checkPage(version,viewport){
     assert.match(await banner().getByLabel('代登录剩余时间').innerText(),/^\d\d:\d\d$/);
     assert.equal(await page.locator('.assistant-widget,.lighthouse-assistant').count(),0);
     await page.screenshot({path:path.join(output,tag+'-active.png'),animations:'disabled'});
-    const geometry=await banner().evaluate(el=>{const r=el.getBoundingClientRect(),b=el.querySelector('button').getBoundingClientRect(),main=document.querySelector('.v2-main,.page-content')?.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,mainTop:main?.top,buttonHeight:b.height,width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth+1};});
+    const geometry=await banner().evaluate(el=>{const r=el.getBoundingClientRect(),b=el.querySelector('button').getBoundingClientRect(),main=document.querySelector('.v2-main,.page-content')?.getBoundingClientRect();return {left:r.left,right:r.right,bottom:r.bottom,mainTop:main?.top,mainLeft:main?.left,mainWidth:main?.width,buttonHeight:b.height,width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth+1};});
     assert(geometry.left>=0&&geometry.right<=geometry.width+1&&!geometry.overflow,'Banner fits the viewport');assert(geometry.buttonHeight>=44);
     assert(geometry.bottom<=geometry.mainTop+1,'Banner does not cover business controls');
+    if(version==='v2')assert(geometry.mainLeft<25&&geometry.mainWidth>=geometry.width-50,'The V2 page shares the full-width track with the impersonation banner');
     assert(!await page.evaluate(id=>[localStorage,sessionStorage].some(store=>Object.values(store).some(value=>value.includes(id))),info.id),'Grant ID stays only in document memory');
     stopFail=true;const activeDocument=await markers();await banner().getByRole('button',{name:'退出代登录',exact:true}).click();
     await banner().getByRole('alert').waitFor();assert.equal(await markers(),activeDocument);assert.equal(writes.at(-1).header,info.id,'Actual stop POST includes the current grant header');
     stopFail=false;holdStop=new Promise(resolve=>releaseStop=resolve);await banner().getByRole('button',{name:'重试退出代登录',exact:true}).click();
     await page.waitForTimeout(100);assert(await banner().getByRole('button',{name:'正在退出…',exact:true}).isDisabled());assert.equal(await markers(),activeDocument);
-    releaseStop();holdStop=null;await page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first().waitFor();
+    releaseStop();holdStop=null;await enter.waitFor();
     assert.notEqual(await markers(),activeDocument);assert.equal(await banner().count(),0);
     const exitUrl=new URL(page.url());assert.equal(version==='v2'?exitUrl.searchParams.get('__page'):exitUrl.pathname,'/admin/settings');assert.equal(exitUrl.searchParams.get('tab'),'permissions');
     info=grant({expires_at:Math.floor(Date.now()/1000)+4});const expiredId=info.id;serverGrantId=info.id;stopFail=false;const beforeExpiry=writes.length;
@@ -196,7 +213,7 @@ async function checkPage(version,viewport){
     assert.equal(writes.length,beforeExpiry+1);await page.waitForTimeout(2200);assert.equal(writes.length,beforeExpiry+1,'Expiry attempts stop once, not continuously');
     await page.screenshot({path:path.join(output,tag+'-expired.png'),animations:'disabled'});
     info=grant({active:false,reason:'管理员已撤销'});serverGrantId=info.id;await page.reload();await banner().getByText(/管理员已撤销/).waitFor();assert.equal(writes.length,beforeExpiry+1,'Inactive grants do not auto-submit');
-    stopFail=false;await banner().getByRole('button',{name:'退出代登录',exact:true}).click();await page.getByRole('button',{name:'临时代登录测试值班员',exact:true}).first().waitFor();
+    stopFail=false;await banner().getByRole('button',{name:'退出代登录',exact:true}).click();await enter.waitFor();
     assert.equal(context.pages().length,1,'No new window is opened');assert.deepEqual(errors,[]);
     reports.push({case:tag,passed:true,geometry,editorFooters,editorFeedback,writes,animationWarnings});
     console.log('PASS '+tag);

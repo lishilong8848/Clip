@@ -91,7 +91,7 @@
   </section>
 </template>
 <script setup lang="ts">
-import { computed,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
+import { computed,nextTick,onActivated,onBeforeUnmount,onDeactivated,onMounted,ref,watch } from 'vue';
 import { NAlert,NButton,NEmpty,NInput,NModal,NRadioButton,NRadioGroup,NSelect,NSkeleton,useDialog,useMessage } from 'naive-ui';
 import { CheckCircle2,ClipboardCheck,History,Paperclip,Pencil,Plus,RefreshCw,Settings2,Trash2 } from 'lucide-vue-next';
 import { requestJson,type Dict } from '../client';
@@ -106,6 +106,7 @@ import CheckHistory from './CheckHistory.vue';
 import CheckRecordEditor from './CheckRecordEditor.vue';
 import PhotoLocationSettings from './PhotoLocationSettings.vue';
 const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const emit=defineEmits<{snapshot:[data:Dict]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
@@ -144,7 +145,19 @@ function defaultFrequency(){return {kind:'shift',day_time:'08:50',night_time:'17
 function frequencyLabel(f:Dict=defaultFrequency()){const labels:Dict={daily:'每日',shift:'每日每班组',weekly:'每周'+['一','二','三','四','五','六','日'][f.weekday||0],month_start:'每月月初',month_end:'每月月底',interval:'每隔'+f.every_days+'天',temporary:'临时'+f.limit+(f.limit_type==='days'?'天':'次')};return (labels[f.kind]||'每日每班组')+' '+(f.time||[f.day_time,f.night_time].filter(Boolean).join(' / '));}
 async function load(force=false){
   if(disposed||loading.value&&!force)return;controller?.abort();const read=new AbortController();controller=read;loading.value=true;
-  try{const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:force?'reload':'no-store'});if(disposed||read.signal.aborted)return;if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');preShiftSummary(result);for(const id of Object.keys(drafts.value)){const next=result.tasks.find((t:Dict)=>t.id===id);if(next&&(next.submitted||draftVersions[id]!==next.definition_version)){delete drafts.value[id];delete draftVersions[id];}}if(firstState){overviewOpen.value=!props.fixedScope&&!!result.can_manage&&result.scopes.length>1&&Array.isArray(result.overview?.rows);firstState=false;}state.value=result;error.value='';if(!visibleTasks.value.some((t:Dict)=>t.id===selectedId.value))selectedId.value=(visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0])?.id||'';}
+  try{
+    const result=await requestJson('/api/pre-shift-checks?scope='+encodeURIComponent(scope.value),{signal:read.signal,cache:force?'reload':'no-store'});
+    if(disposed||read.signal.aborted)return;
+    if(!Array.isArray(result.tasks)||!Array.isArray(result.definition?.items)||!Array.isArray(result.scopes))throw new Error('检查数据不完整，请重试。');
+    preShiftSummary(result);
+    for(const id of Object.keys(drafts.value)){
+      const next=result.tasks.find((t:Dict)=>t.id===id);
+      if(next&&(next.submitted||draftVersions[id]!==next.definition_version)){delete drafts.value[id];delete draftVersions[id];}
+    }
+    if(firstState){overviewOpen.value=!props.fixedScope&&!!result.can_manage&&result.scopes.length>1&&Array.isArray(result.overview?.rows);firstState=false;}
+    state.value=result;loadedAt=Date.now();emit('snapshot',result);error.value='';
+    if(!visibleTasks.value.some((t:Dict)=>t.id===selectedId.value))selectedId.value=(visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0])?.id||'';
+  }
   catch(e){if(!disposed&&!read.signal.aborted)error.value=e instanceof Error?e.message:'班前检查读取失败，请重试。';}finally{if(controller===read)loading.value=false;}
 }
 function changeScope(value:string){if(busy.value||uploading.value||saving.value)return;scope.value=value;selectedId.value='';state.value=undefined;void load(true);}
@@ -175,13 +188,17 @@ async function submit(){
 }
 const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||busy.value||saving.value||editing.value||uploading.value){event.preventDefault();event.returnValue='';}}
-function refresh(){if(!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value&&!recordId.value)void load();}
+let activeView=true, loadedAt=0;
+function refresh(){if(activeView&&!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value&&!recordId.value)void load();}
+onActivated(()=>{activeView=true;if(Date.now()-loadedAt>=30000)refresh();});
+onDeactivated(()=>{activeView=false;historyOpen.value=false;recordId.value='';});
 onMounted(()=>{void load();timer=setInterval(refresh,30000);window.addEventListener('clipflow-business-changed',refresh);window.addEventListener('beforeunload',beforeUnload);document.addEventListener('visibilitychange',refresh);});
 watch(()=>props.user.open_id,()=>{recordId.value='';drafts.value={};state.value=undefined;recipientController?.abort();recipientOptions.value=[];items.value=[];editing.value=false;});
 onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abort();if(timer)clearInterval(timer);removeGuard();window.removeEventListener('clipflow-business-changed',refresh);window.removeEventListener('beforeunload',beforeUnload);document.removeEventListener('visibilitychange',refresh);});
 </script>
 <style>
 .v2-check-workspace{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}.v2-check-task{display:flex;flex-direction:column;gap:10px;min-width:0}.v2-check-result{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.v2-check-workspace>.v2-check-task:only-child{grid-column:1/-1}
 .workspace-v2 .v2-shift-check{container-type:inline-size;container-name:shift-check;gap:10px}
 .workspace-v2 .v2-check-toolbar{gap:8px;flex-wrap:wrap}.workspace-v2 .v2-check-actions{margin-left:auto;flex-wrap:wrap}
 .workspace-v2 .v2-check-toolbar>.n-select{max-width:118px}.workspace-v2 .v2-check-status{padding:8px 10px;border-radius:6px}.workspace-v2 .v2-check-status strong{font-size:13px}

@@ -647,19 +647,17 @@ function toggleVisible(checked: boolean) {
 function cellKey(cell: Pick<Cell,'address'>) {
   return activeSheet.value?.name + '!' + cell.address;
 }
-function reviewCell(cell: Cell) {
+function reviewCell(cell: Cell, sheet = activeSheet.value) {
   const schema = item.value?.template?.schema;
-  const sheet = activeSheet.value;
   if (!sheet || schema?.sheet !== sheet.name) return '';
   if (cell.address === (sheet.review?.reviewer_address || 'E' + schema.review_row)) return 'reviewer';
   if (cell.address === (sheet.review?.reviewed_at_address || 'G' + schema.review_row)) return 'time';
   if (cell.address === 'E' + schema.result_row) return 'result';
-  if (isSignatureCell(cell)) return 'signature';
+  if (isSignatureCell(cell, sheet)) return 'signature';
   return '';
 }
-function isSignatureCell(cell: Cell) {
+function isSignatureCell(cell: Cell, sheet = activeSheet.value) {
   const schema = item.value?.template?.schema;
-  const sheet = activeSheet.value;
   return !!sheet && schema?.sheet === sheet.name && cell.address === (sheet.review?.signature_address || 'E' + schema.review_row);
 }
 function reviewText(cell: Cell) {

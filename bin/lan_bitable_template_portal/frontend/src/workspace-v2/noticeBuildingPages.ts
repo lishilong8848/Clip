@@ -1,9 +1,13 @@
 import type {Dict} from './client';
 
 const lanes=['records','ongoing'] as const;
-export async function readNoticeBuildings(query:URLSearchParams,scopes:string[],read:(query:URLSearchParams)=>Promise<Dict>):Promise<Dict>{
+type BuildingPage = {rows:Record<string,Dict[]>;more:Record<string,boolean>};
+export async function readNoticeBuildings(query:URLSearchParams,scopes:string[],read:(query:URLSearchParams)=>Promise<Dict>,
+  onPartial?:(data:Dict)=>void):Promise<Dict>{
   const end=Object.fromEntries(lanes.map(lane=>[lane,Math.max(1,Number(query.get(lane+'_page'))||1)*20]));
-  const sources=await Promise.all(scopes.map(async scope=>{
+  const ready=new Map<string,BuildingPage>();
+  const combined=()=>combineBuildings(query,end,scopes.flatMap(scope=>ready.has(scope)?[ready.get(scope)!]:[]));
+  const settled=await Promise.allSettled(scopes.map(async scope=>{
     const rows:Record<string,Dict[]>={records:[],ongoing:[]},more={records:true,ongoing:true};
     for(let page=1;lanes.some(lane=>more[lane]&&rows[lane]!.length<=end[lane]!);page++){
       const active=lanes.filter(lane=>more[lane]&&rows[lane]!.length<=end[lane]!);
@@ -19,8 +23,15 @@ export async function readNoticeBuildings(query:URLSearchParams,scopes:string[],
         more[lane]=rows[lane]!.length<total;
       }
     }
-    return {rows,more};
+    ready.set(scope,{rows,more});
+    if(onPartial&&ready.size<scopes.length&&lanes.every(lane=>end[lane]===20))onPartial(combined());
   }));
+  const failed=settled.find(result=>result.status==='rejected');
+  if(failed)throw failed.reason;
+  return combined();
+}
+
+function combineBuildings(query:URLSearchParams,end:Record<string,number>,sources:BuildingPage[]):Dict{
   const result:Dict={source_snapshot_ready:true};
   for(const lane of lanes){
     const unique=new Map<string,Dict>();

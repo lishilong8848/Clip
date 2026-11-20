@@ -25,6 +25,7 @@
         </div>
       </div>
       <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }} <NButton text @click="load(true)">重新读取</NButton></NAlert>
+      <p v-else-if="data.partial_buildings && loading" class="notice-progress" role="status">已显示部分楼栋 · 其余读取中…</p>
       <NAlert v-if="syncing" type="info" :bordered="false"><NSpin size="small" /> 正在同步源表，当前仍可查看已加载的通告。</NAlert>
       <EventNoticeBoard v-if="kind==='event'" :scope="scope" :active="active" />
       <template v-else>
@@ -62,7 +63,7 @@
               </ul>
               <div v-else class="desk-empty" role="status"><Inbox :size="24" /><p>{{ error?'通告读取失败，不能判断为零条':lane.id==='ongoing'?'当前没有进行中通告':'当前筛选下没有计划通告' }}</p></div>
               <footer v-if="lane.rows.length || lane.total" class="lane-pagination"><small>本页 {{ lane.rows.length }} 条</small><NPagination :page="pages[lane.id]" :page-size="20"
-                :item-count="lane.total" :page-slot="3" :disabled="loading" @update:page="value=>changePage(lane.id,value)" /></footer>
+                :item-count="lane.total" :page-slot="3" :disabled="loading || !!data.partial_buildings" @update:page="value=>changePage(lane.id,value)" /></footer>
             </section>
           </template>
         </PageCanvas>
@@ -326,12 +327,15 @@ async function load(fresh=false){
   if(!props.active||disposed||document.hidden)return;
   listAbort?.abort();const c=new AbortController();listAbort=c;loading.value=true;error.value='';
   try{
-    const read=(q:URLSearchParams)=>requestJson('/api/workbench?'+q,{signal:c.signal,...(fresh?{fresh:true}:{})});
+    const read=(q:URLSearchParams)=>requestJson('/api/workbench?'+q,{signal:c.signal,timeoutMs:16000,...(fresh?{fresh:true}:{})});
     const q=query();q.delete('buildings');const buildings=selectedBuildings.value;
     if(buildings?.length===0)throw new Error('当前未选择可访问楼栋。');
     if(buildings?.length===1)q.set('scope',buildings[0]!);
     const aggregate=props.scope==='ALL'&&buildings?.length===buildingOptions.value.length;
-    const value=buildings&&buildings.length>1&&!aggregate?await readNoticeBuildings(q,buildings,read):await read(q);
+    const partial=!Array.isArray(data.value.records)?(snapshot:Dict)=>{
+      if(!c.signal.aborted)data.value={...snapshot,partial_buildings:true};
+    }:undefined;
+    const value=buildings&&buildings.length>1&&!aggregate?await readNoticeBuildings(q,buildings,read,partial):await read(q);
     if(c.signal.aborted)return;
     if(value.source_snapshot_ready===false||!Array.isArray(value.records)||!Array.isArray(value.ongoing))throw new Error('通告资料尚未完整读取，请稍后重试。');data.value=value;
   }
@@ -733,6 +737,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .desk-commands .n-button__content,.v2-notice-editor-footer .n-button__content,.v2-notice-tools .n-button__content {gap:5px}
 .notice-desk .desk-primary:not(:disabled),.desk-editor .n-button--primary-type:not(:disabled),.desk-dialog .n-button--primary-type:not(:disabled) {color:white;background:var(--desk-green)}
 .notice-desk .desk-band {justify-content:space-between;flex-wrap:wrap;gap:6px 14px}
+.notice-desk .notice-progress{margin:4px 0;color:var(--v2-muted);font-size:12px}
 .desk-types {display:flex;gap:3px;max-width:100%;min-width:0;overflow:auto;padding:4px;box-sizing:border-box;border-radius:12px;background:var(--soft-field);box-shadow:var(--soft-inset);scrollbar-width:thin}
 .desk-types button,.desk-switch button {flex:none;min-height:34px;border:1px solid transparent;border-radius:8px;padding:5px 12px;font:inherit;font-size:13px;color:var(--v2-ink);background:transparent;cursor:pointer}
 .desk-types button:hover,.desk-switch button:hover {background:var(--v2-palette-selection)}
