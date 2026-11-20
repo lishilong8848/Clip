@@ -3402,11 +3402,26 @@ class PortalRuntime:
             raise PortalError(str(exc)) from exc
 
     @classmethod
-    def process_manual_finished_bindings(cls):
+    def completed_manual_binding(cls, document, identity):
+        if document.get('state') != 'done':
+            return {}
+        payload = document.get('payload') or {}
+        expected_end = cls.service._repair_management_datetime_ms(payload.get('ended_at'))
+        if (not expected_end or canonical_source_record_id(identity) != canonical_source_record_id(payload)
+                or canonical_target_record_id(identity) != canonical_target_record_id(payload)
+                or not cls.service._target_status_is_finished(identity.get('status'))
+                or cls.service._repair_management_datetime_ms((identity.get('payload') or {}).get('ended_at')) != expected_end):
+            return {}
+        return {'source_record_id': canonical_source_record_id(payload),
+                'target_record_id': canonical_target_record_id(payload), 'target_finished': True,
+                'target_ended_at': payload.get('ended_at'), 'target_status': identity.get('status')}
+
+    @classmethod
+    def process_manual_finished_bindings(cls, *, retry=None):
         """Resume explicit binding requests without writing to the source table."""
         from .module_access import allowed_modules
         from .portal_service import NoticeSourcePending, NoticeSourceSuperseded
-        due = cls.state_store.list_due_manual_notice_bindings(time.time(), limit=3)
+        due = [retry] if retry else cls.state_store.list_due_manual_notice_bindings(time.time(), limit=3)
         for row in due:
             key, document = row['key'], row['payload']
             op = str(document.get('operation_id') or '')
@@ -3443,6 +3458,9 @@ class PortalRuntime:
                     cls.state_store.update_manual_notice_binding(key, op, {
                         'state': 'blocked', 'reason': '计划周期已变化，请重新核对。'})
                     continue
+                if validation.get('target_building_codes'):
+                    codes = validation['target_building_codes']
+                    payload = {**payload, 'building_codes': codes, 'building': cls.service._building_label_from_codes(codes)}
                 if document.get('state') in {'pending', 'attention_required'}:
                     if not cls.service.sync_notice_source_ended_fields(payload, read_only=True):
                         raise NoticeSourceSuperseded('计划周期或源记录已变化，不能继续绑定。')

@@ -29,7 +29,7 @@
     <div v-else-if="tab !== 'sharing' && viewMode === 'practice' && !learner && identityIssue" class="empty"><AlertCircle :size="30" /><strong>尚未关联个人身份</strong><span>{{ identityIssue || '无法进行个人答题，请与管理员核对人员目录。' }}</span></div>
 
     <template v-else>
-      <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" :exemption-date="boot.daily_exemption?.resume_date" @open="openLearning" @refresh="refreshView" />
+      <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" :daily-duty="dailyDuty" @open="openLearning" @refresh="refreshView" />
       <LearningPendingQuestions v-else-if="isAdmin && tab === 'pending'" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
       <LearningSharing v-else-if="tab === 'sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty = $event" @busy="busy = $event" />
       <LearningCompletion v-else-if="tab === 'completion'" :scope="viewMode === 'overview' ? scope : ''" :person-id="learner?.id" :can-view-buildings="canViewBuildings" :refresh-key="completionRefresh" @open-paper="openCompletionPaper" />
@@ -44,15 +44,14 @@
             <span v-if="paper?.status" class="badge">{{ paper.status === 'completed' ? '已完成' : paper.status === 'published' ? '已发布' : paper.status === 'pending' ? '待完成' : paper.status }}</span>
           </div>
           <div v-if="tab === 'today' && viewMode === 'practice' && boot.can_answer" class="actions">
-            <div class="view-switch" role="group" aria-label="学练方式"><button :class="{ active: studyMode === 'daily' }" :aria-pressed="studyMode === 'daily'" :disabled="busy || loading" @click="switchStudyMode('daily')">每日题单</button><button :class="{ active: studyMode === 'practice' }" :aria-pressed="studyMode === 'practice'" :disabled="busy || loading" @click="switchStudyMode('practice')">自主练习</button></div>
-            <button v-if="studyMode === 'practice' || (!boot.daily_exemption && !paper?.questions?.length)" class="primary" :disabled="busy || loading" @click="studyMode === 'daily' ? continueLearning() : startSelfPractice()"><Loader2 v-if="busy || loading" :size="16" class="spin" /><BookOpen v-else-if="studyMode === 'daily'" :size="16" /><Shuffle v-else :size="16" />{{ studyMode === 'daily' ? '打开每日题单' : '开始自主练习' }}</button>
+            <div v-if="dailyDuty" class="view-switch" role="group" aria-label="学练方式"><button :class="{ active: studyMode === 'daily' }" :aria-pressed="studyMode === 'daily'" :disabled="busy || loading" @click="switchStudyMode('daily')">当班题单</button><button :class="{ active: studyMode === 'practice' }" :aria-pressed="studyMode === 'practice'" :disabled="busy || loading" @click="switchStudyMode('practice')">自主练习</button></div>
+            <button v-if="studyMode === 'practice' || (dailyDuty && !paper?.questions?.length)" class="primary" :disabled="busy || loading" @click="studyMode === 'daily' ? continueLearning() : startSelfPractice()"><Loader2 v-if="busy || loading" :size="16" class="spin" /><BookOpen v-else-if="studyMode === 'daily'" :size="16" /><Shuffle v-else :size="16" />{{ studyMode === 'daily' ? '打开当班题单' : '开始自主练习' }}</button>
           </div>
         </div>
         <div v-if="tab === 'today'" class="actions" role="note"><span class="muted">此处显示本题单进度；每日完成统计包含当班自主练习的有效首答，复习不重复计数。</span><button :disabled="busy || loading" @click="switchTab('completion')">查看每日完成</button></div>
         <div v-if="paper?.legacy" class="muted read-only"><Eye :size="16" />旧楼栋题单 · 只读历史，不计入个人画像</div>
         <div v-if="shortageText(paper?.shortage)" class="alert warning"><AlertCircle :size="18" />{{ shortageText(paper?.shortage) }}</div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取题单…</div>
-        <div v-else-if="tab === 'today' && studyMode === 'daily' && boot.daily_exemption && !paper" class="empty"><BookOpen :size="30" /><strong>入职首月免做</strong><span>{{ boot.daily_exemption.resume_date }} 起按排班安排每日题单。</span><button @click="switchStudyMode('practice')">自主练习</button></div>
         <div v-else-if="!paper || !paper.questions?.length" class="empty"><BookOpen :size="30" /><strong>{{ studyMode === 'practice' ? '尚未开始自主练习' : '今日暂无可学习题目' }}</strong><span>{{ syncActive ? '题库正在同步，请稍后刷新。' : studyMode === 'practice' ? '可开始新的自主练习，每轮随机生成15题。' : '每日题单未发布或有效题目不足，可切换到自主练习。' }}</span></div>
         <div v-else-if="current" class="practice-layout">
           <aside class="question-rail" aria-label="题号导航">
@@ -100,7 +99,7 @@
               <VnetSelect input-id="learning-issue-scope" :model-value="issueScopes[filters.issueScope] || '全部楼栋'" :options="['全部楼栋', ...Object.values(issueScopes)]" label="质疑楼栋筛选" @update:model-value="filters.issueScope = keyFor(issueScopes, $event); filterChanged()" />
               <VnetSelect input-id="learning-select-6" :model-value="issueLabels[filters.issue] || '全部状态'" :options="['全部状态', ...Object.values(issueLabels)]" label="质疑状态筛选" @update:model-value="filters.issue = keyFor(issueLabels, $event); filterChanged()" />
             </template>
-            <label v-if="tab !== 'history'" class="search-field"><Search :size="16" /><input v-model="filters.search" aria-label="搜索题目或质疑" placeholder="搜索题目或质疑" type="search" /></label>
+            <label v-if="tab !== 'history'" class="search-field"><Search :size="16" /><input v-model="listSearch" aria-label="搜索题目或质疑" placeholder="搜索题目或质疑" type="search" /></label>
             <button type="button" :disabled="loading || busy" @click="clearFilters"><X :size="16" />清空筛选</button><button type="submit" :disabled="loading || busy"><Search :size="16" />查询</button>
           </div>
           <button v-if="isAdmin && tab === 'issues'" type="button" :disabled="busy" @click="filters.problems = true; switchTab('questions')"><AlertCircle :size="16" />题库待核对 {{ boot.question_problem_count ?? '—' }} 题</button><div v-if="tab === 'questions'" class="actions"><button type="button" :disabled="busy" @click="modalKind = 'import'; importRows = []; importName = ''; error = ''"><Upload :size="16" />导入</button><button type="button" :disabled="busy" @click="exportData('questions')"><Download :size="16" />导出</button><button type="button" class="primary" :disabled="busy" @click="editQuestion()"><Plus :size="16" />新增题目</button></div>
@@ -122,7 +121,7 @@
         <LearningHome v-if="viewMode === 'overview' && !learner" management :is-admin="isAdmin" :data="profile" :date="date" :loading="loading || busy" @open="openLearning" />
         <form class="toolbar profile-toolbar" :class="{ 'custom-period': !filters.period }" @submit.prevent="loadView"><div class="filters"><VnetSelect input-id="learning-select-7" :model-value="({ '7': '近7天', '30': '近30天' } as Dict)[filters.period] || '自定义'" :options="['近7天', '近30天', '自定义']" label="统计周期" @update:model-value="setPeriod(keyFor({ '7': '近7天', '30': '近30天' }, $event)); loadView()" /><label class="inline-field">开始<input v-model="filters.from" aria-label="统计开始日期" type="date" /></label><label class="inline-field">结束<input v-model="filters.to" aria-label="统计结束日期" type="date" /></label><button :disabled="loading || busy"><Search :size="16" />查询</button></div><button v-if="isAdmin" type="button" :disabled="busy || loading" @click="exportData('results')"><Download :size="16" />导出报表</button></form>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取统计…</div>
-        <LearningDashboard :data="profile" :person="learner" :all-scopes="allPortrait" :show-continue="viewMode === 'practice' && boot.can_answer" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
+        <LearningDashboard :data="profile" :person="learner" :all-scopes="allPortrait" :show-continue="!!dailyDuty" :disabled="busy || loading" @select="selectLearner" @continue="continueLearning" />
       </template>
 
       <form v-else-if="tab === 'settings'" class="settings-form" @submit.prevent="saveSettings">
@@ -512,6 +511,13 @@ const scope = ref(props.scope || ""), date = ref(""), tab = ref<Tab>("profile");
 const isLearningHub = computed(() => tab.value === 'home' || (viewMode.value === 'overview' && tab.value === 'profile' && !learner.value));
 const viewParam = ref(new URLSearchParams(window.location.search).get("view") || "");
 const learner = ref<Dict | null>(null), legacyHistory = ref(false);
+const dutyClock = ref(Date.now());
+let dutyCheckedAt = 0;
+const dailyDuty = computed<Dict | null>(() => {
+  const duty = boot.value.daily_duty;
+  return duty && ready.value && viewMode.value === 'practice' && boot.value.can_answer
+    && learner.value?.id === boot.value.self_person?.id && Date.parse(duty.end_at) > dutyClock.value ? duty : null;
+});
 const peopleRows = ref<Dict[]>([]), peopleIssues = ref<Dict[]>([]), peopleSearch = ref(""), peoplePage = ref(1), peopleTotal = ref(0), peopleReady = ref(false), peopleLoading = ref(false);
 let readRequest: AbortController | undefined, peopleRequest: AbortController | undefined;
 const isAdmin = computed(() => boot.value.is_admin === true);
@@ -548,7 +554,9 @@ const profileSection = ref("topics");
 const profileSections = computed(() => [...(isAdmin.value ? [{ value: "buildings", label: "六楼进度" }] : []), { value: "topics", label: "知识点薄弱项" }, ...(isAdmin.value ? [{ value: "questions", label: "题目统计" }] : [])]);
 const profileRows = computed<Dict[]>(() => profileSection.value === "buildings" ? (boot.value.scopes || []).filter((s: Dict) => s.value && (!scope.value || s.value === scope.value)).map((s: Dict) => (profile.value.buildings || []).find((b: Dict) => b.scope === s.value) || { scope: s.value, assigned: 0, answered: 0 }) : profile.value[profileSection.value] || []);
 const visibleProfileRows = computed(() => profileRows.value.slice((pages.profile - 1) * 20, pages.profile * 20));
-const filters = reactive({ search: "", status: "", bank: "", problems: false, review: "mistakes", reviewBank: "", issue: "", issueScope: "", from: "", to: "", period: "7" });
+const filters = reactive({ search: "", bankSearch: "", issueSearch: "", status: "", bank: "", problems: false, review: "mistakes", reviewBank: "", issue: "", issueScope: "", from: "", to: "", period: "7" });
+const searchField = computed(() => tab.value === "questions" ? "bankSearch" : tab.value === "issues" ? "issueSearch" : "search");
+const listSearch = computed({ get: () => filters[searchField.value], set: value => { filters[searchField.value] = value; } });
 const selected = ref<string[]>([]);
 const pageNumber = computed(() => pages[tab.value] || 1);
 const pageCount = computed(() => Math.max(1, Math.ceil(total.value / 20)));
@@ -816,19 +824,26 @@ async function deletePaper(id: string): Promise<void> {
 function query(extra: Dict = {}): string {
   return new URLSearchParams(Object.entries({ scope: scope.value, person_id: learner.value?.id, page: pageNumber.value, page_size: 20, ...extra }).filter(([, v]) => v !== "" && v !== undefined).map(([k, v]) => [k, String(v)])).toString();
 }
+function todayPaperQuery(duty: Dict | null, extra: Dict = {}): string {
+  return query({ mode: studyMode.value, ...(duty ? { date: duty.date, scope: duty.scope } : { today: 1 }), ...extra });
+}
+function todayPaper(data: Dict, duty: Dict | null): Dict | null {
+  return data.items?.find((item: Dict) => !duty || (item.date === duty.date && item.scope === duty.scope)) || null;
+}
 async function loadView(): Promise<void> {
   if (tab.value === 'pending') { ++epoch; readRequest?.abort(); loading.value = false; await loadPendingQuestions(); return; }
   if (tab.value === 'sharing' || tab.value === 'completion') { ++epoch; readRequest?.abort(); loading.value = false; return; }
   const token = ++epoch; readRequest?.abort(); readRequest = new AbortController(); const readOptions = { signal: readRequest.signal }; loading.value = true; error.value = ""; selected.value = [];
   try {
     if (tab.value === "today") {
+      const duty = studyMode.value === 'daily' ? dailyDuty.value : null;
       if (!learner.value) { paper.value = null; return; }
+      if (studyMode.value === 'daily' && !duty) { tab.value = 'home'; await loadView(); return; }
       saveDraft(); paper.value = null;
-      const data = await requestLearning(readOptions,`/papers?${query({ today: 1, mode: studyMode.value })}`);
+      const data = await requestLearning(readOptions,`/papers?${todayPaperQuery(duty)}`);
       if (token !== epoch) return;
-      date.value = data.today || date.value;
-      if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
-      const p = data.items?.[0];
+      date.value = duty?.date || data.today || date.value;
+      const p = todayPaper(data, duty);
       const nextPaper = p ? (p.questions ? p : await requestLearning(readOptions,`/papers/${encodeURIComponent(p.id)}`)) : null;
       if (token !== epoch) return;
       saveDraft(); paper.value = nextPaper; index.value = 0; hydrateQuestion();
@@ -836,9 +851,9 @@ async function loadView(): Promise<void> {
       const data = await requestLearning(readOptions,"/settings");
       if (token === epoch) { Object.assign(settingsForm, data); settingsSnapshot = JSON.stringify(settingsForm); }
     } else {
-      const extra = tab.value === "questions" ? { search: filters.search, status: filters.status, bank: filters.bank, problems: filters.problems ? 1 : "" }
+      const extra = tab.value === "questions" ? { search: filters.bankSearch, status: filters.status, bank: filters.bank, problems: filters.problems ? 1 : "" }
         : tab.value === "review" ? { kind: filters.review, bank: filters.reviewBank, search: filters.search }
-        : tab.value === "issues" ? { scope: filters.issueScope, person_id: undefined, status: filters.issue, search: filters.search }
+        : tab.value === "issues" ? { scope: filters.issueScope, person_id: undefined, status: filters.issue, search: filters.issueSearch }
         : { from: filters.from, to: filters.to, period: filters.period, ...(tab.value === 'profile' && allPortrait.value ? { all_people: 1 } : {}), ...(tab.value === "history" && legacyHistory.value ? { legacy: 1, person_id: "" } : {}) };
       const data = await requestLearning(readOptions,`/${tab.value === 'home' ? 'profile' : tab.value}?${query(tab.value === 'home' ? {period:'7'} : extra)}`);
       if (token !== epoch) return;
@@ -859,12 +874,15 @@ async function switchTab(value: Tab): Promise<void> {
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("离开发布设置", "尚有未保存的设置，确认放弃？")) return;
   saveDraft(); rows.value = []; total.value = 0; tab.value = value; reading.value = false; notice.value = "";
   if (value === "today" && !scope.value) scope.value = boot.value.scopes?.find((s: Dict) => s.value)?.value || "";
-  if (value === 'today' && viewMode.value === 'practice') await loadTodayPaper();
+  if (value === 'today' && viewMode.value === 'practice') {
+    if (!dailyDuty.value) studyMode.value = 'practice';
+    await loadTodayPaper();
+  }
   else await loadView();
   schedulePoll();
 }
 async function openLearning(value:string): Promise<void> {
-  if (busy.value || loading.value) return;
+  if (busy.value || loading.value || (value === 'today' && !dailyDuty.value)) return;
   if (value === 'practice' || value === 'today') {
     saveDraft(); studyMode.value = value === 'practice' ? 'practice' : 'daily';
     await loadTodayPaper();
@@ -916,16 +934,18 @@ function goOverview(): void {
   navigate(`/learning?view=overview${scope.value ? `&scope=${encodeURIComponent(scope.value)}` : ""}`);
 }
 async function continueLearning(): Promise<void> {
-  if (!learner.value || busy.value || loading.value || viewMode.value !== "practice") return;
+  if (!dailyDuty.value || busy.value || loading.value) return;
+  studyMode.value = 'daily';
   saveDraft();
   await loadTodayPaper();
 }
 async function enterPracticeToday(): Promise<void> {
   if (viewMode.value !== "practice" || !boot.value.self_person || boot.value.can_answer !== true) return;
+  if (!dailyDuty.value) { tab.value = 'home'; await loadView(); return; }
   await loadTodayPaper();
 }
 async function switchStudyMode(mode: 'daily' | 'practice'): Promise<void> {
-  if (busy.value || loading.value || studyMode.value === mode) return;
+  if (busy.value || loading.value || studyMode.value === mode || (mode === 'daily' && !dailyDuty.value)) return;
   saveDraft(); studyMode.value = mode; paper.value = null;
   await loadTodayPaper();
 }
@@ -940,16 +960,17 @@ async function startSelfPractice(): Promise<void> {
 }
 async function loadTodayPaper(): Promise<void> {
   if (!learner.value || viewMode.value !== "practice" || busy.value) return;
+  const duty = studyMode.value === 'daily' ? dailyDuty.value : null;
+  if (studyMode.value === 'daily' && !duty) { tab.value = 'home'; await loadView(); return; }
   const token = ++epoch;
   loading.value = true; error.value = "";
   try {
-    const data = await requestLearning(learningOptions, `/papers?` + query({ today: 1, mode: studyMode.value }));
+    const data = await requestLearning(learningOptions, `/papers?` + todayPaperQuery(duty));
     if (token !== epoch) return;
-    date.value = data.today || date.value;
-    if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
-    let p = data.items?.[0] || null;
-    if (!p && studyMode.value === 'daily' && !boot.value.daily_exemption && data.published && boot.value.can_answer === true) {
-      p = await requestLearning(learningOptions, "/papers/claim", "POST", { scope: scope.value, person_id: learner.value.id });
+    date.value = duty?.date || data.today || date.value;
+    let p = todayPaper(data, duty);
+    if (!p && duty && !data.daily_exemption && data.published) {
+      p = await requestLearning(learningOptions, "/papers/claim", "POST", { scope: duty.scope, person_id: learner.value.id, date: duty.date, shift: duty.shift });
     }
     if (token !== epoch) return;
     if (p && !p.questions) p = await requestLearning(learningOptions, `/papers/${encodeURIComponent(p.id)}`);
@@ -962,28 +983,35 @@ function filterChanged(): void { pages[tab.value] = 1; void loadView(); }
 function clearFilters(): void {
   if (tab.value === "review") { filters.review = "mistakes"; filters.reviewBank = ""; filters.search = ""; }
   else if (tab.value === "history") { filters.from = ""; filters.to = ""; }
-  else if (tab.value === "issues") { filters.issue = ""; filters.issueScope = ""; filters.search = ""; }
-  else if (tab.value === "questions") { filters.search = ""; filters.status = ""; filters.bank = ""; filters.problems = false; }
+  else if (tab.value === "issues") { filters.issue = ""; filters.issueScope = ""; filters.issueSearch = ""; }
+  else if (tab.value === "questions") { filters.bankSearch = ""; filters.status = ""; filters.bank = ""; filters.problems = false; }
   filterChanged();
 }
 async function refreshView(): Promise<void> {
   if (!ready.value) { await bootstrap(); return; }
   if (tab.value === 'completion') { completionRefresh.value++; return; }
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("刷新设置", "尚有未保存的设置，确认放弃并重新读取？")) return;
+  const home = tab.value === 'home';
+  if (home) await refreshSync(true);
   if (tab.value === 'today' && viewMode.value === 'practice' && !paper.value) await loadTodayPaper();
   else if (reading.value && paper.value && current.value) await loadPaper(paper.value.id, questionId(current.value));
   else await loadView();
   if (tab.value !== 'pending') void loadPendingQuestions();
-  void refreshSync();
+  if (!home) void refreshSync();
 }
 function setPeriod(value: string): void { filters.period = value; filters.from = ""; filters.to = ""; pages.profile = 1; }
-async function refreshSync(): Promise<void> {
+function updateDailyDuty(data: Dict): void {
+  boot.value.daily_duty = data.daily_duty;
+  dutyCheckedAt = dutyClock.value = Date.now();
+}
+async function refreshSync(quiet = false): Promise<void> {
   if (!ready.value || disposed) return;
   try {
     const data = await requestJson(`/api/learning/bootstrap?scope=${encodeURIComponent(scope.value)}`, { signal: lifetime.signal, timeoutMs: 10000, cache: "no-store" });
     if (disposed) return;
+    updateDailyDuty(data);
     boot.value.sync = data.sync; boot.value.summary = data.summary; boot.value.question_problem_count = data.question_problem_count; pollFailures = 0; schedulePoll();
-  } catch { if (!disposed) notice.value = "操作已保存，暂时无法读取云端同步状态，请稍后刷新。"; }
+  } catch { if (!disposed && !quiet) notice.value = "操作已保存，暂时无法读取云端同步状态，请稍后刷新。"; }
 }
 function turnPage(change: number): void { if (busy.value || loading.value) return; gotoPage(pageNumber.value + change); }
 function gotoPage(target: number): void {
@@ -1009,6 +1037,7 @@ async function bootstrap(): Promise<void> {
         if (learner.value && boot.value.self_person?.id === learner.value.id) learner.value = boot.value.self_person;
       }
       date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || beijingDate();
+      updateDailyDuty(boot.value);
       Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
       ready.value = true;
       const link=new URLSearchParams(window.location.search);
@@ -1019,8 +1048,10 @@ async function bootstrap(): Promise<void> {
           if(isAdmin.value || link.get('review_ticket')) await openReview(link.get('issue_id')!,link.get('review_ticket')||'');
           else await perform(async()=>openIssue({},await requestLearning(learningOptions,'/issues/'+encodeURIComponent(link.get('issue_id')!))));
         }
-      } else if(isAdmin.value && (link.get('edit_question') || link.get('question_id'))) {
-        tab.value='questions'; await loadView(); await editQuestion(link.get('edit_question') || link.get('question_id')!);
+      } else if(isAdmin.value && (link.get('edit_question') || link.get('question_id') || link.get('tab')==='questions')) {
+        tab.value='questions'; await loadView();
+        const target=link.get('edit_question')||link.get('question_id');
+        if(target)await editQuestion(target);
       } else if (isAdmin.value && link.get('tab')==='pending') {
         tab.value='pending'; await loadView();
       } else if (link.get('tab')==='issues') {
@@ -1058,6 +1089,7 @@ function schedulePoll(): void {
     if (document.hidden) { schedulePoll(); return; }
     try {
       const data = await requestLearning(learningOptions,`/bootstrap?scope=${encodeURIComponent(scope.value)}&refresh=1`);
+      updateDailyDuty(data);
       boot.value.sync = data.sync; boot.value.delivery_status = data.delivery_status; boot.value.summary = data.summary; boot.value.question_problem_count = data.question_problem_count; pollFailures = 0;
       if (!syncActive.value && !paper.value && tab.value === "today") await loadView();
     } catch (e) { pollFailures++; if (pollFailures >= 3) error.value = `同步状态读取失败，请手动刷新。${(e as Error).message}`; }
@@ -1066,19 +1098,29 @@ function schedulePoll(): void {
 }
 async function checkToday(): Promise<void> {
   if (disposed || document.hidden || !learner.value || busy.value || loading.value) return;
+  if (!['home','today'].includes(tab.value)) return;
+  const prevDuty = dailyDuty.value;
+  const token = epoch;
+  const rollover = tab.value === 'home' && date.value !== beijingDate();
+  dutyClock.value = Date.now();
+  if (boot.value.can_answer && (rollover || prevDuty && !dailyDuty.value || dutyClock.value - dutyCheckedAt >= 300_000)) await refreshSync(true);
+  if (disposed || token !== epoch || busy.value || loading.value) return;
   if (tab.value === 'home') {
-    if (date.value !== beijingDate()) await loadView();
+    if (rollover || JSON.stringify(prevDuty) !== JSON.stringify(dailyDuty.value)) await loadView();
     return;
   }
   if (tab.value !== 'today') return;
-  const token = epoch;
+  const duty = studyMode.value === 'daily' ? dailyDuty.value : null;
+  if (studyMode.value === 'daily' && !duty) {
+    saveDraft(); paper.value = null; reading.value = false; tab.value = 'home'; await loadView();
+    return;
+  }
   try {
-    const data = await requestLearning(learningOptions, `/papers?${query({ today: 1, mode: studyMode.value, refresh: 1 })}`);
+    const data = await requestLearning(learningOptions, `/papers?${todayPaperQuery(duty, { refresh: 1 })}`);
     if (disposed || token !== epoch || tab.value !== "today" || busy.value || loading.value) return;
-    if ('daily_exemption' in data) boot.value.daily_exemption = data.daily_exemption;
-    const day = data.today || date.value;
-    const changed = day !== date.value || data.items?.[0]?.id !== paper.value?.id;
-    if (changed) { saveDraft(); date.value = day; paper.value = data.items?.[0] || null; index.value = 0; hydrateQuestion(); }
+    const day = duty?.date || data.today || date.value;
+    const nextPaper = todayPaper(data, duty);
+    if (day !== date.value || nextPaper?.id !== paper.value?.id) { saveDraft(); date.value = day; paper.value = nextPaper; index.value = 0; hydrateQuestion(); }
   } catch { return; }
 }
 usePageReadRefresh(url => url.pathname === '/api/learning/papers', checkToday, () => !disposed && tab.value === 'today' && !loading.value && !busy.value);
@@ -1105,7 +1147,7 @@ async function saveSettings(): Promise<void> {
 }
 async function exportData(kind: string): Promise<void> {
   await perform(async () => {
-    if (kind === "questions") downloadJson(await requestLearning(learningOptions,`/export?${query({ kind, bank: filters.bank, status: filters.status, search: filters.search, problems: filters.problems ? 1 : "" })}`), "学练题库.json");
+    if (kind === "questions") downloadJson(await requestLearning(learningOptions,`/export?${query({ kind, bank: filters.bank, status: filters.status, search: filters.bankSearch, problems: filters.problems ? 1 : "" })}`), "学练题库.json");
     else {
       const reportQuery: Dict = { kind, from: filters.from, to: filters.to };
       if (tab.value === "profile") reportQuery.period = filters.period;

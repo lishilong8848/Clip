@@ -1,4 +1,4 @@
-<LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :exemption-date="exemptionDate" @open="emit('open', $event)" @refresh="emit('refresh')" />
+<LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :daily-duty="dailyDuty" @open="emit('open', $event)" @refresh="emit('refresh')" />
 <section v-else class="lp-hub" aria-label="学习管理工作台">
   <section class="lp-panel lp-agenda">
     <header class="lp-heading"><div><h2>{{ management ? '当班学习进度' : '我的题单' }}</h2><small><time :datetime="date">{{ date }}</time> · {{ management ? '当前管理范围' : person?.name || '个人学习' }}</small></div>

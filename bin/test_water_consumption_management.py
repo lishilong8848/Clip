@@ -148,6 +148,25 @@ class WaterConsumptionStateStoreTests(unittest.TestCase):
         self.assertEqual({first['records'][0]['record_id'], second['records'][0]['record_id']},
                          {'missing-value','missing-photo'})
 
+    def test_latest_incomplete_is_relative_to_each_meter_frequency_and_shift(self):
+        rows = [
+            _record("2025-blank", "A", "2025-11-18", meter="已停用", meter_value=None),
+            _record("old-blank", "A", "2026-11-17", meter_value=None),
+            _record("filled-with-zero", "A", "2026-11-18", meter_value=0),
+            _record("old-west", "A", "2026-11-17", meter="西区", meter_value=None),
+            _record("latest-west", "A", "2026-11-18", meter="西区", meter_value=None),
+            _record("future-west", "A", "2026-11-19", meter="西区"),
+            _record("night", "A", "2026-11-17", shift="夜", meter_value=None),
+            _record("different-building", "B", "2026-11-18", shift="夜"),
+            {**_record("weekly", "A", "2026-11-15", frequency="周"), "photo_count": 0, "photos": []},
+        ]
+        self.store.replace_water_consumption_snapshot(app_token="app", table_id="table", fields=[], options={}, records=rows)
+        query = dict(scope="A", start_date="2026-10-20", end_date="2026-11-18", incomplete=True)
+        result = self.store.query_water_consumption_records(**query, latest_only=True)
+        self.assertEqual(result["total"], 3)
+        self.assertEqual([row["record_id"] for row in result["records"]], ["latest-west", "night", "weekly"])
+        self.assertEqual(self.store.query_water_consumption_records(**query)["total"], 5)
+
     def test_operation_checkpoint_is_replayed(self) -> None:
         started = self.store.begin_water_consumption_operation(
             operation_id="water-op-1",

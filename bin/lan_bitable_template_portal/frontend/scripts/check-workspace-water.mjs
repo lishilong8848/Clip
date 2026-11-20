@@ -55,12 +55,13 @@ if (!process.argv.includes('--full-workspace') && !process.argv.includes('--reus
   // Compile the real water components and common UI, independent of concurrent edits to other pages.
   const host = path.join(output, 'host'); await mkdir(host, { recursive: true });
   const sourcePath = path.join(root, 'src').replaceAll('\\', '/');
-  await writeFile(path.join(host, 'WaterHost.vue'), `<template><NConfigProvider :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN"><NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider><div class="v2-shell"><header class="v2-header"><div class="v2-brand"><img src="/assets/vnet-logo.png" alt="世纪互联 VNET"><span>灯塔<small>南通运维工作空间</small></span></div><span>{{ user.name }}</span></header><SidebarNavigation :collapsed="false" :options="menus" selected="water" @select="value=>navigate(value==='water'?'/water-management?scope='+scope:'/')"/><main class="v2-main"><div id="workspace-page-filters"/><WaterWorkspace v-if="ready&&route.pathname==='/water-management'" :key="scope" :scope="scope" :scope-options="scopes" :initial-view="route.searchParams.get('water_view')==='records'?'records':'overview'" @switch-scope="switchScope"/><h1 v-else-if="ready">个人工作台</h1></main></div></NDialogProvider></NMessageProvider></NConfigProvider></template>
+  await writeFile(path.join(host, 'WaterHost.vue'), `<template><NConfigProvider :theme-overrides="theme" :locale="zhCN" :date-locale="dateZhCN"><NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider><div class="v2-shell has-topnav"><header class="v2-header"><div class="v2-brand"><img src="/assets/vnet-logo.png" alt="世纪互联 VNET"><span>灯塔<small>南通运维工作空间</small></span></div><span>{{ user.name }}</span></header><TopNavigation :groups="sidebarGroups(menus,'administrator')" selected="water" @select="value=>navigate(value==='water'?'/water-management?scope='+scope:'/')"/><main class="v2-main"><div id="workspace-page-filters"/><WaterWorkspace v-if="ready&&route.pathname==='/water-management'" :key="scope" :scope="scope" :scope-options="scopes" :initial-view="route.searchParams.get('water_view')==='records'?'records':'overview'" @switch-scope="switchScope"/><h1 v-else-if="ready">个人工作台</h1></main></div></NDialogProvider></NMessageProvider></NConfigProvider></template>
 <script setup>
 import {computed,onMounted,onBeforeUnmount,ref} from 'vue';
 import {NConfigProvider,NDialogProvider,NMessageProvider,zhCN,dateZhCN} from 'naive-ui';
 import WaterWorkspace from '${sourcePath}/workspace-v2/WaterWorkspace.vue';
-import SidebarNavigation from '${sourcePath}/workspace-v2/SidebarNavigation.vue';
+import TopNavigation from '${sourcePath}/workspace-v2/TopNavigation.vue';
+import {sidebarGroups} from '${sourcePath}/workspace-v2/sidebarSections';
 import {theme} from '${sourcePath}/workspace-v2/theme';
 import {requestJson,setReadCacheIdentity} from '${sourcePath}/workspace-v2/client';
 import {navigate} from '${sourcePath}/workspace-v2/navigation';
@@ -314,7 +315,7 @@ try {
   await input.fill('1300');
   await page.getByRole('button',{name:'记录办理',exact:true}).click();
   assert.equal(await input.inputValue(),'1300','clicking the active view must not close or reset the draft');
-  await page.locator('.v2-sidebar').getByText('个人工作台', { exact: true }).click();
+  await openWorkspaceEntry(page,'home');
   await page.getByRole('button', { name: '继续填写', exact: true }).click();
   assert.equal(await input.inputValue(), '1300');
   assert.match(page.url(), /water-management/);
@@ -358,7 +359,7 @@ try {
   await openFirst(page); await input.fill('1350'); state.saveError = ''; state.saveGate = gate();
   await page.getByRole('button', { name: '保存记录', exact: true }).click();
   await page.getByText('正在保存，请等待结果', { exact: true }).waitFor();
-  await page.locator('.v2-sidebar').getByText('个人工作台', { exact: true }).click();
+  await openWorkspaceEntry(page,'home');
   assert.match(page.url(), /water-management/);
   state.saveGate.release(); state.saveGate = null;
   await page.locator('.water-editor').waitFor({ state: 'detached' });
@@ -402,12 +403,14 @@ try {
   for (const width of [360, 390, 430]) {
     await handset.page.setViewportSize({ width, height: 844 });
     await handset.page.locator('.water-mobile-record').first().waitFor();
-    await handset.page.waitForFunction(()=>document.querySelector('.v2-brand img')?.naturalWidth>0);
     assert.equal(await handset.page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
     await capture(handset.page, 'mobile-list-' + width);
     await handset.page.locator('.water-mobile-record').first().click();
     await handset.page.getByLabel('本次水表读数', { exact: true }).waitFor();
-    try { await handset.page.waitForFunction(()=>{const box=document.querySelector('.water-editor')?.getBoundingClientRect();return box&&Math.abs(box.left)<1&&Math.abs(box.right-innerWidth)<1;}); }
+    try { await handset.page.waitForFunction(()=>{
+      const box=document.querySelector('.water-editor')?.getBoundingClientRect();
+      return box&&Math.abs(box.left)<1&&Math.abs(box.right-innerWidth)<1&&Math.abs(box.top)<1&&Math.abs(box.bottom-innerHeight)<1;
+    }); }
     catch(error) { console.log(await handset.page.evaluate(()=>({width:innerWidth,editor:document.querySelector('.water-editor')?.getBoundingClientRect().toJSON(),drawers:[...document.querySelectorAll('.n-drawer,.n-drawer-container')].map(el=>({box:el.getBoundingClientRect().toJSON(),style:el.getAttribute('style'),cssWidth:getComputedStyle(el).width}))})));await capture(handset.page,'mobile-framing-error');throw error; }
     assert.equal(await handset.page.getByLabel('本次水表读数', { exact: true }).isEnabled(), true);
     assert.equal(await handset.page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);

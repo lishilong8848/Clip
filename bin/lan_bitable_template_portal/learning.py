@@ -1103,6 +1103,8 @@ class LearningService:
         if admin:
             # Unmatched admin can still view, just not answer.
             can_view_buildings = True
+        from .learning_schedule import current_daily_duty
+        daily_duty = current_daily_duty(self, self_person, now()) if can_answer and not duty else None
         if not self_pid and not admin and not duty:
             summary = {}  # Unmatched ordinary account: surface identity_issue, no stats yet.
         else:
@@ -1112,7 +1114,7 @@ class LearningService:
             from .learning_onboarding import daily_eligibility, directory_for_learning
             from .learning_schedule import active_night_date
             current = now()
-            date = active_night_date(self, self_person, current) or current.date().isoformat()
+            date = daily_duty['date'] if daily_duty else active_night_date(self, self_person, current) or current.date().isoformat()
             status, resume = daily_eligibility(self_person, date, directory_for_learning(self))
             if status == 'exempt':
                 delivery['daily_exemption'] = {'status': status, 'resume_date': resume}
@@ -1125,7 +1127,7 @@ class LearningService:
                 "scope": scope, "settings": self.public_settings(), "sync": self.sync_status(include_history_issues=admin),
                 "today": now().date().isoformat(), "silent_manual_publish": True,
                 "question_problem_count": sum(bool(q.get("problems")) and q.get("status") != "deleted" for q in self._all("question")) if admin else 0,
-                "summary": summary, **delivery}
+                "summary": summary, "daily_duty": daily_duty, **delivery}
 
     def _paper(self, paper_id, actor, conn=None, write=False):
         paper = self._get("paper", paper_id, conn)
@@ -1359,12 +1361,13 @@ class LearningService:
             if p.get('person_id') and p.get('mode') != 'practice' and exempt(p) else {}) for p in result["items"]]
         if query.get("today") == "1":
             result["today"] = query["date"]
+            result["personal_mode"] = True
+        if query.get("date") and (query.get("today") == "1" or mode == "daily"):
             if mode == 'daily' and person_id and person_id == self._self_person(actor):
                 learner = self._get('person', person_id) or {}
                 state, resume = daily_eligibility(learner, query['date'], directory)
                 result['daily_exemption'] = {'status': state, 'resume_date': resume} if state == 'exempt' else None
             result["published"] = bool(self._get("publication", self._publication_key(query["date"])))
-            result["personal_mode"] = True
         return result
 
     @staticmethod

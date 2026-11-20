@@ -19153,6 +19153,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         page: int = 1,
         page_size: int = 50,
         incomplete: bool = False,
+        latest_only: bool = False,
     ) -> dict[str, Any]:
         scope_code = self._water_scope_code(scope)
         if scope_code not in WATER_CONSUMPTION_SCOPE_CODES:
@@ -19170,6 +19171,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             shift=shift,
             query=query,
             incomplete=incomplete,
+            latest_only=latest_only,
             limit=page_size,
             offset=(page - 1) * page_size,
         )
@@ -36541,7 +36543,6 @@ class MaintenancePortalService(RepairOperationsMixin):
         ongoing_items_authoritative: bool = False,
         allowed_work_types: set[str] | frozenset[str] | None = None,
     ) -> dict[str, Any]:
-        self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         selected_month = str(month or self._current_month_label()).strip()
         requested_sections = {
@@ -36551,6 +36552,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         }
         if not requested_sections:
             requested_sections = {"records", "ongoing", "stats", "zhihang"}
+        ongoing_only = requested_sections == {"ongoing"}
+        if not ongoing_only:
+            self.ensure_snapshot_loaded()
         requested_work_type = str(work_type or "").strip()
         if requested_work_type not in {
             WORK_TYPE_MAINTENANCE,
@@ -36576,7 +36580,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         include_ongoing = "ongoing" in requested_sections
         include_zhihang = "zhihang" in requested_sections or (include_records and requested_work_type == WORK_TYPE_CHANGE)
         try:
-            scope_snapshot = self._state_store.get_source_scope_snapshot(scope)
+            if ongoing_only:
+                scope_snapshot = {"exists": bool(self._state_store.active_source_snapshot_meta().get("snapshot_id"))}
+            else:
+                scope_snapshot = self._state_store.get_source_scope_snapshot(scope)
         except Exception as exc:
             warning = f"SQLite源表快照读取失败: {exc}"
             if warning not in self._load_warnings:

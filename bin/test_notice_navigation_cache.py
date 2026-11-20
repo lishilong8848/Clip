@@ -72,7 +72,10 @@ class NoticeNavigationCacheTests(unittest.TestCase):
         service.ensure_snapshot_loaded = Mock()
         service._load_warnings = []
         service._last_loaded_at = 'fixture'
-        service._state_store = SimpleNamespace(get_source_scope_snapshot=lambda scope: {'exists': True})
+        service._state_store = SimpleNamespace(
+            get_source_scope_snapshot=Mock(return_value={'exists': True}),
+            active_source_snapshot_meta=Mock(return_value={'snapshot_id': 'source'}),
+        )
         service._project_ongoing_items = Mock(return_value=[])
         service._workbench_records = Mock(return_value=[row])
         service._linked_zhihang_record_ids = Mock(return_value=set())
@@ -91,6 +94,9 @@ class NoticeNavigationCacheTests(unittest.TestCase):
         service._sorted_unique_work_specialties = Mock(return_value=[])
         result = service.query_records(scope='E', month='10月', sections={'ongoing'}, ongoing_items_authoritative=True)
         self.assertEqual(result['ongoing'], [])
+        self.assertTrue(result['source_snapshot_ready'])
+        service.ensure_snapshot_loaded.assert_not_called()
+        service._state_store.get_source_scope_snapshot.assert_not_called()
         service._workbench_records.assert_not_called()
         service._filter_zhihang_change_records.assert_not_called()
         service.get_daily_summary.assert_not_called()

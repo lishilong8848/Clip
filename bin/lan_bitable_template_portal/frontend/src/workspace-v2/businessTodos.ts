@@ -1,6 +1,6 @@
 import type { Dict } from './client';
 import { NOTICE_IDS, beijingDate } from './modules';
-import { waterNumber, waterPhotoCount, waterRecordState } from './water';
+import { waterDefaultFilters, waterNumber, waterPhotoCount, waterQuery, waterRecordState } from './water';
 import { noticeListSpecialty, noticeListStatus, noticePlanWindow } from './noticeListMeta';
 
 export const todoCatalog = [
@@ -10,7 +10,7 @@ export const todoCatalog = [
   { value:'signatures', label:'我的签名' },
 ] as const;
 export type TodoKind = typeof todoCatalog[number]['value'];
-export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number; specialty?:string };
+export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number; specialty?:string; referencedScopes?:string[] };
 export type TodoPage = { rows:TodoRow[]; more:boolean; note?:string; partial?:boolean };
 export type TodoSource = { id:string; page:number; more:boolean; load:(page:number, signal:AbortSignal)=>Promise<TodoPage> };
 export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[]; selectedScopes?:string[]; home?:boolean; noticeTypes?:string[] };
@@ -67,12 +67,13 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
       const id=row.active_item_id||row.record_id||row.id;if(!id){partial=true;continue;}
       const sourceId=row.source_record_id||row.record_id;
       const window=noticePlanWindow(row);
+      const referencedScopes:Array<string>=Array.isArray(row.building_codes)?row.building_codes.filter(code=>/^(?:[A-EH]|110)$/.test(code)):[];
       result.push({...ownership(row),key:`notice:${type}:active:${id}`,kind,module:'notices',title:title(row),scope:text(row.building||row.scope||row.building_codes)||ctx.scope,
-        status,time:text(row.start_time||row.time||row.updated_at),detail:noticeTypeLabels[type],noticeWindow:{...window,end:window.end||text(row.end_time)},
+        status,time:text(row.start_time||row.time||row.updated_at),detail:noticeTypeLabels[type],noticeWindow:{...window,end:window.end||text(row.end_time)},referencedScopes,
         ongoing:true,sourceKey:sourceId?type+':'+sourceId:undefined,dueAt:todoTimestamp(row.deadline),specialty:noticeListSpecialty(row),
         url:link('/workbench-lite',{scope:ctx.scope,work_type:type,month,[row.active_item_id?'active_item_id':'record_id']:id})});
     }
-    return {rows:result,more:page<number(data.ongoing_pagination?.total_pages),partial,note:'进行中的通告'};
+    return {rows:result,more:!ctx.home&&page<number(data.ongoing_pagination?.total_pages),partial,note:'进行中的通告'};
   }));
   if(kind==='repair_management')return [source(kind,async(page,signal)=>{
     const limit=ctx.home?200:50, offset=(page-1)*limit;
@@ -109,7 +110,9 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
     }),more:page*20<number(data.total)};
   })];
   if(kind==='water')return buildings('ABCDEH').map(scope=>source(kind+scope,async(page,signal)=>{
-    const data=await read('/api/capacity/water/records',{scope,page,page_size:50,incomplete:ctx.home?'1':''},signal);
+    const params=ctx.home?waterQuery(scope,waterDefaultFilters(),page):new URLSearchParams({scope,page:String(page),page_size:'50'});
+    if(ctx.home){params.set('incomplete','1');params.set('latest_only','1');}
+    const data=await get('/api/capacity/water/records?'+params,signal);
     const list=rows(data.records);
     return {rows:list.flatMap(row=>{
       if(waterNumber(row.meter_value)!==null&&(waterPhotoCount(row)??0)>0)return [];

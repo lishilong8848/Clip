@@ -9,6 +9,22 @@ def windows(day, shift):
     return start, end.replace(hour=9) if shift == '夜' else end
 
 
+def current_daily_duty(service, person, current):
+    from .learning_reminders import shift_learners
+
+    if not person or not service._shift_roster_reader:
+        return None
+    today = current.date()
+    for day, shift in ((today, '夜'), (today, '白'), (today - dt.timedelta(days=1), '夜')):
+        date = day.isoformat()
+        start, end = windows(date, shift)
+        if start <= current < end:
+            for duty, learner in shift_learners(service, date, shift, current=current) or []:
+                if learner['id'] == person['id']:
+                    return {'date': date, 'shift': shift, 'scope': duty['scope'], 'end_at': end.isoformat()}
+    return None
+
+
 def active_night_date(service, person, current):
     """Keep a verified previous-night assignment visible until its learning deadline."""
     day = (current.date() - dt.timedelta(days=1)).isoformat()

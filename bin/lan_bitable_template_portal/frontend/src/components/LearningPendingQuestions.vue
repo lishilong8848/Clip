@@ -1,13 +1,13 @@
 <template>
-  <section class="learning-pending-questions" aria-label="待处理题目" :aria-busy="loading || detailLoading">
-    <aside class="pending-list">
-      <h2>待处理题目</h2>
+  <section class="learning-pending-questions" :class="{ 'pending-compact': compact }" aria-label="待处理题目" :aria-busy="loading || detailLoading">
+    <aside v-if="!compact || !selection" ref="listPanel" class="pending-list">
+      <h2 v-if="!compact">待处理题目</h2>
       <p v-if="error" role="alert">{{ error }} <button type="button" class="text-action" :disabled="loading" @click="emit('page', queue.page || 1)">重试</button></p>
       <p v-else-if="loading && !queue.items?.length" role="status">正在读取待处理题目…</p>
       <p v-else-if="!queue.items?.length">暂无待处理题目</p>
       <ul v-else>
         <li v-for="item in queue.items" :key="item.question_id">
-          <button type="button" class="pending-question-row" :aria-current="item.question_id === selection ? 'true' : undefined" :disabled="busy || loading" @click="selection = item.question_id">
+          <button type="button" class="pending-question-row" :aria-current="item.question_id === selection ? 'true' : undefined" :disabled="busy || loading" @click="openQuestion(item.question_id)">
             <strong>{{ item.stem }}</strong>
             <small>{{ item.type_label || labels[item.type] }} · {{ item.feedback_count }} 条反馈</small>
           </button>
@@ -19,7 +19,8 @@
         <button type="button" :disabled="queue.page * queue.page_size >= queue.total || busy || loading" aria-label="下一页" title="下一页" @click="emit('page', queue.page + 1)"><ChevronRight :size="16" /></button>
       </nav>
     </aside>
-    <article class="pending-detail" aria-label="原题">
+    <article v-if="!compact || selection" ref="detailPanel" tabindex="-1" class="pending-detail" aria-label="原题">
+      <button v-if="compact" type="button" class="text-action" @click="returnToList"><ChevronLeft :size="16" />返回待处理列表</button>
       <p v-if="detailError" role="alert">{{ detailError }} <button type="button" class="text-action" @click="retry++">重试</button></p>
       <p v-else-if="detailLoading" role="status">正在读取原题…</p>
       <template v-else-if="question">
@@ -50,21 +51,30 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue';
+import { computed, nextTick, ref, watch } from 'vue';
 import { ChevronLeft, ChevronRight, Pencil } from 'lucide-vue-next';
 import type { Dict } from '../api/client';
 import { requestLearning } from '../api/learning';
 
-const props = defineProps<{ queue: Dict; labels: Dict; loading: boolean; busy: boolean; error: string }>();
+const props = defineProps<{ queue: Dict; labels: Dict; loading: boolean; busy: boolean; error: string; compact?:boolean }>();
 const emit = defineEmits<{ page: [value: number]; edit: [issueId: string] }>();
 const bankNames: Dict = { written: '笔试题库', duty: '值班面试', professional: '专业面试', supplemental: '专项题库' };
 const selection = ref(''), retry = ref(0), detail = ref<Dict>();
+const listPanel=ref<HTMLElement>(), detailPanel=ref<HTMLElement>();
 const detailLoading = ref(false), detailError = ref('');
 const selectedIssue = computed<string>(() => props.queue.items?.find((item: Dict) => item.question_id === selection.value)?.issue_id || '');
 const question = computed(() => detail.value?.question);
+function openQuestion(id:string) {
+  selection.value=id;
+  if(props.compact)void nextTick(()=>detailPanel.value?.focus());
+}
+function returnToList() {
+  selection.value='';
+  void nextTick(()=>listPanel.value?.querySelector('button')?.focus());
+}
 
 watch(() => props.queue, queue => {
-  if (!queue.items?.some((item: Dict) => item.question_id === selection.value)) selection.value = queue.items?.[0]?.question_id || '';
+  if (!queue.items?.some((item: Dict) => item.question_id === selection.value)) selection.value = props.compact ? '' : queue.items?.[0]?.question_id || '';
 }, { immediate: true });
 watch([selectedIssue, () => props.queue, retry], async ([issueId], _previous, onCleanup) => {
   detail.value = undefined; detailError.value = ''; detailLoading.value = Boolean(issueId);
@@ -103,5 +113,6 @@ watch([selectedIssue, () => props.queue, retry], async ([issueId], _previous, on
 .learning-pending-questions .feedback-heading{margin-top:22px;margin-bottom:6px}.pending-reports li{align-items:baseline;padding:9px 0}.pending-reports li>div,.pending-answer{overflow-wrap:anywhere;white-space:pre-wrap}.pending-reports li>div{flex:1 1 220px}.pending-reports li small{display:block}
 .learning-pending-questions .text-action{min-height:32px;padding:2px 6px;border:0;background:none;color:var(--cf-link,#2156c1)}
 @media(max-width:760px){.learning-pending-questions{grid-template-columns:minmax(0,1fr);gap:14px;padding:8px 0}.pending-list{border:0;border-bottom:1px solid var(--cf-border,#d4deeb);padding:0 0 12px}.pending-detail-header{margin-bottom:12px}.learning-pending-questions .pending-edit{min-height:44px}}
-@media(max-width:760px){.pending-list ul{max-height:220px;overflow:auto;overscroll-behavior:contain}}
+@media(max-width:760px){.learning-pending-questions:not(.pending-compact) .pending-list ul{max-height:220px;overflow:auto;overscroll-behavior:contain}}
+.pending-detail>.text-action:first-child{display:inline-flex;align-items:center;gap:3px;min-height:44px}
 </style>

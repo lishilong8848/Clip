@@ -18,6 +18,9 @@ export function waterDay(offset = 0): string {
   const date = new Date(Date.now() + 8 * 3600000 + offset * 86400000);
   return date.toISOString().slice(0, 10);
 }
+export function waterDefaultFilters(): WaterFilters {
+  return { range:'近30天', month:waterDay().slice(0,7), startDate:waterDay(-29), endDate:waterDay(), meter:'', frequency:'', shift:'', query:'' };
+}
 export function validWaterDate(value: string): boolean {
   return /^\d{4}-\d{2}-\d{2}$/.test(value) && Number.isFinite(Date.parse(value)) && new Date(value + 'T00:00:00Z').toISOString().slice(0, 10) === value;
 }

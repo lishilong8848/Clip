@@ -12,7 +12,7 @@ import WaterDeskOverview from './WaterDeskOverview.vue';
 import WaterDeskAbnormal from './WaterDeskAbnormal.vue';
 import { logicalUrl } from './version';
 import { currentEmbedded as waterEmbedded } from './embeddedContext';
-import { validWaterDate, waterDay, waterImageMime, waterNumber, waterNumberText, waterPhotoCount, waterQuery, waterRecordState, waterScopes, waterTrend, type WaterDraft, type WaterFilters, type WaterPhoto } from './water';
+import { validWaterDate, waterDay, waterDefaultFilters, waterImageMime, waterNumber, waterNumberText, waterPhotoCount, waterQuery, waterRecordState, waterScopes, waterTrend, type WaterDraft, type WaterFilters, type WaterPhoto } from './water';
 const MotionChart=defineAsyncComponent(()=>import('./MotionChart.vue'));
 const props=defineProps<{scope:string;scopeOptions:{value:string;label:string}[];initialView?:string}>();
 const emit=defineEmits<{'switch-scope':[scope:string];status:[message:string]}>();
@@ -24,8 +24,7 @@ const bootstrap=ref<Dict>({}),bootstrapLoading=ref(false),bootstrapError=ref('')
 const canCreate=computed(()=>bootstrap.value.permissions?.can_create===true);
 const records=ref<Dict[]>([]),recordsReady=ref(false),recordsLoading=ref(false),recordsError=ref(''),filterError=ref(''),total=ref(0),page=ref(1),loadedQuery=ref(''),loadedQueryLabel=ref(''),queryDay=ref(waterDay());
 const ranges=['近30天','近3天','本月','全部时间','自定义日期'];
-const defaultFilters=():WaterFilters=>({range:'近30天',month:waterDay().slice(0,7),startDate:waterDay(-29),endDate:waterDay(),meter:'',frequency:'',shift:'',query:''});
-const filters=reactive<WaterFilters>(defaultFilters());
+const filters=reactive<WaterFilters>(waterDefaultFilters());
 type OverviewContext={scope:string;startDate:string;endDate:string;frequency:'日';selectedDay:string};
 function overviewRouteFilters(){
   const url=logicalUrl(),params=url.searchParams,startDate=params.get('water_start')||'',endDate=params.get('water_end')||'';
@@ -39,7 +38,7 @@ let restoredRoute=logicalUrl().href;
 function restoreRouteFilters(){
   const url=logicalUrl();if(url.href===restoredRoute)return;restoredRoute=url.href;
   overviewOrigin.value=overviewRouteFilters();
-  Object.assign(filters,overviewOrigin.value||defaultFilters());page.value=1;attention.value='';
+  Object.assign(filters,overviewOrigin.value||waterDefaultFilters());page.value=1;attention.value='';
 }
 watch(()=>embedded?.route.value.href,restoreRouteFilters);
 const advancedOpen=ref(false),trendOpen=ref(false),attention=ref('');
@@ -86,7 +85,7 @@ function stepRecord(offset: number) {
   if (row && !recordsStale.value && !busy.value) openRecord(row.record_id);
 }
 function resetFilters() {
-  Object.assign(filters, defaultFilters());
+  Object.assign(filters, waterDefaultFilters());
   attention.value = '';
 }
 const editorEvents = {
@@ -570,7 +569,8 @@ onBeforeUnmount(()=>{disposed=true;bootstrapRead?.abort();listRead?.abort();deta
   .reading-queue { width: 100%; }
   .reading-items { max-height: 180px; grid-template-columns: repeat(auto-fit,minmax(min(180px,100%),1fr)); }
 }
-.water-phone-stage { width: 100%; height: 100dvh; min-height: 0; overflow: hidden; }
+:global(body .water-mobile-drawer[role="dialog"]) { max-width: 100vw !important; max-height: 100dvh !important; }
+.water-phone-stage { width: 100%; height: 100%; min-height: 0; overflow: hidden; }
 .water-phone-stage > :deep(.water-editor) { width: 100%; max-width: none; height: 100%; max-height: 100%; box-sizing: border-box; margin: 0; border-radius: 0; }
 .water-photo-dialog { width: min(840px, calc(100vw - 24px)); max-height: 93dvh; overflow: auto; padding: 12px; border-radius: 14px; color: var(--v2-ink,#203b46); background: var(--soft-face,#f5f7f8); box-sizing: border-box; }
 .water-photo-dialog header { margin-bottom: 10px; }

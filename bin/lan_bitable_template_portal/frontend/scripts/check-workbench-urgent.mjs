@@ -17,6 +17,7 @@ const items = ['A', 'B'].flatMap(scope => titles.map((title, index) => ({
   target_record_id: 'audit-target-' + scope + '-maintenance-' + index,
   scope,
   work_type: 'maintenance',
+  specialty: scope === 'B' && index === 1 ? '暖通' : '电气',
   status: '开始',
   start_time: date + ' 09:00',
   deadline: date + ' 10:00',
@@ -106,8 +107,8 @@ async function press(control, mobile) {
 try {
   for (const [actor, expected, testBuilding] of [
     [{ open_id: 'isolated-global', level: 'L0', role: 'admin' }, items, 'A'],
-    [{ open_id: 'isolated-engineer', level: 'L2', category: 'engineer' }, items.slice(0, 2), 'B'],
-    [{ open_id: 'isolated-supervisor', level: 'L3', category: 'supervisor' }, [target]],
+    [{ open_id: 'isolated-engineer', level: 'L2', category: 'engineer', specialties: ['电气'] }, items.slice(0, 2), 'B'],
+    [{ open_id: 'isolated-supervisor', level: 'L3', category: 'supervisor' }, items.slice(0, 2)],
     [{ open_id: 'isolated-basic', level: 'L4' }, [target]],
     [{ open_id: 'isolated-duty', level: 'L4', category: 'duty' }, items.slice(0, 2)],
   ]) {

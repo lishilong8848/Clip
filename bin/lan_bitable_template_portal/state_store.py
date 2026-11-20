@@ -5921,6 +5921,7 @@ class LanPortalStateStore:
         shift: str = "",
         query: str = "",
         incomplete: bool = False,
+        latest_only: bool = False,
         limit: int = 50,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -5948,6 +5949,19 @@ class LanPortalStateStore:
         if normalized_end:
             clauses.append("statistic_date_key<=?")
             params.append(normalized_end)
+        if latest_only:
+            clauses.append("""
+                NOT EXISTS (
+                    SELECT 1 FROM water_consumption_records AS newer
+                    WHERE newer.scope_code=current.scope_code
+                      AND newer.meter=current.meter
+                      AND newer.frequency=current.frequency
+                      AND newer.shift_name=current.shift_name
+                      AND newer.statistic_date_key>current.statistic_date_key
+                      AND (?='' OR newer.statistic_date_key<=?)
+                )
+            """)
+            params.extend((normalized_end, normalized_end))
         for column, value in (
             ("meter", meter),
             ("frequency", frequency),
@@ -5968,7 +5982,7 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 total_row = conn.execute(
-                    f"SELECT COUNT(*) AS count FROM water_consumption_records WHERE {where_sql}",
+                    f"SELECT COUNT(*) AS count FROM water_consumption_records AS current WHERE {where_sql}",
                     tuple(params),
                 ).fetchone()
                 rows = conn.execute(

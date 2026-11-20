@@ -9,15 +9,18 @@ const root=fileURLToPath(new URL('../',import.meta.url));
 const output=path.resolve(root,'../../../output/playwright/learning-daily-entry');
 const designTest=process.argv.includes('--design-test');
 const designBuild=process.env.CLIPFLOW_LEARNING_V2_BUILD;
+const legacyBuild=process.env.CLIPFLOW_LEARNING_LEGACY_BUILD||path.resolve(root,'dist');
 await mkdir(output,{recursive:true});
 const browser=await chromium.launch({headless:true});
-const day='2026-10-28',person={id:'self',name:'隔离学练人员',scopes:['A'],active:true};
+const serve=process.argv.includes('--serve');
+const day=serve?new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date()):'2026-10-28';
+const person={id:'self',name:'隔离学练人员',scopes:['A'],active:true};
 const longAnalysis='核对现场安全条件。'.repeat(120);
 try{
   for(const v2 of [false,true]){
     if(designTest && !v2)continue;
     if(process.argv.includes('--serve') && v2!==!process.argv.includes('--legacy'))continue;
-    let published=false,daily=null,practice=null,admin=false,profileFailure=false,profileDay=day,profileReads=0;
+    let published=false,daily=null,practice=null,admin=false,onDuty=true,profileFailure=false,profileDay=day,profileReads=0;
     const claims=[],errors=[];let auditPage;
     const makePaper=(id,mode)=>({id,mode,person_id:person.id,person,scope:'A',date:day,status:'pending',version:1,
       questions:Array.from({length:2},(_,n)=>({id:id+'-q'+n,version:'1',bank:'written',type:'single',
@@ -32,7 +35,7 @@ try{
         if(!url.pathname.startsWith('/api/')){
           const workspaceAsset=Boolean(designBuild&&url.pathname.startsWith('/assets/workspace-v2/'));
           const file=workspaceAsset?url.pathname.slice('/assets/workspace-v2/'.length):['/','/learning'].includes(url.pathname)?'index.html':url.pathname.slice(1);
-          const directory=workspaceAsset?designBuild:path.resolve(root,'dist');
+          const directory=workspaceAsset?designBuild:legacyBuild;
           const target=path.resolve(directory,file),dist=path.resolve(directory)+path.sep;
           if(!target.startsWith(dist)){res.statusCode=403;res.end();return;}
           try{const data=await readFile(target);res.setHeader('Content-Type',({'.html':'text/html; charset=utf-8','.js':'text/javascript','.css':'text/css','.json':'application/json','.svg':'image/svg+xml','.png':'image/png'})[path.extname(file)]||'application/octet-stream');res.end(data);}
@@ -46,11 +49,16 @@ try{
         if(url.pathname.startsWith('/api/workspace-layouts/'))return ok({revision:0,value:null});
         if(url.pathname==='/api/assistant/appearance')return ok({enabled:false});
         if(url.pathname==='/api/learning/bootstrap')return ok({self_person:person,self_scope:'A',scope:'A',can_answer:true,is_admin:admin,can_view_buildings:admin,
-          scopes:[],today:day,settings:{enabled:true},sync:{status:'ready',pending:0}});
+          scopes:[],today:profileDay,daily_duty:onDuty?{date:profileDay,shift:'白',scope:'A',end_at:serve?new Date(Date.now()+10800000).toISOString():profileDay+'T18:00:00+08:00'}:null,
+          settings:{enabled:true},sync:{status:'ready',pending:0}});
         if(url.pathname==='/api/learning/profile'){
           profileReads++;
           if(profileFailure){res.statusCode=400;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:false,error:'隔离测试：进度暂不可用'}));return;}
-          return ok({to:profileDay,person:url.searchParams.get('person_id')?person:null,summary:{learning_days:3,answered:96,accuracy:88,wrong:8},today_summary:{assigned:2,task_answered:designTest?1:0,answered:0,accuracy:null},people:[],trend:designTest?[9,14,11,15,12,17,18].map((attempt_count,index)=>({date:`2026-10-${22+index}`,attempt_count})):[],banks:[],topics:[],distribution:[]});
+          return ok({to:profileDay,person:url.searchParams.get('person_id')?person:null,
+            summary:{learning_days:3,answered:96,accuracy:88,wrong:8},today_summary:{assigned:20,task_answered:19},
+            daily_tasks:[{date:profileDay,shift:'夜',scope:'A',assigned:18,answered:18},
+              {date:profileDay,shift:'白',scope:'A',assigned:2,answered:designTest?1:0}],
+            people:[],trend:designTest?[9,14,11,15,12,17,18].map((attempt_count,index)=>({date:`2026-10-${22+index}`,attempt_count})):[],banks:[],topics:[],distribution:[]});
         }
         if(url.pathname==='/api/learning/issues/pending-questions'){
           assert(admin,'ordinary users must not read the queue');
@@ -69,13 +77,15 @@ try{
           editRequests.push({method:req.method,grouped});
           return ok({question:revision,editable:true,feedback:grouped?groupFeedback:[],issues_version:grouped?'open-feedback-v1':''});
         }
+        if(designTest&&url.pathname==='/api/learning/questions'){assert(admin);return ok({items:[revision],total:1,page:1});}
         if(designTest && url.pathname==='/api/learning/history')return ok({items:daily?[publicPaper(daily)]:[],total:daily?1:0});
         if(['/api/learning/review','/api/learning/history','/api/learning/issues','/api/learning/sharing'].includes(url.pathname))return ok({items:[],total:0});
         if(url.pathname==='/api/learning/papers')return ok({today:day,published,items:[url.searchParams.get('mode')==='practice'?practice:daily].filter(Boolean).map(publicPaper)});
         if(url.pathname==='/api/learning/papers/claim'){
           claims.push(body);assert.equal(body.person_id,person.id);
           if(body.mode==='practice'){practice=makePaper('practice','practice');return ok(publicPaper(practice));}
-          assert(published);daily=makePaper('daily','daily');return ok(publicPaper(daily));
+          assert(published&&onDuty);assert.equal(body.date,profileDay);assert.equal(body.shift,'白');
+          daily=makePaper('daily','daily');return ok(publicPaper(daily));
         }
         if(url.pathname==='/api/learning/completion'){
           const answered=[daily,practice].flatMap(p=>p?.questions||[]).filter(q=>q.attempt).length;
@@ -113,10 +123,12 @@ try{
         const context=await browser.newContext({viewport:{width:1440,height:1000},serviceWorkers:'block',reducedMotion:'reduce'});
         await context.route('**/*',route=>new URL(route.request().url()).origin===origin?route.continue():route.abort());
         const page=await context.newPage();auditPage=page;page.on('pageerror',error=>errors.push(error.message));
+        await page.clock.setFixedTime(new Date(day+'T14:00:00+08:00'));
         await page.goto(homeUrl);
         const tile=page.getByRole('button',{name:'继续答题',exact:true});
         await tile.waitFor();assert.equal(await tile.getByRole('progressbar').getAttribute('aria-valuenow'),'50');
-        await page.getByRole('button',{name:'待处理题目 1',exact:true}).waitFor();
+        await page.getByRole('button',{name:'题库管理',exact:true}).waitFor();
+        await page.getByRole('button',{name:'题目反馈',exact:true}).waitFor();
         await page.screenshot({path:path.join(output,'redesign-desktop-home.png'),fullPage:true});
         for(const [width,height] of [[402,874],[820,1180]]){
           await page.setViewportSize({width,height});
@@ -124,22 +136,42 @@ try{
           await page.screenshot({path:path.join(output,`redesign-${width}-home.png`),fullPage:true});
         }
         await page.setViewportSize({width:1440,height:1000});
-        await page.getByRole('button',{name:'待处理题目 1',exact:true}).click();
+        await page.getByRole('button',{name:'题库管理',exact:true}).click();
+        const bank=page.getByRole('region',{name:'题库列表'});
+        await bank.getByText(revision.stem,{exact:true}).waitFor();
+        assert.equal(await page.getByRole('navigation',{name:'学练页面'}).count(),0);
+        assert.equal(await bank.getByRole('button',{name:'批量启用'}).count(),0);
+        await page.screenshot({path:path.join(output,'redesign-desktop-bank.png'),fullPage:true});
+        await page.setViewportSize({width:390,height:844});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+        await page.screenshot({path:path.join(output,'redesign-mobile-bank.png'),fullPage:true});
+        await bank.getByRole('button',{name:'导入题目',exact:true}).click();
+        const importDialog=page.getByRole('dialog',{name:'批量导入题目'});
+        await importDialog.getByText('下载模板',{exact:true}).waitFor();
+        await importDialog.getByRole('button',{name:'关闭',exact:true}).click();
+        await page.setViewportSize({width:1440,height:1000});
+        await page.getByRole('button',{name:'题目反馈',exact:true}).click();
+        const feedback=page.getByRole('group',{name:'反馈视图'});
+        await feedback.getByRole('button',{name:'待处理 1',exact:true}).waitFor();
+        await feedback.getByRole('button',{name:'全部反馈',exact:true}).click();
+        await page.getByText('当前筛选下没有反馈',{exact:true}).waitFor();
+        await feedback.getByRole('button',{name:'待处理 1',exact:true}).click();
         await page.getByText('题干建议明确问的是第一步。',{exact:true}).waitFor();
         await page.getByText('题目反馈 · 2 条',{exact:true}).waitFor();
         await page.screenshot({path:path.join(output,'redesign-desktop-pending.png'),fullPage:true});
-        for(const [width,height] of [[402,874],[820,1180]]){
-          await page.setViewportSize({width,height});
-          assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-          await page.screenshot({path:path.join(output,`redesign-${width}-pending.png`),fullPage:true});
-        }
+        await page.setViewportSize({width:402,height:874});
+        assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+        await page.getByRole('button',{name:'返回待处理列表',exact:true}).click();
+        await page.getByRole('button',{name:new RegExp('设备异常时')}).click();
+        await page.getByText('题干建议明确问的是第一步。',{exact:true}).waitFor();
+        await page.screenshot({path:path.join(output,'redesign-402-pending.png'),fullPage:true});
         await page.setViewportSize({width:1440,height:1000});
         const editor=page.getByRole('dialog',{name:'编辑题目',exact:true});
         await page.getByRole('button',{name:'编辑本题',exact:true}).click();
         assert.equal(await editor.getByLabel('题干',{exact:true}).inputValue(),revision.stem);
         await editor.getByLabel('题干',{exact:true}).fill('设备异常时，第一步应核对什么？');
         await editor.getByRole('button',{name:'保存题目',exact:true}).click();
-        await page.getByRole('button',{name:'待处理题目 0',exact:true}).waitFor();
+        await feedback.getByRole('button',{name:'待处理 0',exact:true}).waitFor();
         await page.goto(homeUrl);await tile.click();
         await page.locator('.stem').filter({hasText:'隔离每日题单第2题'}).waitFor();
         await page.getByRole('button',{name:'编辑本题',exact:true}).click();
@@ -158,6 +190,15 @@ try{
         assert.equal(await page.getByRole('button',{name:/待处理题目/}).count(),0);
         await tile.click();await page.locator(v2?'.lp-question':'.question-body').getByRole('button',{name:v2?'题目反馈':'题目有疑问',exact:true}).waitFor();
         assert.equal(await page.getByRole('button',{name:'编辑本题',exact:true}).count(),0);
+        onDuty=false;await page.setViewportSize({width:390,height:844});await page.goto(homeUrl);
+        const home=page.getByRole('region',{name:'个人学习首页'});
+        await home.getByRole('button',{name:'分享会练习',exact:true}).waitFor();
+        assert.equal(await home.getByText('当班题单',{exact:true}).count(),0);
+        await home.getByText('历史题单',{exact:true}).waitFor();
+        await page.screenshot({path:path.join(output,'redesign-mobile-off-duty.png'),fullPage:true});
+        await home.getByRole('button',{name:'分享会练习',exact:true}).click();
+        await page.locator('.sharing-exercises').waitFor();
+        assert.equal(claims.length,0);
         assert.deepEqual(errors,[]);
         await context.close();
         console.log('[LearningRedesign] OK: progress tile, grouped feedback, original revision, paper review, permission gates');
@@ -171,8 +212,8 @@ try{
         const page=await context.newPage();auditPage=page;page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.stack));
         await page.clock.setFixedTime(new Date(day+'T14:00:00+08:00'));
         const ready=async()=>{await page.waitForFunction(()=>document.querySelector('.learning-page')?.getAttribute('aria-busy')==='false');assert.deepEqual(errors,[]);};
-        const dailyButton=()=>page.getByRole('button',{name:v2?/^(开始今日答题|继续今日答题|查看今日题单)$/: '打开每日题单'});
-        const switchMode=mode=>page.getByRole('group',{name:v2?'题单类型':'学练方式'}).getByRole('button',{name:v2&&mode==='每日题单'?'当班题单':mode,exact:true}).click();
+        const dailyButton=()=>page.getByRole('button',{name:'打开当班题单',exact:true});
+        const switchMode=mode=>page.getByRole('group',{name:v2?'题单类型':'学练方式'}).getByRole('button',{name:mode==='每日题单'?'当班题单':mode,exact:true}).click();
         const openSection=async(label)=>{
           const nav=page.getByRole('navigation',{name:'学练页面'});
           if(v2 && width<=760) await nav.getByRole('combobox',{name:'切换学练功能'}).selectOption({label});
@@ -185,21 +226,23 @@ try{
         assert.equal(await page.getByRole('navigation',{name:'学练页面'}).count(),0,'home cards are not duplicated by a second navigation row');
         const home=page.getByRole('region',{name:'个人学习首页'});
         const homeEntries=await home.getByRole('navigation',{name:'学习入口'}).getByRole('button').allTextContents();
-        assert.deepEqual(homeEntries,['自主练习','资料练习','复习中心']);
+        assert.deepEqual(homeEntries,['自主练习','分享会练习','复习中心']);
         profileFailure=true;await page.getByRole('button',{name:'刷新当前页面',exact:true}).click();await ready();
-        await home.getByText('进度暂未读取',{exact:true}).waitFor();assert.equal(await home.getByText('暂无已领取题目',{exact:true}).count(),0,'read failures must not claim no assignments');
-        if(!v2){await page.getByRole('button',{name:'关闭错误提示',exact:true}).click();assert(await home.getByText('进度暂未读取',{exact:true}).isVisible(),'dismissing an error is not a successful refresh');}
+        await home.getByText(/进度暂未读取/).waitFor();assert.equal(await home.getByText(/暂无已领取题目/).count(),0,'read failures must not claim no assignments');
+        if(!v2){await page.getByRole('button',{name:'关闭错误提示',exact:true}).click();assert(await home.getByText(/进度暂未读取/).isVisible(),'dismissing an error is not a successful refresh');}
         profileFailure=false;await home.getByRole('button',{name:'刷新学习进度'}).click();await ready();await home.getByText('待作答 2 题',{exact:true}).waitFor();
         profileDay='2026-10-29';const beforeRollover=profileReads;await page.clock.setFixedTime(new Date(profileDay+'T09:00:00+08:00'));await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
         await page.locator('.learning-page > header time').filter({hasText:/^2026-10-29$/}).waitFor();assert(profileReads>beforeRollover,'home refreshes its statistics after a Beijing date rollover');
         profileDay=day;await page.clock.setFixedTime(new Date(day+'T14:00:00+08:00'));await page.getByRole('button',{name:'刷新当前页面',exact:true}).click();await ready();
-        for(const label of ['复习中心','资料练习','查看全部','个人学习画像','题目反馈']){
+        for(const label of ['复习中心','分享会练习','查看全部','个人学习画像','题目反馈']){
           await home.getByRole('button',{name:new RegExp(label)}).click();await ready();
-          if(label==='资料练习')await page.locator('.sharing-exercises').waitFor();
-          await openSection('学习首页');await home.waitFor();await ready();
+          if(label==='分享会练习')await page.locator('.sharing-exercises').waitFor();
+          if(v2 && label==='题目反馈')await page.getByRole('button',{name:'学练首页',exact:true}).click();
+          else await openSection('学习首页');
+          await home.waitFor();await ready();
         }
         await page.screenshot({path:path.join(output,`${v2?'v2':'legacy'}-${width}-home.png`),fullPage:true,animations:'disabled'});
-        await page.getByRole('region',{name:'个人学习首页'}).getByRole('button',{name:/打开每日题单/}).click();await ready();
+        await page.getByRole('region',{name:'个人学习首页'}).getByRole('button',{name:'打开当班题单',exact:true}).click();await ready();
         const transition=await page.evaluate(()=>{const reject=(name,message)=>{const event=new PromiseRejectionEvent('unhandledrejection',{cancelable:true,promise:Promise.resolve(),reason:new DOMException(message,name)});window.dispatchEvent(event);return event.defaultPrevented;};return [reject('InvalidStateError','Transition was aborted because of invalid state. ViewTransition opt-in disabled'),reject('InvalidStateError','Business state mismatch')];});assert.deepEqual(transition,[true,false]);
         await dailyButton().click();await ready();assert.equal(claims.length,0,'daily entry never silently creates practice');
         published=true;await page.goto(origin+entry);await firstAnswer.waitFor();await ready();
@@ -252,12 +295,13 @@ try{
         }
         admin=true;await page.goto(origin+entry.replace('view=practice','view=overview'));const management=page.getByRole('region',{name:'学习管理工作台'});await management.waitFor();await ready();
         assert.equal(await (v2?management.getByRole('group',{name:'学练入口'}):management).getByRole('button').count(),6);
-        await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'待处理题目 0',exact:true}).waitFor();
+        if(v2)await management.getByRole('button',{name:/题目反馈/}).waitFor();
+        else await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'待处理题目 0',exact:true}).waitFor();
         await page.screenshot({path:path.join(output,`${v2?'v2':'legacy'}-${width}-admin.png`),fullPage:true,animations:'disabled'});
         await context.close();
       }
       assert.deepEqual(errors,[]);
     }catch(error){console.error(errors,await auditPage?.locator('body').innerText());await auditPage?.screenshot({path:path.join(output,'failure.png'),fullPage:true});throw error;}finally{await new Promise(resolve=>server.close(resolve));}
   }
-  console.log('[LearningDailyEntry] OK: legacy/V2 home navigation, failed-read recovery, Beijing rollover, delayed response isolation, invalid questions, fixed controls, autonomous credit and drafts; 402/440/1440');
+  if(!designTest)console.log('[LearningDailyEntry] OK: legacy/V2 home navigation, failed-read recovery, Beijing rollover, delayed response isolation, invalid questions, fixed controls, autonomous credit and drafts; 402/440/1440');
 }finally{await browser.close();}

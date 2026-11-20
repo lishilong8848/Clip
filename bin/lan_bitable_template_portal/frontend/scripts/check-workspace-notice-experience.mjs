@@ -28,6 +28,8 @@ const output=path.resolve(root,'../../../output/playwright/workspace-notices');a
 const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});let page;const errors=[],writes=[],uploads=[];
 let jobPhase='queued',prefillDelay=0,useSop=false,photoRequired=true,waitingScenario=false,jobId='job-experience';
+const bindingOnly=process.argv.includes('--binding-only');
+let bindingStatus='';
 const waitMessage='当前 A楼事件：隔离测试事件\n发生时间：2026-10-16 09:00；事件来源：动环；级别：I3；当前进度：处理中。\n当前通告已排队，将在所有已上传事件结束或删除后自动发送。\n提醒：A楼发生事件，钉钉群中不要发送其它非事件通告，保证钉钉群事件通告可读性。';
 const escape=v=>String(v).replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;');
 const form=(ongoing=false)=>`<form id="lite-notice-form" data-action="${ongoing?'update':'start'}">
@@ -44,9 +46,24 @@ try{
   if(req.method()!=='GET')writes.push(u.pathname);
   if(u.pathname==='/api/auth/status')return ok(route,{logged_in:true,user:{open_id:'experience-fixture',name:'隔离测试',role:'admin',level:'L1',modules:['maintenance','change']},scope_options:[{value:'E',label:'E楼'},{value:'A',label:'A楼'}]});
   if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'experience-fixture'}});
-  if(u.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-E',work_type:'maintenance',title:u.searchParams.get('month')+'计划',source_progress:'未开始',building:'E楼'}],ongoing:[{active_item_id:'active-E',work_type:'maintenance',title:'E楼进行中',status:'开始',building:'E楼'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
+  if(u.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-E',work_type:'maintenance',title:u.searchParams.get('month')+'计划',source_progress:bindingOnly?'进行中':'未开始',building:'E楼'}],ongoing:[{active_item_id:'active-E',work_type:'maintenance',title:'E楼进行中',status:'开始',building:'E楼'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
   if(u.pathname==='/api/workbench/lite-detail')return ok(route,{fragments:{detail:form(u.searchParams.has('active_item_id'))}});
   if(u.pathname==='/api/workbench/draft')return ok(route,{draft:null});
+  if(bindingOnly&&u.pathname==='/api/notice-target-candidates'){
+    assert.equal(req.postDataJSON().lookup_context,'planned_target_table');
+    return ok(route,{candidates:[{target_record_id:'target-E',active_item_id:'active-E',title:'已发原通告',building:'E楼',status:bindingStatus==='active'?'开始':'结束'}]});
+  }
+  if(bindingOnly&&u.pathname==='/api/notice-identity/bind'){
+    const request=req.postDataJSON();
+    assert.equal(request.binding_context,'planned');
+    assert.equal(request.source_record_id,'plan-E');
+    assert.equal(request.target_record_id,'target-E');
+    if(bindingStatus==='active')return ok(route,{source_record_id:'plan-E',target_record_id:'target-E',active_item_id:'active-E',target_finished:false});
+    return ok(route,{binding_pending:true,message:'正在核对飞书源表的实际结束时间和状态。'});
+  }
+  if(bindingOnly&&u.pathname==='/api/notice-identity/bind-wait'){
+    return ok(route,bindingStatus==='done'?{state:'done',target_finished:true,source_record_id:'plan-E',target_record_id:'target-E'}:{state:''});
+  }
   if(u.pathname==='/api/workbench/planned-notice-prefill'){
    if(prefillDelay)await new Promise(r=>setTimeout(r,prefillDelay));
    return ok(route,{selected:{source_record_id:'plan-E'},draft:{title:'EA118机房E楼BA系统资料维护'},recommendations:[{work_type:'maintenance',source_building:'A',source_title:'EA118机房A楼BA系统资料维护',source_updated_at:'2026-10-13 10:00',suggested_values:{content:'E楼BA资料核验',impact:'对IT业务无影响',reason:'A楼原因不可覆盖',progress:'旧进度不可采用',start_time:'旧日期'},needs_site_confirmation:[]}]});
@@ -68,9 +85,45 @@ try{
   return ok(route,{items:[],records:[],settings:{},available:false});
  });
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.addInitScript(()=>sessionStorage.clear());
- const goto=async(kind='maintenance')=>{await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=E&month=10月&work_type='+kind);await page.locator('.v2-notice-entry').first().waitFor();};
+ const goto=async(kind='maintenance')=>{await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=E&month=10月&work_type='+kind);await page.locator('[data-list=planned] .desk-record').first().waitFor();};
  const scrollSection=label=>page.locator({'通告内容':'.v2-notice-page-fields','推荐填写':'[data-notice-section=memory]','照片':'[data-notice-section=photos]'}[label]).scrollIntoViewIfNeeded();
  const open=async()=>{await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();await page.getByRole('textbox',{name:'名称',exact:true}).waitFor();assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0);assert(await page.getByRole('textbox',{name:'原因',exact:true}).isVisible());assert(await page.locator('[data-notice-section=memory]').isVisible());if(photoRequired)assert(await page.locator('[data-notice-section=photos]').isVisible());assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible());await scrollSection('推荐填写');};
+ if(bindingOnly){
+  await page.clock.install();
+  for(const [width,status] of [[1440,'active'],[390,'pending']]){
+   await page.setViewportSize({width,height:900});
+   bindingStatus=status;
+   await goto();
+   await page.locator('[data-list=planned]').getByRole('button',{name:'核验',exact:true}).click();
+   const editor=page.locator('.v2-notice-editor');
+   await editor.getByText('计划已在进行中，请核对并关联已发通告。').waitFor();
+   assert.equal(await editor.getByRole('button',{name:'预览并确认开始',exact:true}).count(),0);
+   await editor.getByRole('textbox',{name:'进度',exact:true}).fill('核验期间保留这段草稿');
+   await editor.getByRole('button',{name:'查找原通告',exact:true}).click();
+   await editor.locator('.v2-notice-candidates').click();
+   await page.getByText(/已发原通告 · E楼/).click();
+   await editor.getByRole('button',{name:'核对并保存关联',exact:true}).click();
+   await page.getByRole('button',{name:'确认关联并重新读取',exact:true}).click();
+   if(status==='active'){
+    await editor.getByRole('button',{name:'预览并确认更新',exact:true}).waitFor();
+    assert.equal(await editor.getByRole('radio',{name:'结束',exact:true}).count(),1);
+   }else{
+    await editor.getByText('正在核对飞书源表的实际结束时间和状态。').waitFor();
+    bindingStatus='done';
+    await page.clock.fastForward(16000);
+    await editor.getByText('已绑定原通告，原通告已结束。').waitFor();
+    assert.equal(await editor.getByRole('radiogroup',{name:'本次操作'}).count(),0);
+   }
+   assert.equal(await editor.getByRole('textbox',{name:'进度',exact:true}).inputValue(),'核验期间保留这段草稿');
+   assert.equal(await editor.getByText('计划已在进行中，请核对并关联已发通告。').count(),0);
+   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
+   await page.screenshot({path:path.join(output,'planned-binding-'+status+'.png'),fullPage:true});
+  }
+  assert.equal(writes.filter(url=>url==='/api/notice-identity/bind').length,2);
+  assert(!writes.includes('/api/workbench-actions'));
+  assert.deepEqual(errors,[]);
+  console.log('PASS: verify started plan, bind exact target, preserve local draft, refresh delayed closure, no extra notice send.');
+ }else{
  await goto();
  await page.getByLabel('计划月份',{exact:true}).click();await page.locator('.n-base-select-option').getByText('11月',{exact:true}).click();
  assert.equal(await page.locator('.v2-notice-heading h1').isVisible(),false,'navigation already names this module');assert.match(await page.locator('[data-list=planned]').innerText(),/10月计划/);
@@ -139,4 +192,5 @@ try{
   jobPhase='success';await page.getByRole('button',{name:'查询进度',exact:true}).click();await page.getByRole('status',{name:'通告办理完成',exact:true}).waitFor();
  }
  assert.deepEqual(errors,[]);console.log('PASS: notice editing, attachments, SOP, event waiting/resume on desktop and mobile, no duplicate submit or false success. All writes mocked.');
+ }
 }catch(e){if(page){await page.screenshot({path:path.join(output,'experience-error.png'),fullPage:true});console.error(errors,await page.locator('.n-modal').allTextContents());}throw e;}finally{await browser.close();await server.close();}

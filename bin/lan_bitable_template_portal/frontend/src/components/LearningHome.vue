@@ -1,5 +1,5 @@
 <template>
-  <LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :exemption-date="exemptionDate" @open="emit('open', $event)" @refresh="emit('refresh')" />
+  <LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :daily-duty="dailyDuty" @open="emit('open', $event)" @refresh="emit('refresh')" />
   <section v-else class="learning-home" :aria-busy="loading" aria-label="学习管理工作台">
     <header v-if="workspaceV2" class="v2-home-header"><h2>{{ management ? '学习管理' : '个人学习' }}</h2><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
     <header :class="{ 'v2-home-desktop-header': workspaceV2 }"><div><span class="eyebrow">{{ management ? '学习管理' : '我的学习' }}</span><h2>{{ management ? '安排学习，跟进完成情况' : `${person?.name || '欢迎回来'}，继续今天的学习` }}</h2><p>{{ management ? '发布、题库与人员进度集中管理。' : '每日题单与当班自主练习一起计入完成情况。' }}</p></div><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
@@ -11,7 +11,7 @@ import {computed} from 'vue';
 import {BookOpen,ChevronRight,History,Settings,Users,MessageSquare,CheckCircle2,RefreshCw} from 'lucide-vue-next';
 import LearningPersonalHome from './LearningPersonalHome.vue';
 import type {Dict} from '../api/client';
-const props=defineProps<{data:Dict;person?:Dict|null;date:string;loading:boolean;failed?:boolean;management?:boolean;isAdmin?:boolean;exemptionDate?:string}>();
+const props=defineProps<{data:Dict;person?:Dict|null;date:string;loading:boolean;failed?:boolean;management?:boolean;isAdmin?:boolean;exemptionDate?:string;dailyDuty?:Dict|null}>();
 const workspaceV2=document.documentElement.classList.contains('workspace-v2');
 const emit=defineEmits<{open:[value:string];refresh:[]}>();
 const selfProgress=computed(()=>props.data.people?.find((row:Dict)=>row.person_id===props.person?.id)?.today);
@@ -21,7 +21,7 @@ const metric=(value:unknown)=>typeof value==='number'?String(value):'—';
 const entries=computed(()=>[
   ...(props.isAdmin?[{id:'settings',title:'发布与提醒',description:'白夜班发布时间、发送结果与重试',icon:Settings},{id:'questions',title:'题库管理',description:'维护题目、答案与资料依据',icon:BookOpen}]:[]),
   {id:'completion',title:'完成情况',description:'按人员、日期与班次核对进度',icon:CheckCircle2},
-  {id:'sharing',title:'资料练习',description:props.isAdmin?'AI出题、人工录题、导入与发布':'查看已发布的练习',icon:Users},
+  {id:'sharing',title:'分享会练习',description:props.isAdmin?'AI出题、人工录题、导入与发布':'查看已发布的练习',icon:Users},
   {id:'issues',title:workspaceV2?'题目反馈':'题目质疑',description:'查看各楼栋的反馈和处理进度',icon:MessageSquare},
   {id:'history',title:'学习记录',description:'查阅题单与作答情况',icon:History},
 ]);

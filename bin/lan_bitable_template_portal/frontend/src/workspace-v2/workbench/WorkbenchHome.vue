@@ -55,9 +55,13 @@ const selectedScope=computed(()=>{
   if (!props.explicitScope&&accountLevel.value==='L2'&&ownScope.value) return ownScope.value;
   return (scopeOptions.value.find(option=>option.value===props.scope)||scopeOptions.value[0])?.value||'';
 });
-const dataScope=computed(()=>globalDesk.value
-  ?scopeOptions.value.find(option=>composite(option.value))?.value||selectedScope.value:selectedScope.value);
-const readScopes=computed(()=>composite(dataScope.value)&&!authorizedScopes.value.some(option=>option.value===dataScope.value)
+const dataScope=computed(()=>{
+  if(!globalDesk.value&&!composite(selectedScope.value))return selectedScope.value;
+  return scopeOptions.value.find(option=>option.value==='ALL')?.value
+    ||(globalDesk.value?scopeOptions.value.find(option=>composite(option.value))?.value:'')||selectedScope.value;
+});
+const readScopes=computed(()=>composite(dataScope.value)&&concreteScopes.value.length>0
+  &&(dataScope.value==='CAMPUS'||!authorizedScopes.value.some(option=>option.value==='ALL'))
   ?concreteScopes.value.map(option=>option.value):undefined);
 const agendaScopes=computed(()=>globalDesk.value&&composite(dataScope.value)?concreteScopes.value:[]);
 const context=computed(()=>JSON.stringify([accessKey.value,role.value,dataScope.value]));
@@ -135,7 +139,7 @@ const readStorageKey=computed(()=>{
 const readKeys=ref(new Set<string>());
 const readIdentity=(item:WorkItem)=>JSON.stringify([item.kind,item.scope,item.key,item.status,item.time,item.dueAt,item.noticeWindow?.start,item.noticeWindow?.end]);
 const isRead=(item:WorkItem)=>readKeys.value.has(readIdentity(item));
-const inQueueScope=(row:WorkItem)=>dataScope.value===selectedScope.value||inDeskScope(row,selectedScope.value);
+const inQueueScope=(row:WorkItem)=>composite(selectedScope.value)||dataScope.value===selectedScope.value||inDeskScope(row,selectedScope.value);
 const queueTasks=computed(()=>allTasks.value.filter(inQueueScope));
 const unreadTasks=computed(()=>queueTasks.value.filter(item=>!isRead(item)));
 watch(context,()=>{
@@ -172,6 +176,10 @@ const dayStart=computed(()=>{
 const startsAt=(row:WorkItem)=>todoTimestamp(row.noticeWindow?.start||row.scheduledAt||row.time);
 const onDeskDay=(time:number|undefined)=>time!==undefined&&time>=dayStart.value&&time<dayStart.value+86400000;
 function isTodayTask(row:WorkItem) {
+  if (row.kind==='notices'&&row.ongoing) {
+    const actualStart=todoTimestamp(row.time)||todoTimestamp(row.noticeWindow?.start);
+    return actualStart===undefined||actualStart<dayStart.value+86400000;
+  }
   const start=startsAt(row), end=todoTimestamp(row.noticeWindow?.end);
   return onDeskDay(start)||onDeskDay(row.dueAt)||(start!==undefined&&start<dayStart.value&&end!==undefined&&end>dayStart.value);
 }
@@ -559,7 +567,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
       </section>
       <PreShiftCheck v-if="checkScope" :key="accessKey+checkScope" class="wb-check-panel shift-check"
         :user="checkUser" :fixed-scope="checkScope" workbench @snapshot="readDuty" />
-      <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
+      <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="composite(selectedScope)?dataScope:selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
     </WorkbenchDailyLayout>
 
     <NoticeWorkspace v-if="inlineNotice && inlineNotice.work!=='event'" :key="inlineNotice.url" :url="inlineNotice.url" :scope="inlineNotice.scope"

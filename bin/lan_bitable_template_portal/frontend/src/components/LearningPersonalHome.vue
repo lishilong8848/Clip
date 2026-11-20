@@ -1,17 +1,17 @@
 <template>
   <section class="learning-personal-home" aria-label="个人学习首页" :aria-busy="loading">
-    <button type="button" class="daily-tile" :aria-label="actionLabel" :aria-describedby="progressId" :disabled="loading || !person" @click="failed ? emit('refresh') : emit('open', 'today')">
+    <button v-if="dailyDuty" type="button" class="daily-tile" :aria-label="actionLabel" :aria-describedby="progressId" :disabled="loading || !person" @click="failed ? emit('refresh') : emit('open', 'today')">
       <span class="daily-tile-main">
         <span class="daily-title"><CalendarDays :size="22" aria-hidden="true" />当班题单</span>
         <span :id="progressId" class="daily-stats">
-          <template v-if="loading">正在读取当日进度…</template>
+          <span>{{ dailyDuty.date }} · {{ dailyDuty.shift }}班</span>
+          <template v-if="loading">正在读取当班进度…</template>
           <template v-else-if="failed">进度暂未读取</template>
-          <template v-else-if="exemptionDate">入职首月免做 · {{ exemptionDate }} 恢复</template>
           <template v-else-if="total">
             <span class="daily-figures"><span><strong>{{ answered }} / {{ total }}</strong> 题<small>已答题数</small></span><span>{{ uncertain ? '当班进度待核对' : completed ? '已完成' : `待作答 ${total - answered} 题` }}</span></span>
             <progress class="daily-progress" :max="total" :value="answered" aria-label="当班题单进度"></progress>
           </template>
-          <template v-else>暂无已领取题目</template>
+          <template v-else>{{ uncertain ? '当班进度待核对' : '暂无已领取题目' }}</template>
         </span>
       </span>
       <span class="daily-action">{{ actionText }} <ArrowRight :size="23" aria-hidden="true" /></span>
@@ -19,7 +19,7 @@
 
     <nav class="personal-shortcuts" aria-label="学习入口">
       <button type="button" :disabled="loading" @click="emit('open', 'practice')"><Pencil :size="19" />自主练习</button>
-      <button type="button" :disabled="loading" @click="emit('open', 'sharing')"><Layers :size="19" />资料练习</button>
+      <button type="button" :disabled="loading" @click="emit('open', 'sharing')"><Layers :size="19" />分享会练习</button>
       <button type="button" :disabled="loading" @click="emit('open', 'review')"><RotateCcw :size="19" />复习中心</button>
     </nav>
 
@@ -41,7 +41,7 @@
         <ul v-else class="personal-records">
           <li v-for="row in records" :key="row.id">
             <component :is="row.mode === 'practice' ? Pencil : CalendarDays" :size="17" />
-            <span>{{ row.mode === 'practice' ? '自主练习' : '当班题单' }}</span>
+            <span>{{ row.mode === 'practice' ? '自主练习' : '历史题单' }}</span>
             <span>{{ metric(row.stats?.answered) }} / {{ metric(row.stats?.total) }}</span><time :datetime="row.date">{{ row.date }}</time>
           </li>
         </ul>
@@ -58,14 +58,19 @@ import type { Dict } from '../api/client';
 import { requestLearning } from '../api/learning';
 import MotionChart from '../workspace-v2/MotionChart.vue';
 
-const props = defineProps<{ data: Dict; person?: Dict | null; loading: boolean; failed?: boolean; exemptionDate?: string }>();
+const props = defineProps<{ data: Dict; person?: Dict | null; loading: boolean; failed?: boolean; dailyDuty?: Dict | null }>();
 const emit = defineEmits<{ open: [value: string]; refresh: [] }>();
 const progressId = useId();
-const total = computed(() => Number(props.data.today_summary?.assigned) || 0);
-const answered = computed(() => Math.min(total.value, Number(props.data.today_summary?.task_answered) || 0));
-const uncertain = computed(() => Boolean(props.data.today_summary?.has_uncertain_tasks));
+const task = computed(() => {
+  const duty = props.dailyDuty;
+  return duty && (props.data.daily_tasks || []).find((row: Dict) =>
+    row.date === duty.date && row.shift === duty.shift && row.scope === duty.scope);
+});
+const total = computed(() => Number(task.value?.assigned) || 0);
+const answered = computed(() => Math.min(total.value, Number(task.value?.answered) || 0));
+const uncertain = computed(() => task.value?.status === '待核对');
 const completed = computed(() => total.value > 0 && answered.value >= total.value && !uncertain.value);
-const actionText = computed(() => props.loading ? '载入中' : props.failed ? '重试' : props.exemptionDate ? '查看今日题单' : completed.value ? '回顾题单' : answered.value ? '继续答题' : '打开每日题单');
+const actionText = computed(() => props.loading ? '载入中' : props.failed ? '重试' : completed.value ? '回顾题单' : answered.value ? '继续答题' : '打开当班题单');
 const actionLabel = computed(() => props.failed ? '刷新学习进度' : actionText.value);
 const metric = (value: unknown, suffix = '') => typeof value === 'number' && Number.isFinite(value) ? value + suffix : '—';
 const trend = computed(() => (props.data.trend || []).filter((row: Dict) => typeof row.attempt_count === 'number' || typeof row.answered === 'number')

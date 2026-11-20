@@ -283,7 +283,13 @@ export async function coreFixture({ url, method = 'GET', body }) {
     const next = { revision: current.revision + 1, value: data.value }; layouts.set(p, next); return ok(next);
   }
   if (p === '/api/assistant/appearance') return ok({ shape: 'weather-lighthouse-mini', color: 'encre', size: 56 });
-  if (p === '/api/assistant/icon-weather') return ok({available:true,city:'南通',date:day,temperature:18,humidity:61,description:'多云',forecast:[{date:day,minimum:13,maximum:20,description:'多云'}]});
+  if (p === '/api/assistant/icon-weather') return ok({
+    available:true,city:'南通',date:day,temperature:18,humidity:61,description:'多云',
+    forecast:[{date:day,minimum:13,maximum:20,description:'多云'}],
+    hourly:[18,20,19,17,15].map((temp,i)=>({
+      time:new Date((Math.floor(Date.now()/3600000)+1+i*2)*3600000).toISOString(),temp,
+    })),
+  });
   if (p === '/api/personal-calendar/weather') return ok({warning_ready:true,alerts:[],guard_level:'',guard_actions:[]});
   if (p === '/api/learning/workbench-summary') {
     const buildings=['ALL','CAMPUS'].includes(q.get('scope'))?[...'ABCDEH']:[scope];

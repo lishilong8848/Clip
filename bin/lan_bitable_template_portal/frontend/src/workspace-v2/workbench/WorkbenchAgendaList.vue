@@ -1,0 +1,32 @@
+<script setup lang="ts">
+import { ChevronRight } from 'lucide-vue-next';
+import type { WorkItem } from './sources';
+
+defineProps<{ entries: {key:string;time:string;label:string;title:string;meta:string;task?:WorkItem}[] }>();
+defineEmits<{ task:[item:WorkItem] }>();
+</script>
+
+<template>
+  <ol class="timeline">
+    <li v-for="entry in entries" :key="entry.key">
+      <time>{{ entry.time }}</time>
+      <div>
+        <small>{{ entry.label }}</small>
+        <button v-if="entry.task" type="button" class="agenda-task" @click="$emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></button>
+        <b v-else>{{ entry.title }}</b>
+        <p v-if="entry.meta">{{ entry.meta }}</p>
+      </div>
+    </li>
+  </ol>
+</template>
+
+<style scoped>
+.timeline { list-style:none; padding:0; margin:8px 0 0 }
+.timeline li { display:grid; grid-template-columns:42px minmax(0,1fr); gap:8px; font-size:13px }
+.timeline time { padding-top:8px; color:var(--desk-blue); font-size:12px; font-variant-numeric:tabular-nums }
+.timeline li>div { position:relative; display:grid; gap:2px; border-left:1px solid var(--desk-line); padding:5px 0 8px 11px; overflow-wrap:anywhere }
+.timeline li>div::before { content:""; position:absolute; left:-3px; top:12px; width:5px; height:5px; border-radius:50%; background:var(--desk-blue) }
+.timeline small,.timeline p { margin:0; color:var(--desk-muted); font-size:12px }
+.agenda-task { display:flex; align-items:center; gap:5px; text-align:left; padding:0; border:0; background:transparent; font:inherit; font-weight:650; color:var(--desk-green); cursor:pointer }
+.agenda-task svg { flex:none }
+</style>

@@ -86,6 +86,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         self.service._work_status_dir = root / "work-status"
         self.service._summary_dir = root / "summaries"
         self.service._legacy_summary_migrated = True
+        self.service._summary_lock = threading.RLock()
         self.service._state_version_lock = threading.RLock()
         self.service._state_version = 0
         ended_at = "2026-10-28 10:23:47"
@@ -98,8 +99,9 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             section="other", origin="portal")
         store.delete_qt_active_item(active_item_id=request["active_item_id"])
         before_identities = store.list_notice_identities(include_deleted=True)
-        validation = {**request, "source_found": True, "target_active": False, "target_finished": True,
-            "target_status": "已结束", "target_ended_at": ended_at, "_target_active_payload": {}}
+        period = self.service.notice_source_period_snapshot({**request, "plan_month": "10月", "maintenance_cycle": "月"})
+        validation = {**request, "_source_period": period, "source_found": True, "target_active": False, "target_finished": True,
+            "target_status": "已结束", "target_ended_at": ended_at, "target_building_codes": ["A"], "_target_active_payload": {}}
         session = {"user": {"open_id": "fixture-bind-user"}, "role": "building", "allowed_scopes": ["A"]}
         with (
             mock.patch.object(PortalRuntime, "state_store", store),
@@ -109,6 +111,10 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
             mock.patch.object(PortalRuntime.auth_manager, "scope_allowed", side_effect=lambda _session, scope: scope == "A") as scope_allowed,
             mock.patch.object(PortalRuntime.auth_manager, "is_admin", return_value=False),
             mock.patch.object(self.service, "validate_notice_identity_binding", return_value=validation) as validate,
+            mock.patch.object(self.service, "_source_record_in_scope_snapshot", return_value={
+                "record_id": request["source_record_id"], "work_type": "maintenance",
+                "display_fields": {"计划维护月份": "10月", "维护周期": "月"},
+            }),
             mock.patch.object(self.service, "sync_notice_source_ended_fields", side_effect=[
                 NoticeSourcePending("源表状态字段元信息缺失，后台将重新读取字段定义后重试，未猜测写入。"), True,
             ]) as sync,
@@ -133,9 +139,11 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 sync.assert_not_called()
 
                 pending = client.post("/api/notice-identity/bind", json=request)
-                self.assertEqual(pending.status_code, 403, pending.text)
-                self.assertEqual(pending.json(), {"ok": False, "error":
-                    "目标通告已结束，但源表完成信息尚未核实；本次绑定未完成，请稍后重试绑定。"})
+                self.assertEqual(pending.status_code, 200, pending.text)
+                self.assertTrue(pending.json()["data"]["binding_pending"])
+                query = {key: request[key] for key in ("scope", "work_type", "source_record_id")}
+                status = client.get("/api/notice-identity/bind-wait", params=query)
+                self.assertEqual(status.json()["data"]["state"], "pending")
                 self.assertEqual(sync.call_args.args[0]["ended_at"], ended_at)
                 save_identity.assert_not_called()
                 finish.assert_not_called()
@@ -151,16 +159,24 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 self.assertEqual(retried.status_code, 200, retried.text)
                 data = retried.json()["data"]
                 self.assertTrue(data["target_finished"])
-                self.assertTrue(data["source_ended_synced"])
                 self.assertEqual(data["target_ended_at"], ended_at)
                 self.assertEqual(sync.call_count, 2)
-                self.assertEqual(sync.call_args_list[0], sync.call_args_list[1])
-                save_identity.assert_called_once()
+                self.assertEqual(sync.call_args.args[0]["ended_at"], ended_at)
+                self.assertEqual(sync.call_args.kwargs, {"read_only": True})
+                save_identity.assert_not_called()
                 finish.assert_called_once()
                 self.assertEqual(finish.call_args.kwargs["ended_at"], ended_at)
                 identity = store.resolve_notice_identity(work_type="maintenance", source_record_id=request["source_record_id"])
                 self.assertEqual(identity["payload"]["ended_at"], ended_at)
                 self.assertEqual(identity["payload"]["status"], "已结束")
+                status = client.get("/api/notice-identity/bind-wait", params=query).json()["data"]
+                self.assertEqual(status["state"], "done")
+                self.assertEqual(status["target_record_id"], request["target_record_id"])
+                self.assertTrue(status["target_finished"])
+                with mock.patch.object(store, "resolve_notice_identity", return_value={
+                    **identity, "target_record_id": "rec-rebound",
+                }):
+                    self.assertEqual(client.get("/api/notice-identity/bind-wait", params=query).json()["data"]["state"], "")
                 local = self.service._load_work_status_locked(building_code="A")["items"]
                 self.assertEqual([(row["status"], row["ended_at"]) for row in local], [("已结束", ended_at)])
                 restored = store.restore_live_portal_qt_active_items(force=True, grace_seconds=0)
@@ -170,7 +186,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
                 enqueue.assert_not_called()
                 queue.assert_not_called()
                 background.assert_not_called()
-                self.assertEqual(scope_allowed.call_args_list.count(mock.call(session, "A")), 2)
+                self.assertGreaterEqual(scope_allowed.call_args_list.count(mock.call(session, "A")), 2)
                 for call in validate.call_args_list:
                     self.assertEqual(call.kwargs["scope"], "A")
                     self.assertTrue(call.kwargs["allow_finished"])

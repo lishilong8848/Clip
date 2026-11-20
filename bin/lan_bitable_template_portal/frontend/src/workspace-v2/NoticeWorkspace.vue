@@ -80,8 +80,9 @@
       <NAlert v-if="detailError" type="error" role="alert" :bordered="false">{{ detailError }}<NButton v-if="issueTarget&&!job&&!ambiguous" text data-v2-navigation @click="focusIssue">{{ issueTarget.label }}</NButton></NAlert>
       <NAlert v-if="draftWarning" type="warning" :bordered="false">{{ draftWarning }}</NAlert>
       <template v-if="form&&!detailLoading">
-        <NAlert v-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看，不可重新发送。</NAlert>
-        <NAlert v-if="verifyBeforeStart" type="warning" :bordered="false">计划显示进行中，但尚未定位到已发目标通告。请先在“关联与接收”中查找原通告；此时不能重复发送开始。</NAlert>
+        <NAlert v-if="bindingFinished" type="success" role="status" :bordered="false">已绑定原通告，原通告已结束。</NAlert>
+        <NAlert v-else-if="verifyBeforeStart" type="warning" :bordered="false">计划已在进行中，请核对并关联已发通告。</NAlert>
+        <NAlert v-else-if="!form.actions.length" type="warning" :bordered="false">此通告当前只可查看。</NAlert>
         <NAlert v-if="(confirming||job||ambiguous)&&cycleWarnings.length" type="warning" :bordered="false" data-cycle-warning-summary><p v-for="warning in cycleWarnings" :key="warning">{{ warning }}</p></NAlert>
         <NoticeDeskReceipt v-if="job||ambiguous" :job="job" :title="taskTitle" :ambiguous="ambiguous" :succeeded="succeeded"
           :terminal="terminal" :event-waiting="eventWaiting" :delivery-label="deliveryLabel">
@@ -112,18 +113,20 @@
         <div v-if="!job&&!ambiguous" v-show="!confirming" class="editor-sheet">
           <aside class="editor-routing">
             <header class="editor-section-title"><Link2 :size="18" /><h2>关联与接收</h2></header>
-            <div data-notice-section="relations"><NoticeRelations ref="relations" :key="formKey" :form="form" :action="action" :locked="locked" @busy="busy=$event" @bound="associationBound" /></div>
+            <div data-notice-section="relations"><NoticeRelations ref="relations" :key="formKey" :form="form" :action="action" :locked="locked" :verify-plan="verifyBeforeStart" :finished="bindingFinished" @busy="busy=$event" @bound="associationBound" /></div>
         <NoticePlanBinding v-if="form.detailMode==='ongoing'||form.values.manual_binding_required||form.sourceOptions.length" :form="form" :expanded="sourceExpanded" v-model:choice="sourceChoice" :options="sourceOptions" :loading="sourceLoading" :locked="locked" @toggle="toggleSource" @mode="chooseSourceMode" @search="searchSources" @confirm="bindSource" />
-          <NoticeDingTalkPicker v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
+          <NoticeDingTalkPicker v-if="!verifyBeforeStart&&!bindingFinished" v-model="form.values.dingtalk_robot_ids" :work-type="form.values.work_type" :notice-type="form.values.notice_type" :target-record-id="form.values.target_record_id" :buildings="form.values.building_codes" :disabled="locked" @selected-names="selectedDingNames=$event" />
             <div v-if="form.values.target_record_id" role="region" aria-label="通告推荐标签"><NoticeAlertTags :record-id="form.values.target_record_id" :work-type="form.values.work_type" /></div>
           </aside>
         <NForm label-placement="top" class="v2-notice-pane-form" :disabled="locked" @submit.prevent="preview" @paste="pastePhotos">
-            <header class="editor-section-title"><ClipboardList :size="18" /><h2>办理内容</h2>
-              <small role="status">{{ cycleWarnings.length?'维保周期不一致':missingFields.length?'待补充 '+missingFields.length+' 项':'必填字段已齐全' }}</small>
+            <header class="editor-section-title"><ClipboardList :size="18" /><h2>{{ bindingFinished?'当前填写':'办理内容' }}</h2>
+              <small v-if="!verifyBeforeStart&&!bindingFinished" role="status">{{ cycleWarnings.length?'维保周期不一致':missingFields.length?'待补充 '+missingFields.length+' 项':'必填字段已齐全' }}</small>
             </header>
             <NoticeFields :fields="editingFields" :values="form.values" :cycle-rules="form.cycleRules" :locked="locked" :attempted="attempted" compact><NFormItem v-if="action==='start'" label="所属楼栋" required data-notice-section="buildings" :show-feedback="false"><NCheckboxGroup v-model:value="form.values.building_codes" :disabled="locked"><NCheckbox v-for="s in buildingOptions" :key="s.value" :value="s.value">{{ s.label }}</NCheckbox></NCheckboxGroup></NFormItem></NoticeFields>
-          <section v-if="form.values.source_record_id&&!form.values.target_record_id&&action==='start'" class="v2-notice-field-section" data-notice-section="memory"><NoticeMemorySuggestions :key="formKey" :form="form" :month="applied.month" :action="action" :locked="locked" @applied="persist" /></section>
-          <section v-if="form.sop&&action==='start'" class="v2-notice-field-section" data-notice-section="sop"><h2>本次工单</h2><LighthouseNoticeSop id="v2-notice-sop" :field="sopField" v-model="sop" :disabled="locked" @load-options="loadSops($event.q)" /></section>
+          <template v-if="action==='start'&&!verifyBeforeStart&&!bindingFinished">
+            <section v-if="form.values.source_record_id&&!form.values.target_record_id" class="v2-notice-field-section" data-notice-section="memory"><NoticeMemorySuggestions :key="formKey" :form="form" :month="applied.month" :action="action" :locked="locked" @applied="persist" /></section>
+            <section v-if="form.sop" class="v2-notice-field-section" data-notice-section="sop"><h2>本次工单</h2><LighthouseNoticeSop id="v2-notice-sop" :field="sopField" v-model="sop" :disabled="locked" @load-options="loadSops($event.q)" /></section>
+          </template>
           <section v-if="form.groupId" class="v2-notice-field-section" data-notice-section="workorder"><h2>已关联工单</h2><NAlert v-if="sopStatus" :type="sopStatus.state==='completed'?'success':'info'" :bordered="false">{{ sopStatus.error || (sopStatus.state==='completed'?'工单已完成':sopStatus.state==='upload_pending'?'步骤已全部完成，工单表格正在上传':'工单执行中') }}<span v-if="sopStatus.enabled&&!sopStatus.ready"> · 延时核验尚未满足，剩余 {{ sopStatus.remaining_seconds }} 秒</span></NAlert><div class="v2-notice-tools"><NButton v-for="link in form.sopLinks" :key="link.url" tag="a" :href="workspaceUrl(link.url)" target="_blank" rel="noopener noreferrer">{{ link.label }}</NButton><NButton :loading="busy" :disabled="locked" @click="refreshSopStatus">刷新工单状态</NButton><NButton :loading="busy" :disabled="locked" @click="resendSopLinks">重发操作人及审核人链接</NButton><NButton v-if="sopStatus?.state==='upload_pending'" :loading="busy" :disabled="locked" @click="retrySopUpload">重试上传工单表格</NButton></div></section>
           <div v-if="form.photoRequired||form.values.work_type==='change'" class="v2-notice-photo-columns">
           <section v-if="form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section>
@@ -139,10 +142,10 @@
           <NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton>
           <NButton v-else class="v2-notice-close" secondary data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor"><X :size="18" />关闭</NButton>
 
-          <div v-if="form&&!job&&!ambiguous" class="v2-notice-submit-group" data-notice-section="action">
-            <NRadioGroup v-if="!confirming" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
+          <div v-if="form&&!job&&!ambiguous&&!bindingFinished" class="v2-notice-submit-group" data-notice-section="action">
+            <NRadioGroup v-if="!confirming&&!verifyBeforeStart" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
             <NButton v-if="confirming" type="primary" :disabled="!form.values.dingtalk_robot_ids?.length" :loading="busy" data-v2-submit @click="send">确认发送{{ actionLabel(action) }}</NButton>
-            <NButton v-else-if="needsOriginalNotice(form,action)" type="primary" :disabled="locked" @click="locateOriginal"><Search :size="16" />查找原通告</NButton>
+            <NButton v-else-if="verifyBeforeStart||needsOriginalNotice(form,action)" type="primary" :disabled="locked" @click="locateOriginal"><Search :size="16" />查找原通告</NButton>
             <NButton v-else type="primary" :disabled="locked||!form.actions.length||!form.values.dingtalk_robot_ids?.length" :loading="busy" @click="preview"><Send :size="16" />预览并确认{{ actionLabel(action) }}</NButton>
           </div>
         </div>
@@ -272,6 +275,7 @@ const pendingPhotos=computed(()=>Number(siteUpload.value?.pending||0)+Number(ali
 function uploadBusy(value:boolean){uploading.value=value;}
 function persistAfterUpload(){void nextTick(persist);}
 const verifyBeforeStart=ref(false);
+const bindingFinished=ref(false);
 const relations=ref<InstanceType<typeof NoticeRelations>>();
 const action=ref('start'),sop=ref<Dict>({}),sopField=ref<Dict>({}),photos=ref<Dict[]>([]),aliPhotos=ref<Dict[]>([]),job=ref<Dict|null>(null);
 const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:string;title?:string;building?:string;cycle?:string}[]>([]),sourceLoading=ref(false),sourceExpanded=ref(false);
@@ -315,7 +319,7 @@ function showEventWait(value:Dict){
 }
 const nextRecord=computed(()=>{const v=form.value?.values||{};return (action.value==='start'?lanes.value[0].rows:lanes.value[1].rows).find(r=>![v.active_item_id,v.source_record_id,v.target_record_id].includes(rowKey(r))&&!rowEnded(r)&&!(action.value==='start'&&(rowStarted(r)||rowUnknown(r))));});
 function showTaskRecords(){if(!props.recordOnly)closeEditor();recordsOpen.value=true;}
-const locked=computed(()=>busy.value||saving.value||uploading.value||detailLoading.value||ambiguous.value||!!job.value||!form.value?.actions.length);
+const locked=computed(()=>busy.value||saving.value||uploading.value||detailLoading.value||ambiguous.value||!!job.value||bindingFinished.value||!form.value?.actions.length);
 const saved=ref('');
 let draftVersion=0,operationId='',frozen:Dict|null=null,formKey='',originalProgress='',progressBeforeEnd='';
 const snapshot=()=>JSON.stringify({values:form.value?.values,sop:sop.value,photos:photos.value,aliPhotos:aliPhotos.value,action:action.value});
@@ -358,7 +362,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
   if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
   if(busy.value||uploading.value||saving.value)return;
   if(editing.value&&dirty.value&&!job.value){askLeave(()=>openRecord(row,initial,desiredAction,parsedHtml,manualType,focusBinding));return;}
-  attempted.value=false;issueTarget.value=null;confirming.value=false;verifyBeforeStart.value=false;attentionKeys.value=[];
+  attempted.value=false;issueTarget.value=null;confirming.value=false;verifyBeforeStart.value=false;bindingFinished.value=false;attentionKeys.value=[];
   draftWarning.value='';
   detailAbort?.abort();const c=new AbortController();detailAbort=c;editing.value=true;detailLoading.value=true;detailError.value='';form.value=null;job.value=null;ambiguous.value=false;frozen=null;operationId='';draftVersion=0;photos.value=[];aliPhotos.value=[];sop.value={};sopField.value={};formKey='';
   const work=row?.work_type||manualType||kind.value;
@@ -375,7 +379,7 @@ async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtm
     const preferredAction=desiredAction||next.initialAction;
     form.value=next;action.value=next.actions.includes(preferredAction)?preferredAction:desiredAction?'':next.actions[0]||'start';formKey=cacheKey(next.values);sourceChoice.value=next.values.source_record_id||null;sourceOptions.value=next.sourceOptions;sourceExpanded.value=focusBinding||!!(next.values.manual_binding_required&&!next.values.source_record_id&&!next.values.target_record_id);
     if(sourceChoice.value&&!sourceOptions.value.some(o=>o.value===sourceChoice.value))sourceOptions.value.unshift({label:'已绑定源表事项',value:sourceChoice.value});
-    verifyBeforeStart.value=Boolean((row?rowStarted(row)&&!row.active_item_id:initial&&params.value.get('notice_action')==='verify')
+    verifyBeforeStart.value=Boolean((row?lanes.value[0].rows.includes(row)&&rowStarted(row):initial&&params.value.get('notice_action')==='verify')
       &&!next.values.target_record_id&&next.actions.includes('start'));
     originalFields.value={...next.values};attentionKeys.value=next.fields.filter(f=>f.required&&!String(next.values[f.key]??'').trim()).map(f=>f.key);
     sop.value={sop_version:0,scope:sopScope.value,exempt:next.values.polling_work_order_exempt===true};sopField.value={notice_scope:sopScope.value,work_type:next.values.work_type};
@@ -473,8 +477,7 @@ async function saveDraft(){
 function preview(){
   if(!form.value||locked.value)return;
   attempted.value=true;issueTarget.value=null;detailError.value=validateNotice(form.value,action.value,sop.value,photos.value);
-  if(verifyBeforeStart.value&&action.value==='start'){detailError.value='请先核验原目标通告，不能重复发送开始。';issueTarget.value={target:'relations',label:'核验关联'};}
-  if(needsOriginalNotice(form.value,action.value)){locateOriginal();return;}
+  if(verifyBeforeStart.value||needsOriginalNotice(form.value,action.value)){locateOriginal();return;}
   if(pendingPhotos.value){detailError.value='还有图片未上传成功，请重试或移除后再预览。';issueTarget.value={target:siteUpload.value?.pending?'photos':'ali',label:'处理未上传图片'};}
   if(!detailError.value&&action.value==='end'&&form.value.groupId){
     const state=sopStatus.value;issueTarget.value={target:'workorder',label:'核验工单状态'};
@@ -490,7 +493,7 @@ function preview(){
   issueTarget.value=null;confirming.value=true;void nextTick(()=>document.querySelector('.v2-notice-editor>.n-card-content')?.scrollTo({top:0}));
 }
 function locateOriginal(){
-  detailError.value='请核对原通告的楼栋、名称和时间后选择记录。若首条刚发送，请在办理记录中核对同步状态。';
+  detailError.value=verifyBeforeStart.value?'':'请核对原通告的楼栋、名称和时间后选择记录。若首条刚发送，请在办理记录中核对同步状态。';
   issueTarget.value={target:'relations',label:'核验关联'};
   focusIssue();
   void relations.value?.openTarget();
@@ -506,7 +509,7 @@ function focusIssue(){
 }
 async function submit(){
   if(!form.value||busy.value)return {ok:false};
-  if(!frozen&&verifyBeforeStart.value&&action.value==='start'){detailError.value='请先核验原目标通告，不能重复发送开始。';return {ok:false};}
+  if(bindingFinished.value||!frozen&&verifyBeforeStart.value){detailError.value='请核对原通告的关联状态。';return {ok:false};}
   busy.value=true;detailError.value='';
   try{
     if(!frozen){const issue=validateNotice(form.value,action.value,sop.value,photos.value);if(issue)throw new Error(issue);if(!await saveDraft()){confirming.value=false;return {ok:false};}operationId=createRepairOperationId('v2-notice');frozen=noticeCommand(form.value,action.value,operationId,draftVersion,sop.value,photos.value,aliPhotos.value);persist();}
@@ -590,24 +593,34 @@ async function loadSources(q=''){if(!form.value)return;const current=form.value,
 async function associationBound(result:Dict){
   const current=form.value;if(!current)return;
   const v=current.values,selectedAction=['update','end'].includes(action.value)?action.value:'update';
+  const target=result.target_record_id||v.target_record_id;
+  if(result.target_finished===true){
+    if(result.source_record_id!==v.source_record_id||!target||job.value||ambiguous.value)return;
+    bindingFinished.value=true;verifyBeforeStart.value=false;confirming.value=false;
+    detailError.value='';issueTarget.value=null;
+    window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);
+    return;
+  }
   const restoring=needsOriginalNotice(current,action.value);
-  const carried=restoring?Object.fromEntries(current.fields.filter(field=>
-    !field.readonly&&!['title','name','start_time','end_time','fault_time','expected_time'].includes(field.key)&&String(v[field.key]??'').trim()
+  const keepEdits=restoring||verifyBeforeStart.value;
+  const carried=keepEdits?Object.fromEntries((restoring?current.fields:changedFields.value).filter(field=>
+    !field.readonly&&!['title','name','start_time','end_time','fault_time','expected_time'].includes(field.key)
+      &&(!restoring||String(v[field.key]??'').trim())
   ).map(field=>[field.key,v[field.key]])):{};
   const previousKey=formKey;
-  if(restoring)persist();
-  else try{sessionStorage.removeItem(previousKey);}catch{/* Read the canonical association again. */}
+  if(keepEdits&&!persist())return;
+  if(!keepEdits)try{sessionStorage.removeItem(previousKey);}catch{/* Read the canonical association again. */}
   saved.value=snapshot();editing.value=false;busy.value=false;
   window.dispatchEvent(new Event('clipflow-business-changed'));void load(true);
-  const target=result.target_record_id||v.target_record_id;
   await openRecord({work_type:v.work_type,active_item_id:result.active_item_id||v.active_item_id,target_record_id:target,_request_scope:v.scope},false,selectedAction);
   const reopened=form.value;
   if(!reopened||reopened===current||reopened.values.target_record_id!==target||action.value!==selectedAction)return;
-  if(restoring&&!job.value&&!ambiguous.value){
+  if(keepEdits&&!job.value&&!ambiguous.value){
     for(const field of reopened.fields)if(!field.readonly&&field.key in carried)reopened.values[field.key]=carried[field.key];
     if(!persist())return;
   }
   if(previousKey!==formKey)try{sessionStorage.removeItem(previousKey);}catch{/* Only remove the superseded local copy. */}
+  if(result.target_record_id)message.success('已绑定原通告');
 }
 function bindSource(){
   if(!form.value||!sourceChoice.value||locked.value)return;

@@ -834,7 +834,17 @@ def claim(service, actor, payload):
     date = day.isoformat()
     requested = payload.get('date', date)
     shift = payload.get('shift')
-    if 'date' not in payload and not shift:
+    if 'shift' in payload and shift not in ('白', '夜'):
+        raise LearningError('排班日期或班次无效。')
+    verified = None
+    if not shift and service._shift_roster_reader:
+        from .learning_schedule import current_daily_duty
+        verified = current_daily_duty(service, self_person, current)
+        if (not verified or verified['scope'] != scope
+                or 'date' in payload and requested != verified['date']):
+            raise LearningError('当前没有可领取的本人当班题单，请核对排班。', 403)
+        requested, shift = verified['date'], verified['shift']
+    elif 'date' not in payload and not shift:
         from .learning_schedule import active_night_date
         night_date = active_night_date(service, self_person, current)
         if night_date:
@@ -848,8 +858,6 @@ def claim(service, actor, payload):
     if shift:
         from .learning_reminders import shift_learners
         from .learning_schedule import windows
-        if shift not in ('白', '夜'):
-            raise LearningError('排班日期或班次无效。')
         try:
             day = dt.date.fromisoformat(requested)
             if requested != day.isoformat():
@@ -864,7 +872,7 @@ def claim(service, actor, payload):
     eligibility, resume = daily_eligibility(self_person, date, directory_for_learning(service))
     if eligibility == 'exempt':
         raise LearningError(f'入职首月免做，{resume} 起按排班安排。', 409)
-    if shift:
+    if shift and not verified:
         learners = shift_learners(service, date, shift)
         if learners is None:
             raise LearningError('对应排班名单暂不可用，请稍后重试。', 503)
@@ -1181,6 +1189,8 @@ def profile(service, actor, query):
             today_summary['task_label'] = '昨夜夜班学练'
     today_summary['learning_activity_people'] = sum(bool(p['activity_answered'] or p['review_count'] or p['sharing_answered']) for p in today_people.values())
     return {'person': learner, 'summary': summary, 'today_summary': today_summary,
+            'daily_tasks': [{k: task[k] for k in ('date', 'scope', 'shift', 'assigned', 'answered', 'status')}
+                            for task in today_tasks.values()] if identity and identity == actor.get('person_id') else [],
             'buildings': [] if ordinary else buildings, 'people': people_rows, 'trend': trend,
             'topics': topics, 'banks': bank_rows, 'distribution': [] if ordinary else distribution,
             'questions': questions, 'inventory': {} if ordinary else (inventory if actor.get('is_admin') else {}),

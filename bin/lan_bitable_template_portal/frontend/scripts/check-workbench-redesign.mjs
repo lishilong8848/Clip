@@ -60,6 +60,8 @@ try {
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
   let currentAccount={}, holdAgenda=false, releaseAgenda;
   let dailyDesk=false;
+  let aggregateTrial=false, lateForecast=false;
+  let pausedReads;
   let repairTrial=false, historyClosed=false;
   let mopDelayed=false, riskDenied=false, mopRetryFailures=0;
   let embeddedTest=false;
@@ -85,7 +87,10 @@ try {
     if(req.method()!=='GET') {unexpected.push(req.method()+' '+url.pathname);return route.abort();}
     if(url.pathname==='/api/assistant/icon-weather')return ok({
       available:true,date:'2026-11-18',temperature:16,humidity:62,description:'多云',
-      hourly:[{time:'2026-11-18T09:00:00+08:00',temp:14},{time:'2026-11-18T12:00:00+08:00',temp:16},{time:'2026-11-18T15:00:00+08:00',temp:19}],
+      hourly:(lateForecast
+        ? [['18T21:00',14],['19T00:00',13],['19T03:00',11],['19T06:00',10],['19T09:00',15]]
+        : [['18T09:00',14],['18T12:00',16],['18T15:00',19],['18T18:00',17],['18T21:00',15],['19T00:00',13]]
+      ).map(([time,temp])=>({time:'2026-11-'+time+':00+08:00',temp})),
       forecast:[{date:'2026-11-18',minimum:9,maximum:19,description:'多云'},
         {date:'2026-11-19',minimum:10,maximum:18,description:'小雨'}],
     });
@@ -96,7 +101,8 @@ try {
       roster_dates:dailyDesk&&url.searchParams.get('month')==='2026-11'?['2026-11-18']:[],
       days:dailyDesk&&url.searchParams.get('month')==='2026-11'?{'2026-11-18':{
         items:scope==='A'?[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'},
-          {kind:'风险排查',source:'智航',title:'隔离智航风险',start:'2026-11-18T09:30:00+08:00'}]:[],
+          {kind:'风险排查',source:'智航',title:'隔离智航风险',start:'2026-11-18T09:30:00+08:00'},
+          ...Array.from({length:18},(_,i)=>({kind:'变更',title:'隔离晚间事项 '+(i+1),start:'2026-11-18T19:00:00+08:00'}))]:[],
         staff:scope==='A'||scope==='ALL'?[
           {scope:'A',shift:'白班',names:['验收值班员']},
           {scope:'A',shift:'白',names:['验收值班员','白班第二人']},
@@ -128,6 +134,7 @@ try {
         }))});
       }
       if(hold&&scope==='A'&&!url.searchParams.has('date_field'))await new Promise(resolve=>release=resolve);
+      if(pausedReads&&scope==='A')await new Promise(resolve=>pausedReads.push(resolve));
       if(failure&&scope==='B'&&!url.searchParams.has('date_field'))return route.fulfill({status:Number(failure),json:{ok:false,error:'fixture'}});
       return ok({scope,month,snapshot_exists:true,records:[
         {id:'event-'+scope,title:scope+'楼隔离事件',specialty:'电气',status:'处理中'},
@@ -143,6 +150,16 @@ try {
     if(url.pathname==='/api/workbench'){
       const planPage=Number(url.searchParams.get('records_page')||1);
       const type=url.searchParams.get('work_type');
+      if(aggregateTrial && url.searchParams.get('sections')==='ongoing'){
+        const ongoing=[
+          {active_item_id:'today-a',title:'A楼今日进行中',start_time:'2026-11-18 08:00',building_codes:['A']},
+          {active_item_id:'late-b',title:'B楼前期仍未结束',start_time:'2026-10-29 08:00',end_time:'2026-10-29 09:00',building_codes:['B']},
+          {active_item_id:'two-floors',title:'跨楼进行中',start_time:'2026-11-18 08:00',building_codes:['A','B']},
+          {active_item_id:'closed',title:'已结束的旧通告',start_time:'2026-11-18 07:00',building_codes:['A'],status:'结束'},
+          {active_item_id:'future',title:'次日才开始的通告',start_time:'2026-11-19 08:00',building_codes:['A']},
+        ].filter(row=>scope==='ALL'||(scope==='CAMPUS'?row.building_codes.length>1:row.building_codes.includes(scope)));
+        return ok({ongoing:ongoing.map(row=>({work_type:'maintenance',status:'开始',...row})),source_snapshot_ready:false});
+      }
       if(type!=='all'){
         const title=({change:'变更',repair:'检修',power:'上下电'})[type];
         return ok({ongoing:[{work_type:type,active_item_id:scope+type,scope,title:scope+'楼隔离'+title,status:'开始',start_time:'2026-11-18 09:30'}],records:[],
@@ -188,9 +205,12 @@ try {
     }
     if(url.pathname==='/api/critical-guard/tasks')return ok({tasks:scope==='A'
       ? [{task_id:'guard-live',title:'本楼重保任务',complete:false,status:'published'},{task_id:'guard-done',title:'已完成重保',complete:true,status:'published'}] : []});
-    if(url.pathname==='/api/risk-inspections')return riskDenied || scope==='CAMPUS'
-      ? route.fulfill({status:403,json:{ok:false,error:'隔离权限校验'}})
-      : ok({total:1,items:[{id:'risk-1',name:'隔离专项排查',total:2,approved:1,submitted:1,status:'active'}]});
+    if(url.pathname==='/api/risk-inspections'){
+      if(pausedReads&&scope==='A')await new Promise(resolve=>pausedReads.push(resolve));
+      return riskDenied || scope==='CAMPUS'
+        ? route.fulfill({status:403,json:{ok:false,error:'隔离权限校验'}})
+        : ok({total:1,items:[{id:'risk-1',name:'隔离专项排查',total:2,approved:1,submitted:1,status:'active'}]});
+    }
     if(url.pathname==='/api/cabinet-power/batches')return ok({total:2,items:[{batch_id:'cab-live',title:'机柜待确认',is_todo:true},{batch_id:'cab-done',title:'机柜已确认',is_todo:false}]});
     if(url.pathname==='/api/capacity/water/records')return ok({total:waterTrial?1:0,records:waterTrial?[waterRow()]:[],snapshot:{exists:true}});
     if(url.pathname==='/api/capacity/water/bootstrap')return ok({
@@ -579,7 +599,17 @@ try {
   assert.match(await page.evaluate(()=>window.opened),/^\/repair-management/);
   const weather=page.getByRole('region',{name:'今日天气'});
   await weather.getByText('16°C',{exact:true}).waitFor();
-  await weather.getByRole('img',{name:/今日气温趋势.*09:00 14°C/}).waitFor();
+  const trend=weather.getByRole('group',{name:/未来 10 小时气温趋势/});
+  await trend.waitFor();
+  assert.equal(await trend.locator('.weather-point').count(),4,'only points in the coming ten hours are drawn');
+  const firstPoint=await trend.locator('.weather-point').first().boundingBox();
+  await page.mouse.move(firstPoint.x+firstPoint.width/2,firstPoint.y+firstPoint.height/2);
+  await trend.getByText('12:00 · 16°C',{exact:true}).waitFor();
+  await trend.focus();
+  await trend.press('ArrowRight');
+  await trend.getByText('15:00 · 19°C',{exact:true}).waitFor();
+  await trend.press('Escape');
+  await trend.locator('output').waitFor({state:'detached'});
   assert.equal(await page.getByRole('button',{name:'天气详情'}).count(),0);
   const roster=agenda.getByRole('region',{name:'今日上班人员'});
   await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
@@ -603,7 +633,8 @@ try {
   assert.equal(await preview.getByText(/B楼/).count(),0);
   assert.equal(await futureDate.getAttribute('aria-pressed'),'false');
   await agenda.getByRole('button',{name:/^2026-11-19/}).click();
-  await agenda.getByLabel('选中日期天气').getByText('10～18°C').waitFor();
+  await agenda.getByRole('heading',{name:/11 \/ 19/}).waitFor();
+  assert.equal(await agenda.getByLabel('选中日期天气').count(),0);
   const aRoster=roster.getByRole('row').filter({has:page.getByRole('rowheader',{name:'A楼',exact:true})});
   await aRoster.getByRole('cell').nth(0).getByText('验收值班员',{exact:true}).waitFor();
   assert.equal(await aRoster.getByText('验收值班员',{exact:true}).count(),1);
@@ -620,9 +651,34 @@ try {
   await agenda.getByRole('button',{name:'今天',exact:true}).click();
   await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
   await agenda.getByText('隔离智航风险',{exact:true}).waitFor();
+  const openAgenda=agenda.getByRole('button',{name:/展开全部 .* 项日程/});
+  const railHeight=(await agenda.boundingBox()).height;
+  const agendaDialog=page.getByRole('dialog',{name:'当天全部日程'});
+  await openAgenda.click();
+  await agendaDialog.waitFor();
+  await agendaDialog.getByText('隔离晚间事项 18',{exact:true}).waitFor();
+  assert.equal(await agenda.getByRole('region',{name:'所选日期日程'}).locator('.timeline li').count(),3);
+  assert(await agendaDialog.locator('.agenda-scroll').evaluate(el=>el.scrollHeight>el.clientHeight&&getComputedStyle(el).overflowY==='auto'));
+  assert.ok(Math.abs((await agenda.boundingBox()).height-railHeight)<3,'the full agenda does not extend the calendar rail');
+  await page.setViewportSize({width:390,height:844});
+  const agendaBounds=await agendaDialog.boundingBox();
+  await page.screenshot({path:path.join(output,'agenda-mobile.png'),animations:'disabled'});
+  assert(agendaBounds.x>=8&&agendaBounds.x+agendaBounds.width<=382&&agendaBounds.height<844,'the agenda dialog fits a phone '+JSON.stringify(agendaBounds));
+  await agendaDialog.press('Escape');
+  await agendaDialog.waitFor({state:'hidden'});
+  await page.setViewportSize({width:1440,height:1000});
+  embeddedTest=true;
+  await openAgenda.click();
+  const scheduledDetail=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/workbench/lite-detail');
+  await agendaDialog.getByRole('button',{name:'冷冻水系统运行参数调整',exact:true}).click();
+  const detailQuery=new URL((await scheduledDetail).url()).searchParams;
+  assert.equal(detailQuery.get('active_item_id'),'A-active-change');
+  assert.equal(detailQuery.get('scope'),'A');
+  await page.locator('.v2-notice-editor').getByRole('button',{name:'关闭',exact:true}).click();
+  embeddedTest=false;
   await agenda.getByText('验收值班员',{exact:true}).waitFor();
   assert.equal(await agenda.getByText(/未来 12 小时气温/).count(),0);
-  await agenda.getByLabel('选中日期天气').getByText('16°C').waitFor();
+  assert.equal(await agenda.getByText('16°C',{exact:true}).count(),0,'temperature is only shown in the masthead');
   await agenda.getByText('大风预警',{exact:true}).waitFor();
   await agenda.getByText('戒备等级 三级',{exact:true}).waitFor();
   await agenda.getByLabel('日程楼栋').selectOption('');
@@ -707,6 +763,9 @@ try {
   waterTrial=true;
   await set({...account('water-desk','other',['water']),level:'L4'},['A']);
   await reveal('water');
+  const recentQuery=requests.find(([_,url,scope,q])=>url==='/api/capacity/water/records'&&scope==='A'&&q.get('latest_only')==='1')?.[3];
+  assert.equal(recentQuery?.get('start_date'),'2026-10-20');
+  assert.equal(recentQuery?.get('end_date'),'2026-11-18');
   await task('工作台验收水表').click();
   const input=dialog('工作台验收水表').getByLabel('本次水表读数',{exact:true});
   await input.fill('1250');
@@ -745,9 +804,50 @@ try {
   await todo.locator('.wb-task-tile[data-group="repair_management"][data-count="1"]').waitFor();
   await absent('repair_management','跨月待跟进项目');
   repairTrial=false;
+
+  aggregateTrial=true;
+  const scopePicker=page.getByLabel('工作台楼栋',{exact:true});
+  const todayButton=todo.getByRole('button',{name:'今日',exact:true});
+  await set({...account('both-aggregate','administrator',['maintenance']),level:'L0'},['CAMPUS','A','B','ALL']);
+  for(const scope of ['CAMPUS','ALL','A']){
+    await scopePicker.selectOption(scope);
+    await todayButton.click();
+    await reveal('notices:维保');
+    await task('A楼今日进行中').waitFor();
+    await task('跨楼进行中').waitFor();
+    assert.equal(await task('B楼前期仍未结束').count(),scope==='A'?0:1);
+    assert.equal(await task('已结束的旧通告').count(),0);
+    assert.equal(await task('次日才开始的通告').count(),0);
+  }
+  await set({...account('scoped-aggregate','manager',['maintenance']),level:'L1'},['CAMPUS','A','D']);
+  await todayButton.click();
+  await reveal('notices:维保');
+  await task('A楼今日进行中').waitFor();
+  await task('跨楼进行中').waitFor();
+  await absent('notices:维保','B楼前期仍未结束');
+  pausedReads=[];
+  try {
+    await set({...account('slow-sources','supervisor',['maintenance','event','risk_inspection']),level:'L3'},['A']);
+    await reveal('notices:维保');
+    await task('A楼今日进行中').waitFor({timeout:4000});
+    assert(pausedReads.length>=2,'a slower event and risk request are still in flight when notices appear');
+  } finally {
+    const reads=pausedReads;
+    pausedReads=undefined;
+    reads.forEach(resolve=>resolve());
+  }
+  aggregateTrial=false;
+  lateForecast=true;
+  await page.clock.setFixedTime(new Date('2026-11-18T14:30:00Z'));
   await set(account('visual-check','manager'),['A','B']);
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
+  await trend.waitFor();
+  assert.equal(await trend.locator('.weather-point').count(),3,'the ten-hour window crosses midnight');
+  const midnight=await trend.locator('.weather-point').first().boundingBox();
+  await trend.dispatchEvent('pointerdown',{pointerType:'touch',clientX:midnight.x+midnight.width/2,clientY:midnight.y+midnight.height/2});
+  await trend.getByText('次日 00:00 · 13°C',{exact:true}).waitFor();
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   assert.ok(await tiles.first().evaluate(element=>element.getBoundingClientRect().height>=44));
   assert.deepEqual(requests.filter(([method])=>method!=='GET').map(([method,url])=>[method,url]),[
     ['PATCH','/api/capacity/water/records/water-home'],['PATCH','/api/capacity/water/records/water-home'],

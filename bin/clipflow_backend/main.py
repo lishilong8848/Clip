@@ -3542,6 +3542,7 @@ class FastAPIPortalController:
                     page=int(request.query_params.get("page") or 1),
                     page_size=int(request.query_params.get("page_size") or 50),
                     incomplete=request.query_params.get("incomplete") == "1",
+                    latest_only=request.query_params.get("latest_only") == "1",
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -7868,12 +7869,19 @@ class FastAPIPortalController:
                 if period != stored.get('_source_period'):
                     return self._json_ok(request, session, {'state': ''})
                 state = str(document.get('state') or '')
-                message = ('已保存关联请求，等待飞书同步；核验通过后自动绑定。' if state == 'pending' else
+                identity = PortalRuntime.state_store.resolve_notice_identity(work_type=kind, source_record_id=source) or {}
+                linked = canonical_target_record_id(identity)
+                if linked and linked != canonical_target_record_id(stored):
+                    return self._json_ok(request, session, {'state': ''})
+                completed = PortalRuntime.completed_manual_binding(document, identity)
+                if state == 'done' and not completed:
+                    return self._json_ok(request, session, {'state': ''})
+                message = ('目标通告已结束，正在核对飞书源表的实际结束时间和状态。' if state == 'pending' else
                            '关联等待已超过30分钟，请核对飞书引用表；后台仍会继续核验。' if state == 'attention_required' else
                            '关联已核验，正在更新显示。' if state == 'bound' else
-                           '关联已完成，请重新打开通告查看；当前填写不会自动重置。' if state == 'done' else
+                           '已绑定原通告，原通告已结束。' if state == 'done' else
                            '关联等待已暂停，请重新核对权限、周期和目标通告。' if state == 'blocked' else '')
-                return self._json_ok(request, session, {'state': state, 'message': message})
+                return self._json_ok(request, session, {'state': state, 'message': message, **completed})
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
@@ -7984,6 +7992,11 @@ class FastAPIPortalController:
                     }
                 )
                 if target_finished:
+                    if validation.get("target_building_codes"):
+                        identity_payload["building_codes"] = validation["target_building_codes"]
+                        identity_payload["building"] = PortalRuntime.service._building_label_from_codes(
+                            identity_payload["building_codes"]
+                        )
                     identity_payload["status"] = str(
                         validation.get("target_status") or "已结束"
                     ).strip()
@@ -8002,9 +8015,22 @@ class FastAPIPortalController:
                                 and waiting_payload.get('_source_period') == identity_payload.get('_source_period')
                                 and waiting_payload.get('ended_at') == identity_payload.get('ended_at'))
                         if same:
+                            if waiting['state'] in {'pending', 'attention_required'}:
+                                await asyncio.to_thread(PortalRuntime.process_manual_finished_bindings,
+                                    retry={'key': wait_key, 'payload': waiting})
+                            fresh_wait = PortalRuntime.state_store.get_document('notice_manual_binding_wait', wait_key) or {}
+                            if fresh_wait.get('operation_id') != waiting['operation_id'] or fresh_wait.get('state') == 'blocked':
+                                raise PortalError('原关联请求已变化，请刷新后核对计划和目标通告。')
+                            if fresh_wait.get('state') == 'done':
+                                identity = PortalRuntime.state_store.resolve_notice_identity(
+                                    work_type=work_type, source_record_id=source_record_id) or {}
+                                completed = PortalRuntime.completed_manual_binding(fresh_wait, identity)
+                                if not completed:
+                                    raise PortalError('原关联状态已变化，请刷新后核对。')
+                                return self._json_ok(request, session, completed)
                             return self._json_ok(request, session, {
                                 'binding_pending': True, 'binding_id': waiting['operation_id'],
-                                'message': '关联请求已保存，正在等待飞书源表同步。',
+                                'message': '目标通告已结束，正在核对飞书源表的实际结束时间和状态。',
                             })
                         from lan_bitable_template_portal.account_impersonation import COOKIE as impersonation_cookie
                         from lan_bitable_template_portal.portal_auth import topic_execution
@@ -8033,7 +8059,7 @@ class FastAPIPortalController:
                             PortalRuntime.queue_manual_finished_binding, identity_payload, actor)
                         return self._json_ok(request, session, {
                             'binding_pending': True, 'binding_id': pending['operation_id'],
-                            'message': '已保存关联请求，等待飞书源表同步；核验通过后自动绑定。',
+                            'message': '目标通告已结束，正在核对飞书源表的实际结束时间和状态。',
                         })
                     if validation.get("source_found") and not source_ended_synced:
                         raise PortalError("目标记录已结束，但源表完成状态同步失败，请重试绑定。")
@@ -8285,7 +8311,7 @@ class FastAPIPortalController:
                         "notice_type": notice_type,
                         "source_record_id": source_record_id,
                         "target_record_id": target_record_id,
-                        "active_item_id": active_item_id,
+                        "active_item_id": result.get("active_item_id") or active_item_id,
                         "binding_context": binding_context,
                         "target_finished": target_finished,
                         "target_status": str(validation.get("target_status") or ""),

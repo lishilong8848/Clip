@@ -7567,6 +7567,7 @@ def render_workbench_lite(
           return;
         }}
         const result = data.data || data;
+        const targetEnded = result.target_finished ?? isEndedCandidate(candidate);
         const targetFormFields = result.target_form_fields
           || result.validation?.target_form_fields
           || candidate.form_fields
@@ -7581,17 +7582,17 @@ def render_workbench_lite(
         applyIdentityBindingToInbox(
           form,
           Object.assign({{}}, result, {{
-            target_ended: isEndedCandidate(candidate),
-            target_status: candidate.status || '',
+            target_ended: targetEnded,
+            target_status: result.target_status || candidate.status || '',
           }}),
           targetRecordId
         );
-        form.dataset.targetEnded = isEndedCandidate(candidate) ? '1' : '';
+        form.dataset.targetEnded = targetEnded ? '1' : '';
         const status = document.getElementById('lite-target-link-status');
-        if (status) status.textContent = isEndedCandidate(candidate)
+        if (status) status.textContent = targetEnded
           ? '已闭环'
           : '已绑定';
-        if (isEndedCandidate(candidate)) {{
+        if (targetEnded) {{
           updateNoticePreview(form);
         }} else {{
           setOngoingSubmitButtons(form);

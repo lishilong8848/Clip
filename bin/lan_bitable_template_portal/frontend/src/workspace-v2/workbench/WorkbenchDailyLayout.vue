@@ -1,17 +1,17 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
-import { NPopover } from 'naive-ui';
+import { NModal, NPopover } from 'naive-ui';
 import { ArrowRight, Bell, CalendarDays, ChevronLeft, ChevronRight, Cloud, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
 import { todoTimestamp } from '../businessTodos';
 import { requestJson } from '../client';
 import type { WorkItem } from './sources';
 import { inDeskScope } from './deskPolicy';
+import WorkbenchAgendaList from './WorkbenchAgendaList.vue';
 import WorkbenchRoster from './WorkbenchRoster.vue';
 import NavThemePicker from '../NavThemePicker.vue';
 import './workbench.css';
 
 type Link = {label:string; url:string};
-type DayWeather = {date:string; description:string; minimum:number|null; maximum:number|null};
 type AgendaEntry = {key:string; item:WorkItem; type:'plan'|'change'|'due'; label:string; time:string; stamp:number};
 type CalendarItem={kind:string;title:string;scopes?:string[];notes?:string[];start?:string;source_id?:string;source?:string};
 type CalendarDay={items:CalendarItem[];staff:{scope:string;shift:string;names:string[]}[]};
@@ -115,7 +115,6 @@ function moveCalendar(delta:number){
   const target=Date.parse(selected.value+'T00:00:00Z')+delta*7*86400000;
   selectDay(new Date(target).toISOString().slice(0,10));
 }
-watch(selected,()=>{agendaExpanded.value=false;});
 const byDay = computed(()=>{
   const days = new Map<string,AgendaEntry[]>();
   for (const task of props.tasks) {
@@ -163,6 +162,11 @@ const calendarNotice=ref(''), calendarBusy=ref(false);
 const calendarRevision=ref(0), calendarFailed=ref(false);
 const calendarDay=computed(()=>calendarDays.value[selected.value]);
 const calendarScope=computed(()=>agendaScope.value||props.calendarScope||'');
+const pendingAgendaTask=ref<WorkItem>();
+watch([selected,calendarScope,()=>props.calendarIdentity],()=>{
+  pendingAgendaTask.value=undefined;
+  agendaExpanded.value=false;
+});
 const rosterKey=computed(()=>JSON.stringify([today.value,calendarScope.value,props.calendarIdentity]));
 const rosterRevision=ref(0);
 const roster=ref<RosterSnapshot>();
@@ -294,40 +298,41 @@ const noticesByDay = computed(()=>{
   return days;
 });
 
-const weather = ref<{temp:number|null;humidity:number|null;description:string;days:DayWeather[];hourly:{stamp:number;temp:number}[]}>();
+const weather = ref<{temp:number|null;humidity:number|null;description:string;hourly:{stamp:number;temp:number}[]}>();
 const weatherBusy = ref(false);
 const selectedWeekday = computed(()=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,weekday:'long'}).format(new Date(selected.value+'T12:00:00+08:00')));
-const selectedWeather = computed(()=>{
-  const forecast=weather.value?.days.find(day=>day.date===selected.value);
-  const current=selected.value===today.value?weather.value:undefined;
-  if (!current&&!forecast) return undefined;
-  const temp=current?.temp;
-  const low=forecast?.minimum, high=forecast?.maximum;
-  return {
-    description:current?.description||forecast?.description||'',
-    temperature:temp!=null?temp+'°C':low!=null&&high!=null?low+'～'+high+'°C':high!=null?high+'°C':low!=null?low+'°C':'',
-  };
-});
 const condition=(description:string)=>description.includes('雪')?'snow':/雨|雷/.test(description)?'rain':
   /多云|晴间/.test(description)?'partly':/晴/.test(description)?'sun':'cloud';
 const icons={snow:CloudSnow,rain:CloudRain,partly:CloudSun,sun:Sun,cloud:Cloud};
-const weatherIcon=computed(()=>icons[condition(selectedWeather.value?.description||'')]);
 const currentCondition=computed(()=>condition(weather.value?.description||''));
+const forecastHours=10*3600000;
+const weatherTime=(stamp:number)=> (dayKey(stamp)===today.value?'':'次日 ')+dayTime(stamp);
 const weatherTrend=computed(()=>{
   if(!weather.value)return;
-  const hourly=weather.value.hourly;
-  const daily=hourly.length<2;
-  const samples=daily?weather.value.days.flatMap(day=>day.maximum===null?[]:[{
-    stamp:Date.parse(day.date+'T00:00:00+08:00'),temp:day.maximum,
-  }]):hourly;
-  if(samples.length<2)return;
+  const now=props.clock, until=now+forecastHours;
+  const samples=weather.value.hourly.filter(point=>point.stamp>=now&&point.stamp<=until);
+  if(!samples.length)return;
   const min=Math.min(...samples.map(point=>point.temp)),max=Math.max(...samples.map(point=>point.temp));
-  const first=samples[0].stamp,last=samples[samples.length-1].stamp;
-  const points=samples.map(({stamp,temp})=>`${3+138*(stamp-first)/(last-first)},${25-20*(temp-min+1)/(max-min+2)}`).join(' ');
-  const label=daily?'未来几天最高温':'今日气温趋势';
-  const time=(stamp:number)=>daily?dayKey(stamp).slice(5):dayTime(stamp);
-  return {points,label,start:time(first),end:time(last),details:samples.map(({stamp,temp})=>time(stamp)+' '+temp+'°C').join('，')};
+  const readings=samples.map(({stamp,temp})=>({stamp,temp,
+    x:3+138*(stamp-now)/forecastHours,y:25-20*(temp-min+1)/(max-min+2)}));
+  const points=readings.map(({x,y})=>`${x},${y}`).join(' ');
+  const fill=`${readings[0].x},28 ${points} ${readings[readings.length-1].x},28`;
+  return {readings,points,fill,end:weatherTime(until)};
 });
+const weatherStamp=ref<number>();
+const weatherReading=computed(()=>weatherTrend.value?.readings.find(point=>point.stamp===weatherStamp.value));
+function showWeatherPoint(event:PointerEvent) {
+  const rect=(event.currentTarget as HTMLElement).getBoundingClientRect();
+  const x=144*(event.clientX-rect.left)/rect.width;
+  const readings=weatherTrend.value?.readings;
+  if(readings?.length)weatherStamp.value=readings.reduce((near,point)=>Math.abs(point.x-x)<Math.abs(near.x-x)?point:near).stamp;
+}
+function stepWeatherPoint(step:number) {
+  const readings=weatherTrend.value?.readings;
+  if(!readings?.length)return;
+  const index=readings.findIndex(point=>point.stamp===weatherStamp.value);
+  weatherStamp.value=readings[Math.min(readings.length-1,Math.max(0,index+step))].stamp;
+}
 let weatherAbort:AbortController|undefined;
 let weatherAt=0;
 async function readWeather() {
@@ -342,18 +347,12 @@ async function readWeather() {
       return;
     }
     const temperature=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?Math.round(value):null;
-    const days:DayWeather[]=[];
-    if(Array.isArray(data.forecast)) data.forecast.slice(0,5).forEach(day=>{
-      if(typeof day?.date==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(day.date)&&typeof day.description==='string')
-        days.push({date:day.date,description:day.description,minimum:temperature(day.minimum),maximum:temperature(day.maximum)});
-    });
     const hourly=new Map<number,number>();
     if(Array.isArray(data.hourly)) for(const point of data.hourly){
       const stamp=todoTimestamp(point?.time),temp=temperature(point?.temp);
-      if(stamp!==undefined&&temp!==null&&dayKey(stamp)===today.value)hourly.set(stamp,temp);
+      if(stamp!==undefined&&temp!==null)hourly.set(stamp,temp);
     }
     weather.value={temp:temperature(data.temperature),humidity:temperature(data.humidity),description:data.current_description||data.description,
-      days:[...new Map(days.map(day=>[day.date,day])).values()].sort((a,b)=>a.date.localeCompare(b.date)),
       hourly:[...hourly].sort(([a],[b])=>a-b).map(([stamp,temp])=>({stamp,temp}))};
   } catch {
     // Keep verified readings until the date changes.
@@ -364,7 +363,7 @@ async function readWeather() {
 watch(()=>props.clock,()=>{if(!props.guest&&!document.hidden&&Date.now()-weatherAt>(weather.value?600000:60000))void readWeather();});
 watch(()=>props.calendarIdentity,()=>{weatherAbort?.abort();weather.value=undefined;weatherAt=0;if(!props.guest)void readWeather();});
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest){void readWeather();void loadCalendarWeather();}});
-onDeactivated(()=>{panel.value='';});
+onDeactivated(()=>{panel.value='';pendingAgendaTask.value=undefined;agendaExpanded.value=false;});
 onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weatherAbort?.abort();calendarWeatherRequest?.abort();});
 
 
@@ -397,6 +396,15 @@ const itinerary=computed(()=>{
     meta:[entry.item.scope,entry.item.status,entry.due?'截止 '+entry.due:''].filter(Boolean).join(' · '),task:entry.item}));
   return [...records,...entries].sort((a,b)=>(a.stamp??Infinity)-(b.stamp??Infinity));
 });
+function openAgendaTask(item:WorkItem) {
+  pendingAgendaTask.value=item;
+  agendaExpanded.value=false;
+}
+function afterAgendaClose() {
+  const item=pendingAgendaTask.value;
+  pendingAgendaTask.value=undefined;
+  if(item)emit('task',item);
+}
 </script>
 
 <template>
@@ -424,12 +432,22 @@ const itinerary=computed(()=>{
           <small v-if="weather">{{ [weather.description,weather.humidity!=null?'湿度 '+weather.humidity+'%':''].filter(Boolean).join(' · ') }}</small>
         </div>
         <div v-if="weatherTrend" class="weather-chart">
-          <svg viewBox="0 0 144 28" role="img" :aria-label="weatherTrend.label+'，'+weatherTrend.details">
-            <polygon :points="'3,28 '+weatherTrend.points+' 141,28'" fill="currentColor" opacity=".13"/>
-            <polyline :points="weatherTrend.points" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-          </svg>
-          <div><span>{{ weatherTrend.start }}</span><span>{{ weatherTrend.label }}</span><span>{{ weatherTrend.end }}</span></div>
+          <div class="weather-plot" role="group" tabindex="0" aria-label="未来 10 小时气温趋势，使用左右方向键查看预报"
+            @pointermove="$event.pointerType!=='touch' && showWeatherPoint($event)" @pointerdown="showWeatherPoint"
+            @pointerleave="$event.pointerType!=='touch' && (weatherStamp=undefined)" @blur="weatherStamp=undefined"
+            @focus="weatherStamp===undefined && stepWeatherPoint(1)" @keydown.left.prevent="stepWeatherPoint(-1)"
+            @keydown.right.prevent="stepWeatherPoint(1)" @keydown.esc="weatherStamp=undefined">
+            <svg viewBox="0 0 144 28" preserveAspectRatio="none" aria-hidden="true">
+              <polygon :points="weatherTrend.fill" fill="currentColor" opacity=".13"/>
+              <polyline :points="weatherTrend.points" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+            </svg>
+            <span v-for="point in weatherTrend.readings" :key="point.stamp" class="weather-point" aria-hidden="true"
+              :class="{active:point.stamp===weatherStamp}" :style="{left:point.x/144*100+'%',top:point.y/28*100+'%'}"></span>
+            <output v-if="weatherReading" class="weather-reading" :style="{'--sample-x':weatherReading.x/144*100+'%'}">{{ weatherTime(weatherReading.stamp) }} · {{ weatherReading.temp }}°C</output>
+          </div>
+          <div class="weather-axis"><span>现在</span><span>未来 10 小时</span><span>{{ weatherTrend.end }}</span></div>
         </div>
+        <small v-else-if="weather" class="weather-axis">暂无小时预报</small>
       </section>
       <div class="mast-actions"><div class="desk-tools">
         <button v-if="!guest" class="small-key agenda-jump" aria-label="跳到日历" title="日历" @click="showAgenda"><CalendarDays :size="16" aria-hidden="true" /></button>
@@ -489,17 +507,14 @@ const itinerary=computed(()=>{
           </div>
         </header>
         <section class="itinerary" aria-label="所选日期日程">
-          <div class="line-head"><h3>{{ selected.slice(5).replace('-',' / ') }} <small>{{ selectedWeekday }}</small></h3>
-            <div class="selected-weather" aria-label="选中日期天气"><component :is="weatherIcon" :size="16" /><span>{{ selectedWeather?.description || '' }}</span><b>{{ selectedWeather?.temperature || (weatherBusy?'读取中':'预报待更新') }}</b></div>
-          </div>
-          <ol v-if="itinerary.length" class="timeline"><li v-for="entry in agendaExpanded?itinerary:itinerary.slice(0,3)" :key="entry.key">
-            <time>{{ entry.time }}</time><div><small>{{ entry.label }}</small>
-              <button v-if="entry.task" class="agenda-task" @click="emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" /></button><b v-else>{{ entry.title }}</b>
-              <p v-if="entry.meta">{{ entry.meta }}</p>
-            </div>
-          </li></ol>
+          <h3>{{ selected.slice(5).replace('-',' / ') }} <small>{{ selectedWeekday }}</small></h3>
+          <WorkbenchAgendaList v-if="itinerary.length" :entries="itinerary.slice(0,3)" @task="emit('task',$event)" />
           <p v-else-if="!calendarNotice" class="muted">{{ calendarBusy?'读取中…':calendarFailed?'日程读取失败':!calendarScope?'暂无授权日程':queueNote?'暂无已读取日程':'当日无安排' }}</p>
-          <button v-if="itinerary.length>3" class="text-key" :aria-expanded="agendaExpanded" @click="agendaExpanded=!agendaExpanded">{{ agendaExpanded?'收起日程':'展开全部 '+itinerary.length+' 项日程' }}</button>
+          <button v-if="itinerary.length>3" class="text-key" aria-haspopup="dialog" @click="agendaExpanded=true">展开全部 {{ itinerary.length }} 项日程</button>
+          <NModal v-model:show="agendaExpanded" preset="card" class="wb-agenda-dialog" style="width:min(92vw,560px)" :title="selected+' 日程'"
+            aria-label="当天全部日程" transform-origin="center" @after-leave="afterAgendaClose">
+            <div class="agenda-scroll"><WorkbenchAgendaList :entries="itinerary" @task="openAgendaTask" /></div>
+          </NModal>
           <div v-if="calendarNotice" class="retry-note" role="status">{{ calendarNotice }} <button class="text-key" @click="calendarRevision++">重试日程</button></div>
         </section>
         </div>
@@ -548,21 +563,21 @@ const itinerary=computed(()=>{
 .daily-desk button { cursor:pointer }
 .daily-desk button:disabled { cursor:wait; opacity:.65 }
 .daily-desk :is(button,select,input):focus-visible,.day-planner:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
-.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.selected-weather,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
+.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
 .desk-head,.line-head,.month-tools { justify-content:space-between }
 .desk-head { flex-wrap:wrap; gap:10px 16px }
 .desk-title { gap:12px; min-width:0 }
 .desk-avatar { width:43px; height:43px; border-radius:15px; display:grid; place-items:center; color:var(--desk-blue); background:linear-gradient(135deg,var(--desk-blue-wash),var(--desk-green-wash)); box-shadow:var(--desk-shadow); overflow:hidden }
 .desk-avatar img { width:100%; height:100%; object-fit:cover }
 .identity-line { font-size:12px; color:var(--desk-muted); flex-wrap:wrap; gap:3px 8px; margin-top:3px; overflow-wrap:anywhere }
-.name-control,.text-key,.agenda-task { border:0; padding:0; background:transparent; color:var(--desk-green); font-weight:650 }
+.name-control,.text-key { border:0; padding:0; background:transparent; color:var(--desk-green); font-weight:650 }
 .desk-tools { position:relative; flex-wrap:nowrap; max-width:100% }
 .desk-anchor { position:relative; min-width:0 }
 .search-field,.tool-key,.small-key,.day-planner select,.today-key { background:var(--desk-paper); border:1px solid var(--desk-line); border-radius:10px }
 .search-field { height:40px; width:clamp(145px,17vw,230px); padding:0 11px; background:var(--desk-well); color:var(--desk-muted) }
 .search-field input { width:100%; min-width:0; padding:0; background:transparent; border:0; font-size:13px }
 .search-field svg { flex:none }
-.tool-key,.small-key,.text-key,.icon-key,.agenda-task { display:inline-flex; align-items:center; justify-content:center; gap:5px }
+.tool-key,.small-key,.text-key,.icon-key { display:inline-flex; align-items:center; justify-content:center; gap:5px }
 .tool-key,.small-key { min-height:40px; padding:5px 10px; font-size:13px; position:relative }
 .icon-key { background:transparent; border:1px solid transparent; width:32px; height:32px; border-radius:8px }
 .notice-count { position:absolute; right:0; top:0; min-width:16px; padding:1px 3px; border-radius:999px; background:var(--desk-blue); color:var(--desk-paper); font-size:10px; line-height:1.35; font-weight:700; text-align:center }
@@ -573,15 +588,15 @@ const itinerary=computed(()=>{
 .search-results button { display:flex; justify-content:space-between; align-items:center }
 .search-results button:hover,.pointed,.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
 .notice-row { display:grid; gap:2px }
-.notice-row span,.muted,.itinerary h3 small,.timeline small,.timeline p { color:var(--desk-muted); font-size:12px; font-weight:normal }
-.timeline { list-style:none; padding:0 }
+.notice-row span,.muted,.itinerary h3 small { color:var(--desk-muted); font-size:12px; font-weight:normal }
 .masthead { justify-content:flex-start;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
 .mast-actions { display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:5px;min-width:0;margin-inline-start:auto }
 .desk-weather {
-  --weather-hue:var(--desk-blue); --weather-tint:#9dbee1;
-  display:flex;align-items:center;gap:8px;min-width:0;width:min(100%,340px);padding:6px 10px;border:1px solid var(--desk-line);
-  border-radius:14px;background:linear-gradient(110deg,color-mix(in srgb,var(--weather-tint) 29%,var(--desk-paper)),var(--desk-paper) 82%);
+  --weather-hue:var(--desk-blue); --weather-tint:#9dbee1; --weather-strength:34%;
+  display:flex;align-items:center;gap:8px;min-width:0;width:min(100%,360px);margin-inline:auto;padding:8px 12px;
+  background:radial-gradient(ellipse closest-side, color-mix(in srgb,var(--weather-tint) var(--weather-strength),transparent) 16%, transparent 100%);
 }
+[data-v2-theme="dark"] .desk-weather { --weather-strength:21% }
 .desk-weather[data-condition="sun"] { --weather-tint:#f3bd67 }
 .desk-weather[data-condition="partly"] { --weather-tint:#c9cedf }
 .desk-weather[data-condition="rain"] { --weather-tint:#73a7c6 }
@@ -591,11 +606,15 @@ const itinerary=computed(()=>{
 [data-v2-theme="dark"] .desk-weather[data-condition="sun"] .weather-mark { color:#ffc978 }
 .weather-current { display:grid;gap:1px;min-width:0;flex:none;max-width:53% }
 .weather-current strong { font-size:21px;line-height:1.14;font-variant-numeric:tabular-nums }
-.weather-current small,.weather-chart div { font-size:10px;color:var(--desk-muted);line-height:1.25 }
+.weather-current small,.weather-axis { font-size:10px;color:var(--desk-muted);line-height:1.25 }
 .weather-chart { flex:1 1 auto;min-width:0;color:var(--weather-hue) }
+.weather-plot { position:relative;cursor:crosshair }
+.weather-plot:focus-visible { outline:2px solid var(--desk-blue); outline-offset:2px }
 .weather-chart svg { display:block;width:100%;height:25px }
-.weather-chart div { display:flex;justify-content:space-between;gap:3px;font-variant-numeric:tabular-nums }
-.weather-chart div span { white-space:nowrap }
+.weather-axis { display:flex;justify-content:space-between;gap:3px;white-space:nowrap;font-variant-numeric:tabular-nums }
+.weather-point { position:absolute;pointer-events:none;width:4px;height:4px;transform:translate(-50%,-50%);border-radius:50%;background:currentColor }
+.weather-point.active { width:8px;height:8px;box-shadow:0 0 0 2px var(--desk-paper) }
+.weather-reading { position:absolute;z-index:3;bottom:calc(100% + 4px);left:clamp(42px,var(--sample-x),calc(100% - 42px));transform:translateX(-50%);padding:3px 6px;border:1px solid var(--desk-line);border-radius:5px;background:var(--desk-paper);color:var(--desk-ink);pointer-events:none;white-space:nowrap;font-size:11px }
 .mast-identity { min-width:0 }
 .title-line { display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap }
 .title-line h1 { font-size:21px;letter-spacing:-.03em;line-height:1.25 }
@@ -632,21 +651,17 @@ const itinerary=computed(()=>{
 .day-cell i { display:block; position:absolute; bottom:2px; left:calc(50% - 2px); border-radius:50%; background:currentColor; width:4px; height:4px }
 .day-preview { max-width:min(280px,80vw); max-height:230px; overflow:auto; font-size:13px }
 .day-preview p { display:grid; margin:6px 0; gap:2px }
-.selected-weather { gap:3px; font-size:12px; color:var(--desk-blue) }
 .itinerary .muted { margin-top:9px }
-.timeline { margin-top:8px!important }
-.timeline li { display:grid; grid-template-columns:42px minmax(0,1fr); gap:8px; font-size:13px }
-.timeline time { padding-top:8px; color:var(--desk-blue); font-size:12px; font-variant-numeric:tabular-nums }
-.timeline li>div { position:relative; display:grid; gap:2px; border-left:1px solid var(--desk-line); padding:5px 0 8px 11px; overflow-wrap:anywhere }
-.timeline li>div::before { content:""; position:absolute; left:-3px; top:12px; width:5px; height:5px; border-radius:50%; background:var(--desk-blue) }
-.agenda-task { justify-content:flex-start; text-align:left }
+:global(.wb-agenda-dialog) { --desk-blue:var(--v2-palette-accent-text,var(--v2-blue)); --desk-green:var(--desk-blue); --desk-muted:var(--v2-muted); --desk-line:var(--v2-border) }
+.agenda-scroll { max-height:min(58dvh,480px);overflow:auto;overscroll-behavior:contain }
 .retry-note,.weather-guard { font-size:12px }
 .retry-note,.weather-guard>*+* { margin-top:6px }
 .weather-guard ul { padding-left:18px }
 .warning { display:flex; justify-content:space-between; padding:6px 9px; background:var(--desk-blue-wash); border-radius:8px }
 .agenda-jump { display:inline-flex }
 @container daily-desk (min-width:980px) {
-  .masthead.folio { display:grid;grid-template-columns:minmax(0,1fr) minmax(250px,340px) minmax(0,1fr) }
+  .masthead.folio { display:grid;grid-template-columns:minmax(0,1fr) clamp(340px,38cqw,520px) minmax(0,1fr) }
+  .desk-weather { width:100% }
   .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
   .agenda-jump { display:none }
 }

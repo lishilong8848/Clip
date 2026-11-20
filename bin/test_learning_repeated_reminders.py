@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from bin import test_learning as support
 from bin.test_learning import learning
 from lan_bitable_template_portal import learning_engagement as engagement
-from lan_bitable_template_portal.pre_shift_checks import windows
+from lan_bitable_template_portal.learning_schedule import windows
 
 REAL_THREAD_START = threading.Thread.start
 DAY = '2026-10-10'
@@ -33,7 +33,9 @@ class RepeatedReminderTests(unittest.TestCase):
         self.hr = {'people': {'r1': {'name': 'Worker', 'scopes': ['A'], 'selectable': True,
             'position': '值班员', 'login_ids': ['ou_person']}}}
         self.roster = [{'name': 'Worker', 'scope': 'A', 'shift': '白', 'open_id': 'ou_person'}]
-        self.reader = Mock(side_effect=lambda day: copy.deepcopy(self.roster) if day == DAY else [])
+        self.reader = Mock(side_effect=lambda day: {'source_date': day,
+            'source_observed_at': dt.datetime.fromisoformat(day + 'T08:00:00+08:00').timestamp(),
+            'people': copy.deepcopy(self.roster) if day == DAY else []})
         self.service._login_people_reader = lambda: self.hr
         self.service._shift_roster_reader = self.reader
         self.service._portal_url = lambda: 'http://portal.test:18766'
@@ -369,6 +371,33 @@ class RepeatedReminderTests(unittest.TestCase):
         with patch.object(learning, 'now', return_value=windows(DAY, '夜')[1]):
             with self.assertRaisesRegex(learning.LearningError, '班次已结束'):
                 self.service.dispatch('paper.claim', payload, actor, {})
+
+    def test_current_duty_entry_uses_roster_and_preserves_night_date(self):
+        self.roster[0]['shift'] = '夜'
+        self.send(self.at(20))
+        actor = {'id': 'ou_person', 'person_id': 'canonical', 'can_answer': True}
+        with patch.object(learning, 'now', return_value=self.at(8, 30, day=11)):
+            duty = self.service.bootstrap('', actor)['daily_duty']
+            self.assertEqual(duty, {'date': DAY, 'shift': '夜', 'scope': 'A', 'end_at': '2026-10-11T09:00:00+08:00'})
+            claimed = self.service.dispatch('paper.claim', {}, actor, {})
+            self.assertEqual(claimed['date'], DAY)
+            result = self.service.list_papers(actor, {'date': DAY, 'mode': 'daily'})
+            self.assertEqual([row['id'] for row in result['items']], [claimed['id']])
+        with patch.object(learning, 'now', return_value=self.at(9, day=11)):
+            self.assertIsNone(self.service.bootstrap('', actor)['daily_duty'])
+            with self.assertRaisesRegex(learning.LearningError, '当前没有可领取'):
+                self.service.dispatch('paper.claim', {}, actor, {})
+            self.assertEqual(len(self.service._all('paper')), 1)
+
+    def test_current_duty_entry_respects_new_hire_exemption(self):
+        self.hr['people']['r1']['entry_date'] = '2026-10-01'
+        actor = {'id': 'ou_person', 'person_id': 'canonical', 'can_answer': True}
+        with patch.object(learning, 'now', return_value=self.at(14)):
+            boot = self.service.bootstrap('', actor)
+            self.assertIsNone(boot['daily_duty'])
+            self.assertEqual(boot['daily_exemption']['resume_date'], '2026-11-01')
+            with self.assertRaises(learning.LearningError):
+                self.service.dispatch('paper.claim', {}, actor, {})
 
     def test_night_claim_rejects_wrong_roster_scope_person_and_invalid_window(self):
         self.roster[0]['shift'] = '夜'

@@ -7,7 +7,7 @@ import type { Role, Section } from './recipes';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
 export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
-export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean; urgentEvent?:string };
+export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; readOnly?:boolean; urgentEvent?:string };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
 type Publish = (partial:SourceResult)=>void;
 export type Source = {
@@ -56,9 +56,11 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     if (!scoped && ['critical_guard','water'].includes(id)) return [];
     if (id==='signatures' && ctx.user.impersonation) return [];
     const readOnly=ctx.role==='manager'&&id==='notices'&&!ctx.accessLevel;
-    const selectedScopes=id==='risk_inspection'&&ctx.scope==='CAMPUS'
-      ? ctx.scopes.map(option=>option.value).filter(scope=>/^[A-EH]$/.test(scope))
-      : ctx.selectedScopes;
+    const selectedScopes=id==='notices'&&ctx.scope==='CAMPUS'&&ctx.selectedScopes
+      ? [...ctx.selectedScopes,ctx.scope]
+      : id==='risk_inspection'&&ctx.scope==='CAMPUS'
+        ? ctx.scopes.map(option=>option.value).filter(scope=>/^[A-EH]$/.test(scope))
+        : ctx.selectedScopes;
     const available = todoSources(id,{...ctx,selectedScopes,home:true},get);
     if (!available.length) return [];
     return [{

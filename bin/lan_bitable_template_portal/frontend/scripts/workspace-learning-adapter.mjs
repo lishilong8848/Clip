@@ -141,12 +141,18 @@ watch(()=>paper.value?.id,()=>{v2CompletionHidden.value=false;v2AnswerCard.value
 const v2PrimaryTabs=computed(()=>['home','today','review','profile','history'].flatMap(id=>tabs.value.filter(item=>item.id===id).map(item=>({...item,label:id==='today'?'答题':id==='review'?'错题':id==='history'?'历史':item.label}))));
 const v2AuxOptions=computed(()=>tabs.value.filter(item=>!['home','today','review','profile','history'].includes(item.id)).map(item=>({key:item.id,label:item.label,disabled:busy.value})));
 const v2AuxTitle=computed(()=>v2AuxOptions.value.find(item=>item.key===tab.value)?.label|| (isAdmin.value?'学练管理':'更多'));
-function v2OpenSection(key:string){if(tabs.value.some(item=>item.id===key))void switchTab(key as Tab);}
+const v2Feedback=computed(()=>tab.value==='issues'||tab.value==='pending');
+const v2FocusedLearning=computed(()=>v2Feedback.value||tab.value==='questions');
+const v2LearningTabs=computed(()=>tabs.value.filter(item=>item.id!=='pending').map(item=>item.id==='issues'?{...item,label:'题目反馈'}:item));
+function v2OpenSection(key:string){
+  if(key==='issues'&&isAdmin.value)void switchTab('pending');
+  else if(v2LearningTabs.value.some(item=>item.id===key))void switchTab(key as Tab);
+}
 function v2Building(value:string){const row=overviewScopes.value.find(item=>item.value===value);if(row)void changeScope(row.label);}
 const v2Completed=computed(()=>!!paper.value && validCount.value>0 && answered.value>=validCount.value);
 const v2PaperStats=computed(()=>{const qs=(paper.value?.questions||[]).filter((q:Dict)=>!q.invalid);const choices=qs.filter((q:Dict)=>q.type!=='interview'&&q.attempt);return {choices:choices.length,correct:choices.filter((q:Dict)=>q.attempt.correct===true).length,interviews:qs.filter((q:Dict)=>q.type==='interview'&&q.attempt).length};});
 async function v2Resume(mode:'daily'|'practice'){
-  if(busy.value||loading.value||viewMode.value!=='practice'||!boot.value.can_answer||learner.value?.id!==boot.value.self_person?.id)return;
+  if(busy.value||loading.value||viewMode.value!=='practice'||!boot.value.can_answer||learner.value?.id!==boot.value.self_person?.id||(mode==='daily'&&!dailyDuty.value))return;
   if(studyMode.value!==mode)await switchStudyMode(mode);else if(!paper.value)await loadTodayPaper();
   if(!paper.value)return;
   tab.value='today';reading.value=true;
