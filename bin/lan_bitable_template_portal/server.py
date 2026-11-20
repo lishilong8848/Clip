@@ -9608,6 +9608,15 @@ class PortalRuntime:
         target_record_id: str,
         result_message: str,
     ) -> dict:
+        from .qt_event_delivery import OPERATIONS
+        delivery = cls.state_store.get_document(OPERATIONS, operation_id) or {}
+        if delivery.get("delivery_state") in {"sent", "skipped"}:
+            result = {"robot_sent": delivery["delivery_state"] == "sent",
+                      "robot_skipped": delivery["delivery_state"] == "skipped",
+                      "last_robot_error": "", "remote_written": True}
+            cls._mark_notice_remote_operation(operation_id, status=None,
+                result={**result, "robot_delivery_state": delivery["delivery_state"]})
+            return result
         lock = cls._event_robot_lock_for_operation(
             operation_id,
             target_record_id=target_record_id,
@@ -9910,10 +9919,13 @@ class PortalRuntime:
 
     @classmethod
     def retry_pending_event_robot_messages(cls, *, limit: int = 20) -> dict:
+        from .qt_event_delivery import OPERATIONS
         retried = sent = failed = superseded = 0
         for operation in cls.state_store.list_pending_event_robot_operations(
             limit=max(1, int(limit or 20)),
         ):
+            if cls.state_store.get_document(OPERATIONS, operation["operation_id"]):
+                continue
             result = dict(operation.get("result") or {})
             retry_data = dict(result.get("robot_payload") or {})
             target_record_id = str(
@@ -9990,8 +10002,9 @@ class PortalRuntime:
     ) -> None:
         if str((data or {}).get("notice_type") or "").strip() != "事件通告":
             return
+        from .qt_event_delivery import ARCHIVING
         robot_result = robot_result if isinstance(robot_result, dict) else {}
-        if success and action_type in {"upload", "start", "update", "end"} and robot_result.get("remote_verified", True):
+        if success and not ARCHIVING.get() and action_type in {"upload", "start", "update", "end"} and robot_result.get("remote_verified", True):
             from .event_priority import record_result
             record_result(cls.state_store, data, action_type, record_id)
             cls.action_queue_event.set()
@@ -10310,6 +10323,7 @@ class PortalRuntime:
         cls, data: dict, record_id: str, fields: dict, *, allow_finished: bool = False
     ) -> str:
         from .event_priority import NAMESPACE
+        from .qt_event_delivery import ARCHIVING
 
         lifecycle = cls.service._target_record_lifecycle(
             work_type=WORK_TYPE_EVENT,
@@ -10321,6 +10335,7 @@ class PortalRuntime:
             lifecycle["finished"]
             or fields.get(EVENT_NOTICE_FIELDS["end_time"])
             or (local_lifecycle.get("state") == "ended" and local_lifecycle.get("web_event_id"))
+            or (local_lifecycle.get("state") == "ended" and local_lifecycle.get("qt_event_id") and not ARCHIVING.get())
         ):
             return "目标事件已结束，不能再上传更新或结束。请刷新并核对事件记录。"
         incoming_time = cls._event_notice_time_key(data)
@@ -10673,12 +10688,21 @@ class PortalRuntime:
             )
         payload["notice_type"] = notice_type
         section = "event" if notice_type == "事件通告" else "other"
+        ended_before_archive = False
+        if section == "event":
+            from .qt_event_delivery import ARCHIVING, EVENTS, OPERATIONS
+            if ARCHIVING.get():
+                delivery = cls.state_store.get_document(OPERATIONS, ARCHIVING.get()) or {}
+                event = cls.state_store.get_document(EVENTS, delivery.get("event_id", "")) or {}
+                ended_before_archive = event.get("state") == "ended"
+                if ended_before_archive:
+                    payload.update(status="已结束", action="end")
         try:
             cls.state_store.upsert_notice_identity(payload, origin="qt_upload")
         except Exception as exc:
             log_warning(f"Qt 上传目标 ID 写入身份表失败: {exc}")
         active_item_id = str(payload.get("active_item_id") or "").strip()
-        if not active_item_id:
+        if not active_item_id or ended_before_archive:
             return record_version
         try:
             cls.state_store.upsert_qt_active_item(

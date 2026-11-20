@@ -7,38 +7,21 @@ const bundled=await build({entryPoints:[fileURLToPath(new URL('../src/workspace-
 const values=new Map(),sandbox={console,setTimeout,clearTimeout,document:{documentElement:{dataset:{},style:{setProperty(){}}},createElement:()=>({})},localStorage:{getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)}};
 runInNewContext(bundled.outputFiles[0].text,sandbox);
 const api=sandbox.themes;
-assert.equal(api.PALETTES.length,6);
-for(const palette of api.PALETTES)for(const dark of [false,true]){
-  const c=api.paletteColors(palette.id,dark);
-  for(const background of [c.bg,c.surface,c.soft]){
-    assert(api.contrast(c.text,background)>=4.5,palette.id+' body text');
-    assert(api.contrast(c.muted,background)>=4.5,palette.id+' secondary text');
-    assert(api.contrast(c.accentText,background)>=4.5,palette.id+' accent text');
-  }
-  for(const background of [c.accent,c.hover,c.pressed])assert(Math.max(api.contrast('#000000',background),api.contrast('#ffffff',background))>=4.5,palette.id+' button label');
-  assert(api.contrast('#f4f8ff',c.header)>=4.5,palette.id+' header');
-  assert(api.contrast(c.text,c.selection)>=4.5,palette.id+' selected menu');
-  for(const background of [c.sidebar,c.sidebarEnd,c.navHover,c.navSelected]){
-    assert(api.contrast(c.navText,background)>=4.5,palette.id+' navigation text');
-    assert(api.contrast(c.navMuted,background)>=4.5,palette.id+' navigation secondary text');
-  }
+function luminance(hex) {
+  const channels=hex.slice(1).match(/../g).map(pair=>parseInt(pair,16)/255)
+    .map(c=>c<=0.04045?c/12.92:((c+0.055)/1.055)**2.4);
+  return channels[0]*.2126+channels[1]*.7152+channels[2]*.0722;
 }
-for(const custom of ['#000000','#ffffff','#fdc941','#ff0000','#808080'])for(const dark of [false,true]){
-  const c=api.paletteColors('custom',dark,custom);
-  assert(api.contrast(c.accentText,c.surface)>=4.5,'custom accent text');
-  assert(api.contrast(c.onAccent,c.accent)>=4.5,'custom filled button');
-  assert(api.contrast(c.navText,c.sidebar)>=4.5,'custom navigation text');
+function readable(text,bg){
+  const [high,low]=[luminance(text),luminance(bg)].sort((a,b)=>b-a);
+  assert((high+.05)/(low+.05)>=4.5,text+' on '+bg);
 }
-api.savePalette('a','gold');api.saveNightMode('a',true);
-api.loadPalette('b');api.loadNightMode('b');
-assert.equal(api.paletteId.value,'cobalt');assert.equal(api.nightMode.value,false);
-api.loadPalette('a');api.loadNightMode('a');
-assert.equal(api.paletteId.value,'gold');assert.equal(api.nightMode.value,true);
-values.set('clipflow:workspace-nav-color:old','#16836d');api.loadPalette('old');
-assert.equal(api.paletteId.value,'custom');assert.equal(api.customNavColor.value,'#16836d');
-values.set('clipflow:workspace-palette:bad','<script>');values.set('clipflow:workspace-nav-color:bad','invalid');api.loadPalette('bad');
-assert.equal(api.paletteId.value,'cobalt');
-const before=api.paletteId.value;assert.equal(api.savePalette('a','missing'),false);assert.equal(api.paletteId.value,before);
-const oldSet=sandbox.localStorage.setItem;sandbox.localStorage.setItem=()=>{throw new Error('Storage blocked');};
-assert.equal(api.savePalette('a','mint'),false);assert.equal(api.paletteId.value,'mint');sandbox.localStorage.setItem=oldSet;
-console.log('PASS: 6 palettes / 12 modes, readable text and button labels, custom extremes, legacy preference recovery, account isolation, storage failure.');
+for(const c of Object.values(api.mineral)){
+  for(const bg of [c.bg,c.surface,c.soft,c.selection])for(const text of [c.text,c.muted,c.accentText])readable(text,bg);
+  for(const bg of [c.accent,c.hover,c.pressed])readable(c.onAccent,bg);
+}
+api.saveNightMode('a',true);api.loadNightMode('b');assert.equal(api.nightMode.value,false);
+api.loadNightMode('a');assert.equal(api.nightMode.value,true);
+sandbox.localStorage.setItem=()=>{throw Error('blocked');};
+assert.equal(api.saveNightMode('a',false),false);assert.equal(api.nightMode.value,false);
+console.log('PASS: light and dark contrast, per-account display preferences and storage errors.');

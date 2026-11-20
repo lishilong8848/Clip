@@ -1310,6 +1310,12 @@ class BackendProcessPortalController:
             if delay:
                 time.sleep(delay)
             operation = self.get_qt_notice_operation(operation_id)
+            if event_notice:
+                from upload_event_module.event_delivery_receipt import qt_event_delivery_reply
+
+                reply = qt_event_delivery_reply(operation, operation_id, data_dict.get("record_id") or "")
+                if reply is not None:
+                    return reply
             status = str((operation or {}).get("status") or "").strip()
             operation_result = dict((operation or {}).get("result") or {})
             if status in {"completed", "failed"} or (

@@ -1,206 +1,12 @@
-<!-- 独立新版页面代码：灯塔个人工作台。业务数据与办理权限由现有工作台提供。 -->
-<template>
-  <div ref="surface" class="daily-desk" @keydown.esc="dismiss">
-    <header class="desk-bar" :class="{'desk-guest':guest}">
-      <div v-if="!guest" class="desk-greeting">
-        <span class="desk-date">{{ dateLabel }}</span>
-        <h1>{{ greeting }}，{{ name || '当前账号' }}</h1>
-      </div>
-      <div class="desk-actions">
-        <div v-if="!guest" class="desk-anchor">
-          <button ref="weatherButton" type="button" class="desk-control" aria-label="天气详情"
-            :aria-expanded="panel==='weather'" @click="toggle('weather')">
-            <CloudSun :size="19" aria-hidden="true" /> <span v-if="weather?.temp!=null">{{ weather.temp }}°</span>
-          </button>
-          <section v-if="panel==='weather'" class="desk-popover" aria-label="南通天气预报">
-            <h2>南通天气</h2>
-            <p v-if="!weather" role="status">{{ weatherBusy ? '正在获取天气…' : '天气暂不可用' }}</p>
-            <template v-else>
-              <p>{{ weather.temp==null?'实时气温暂缺':weather.temp+'°C' }} · {{ weather.description }} · {{ weather.humidity==null?'湿度暂缺':'湿度 '+weather.humidity+'%' }}</p>
-              <ul class="desk-pop-list">
-                <li v-for="day in weather.days" :key="day.date"><span>{{ day.date.slice(5) }} · {{ day.description }}</span><strong>{{ day.minimum ?? '—' }}～{{ day.maximum ?? '—' }}°C</strong></li>
-              </ul>
-            </template>
-          </section>
-        </div>
-        <form class="desk-anchor desk-search" role="search" @submit.prevent="openSearch(matches[searchIndex])">
-          <Search :size="17" aria-hidden="true" />
-          <input ref="searchInput" v-model.trim="query" type="search" aria-label="全局搜索"
-            :aria-expanded="panel==='search'" aria-controls="desk-search-results" placeholder="搜索系统功能"
-            @focus="panel='search'" @input="panel='search'; searchIndex=0"
-            @keydown.down.prevent="moveSearch(1)" @keydown.up.prevent="moveSearch(-1)" />
-          <section v-if="panel==='search'" id="desk-search-results" class="desk-popover" aria-label="搜索结果">
-            <p v-if="!matches.length" role="status">未找到可访问的功能</p>
-            <ul v-else class="desk-pop-list">
-              <li v-for="(entry,index) in matches" :key="entry.url">
-                <button type="button" :class="{highlight:index===searchIndex}" data-v2-navigation @click="openSearch(entry)">
-                  <span>{{ entry.label }}</span><ChevronRight :size="15" aria-hidden="true" />
-                </button>
-              </li>
-            </ul>
-          </section>
-        </form>
-        <div v-if="!guest" class="desk-anchor">
-          <button ref="noticeButton" type="button" class="desk-control desk-bell" :aria-label="'消息通知，'+unread.length+' 条未读'"
-            :aria-expanded="panel==='notices'" @click="toggle('notices')">
-            <Bell :size="19" aria-hidden="true" /><span v-if="unread.length" class="desk-badge" aria-hidden="true">{{ Math.min(unread.length,99) }}</span>
-          </button>
-          <section v-if="panel==='notices'" class="desk-popover desk-notifications" aria-label="新任务通知">
-            <h2>新任务通知</h2>
-            <p v-if="!unread.length" role="status">暂无未读任务</p>
-            <ul v-else class="desk-pop-list">
-              <li v-for="item in unread.slice(0,8)" :key="item.key">
-                <button type="button" @click="panel=''; emit('task',item)"><span>{{ item.title }}</span><ChevronRight :size="15" aria-hidden="true" /></button>
-              </li>
-            </ul>
-            <button v-if="unread.length" type="button" class="wb-link" @click="emit('unread'); panel=''">查看全部未读</button>
-          </section>
-        </div>
-        <button type="button" class="desk-avatar" :title="name || '个人信息'" :aria-label="guest?'访客账号':'个人信息'" data-v2-navigation @click="guest ? emit('guest-account') : emit('open','/?view=my')">
-          <img v-if="avatar && !avatarFailed" :src="avatar" alt="" referrerpolicy="no-referrer" @error="avatarFailed=true" />
-          <span v-else>{{ name?.slice(0,1) || '我' }}</span>
-        </button>
-      </div>
-    </header>
-
-    <div v-if="!guest" class="desk-indicators" aria-label="工作台指标">
-      <article v-for="(metric,index) in metrics" :key="metric.label" class="desk-metric">
-        <component :is="indicatorIcons[index]" class="desk-metric-icon" :size="17" aria-hidden="true" />
-        <div class="desk-metric-copy">
-          <h2>{{ metric.label }}</h2>
-          <button v-if="metric.url" type="button" class="desk-metric-link wb-link" data-v2-navigation @click="emit('open',metric.url)">打开审核入口 <ChevronRight :size="13" aria-hidden="true" /></button>
-          <small v-else-if="metric.partial || metric.value===null" class="desk-metric-note" :title="metric.note">{{ metric.value===null ? '待核验' : '已读取' }}</small>
-        </div>
-        <strong>{{ metric.value ?? '—' }}</strong>
-      </article>
-    </div>
-    <div v-if="!guest" class="desk-columns">
-      <div class="desk-main"><slot /></div>
-      <aside class="wb-panel desk-agenda" aria-labelledby="desk-agenda-title">
-        <header class="desk-agenda-title"><CalendarDays :size="20" aria-hidden="true" /><h2 id="desk-agenda-title">我的日程</h2>
-        </header>
-        <label v-if="agendaScopes?.length && agendaScopes.length>1" class="desk-agenda-scope">
-          <span>日程楼栋</span><select v-model="agendaScope"><option value="">所有已授权楼栋</option>
-          <option v-for="scope in agendaScopes" :key="scope.value" :value="scope.value">{{ scope.label }}</option></select>
-        </label>
-        <div class="desk-weather-panel">
-          <div class="desk-weather-strip" aria-label="选中日期天气">
-            <div class="desk-weather-date"><b>{{ selected.slice(-2) }}</b><span>{{ selectedWeekday }}</span></div>
-            <component v-if="selectedWeather" :is="weatherIcon" class="desk-weather-icon" :size="23" aria-hidden="true" />
-            <div class="desk-weather-reading">
-              <b v-if="selectedWeather?.temperature">{{ selectedWeather.temperature }}</b>
-              <small>{{ selectedWeather?.description || (weatherBusy ? '正在读取天气…' : '暂无天气预报') }}</small>
-            </div>
-          </div>
-        </div>
-        <div class="desk-month">
-          <strong>{{ monthDate.getUTCFullYear() }} 年 {{ monthDate.getUTCMonth()+1 }} 月</strong>
-          <div>
-            <button type="button" class="desk-small" aria-label="上个月" @click="moveMonth(-1)"><ChevronLeft :size="17" /></button>
-            <button type="button" class="desk-small" @click="goToday">今天</button>
-            <button type="button" class="desk-small" aria-label="下个月" @click="moveMonth(1)"><ChevronRight :size="17" /></button>
-          </div>
-        </div>
-        <div class="desk-calendar">
-          <span v-for="day in '一二三四五六日'" :key="day" class="desk-weekday">{{ day }}</span>
-          <template v-for="day in monthCells" :key="day.key">
-            <NPopover v-if="day.inMonth" trigger="hover" placement="top" scrollable
-              :disabled="!noticesByDay.has(day.key)&&!calendarDays[day.key]?.items.length" :delay="180">
-              <template #trigger>
-                <button type="button" class="desk-day" :class="{scheduled:dayCount(day.key)>0, conflict:calendarDays[day.key]?.items.some(item=>item.kind==='冲突')}"
-                  :aria-label="day.key+(dayCount(day.key)?'，'+dayCount(day.key)+' 项日程':'')"
-                  :aria-current="day.key===today?'date':undefined" :aria-pressed="day.key===selected" @click="selected=day.key">
-                  {{ day.number }} <i v-if="dayCount(day.key)" aria-hidden="true"></i>
-                </button>
-              </template>
-              <section class="desk-day-preview" :aria-label="day.key+' 通告预览'">
-                <strong>{{ day.key.slice(5).replace('-',' 月 ') }} 日日程</strong>
-                <ul>
-                  <li v-for="{item,times} in noticesByDay.get(day.key)" :key="item.key">
-                    <small>{{ item.detail || '通告' }} · {{ item.scope.replace(/^([A-EH])$/,'$1楼') }} · {{ times.join(' · ') }}</small>
-                    <span>{{ item.title }}</span>
-                  </li>
-                  <li v-for="(item,index) in calendarDays[day.key]?.items" :key="'calendar-'+index">
-                    <small>{{ item.kind }}<template v-if="item.scopes?.length"> · {{ item.scopes.join('、') }}</template></small><span>{{ item.title }}</span>
-                  </li>
-                </ul>
-              </section>
-            </NPopover>
-            <span v-else class="desk-day desk-other" aria-hidden="true">{{ day.number }}</span>
-          </template>
-        </div>
-        <p v-if="calendarNotice" class="desk-calendar-note" role="status">{{ calendarNotice }} <button v-if="calendarFailed" type="button" class="wb-link" @click="calendarRevision++">重试日程</button></p>
-        <section class="desk-schedule-extra" aria-labelledby="desk-staff-title">
-          <header class="desk-roster-head"><h3 id="desk-staff-title">今日排班</h3><span>{{ dateLabel }}</span></header>
-          <table v-if="rosterRows.length" class="desk-roster" aria-labelledby="desk-staff-title">
-            <thead><tr><th scope="col">楼栋</th><th scope="col"><span class="desk-shift desk-shift-day"><Sun :size="13" aria-hidden="true" />白班</span></th><th scope="col"><span class="desk-shift desk-shift-night"><Moon :size="13" aria-hidden="true" />夜班</span></th></tr></thead>
-            <tbody>
-              <template v-for="row in rosterRows" :key="row.scope">
-                <tr>
-                  <th scope="row"><span class="desk-roster-building">{{ row.scope==='110' ? '110站' : row.scope+'楼' }}</span></th>
-                  <td v-for="shift in (['day','night'] as const)" :key="shift">
-                    <span v-if="row[shift].size" class="desk-roster-names"><span v-for="name in row[shift]" :key="name">{{ name }}</span></span>
-                    <span v-else class="desk-roster-empty" aria-label="暂无排班">—</span>
-                  </td>
-                </tr>
-                <tr v-if="row.other.size" class="desk-roster-other">
-                  <td></td><td colspan="2"><span v-for="[shift,names] in row.other" :key="shift">{{ shift }} · {{ [...names].join('、') }}</span></td>
-                </tr>
-              </template>
-            </tbody>
-          </table>
-          <p v-else class="wb-note">{{ rosterMessage }} <button v-if="visibleRoster?.state==='failed'" type="button" class="wb-link" @click="calendarRevision++">重试排班</button></p>
-        </section>
-        <div class="desk-schedule-head"><h3>{{ selected.slice(5).replace('-',' 月 ') }} 日安排</h3><span>{{ dayCount(selected) }} 项</span></div>
-        <ul v-if="dayCount(selected)" class="desk-schedule">
-          <li v-for="entry in agenda" :key="entry.key">
-            <span class="desk-event-time">{{ entry.time }}</span>
-            <span class="desk-event-dot" :class="entry.type" aria-hidden="true"></span>
-            <div><small>{{ entry.label }}<template v-if="agendaScopes?.length && !agendaScope"> · {{ entry.item.scope.replace(/^([A-EH])$/,'$1楼') }}</template><template v-if="entry.due"> · 截止 {{ entry.due }}</template></small>
-              <button v-if="entry.item.url" class="desk-agenda-link" type="button" data-v2-navigation @click="emit('task',entry.item)">{{ entry.item.title }}</button>
-              <strong v-else>{{ entry.item.title }}</strong>
-            </div>
-          </li>
-          <li v-for="(item,index) in calendarDay?.items" :key="'calendar-'+index">
-            <span class="desk-event-time">{{ scheduleTime(item.start) }}</span>
-            <span :class="['desk-event-dot',item.kind==='冲突'?'conflict':item.kind==='封网'?'due':'change']" aria-hidden="true"></span>
-            <div><small>{{ item.kind }}<template v-if="item.scopes?.length"> · {{ item.scopes.join('、') }}</template></small>
-              <strong>{{ item.title }}</strong><small v-if="item.notes?.length">{{ item.notes.join('；') }}</small></div>
-          </li>
-        </ul>
-        <p v-else class="wb-note">此日暂无已读取的日程</p>
-        <section class="desk-schedule-extra" aria-labelledby="desk-alerts-title">
-          <h3 id="desk-alerts-title">预警与戒备</h3>
-          <p v-if="calendarWeatherBusy && !calendarWeather" class="wb-note" role="status">正在读取预警和戒备状态…</p>
-          <template v-else>
-            <div v-if="calendarWeather?.warning_ready" class="desk-alerts">
-              <strong v-if="calendarWeather.guard_level">戒备等级 {{ calendarWeather.guard_level }}</strong>
-              <ul v-if="calendarWeather.alerts.length">
-                <li v-for="(alert,index) in calendarWeather.alerts" :key="alert.id||index">
-                  {{ alert.title }}<small v-if="alert.guard_level && alert.guard_level!==calendarWeather.guard_level"> · {{ alert.guard_level }}</small>
-                </li>
-              </ul>
-              <p v-else-if="!calendarWeather.guard_level && !calendarWeather.guard_note" class="wb-note">当前暂无戒备预警</p>
-              <ul v-if="calendarWeather.guard_actions.length"><li v-for="action in calendarWeather.guard_actions" :key="action">{{ action }}</li></ul>
-              <p v-if="calendarWeather.guard_note" class="wb-note">{{ calendarWeather.guard_note }}</p>
-            </div>
-            <p v-else class="wb-note">{{ calendarWeather?.guard_note || (guardFailed ? '重保戒备读取失败' : '重保管理尚无已确认的戒备信息') }} <button v-if="guardFailed" type="button" class="wb-link" @click="loadCalendarWeather(true)">重试</button></p>
-          </template>
-        </section>
-      </aside>
-    </div>
-    <div v-if="!guest" class="desk-overview"><slot name="overview" /></div>
-  </div>
-</template>
-
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NPopover } from 'naive-ui';
-import { Bell, CalendarDays, ChevronLeft, ChevronRight, ClipboardList, CloudRain, CloudSnow, CloudSun, Moon, Radio, Search, ShieldCheck, Sun } from 'lucide-vue-next';
+import { Activity, ArrowRight, Bell, CalendarDays, ClipboardList, Clock3, FileText, KeyRound, ListChecks, Wrench, ChevronLeft, ChevronRight, CloudRain, CloudSnow, CloudSun, Search, ShieldCheck, Sun, UserRound, X } from 'lucide-vue-next';
 import { todoTimestamp } from '../businessTodos';
 import { requestJson } from '../client';
 import type { WorkItem } from './sources';
 import { inDeskScope } from './deskPolicy';
+import WorkbenchRoster from './WorkbenchRoster.vue';
 import './workbench.css';
 
 type Link = {label:string; url:string};
@@ -214,9 +20,22 @@ type CalendarWeather={warning_ready:boolean;
   alerts:{id?:string;title:string;guard_level?:string}[];guard_level?:string;guard_actions:string[];guard_note?:string};
 const props = defineProps<{name:string; avatar?:string; clock:number; links:Link[]; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
   metrics?:{label:string;value:number|null;partial?:boolean;note?:string;url?:string}[]; agendaScopes?:{label:string;value:string}[];
-  calendarScope?:string; calendarIdentity?:string}>();
+  calendarScope?:string; calendarIdentity?:string; queueNote?:string}>();
 const emit = defineEmits<{open:[url:string]; unread:[]; task:[item:WorkItem]; 'guest-account':[]}>();
-const indicatorIcons=[ClipboardList,Radio,CalendarDays,ShieldCheck];
+
+function metricIcon(label:string) {
+  if (label.includes('事件')) return Activity;
+  if (label.includes('权限')) return KeyRound;
+  if (label.includes('审核') || label.includes('排查')) return ShieldCheck;
+  if (label.includes('维修')) return Wrench;
+  if (label.includes('截止')) return Clock3;
+  if (label.includes('本周')) return CalendarDays;
+  if (label.includes('通告') || label.includes('单据')) return FileText;
+  if (label.includes('未读')) return Bell;
+  if (label.includes('确认') || label.includes('巡检')) return ListChecks;
+  return ClipboardList;
+}
+
 const avatar=computed(()=>/^https:\/\//i.test(props.avatar||'')?props.avatar:undefined);
 const avatarFailed=ref(false);
 watch(avatar,()=>{avatarFailed.value=false;});
@@ -232,8 +51,14 @@ function dismiss() {
   const trigger = panel.value === 'weather' ? weatherButton : panel.value === 'notices' ? noticeButton : searchInput;
   if (panel.value) { trigger.value?.focus(); panel.value = ''; }
 }
+function escapePanel(event:KeyboardEvent) {
+  if(panel.value){event.stopPropagation();dismiss();}
+}
 function outside(event:PointerEvent) {
   if (panel.value && !(event.target instanceof Element && surface.value?.contains(event.target) && event.target.closest('.desk-anchor'))) panel.value = '';
+}
+function leaveSearch(event:FocusEvent){
+  if(panel.value==='search' && event.currentTarget instanceof Element && !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)))panel.value='';
 }
 function rank(label:string, term:string) {
   if (label.includes(term)) return label === term ? 0 : 1;
@@ -262,11 +87,11 @@ const zone = 'Asia/Shanghai';
 const dayKey = (stamp:number) => new Date(stamp+8*3600000).toISOString().slice(0,10);
 const dayTime = (stamp:number) => new Intl.DateTimeFormat('zh-CN',{timeZone:zone,hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(stamp);
 const today = computed(()=>dayKey(props.clock));
-const dateLabel = computed(()=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,month:'long',day:'numeric',weekday:'long'}).format(props.clock));
-const greeting = computed(()=>{
-  const hour = new Date(props.clock+8*3600000).getUTCHours();
+const greeting=computed(()=>{
+  const hour=new Date(props.clock).getHours();
   return hour<6?'夜里好':hour<11?'早上好':hour<14?'中午好':hour<18?'下午好':'晚上好';
 });
+
 const selected = ref(today.value), month = ref(today.value.slice(0,7));
 const agendaScope=ref('');
 watch(()=>props.agendaScopes,scopes=>{if(!scopes?.some(scope=>scope.value===agendaScope.value))agendaScope.value='';});
@@ -290,6 +115,19 @@ const monthCells = computed(()=>{
     return {key,number:current.getUTCDate(),inMonth:key.startsWith(month.value)};
   });
 });
+const monthExpanded=ref(false), agendaExpanded=ref(false);
+const weekday=computed(()=>new Intl.DateTimeFormat('zh-CN',{weekday:'short',timeZone:zone}).format(props.clock));
+const visibleDates=computed(()=>{
+  if(monthExpanded.value)return monthCells.value;
+  const row=Math.floor(monthCells.value.findIndex(cell=>cell.key===selected.value)/7)*7;
+  return monthCells.value.slice(row,row+7);
+});
+function moveCalendar(delta:number){
+  if(monthExpanded.value){moveMonth(delta);return;}
+  const target=Date.parse(selected.value+'T00:00:00Z')+delta*7*86400000;
+  selectDay(new Date(target).toISOString().slice(0,10));
+}
+watch(selected,()=>{agendaExpanded.value=false;});
 const byDay = computed(()=>{
   const days = new Map<string,AgendaEntry[]>();
   for (const task of props.tasks) {
@@ -299,7 +137,6 @@ const byDay = computed(()=>{
     const dueAt = task.dueAt ?? todoTimestamp(task.noticeWindow?.end);
     const add = (stamp:number, type:AgendaEntry['type'], label:string, raw?:string) => {
       const day=dayKey(stamp);
-      if(type!=='due'&&task.sourceKey&&calendarDays.value[day]?.items.some(item=>item.source_id&&'change:'+item.source_id===task.sourceKey))return;
       const time=raw && /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(raw.trim())?'全天':dayTime(stamp);
       const entry={key:task.key+':'+type,item:task,type,label,time,stamp};
       const entries=days.get(day);
@@ -326,9 +163,15 @@ const mergedAgenda=computed(()=>{
   }
   return days;
 });
-const agenda = computed(()=>mergedAgenda.value.get(selected.value) || []);
 const calendarDays=ref<Record<string,CalendarDay>>({});
-const calendarNotice=ref('');
+const calendarSourceKeys=computed(()=>new Map(Object.entries(calendarDays.value).map(([day,record])=>[
+  day,new Set(record.items.filter(item=>item.source_id).map(item=>'change:'+item.source_id)),
+])));
+function separateTasks(day:string){
+  const represented=calendarSourceKeys.value.get(day);
+  return (mergedAgenda.value.get(day)||[]).filter(entry=>!entry.item.sourceKey||!represented?.has(entry.item.sourceKey));
+}
+const calendarNotice=ref(''), calendarBusy=ref(false);
 const calendarRevision=ref(0), calendarFailed=ref(false);
 const calendarDay=computed(()=>calendarDays.value[selected.value]);
 const calendarScope=computed(()=>agendaScope.value||props.calendarScope||'');
@@ -351,12 +194,13 @@ const rosterRows=computed(()=>{
   return rosterOrder.flatMap(scope=>{const row=buildings.get(scope);return row?[row]:[];});
 });
 const rosterMessage=computed(()=>{
-  if(!calendarScope.value)return '当前范围暂无排班';
-  if(!visibleRoster.value)return '正在读取今日排班…';
-  return visibleRoster.value.state==='failed'?'今日排班暂未读取到':'今日暂无已确认的排班人员';
+  if(!calendarScope.value)return '暂无排班';
+  if(!visibleRoster.value)return '正在读取排班…';
+  return visibleRoster.value.state==='failed'?'排班读取失败':'暂无排班';
 });
-const dayCount=(day:string)=>(mergedAgenda.value.get(day)?.length||0)+(calendarDays.value[day]?.items.length||0);
+const dayCount=(day:string)=>separateTasks(day).length+(calendarDays.value[day]?.items.length||0);
 function scheduleTime(value?:string){
+  if(value && /^\d{4}[-/]\d{1,2}[-/]\d{1,2}$/.test(value.trim()))return '全天';
   const stamp=todoTimestamp(value);
   return stamp===undefined?'—':dayTime(stamp);
 }
@@ -370,8 +214,10 @@ watch([month,calendarScope,()=>props.calendarIdentity,rosterKey],async([activeMo
   if(!old || activeMonth!==old[0] || scope!==old[1] || identity!==old[2])calendarDays.value={};
   calendarNotice.value='';
   calendarFailed.value=false;
+  calendarBusy.value=false;
   if(props.guest||!scope)return;
   const controller=new AbortController();
+  calendarBusy.value=true;
   onCleanup(()=>controller.abort());
   const date=today.value, currentMonth=date.slice(0,7);
   function receiveRoster(data?:CalendarResponse) {
@@ -396,6 +242,8 @@ watch([month,calendarScope,()=>props.calendarIdentity,rosterKey],async([activeMo
       calendarFailed.value=true;
       if(activeMonth===currentMonth && visibleRoster.value?.state!=='ready')receiveRoster();
     }
+  } finally {
+    if(!controller.signal.aborted) calendarBusy.value=false;
   }
 },{immediate:true});
 const calendarWeather=ref<CalendarWeather>();
@@ -468,7 +316,11 @@ async function readWeather() {
   const controller=weatherAbort=new AbortController();
   try {
     const data=await requestJson('/api/assistant/icon-weather?detail=1',{signal:controller.signal,timeoutMs:14000});
-    if(controller.signal.aborted||data.available!==true||data.date!==today.value||typeof data.description!=='string') return;
+    if(controller.signal.aborted)return;
+    if(data.available!==true||data.date!==today.value||typeof data.description!=='string'){
+      weather.value=undefined;
+      return;
+    }
     const temperature=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?Math.round(value):null;
     const days:DayWeather[]=[];
     if(Array.isArray(data.forecast)) data.forecast.slice(0,5).forEach(day=>{
@@ -477,171 +329,316 @@ async function readWeather() {
     });
     weather.value={temp:temperature(data.temperature),humidity:temperature(data.humidity),description:data.current_description||data.description,days};
   } catch {
-    // The dashboard remains usable while weather is unreachable.
+    if(!controller.signal.aborted)weather.value=undefined;
   } finally {
     if(weatherAbort===controller)weatherBusy.value=false;
   }
 }
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest){void readWeather();void loadCalendarWeather();}});
 onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);weatherAbort?.abort();calendarWeatherRequest?.abort();});
+
+
+const agendaPanel=ref<HTMLElement>();
+function showAgenda(){
+  agendaPanel.value?.scrollIntoView({block:'start'});
+  agendaPanel.value?.focus({preventScroll:true});
+}
+function selectDay(key:string){
+  selected.value=key;
+  month.value=key.slice(0,7);
+}
+function showUnreadQueue(){
+  panel.value='';
+  emit('unread');
+}
+function openNotification(item:WorkItem){
+  dismiss();
+  emit('task',item);
+}
+const itinerary=computed(()=>{
+  const records=(calendarDay.value?.items||[]).map((record,index)=>{
+    const task=record.source_id?props.tasks.find(row=>row.sourceKey==='change:'+record.source_id&&(!agendaScope.value||inDeskScope(row,agendaScope.value))):undefined;
+    const related=task && mergedAgenda.value.get(selected.value)?.find(entry=>entry.item.key===task.key);
+    const due=related?.type==='due'?related.time:related?.due;
+    return {key:'schedule:'+index,stamp:todoTimestamp(record.start),time:scheduleTime(record.start),label:record.kind,title:record.title,
+      meta:[...(record.scopes||[]),...(record.notes||[]),due?'截止 '+due:''].filter(Boolean).join(' · '),task};
+  });
+  const entries=separateTasks(selected.value).map(entry=>({key:entry.key,stamp:entry.stamp,time:entry.time,label:entry.label,title:entry.item.title,
+    meta:[entry.item.scope,entry.item.status,entry.due?'截止 '+entry.due:''].filter(Boolean).join(' · '),task:entry.item}));
+  return [...records,...entries].sort((a,b)=>(a.stamp??Infinity)-(b.stamp??Infinity));
+});
 </script>
 
+<template>
+  <div ref="surface" class="daily-desk" @keydown.esc="escapePanel">
+    <header class="desk-head masthead" :class="{folio:!guest}">
+      <div class="desk-title">
+        <span v-if="guest" class="desk-avatar" aria-hidden="true">
+          <img v-if="avatar && !avatarFailed" :src="avatar" alt="" @error="avatarFailed=true">
+          <UserRound v-else :size="20" />
+        </span>
+        <div class="mast-identity">
+          <div v-if="!guest" class="title-line"><h1 data-v2-page-title>个人工作台</h1>
+            <time class="folio-date" :datetime="today">{{ Number(today.slice(5,7)) }}月{{ Number(today.slice(-2)) }}日 · {{ weekday }}</time>
+          </div>
+          <div class="identity-line">
+            <button v-if="guest" class="name-control" @click="emit('guest-account')">{{ name || '访客账号' }}</button>
+            <span v-else>{{ greeting }}{{ name?'，'+name:'' }}</span><slot name="context" />
+          </div>
+        </div>
+      </div>
+      <div class="desk-tools">
+        <button v-if="!guest" class="small-key agenda-jump" aria-label="跳到日历" title="日历" @click="showAgenda"><CalendarDays :size="16" aria-hidden="true" /></button>
+        <div class="desk-anchor search-anchor" @focusout="leaveSearch">
+          <label class="search-field"><Search :size="16" />
+            <input ref="searchInput" v-model="query" type="search" aria-label="全局搜索" placeholder="搜索功能"
+              :aria-expanded="panel==='search'" @focus="panel='search'" @input="panel='search'"
+              @keydown.down.prevent="moveSearch(1)" @keydown.up.prevent="moveSearch(-1)" @keydown.enter.prevent="openSearch(matches[searchIndex])">
+          </label>
+          <section v-if="panel==='search'" class="floating search-results" aria-label="搜索结果">
+            <button v-for="(link,i) in matches" :key="link.url" :class="{pointed:i===searchIndex}" @click="openSearch(link)">{{ link.label }}<ArrowRight :size="14" /></button>
+            <p v-if="!matches.length">未找到入口</p>
+          </section>
+        </div>
+        <template v-if="!guest">
+          <div class="desk-anchor">
+            <button ref="weatherButton" class="tool-key" aria-label="天气详情" :title="weather?.temp!=null?'今日气温 '+weather.temp+'°C':'天气详情'" :aria-expanded="panel==='weather'" @click="toggle('weather')"><CloudSun :size="19" aria-hidden="true" /></button>
+            <section v-if="panel==='weather'" class="floating forecast" aria-label="天气详情">
+              <div class="line-head"><h3>天气预报</h3><button class="small-key" :disabled="weatherBusy" @click="readWeather">更新天气</button></div>
+              <p>{{ [weather?.description,weather?.temp!=null?weather.temp+'°C':'',weather?.humidity!=null?'湿度 '+weather.humidity+'%':''].filter(Boolean).join(' · ') || (weatherBusy?'天气读取中…':'当前天气暂未提供') }}</p>
+              <ul v-if="weather?.days.length"><li v-for="day in weather.days" :key="day.date"><time>{{ day.date.slice(5) }}</time><span>{{ day.description }}</span><b>{{ day.minimum ?? '—' }} / {{ day.maximum ?? '—' }}°C</b></li></ul>
+
+            </section>
+          </div>
+          <div class="desk-anchor">
+            <button ref="noticeButton" class="tool-key" :aria-label="'消息通知，'+(!unread.length && queueNote?queueNote:unread.length+' 项未读')" :aria-expanded="panel==='notices'" @click="toggle('notices')">
+              <Bell :size="18" aria-hidden="true" /><span v-if="unread.length" class="notice-count" aria-hidden="true">{{ unread.length>99?'99+':unread.length }}</span>
+            </button>
+            <section v-if="panel==='notices'" class="floating notification" aria-label="未读消息">
+              <div class="line-head">
+                <h3>未读</h3><div class="notification-actions">
+                  <button v-if="unread.length" class="icon-key" aria-label="打开未读清单" title="打开未读清单" @click="showUnreadQueue"><ArrowRight :size="16" aria-hidden="true" /></button>
+                  <button class="icon-key" aria-label="关闭消息" @click="dismiss"><X :size="15" aria-hidden="true" /></button>
+                </div>
+              </div>
+              <button v-for="item in unread.slice(0,5)" :key="item.key" class="notice-row" @click="openNotification(item)"><strong>{{ item.title }}</strong><span v-if="item.scope || item.status">{{ [item.scope,item.status].filter(Boolean).join(' · ') }}</span></button>
+              <p v-if="!unread.length">{{ queueNote || '暂无未读' }}</p>
+            </section>
+          </div>
+        </template>
+      </div>
+      <div v-if="!guest && $slots.focus" class="command-line"><slot name="focus" /></div>
+    </header>
+
+    <section v-if="!guest && metrics?.length" class="digest" aria-label="工作台指标">
+      <article v-for="(metric,i) in metrics" :key="metric.label" class="metric-pill" :class="{'digest-lead':i===0}" :data-unknown="metric.value==null">
+        <span class="metric-symbol"><component :is="metricIcon(metric.label)" :size="17" aria-hidden="true" /></span>
+        <div class="metric-copy"><h3>{{ metric.label }}</h3>
+          <div class="metric-value"><strong>{{ metric.value ?? '—' }}</strong><small :title="metric.note">{{ metric.value==null?'待核实':metric.note || (metric.partial?'已读取':'项') }}</small></div>
+        </div>
+        <button v-if="metric.url" class="icon-key metric-open" :aria-label="'打开'+metric.label" @click="emit('open',metric.url)"><ArrowRight :size="14" /></button>
+      </article>
+    </section>
+    <div :class="{'working-grid':!guest}">
+      <div class="desk-content"><slot /></div>
+      <aside v-if="!guest" ref="agendaPanel" class="day-planner" tabindex="-1" aria-label="我的日程">
+        <div class="planner-module rail-module">
+        <header class="planner-head">
+          <div class="month-tools"><button class="month-mode" :aria-expanded="monthExpanded" :aria-label="monthExpanded?'收起月历':'展开月历'" @click="monthExpanded=!monthExpanded">{{ month.replace('-', '.') }} <span>{{ monthExpanded?'月历 ▴':'周历 ▾' }}</span></button><div>
+            <button class="icon-key" :aria-label="monthExpanded?'上个月':'上一周'" @click="moveCalendar(-1)"><ChevronLeft :size="16" /></button><button class="today-key" @click="goToday">今天</button><button class="icon-key" :aria-label="monthExpanded?'下个月':'下一周'" @click="moveCalendar(1)"><ChevronRight :size="16" /></button>
+          </div><select v-if="agendaScopes?.length" v-model="agendaScope" data-native-select aria-label="日程楼栋"><option value="">全部楼栋</option><option v-for="scope in agendaScopes" :key="scope.value" :value="scope.value">{{ scope.label }}</option></select></div>
+          <div class="month-grid">
+            <span v-for="weekday in ['一','二','三','四','五','六','日']" :key="weekday" class="weekday">{{ weekday }}</span>
+            <NPopover v-for="cell in visibleDates" :key="cell.key" :disabled="!noticesByDay.get(cell.key)?.length" trigger="hover" placement="top" :duration="100">
+              <template #trigger><button class="day-cell" :class="{adjacent:!cell.inMonth,current:cell.key===today}" :aria-pressed="cell.key===selected"
+                :aria-current="cell.key===today?'date':undefined" :aria-label="cell.key+'，已载入 '+dayCount(cell.key)+' 项日程'" @click="selectDay(cell.key)">
+                {{ cell.number }}<i v-if="dayCount(cell.key)" aria-hidden="true" />
+              </button></template>
+              <section class="day-preview" :aria-label="cell.key+' 通告预览'"><strong>{{ cell.key }} 通告预览</strong>
+                <p v-for="entry in noticesByDay.get(cell.key)" :key="entry.item.key"><b>{{ entry.item.title }}</b><small>{{ entry.item.scope }} · {{ entry.times.join(' / ') }}</small></p>
+              </section>
+            </NPopover>
+          </div>
+        </header>
+        <section class="itinerary" aria-label="所选日期日程">
+          <div class="line-head"><h3>{{ selected.slice(5).replace('-',' / ') }} <small>{{ selectedWeekday }}</small></h3>
+            <div class="selected-weather" aria-label="选中日期天气"><component :is="weatherIcon" :size="16" /><span>{{ selectedWeather?.description || '' }}</span><b>{{ selectedWeather?.temperature || (weatherBusy?'读取中':'预报待更新') }}</b></div>
+          </div>
+          <ol v-if="itinerary.length" class="timeline"><li v-for="entry in agendaExpanded?itinerary:itinerary.slice(0,3)" :key="entry.key">
+            <time>{{ entry.time }}</time><div><small>{{ entry.label }}</small>
+              <button v-if="entry.task" class="agenda-task" @click="emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" /></button><b v-else>{{ entry.title }}</b>
+              <p v-if="entry.meta">{{ entry.meta }}</p>
+            </div>
+          </li></ol>
+          <p v-else-if="!calendarNotice" class="muted">{{ calendarBusy?'读取中…':calendarFailed?'日程读取失败':!calendarScope?'暂无授权日程':queueNote?'暂无已读取日程':'当日无安排' }}</p>
+          <button v-if="itinerary.length>3" class="text-key" :aria-expanded="agendaExpanded" @click="agendaExpanded=!agendaExpanded">{{ agendaExpanded?'收起日程':'展开全部 '+itinerary.length+' 项日程' }}</button>
+          <div v-if="calendarNotice" class="retry-note" role="status">{{ calendarNotice }} <button class="text-key" @click="calendarRevision++">重试日程</button></div>
+        </section>
+        </div>
+        <WorkbenchRoster class="rail-module roster-module" :rows="rosterRows" :message="rosterMessage" :can-retry="visibleRoster?.state==='failed'" @retry="calendarRevision++" />
+        <section class="weather-guard rail-module" aria-label="天气预警与戒备">
+          <div class="line-head"><h3><ShieldCheck :size="16" /> 今日预警与戒备</h3><button class="text-key" :disabled="calendarWeatherBusy" @click="loadCalendarWeather(true)">刷新</button></div>
+          <div class="guard-summary" role="status">
+            <span v-if="!calendarWeather && calendarWeatherBusy">读取中…</span>
+            <span v-else-if="!calendarWeather?.warning_ready && !calendarWeather?.guard_level && !guardFailed">待更新</span>
+            <template v-else>
+              <span v-if="!calendarWeather?.warning_ready">预警待更新</span>
+              <span v-else-if="!calendarWeather.alerts?.length">无天气预警</span>
+              <b v-if="calendarWeather?.guard_level && !guardFailed">戒备等级 {{ calendarWeather.guard_level }}</b>
+              <span v-else>{{ guardFailed?'戒备读取失败':'戒备待更新' }}</span>
+            </template>
+          </div>
+          <div v-for="alert in calendarWeather?.alerts" :key="alert.id || alert.title" class="warning"><b>{{ alert.title }}</b><span v-if="alert.guard_level">{{ alert.guard_level }}</span></div>
+          <ul v-if="calendarWeather?.guard_actions?.length"><li v-for="action in calendarWeather.guard_actions" :key="action">{{ action }}</li></ul><p v-if="calendarWeather?.guard_note">{{ calendarWeather.guard_note }}</p>
+        </section>
+      </aside>
+      <div v-if="$slots.shortcuts || $slots.overview" class="desk-supplement">
+        <slot v-if="!guest" name="shortcuts" />
+        <slot name="overview" />
+      </div>
+    </div>
+  </div>
+</template>
+
 <style scoped>
-.daily-desk { min-width:0; }
-.desk-bar,.desk-agenda { color:var(--wb-ink); background:var(--wb-surface); border:1px solid var(--wb-border); border-radius:12px; }
-.desk-bar { display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;margin-bottom:14px; }
-.desk-guest { justify-content:flex-end; }
-.desk-greeting { min-width:0;overflow-wrap:anywhere; }
-.desk-greeting .desk-date { display:block;margin-bottom:5px;font-size:12px;color:var(--wb-muted); }
-.desk-actions { display:flex;align-items:center;gap:9px;flex:none; }
-.desk-anchor { position:relative; }
-.desk-control,.desk-avatar,.desk-small { display:inline-flex;justify-content:center;align-items:center;gap:6px;background:var(--wb-surface);color:var(--wb-ink);border:1px solid var(--wb-border);border-radius:8px;min-width:36px;min-height:36px;padding:4px 8px; }
-.desk-control[aria-expanded=true],.desk-control:hover,.desk-small:hover { color:var(--wb-primary);background:var(--desk-tint); }
-.desk-avatar { width:36px;height:36px;padding:0;overflow:hidden;border-radius:50%;color:var(--wb-primary);background:var(--desk-tint);font-weight:700; }
-.desk-avatar img { width:100%;height:100%;object-fit:cover; }
-.daily-desk { --desk-tint:color-mix(in srgb,var(--wb-primary) 9%,var(--wb-surface)); }
-.desk-bell { position:relative; }
-.desk-badge { position:absolute;top:-6px;right:-5px;border:2px solid var(--wb-surface);border-radius:12px;background:var(--wb-accent);color:var(--wb-on-primary);min-width:17px;padding:0 3px;font:600 10px/15px system-ui,sans-serif; }
-.desk-search { display:flex;align-items:center;gap:7px;padding:0 9px;min-height:36px;width:clamp(150px,18vw,265px);border:1px solid var(--wb-border);border-radius:8px;color:var(--wb-muted); }
-.desk-search:focus-within { border-color:var(--wb-primary); }
-.desk-search input { font:inherit;color:var(--wb-ink);background:transparent;border:0;outline:0;min-width:0;width:100%; }
-.desk-popover { position:absolute;right:0;top:calc(100% + 7px);z-index:12;min-width:235px;max-width:min(340px,calc(100vw - 32px));padding:12px;background:var(--wb-surface);border:1px solid var(--wb-border);border-radius:10px;box-shadow:0 8px 24px #17274824;color:var(--wb-ink); }
-.desk-notifications { width:300px; }
-.desk-popover > p { margin-top:8px;color:var(--wb-muted); }
-.desk-pop-list,.desk-schedule { list-style:none;margin:8px 0 0;padding:0; }
-.desk-pop-list li { display:flex;align-items:center;justify-content:space-between;gap:8px;padding:5px 0; }
-.desk-pop-list li button { display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;padding:6px;border:0;text-align:left;border-radius:6px;color:inherit;background:none; }
-.desk-pop-list li button:hover,.desk-pop-list li button.highlight { background:var(--desk-tint); }
-.desk-pop-list li button span { overflow-wrap:anywhere; }
-.desk-pop-list svg { flex-shrink:0; }
-.desk-columns { display:grid;grid-template-columns:minmax(0,2fr) minmax(268px,1fr);gap:14px;align-items:start; }
-.desk-indicators { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:12px;border:1px solid var(--wb-border);border-radius:10px;background:var(--wb-surface); }
-.desk-metric { display:flex;align-items:center;gap:9px;min-height:54px;padding:7px 12px;min-width:0; }
-.desk-metric + .desk-metric { border-inline-start:1px solid var(--wb-border); }
-.desk-metric-icon { flex:none;color:var(--wb-primary);box-sizing:content-box;padding:5px;border-radius:6px;background:var(--desk-tint); }
-.desk-metric-copy { flex:1;min-width:0; }
-.desk-metric h2 { color:var(--wb-ink);font-weight:600;font-size:13px;line-height:1.25;overflow-wrap:anywhere; }
-.desk-metric strong { flex:none;font-size:23px;line-height:1;font-variant-numeric:tabular-nums; }
-.desk-metric-note { font-size:11px;color:var(--wb-muted); }
-.desk-metric .desk-metric-link { display:flex;align-items:center;gap:3px;min-height:22px;padding:0;font-size:11px;text-align:start;white-space:normal; }
-.desk-main { min-width:0; }
-.desk-main :deep(.wb-module-grid) { grid-template-columns:minmax(0,1fr); }
-.desk-main :deep(.desk-delete) { flex:none; }
-.desk-overview { margin-top:14px; }
-.desk-overview :deep(.wb-period) { grid-column:1/-1; }
-.desk-agenda { padding:12px; }
-.desk-agenda-title,.desk-month,.desk-schedule-head { display:flex;align-items:center;gap:8px; }
-.desk-agenda-title svg { color:var(--wb-primary); }
-.desk-agenda-title h2 { font-size:16px; }
-.desk-agenda-scope { display:flex;align-items:center;gap:8px;margin-top:8px;color:var(--wb-muted); }
-.desk-agenda-scope select { min-width:0;flex:1;color:var(--wb-ink);background:var(--wb-surface);border:1px solid var(--wb-border);border-radius:6px;padding:5px; }
-.desk-month,.desk-schedule-head { justify-content:space-between;margin:8px 0 4px; }
-.desk-month > div { display:flex;gap:3px; }
-.desk-small { min-height:28px;min-width:28px;padding:2px 4px;font-size:12px;border-color:transparent; }
-.desk-calendar { display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px;text-align:center; }
-.desk-weekday { color:var(--wb-muted);padding:2px 0;font-size:11px; }
-.desk-day { position:relative;display:grid;place-items:center;min-height:27px;padding:0;border:1px solid transparent;border-radius:6px;background:none;color:inherit;font-variant-numeric:tabular-nums;font-size:12px; }
-.desk-day[aria-current=date] { border-color:var(--wb-primary); }
-.desk-day.scheduled { background:var(--desk-tint);color:var(--wb-primary);font-weight:700; }
-.desk-day.conflict:not([aria-pressed=true]) { color:var(--v2-danger,#a42b35);background:color-mix(in srgb,currentColor 10%,var(--wb-surface)); }
-.desk-day:hover { border-color:var(--wb-primary); }
-.desk-day[aria-pressed=true] { background:var(--wb-accent);color:var(--wb-on-primary); }
-.desk-day i { position:absolute;bottom:2px;width:3px;height:3px;border-radius:50%;background:currentColor; }
-.desk-day-preview { width:min(300px,calc(100vw - 48px));max-height:45dvh;overflow:auto;overflow-wrap:anywhere; }
-.desk-day-preview ul { list-style:none;margin:6px 0 0;padding:0; }
-.desk-day-preview li { display:grid;gap:3px;padding:6px 0;border-top:1px solid var(--v2-border,#dbe2ed); }
-.desk-day-preview small { color:var(--v2-muted,#526073); }
-.desk-other { color:var(--wb-muted);opacity:.55; }
-.desk-weather-panel { margin-top:8px;border-radius:7px;background:var(--desk-tint); }
-.desk-weather-strip { display:flex;align-items:center;gap:8px;min-height:36px;padding:4px 9px; }
-.desk-weather-date { display:flex;align-items:baseline;gap:6px;white-space:nowrap; }
-.desk-weather-date b { font-size:19px;color:var(--wb-primary);font-variant-numeric:tabular-nums; }
-.desk-weather-icon { flex:none;color:var(--wb-primary); }
-.desk-weather-reading { min-width:0;margin-inline-start:auto;display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:baseline;gap:2px 6px;text-align:right; }
-.desk-weather-reading b { font-size:15px;white-space:nowrap; }
-.desk-weather-reading small { color:var(--wb-muted); }
-.desk-schedule-head span,.desk-event-time,.desk-schedule small { color:var(--wb-muted);font-size:12px; }
-.desk-schedule { max-height:240px;overflow:auto; }
-.desk-schedule li { display:grid;grid-template-columns:39px 7px 1fr;gap:7px;align-items:start;padding:8px 0;border-top:1px solid var(--wb-border); }
-.desk-schedule strong,.desk-schedule small { display:block;overflow-wrap:anywhere; }
-.desk-agenda-link { display:block;padding:0;border:0;background:none;text-align:left;color:var(--wb-ink);font-weight:650;overflow-wrap:anywhere; }
-.desk-agenda-link:hover { color:var(--wb-primary);text-decoration:underline; }
-.desk-event-dot { width:7px;height:7px;border-radius:50%;margin-top:6px;background:var(--wb-primary); }
-.desk-event-dot.change { background:#a072d6; }
-.desk-event-dot.due { background:#dc8a27; }
-.desk-event-dot.conflict { background:var(--v2-danger,#a42b35); }
-.desk-calendar-note { padding:7px 0;color:var(--wb-muted);font-size:12px; }
-.desk-schedule-extra { border-top:1px solid var(--wb-border);margin-top:10px;padding-top:8px; }
-.desk-schedule-extra h3 { font-weight:650;line-height:1.6; }
-.desk-schedule-extra h3 span { margin-left:5px;font-weight:400;color:var(--wb-muted);font-size:12px; }
-.desk-schedule-extra > .wb-note { margin-top:6px; }
-.desk-roster-head { display:flex;align-items:center;justify-content:space-between;gap:8px; }
-.desk-roster-head > span { color:var(--wb-muted);font-size:12px; }
-.desk-roster { width:100%;table-layout:fixed;margin-top:5px;border-collapse:collapse;font-size:12px;text-align:left; }
-.desk-roster th,.desk-roster td { padding:4px 5px;vertical-align:top;line-height:1.45; }
-.desk-roster th:first-child { width:57px; }
-.desk-roster thead th { color:var(--wb-muted);font-weight:600; }
-.desk-roster tbody tr { border-top:1px solid var(--wb-border); }
-.desk-shift,.desk-roster-building { display:inline-flex;align-items:center;gap:4px;padding:2px 5px;border-radius:5px;white-space:nowrap; }
-.desk-shift-day { background:color-mix(in srgb,var(--v2-warning,#b27014) 13%,var(--wb-surface));color:var(--wb-ink); }
-.desk-shift-day svg { color:var(--v2-warning,#b27014); }
-.desk-shift-night { background:var(--desk-tint);color:var(--wb-primary); }
-.desk-roster-building { background:var(--desk-tint);color:var(--wb-primary);font-weight:650; }
-.desk-roster-names { display:flex;flex-wrap:wrap;gap:1px 8px;padding-block:2px; }
-.desk-roster-names > span { max-width:100%;overflow-wrap:anywhere; }
-.desk-roster-empty,.desk-roster-other { color:var(--wb-muted); }
-.desk-roster-other span { display:block;overflow-wrap:anywhere; }
-.desk-alerts small { font-size:11px;color:var(--wb-muted); }
-.desk-alerts ul { padding-left:18px;margin:5px 0; }
-.desk-main :deep(.desk-queue) { display:block;padding:0;border-radius:12px; }
-.desk-main :deep(.wb-todo-toolbar) { grid-template-columns:minmax(0,1fr) auto;border:0;padding:12px 14px 8px; }
-.desk-main :deep(.wb-todo-toolbar h2) { min-width:0; }
-.desk-main :deep(.wb-task-filters) { grid-column:1/-1;grid-template-columns:minmax(0,1fr) minmax(118px,auto);justify-content:stretch; }
-.desk-main :deep(.desk-task-search) { position:relative;align-items:center; }
-.desk-main :deep(.desk-task-search svg) { position:absolute;left:9px;color:var(--wb-muted);pointer-events:none; }
-.desk-main :deep(.desk-task-search input) { width:100%;padding-left:30px; }
-.desk-main :deep(.wb-task-module-grid) { display:block; }
-.desk-main :deep(.wb-task-list > li) { padding:0 14px; }
-.desk-main :deep(.wb-identity) { padding:7px 12px;margin-bottom:8px; }
-.desk-main :deep(.wb-task-row) { min-height:52px; }
-.desk-main :deep(.wb-task-action) { max-width:36%;text-align:right;white-space:normal;overflow-wrap:anywhere; }
-.desk-main :deep(.wb-task-action > span:first-child) { white-space:normal;color:var(--wb-muted); }
-.desk-main :deep(.wb-task-group),.desk-main :deep(.wb-queue-status) { margin:0;padding:5px 14px; }
-.desk-main :deep(.wb-queue-status) { padding-block:13px; }
-.desk-main :deep(.desk-task-tabs) { display:flex;flex-wrap:wrap;gap:0 12px;border-bottom:1px solid var(--wb-border);padding:0 14px; }
-.desk-main :deep(.desk-task-tabs button) { padding:8px 3px;border:0;border-bottom:2px solid transparent;background:none;color:var(--wb-muted);font-size:13px;white-space:nowrap; }
-.desk-main :deep(.desk-task-tabs button[aria-pressed=true]) { border-color:var(--wb-primary);color:var(--wb-primary);font-weight:650; }
-.desk-main :deep(.desk-task-tabs button span) { margin-left:2px;font-variant-numeric:tabular-nums; }
-.desk-main :deep(.desk-drill-heading) { padding:9px 14px;background:var(--desk-tint);border-block:1px solid var(--wb-border); }
-.desk-main :deep(.desk-queue-health) { padding:5px 14px;border-top:1px solid var(--wb-border);font-size:12px;color:var(--wb-muted); }
-.desk-main :deep(.desk-queue-health summary) { min-height:32px;align-content:center;cursor:pointer; }
-.desk-main :deep(.desk-queue-health summary span) { margin-left:8px; }
-.desk-main :deep(.desk-queue-health ul) { margin:0;padding:0;list-style:none; }
-.desk-main :deep(.desk-queue-health li) { display:flex;align-items:center;justify-content:space-between;gap:8px;border-top:1px solid var(--wb-border); }
-.desk-main :deep(.desk-queue-health li small) { display:block;color:var(--wb-muted); }
-.desk-main :deep(.desk-module-pill) { background:var(--desk-tint);color:var(--wb-primary);border-radius:20px;width:88px;max-width:30%;flex:none;text-align:center;padding:4px 3px;font-size:12px; }
-.desk-main :deep(.desk-unread) { display:inline-block;width:6px;height:6px;margin-right:5px;vertical-align:2px;border-radius:50%;background:var(--wb-primary); }
-.desk-overview :deep(.wb-dashboard) { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px; }
-@container workbench (max-width:790px) {
-  .desk-columns { grid-template-columns:minmax(0,1fr); }
+.daily-desk {
+  --desk-paper:var(--soft-face,#f4f7f7); --desk-well:var(--soft-field,#edf2f3);
+  --desk-ink:var(--v2-ink,#20373b); --desk-muted:var(--v2-muted); --desk-line:var(--soft-edge);
+  --desk-green:var(--v2-palette-accent-text); --desk-green-wash:var(--v2-palette-selection);
+  --desk-blue:#266288; --desk-blue-wash:#dcedf8; --desk-shadow:var(--soft-key);
+  display:grid; gap:14px; min-width:0; color:var(--desk-ink); font:inherit;
 }
-@container workbench (max-width:530px) {
-  .desk-indicators,.desk-overview :deep(.wb-dashboard) { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .desk-overview :deep(.wb-dashboard) { gap:8px; }
-  .desk-metric { padding-inline:8px;gap:6px; }
-  .desk-metric:nth-child(odd) { border-inline-start:0; }
-  .desk-metric:nth-child(n+3) { border-top:1px solid var(--wb-border); }
-  .desk-metric-icon { display:none; }
-  .desk-day { min-height:32px; }
-  .desk-bar { align-items:flex-start;flex-direction:column;padding:12px; }
-  .desk-actions { width:100%; }
-  .desk-search { flex:1;min-width:0;width:auto; }
-  .desk-actions > .desk-anchor:first-child .desk-popover { left:0;right:auto; }
-  .desk-actions { position:relative; }
-  .desk-actions > .desk-anchor { position:static; }
-  .desk-actions .desk-popover { min-width:0;max-width:100%;width:min(300px,100%); }
-  .desk-main :deep(.wb-task-list > li) { padding:0 8px; }
-  .desk-main :deep(.desk-task-tabs button) { min-height:44px; }
-  .desk-main :deep(.desk-module-pill) { width:auto;max-width:27%; }
+[data-v2-theme="dark"] .daily-desk {
+  --desk-blue:#aad5ee; --desk-blue-wash:#243e4f;
 }
+.daily-desk *, .daily-desk *::after { box-sizing:border-box }
+.daily-desk :is(h1,h2,h3,p,ul,ol) { margin:0 }
+.daily-desk h1 { font-size:clamp(20px,2vw,27px); line-height:1.2; letter-spacing:-.035em }
+.daily-desk h2 { font-size:18px }
+.daily-desk h3 { font-size:14px }
+.daily-desk :is(button,select,input) { font:inherit; color:inherit }
+.daily-desk button { cursor:pointer }
+.daily-desk button:disabled { cursor:wait; opacity:.65 }
+.daily-desk :is(button,select,input):focus-visible,.day-planner:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
+.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.metric-heading,.metric-line,.selected-weather,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
+.desk-head,.line-head,.month-tools { justify-content:space-between }
+.desk-head { flex-wrap:wrap; gap:10px 16px }
+.desk-title { gap:12px; min-width:0 }
+.desk-avatar { width:43px; height:43px; border-radius:15px; display:grid; place-items:center; color:var(--desk-blue); background:linear-gradient(135deg,var(--desk-blue-wash),var(--desk-green-wash)); box-shadow:var(--desk-shadow); overflow:hidden }
+.desk-avatar img { width:100%; height:100%; object-fit:cover }
+.identity-line { font-size:12px; color:var(--desk-muted); flex-wrap:wrap; gap:3px 8px; margin-top:3px; overflow-wrap:anywhere }
+.name-control,.text-key,.agenda-task { border:0; padding:0; background:transparent; color:var(--desk-green); font-weight:650 }
+.desk-tools { position:relative; flex-wrap:nowrap; max-width:100% }
+.desk-anchor { position:relative; min-width:0 }
+.search-field,.tool-key,.small-key,.day-planner select,.today-key { background:var(--desk-paper); border:1px solid var(--desk-line); border-radius:10px }
+.search-field { height:40px; width:clamp(145px,17vw,230px); padding:0 11px; background:var(--desk-well); color:var(--desk-muted) }
+.search-field input { width:100%; min-width:0; padding:0; background:transparent; border:0; font-size:13px }
+.search-field svg { flex:none }
+.tool-key,.small-key,.text-key,.icon-key,.agenda-task { display:inline-flex; align-items:center; justify-content:center; gap:5px }
+.tool-key,.small-key { min-height:40px; padding:5px 10px; font-size:13px; position:relative }
+.icon-key { background:transparent; border:1px solid transparent; width:32px; height:32px; border-radius:8px }
+.notice-count { position:absolute; right:0; top:0; min-width:16px; padding:1px 3px; border-radius:999px; background:var(--desk-blue); color:var(--desk-paper); font-size:10px; line-height:1.35; font-weight:700; text-align:center }
+.notification-actions { gap:3px }
+.floating { position:absolute; z-index:25; top:calc(100% + 6px); right:0; width:min(310px,85vw); padding:14px; border:1px solid var(--desk-line); border-radius:14px; background:var(--desk-paper); box-shadow:0 12px 30px #122e3a2b; overflow:auto; max-height:60vh; font-size:13px }
+.search-results,.notification { display:grid; gap:4px }
+.search-results button,.notice-row { background:transparent; border:0; border-radius:8px; padding:9px; text-align:left }
+.search-results button { display:flex; justify-content:space-between; align-items:center }
+.search-results button:hover,.pointed,.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
+.notice-row { display:grid; gap:2px }
+.notice-row span,.muted,.metric-line small,.itinerary h3 small,.timeline small,.timeline p { color:var(--desk-muted); font-size:12px; font-weight:normal }
+.forecast p,.forecast ul,.notification>.text-key { margin-top:8px }
+.forecast ul,.timeline { list-style:none; padding:0 }
+.forecast li { display:flex; justify-content:space-between; padding:5px 0; border-top:1px solid var(--desk-line) }
+.masthead { justify-content:flex-start;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
+.mast-identity,.metric-copy { min-width:0 }
+.title-line { display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap }
+.title-line h1 { font-size:21px;letter-spacing:-.03em;line-height:1.25 }
+.folio-date { color:var(--desk-muted);white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums }
+.masthead .search-field { width:clamp(115px,10vw,155px);height:35px;border-radius:20px }
+.masthead .tool-key,.masthead .small-key { min-height:35px;border-radius:20px;white-space:nowrap }
+.masthead .desk-tools { gap:5px; margin-inline-start:auto }
+.command-line { display:flex;align-items:center;flex-wrap:wrap;min-width:0;max-width:100% }
+.command-line :slotted(*) { max-width:100%;flex-wrap:wrap }
+.digest { display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px }
+.metric-pill { display:flex;align-items:center;gap:9px;position:relative;min-width:0;padding:8px 13px;border:1px solid var(--desk-line);border-radius:22px;background:var(--desk-paper);box-shadow:var(--desk-shadow) }
+.metric-pill.digest-lead { background:linear-gradient(105deg,var(--desk-green-wash),var(--desk-paper) 82%);border-color:color-mix(in srgb,var(--desk-green) 24%,var(--desk-line)) }
+.metric-symbol { flex:none;width:31px;height:31px;border-radius:50%;display:grid;place-items:center;background:var(--desk-blue-wash);color:var(--desk-blue) }
+.digest-lead .metric-symbol { background:var(--v2-palette-accent);color:var(--v2-palette-on-accent) }
+.metric-pill[data-unknown="true"] .metric-symbol { background:var(--desk-well);color:var(--desk-muted) }
+.digest h3 { font-size:12px;line-height:1.25;font-weight:550;overflow-wrap:anywhere }
+.metric-value { display:flex;align-items:baseline;gap:5px;line-height:1.15 }
+.metric-value strong { font-size:22px;font-variant-numeric:tabular-nums }
+.digest-lead strong { color:var(--desk-green) }
+.metric-value small { font-size:11px;color:var(--desk-muted) }
+.metric-open { margin-left:auto;flex:none }
+.month-mode { display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;padding:4px 0;color:var(--desk-ink);font-weight:650!important }
+.month-mode span { color:var(--desk-blue);font-size:11px }
+.working-grid { display:grid;align-items:start;gap:12px;grid-template-columns:minmax(0,1fr) clamp(310px,24vw,350px);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
+.desk-content { grid-area:tasks;min-width:0 }
+.desk-supplement { grid-area:supplement;display:grid;gap:10px;min-width:0 }
+.day-planner { grid-area:agenda;display:grid;align-items:start;gap:9px;min-width:0;scroll-margin-top:72px }
+.rail-module { min-width:0;padding:11px 13px;border:1px solid var(--desk-line);border-radius:15px;background:var(--desk-paper);box-shadow:var(--desk-shadow) }
+.day-planner .roster-module { padding:6px 9px }
+.planner-module { background:linear-gradient(155deg,color-mix(in srgb,var(--desk-blue-wash) 55%,var(--desk-paper)),var(--desk-paper) 58%) }
+.weather-guard h3 { font-size:14px;font-weight:680 }
+.itinerary { margin-top:8px;padding-top:8px;border-top:1px solid var(--desk-line) }
+.guard-summary { display:flex;align-items:center;flex-wrap:wrap;gap:3px 7px;color:var(--desk-muted) }
+.guard-summary b { color:var(--desk-green) }
+.month-tools select { min-width:0; max-width:102px; padding:3px 5px; font-size:12px }
+.month-tools { flex-wrap:wrap; gap:3px 5px; font-size:13px }
+.month-tools>div { gap:2px; margin-inline-start:auto }
+.month-tools .icon-key { width:26px }
+.today-key { min-height:28px; padding:1px 6px; font-size:12px }
+.month-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:2px; margin-top:5px }
+.weekday { text-align:center; color:var(--desk-muted); font-size:11px; padding:3px }
+.day-cell { position:relative; min-width:0; min-height:31px; border:1px solid transparent; border-radius:8px; background:transparent; font-size:13px!important; font-variant-numeric:tabular-nums }
+.day-cell.adjacent { color:var(--desk-muted); font-weight:normal }
+.day-cell.current { border-color:var(--desk-green) }
+.day-cell[aria-pressed="true"] { background:var(--v2-palette-accent); color:var(--v2-palette-on-accent); font-weight:700 }
+.day-cell i { display:block; position:absolute; bottom:2px; left:calc(50% - 2px); border-radius:50%; background:currentColor; width:4px; height:4px }
+.day-preview { max-width:min(280px,80vw); max-height:230px; overflow:auto; font-size:13px }
+.day-preview p { display:grid; margin:6px 0; gap:2px }
+.selected-weather { gap:3px; font-size:12px; color:var(--desk-blue) }
+.itinerary .muted { margin-top:9px }
+.timeline { margin-top:8px!important }
+.timeline li { display:grid; grid-template-columns:42px minmax(0,1fr); gap:8px; font-size:13px }
+.timeline time { padding-top:8px; color:var(--desk-blue); font-size:12px; font-variant-numeric:tabular-nums }
+.timeline li>div { position:relative; display:grid; gap:2px; border-left:1px solid var(--desk-line); padding:5px 0 8px 11px; overflow-wrap:anywhere }
+.timeline li>div::before { content:""; position:absolute; left:-3px; top:12px; width:5px; height:5px; border-radius:50%; background:var(--desk-blue) }
+.agenda-task { justify-content:flex-start; text-align:left }
+.retry-note,.weather-guard { font-size:12px }
+.retry-note,.weather-guard>*+* { margin-top:6px }
+.weather-guard ul { padding-left:18px }
+.warning { display:flex; justify-content:space-between; padding:6px 9px; background:var(--desk-blue-wash); border-radius:8px }
+.agenda-jump { display:none }
+@media(max-width:1000px) {
+  .working-grid { grid-template-columns:minmax(0,1fr);grid-template-areas:"tasks" "agenda" "supplement";grid-template-rows:auto }
+  .agenda-jump { display:inline-flex }
+  .day-planner { scroll-margin-top:65px }
+}
+@media(min-width:701px) and (max-width:1000px){
+  .day-planner { grid-template-columns:repeat(2,minmax(0,1fr)) }
+  .planner-module { grid-row:span 2 }
+}
+@media(max-width:700px) {
+  .daily-desk { gap:9px }
+  .masthead { gap:6px 10px;padding:0 }
+  .masthead .desk-tools { flex:1 1 auto;flex-wrap:wrap;margin-inline-start:0 }
+  .digest { grid-template-columns:repeat(2,minmax(0,1fr));gap:6px }
+  .metric-pill { padding:6px 9px;gap:7px;border-radius:17px }
+  .metric-value strong { font-size:19px }
+  .day-cell,.today-key,.masthead .small-key,.masthead .tool-key { min-height:40px }
+}
+@media(max-width:540px) {
+  .desk-title { width:100% }
+  .mast-identity { display:flex;align-items:center;flex-wrap:wrap;gap:2px 10px }
+  .identity-line { margin-top:0 }
+  .masthead .desk-tools { width:100%;flex-wrap:nowrap }
+  .desk-anchor { position:static }
+  .search-anchor { flex:1 }
+  .masthead .search-field { width:100%;height:40px }
+  .floating { left:0;width:100% }
+  .metric-symbol { width:26px;height:26px }
+}
+.month-mode,.today-key { white-space:nowrap }
 </style>

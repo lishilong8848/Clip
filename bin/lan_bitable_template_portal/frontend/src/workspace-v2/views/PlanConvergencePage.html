@@ -1,0 +1,119 @@
+<section class="sp-page" aria-label="计划收敛">
+  <header class="sp-bar">
+    <VnetBackButton to="/"/><h1>计划收敛</h1>
+    <nav class="sp-tabs pc-tabs" aria-label="核对任务"><button v-for="t in tabs" :key="t.id" :aria-pressed="tab===t.id" :class="{active:tab===t.id}" @click="switchTab(t.id)">{{ t.label }}</button></nav>
+    <button v-if="boot.is_admin" @click="openSettings"><Settings :size="15"/>平台设置</button>
+  </header>
+  <p v-if="loading" role="status">正在读取核对工作区…</p>
+  <div v-if="error" class="sp-alert" role="alert">{{ error }} <button aria-label="关闭错误提示" @click="error=''"><X :size="14"/></button></div>
+  <p v-if="notice" role="status">{{ notice }} <button aria-label="关闭提示" @click="notice=''"><X :size="14"/></button></p>
+
+  <template v-if="tab==='review'">
+    <section class="sp-card">
+      <header class="sp-bar v2-plan-record-head"><h2>屏蔽记录</h2><span class="pc-badge">屏蔽中 {{ activeCount }}</span>
+        <input v-model="search" type="search" placeholder="名称或屏蔽 ID" aria-label="搜索屏蔽记录"/>
+        <select id="pc-block-status" v-model="status" aria-label="屏蔽状态"><option>全部状态</option><option>屏蔽中</option><option>已关闭</option></select>
+        <button data-v2-refresh :disabled="listLoading || loading" @click="v2RefreshBlocks($event)"><RefreshCw :size="14"/>刷新记录</button>
+        <form class="sp-tools" @submit.prevent="chooseBlock(queryId)"><input v-model="queryId" aria-label="查询屏蔽 ID" placeholder="按 ID 直查" required/><button class="sp-primary" :disabled="!queryId.trim() || detailLoading">查询</button></form>
+      </header>
+      <div class="sp-grid"><button v-for="row in blockPageRows" :key="blockId(row)" class="sp-record pc-record" :aria-pressed="selectedId===blockId(row)" :class="{selected:selectedId===blockId(row)}" @click="chooseBlock(blockId(row))">
+        <strong>{{ row.blockName || blockId(row) }}</strong><small>#{{ blockId(row) }} · {{ String(row.status)==='1'?'屏蔽中':'已关闭' }}<template v-if="row.userName"> · {{ row.userName }}</template></small></button>
+      </div>
+      <div class="sp-tools sp-pagefoot"><span>{{ filteredBlocks.length }} 条 · 最近读取 {{ timeText(loadedAt) }}</span>
+        <template v-if="blockPages>1"><button :disabled="blockPage<=1" @click="blockPage--">上一页</button>{{ blockPage }} / {{ blockPages }}<button :disabled="blockPage>=blockPages" @click="blockPage++">下一页</button></template></div>
+      <p v-if="!loading && !listLoading && !filteredBlocks.length">当前范围没有屏蔽记录</p>
+    </section>
+
+    <p v-if="detailLoading" role="status">正在读取记录明细…</p>
+    <template v-if="detail">
+      <section class="sp-card">
+        <header class="sp-bar"><h2>{{ detail.blockName || selectedId }}</h2><small>#{{ selectedId }} · {{ detailRows.length }} 条明细</small>
+          <button @click="showFields(detail,'屏蔽记录字段')">查看记录字段</button></header>
+        <div class="sp-detail-list">
+          <article v-for="(row,i) in detailPageRows" :key="row.blockDetailId || i" class="sp-detail" :class="{'pc-focused-detail':focusedDetails.has(row)}">
+            <div><strong>{{ row.classifyModel || '全部类型' }} · {{ row.spaceModel || '全部资源' }}</strong><p>{{ row.instances || '全部设备' }} · {{ row.relateConfig || '全部规则' }}</p></div>
+            <div class="sp-tools">
+              <button aria-label="查看实例快照" @click="drill(row,'snapshots')"><Camera :size="14"/>快照</button>
+              <button @click="drill(row,'rule-view')">规则视图</button><button @click="showPoints(row)">设备测点</button><button @click="showFields(row,'屏蔽明细字段')">全部字段</button>
+            </div>
+          </article>
+        </div>
+        <p v-if="!detailRows.length">这条记录没有屏蔽明细。</p>
+        <div v-if="detailPages>1" class="sp-tools sp-pagefoot"><button :disabled="detailPage===1" @click="detailPage--">上一页明细</button>{{ detailPage }} / {{ detailPages }}<button :disabled="detailPage===detailPages" @click="detailPage++">下一页明细</button></div>
+      </section>
+    </template>
+    <div class="sp-checks">
+      <section class="sp-card">
+        <header class="sp-bar"><h2>规则集核对</h2><select v-model="setId" aria-label="选择规则集"><option value="">选择规则集</option><option v-for="r in ruleSets" :key="r.id" :value="String(r.id)">{{ ruleSetLabel(r) }}</option></select>
+          <button data-v2-refresh @click="v2RefreshMatchSets($event)">刷新规则集</button><button class="sp-primary" :disabled="!detail || !setId || matchLoading" @click="matchRules">{{ matchLoading?'核对中…':'核对规则集' }}</button></header>
+        <div v-if="matchResult" class="sp-results"><strong>{{ matchResult.passed?'核对通过':'有待核对项' }} · {{ matchResult.source_name }}</strong>
+          <p>规则集 {{ matchResult.set_device_count }} 台 · 记录 {{ matchResult.record_device_count }} 台<span v-if="matchResult.missing_count!=null"> · 缺少 {{ matchResult.missing_count }} 台</span><span v-if="matchResult.extra_count!=null"> · 额外 {{ matchResult.extra_count }} 台</span></p>
+          <button v-for="(g,i) in matchGroups" :key="i" @click="showGroup(g)">{{ g.kind }} · {{ g.label }} · {{ g.matched?'已覆盖':'缺少 '+g.missing_count+' 台' }}</button>
+          <button v-if="matchResult.missing?.length" @click="showDialog('缺少的设备','table',matchResult.missing,deviceColumns)">查看缺少的设备</button>
+          <p v-if="matchResult.not_found_devices?.length">未识别设备 {{ valueText(matchResult.not_found_devices) }}</p>
+          <button @click="showFields(matchResult,'规则核对完整结果')">完整结果</button><small>{{ matchResult.checked_at }}</small>
+        </div>
+      </section>
+      <section class="sp-card">
+        <header class="sp-bar"><h2>Excel 场景核对</h2><label class="sp-file">导入工作簿<input type="file" accept=".xls,.xlsx,.xlsm" :disabled="excelLoading" @change="uploadExcel"/></label>
+          <select v-if="sheets.length" v-model="sheetName" aria-label="选择工作表"><option v-for="s in sheets" :key="s.name">{{ s.name }}</option></select>
+          <button class="sp-primary" :disabled="!detail || !sheetName || excelLoading" @click="compareExcel">{{ excelLoading?'处理中…':'核对工作表' }}</button></header>
+        <small v-if="excelFilename">{{ excelFilename }} · {{ sheets.length }} 张工作表</small>
+        <div v-if="excelResult" class="sp-results"><strong>{{ excelResult.passed?'核对通过':'存在补配要求' }} · {{ excelResult.source_name }}</strong>
+          <p v-if="excelResult.stats">要求 {{ excelResult.stats.expected_count ?? '—' }} 组 · 已覆盖 {{ excelResult.stats.matched_count ?? '—' }} 组 · 缺少 {{ excelResult.stats.missing_count ?? '—' }} 组 · 额外 {{ excelResult.stats.extra_count ?? '—' }} 组</p>
+          <div v-for="(gap,i) in excelResult.missing_data_list" :key="i"><b>{{ gap.scenario_name }}</b> · 第 {{ gap.row_numbers?.join('、') }} 行 · {{ gap.message }}</div>
+          <button @click="downloadGaps"><Download :size="14"/>导出补配清单</button><button @click="showFields(excelResult,'场景核对完整结果')">完整结果</button><small>{{ excelResult.checked_at }}</small></div>
+      </section>
+    </div>
+  </template>
+
+  <PlanConvergenceRules v-if="tab==='rules'" ref="rulesRef" :is-admin="boot.is_admin===true"/>
+  <section v-if="tab==='maintenance' || tab==='change'" class="sp-card" :key="auditKind">
+    <header class="sp-bar"><h2>{{ currentAudit.label }}核对</h2><input v-model="currentAudit.search" class="sp-audit-search" type="search" :aria-label="'搜索'+currentAudit.label+'记录'" placeholder="通告、设备、楼栋或位置"/>
+      <button data-v2-refresh :disabled="currentAudit.checking || currentAudit.loading" @click="v2RefreshNotices($event)">刷新{{ currentAudit.label }}记录</button>
+      <button class="sp-primary" :disabled="currentAudit.checking || currentAudit.loading" @click="checkNoticeAudit()">{{ currentAudit.checking?'核对中…':'核对全部' }}</button></header>
+    <p v-if="currentAudit.error" role="alert">{{ currentAudit.error }} <button @click="retryNoticeAudit">重试</button></p>
+    <p v-if="currentAudit.loading" role="status">正在读取{{ currentAudit.label }}记录…</p>
+    <p v-if="currentAudit.stats">匹配 {{ currentAudit.stats.matched_records }} 条 · 屏蔽记录 {{ currentAudit.stats.blocks }} 条 · 未关联屏蔽 {{ currentAudit.stats.orphan_blocks }} 条</p>
+    <div class="sp-grid sp-audit"><article v-for="row in auditPageRows" :key="row.record_id" class="sp-item">
+      <h3>{{ row.name || row.record_id }}</h3><small>{{ [row.building,row.status,row.device,row.location,row.start_time].filter(Boolean).join(' · ') }}</small>
+      <p v-if="row.fault">{{ row.fault }}</p>
+      <div v-if="(row.check_status || row.auto_check_status)==='skipped'">跳过核对<span v-if="row.skip_reason"> · {{ row.skip_reason }}</span></div>
+      <div v-else-if="Array.isArray(row.hits) && (!row.check_status || row.check_status==='ready') && (row.check_status==='ready' || !row.auto_check_status || row.auto_check_status==='ready')">
+        <strong>{{ row.hits.length?'找到 '+row.hits.length+' 条候选屏蔽':'未找到匹配屏蔽' }}</strong>
+        <button v-for="hit in row.hits" :key="hit.blockId" :title="hit.reason" @click="locateNoticeBlock(hit,row)">{{ hit.blockName || hit.blockId }} · {{ hit.reason }}</button>
+      </div>
+      <p v-else>{{ auditResultText(row) }}</p>
+      <div class="sp-tools"><small v-if="row.checked_at || row.auto_checked_at">{{ row.check_source==='manual'?'手动核对':'自动核对' }} · {{ timeText(row.checked_at || row.auto_checked_at) }}</small>
+        <button v-if="(row.check_status || row.auto_check_status)!=='skipped'" :disabled="currentAudit.checking || currentAudit.loading" @click="checkNoticeAudit(row.record_id)">核对本条</button>
+        <button @click="showFields(row,currentAudit.label+'通告字段')">详情</button></div>
+    </article></div>
+    <p v-if="!currentAudit.loading && !currentAudit.error && !auditFiltered.length">没有符合条件的{{ currentAudit.label }}记录</p>
+    <div v-if="auditPages>1" class="sp-tools sp-pagefoot"><button :disabled="currentAudit.page===1" @click="currentAudit.page--">上一页</button>{{ currentAudit.page }} / {{ auditPages }}<button :disabled="currentAudit.page===auditPages" @click="currentAudit.page++">下一页</button></div>
+  </section>
+
+  <Teleport to="body"><div v-if="dialog.open" class="sp-modal-backdrop" @mousedown.self="closeDialog">
+    <section ref="dialogElement" class="sp-modal" role="dialog" aria-modal="true" aria-labelledby="sp-dialog-title" tabindex="-1" data-v2-inline-feedback>
+      <header class="sp-bar"><button v-if="dialog.previous" @click="restoreDialog(); dialogElement?.focus()">返回上层</button><h2 id="sp-dialog-title">{{ dialog.title }}</h2><button aria-label="关闭弹窗" :disabled="settingsBusy" @click="closeDialog"><X :size="17"/></button></header>
+      <div class="sp-modal-body"><p v-if="dialog.error" role="alert">{{ dialog.error }}</p><p v-if="dialog.loading" role="status">正在读取…</p>
+        <template v-else-if="dialog.kind==='settings' && boot.is_admin">
+          <p>{{ settings.has_token?(settings.expired?'登录已过期':'已连接智航'):'尚未连接智航' }} · {{ authAccount || '账号未提供' }} · 到期 {{ expiresText(settings.expires_at) }}</p>
+          <div class="sp-tools"><button :disabled="loginActive || loginBusy || settingsBusy" @click="startBrowserLogin">{{ loginStatusLabel }}</button>
+            <button v-if="loginActive" :disabled="loginBusy || settingsBusy" @click="cancelBrowserLogin">取消登录</button><span role="status">{{ loginJob.message }}</span></div>
+          <label>手动更新 Token<input v-model="settings.token" type="password" autocomplete="off" :disabled="settingsBusy || loginActive"/></label>
+          <div class="sp-tools"><button class="sp-primary" :disabled="settingsBusy || loginActive || !settings.token.trim()" @click="saveSettings">保存 Token</button><button :disabled="settingsBusy || loginActive" @click="testSettings">{{ settings.token.trim()?'保存并测试连接':'测试连接' }}</button></div>
+        </template>
+        <template v-else>
+          <div v-for="(row,i) in dialogPageRows" :key="i" class="sp-dialog-row">
+            <dl><div v-for="col in dialog.columns" :key="col.key"><dt>{{ col.label }}</dt><dd>{{ valueText(row[col.key]) }}</dd></div></dl>
+            <div v-if="dialog.kind!=='table' || !('label' in row && 'value' in row)" class="sp-tools">
+              <button v-if="dialog.kind==='snapshots' && row.insName" @click="showPoints({instances:row.insName}); dialogElement?.focus()">设备测点</button>
+              <button v-if="dialog.kind==='instances'" @click="showInstancePoints(row); dialogElement?.focus()">查看测点</button><button @click="showDialogRow(row); dialogElement?.focus()">全部字段</button></div>
+          </div><p v-if="!dialog.error && !dialogPageRows.length">没有可显示的明细</p>
+        </template>
+      </div>
+      <footer v-if="dialogPages>1" class="sp-tools"><button :disabled="dialogPage<=1" @click="dialogPage--">上一页</button>{{ dialogPage }} / {{ dialogPages }}<button :disabled="dialogPage>=dialogPages" @click="dialogPage++">下一页</button></footer>
+    </section>
+  </div></Teleport>
+  <ConfirmDialog :open="confirmOpen" title="放弃规则修改？" message="当前规则集尚未保存，离开会丢弃本次修改。" confirm-label="放弃并离开" cancel-label="继续编辑" tone="warning" @resolve="resolveConfirm"/>
+</section>

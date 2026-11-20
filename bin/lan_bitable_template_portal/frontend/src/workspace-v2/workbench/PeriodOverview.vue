@@ -1,13 +1,13 @@
 <template>
   <section v-if="sources.length" class="wb-period" aria-label="工作状态">
     <header class="wb-period-header">
-      <div><h2>工作状态</h2><p>{{ dateLabel }} · {{ scopeLabel }}</p></div>
+      <h2 :title="dateLabel+' · '+scopeLabel">工作状态</h2>
       <div class="wb-period-select" role="group" aria-label="统计周期">
         <button v-for="option in periods" :key="option.id" type="button" :aria-pressed="period === option.id"
           @click="period = option.id">{{ option.label }}</button>
       </div>
     </header>
-    <div v-if="sources.length" class="wb-period-grid" aria-live="polite">
+    <div class="wb-period-grid" aria-live="polite">
       <article v-for="source in sources" :key="source.id" class="wb-period-card">
         <header><h3>{{ source.label }}</h3><button v-if="source.url && !results[source.id]?.denied" type="button" :aria-label="`打开${source.label}`"
           @click="$emit('open', source.url)"><ArrowUpRight :size="18" /></button></header>
@@ -24,7 +24,6 @@
         <p v-else class="wb-period-message" role="status">正在读取</p>
       </article>
     </div>
-    <p v-else class="wb-period-message">当前范围暂无可展示的统计。</p>
   </section>
 </template>
 
@@ -99,7 +98,7 @@ const sources = computed<Source[]>(() => {
         { label: '处理中', value: events.records.filter((row: Dict) => eventStatusTone(row.status) === 'processing').length, max: total, tone: 'warn' },
         { label: '已恢复', value: events.records.filter((row: Dict) => eventStatusTone(row.status) === 'recovered').length, max: total, tone: 'ok' },
         { label: 'I2 及以上', value: events.stats.i2_or_higher, max: total },
-      ], note: events.unknown_time_count ? '含发生时间待核对记录，已排除在周期统计外' : undefined };
+      ], note: events.unknown_time_count ? '部分时间待核对' : undefined };
     },
   });
   const noticeKinds = ['maintenance', 'change', 'repair'].filter(kind => grants.includes(kind));
@@ -197,21 +196,21 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.wb-period { display: contents; }
-.wb-period-header { grid-column:1/-1;display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.wb-period { display:grid;gap:7px;min-width:0 }
+.wb-period-header { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 9px }
 .wb-period h2, .wb-period h3, .wb-period p { margin: 0; }
 .wb-period h2 { font-size: 16px; }
 .wb-period p { color: var(--v2-muted); font-size: 13px; line-height: 1.55; }
-.wb-period-select { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); border: 1px solid var(--v2-border); background: var(--wb-surface,var(--v2-bg)); border-radius: 8px; }
+.wb-period-select { display:grid;grid-template-columns:repeat(3,auto);border:1px solid var(--v2-border);background:var(--soft-face);border-radius:999px }
 .wb-period button { border: 0; color: inherit; background: none; cursor: pointer; }
 .wb-period button:focus-visible { outline: 2px solid var(--wb-primary,var(--v2-blue)); outline-offset: -2px; }
-.wb-period-select button { min-height: 34px; padding: 0 12px; border-radius: 7px; font-weight: 600; }
+.wb-period-select button { min-height:30px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600 }
 .wb-period-select button[aria-pressed='true'] { color: var(--wb-primary,var(--v2-blue)); background: color-mix(in srgb,var(--wb-primary,var(--v2-blue)) 12%,transparent); }
-.wb-period-grid { display: contents; }
-.wb-period-card { display: grid; grid-template-rows: 34px auto; align-content: start; gap: 5px; min-width: 0; padding: 6px 10px 10px; background: var(--wb-surface,var(--v2-bg)); border: 1px solid var(--v2-border); border-radius: 8px; }
-.wb-period-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.wb-period-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,230px),1fr));gap:8px;align-items:start }
+.wb-period-card { display:grid;align-content:start;gap:4px;min-width:0;padding:8px 10px;background:var(--soft-face);border:1px solid var(--soft-edge);border-radius:12px }
+.wb-period-card header { display:flex;align-items:center;justify-content:space-between;gap:8px;min-height:28px }
 .wb-period-card h3 { font-size: 14px; }
-.wb-period-card header button { display: grid; place-items: center; min-width: 34px; min-height: 34px; color: var(--wb-primary,var(--v2-blue)); }
+.wb-period-card header button { display:grid;place-items:center;min-width:28px;min-height:28px;color:var(--wb-primary,var(--v2-blue)) }
 .wb-period-value { display: flex; align-items: baseline; flex-wrap: wrap; column-gap: 8px; line-height: 1.12; }
 .wb-period-value strong { font-size: clamp(24px,2vw,30px); font-variant-numeric: tabular-nums; }
 .wb-period-value span { color: var(--v2-muted); font-size: 12px; }
@@ -225,9 +224,7 @@ onBeforeUnmount(() => {
 .wb-period-bar meter::-moz-meter-bar { background: var(--bar-color); }
 .wb-period-message button { color: var(--wb-primary,var(--v2-blue)); min-height: 34px; text-decoration: underline; }
 @media(max-width:560px) {
-  .wb-period-select { width: 100%; }
   .wb-period-select button,.wb-period-card header button,.wb-period-message button { min-height: 44px; }
-  .wb-period-card { grid-template-rows: 44px auto; }
   .wb-period-card { padding-inline: 10px; }
   .wb-period-bar { grid-template-columns: 5em minmax(12px,1fr) auto; gap: 4px; }
 }

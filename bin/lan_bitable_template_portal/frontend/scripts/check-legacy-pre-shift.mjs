@@ -73,7 +73,7 @@ try {
     return ok({ items: [], records: [], stats: {}, summary: {} });
   });
   page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
-  await page.goto(origin + '/');
+  await page.goto(origin + '/?frontend=legacy');
   const card = page.locator('.module-pre_shift');
   await card.locator('.module-check-alert').waitFor();
   assert(await page.locator('.module-card').first().evaluate(el => el.classList.contains('module-pre_shift')), 'authorized checklist is the first home card');
@@ -133,7 +133,7 @@ try {
   const upcoming = { ...task, id: 'next', day: '2026-10-18', due: now + 86400, deadline: now + 100000 };
   const overdue = { ...task, id: 'overdue', due: now - 86400, deadline: now - 1 };
   scheduledTasks = [upcoming, advance, { ...overdue, id: 'expired-done', submitted: serverTime }, overdue];
-  await page.goto(origin + '/?entry=pre_shift');
+  await page.goto(origin + '/?frontend=legacy&entry=pre_shift');
   await check.getByText('逾期待补做', { exact: true }).waitFor();
   const choices = check.locator('.v2-check-choice');
   assert.equal(await choices.count(), 3, 'expired completed checks hide, unfinished ones remain');
@@ -155,7 +155,7 @@ try {
   assert(await check.evaluate(el => el.classList.contains('has-pending-checks')), 'the next occurrence starts alerting only when due');
   scheduledTasks = null; serverTime = state.server_time;
   mode = 'manager'; submitted = false;
-  await page.goto(origin + '/?entry=pre_shift');
+  await page.goto(origin + '/?frontend=legacy&entry=pre_shift');
   for (const width of [1440,390]) {
     await page.setViewportSize({width,height:width<700?844:960});
     await check.getByRole('button',{name:'提交检查',exact:true}).waitFor();
@@ -181,15 +181,15 @@ try {
     await page.screenshot({path:path.join(output,'long-check-'+viewport.width+'.png'),fullPage:true});
   }
   for (mode of ['engineer']) {
-    const before = checks; await page.goto(origin + '/');
+    const before = checks; await page.goto(origin + '/?frontend=legacy');
     await page.locator('.module-card').first().waitFor();
     assert.equal(await card.count(), 0); assert.equal(checks, before, 'unauthorized home never reads checklists');
-    await page.goto(origin + '/?entry=pre_shift');
+    await page.goto(origin + '/?frontend=legacy&entry=pre_shift');
     await page.getByText('当前账号没有班前检查权限。', { exact: true }).waitFor(); assert.equal(checks, before);
   }
   mode = 'guest';
   const beforeGuest = checks;
-  await page.goto(origin + '/?entry=pre_shift');
+  await page.goto(origin + '/?frontend=legacy&entry=pre_shift');
   await page.waitForURL('**/cabinet-power');
   assert.equal(await card.count(), 0); assert.equal(checks, beforeGuest, 'guest remains cabinet-only');
   assert.deepEqual(errors, []);

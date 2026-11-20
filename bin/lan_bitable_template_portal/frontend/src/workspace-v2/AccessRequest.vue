@@ -69,28 +69,35 @@ function unload(event:BeforeUnloadEvent){if(busy.value||dirty.value){event.preve
 onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onBeforeUnmount(()=>{disposed=true;abort.abort();window.clearTimeout(timer);stop();window.removeEventListener('beforeunload',unload);});
 </script>
 <template>
- <section class="v2-access-request" data-v2-inline-feedback>
-  <header><div><ShieldCheck :size="22" /><h1>本人权限申请</h1></div><NButton :disabled="busy" data-v2-navigation @click="emit('back')"><ArrowLeft :size="16" />返回</NButton></header>
-  <NAlert v-if="error" type="error" :bordered="false">{{error}}</NAlert>
-  <NSpin :show="loading">
-   <div class="v2-access-current"><strong>{{user.name}}</strong><NTag size="small">{{data.current?.level||user.level}}</NTag><span>{{(data.current?.scope_rules||[]).join('、')}} · {{data.current?.modules?.length||0}} 项权限</span><NButton quaternary circle aria-label="刷新申请结果" :disabled="busy" @click="load"><RefreshCw :size="17" /></NButton></div>
-   <NAlert v-if="request.request_id" :type="request.status==='approved'?'success':request.status==='rejected'?'warning':'info'" :bordered="false" class="v2-access-state">
-    {{({pending:'等待上级审批',approved:'已通过，权限已生效',rejected:'申请已拒绝',superseded:'已由新申请替代'} as Record<string,string>)[request.status]||'申请已失效'}} · {{request.approver_name}}
-    <p v-if="request.reject_reason">{{request.reject_reason}}</p>
-    <p v-if="request.notification_status==='failed'">{{request.notification_error}} <NButton text :disabled="busy" @click="retry">重试发送审批表单</NButton></p>
-   </NAlert>
-   <NEmpty v-if="!loading&&!people.length" :description="data.current?.is_fixed_superuser?'固定超级管理员已拥有全楼栋及全部功能权限':'暂无符合管理范围的审批人，请联系超级管理员'" />
-   <NForm v-else label-placement="top" :disabled="busy" @submit.prevent="submit">
-    <div class="v2-access-fields"><NFormItem label="上级审批人" required><NSelect v-model:value="form.approver" :options="people" filterable placeholder="选择上级审批人" aria-label="上级审批人" /></NFormItem><NFormItem label="目标级别" required><NSelect v-model:value="form.level" :options="approver?.level_options||[]" :disabled="!approver||busy" aria-label="目标级别" /></NFormItem><NFormItem label="岗位" required><NSelect v-model:value="form.category" :options="approver?.category_options||[]" :disabled="!approver||busy" aria-label="申请岗位" /></NFormItem></div>
-    <NFormItem label="可访问楼栋" required><NCheckboxGroup v-model:value="form.scopes" :disabled="busy||['L0','L1'].includes(form.level)"><NCheckbox v-for="item in scopeOptions" :key="item.value" :value="item.value">{{item.label}}</NCheckbox></NCheckboxGroup></NFormItem>
-    <fieldset v-for="group in groups" :key="group.label"><legend>{{group.label}}</legend><NCheckboxGroup v-model:value="form.modules" :disabled="busy"><NCheckbox v-for="item in group.items" :key="item.value" :value="item.value">{{item.label}}</NCheckbox></NCheckboxGroup></fieldset>
-    <NFormItem label="申请原因" required><NInput v-model:value="form.reason" type="textarea" :autosize="{minRows:2,maxRows:5}" maxlength="500" :input-props="{'aria-label':'申请原因'}" /></NFormItem>
-    <footer><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uncertain||(!dirty&&request.status==='pending')||!approver||!form.level||!form.category||!form.scopes.length||!form.reason.trim()"><Send :size="16" />提交并发送飞书审批</NButton></footer>
-   </NForm>
-  </NSpin>
- </section>
+  <section class="serenity-desk access-desk v2-access-request">
+    <header class="serenity-heading"><div><h1>申请权限</h1><p>{{ user.name }} · {{ data.current?.level || user.level }}</p></div>
+      <div class="serenity-actions"><NButton :loading="loading" :disabled="busy" aria-label="刷新申请结果" @click="load"><RefreshCw :size="15" />刷新</NButton><NButton @click="emit('back')">返回个人信息</NButton></div></header>
+    <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
+    <article v-if="request.request_id" class="serenity-panel access-receipt"><div><small>最近一次申请</small>
+      <h2>{{ ({pending:'等待审批',approved:'权限已生效',rejected:'申请已驳回',superseded:'已提交新申请'} as Record<string,string>)[request.status] || '申请状态待核验' }}</h2></div>
+      <div><strong>{{ request.approver_name }}</strong><p>{{ request.reject_reason || request.reason }}</p></div>
+      <NButton v-if="request.notification_status==='failed'" :disabled="busy" @click="retry">重试审批提醒</NButton></article>
+    <form class="access-grid" @submit.prevent="submit">
+      <section class="serenity-panel access-settings"><h2>审批与岗位</h2>
+        <label>审批人<NSelect v-model:value="form.approver" :options="people" filterable :disabled="busy" aria-label="审批人"/></label>
+        <div class="access-pair"><label>权限等级<NSelect v-model:value="form.level" :options="approver?.level_options||[]" :disabled="!approver||busy" aria-label="权限等级"/></label>
+        <label>岗位<NSelect v-model:value="form.category" :options="approver?.category_options||[]" :disabled="!approver||busy" aria-label="岗位"/></label></div>
+        <label>申请原因<NInput v-model:value="form.reason" type="textarea" :disabled="busy" aria-label="申请原因"/></label>
+      </section>
+      <section class="serenity-panel access-grants"><header class="serenity-heading"><h2>授权范围</h2>
+        <NButton type="primary" attr-type="submit" :loading="busy" :disabled="loading||uncertain||!approver||!form.level||!form.category||!form.scopes.length||!form.reason.trim()||(!dirty && request.status==='pending')"><Send :size="15" />提交申请</NButton></header>
+        <p v-if="!approver">选择审批人后可查看申请范围。</p>
+        <template v-else><h3>楼栋</h3><NCheckboxGroup v-model:value="form.scopes" :disabled="busy || ['L0','L1'].includes(form.level)">
+          <NCheckbox v-for="option in scopeOptions" :key="option.value" :value="option.value">{{ option.label }}</NCheckbox></NCheckboxGroup>
+          <h3>功能模块</h3><NCheckboxGroup v-model:value="form.modules" :disabled="busy"><div v-for="group in groups" :key="group.label" class="access-block">
+            <strong>{{ group.label }}</strong><div><NCheckbox v-for="module in group.items" :key="module.value" :value="module.value">{{ module.label }}</NCheckbox></div></div></NCheckboxGroup></template>
+      </section>
+    </form>
+  </section>
 </template>
 <style scoped>
-.v2-access-request{max-width:1100px}.v2-access-request>header,.v2-access-request>header>div,.v2-access-current{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.v2-access-request>header{justify-content:space-between;margin-bottom:18px}h1{margin:0}.v2-access-current{padding:14px 0;border-bottom:1px solid var(--v2-border);margin-bottom:18px;font-size:13px}.v2-access-current>.n-button{margin-left:auto}.v2-access-state{margin-bottom:18px}.v2-access-fields{display:grid;grid-template-columns:2fr 1fr 1fr;gap:18px}fieldset{border:0;border-top:1px solid var(--v2-border);padding:14px 0;margin:0 0 18px}legend{font-size:13px;font-weight:600;padding-right:12px}.n-checkbox-group{display:flex;flex-wrap:wrap;gap:12px 20px}.n-button :deep(.n-button__content){gap:6px}footer{display:flex;justify-content:flex-end;padding:12px 0}
-@media(max-width:760px){.v2-access-fields{grid-template-columns:1fr;gap:0}.n-checkbox-group{gap:10px}.n-checkbox{min-height:36px;align-items:center}footer>.n-button{width:100%}}
+.access-grid{display:grid;grid-template-columns:minmax(235px,.85fr) minmax(0,1.6fr);gap:12px;align-items:start}.access-settings{display:grid;gap:9px}.access-settings label{display:grid;gap:4px}.access-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.access-desk h2{margin:0;font-size:17px}.access-desk h3{font-size:14px;margin:10px 0 5px}.access-block{display:grid;grid-template-columns:minmax(5em,.24fr) 1fr;align-items:baseline;gap:10px;padding:6px 0;border-top:1px solid var(--soft-edge)}.access-block .n-checkbox,.access-grants>.n-checkbox-group>.n-checkbox{margin:3px 8px 3px 0}
+.access-receipt{display:flex;align-items:center;flex-wrap:wrap;gap:8px 18px}.access-receipt small,.access-receipt p{color:var(--v2-muted);margin:0}
+@media(max-width:700px){.access-grid{grid-template-columns:1fr}.access-block{grid-template-columns:1fr;gap:3px}}
 </style>

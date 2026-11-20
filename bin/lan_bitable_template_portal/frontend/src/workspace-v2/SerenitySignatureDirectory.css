@@ -1,0 +1,39 @@
+.ssig {--ss-face:var(--soft-face,#f4f7f6);--ss-field:var(--soft-field,#e9efee);--ss-ink:var(--v2-ink,#223c45);--ss-sub:color-mix(in srgb,var(--ss-ink) 77%,var(--ss-face));--ss-line:color-mix(in srgb,var(--ss-ink) 17%,transparent);box-sizing:border-box;display:grid;align-content:start;gap:10px;min-width:0;padding:clamp(8px,1.3vw,18px);color:var(--ss-ink);font-size:14px;container-type:inline-size;}
+.ssig .directory-panel,.ssig-duplicates,.signature-dialog {background:var(--ss-face);border:1px solid var(--ss-line);border-radius:16px;box-shadow:var(--soft-raised,0 3px 12px #28414912);min-width:0;}
+.ssig-bar {display:flex;align-items:center;gap:7px;flex-wrap:wrap;padding:11px 14px;border-radius:16px 16px 0 0;background:linear-gradient(106deg,color-mix(in srgb,var(--ss-face) 72%,#a5d2ef),color-mix(in srgb,var(--ss-face) 80%,#9edabf));}
+.ssig h1,.ssig h2,.ssig h3 {margin:0;line-height:1.3;overflow-wrap:anywhere;}.ssig h1 {font-size:clamp(18px,2vw,25px);margin-right:4px;}.ssig h2 {font-size:17px;}.ssig h3 {font-size:15px;}
+.ssig-search {display:flex;align-items:center;gap:6px;min-width:9rem;flex:1 1 145px;background:var(--ss-field);padding:0 10px;border-radius:9px;box-shadow:var(--soft-inset,inset 1px 2px 4px #26435218);}
+.ssig .ssig-search input {border:0;outline-offset:1px;min-width:0;width:100%;background:transparent;}
+.ssig input:not([type=checkbox]):not([type=radio]),.ssig select {box-sizing:border-box;max-width:100%;font:inherit;color:inherit;padding:7px 8px;border:1px solid var(--ss-line);border-radius:8px;background:var(--ss-field);}
+.ssig button,.ssig summary {box-sizing:border-box;font:inherit;font-size:13px;font-weight:550;color:inherit;background:var(--ss-face);border:1px solid var(--ss-line);border-radius:8px;cursor:pointer;min-height:33px;padding:6px 10px;}
+.ssig button {display:inline-flex;align-items:center;justify-content:center;gap:5px;}.ssig button:hover:not(:disabled) {border-color:#51957a;}
+.ssig button.primary {background:#176f50;color:white;border-color:#176f50;}.ssig button.primary:hover:not(:disabled) {background:#125b41;color:white;}.ssig button:disabled {opacity:.52;cursor:default;}
+.ssig :focus-visible {outline:3px solid var(--v2-blue,#3389b6);outline-offset:2px;}.ssig input[type=checkbox],.ssig input[type=radio] {accent-color:#187451;}
+.ssig-line,.ssig-actions,.ssig-person,.ssig-pager,.recipient-pinned {display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0;}
+.ssig .directory-panel>.ssig-line {padding:8px 14px;color:var(--ss-sub);font-size:12px;}.ssig-line>strong,.ssig-line>h2 {color:var(--ss-ink);}
+.ssig .source-status summary {list-style:none;display:inline-flex;align-items:center;min-height:28px;font-size:12px;}
+.source-status[open] span {display:inline-block;padding:3px 6px;}.ssig small {color:var(--ss-sub);font-size:12px;}
+.ssig .people,.dup-grid {display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,260px),1fr));gap:8px;}
+.ssig .people {padding:0 14px 12px;margin:0;}
+.ssig .person-card,.duplicate-row {box-sizing:border-box;display:grid;align-content:start;gap:5px;padding:9px 11px;background:var(--ss-face);border:1px solid var(--ss-line);border-radius:10px;min-width:0;overflow-wrap:anywhere;}
+.ssig .person-info {flex:1 1 125px;min-width:0;}.ssig .person-info strong {display:block;font-size:15px;}.ssig .person-info small {display:block;}
+.ssig .state {font-size:12px;font-weight:600;}.ssig .state[data-state=signed] {border-bottom:2px solid #4f9e79;}.ssig .state[data-state=resign] {border-bottom:2px dotted #bf8b3b;}
+.ssig .ssig-actions button {font-size:12px;min-height:29px;padding:4px 8px;}
+.ssig p {margin:0;overflow-wrap:anywhere;}.ssig .directory-panel>p {margin:8px 14px;}.ssig [role=alert] {border-radius:8px;background:#fff1df;color:#763e1e;padding:7px 9px;}
+.ssig-pager {padding:9px 14px;justify-content:flex-end;border-top:1px solid var(--ss-line);font-size:13px;}
+.ssig-duplicates {padding:12px;}.dup-group {display:grid;gap:8px;margin-top:9px;padding-top:9px;border-top:1px solid var(--ss-line);}
+.signature-dialog {box-sizing:border-box;width:min(580px,calc(100vw - 20px));max-height:min(90dvh,840px);margin:auto;overflow:hidden;padding:0;color:var(--ss-ink);box-shadow:0 16px 50px #1c394534;}
+.signature-dialog::backdrop {background:#17333e65;}.signature-dialog form {margin:0;display:flex;flex-direction:column;max-height:min(89dvh,834px);}
+.signature-dialog header,.signature-dialog footer {display:flex;align-items:center;justify-content:space-between;gap:8px;padding:12px 15px;flex:none;}
+.signature-dialog header {border-bottom:1px solid var(--ss-line);}.signature-dialog footer {justify-content:flex-end;border-top:1px solid var(--ss-line);}
+.ssig-body {display:grid;gap:9px;min-height:0;overflow:auto;overscroll-behavior:contain;padding:12px 15px;}
+.signature-dialog fieldset {display:grid;gap:10px;margin:0;padding:0;border:0;min-width:0;}.signature-dialog .ssig-fields {grid-template-columns:repeat(2,minmax(0,1fr));}
+.ssig-field,.ssig-fields label {display:grid;gap:4px;min-width:0;}.ssig-field,.ssig-fields label,.signature-dialog label {font-size:13px;}
+.signature-dialog fieldset>button {justify-self:start;}
+.signature-dialog .staff-results {display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,150px),1fr));gap:5px;max-height:36dvh;overflow:auto;overscroll-behavior:contain;}
+.signature-dialog .staff-results button {display:grid;justify-content:start;text-align:left;overflow-wrap:anywhere;}
+.signature-dialog [aria-pressed=true] {background:var(--v2-palette-selection,#dcede4);border-color:var(--v2-blue,#417b94);}
+.signature-dialog .chosen {padding:6px 8px;border-radius:8px;background:var(--ss-field);font-size:13px;}
+.preview-area img {display:block;max-width:100%;max-height:55dvh;height:auto;object-fit:contain;margin:auto;background:white;}.preview-area .hidden {display:none;}
+@container (max-width:610px){.ssig-bar {padding:9px;}.ssig .people {padding:0 9px 9px;grid-template-columns:repeat(auto-fit,minmax(min(100%,225px),1fr));}}
+@media(max-width:600px){.ssig button,.ssig .ssig-actions button,.ssig select {min-height:38px;}.signature-dialog .ssig-fields {grid-template-columns:1fr;}}

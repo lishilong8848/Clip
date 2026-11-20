@@ -170,6 +170,11 @@ class EventNoticeDelivery:
     def public(self,row):
         if not row:return {}
         value={key:copy.deepcopy(row.get(key)) for key in ('event_id','created_by','state','created_at','updated_at','text','metadata','metadata_revision','sync_revision','sync_state','sync_error','target_record_id','access_scopes','metadata_issues')}
+        if row.get('target_record_id'):
+            from .event_priority import NAMESPACE
+            lifecycle=self.store.get_document(NAMESPACE,row['target_record_id']) or {}
+            if lifecycle.get('qt_event_id') and lifecycle.get('state')=='ended':
+                value['state']='ended'
         value['missing']=missing(row.get('metadata') or {})
         op=self.store.get_document(OPS,row['operations'][-1]) if row.get('operations') else None
         value['delivery']={'operation_id':op['operation_id'],'state':op['state'],'action':op['intent']['action'],

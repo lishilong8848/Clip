@@ -1,0 +1,261 @@
+<section class="cabinet-page cab-desk">
+  <header class="cab-head cab-inline-heading">
+    <div><p class="cab-muted">机柜上下电</p><h1>{{ props.scope ? props.scope+'楼机柜工作台' : '园区机柜工作台' }}</h1></div>
+      <span v-if="props.scope && !props.readOnly" data-v2-layout-tools="cabinet"></span>
+      <VnetBackButton :to="props.scope ? '/cabinet-power' : '/'"/>
+      <CabinetBuildingSwitcher v-if="props.scope" :scope="props.scope" :scope-options="props.scopeOptions"/>
+      <button type="button" :disabled="loading || busy || bootstrapReading || bootstrapStarting" @click="props.readOnly ? load() : refresh()"><RefreshCw/>刷新</button>
+  </header>
+  <p v-if="error" class="cab-alert notice danger" role="alert">{{ error }} <button data-v2-feedback-close @click="error=''">关闭</button></p>
+  <p v-if="message" class="cab-alert" role="status">{{ message }} <button @click="message=''">关闭</button></p>
+  <p v-if="storageWarning" class="cab-alert" role="alert">{{ storageWarning }}</p>
+  <section v-if="!props.readOnly && (bootstrapConnectionError || bootstrapVisible)" class="cab-panel" aria-label="资料同步">
+    <header class="cab-section-head cab-inline-heading"><strong>{{ bootstrapConnectionError || bootstrapMessage }}</strong>
+      <button v-if="bootstrapConnectionError" :disabled="bootstrapReading" @click="pollBootstrap()">重新连接</button>
+      <button v-else-if="bootstrapHasFailures" :disabled="bootstrapStarting || bootstrapActive" @click="startBootstrap(true)">重试失败楼栋</button>
+    </header>
+    <div v-if="bootstrap.buildings?.length" class="cab-fields"><span v-for="b in bootstrap.buildings" :key="b.scope" class="cab-chip">{{ b.scope }}楼 · {{ bootstrapStatusLabel(b.status) }}</span></div>
+  </section>
+  <section v-if="!props.readOnly" class="cab-taskbar cab-inline-heading" aria-label="上下电办理">
+    <div><h2>上下电办理</h2><span class="cab-muted">{{ batchStatusError || (batchPendingCount+' 个待办批次') }}</span></div>
+      <button class="cab-primary" @click="openTodoBatches"><ClipboardList/>查看待办</button>
+      <button @click="navigate(batchCreateUrl)"><Plus/>新建批次</button>
+      <button v-if="batchStatusError" @click="loadBatchCount">重读数量</button>
+      <button v-if="props.scope && overview.sheet_formats?.length" :disabled="saving" @click="openEditor()">登记单柜</button>
+  </section>
+  <template v-if="!props.scope">
+    <section class="cab-panel"><div class="cab-section-head"><h2>选择楼栋</h2><span>当前可查看 {{ buildings.length }} 栋</span></div>
+      <div class="cab-buildings">
+        <button v-for="b in buildings" :key="b.scope" class="cab-building" @click="navigate('/cabinet-power?scope='+encodeURIComponent(b.scope))">
+          <strong>{{ b.scope }}楼 <ArrowUpRight/></strong>
+          <template v-if="b.bootstrap_status==='succeeded'"><b>{{ b.counts?.total ?? '—' }} <small>台</small></b>
+            <span>上电率 {{ v2CabinetRateText(b.counts) }}</span>
+            <span>正式电 {{ b.counts?.formal ?? '—' }} · 测试电 {{ b.counts?.test ?? '—' }}</span>
+            <span>未上电 / 已下电 {{ b.counts?.off ?? '—' }} · 待核实 {{ b.counts?.unknown ?? '—' }}</span>
+            <small>{{ b.record_count ?? '—' }} 条操作记录 · {{ b.updated_at || '更新时间待核验' }}</small>
+          </template><span v-else>{{ b.bootstrap_error || bootstrapStatusLabel(b.bootstrap_status) }}</span>
+        </button>
+      </div><p v-if="!buildings.length">{{ loading || bootstrapReading ? '正在读取楼栋资料…' : '暂无可用楼栋资料' }}</p>
+    </section>
+    <section v-if="!props.readOnly" class="cab-panel">
+      <header class="cab-section-head cab-inline-heading"><h2>园区归档</h2>
+        <button v-if="props.isAdmin" @click="openExportSchedule"><Settings2/>设置</button>
+        <button v-if="'ABCDE'.split('').every(code=>buildings.some(b=>b.scope===code))" class="cab-primary"
+          :disabled="v2ArchiveChecking || (!allExportBatchId && !allExportReady)" @click="v2ArchiveAction">{{ v2ArchiveActionLabel }}</button>
+      </header>
+      <template v-if="allExportBatchId"><p role="status">{{ allExportStatusLabel }} · 已生成 {{ allExportCompleted }}/5 · {{ allExportTime }}</p>
+        <p v-if="v2ArchiveProgress.error" class="cab-alert" role="alert">{{ v2ArchiveProgress.error }}</p>
+        <div class="cab-buildings all-export-items"><div v-for="item in allExportItems" :key="item.scope" class="cab-item"><strong>{{ item.scope }}楼</strong><span>{{ allExportLabel(item) }}</span><small>{{ item.error || item.result?.filename }}</small>
+          <a v-if="item.result?.export_id && !item.result.deleted" :href="api+'/exports/'+encodeURIComponent(item.result.export_id)+'/download'" download>下载</a></div></div>
+        <a v-if="allExportArchiveUrl" :href="allExportArchiveUrl" target="_blank" rel="noopener">打开归档记录</a>
+      </template><p v-else class="cab-muted">A–E 五栋资料就绪后，可生成五份表格并归入同一条记录。</p>
+    </section>
+  </template>
+  <PageCanvas v-else page="cabinet" label="机柜管理" :plain="props.readOnly" :blocks="[{id:'summary',title:'供电状态',w:12,h:2,minH:2},{id:'workspace',title:'机柜查询与办理',w:12,h:12,minH:5}]">
+    <template #summary><section class="cab-panel cab-summary">
+        <div class="cab-section-head"><h2>供电状态</h2><span>{{ overview.updated_at || '等待读取楼栋资料' }}</span></div>
+      <div class="cab-metrics"><div class="cab-rate"><small>上电率</small><strong>{{ v2CabinetRate }}</strong></div>
+        <button v-for="metric in metricItems" :key="metric.key" @click="showStateRacks(metric.key)"><small>{{ metric.label }}</small><b>{{ overview.counts?.[metric.key] ?? (metric.key==='powered' && overview.counts ? v2CabinetPowered : '—') }}</b></button>
+      </div>
+    </section>
+    </template><template #workspace><div class="cab-workspace-content">
+    <section v-if="pendingWrites.length || pendingWritesError || saving && !editorOpen || saveError && !editorOpen" class="cab-panel">
+      <h2>待核验提交</h2><p v-if="pendingWritesError">{{ pendingWritesError }} <button @click="loadPending">重试核验</button></p>
+      <p v-if="saving" role="status">{{ saveStepLabel }}</p><p v-if="!editorOpen && saveError" role="alert">{{ saveError }}</p>
+      <div v-for="item in pendingWrites" :key="item.operation_id" class="cab-line"><div><strong>{{ item.scope || props.scope }}楼 · {{ item.record_id || item.operation_id }}</strong><p>{{ item.error || item.status }}</p></div>
+        <div class="cab-actions" v-if="!props.readOnly"><button :disabled="saving && saveStatus.operation_id!==item.operation_id" @click="showSubmission(item.operation_id)">查看提交</button>
+          <button v-if="(!item.delete || canDelete) && item.retryable" :disabled="saving" @click="resumePending(item.operation_id)">继续原提交</button>
+          <button v-if="(!item.delete || canDelete) && item.status==='conflict'" :disabled="saving" @click="reconcilePending(item.operation_id)">核对云端版本</button></div>
+      </div>
+    </section>
+    <section class="cab-panel cab-query">
+      <div class="cab-section-head"><h2>机柜查询</h2>
+        <button :disabled="racksLoading || !overview.racks?.length"
+          @click="event => import('../../scripts/workspace-cabinet-design.mjs').then(m => m.openCabinetScanner(event.target.closest('button'), props.scope, overview.racks, openHistory)).catch(fail)">扫码查机柜</button>
+      </div>
+      <div class="cab-tabs" role="group" aria-label="查询方式">
+        <button v-for="item in tabs" :key="item.key" :aria-pressed="tab===item.key" :disabled="!overview.rooms && item.key==='layout'" @click="changeTab(item.key)">{{ item.label }}</button>
+      </div>
+      <template v-if="tab==='overview'">
+        <p v-if="typeWarningRooms.length" class="cab-alert">以下包间存在类型差异：{{ typeWarningRooms.join('、') }}</p>
+        <div class="cab-room-grid">
+          <article v-for="room in overview.rooms" :key="room.id" class="cab-room">
+            <header class="cab-section-head cab-inline-heading"><h3>{{ room.name || room.id+' 包间' }}</h3><small>{{ v2RoomRate(room) }} 上电</small>
+              <button @click="tab='layout';selectRoom(room.id)">平面定位</button><button @click="showRoomRecords(room.id)">包间台账</button></header>
+            <div class="cab-actions"><button :aria-label="room.id+'包间全部机柜'" @click="showStateRacks('total',room.id)">总数 {{ room.total ?? '—' }}</button>
+              <button :aria-label="room.id+'包间已上电'" @click="showStateRacks('powered',room.id)">已上电 {{ v2CabinetKnownSum([room.counts?.formal,room.counts?.test]) }}</button>
+              <button v-for="state in ['formal','test','off','unknown']" :key="state" @click="showStateRacks(state,room.id)">{{ stateLabels[state] }} {{ room.counts?.[state] ?? '—' }}</button></div>
+            <details><summary>机柜类型明细</summary><div class="cab-scroll"><table class="cab-table"><thead><tr><th>类型</th><th>总数</th><th>上电</th><th>正式电</th><th>测试电</th><th>下电 / 未上电</th><th>待核实</th></tr></thead>
+              <tbody><tr v-for="type in ['网络机柜','服务器机柜']" :key="type"><th>{{ type }}</th><td>{{ room.types?.[type] ?? '—' }}</td><td>{{ room.type_summary?.[type]?.powered ?? '—' }}</td><td v-for="state in ['formal','test','off','unknown']" :key="state">{{ room.type_counts?.[type]?.[state] ?? '—' }}</td></tr></tbody></table></div></details>
+          </article>
+        </div>
+        <details v-if="overview.rooms?.length"><summary>全楼分类合计</summary>
+          <div class="cab-scroll"><table class="cab-table"><thead><tr><th>类型</th><th>总数</th><th>已上电</th><th>正式电</th><th>测试电</th><th>下电 / 未上电</th><th>待核实</th></tr></thead><tbody><tr v-for="type in ['网络机柜','服务器机柜']" :key="type"><th>{{ type }}</th><td>{{ roomTotals.types[type] }}</td><td>{{ roomTotals.type_summary[type].powered }}</td><td v-for="state in ['formal','test','off','unknown']" :key="state">{{ roomTotals.type_counts[type][state] }}</td></tr></tbody></table></div>
+        </details>
+        <details v-if="overview.daily && Object.keys(overview.daily).length"><summary>按日查看操作数量</summary>
+          <div class="cab-scroll"><table class="cab-table"><thead><tr><th>日期</th><th v-for="act in actionOptions" :key="act">{{ act }}</th></tr></thead>
+            <tbody><tr v-for="day in Object.keys(overview.daily).sort().reverse()" :key="day"><th><button @click="query.from=day;query.to=day;changeTab('records')">{{ day }}</button></th><td v-for="act in actionOptions" :key="act">{{ overview.daily[day][act] ?? 0 }}</td></tr></tbody></table></div>
+        </details>
+        <details v-if="overview.issues?.length"><summary>需核对的记录（{{ overview.issues.length }}）</summary>
+          <div class="cab-line" v-for="(issue,i) in overview.issues" :key="i"><span>{{ issue.room }} {{ issue.rack }} · {{ (issue.issues || []).join('、') || issue.message }}</span>
+            <button v-if="!props.readOnly && issue.record_id" @click="editIssue(issue.record_id)">核对并编辑</button><button v-else-if="issue.rack" @click="openHistory(issue.room,issue.rack)">查看历史</button></div>
+        </details>
+      </template>
+      <template v-else-if="tab==='layout'">
+        <div class="cab-fields"><label>查找包间或机柜<input type="search" v-model.trim="mapSearch" placeholder="包间名称或机柜号"></label>
+          <div class="cab-actions"><button aria-label="缩小平面图" @click="zoom=Math.max(.2,zoom-.1)"><ZoomOut/></button><button @click="fitMap">适应宽度</button><button aria-label="放大平面图" @click="zoom=Math.min(4,zoom+.1)"><ZoomIn/></button><small>{{ Math.round(zoom*100) }}%</small></div></div>
+        <div class="cab-tabs room-sidebar"><button v-for="room in filteredRooms" :key="room.id" :aria-pressed="currentRoom===room.id" @click="selectRoom(room.id)">{{ room.name || room.id+' 包间' }}</button></div>
+        <p v-if="!filteredRooms.length">没有匹配的包间或机柜</p>
+        <div class="cab-map" ref="viewport" tabindex="0" aria-label="包间平面图">
+          <p v-if="layoutLoading" role="status">正在读取平面图…</p>
+          <div v-else-if="layout.layout" :style="{width:layout.layout.width*zoom+'px',height:layout.layout.height*zoom+'px',position:'relative'}">
+            <div class="cab-map-paper" :style="{width:layout.layout.width+'px',height:layout.layout.height+'px',transform:'scale('+zoom+')'}">
+              <component :is="cell.rack?'button':'span'" v-for="cell in layout.layout.cells" :key="cell.ref" class="map-cell" :style="cellStyle(cell)"
+                :class="{found:mapSearch && cell.rack?.includes(mapSearch.toUpperCase())}" :aria-label="cell.rack ? cell.rack+' '+(stateLabels[cell.state] || '待核实') : undefined"
+                @click="cell.rack && openHistory(currentRoom,cell.rack)">{{ cell.text }}</component>
+            </div>
+          </div><p v-else>暂无平面数据 <button v-if="currentRoom" @click="selectRoom(currentRoom)">重试读取</button></p>
+        </div><p class="cab-muted">点选机柜查看操作历史。</p>
+      </template>
+      <template v-else-if="tab==='records'">
+        <form class="cab-fields" @submit.prevent="loadRecords(1)">
+          <label>工作表<select v-model="query.sheet" @change="loadRecords(1)"><option v-for="f in overview.sheet_formats" :key="f.sheet" :value="f.sheet">{{ f.sheet }}（{{ f.count ?? '—' }}）</option></select></label>
+          <label>关键词<input v-model.trim="query.q" type="search" placeholder="机柜、包间或操作"></label>
+          <label>包间<select v-model="query.room"><option value="">全部包间</option><option v-for="room in overview.rooms" :key="room.id" :value="room.id">{{ room.name || room.id }}</option></select></label>
+          <label>方向<select v-model="query.direction"><option value="">全部操作</option><option value="up">上电</option><option value="down">下电</option><option value="empty">无操作明细</option></select></label>
+          <label>开始日期<input type="date" v-model="query.from"></label><label>结束日期<input type="date" v-model="query.to"></label>
+          <label><input type="checkbox" v-model="onlyIssues">仅需核对</label>
+          <button class="cab-primary" type="submit" :disabled="recordsLoading">查询记录</button><button type="button" @click="resetFilters">重置</button>
+        </form>
+        <p v-if="recordsLoading" role="status">正在读取台账…</p>
+        <div class="cab-scroll"><table class="cab-table cab-source" :style="{minWidth:sourceTableWidth+'px'}"><thead><tr><th>操作</th><th v-for="c in activeFormat?.columns" :key="c.column" :style="{minWidth:c.width+'px'}">{{ c.group!==undefined ? groupLabel(c.group,activeFormat)+' · ' : '' }}{{ c.label }}</th></tr></thead>
+          <tbody><tr v-for="op in records.items" :key="op.record_id"><td><button @click="openRecordDetails(op)">查看完整历史</button> <button v-if="!props.readOnly" :disabled="saving" @click="openEditor(op)">编辑</button>
+            <button v-if="!props.readOnly && canDelete && isResidualEmptyRecord(op)" :disabled="saving" @click="requestDeleteEmptyRecord(op)">删除空记录</button></td>
+            <td v-for="c in activeFormat?.columns" :key="c.column">{{ sourceCell(op,c) || '—' }}</td></tr></tbody></table></div>
+        <p v-if="!recordsLoading && records.total===0">当前条件没有匹配记录。</p><div class="cab-pager"><span>共 {{ records.total ?? '—' }} 条</span>
+          <button v-for="n in pageNumbers" :key="n" :aria-current="n===records.page?'page':undefined" :disabled="recordsLoading" @click="loadRecords(n)">{{ n }}</button></div>
+      </template>
+      <template v-else>
+        <div class="cab-fields"><label>机柜号<input type="search" v-model.trim="rackSearch" placeholder="扫描或输入机柜号"></label>
+          <label>包间<select v-model="rackRoom"><option value="">全部包间</option><option v-for="room in rackRooms" :key="room.id" :value="room.id">{{ room.name || room.id }}</option></select></label>
+          <label>供电状态<select v-model="rackState"><option value="">全部状态</option><option value="powered">已上电</option><option v-for="(label,key) in stateLabels" :key="key" :value="key">{{ label }}</option></select></label></div>
+        <div v-if="tab==='carrier'" class="cab-actions"><button v-for="room in rackRooms" :key="room.id" @click="rackRoom=room.id">{{ room.name || room.id }}</button>
+          <button v-if="!props.readOnly && rackRoom" :disabled="saving" @click="registerCarrier(rackRoom)">登记运营商机柜</button></div>
+        <p v-if="racksLoading" role="status">正在读取机柜名册…</p>
+        <div class="cab-scroll"><table class="cab-table" aria-label="机柜状态明细"><thead><tr><th>机柜</th><th>包间</th><th>类型</th><th>供电状态</th><th>功率</th><th>最近操作</th><th>位置</th></tr></thead>
+          <tbody><tr v-for="rack in stateRacks.slice((rackPage-1)*50,rackPage*50)" :key="rack.room+'/'+rack.rack"><td><button @click="openHistory(rack.room,rack.rack)">{{ rack.rack }}</button></td><td>{{ rack.room }}</td><td>{{ rack.rack_type || '待核实' }}</td><td>{{ stateLabels[rack.state] || '待核实' }}</td><td>{{ rack.power==null?'—':rack.power+' W' }}</td><td>{{ rack.last_operation || '—' }}</td><td><button :disabled="!rack.positions?.length" @click="locateRack(rack)">平面定位</button></td></tr></tbody></table></div>
+        <p v-if="!racksLoading && !stateRacks.length">没有匹配的已编号机柜。</p>
+        <p v-for="room in unnumberedRooms" :key="room.id">{{ room.name || room.id }} · {{ unnumberedCount(room) }} 台尚无定位编号</p>
+        <div class="cab-pager"><span>{{ stateRacks.length }} 台</span><button v-for="n in rackPageNumbers" :key="n" :aria-current="n===rackPage?'page':undefined" @click="rackPage=n">{{ n }}</button></div>
+      </template>
+    </section>
+    <section class="cab-panel"><div class="cab-section-head"><div><h2>楼栋导出</h2><small>{{ overview.export_state?.stale_reason || overview.export_state?.created_at }}</small></div>
+      <div class="cab-actions"><button @click="showExports(1)">历史导出</button><button :disabled="busy || !overview.rooms" @click="startJob('exports')"><Download/>{{ busy ? exportPhaseLabel(job.phase) : pendingExportRequest ? '继续上次导出' : '导出本楼表格' }}</button></div></div>
+      <p v-if="job.error || downloadError" role="alert">{{ job.error || downloadError }}</p><div v-if="exported.export_id && !exported.deleted" class="cab-line"><span>{{ exported.filename }}</span><button @click="downloadExport(exported.export_id)">下载</button></div>
+    </section>
+    </div></template>
+  </PageCanvas>
+  <section v-if="props.isAdmin && !props.readOnly" class="cab-panel">
+    <header class="cab-section-head cab-inline-heading"><h2>服务器存储</h2>
+      <button :disabled="serverStorageLoading" @click="loadServerStorage">{{ serverStorageLoading?'正在读取…':'查看占用' }}</button>
+      <button v-if="serverStorage.evidence_bytes!=null" :disabled="serverStorageLoading || !serverStorage.cloud_backed_files" @click="cacheCleanupOpen=true">清理已备份的图片（{{ serverStorage.cloud_backed_files }}）</button>
+    </header>
+    <p v-if="serverStorage.evidence_bytes!=null">凭证 {{ formatBytes(serverStorage.evidence_bytes) }} · 缩略图 {{ formatBytes(serverStorage.thumbnail_bytes) }} · 导入 {{ formatBytes(serverStorage.import_bytes) }} · 导出 {{ formatBytes(serverStorage.export_bytes) }}</p>
+  </section>
+
+  <div v-if="historyOpen && !editorOpen" v-show="!previewEvidence && !discardDialogOpen" class="cab-modal-wrap scrim">
+    <section class="cab-dialog modal" role="dialog" aria-modal="true" aria-label="机柜完整历史">
+      <header class="cab-section-head"><div><small>机柜完整历史</small><h2>{{ props.scope }}楼 · {{ historyRoom }} · {{ historyRack }}</h2></div><button aria-label="关闭历史" @click="historyOpen=false"><X/></button></header>
+      <p v-if="historyLoading" role="status">正在读取机柜历史…</p>
+      <template v-if="selectedRack"><div class="cab-metrics"><span>供电状态 <b>{{ stateLabels[selectedRack.state] || '待核实' }}</b></span><span>类型 <b>{{ selectedRack.rack_type || '—' }}</b></span><span>功率 <b>{{ selectedRack.power==null ? '—' : selectedRack.power+' W' }}</b></span></div>
+        <div v-if="!props.readOnly && !historyLoading && !historyError" class="cab-actions">
+          <button :disabled="saving" @click="openPowerEditor">修改机柜功率</button>
+          <button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state===target || !['formal','test','off'].includes(selectedRack.state)" @click="openStateSwitch(target)">{{ stateAction(target) }}</button>
+        </div>
+      </template>
+      <p v-if="historyError" role="alert" class="cab-alert">{{ historyError }} <button @click="history.items?.length ? moreHistory() : openHistory(historyRoom,historyRack)">重试读取</button></p>
+      <div v-if="history.items?.length" class="cab-history-grid"><article v-for="op in history.items" :key="op.record_id" class="cab-item history-record">
+        <div class="cab-section-head"><strong>{{ op.source || op.display_sheet }}{{ op.source_row ? ' 第 '+op.source_row+' 行' : '' }}</strong>
+          <div v-if="!props.readOnly" class="cab-actions"><button @click="openEditor(op)" :disabled="saving">编辑</button><button v-if="canDelete && isResidualEmptyRecord(op)" :disabled="saving" @click="requestDeleteEmptyRecord(op)">删除空记录</button></div>
+        </div>
+        <p v-if="op.issues?.length" class="cab-alert">{{ op.issues.join('、') }}</p>
+        <div v-for="(event,i) in sortedEvents(op.events || [])" :key="i" class="cab-event"><b>{{ event.action }} · {{ event.result || '—' }}</b>
+          <span>期望 {{ event.expected || '—' }} · 实际 {{ event.actual || '—' }}</span>
+          <small v-if="event.failure_reason || op.groups?.[event.group]?.failure_reason">{{ event.failure_reason || op.groups[event.group].failure_reason }}</small>
+        </div>
+        <div v-for="(group,i) in op.groups" :key="group.id || i" class="cab-evidence">
+          <button v-for="img in imagesWithIds(group)" :key="img.image_id" :aria-label="'预览'+(img.filename || '凭证图片')" @click="previewEvidence=evidenceUrl(op.record_id,img.image_id,true)"><img loading="lazy" :src="evidenceUrl(op.record_id,img.image_id)" alt="操作凭证"></button>
+          <a v-for="doc in documentsWithIds(group)" :key="doc.file_id" :href="documentUrl(op.record_id,doc.file_id)" target="_blank" rel="noopener">{{ doc.filename || '查看 PDF 凭证' }}</a>
+        </div>
+        <p v-if="!op.events?.length">该记录没有操作明细。</p>
+      </article></div>
+      <p v-if="!historyLoading && !historyError && !history.items?.length">该机柜暂无已登记的操作历史。</p>
+      <button v-if="history.items?.length < history.total && !historyError" :disabled="historyMoreLoading" @click="moreHistory">{{ historyMoreLoading ? '正在读取…' : '加载更多' }}</button>
+    </section>
+  </div>
+  <div v-if="editorOpen" v-show="!previewEvidence && !discardDialogOpen && !deleteRecordConfirmOpen" class="cab-modal-wrap editor-layer">
+    <form class="cab-dialog modal" role="dialog" aria-modal="true" :aria-label="form.power_only?'修改机柜功率':'机柜操作登记'" @submit.prevent="saveRecord()">
+      <header class="cab-section-head"><div><small>{{ props.scope }}楼 · {{ editingId ? '修改记录' : '现场办理' }}</small><h2>{{ form.power_only?'修改机柜功率':'机柜操作登记' }}</h2></div><button type="button" :disabled="saving" aria-label="关闭编辑" @click="closeEditor"><X/></button></header>
+      <fieldset :disabled="saving || props.readOnly || moveLoading">
+        <legend>机柜信息</legend>
+        <p v-if="form.power_only">{{ form.scope }}楼 · {{ form.room }} · {{ form.rack }}</p>
+        <div class="cab-fields"><template v-if="!form.power_only">
+          <label v-if="props.isAdmin && editingId">记录楼栋<select :value="form.scope" @change="changeRecordScope(($event.target as HTMLSelectElement).value)"><option v-for="s in 'ABCDE'" :key="s" :value="s">{{ s }}楼</option></select></label>
+          <label>记录工作表<select :value="form.source" :disabled="!!form.target_state" @change="requestSheetChange"><option v-for="f in editorOverview.sheet_formats" :key="f.sheet" :value="f.sheet">{{ f.sheet }}</option></select></label>
+          <label>包间<select v-model="form.room" :disabled="!!form.target_state" @change="form.rack=''"><option value="">选择包间</option><option v-for="r in editorOverview.rooms" :key="r.id" :value="r.id">{{ r.name || r.id }}</option></select></label>
+          <label>机柜号<input v-model.trim="form.rack" :disabled="!!form.target_state" list="cab-desk-rack-choices"><datalist id="cab-desk-rack-choices"><option v-for="r in editorRacks" :key="r.rack" :value="r.rack"/></datalist></label>
+          <label>记录机柜类型<select v-model="form.rack_type"><option value="">待填写</option><option>网络机柜</option><option>服务器机柜</option><option v-if="form.rack_type && !['网络机柜','服务器机柜'].includes(form.rack_type)">{{ form.rack_type }}</option></select></label>
+        </template><label>机柜功率（W）<input type="number" step="any" min="0" v-model="form.power" placeholder="未登记"></label></div>
+        <p v-if="form.current_rack_type">目录类型 · {{ form.current_rack_type }}</p>
+        <label v-if="form.scope==='B' && ['216','247'].includes(form.room) && !form.power_only && !editorRacks.some(r=>r.rack===form.rack)"><input type="checkbox" v-model="form.add_inventory">将新机柜加入运营商机房目录</label>
+        <label v-if="props.isAdmin && form.scope!==props.scope"><input type="checkbox" v-model="form.confirm_scope_move" required>确认将此记录迁移至 {{ form.scope }} 楼</label>
+      </fieldset>
+      <fieldset v-if="!form.power_only" :disabled="saving || props.readOnly || moveLoading"><legend class="cab-detail-legend">操作明细 <button type="button" :disabled="saving || props.readOnly || moveLoading" @click="form.groups.push(newGroup())"><Plus/>添加操作明细</button></legend>
+        <article v-for="(group,index) in editableGroups" :key="group.id || index" class="cab-item">
+          <div class="cab-section-head"><h3>{{ editorGroupLabel(group,index) }}</h3><button type="button" @click="removeGroup(group)">移除此明细</button></div>
+          <div class="cab-fields">
+            <label>操作类型<select v-model="group.action"><option value="">请选择</option><option v-for="act in actionOptions" :key="act">{{ act }}</option><option v-if="group.action && !actionOptions.includes(group.action)">{{ group.action }}</option></select></label>
+            <label v-for="field in ['expected','actual']" :key="field">{{ field==='actual'?'实际时间':'期望时间' }}
+              <input :type="singleDate(group[field])?'datetime-local':'text'" step="1" :value="singleDate(group[field])?String(group[field] || '').replace(' ','T'):group[field]" @input="group[field]=($event.target as HTMLInputElement).value.replace('T',' ')">
+            </label>
+            <label>操作结果<select v-model="group.result"><option value="">待填写</option><option>成功</option><option>失败</option></select></label>
+            <label v-if="group.result==='失败'">失败原因<textarea v-model="group.failure_reason" rows="2"/></label>
+          </div>
+          <div v-if="editingId" class="cab-evidence"><button v-for="img in imagesWithIds(group)" type="button" :key="img.image_id" @click="previewEvidence=evidenceUrl(editingId,img.image_id,true)"><img :src="evidenceUrl(editingId,img.image_id)" alt="操作凭证"></button>
+            <a v-for="doc in documentsWithIds(group)" :key="doc.file_id" :href="documentUrl(editingId,doc.file_id)" target="_blank" rel="noopener">{{ doc.filename || 'PDF 凭证' }}</a></div>
+        </article>
+      </fieldset>
+      <p v-if="saveError" class="cab-alert" role="alert">{{ saveError }}</p><p v-if="saving || moveLoading" role="status">{{ moveLoading?'正在读取目标楼栋…':saveStepLabel }}</p>
+      <footer class="cab-actions"><button type="button" :disabled="saving" @click="closeEditor">返回</button><button v-if="!props.readOnly" class="cab-primary" :disabled="saving || moveLoading" type="submit"><Save/>{{ saving?'正在提交':'保存记录' }}</button></footer>
+    </form>
+  </div>
+  <div v-if="previewEvidence" class="cab-modal-wrap evidence-preview" role="dialog" aria-modal="true" aria-label="凭证原图"><button aria-label="关闭原图" @click="previewEvidence=''"><X/></button><img :src="previewEvidence" alt="机柜操作凭证原图"></div>
+  <div v-if="exportListOpen" v-show="!cleanupTarget" class="cab-modal-wrap scrim" @keydown.esc.stop="exportListOpen=false">
+    <section class="cab-dialog modal" role="dialog" aria-modal="true" aria-label="楼栋导出历史"><header class="cab-section-head"><h2>{{ props.scope }}楼导出历史</h2><button aria-label="关闭导出历史" @click="exportListOpen=false"><X/></button></header>
+      <p v-if="exportHistoryLoading">正在读取…</p><p v-if="error" role="alert">{{ error }} <button @click="showExports(exportPage)">重新读取</button></p>
+      <article v-for="item in exportList" :key="item.export_id" class="cab-item cab-export-record"><div><strong>{{ item.filename }}</strong><p>{{ item.created_at }} · {{ cloudUploadLabel(item) }} · {{ item.stale_reason || (item.is_stale?'已过期':'当前版本') }}</p></div>
+        <div class="cab-actions"><button v-if="item.file_available" @click="downloadExport(item.export_id)">下载</button><span v-else>本地文件不可用</span>
+          <a v-if="item.archive_url" :href="item.archive_url" target="_blank" rel="noopener">查看归档</a>
+          <button v-if="item.file_available && !props.readOnly" :disabled="item._cleaning" @click="confirmCleanup(item)">清理本地文件</button></div>
+      </article><p v-if="!exportHistoryLoading && !error && !exportList.length">暂无历史导出。</p><div class="cab-pager"><button :disabled="exportHistoryLoading || exportPage<=1" @click="showExports(exportPage-1)">上一页</button>{{ exportPage }}/{{ exportPageCount }}<button :disabled="exportHistoryLoading || exportPage>=exportPageCount" @click="showExports(exportPage+1)">下一页</button></div>
+    </section>
+  </div>
+  <div v-if="exportScheduleOpen && props.isAdmin && !props.readOnly" class="cab-modal-wrap">
+    <form class="cab-dialog modal export-schedule-modal" role="dialog" aria-modal="true" aria-label="机柜月度自动归档设置" @submit.prevent="saveExportSchedule">
+      <header class="cab-section-head"><h2>月度自动归档</h2><button class="cab-primary" :disabled="!savedExportSchedule || exportScheduleSaving || !exportScheduleDirty || !schedulePreview">保存设置</button><button type="button" :disabled="exportScheduleSaving" aria-label="关闭设置" @click="exportScheduleOpen=false"><X/></button></header>
+      <p v-if="exportScheduleLoading">正在读取…</p><p v-if="exportScheduleError" class="cab-alert">{{ exportScheduleError }} <button type="button" @click="openExportSchedule">重新读取</button></p>
+      <fieldset :disabled="exportScheduleLoading || exportScheduleSaving || !savedExportSchedule"><legend>执行计划</legend><div class="cab-fields">
+        <label><input type="checkbox" v-model="exportSchedule.enabled">启用定时归档</label><label>每月日期<input type="number" min="1" max="31" required v-model.number="exportSchedule.day"></label>
+        <label>开始时间<input type="time" required v-model="exportSchedule.time"></label></div></fieldset>
+      <p v-if="schedulePreview">{{ exportScheduleDirty?'保存后下次计划：':'下次计划：' }}{{ schedulePreview.next_run_at }}</p><p v-if="schedulePreview?.pending_run_at">待补执行：{{ schedulePreview.pending_run_at }}</p>
+      <p v-if="exportSchedule.current_month_batch">本月批次 · {{ scheduleBatchLabel(exportSchedule.current_month_batch) }}
+        <button v-if="['interrupted','failed'].includes(exportSchedule.current_month_batch.status)" type="button" :disabled="exportScheduleSaving" @click="resumeScheduledBatch">继续原批次</button></p>
+      
+    </form>
+  </div>
+  <ConfirmDialog :open="discardDialogOpen" title="确认放弃修改？" :message="discardMessage" confirm-label="继续" cancel-label="保留修改" @resolve="resolveDiscardConfirmation"/>
+  <ConfirmDialog :open="restoreDialogOpen" title="恢复机柜填写草稿？" message="检测到此楼栋尚未提交的输入。" confirm-label="恢复草稿" cancel-label="丢弃草稿" @resolve="restoreDraft"/>
+  <ConfirmDialog :open="deleteRecordConfirmOpen" tone="danger" title="删除空记录？" message="保存后将从台账删除这条没有操作明细的记录。" confirm-label="确认删除" @resolve="resolveRecordDelete"/>
+  <ConfirmDialog :open="!!cleanupTarget" tone="danger" title="清理本地导出文件？" :message="cleanupTarget?.filename || '清理选中的导出文件。'" confirm-label="清理文件" @resolve="resolveExportCleanup"/>
+  <ConfirmDialog :open="cacheCleanupOpen" tone="warning" title="清理已备份的凭证缓存？" message="清理服务器上已经有云端备份的凭证图片。" confirm-label="确认清理" @resolve="resolveCacheCleanup"/>
+</section>

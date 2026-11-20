@@ -1,13 +1,12 @@
 <template>
   <NConfigProvider :theme="nightMode && !printMode && !printing ? darkTheme : null" :theme-overrides="nightMode && !printMode && !printing ? nightTheme : theme" :locale="zhCN" :date-locale="dateZhCN">
     <NMessageProvider placement="bottom-right" :duration="0" closable><NDialogProvider>
-      <div :key="impersonationSession" class="v2-shell" :style="{'--v2-nav-color':navColor}" :class="{ 'has-rail':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-collapsed': collapsed, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
+      <div :key="impersonationSession" class="v2-shell" :class="{ 'has-topnav':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink)" class="v2-header">
-          <NButton v-if="loggedIn && !publicLink && user.role !== 'guest'" data-v2-navigation quaternary circle aria-label="展开或收起导航" :aria-expanded="!collapsed" @click="collapsed = !collapsed"><Menu :size="21" /></NButton>
           <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
-            <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" @change="navColor=$event" />
+            <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" />
             <NButton v-if="loggedIn || !checking && !publicLink" data-v2-navigation size="small" secondary :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" :style="!loggedIn ? {minHeight:'44px'} : undefined" @click="requestVersion(switchLegacy)">切换旧版</NButton>
             <NDropdown v-if="loggedIn && user.role !== 'guest'" trigger="click" placement="bottom-end" :options="accountOptions" :node-props="accountNodeProps" @select="selectAccountAction">
               <NButton data-v2-navigation quaternary class="v2-person" :aria-label="'账户菜单：'+user.name" title="账户菜单" :disabled="logoutBusy"><UserRound :size="17" /><span>{{ user.name }}</span><ChevronDown :size="14" /></NButton>
@@ -16,15 +15,19 @@
           </div>
         </header>
         <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
-        <SidebarNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" v-model:collapsed="collapsed" :groups="menuGroups" :selected="selectedMenu" :hold-open="accountMenuOpen || appearanceOpen" @dismiss-popovers="dismissAccountPopovers" @select="selectMenu">
-          <template #footer>
-            <NDropdown trigger="click" placement="top-start" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
-              <NButton data-v2-navigation quaternary class="v2-rail-user" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="v2-rail-label">{{ user.name }}</span><ChevronDown class="v2-rail-label" :size="14" /></NButton>
+        <TopNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" :groups="menuGroups" :selected="selectedMenu" @select="selectMenu">
+          <template #account>
+            <NDropdown trigger="click" placement="bottom-end" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
+              <NButton data-v2-navigation quaternary class="topnav-account" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="topnav-username">{{ user.name }}</span><ChevronDown aria-hidden="true" :size="14" /></NButton>
             </NDropdown>
-            <div class="v2-rail-appearance"><NavThemePicker :close-signal="sidebarCloseKey" :user-id="String(user.open_id||'')" @change="navColor=$event" @open="appearanceOpen=$event" /><span class="v2-rail-label">主题配色</span></div>
+            <NavThemePicker :user-id="String(user.open_id||'')" />
           </template>
-        </SidebarNavigation>
+        </TopNavigation>
         <main v-if="!impersonationBlocked" class="v2-main">
+          <nav v-if="breadcrumb && !impersonationBlocked && !checking && !denied && !printMode && !publicLink && !immersiveInspection && user.role!=='guest'" class="v2-breadcrumb" aria-label="当前位置">
+            <button type="button" @click="navigate('/')" aria-label="返回个人工作台"><House :size="15" aria-hidden="true" /></button>
+            <span>{{ breadcrumb.group }}</span><ChevronRight :size="13" aria-hidden="true" /><strong>{{ breadcrumb.page }}</strong>
+          </nav>
           <NButton v-if="loggedIn && workbenchReturn" text type="primary" class="v2-workbench-return" data-v2-navigation
             style="min-height:44px" @click="navigate(workbenchReturn)"><ArrowLeft :size="16" />返回工作台</NButton>
           <NAlert v-if="authError" type="error" :bordered="false" class="v2-alert">{{ authError }} <NButton text type="primary" @click="loadAuth">重新读取</NButton></NAlert>
@@ -43,34 +46,21 @@
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
-            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :search-links="workbenchSearchLinks" :initial-kind="route.searchParams.get('kind')||undefined" @open="openWorkspaceModule($event,view==='home')" />
-            <section v-else-if="view === 'my' && route.pathname === '/'" class="v2-my">
-              <header class="v2-profile-heading"><NAvatar :size="48" :style="{background:'var(--v2-nav-active)',color:'var(--v2-nav-text)'}"><UserRound :size="25" /></NAvatar><div class="v2-profile-name"><h1>{{ user.name }}</h1><p>个人信息</p></div>
-                <div v-if="!desktopNavigation" class="v2-mobile-profile-tools">
-                  <NavThemePicker :close-signal="sidebarCloseKey" :user-id="String(user.open_id||'')" @change="navColor=$event" @open="appearanceOpen=$event" />
-                  <NDropdown trigger="click" placement="bottom-end" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
-                    <NButton quaternary circle :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><Ellipsis :size="22" /></NButton>
+            <HomePage v-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :explicit-scope="route.searchParams.has('scope')" :view="view" :search-links="workbenchSearchLinks" :menu-groups="menuGroups" :initial-kind="route.searchParams.get('kind')||undefined" @select-menu="selectMenu" @open="openWorkspaceModule($event,view==='home')" />
+            <AccountHome v-else-if="view==='my' && route.pathname==='/'" :user="user" :scopes="scopes" :level="levelLabel" :category="categoryLabel"
+              :groups="menuGroups" :mobile="!desktopNavigation" :settings="!!visibleSettings.length" @open="navigate" @settings="selectAccountAction('settings')">
+              <template #tools>
+                <template v-if="!desktopNavigation">
+                  <NavThemePicker :user-id="String(user.open_id||'')" />
+                  <NDropdown trigger="click" placement="bottom-end" :options="accountOptions" :node-props="accountNodeProps" @select="selectAccountAction">
+                    <NButton quaternary circle :aria-label="'账户菜单：'+user.name"><Ellipsis :size="18"/></NButton>
                   </NDropdown>
-                </div>
-              </header>
-              <div class="v2-profile-layout">
-                <section class="v2-profile-identity" aria-label="账号信息">
-                  <h2><UserRound :size="17" />账号信息</h2>
-                  <dl><div><dt>角色</dt><dd>{{ levelLabel }} · {{ user.category_label || categoryLabel }}</dd></div><div><dt>登录方式</dt><dd>{{ user.login_method === 'password' ? '姓名密码登录' : '飞书登录' }}</dd></div></dl>
-                  <h2><Building2 :size="17" />可访问楼栋</h2><div class="v2-profile-scopes"><NTag v-for="scope in scopes" :key="scope.value" :bordered="false" size="small">{{ scope.label }}</NTag><span v-if="!scopes.length">暂无</span></div>
-                  <div class="v2-profile-actions">
-                    <NButton v-if="!desktopNavigation && visibleSettings.length" secondary type="primary" data-v2-navigation @click="selectAccountAction('settings')"><Settings :size="17" /><span>{{user.role==='admin'?'系统设置':'账号与权限'}}</span><ChevronRight :size="16" /></NButton>
-                    <NButton v-if="user.login_method === 'password'" data-v2-navigation secondary @click="navigate('/?account=password')"><KeyRound :size="17" /><span>修改密码</span><ChevronRight :size="16" /></NButton>
-                    <NButton data-v2-navigation secondary @click="navigate('/?view=permission')"><ShieldCheck :size="17" /><span>申请权限</span><ChevronRight :size="16" /></NButton>
-                  </div>
-                </section>
-                <section class="v2-profile-access" aria-label="功能权限"><h2><ShieldCheck :size="17" />功能权限<NTag size="small" :bordered="false">{{ profileGroups.reduce((sum, group) => sum + group.items.length, 0) }} 项</NTag></h2><div v-for="group in profileGroups" :key="group.name" class="v2-profile-group"><h3>{{ group.name }}</h3><div class="v2-profile-modules"><NTag v-for="item in group.items" :key="item.id" size="small" :bordered="false">{{ item.label }}</NTag></div></div><NEmpty v-if="!granted.length" description="暂无已授权功能" /></section>
-              </div>
-              <AccountCertificate v-if="user.role==='admin'&&['L0','L1'].includes(user.level)" :key="identityKey" />
-              <AccountSignature v-if="granted.includes('signatures')" :key="identityKey" class="v2-my-signatures" />
-            </section>
-            <section v-else-if="view === 'handover' && route.pathname === '/'" class="v2-links"><h2>交接班审核</h2><PageCanvas plain page="handover" label="交接班审核" :blocks="[{id:'reviews',title:'楼栋审核',w:12,h:5,minW:4,minH:4}]"><template #reviews><NSpin :show="handoverLoading"><div class="v2-feature-grid"><NButton v-for="(url, scope) in handovers" :key="scope" tag="a" :href="String(url)" target="_blank" rel="noopener noreferrer">{{ scope }}楼审核</NButton></div><NEmpty v-if="!handoverLoading && !Object.keys(handovers).length" description="暂无可用审核入口" /></NSpin></template></PageCanvas></section>
-            <section v-else-if="view === 'assistant' && route.pathname === '/'" class="v2-links"><h2>灯塔助手</h2><NButton type="primary" @click="openAssistant">打开会话</NButton></section>
+                </template>
+              </template>
+              <AccountCertificate v-if="!user.impersonation && user.role==='admin' && ['L0','L1'].includes(user.level)" :key="identityKey"/>
+              <AccountSignature v-if="!user.impersonation && granted.includes('signatures')" :key="identityKey"/>
+            </AccountHome>
+            <section v-else-if="view === 'assistant' && route.pathname === '/'" ref="assistantPageHost" class="ld-page-host" aria-label="灯塔助手工作区"><p v-if="user.impersonation">代操作期间无法使用个人助手。</p></section>
             <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
             <template v-else-if="route.pathname === '/workbench-lite'" />
@@ -79,8 +69,10 @@
             <NoticeWorkspace v-if="noticeView" v-show="noticeActive" :key="noticeView.identity" :url="noticeView.url" :active="noticeActive" :scope="currentScope" :scopes="scopes" :user="user" />
           </template>
         </main>
-        <MobileNavigation v-if="!immersiveInspection && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="value=>navigate('/?view='+value)" @direction="animateMobilePage" />
-        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
+        <HandoverReviewDialog v-if="handoverOpen && loggedIn && canReviewHandover(user) && !impersonationBlocked && !denied && view==='home' && route.pathname==='/'"
+          :scopes="scopes" @close="handoverOpen=false" />
+        <MobileNavigation v-if="!desktopNavigation && !immersiveInspection && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="selectMobileTab" @direction="animateMobilePage" />
+        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" ref="assistantInstance" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
         <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
         <NModal v-model:show="accountConfirm" preset="dialog" :title="accountAction==='switch'?'切换账号':'退出登录'" :content="accountAction==='switch'?'将退出当前账号并返回登录页，已保存的资料会保留。':'确定退出当前账号？已保存的资料会保留。'" positive-text="继续" negative-text="取消" @positive-click="confirmAccountAction" />
       </div>
@@ -93,16 +85,16 @@ import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, 
 import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
-import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, zhihangDataModule } from './modules';
+import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, canReviewHandover, zhihangDataModule } from './modules';
 import { canViewInspectionHistory } from '../inspectionAccess';
 import { personaFor } from './persona';
-import { sidebarGroups } from './sidebarSections';
+import { sidebarGroups, sidebarRole } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
-import { navigate, navigateBack, runNavigationAction } from './navigation';
-import { DEFAULT_NAV_COLOR,theme,nightTheme,nightMode,loadNightMode,loadPalette } from './theme';
+import { navigate, navigateBack, registerNavigationGuard, runNavigationAction } from './navigation';
+import { theme,nightTheme,nightMode,loadNightMode } from './theme';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
-import SidebarNavigation from './SidebarNavigation.vue';
+import TopNavigation from './TopNavigation.vue';
 import {useAuthVersionGuard} from './authVersionGuard';
 import { pageContext } from './pageLayout';
 import {moduleScope,scopeFamily,scopeOwner,readScopeMemory,saveScopeMemory} from './scopeMemory';
@@ -116,9 +108,10 @@ import ImpersonationBanner, { impersonationIdentity } from '../components/Impers
 import AsyncPageState from '../components/AsyncPageState.vue';
 import AccountSignature from '../components/AccountSignature.vue';
 const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, loadingComponent: AsyncPageState, errorComponent: AsyncPageState, delay: 100, timeout: 30000 });
+const AccountHome=lazy(()=>import('./AccountHome.vue'));
 const HomePage = lazy(() => import('./HomePage.vue'));
 const GuestWorkbenchHeader = lazy(() => import('./workbench/WorkbenchDailyLayout.vue'));
-const PageCanvas = lazy(() => import('./PageCanvas.vue'));
+const HandoverReviewDialog = lazy(() => import('./workbench/HandoverReviewDialog.vue'));
 const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
 const NoticeWorkspace = lazy(() => import('./NoticeWorkspace.vue'));
 const NoticeSopManager = lazy(() => import('./NoticeSopManager.vue'));
@@ -139,7 +132,7 @@ const pages: Record<string, any> = {
   documents: lazy(() => import('../components/DocumentLibraryPage.vue')),
   daily: lazy(() => import('../components/DailyTaskChecklistPage.vue')),
   daily_inspection: lazy(() => import('../components/DailyInspectionPage.vue')),
-  cold_source: lazy(() => import('../components/ColdSourceMonitorPage.vue')),
+  cold_source: lazy(() => import('./ColdSourceDesk.vue')),
   water: lazy(() => import('./WaterWorkspace.vue')),
   critical_guard: lazy(() => import('../components/CriticalGuardPage.vue')),
   risk_inspection: lazy(() => import('../components/InspectionWorkspace.vue')),
@@ -158,20 +151,20 @@ const navigationQuery=window.matchMedia('(min-width:761px) and (hover:hover), (m
 const phoneQuery=window.matchMedia('(max-width:760px), (hover:none) and (max-width:1024px) and (max-height:500px)'),phoneViewport=ref(phoneQuery.matches);
 const phoneViewportChanged=()=>{phoneViewport.value=phoneQuery.matches;};
 provide('workspace-mobile-navigation',computed(()=>!desktopNavigation.value));
-function navigationViewportChanged(){desktopNavigation.value=navigationQuery.matches;collapsed.value=true;dismissAccountPopovers();}
+function navigationViewportChanged(){desktopNavigation.value=navigationQuery.matches;accountMenuOpen.value=false;}
 onMounted(()=>navigationQuery.addEventListener('change',navigationViewportChanged));
 onBeforeUnmount(()=>navigationQuery.removeEventListener('change',navigationViewportChanged));
 onMounted(()=>phoneQuery.addEventListener('change',phoneViewportChanged));
 onBeforeUnmount(()=>phoneQuery.removeEventListener('change',phoneViewportChanged));
-const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login'), collapsed = ref(true);
+const route = ref(logicalUrl()), checking = ref(true), loggedIn = ref(false), user = ref<Dict>({}), scopes = ref<{value:string;label:string}[]>([]), authError = ref(''), loginUrl = ref('/api/auth/login');
 const operationError=ref(''),logoutBusy=ref(false);
 const impersonationExpired=ref(false),impersonationLeaving=ref(false);
 const impersonationBlocked=computed(()=>impersonationExpired.value||impersonationLeaving.value);
 const impersonationSession=computed(()=>JSON.stringify([user.value.open_id,impersonationIdentity(user.value)]));
 watch(impersonationSession,()=>{impersonationExpired.value=false;impersonationLeaving.value=false;},{flush:'sync'});
 watch(user,value=>setImpersonationContext(value.impersonation?.id||''),{immediate:true,flush:'sync'});
-const navColor=ref(DEFAULT_NAV_COLOR);
-watch(()=>String(user.value.open_id||''),id=>{loadNightMode(id);loadPalette(id);},{immediate:true,flush:'sync'});
+
+watch(()=>String(user.value.open_id||''),id=>{loadNightMode(id);},{immediate:true,flush:'sync'});
 const printMedia=window.matchMedia('print'),printing=ref(printMedia.matches);
 const syncPrinting=()=>{printing.value=printMedia.matches;};
 onMounted(()=>printMedia.addEventListener('change',syncPrinting));
@@ -184,7 +177,6 @@ const watermarkDay=beijingDate();
 function preventSignatureDrag(event:DragEvent){const image=(event.target as Element)?.closest?.('img');if(image&&(image.src.includes('/api/signatures/')||image.alt.includes('签名')))event.preventDefault();}
 const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value, impersonationIdentity(user.value)]));
 const toolManagementAvailable = computed(() => user.value.tool_management_enabled === true);
-const profileGroups = computed(() => [...new Set(modules.map(item=>item.group))].map(name=>({name,items:modules.filter(item=>item.group===name&&(item.id==='tool_management'?toolManagementAvailable.value:granted.value.includes(item.permission||item.id)))})).filter(group=>group.items.length));
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
 const inspectionHistory = computed(()=>canViewInspectionHistory(user.value));
 const activeModule = computed(() => moduleForRoute(route.value));
@@ -197,6 +189,7 @@ const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspecti
 const zhihangDataAllowed = computed(() => canManageZhihangData(user.value));
 const denied = computed(() => {
   if (!loggedIn.value || publicLink.value) return false;
+  if (activeModule.value==='handover' && !canReviewHandover(user.value)) return true;
   if (activeModule.value === zhihangDataModule.id) return !zhihangDataAllowed.value;
   return activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='tool_management' && toolManagementAvailable.value || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !(activeModule.value==='tool_management' && user.value.tool_management_full_access===true) && !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'));
 });
@@ -231,14 +224,24 @@ const permissionPage = computed(() => view.value === 'permission');
 const levelLabel = computed(() => ({ L0:'超级管理员',L1:'全楼管理员',L2:'工程师',L3:'楼栋主管',L4:'成员' }[String(user.value.level)] || '成员'));
 const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',engineer:'工程师',duty:'值班账号',operator:'值班员',shift_leader:'值班长' }[String(user.value.category)] || '工作空间'));
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'dingtalk',label:'钉钉推送'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
-const visibleSettings = computed(()=>granted.value.includes('accounts')?settingsTabs.filter(item=>user.value.role==='admin'||item.key==='permissions'):[]);
+const diagnosticsAvailable = ref(true);
+const visibleSettings = computed(() => {
+  if (!granted.value.includes('accounts') || user.value.impersonation) return [];
+  return settingsTabs.filter(item => (user.value.role === 'admin' || item.key === 'permissions')
+    && (diagnosticsAvailable.value || !['status','pressure'].includes(item.key)));
+});
+provide('workspace-visible-settings', visibleSettings);
 const selectedMenu = computed(() => activeModule.value === 'accounts'
   ? 'settings:' + (route.value.searchParams.get('tab') || 'permissions')
   : route.value.pathname === '/workbench-lite' ? 'notices' : activeModule.value || view.value);
+// The temporary session can only enter business pages whose reads are allowed by account_impersonation.
+const impersonationPages = new Set(['daily','water','work_handover','notices','plan_convergence','repair_management',
+  'engineer_mop','sops','event','drills','risk_inspection','critical_guard','cabinet','learning','links','life_guide']);
 const permittedModules = computed(() => {
   const entries = navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(module =>
-    module.id !== 'accounts' &&
-    (module.id !== 'signatures' || user.value.role !== 'guest' && !user.value.impersonation) &&
+    module.id !== 'accounts' && module.id !== 'handover' &&
+    (!user.value.impersonation || impersonationPages.has(module.id)) &&
+    (module.id !== 'signatures' || user.value.role !== 'guest') &&
     (module.id !== 'daily_inspection' || scopes.value.some(scope => ['ALL', 'D', 'E'].includes(scope.value))));
   if (granted.value.includes('event') && !entries.some(module => module.id === 'notices')) {
     entries.push({ id: 'notices', label: '通告办理', group: '运行管理', path: '/workbench-lite?work_type=event', icon: 'notice' });
@@ -255,9 +258,18 @@ const guestSearchLinks = [{label:'机柜查询',url:'/cabinet-power'}];
 const menuGroups = computed(() => sidebarGroups([
   ...permittedModules.value.map(module => ({ key: module.id, label: module.label, icon: moduleIcons[module.icon as keyof typeof moduleIcons] })),
   ...visibleSettings.value.map(item => ({ key: 'settings:' + item.key, label: item.label })),
-], ['operator', 'shift_leader'].includes(user.value.category) ? 'duty' : personaFor(user.value)));
-const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false),appearanceOpen=ref(false),sidebarCloseKey=ref(0);
-function dismissAccountPopovers(){accountMenuOpen.value=false;appearanceOpen.value=false;sidebarCloseKey.value++;}
+], sidebarRole(user.value, scopes.value)));
+const breadcrumb=computed(()=>{
+  if(!activeModule.value || route.value.pathname==='/' && homeViews.includes(view.value) && !route.value.searchParams.has('mode'))return null;
+  for(const group of menuGroups.value){
+    const entries=group.direct?[group.direct]:group.branches?.flatMap(branch=>branch.entries)||[];
+    const entry=entries.find(item=>item.key===selectedMenu.value);
+    if(entry && entry.label!==group.label)return {group:group.label,page:entry.label};
+  }
+  return null;
+});
+const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false);
+
 const accountOptions=computed(()=>[
  ...(desktopNavigation.value?[{key:'profile',label:'个人信息',icon:()=>h(UserRound,{size:17})}]:[]),
  {key:'legacy',label:'切换旧版',icon:()=>h(PanelLeft,{size:17}),disabled:versionBusy.value},
@@ -268,10 +280,9 @@ const accountOptions=computed(()=>[
 function accountNodeProps(option:Dict){return {role:option.type==='divider'?'separator':'menuitem','aria-disabled':option.disabled?'true' as const:undefined};}
 function selectAccountAction(key:string){
  accountMenuOpen.value=false;
- if(window.matchMedia('(max-width:760px)').matches)collapsed.value=true;
  if(key==='legacy'){requestVersion(switchLegacy);return;}
  if(key==='profile')navigate('/?view=my');
- else if(key==='settings'&&visibleSettings.value.length)navigate('/admin/settings?tab='+(user.value.role==='admin'?'status':'permissions'));
+ else if(key==='settings'&&visibleSettings.value.length)selectMenu('settings:'+(visibleSettings.value.find(tab=>tab.key==='status')||visibleSettings.value[0]).key);
  else if(key==='switch'||key==='logout'){accountAction.value=key;accountConfirm.value=true;}
 }
 function confirmAccountAction(){
@@ -280,6 +291,15 @@ function confirmAccountAction(){
  runNavigationAction(target,()=>void logout(target));
 }
 const mobileTabs = [{value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},{value:'my',label:'我的',icon:UserRound}];
+function selectMobileTab(value:string){
+ const current=route.value;
+ if(current.pathname==='/' && view.value===value && !current.searchParams.has('mode') && !current.searchParams.has('account'))return;
+ const url=new URL('/',current);
+ url.searchParams.set('view',value);
+ const scope=current.searchParams.get('scope');
+ if(scope && scopes.value.some(option=>option.value===scope))url.searchParams.set('scope',scope);
+ navigate(url);
+}
 const dutyTabs = computed(() => [
   ...(NOTICE_IDS.some(id => granted.value.includes(id)) ? [{id:'notices',label:'通告处理',icon:ClipboardList,url:'/workbench-lite?work_type=all'}] : []),
   ...[{id:'water',label:'水耗处理',icon:Droplets},{id:'drills',label:'演练管理',icon:Activity},{id:'critical_guard',label:'重保管理',icon:ShieldCheck}].filter(tab => granted.value.includes(tab.id)).map(tab => ({...tab,url:moduleUrl(modules.find(m=>m.id===tab.id)!,scopeFor(tab.id))})),
@@ -294,6 +314,10 @@ function selectMenu(key: string) {
 }
 function openWorkspaceModule(target:string,fromHome=false){
  const url=logicalUrl(new URL(target,location.origin).href),module=moduleForRoute(url);
+ if(module==='handover' && fromHome){
+   if(canReviewHandover(user.value))handoverOpen.value=true;
+   return;
+ }
  const precise=['record_id','active_item_id','source_record_id','event_id','batch_id','paper_id','job_id','task_id','drill_id','notice_key','token','tool_session','tool_order','tool_view'].some(key=>url.searchParams.has(key));
  const homeScope=fromHome&&scopes.value.some(scope=>scope.value===url.searchParams.get('scope'));
  if(module && module !== zhihangDataModule.id && !precise&&!homeScope)url.searchParams.set('scope',scopeFor(module));
@@ -302,7 +326,17 @@ function openWorkspaceModule(target:string,fromHome=false){
 
 function changeScope(scope: string) { const url = logicalUrl(); url.searchParams.set('scope', scope); if(['drills','critical_guard'].includes(activeModule.value))url.searchParams.delete('mode'); navigate(url); }
 function selectAdminTab(tab: string) { navigate('/admin/settings?tab=' + encodeURIComponent(tab), {replace:true}); }
-function openAssistant() { window.dispatchEvent(new CustomEvent('clipflow:assistant-open')); const trigger = document.querySelector<HTMLButtonElement>('[aria-label="打开灯塔助手"]'); trigger?.click(); }
+const assistantPageHost = ref<HTMLElement | null>(null);
+const assistantInstance = ref<{ needsPageGuard: boolean; allowPageExit: (proceed: () => void) => boolean } | null>(null);
+provide('lighthouse-page-host', assistantPageHost);
+watch(() => assistantInstance.value?.needsPageGuard, (needed, _, onCleanup) => {
+  if (!needed) return;
+  onCleanup(registerNavigationGuard((target, proceed) => {
+    const next = logicalUrl(target);
+    if (next.origin === location.origin && next.pathname === '/' && next.searchParams.get('view') === 'assistant' && !next.searchParams.has('frontend')) return true;
+    return assistantInstance.value?.allowPageExit(proceed) ?? true;
+  }));
+}, {flush:'sync'});
 function switchLegacy() { navigate(loggedIn.value ? '/?frontend=legacy' : loginVersionUrl('legacy'), {hard:true,legacy:true}); }
 let statusRevision=0;
 async function onStatus(text: string) {
@@ -354,6 +388,7 @@ async function loadAuth() {
     const data = await requestJson('/api/auth/status?next=' + encodeURIComponent(window.location.pathname + window.location.search), {signal:controller.signal, cache:'no-store',timeoutMs:15000});
     if (disposed || controller.signal.aborted || authRead!==controller) return;
     loggedIn.value = !!data.logged_in; user.value = data.user || {}; scopes.value = data.scope_options || []; authDefaultScope.value = String(data.default_scope||''); loginUrl.value = data.login_url || '/api/auth/login';
+    diagnosticsAvailable.value = data.backend_diagnostics_available !== false;
     setModulePermissions(granted.value); setReadCacheIdentity(identityKey.value); authError.value = data.directory_warning || '';
     if (loggedIn.value && !user.value.impersonation && user.value.role !== 'guest' && user.value.open_id) saveVersion(String(user.value.open_id), 'workspace');
     if (user.value.role === 'guest' && route.value.pathname !== '/cabinet-power' && !publicLink.value) navigate('/cabinet-power', {replace:true,bypassGuard:true});
@@ -379,15 +414,16 @@ watch(()=>[permissionPage.value,loggedIn.value,user.value.open_id],async(_value,
   try{const data=await requestJson('/api/auth/permission-requests/current',{signal:abort.signal,cache:'no-store'}),r=data.request;if(!abort.signal.aborted&&r?.request_id)Object.assign(permission,{requestId:r.request_id,scopes:r.requested_scopes||[],reason:r.reason||'',status:r.status,approverOpenId:r.approver_open_id||'',notificationStatus:r.notification_status||'',notificationError:r.notification_error||'',rejectReason:r.reject_reason||''});}
   catch{/* A temporary read failure must not block a new application. */}
 });
-const handovers=ref<Dict>({}),handoverLoading=ref(false);
-watch([view,loggedIn,identityKey],async(_value,_old,onCleanup)=>{
-  handovers.value={};handoverLoading.value=false;
-  if(view.value!=='handover'||!loggedIn.value||!granted.value.includes('handover'))return;
-  const controller=new AbortController();onCleanup(()=>controller.abort());handoverLoading.value=true;
-  try{const data=await requestJson('/api/handover-links',{signal:controller.signal});if(!controller.signal.aborted)handovers.value=data.links||{};}
-  catch(e:any){if(!controller.signal.aborted)authError.value=e.message;}
-  finally{if(!controller.signal.aborted)handoverLoading.value=false;}
-});
+const handoverOpen=ref(false);
+watch([route,identityKey,loggedIn],()=>{handoverOpen.value=false;},{flush:'sync'});
+// Existing bookmarks open the same workbench control as a click on the home page.
+watch([route,checking,loggedIn,denied],()=>{
+  if(checking.value || !loggedIn.value || denied.value || route.value.pathname!=='/' || view.value!=='handover')return;
+  const home=new URL(route.value);
+  home.searchParams.set('view','home');
+  navigate(home,{replace:true});
+  handoverOpen.value=true;
+},{immediate:true});
 onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>

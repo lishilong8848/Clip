@@ -90,6 +90,56 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
                     finally:
                         book.close()
 
+    def test_all_visible_anchors_dates_and_choices_export_from_snapshot(self):
+        from datetime import date, datetime, time
+        from openpyxl.styles import Border, Side
+        book = load(self.hvac)
+        form = book[parse_template(self.hvac)['sheet']]
+        sheet_name = form.title
+        cover = book['封面']
+        cover.merge_cells('K20:L21')
+        cover['K20'] = '电池[] 端子［ ］ 记录☐'
+        cover['K22'] = '年 月 日 时 分'
+        cover['K23'] = '时 分'
+        cover['K24'] = '年 月'
+        cover['M24'].number_format = 'yyyy-mm-dd hh:mm'
+        cover['M25'].number_format = 'yyyy-mm-dd'
+        cover['M26'].number_format = 'hh:mm'
+        cover['N28'].border = Border(bottom=Side(style='thin'))
+        form['I14'] = '是［ ］ 否［ ］'
+        data = io.BytesIO()
+        book.save(data)
+        book.close()
+        content = data.getvalue()
+        layout = describe(content)
+        views = {s['name']:cells(s) for s in layout['sheets']}
+        self.assertNotIn('L21', views['封面'])
+        self.assertEqual({a:views['封面'][a]['input_kind'] for a in ('K22','K23','K24','M24','M25','M26')},
+                         dict(K22='datetime-local', K23='time', K24='month', M24='datetime-local', M25='date', M26='time'))
+        all_anchors = {name+'!'+address:'测试内容' for name, grid in views.items() for address, cell in grid.items()
+                       if cell['text_editable'] or cell['editable'] and not cell.get('check')}
+        self.assertIn('封面!N28', all_anchors)
+        all_anchors.update({'封面!K20':'电池[√] 端子［ ］ 记录☑', '封面!K22':'2026-11-20T14:35', '封面!K23':'09:17',
+                            '封面!K24':'2026-12','封面!M24':'2026-11-20T18:41','封面!M25':'2026-11-21',
+                            '封面!M26':'16:12', sheet_name+'!G11':'2026-11-20T07:45'})
+        book = load(self.export(content, all_anchors))
+        try:
+            target = book['封面']
+            for addr, expected in dict(K20='电池[√] 端子［ ］ 记录☑', K22='2026年11月20日14时35分', K23='09时17分',
+                                       K24='2026年12月', M24=datetime(2026,11,20,18,41),
+                                       M26=time(16,12), N28='测试内容').items():
+                self.assertEqual(target[addr].value, expected, addr)
+            self.assertEqual(target['M25'].value.date(), date(2026,11,21))
+            self.assertEqual(book[sheet_name]['G11'].value, '2026年11月20日07时45分')
+            self.assertEqual(book[sheet_name]['I14'].value, '是［√］ 否［ ］')
+            self.assertIn('K20:L21', {str(r) for r in target.merged_cells.ranges})
+            for key, value in all_anchors.items():
+                name,address = key.rsplit('!',1)
+                if value == '测试内容':
+                    self.assertEqual(book[name][address].value, value, key)
+        finally:
+            book.close()
+
     def test_inspector_defaults_to_the_text_in_the_original_workbook(self):
         before = describe(self.electrical)
         sheet = before['schema']['sheet']
@@ -238,6 +288,13 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
             book.close()
 
     def test_rejects_noneditable_formula_and_incomplete_checks(self):
+        with io.BytesIO() as stream:
+            book = load(self.hvac)
+            book['封面']['C3'] = '=1+1'
+            book.save(stream)
+            book.close()
+            with self.assertRaisesRegex(RiskError, '公式'):
+                describe(stream.getvalue())
         description = describe(self.hvac)
         name = description['schema']['sheet']
         check_map = answers(description)

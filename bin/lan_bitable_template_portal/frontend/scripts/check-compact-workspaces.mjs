@@ -1,3 +1,4 @@
+import {openWorkspaceEntry} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 import { mkdir } from 'node:fs/promises';
@@ -409,7 +410,7 @@ try {
     authUser = user1;
     await context.clearCookies();
     await page.goto(entry+'?scope=H');
-    await page.locator('.v2-sidebar').getByText('机柜管理',{exact:true}).click();
+    await openWorkspaceEntry(page,'cabinet');
     await page.locator('.cabinet-page').waitFor();
     await page.locator('.v2-cabinet-rate-value').getByText('95.0%',{exact:true}).waitFor();
     assert((await page.locator('.v2-cabinet-status').boundingBox()).height<70,'desktop status strip is compact');

@@ -249,13 +249,18 @@ def persistent_active_item_data(data_dict: dict | None) -> dict:
         and isinstance(inflight_snapshot, dict)
         and str(normalized.get("notice_type") or "").strip() == "事件通告"
     ):
-        normalized = normalize_active_item_data(inflight_snapshot)
+        inflight = normalize_active_item_data(inflight_snapshot)
+        if normalized.get("_event_delivery_pending"):
+            for key in ("_event_delivery_pending", "_event_wait_job_id", "_upload_operation_id"):
+                if normalized.get(key):
+                    inflight[key] = normalized[key]
+        normalized = inflight
     event_operation_id = str(normalized.get("_upload_operation_id") or "").strip()
     preserve_event_operation = bool(
         event_operation_id
         and str(normalized.get("notice_type") or "").strip() == "事件通告"
     )
-    if preserve_event_operation:
+    if preserve_event_operation and not normalized.get("_event_delivery_pending"):
         normalized["_remote_written_pending_verification"] = True
         retry_action = str(
             normalized.get("_remote_written_retry_action") or ""

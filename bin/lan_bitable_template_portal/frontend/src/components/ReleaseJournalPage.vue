@@ -41,6 +41,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCollapse, NCollapseItem, NEmpty, NInput, NModal, NPagination, NSelect, NSpin, NTag } from 'naive-ui';
 import { ChevronRight, NotebookPen, RefreshCw, Search } from 'lucide-vue-next';
 import { ApiError, requestJson } from '../api/client';
+import ReleaseDeskEntry from '../workspace-v2/ReleaseDeskEntry.vue';
 type Issue = { problem:string; solution:string; module:string };
 type Release = { id:string; version:string; patch:number; published_at:string; items:Issue[]; commits?:Array<{id?:string;hash?:string;sha?:string;subject?:string;title?:string;message?:string}> };
 const query=ref(''),moduleFilter=ref<string|null>(null),page=ref(1),pageSize=20,total=ref(0),items=ref<Release[]>([]),modules=ref<string[]>([]);

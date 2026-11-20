@@ -1,0 +1,248 @@
+<NConfigProvider :locale="zhCN" :date-locale="dateZhCN">
+  <section class="sdoc" aria-label="南通文件" :style="styles">
+    <div class="sdoc-surface">
+      <form class="sdoc-bar" @submit.prevent="activeTable && searchRecords()">
+        <VnetBackButton v-if="activeTable" within-module title="全部数据表" @click="selectTable('')" />
+        <h1>{{ activeTable?.name || '南通文件' }}</h1>
+        <label class="sdoc-find"><Search :size="16"/>
+          <input v-if="activeTable" v-model="query" type="search" aria-label="搜索资料" placeholder="搜索资料" />
+          <input v-else v-model="tableQuery" type="search" aria-label="搜索数据表" placeholder="查找数据表" />
+        </label>
+        <template v-if="activeTable">
+          <NSelect class="sdoc-scope" aria-label="资料楼栋" :value="scope" :disabled="busy || listLoading" :options="[{value:'',label:'全部授权楼栋'}, ...scopeOptions]" @update:value="changeScope"/>
+          <button type="submit" :disabled="busy || listLoading">查询</button>
+          <button v-if="schema" type="button" :disabled="busy || !filterFields.length || filters.length>=20" @click="addFilter">字段筛选</button>
+        </template>
+        <button type="button" aria-label="刷新文件列表" :disabled="busy || tablesLoading || listLoading" @click="reload"><RefreshCw :size="15"/>刷新</button>
+        <button v-if="activeTable?.capabilities?.create" class="sdoc-primary" type="button" :disabled="busy || !schema || !!tablesError" @click="createRecord"><Plus :size="15"/>新建资料</button>
+        <button v-if="!activeTable && canConfigure" class="sdoc-primary" type="button" :disabled="busy || !!tablesError" @click="openSettings(true)"><Plus :size="15"/>接入数据表</button>
+      </form>
+
+      <p v-if="tablesError" role="alert">{{ tablesError }}</p>
+      <p v-if="notice && !detailOpen" role="status">{{ notice }}</p>
+      <p v-if="tables.cleanup_error" role="alert">后台清理尚未完成：{{ tables.cleanup_error }}</p>
+      <p v-if="cleanupPending" role="status">接入已移除，来源索引后台清理中（{{ cleanupPending }} 项）。</p>
+      <div v-if="!activeTable" class="sdoc-inner">
+        <div class="sdoc-meta"><span>{{ tablesLoading ? '正在读取数据表…' : visibleTables.length+' 张数据表' }}</span>
+          <button v-if="canConfigure" :disabled="busy" @click="openStorage"><HardDrive :size="14"/>本地附件缓存</button>
+        </div>
+        <div v-if="visibleTables.length" class="sdoc-grid">
+          <article v-for="table in visibleTables" :key="table.key" class="sdoc-tile">
+            <button class="sdoc-title" :aria-label="'打开数据表：'+table.name" :disabled="busy" @click="selectTable(table.key)"><FolderOpen :size="19"/><strong>{{ table.name }}</strong><ChevronRight :size="15"/></button>
+            <div class="sdoc-meta"><span>{{ tableScopes(table) }}</span><span v-if="table.summary">{{ table.summary.records }} 条缓存记录</span>
+              <a v-if="sourceLink(table)" :aria-label="'打开飞书原表：'+table.name" :href="sourceLink(table)" target="_blank" rel="noopener noreferrer">打开源表 ↗</a></div>
+            <small v-if="table.summary">最近同步 {{ timeText(table.summary.updated_at) }}<template v-if="table.summary.pending_items"> · {{ table.summary.pending_items }} 项待处理</template></small>
+            <p v-if="table.summary?.error" role="alert">{{ table.summary.error }}</p>
+          </article>
+        </div>
+        <p v-else-if="!tablesLoading && !tablesError">{{ tableQuery ? '没有匹配的数据表' : '暂无可访问的数据表' }}</p>
+      </div>
+
+      <div v-else class="sdoc-inner">
+        <div v-if="filters.length" class="sdoc-facets" aria-label="字段筛选条件">
+          <div v-for="(f,i) in filters" :key="i" class="sdoc-facet">
+            <NSelect :value="f.field" :options="filterFields" :disabled="busy" aria-label="筛选字段" @update:value="(id:string)=>changeFilterField(i,id)"/>
+            <NSelect v-model:value="f.op" :options="filterOperators(f)" :disabled="busy" aria-label="匹配方式"/>
+            <template v-if="!['empty','not_empty'].includes(f.op)">
+              <NInputNumber v-if="filterKind(f)==='number'" v-model:value="f.value" :disabled="busy" aria-label="数字条件"/>
+              <NDatePicker v-else-if="filterKind(f)==='date'" v-model:value="f.value" :type="schema?.fields.find(fld=>fld.id===f.field)?.property?.show_time ? 'datetime':'date'" clearable :disabled="busy" aria-label="日期条件"/>
+              <NSelect v-else-if="filterChoices(f).length" v-model:value="f.value" :options="filterChoices(f)" filterable :disabled="busy" aria-label="筛选值"/>
+              <input v-else v-model="f.value" :disabled="busy" aria-label="筛选值" @keydown.enter.prevent="searchRecords"/>
+            </template>
+            <button :disabled="busy" :aria-label="'移除条件 '+(i+1)" @click="filters.splice(i,1)"><X :size="14"/></button>
+          </div>
+        </div>
+        <p v-if="filterError" role="alert">{{ filterError }}</p>
+        <div class="sdoc-meta">
+          <b>{{ total === undefined ? '当前资料' : (listCache?.complete===false?'当前缓存 ':'匹配 ')+total+' 条' }}</b>
+          <span>{{ tableScopes(activeTable) }}</span>
+          <small v-if="listCache">最近同步 {{ timeText(listCache.updated_at) }}</small>
+          <a v-if="sourceLink(activeTable)" :aria-label="'打开飞书原表：'+activeTable.name" :href="sourceLink(activeTable)" target="_blank" rel="noopener noreferrer">打开源表 ↗</a>
+          <button v-if="canReindex && !showRecordSelection" :disabled="busy || !listReady" @click="selectingRecords=true">选择记录</button>
+          <details v-if="canConfigure" class="sdoc-more"><summary>数据表管理</summary><div>
+            <button :disabled="busy" @click="openSettings(false)">数据表配置</button>
+            <button :disabled="busy" @click="openSettings(true)">接入数据表</button>
+            <button :disabled="busy" @click="openStorage">本地附件缓存</button>
+            <button v-if="canRemove(activeTable)" :disabled="busy" @click="confirmRemove(activeTable)">移除本地接入</button>
+          </div></details>
+        </div>
+        <div v-if="showRecordSelection" class="sdoc-selection" role="group" aria-label="批量更新索引">
+          <span>{{ selectionLabel }}</span>
+          <button :disabled="busy || listLoading || !selectableRecords.length" @click="selectPage">选择本页</button>
+          <button :disabled="busy || listLoading || !listReady || !records.length" @click="selectAll">选择全部匹配记录（跨页）</button>
+          <select v-model="reindexMode" :disabled="busy" aria-label="索引更新范围"><option value="all">全部重建</option><option value="failed">仅重试失败项</option><option value="missing">仅补齐缺失项</option></select>
+          <button :disabled="busy || listLoading || !hasSelection" @click="confirmReindex()">{{ reindexAction }}</button>
+          <button :disabled="busy" @click="clearSelection">取消选择</button>
+        </div>
+        <div v-if="maintenanceIntent && !maintenanceOpen" role="status">有待核对的操作 <button :disabled="busy" @click="maintenanceOpen=true">查看原操作</button></div>
+        <section v-if="operations.length || operationError" class="sdoc-receipts" aria-label="待核验操作">
+          <h2>待核验操作</h2><p v-if="operationError" role="alert">{{ operationError }} <button :disabled="busy" @click="loadOperations">刷新回执</button></p>
+          <div v-for="op in operations" :key="op.operation_id" class="sdoc-receipt">
+            <div><strong>{{ op.reason || op.kind }}</strong><small>{{ op.actor_name }} · {{ timeText(op.created_at) }} · {{ op.status }}</small>
+              <small>操作编号 {{ op.operation_id }}<template v-if="op.record_id"> · 记录 {{ op.record_id }}</template></small></div>
+            <input v-if="!op.record_id" v-model="operationTargets[op.operation_id]" aria-label="候选记录 ID" placeholder="候选记录 ID" :disabled="busy"/>
+            <button :disabled="busy" @click="verifyOperation(op)">{{ verifying===op.operation_id?'核验中…':'核验原操作' }}</button>
+          </div>
+        </section>
+        <p v-if="listError" role="alert">{{ listError }} <button :disabled="busy || listLoading" @click="retryRecords">{{ syncFailed?'重新同步':'重试' }}</button></p>
+        <p v-if="listPending" role="status">资料缓存同步中，当前显示已读取的记录。</p>
+        <p v-if="listLoading || listRefreshing" role="status">{{ listLoading?'正在读取资料…':'正在刷新资料…' }}</p>
+        <div v-if="records.length" class="sdoc-grid" :aria-busy="listLoading">
+          <article v-for="r in records" :key="r.record_id" class="sdoc-tile" :class="{selected:showRecordSelection && isSelected(r)}">
+            <div class="sdoc-tile-head"><NCheckbox v-if="showRecordSelection" :checked="isSelected(r)" :disabled="busy || listLoading || !r.capabilities.reindex" :aria-label="'选择资料：'+title(r)" @update:checked="(checked:boolean)=>toggleRecord(r,checked)"/>
+              <button class="sdoc-title" :disabled="busy" :aria-label="'查看资料：'+title(r)" @click="openRecord(r.record_id)"><FileText :size="16"/><strong>{{ title(r) }}</strong><ChevronRight :size="15"/></button></div>
+            <dl v-if="displayFields.length>1" class="sdoc-values">
+              <div v-for="f in displayFields.slice(1)" :key="f.id"><dt>{{ f.name }}</dt><dd><DocumentLibraryField :field="f" :model-value="r.fields[f.id]" :interactive="false"/></dd></div>
+            </dl>
+            <div class="sdoc-meta"><span><Paperclip :size="13"/>{{ r.attachments.length }} 个附件</span><span :data-tone="vectorType(r)">{{ indexLabel(r) }}</span><span>{{ vectorProgress(r) }}</span></div>
+            <div class="sdoc-meta"><small>{{ cacheLabel(r) }}</small>
+              <button v-if="canReindex && r.capabilities.reindex" :aria-label="reindexAction+'：'+title(r)" :disabled="busy || listLoading" @click="confirmReindex(r)">{{ reindexAction }}</button>
+            </div>
+          </article>
+        </div>
+        <p v-else-if="listReady && !listPending && !listLoading && !listError">没有符合条件的资料</p>
+        <nav v-if="listReady" class="sdoc-pagination" aria-label="资料分页"><small>本页 {{ records.length }} 条</small>
+          <button aria-label="首页资料" :disabled="busy || listLoading || !hasPrevious" @click="firstPage"><ChevronsLeft :size="14"/></button>
+          <button aria-label="上一页资料" :disabled="busy || listLoading || !hasPrevious" @click="previousPage"><ChevronLeft :size="14"/></button>
+          <template v-for="(p,i) in pageNumbers" :key="i"><button v-if="p" :aria-label="'第 '+p+' 页资料'" :aria-current="p===currentPage?'page':undefined" :disabled="busy || listLoading" @click="goPage(p)">{{ p }}</button><span v-else>…</span></template>
+          <button aria-label="下一页资料" :disabled="busy || listLoading || !hasMore" @click="nextPage"><ChevronRight :size="14"/></button>
+          <button aria-label="末页资料" :disabled="busy || listLoading || total===undefined || !hasMore" @click="lastPage"><ChevronsRight :size="14"/></button>
+        </nav>
+      </div>
+    </div>
+  </section>
+
+  <NDrawer :show="detailOpen" placement="right" width="min(760px, 100vw)" :close-on-esc="!busy && !previewFile && !discardOpen && !maintenanceOpen" :mask-closable="!busy" @update:show="(show:boolean)=>{if(!show)closeDetail()}">
+    <NDrawerContent :native-scrollbar="true" :body-content-style="{padding:'12px clamp(10px,2vw,20px)'}">
+      <template #header><div class="sdoc-dialog-head"><div><small class="document-record-source">{{ activeTable?.name }}</small><h2>{{ creating?'新建资料':detail?title(detail):'资料详情' }}</h2></div><button :disabled="busy" aria-label="关闭" @click="closeDetail"><X :size="18"/></button></div></template>
+      <section class="sdoc-detail" :style="styles" data-v2-inline-feedback>
+        <div v-if="detailLoading" role="status">正在读取资料…</div>
+        <p v-if="detailError" role="alert">{{ detailError }} <button v-if="!detail && !creating && targetId" :disabled="busy || detailLoading" @click="openRecord(targetId)">重试</button></p>
+        <p v-if="notice" role="status">{{ notice }}</p>
+        <p v-if="pendingUpload || pendingWrite" role="status">操作回执尚未确认，输入及原操作编号已保留。请核验后按原操作重试。</p>
+        <div v-if="pendingUpload || pendingWrite" class="sdoc-receipt">
+          <small>操作编号 {{ pendingWrite?.operation_id || pendingUpload?.operation_id }}</small>
+          <input v-if="activeReceipt && !activeReceipt.record_id" v-model="operationTargets[activeReceipt.operation_id]" placeholder="候选记录 ID" aria-label="候选记录 ID" :disabled="busy"/>
+          <button v-if="activeReceipt" :disabled="busy" @click="verifyOperation(activeReceipt)">{{ verifying?'核验中…':'核验原操作' }}</button>
+          <button v-else :disabled="busy" @click="loadOperations">刷新待核验回执</button>
+          <p v-if="operationError" role="alert">{{ operationError }}</p>
+        </div>
+        <template v-if="detail || creating">
+          <div v-if="detail" class="sdoc-meta"><span>记录 {{ detail.record_id }}</span><span>{{ indexLabel(detail) }} · {{ vectorProgress(detail) }}</span>
+            <button :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload || !!fieldConflicts.length" @click="readLatest">重新读取资料</button>
+            <button v-if="detail.capabilities.edit && !editing" class="sdoc-primary" :disabled="busy || detailLoading || !!pendingUpload" @click="selectDetailTab('fields'); editing=true"><Pencil :size="14"/>编辑资料</button>
+          </div>
+          <div v-if="conflict" class="sdoc-notice" role="alert">记录版本已变化。
+            <button v-if="!fieldConflicts.length" :disabled="busy || detailLoading || !!pendingWrite || !!pendingUpload" @click="readLatest">读取最新版本，保留输入</button>
+          </div>
+          <section v-if="fieldConflicts.length" class="sdoc-conflicts" aria-label="字段冲突对比">
+            <article v-for="field in fieldConflicts" :key="field.id"><h3>{{ schema?.fields.find(f=>f.id===field.id)?.name || field.id }}</h3>
+              <dl><dt>我的输入</dt><dd>{{ valueText(field.mine) }}</dd><dt>最新值</dt><dd>{{ valueText(field.latest) }}</dd></dl>
+              <button :disabled="busy" @click="resolveConflict(field.id,true)">保留我的输入</button><button :disabled="busy" @click="resolveConflict(field.id,false)">使用最新值</button>
+            </article>
+          </section>
+          <nav v-if="!creating" class="sdoc-tabs" aria-label="资料内容">
+            <button v-for="tab in documentTabs" :key="tab.id" :aria-pressed="detailTab===tab.id" :disabled="busy" @click="selectDetailTab(tab.id)">{{ tab.name }}</button>
+          </nav>
+          <form v-if="detailTab==='fields'" ref="recordForm" class="sdoc-form" @submit.prevent="(creating?activeTable?.capabilities?.create:detail?.capabilities.edit) && saveRecord()">
+            <div class="sdoc-fields">
+              <div v-for="field in formFields" :key="field.id" :data-field-id="field.id" class="sdoc-field document-detail-field">
+                <strong>{{ field.name }}<small v-if="editing && requiredField(field)"> · 必填</small></strong>
+                <DocumentLibraryField :field="field" :model-value="editing ? draft[field.id] : detail?.fields[field.id]" :editing="editing && (creating ? !!activeTable?.capabilities?.create : !!detail?.capabilities.edit)" :disabled="busy || detailLoading || !!pendingWrite" @update:model-value="(value:unknown)=>updateField(field.id,value)"/>
+                <p v-if="fieldErrors[field.id]" role="alert">{{ fieldErrors[field.id] }}</p>
+              </div>
+            </div>
+            <details v-if="deferredFields.length" class="sdoc-sys document-system-fields"><summary>系统与只读字段（{{ deferredFields.length }}）</summary>
+              <div v-for="field in deferredFields" :key="field.id"><strong>{{ field.name }}</strong><DocumentLibraryField :field="field" :model-value="detail?.fields[field.id]"/>
+                <small v-if="field.read_only_reason">{{ field.read_only_reason }}</small></div>
+            </details>
+            <label v-if="editing" class="sdoc-stack">变更原因<textarea v-model="reason" rows="2" :disabled="busy || !!pendingWrite" required/></label>
+            <div v-if="editing" class="sdoc-actions"><button type="button" :disabled="busy" @click="closeDetail">取消编辑</button>
+              <button v-if="creating?activeTable?.capabilities?.create:detail?.capabilities.edit" type="submit" class="sdoc-primary" :disabled="busy || detailLoading || conflict || !reason.trim()">{{ saving?'正在保存…':pendingWrite?'按原操作重试保存':'保存资料' }}</button></div>
+          </form>
+          <section v-if="detail && (detailTab==='attachments' || (detailTab==='fields' && !editing && detail.attachments.length))" aria-label="当前附件">
+            <div class="sdoc-meta"><h3>当前附件</h3><span>{{ detail.attachments.length }} 个</span></div>
+            <div v-for="file in detail.attachments" :key="file.id" class="sdoc-file"><div><strong>{{ file.name }}</strong><small>{{ schema?.fields.find(f=>f.id===file.field_id)?.name }} · {{ sizeText(file.size) }}</small></div>
+              <button :aria-label="'预览附件：'+file.name" @click="openPreview(file, detail.attachments)"><Eye :size="14"/>预览</button>
+              <a :href="fileUrl(file)" :aria-label="'打开附件：'+file.name" target="_blank" rel="noopener noreferrer"><Download :size="14"/>下载</a></div>
+            <small v-if="!detail.attachments.length">暂无附件</small>
+            <form v-if="detailTab==='attachments' && detail.capabilities.upload && attachmentFields.length && !editing" class="sdoc-form" @submit.prevent="detail.capabilities.upload && uploadAttachment()">
+              <div class="sdoc-fields">
+                <label class="sdoc-stack">附件字段<select v-model="uploadField" :disabled="busy || !!pendingUpload"><option v-for="f in attachmentFields" :key="f.id" :value="f.id">{{ f.name }}</option></select></label>
+                <label class="sdoc-stack">上传方式<select v-model="replaceId" :disabled="busy || !!pendingUpload"><option value="">添加新附件</option>
+                  <option v-for="file in detail.attachments.filter(f=>f.field_id===uploadField)" :key="file.id" :value="file.id">替换 {{ file.name }}</option></select></label>
+              </div>
+              <label class="sdoc-stack">选择资料附件 <input type="file" :disabled="busy || !!pendingUpload" @change="pickFile"/></label>
+              <small v-if="detail.capabilities.max_upload_bytes">单个附件上限 {{ sizeText(detail.capabilities.max_upload_bytes) }}</small>
+              <label class="sdoc-stack">附件变更原因<textarea v-model="uploadReason" rows="2" :disabled="busy || !!pendingUpload" required/></label>
+              <span v-if="pickedFile">{{ pickedFile.name }} · {{ sizeText(pickedFile.size) }}</span>
+              <progress v-if="uploading" :value="progress" max="100" aria-label="上传进度"/>
+              <div class="sdoc-actions"><button type="submit" class="sdoc-primary" :disabled="busy || detailLoading || !pickedFile || !uploadField || !uploadReason.trim() || conflict"><Upload :size="15"/>{{ uploading?'正在上传 '+progress+'%':pendingUpload?'按原操作重试上传':'上传附件' }}</button></div>
+            </form>
+          </section>
+          <section v-if="detail && detailTab==='versions'" aria-label="附件版本">
+            <p v-if="versionsLoading" role="status">读取附件版本…</p>
+            <p v-if="versionsError" role="alert">{{ versionsError }} <button :disabled="versionsLoading" @click="loadVersions">重试读取版本</button></p>
+            <div v-for="file in versions" :key="file.id+'-'+file.version" class="sdoc-file"><div><strong>{{ file.name }}</strong>
+              <small>{{ file.current?'当前版本':'历史版本' }} · v{{ file.version }} · {{ sizeText(file.size) }} · {{ file.created_by }} {{ file.created_at }}</small></div>
+              <button @click="openPreview(file,versions)">预览</button><a :href="fileUrl(file)" target="_blank" rel="noopener noreferrer">下载此版本</a></div>
+            <p v-if="versionsReady && !versionsError && !versions.length">暂无附件版本</p>
+          </section>
+          <section v-if="detail && detailTab==='index'" aria-label="知识库索引">
+            <div class="sdoc-meta"><h3>{{ indexLabel(detail) }}</h3><span>{{ vectorProgress(detail) }} · {{ cacheLabel(detail) }}</span></div>
+            <p v-if="typeof detail.knowledge_status==='object' && detail.knowledge_status?.error" role="alert">{{ detail.knowledge_status.error }}</p>
+            <div v-for="(item,i) in indexItems" :key="item.attachment_id || item.field_id || i" class="sdoc-inspect">
+              <strong>{{ item.name }}</strong><span>{{ indexItemLabel(item) }}</span><small>{{ item.cached===true?'已缓存':item.cached===false?'未缓存':'缓存状态待核对' }}</small>
+              <span v-if="item.error" role="alert">{{ item.error }}</span><small v-if="item.error_code">{{ item.error_code }}</small>
+            </div><p v-if="!indexItems.length">暂无分项索引信息</p>
+            <div v-if="canReindex && detail.capabilities.reindex" class="sdoc-actions">
+              <select v-model="reindexMode" aria-label="索引更新范围" :disabled="busy"><option value="all">全部重建</option><option value="failed">仅重试失败项</option><option value="missing">仅补齐缺失项</option></select>
+              <button :disabled="busy" @click="confirmReindex(detail)">{{ reindexAction }}</button>
+            </div>
+          </section>
+        </template>
+      </section>
+    </NDrawerContent>
+  </NDrawer>
+  <NModal :show="!!(previewFile && detail && detailOpen)" @update:show="(show:boolean)=>{if(!show)previewFile=null}">
+    <section v-if="previewFile && detail" class="sdoc-dialog sdoc-preview document-preview" :class="{'sdoc-image-preview':previewKind==='image'}" role="dialog" aria-modal="true" aria-label="附件预览" data-v2-inline-feedback>
+      <header class="sdoc-dialog-head"><h2>{{ previewFile.name }}</h2><button aria-label="关闭预览" @click="previewFile=null"><X :size="16"/></button></header>
+      <div class="sdoc-preview-body">
+        <p v-if="previewError" role="alert">{{ previewError }} <button @click="previewError=''">重试预览</button></p>
+        <img v-else-if="previewKind==='image'" :key="previewUrl(previewFile)" :src="previewUrl(previewFile)" :alt="previewFile.name" @error="previewError='图片读取失败'"/>
+        <iframe v-else-if="previewKind==='pdf'" :key="previewUrl(previewFile)" :src="previewUrl(previewFile)" :title="previewFile.name" referrerpolicy="no-referrer" @error="previewError='PDF 读取失败'"/>
+        <p v-else>此格式请下载原文件查看。</p>
+      </div>
+      <div class="sdoc-actions"><a :href="fileUrl(previewFile)" target="_blank" rel="noopener noreferrer">下载原文件</a>
+        <button :disabled="previewPosition<=0" @click="stepPreview(-1)">上一个</button><span>{{ previewPosition+1 }} / {{ previewFiles.length }}</span>
+        <button :disabled="previewPosition>=previewFiles.length-1" @click="stepPreview(1)">下一个</button></div>
+    </section>
+  </NModal>
+  <NModal :show="maintenanceOpen" :mask-closable="!maintenanceBusy" :close-on-esc="!maintenanceBusy" @update:show="(show:boolean)=>{if(!show)closeMaintenance()}">
+    <section v-if="maintenanceIntent" class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="确认维护操作">
+      <h2>{{ maintenanceIntent.kind==='remove'?'移除本地接入':reindexAction }}</h2><p>{{ maintenanceIntent.label }}</p>
+      <p>{{ maintenanceIntent.kind==='remove'?'将移除本地数据表接入并清理该来源的本地索引。飞书源表和原始文件保留。':'将按上述范围重新提交本地知识库索引任务。' }}</p>
+      <p v-if="maintenanceError" role="alert">{{ maintenanceError }}</p>
+      <div class="sdoc-actions"><button :disabled="maintenanceBusy" @click="closeMaintenance">取消</button>
+        <button class="sdoc-primary" :disabled="maintenanceBusy || (!!maintenanceError && !maintenanceUncertain)" @click="runMaintenance">{{ maintenanceBusy?'处理中…':maintenanceUncertain?'按原操作重试':maintenanceIntent.kind==='remove'?'确认移除本地接入':'确认更新索引' }}</button></div>
+    </section>
+  </NModal>
+  <NModal :show="discardOpen" @update:show="(show:boolean)=>{if(!show)discardOpen=false}">
+    <section class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="放弃未保存修改">
+      <h2>放弃未保存的修改？</h2><p>当前输入或待核验的操作将退出编辑。{{ pendingWrite || pendingUpload ? '请先核对原操作回执。' : '' }}</p>
+      <div class="sdoc-actions"><button @click="discardOpen=false">继续编辑</button><button @click="confirmDiscard">放弃修改</button></div>
+    </section>
+  </NModal>
+  <NModal :show="storageOpen && canConfigure" :mask-closable="!storageBusy" :close-on-esc="!storageBusy" @update:show="(show:boolean)=>{if(!show && !storageBusy)storageOpen=false}">
+    <section class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="本地附件缓存">
+      <header class="sdoc-dialog-head"><h2>本地附件缓存</h2><button :disabled="storageBusy" @click="storageOpen=false">关闭</button></header>
+      <p v-if="storageError" role="alert">{{ storageError }}</p><p v-if="storageBusy" role="status">正在处理缓存…</p>
+      <dl v-if="storageInfo" class="sdoc-values"><div><dt>使用空间</dt><dd>{{ sizeText(storageInfo.bytes) }} · {{ storageInfo.files }} 个文件</dd></div>
+        <div><dt>可安全清理</dt><dd>{{ sizeText(storageInfo.orphan_bytes) }} · {{ storageInfo.orphan_files }} 个无引用文件</dd></div>
+        <div><dt>磁盘可用</dt><dd>{{ sizeText(storageInfo.free_bytes) }}</dd></div></dl>
+      <div class="sdoc-actions"><button :disabled="storageBusy" @click="openStorage">刷新</button>
+        <button :disabled="storageBusy || !!storageError || !storageInfo?.orphan_files || !storageInfo.revision" @click="cleanStorage">清理无引用缓存</button></div>
+    </section>
+  </NModal>
+  <DocumentLibraryTableSettings v-if="canConfigure && settingsOpen" :show="settingsOpen" :initial="settingsNew?undefined:activeTable" :schema="settingsNew?undefined:schema || undefined" :scopes="configurationScopes" @close="closeSettings" @saved="configurationSaved"/>
+</NConfigProvider>

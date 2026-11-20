@@ -119,6 +119,7 @@ const server=await createServer({root,configFile:false,plugins:[vue(),plugin],lo
 await listenTestServer(server);const origin='http://127.0.0.1:'+server.httpServer.address().port;
 if(process.argv.includes('--serve')){console.log(origin+'/__cycle?mode=workspace');await new Promise(()=>{});}
 const browser=await chromium.launch({headless:true});
+const cycleRobot={id:'a'.repeat(32),name:'隔离维保群',types:['维保通告'],scopes:['A']};
 const helper=await build({entryPoints:[path.join(root,'src/workspace-v2/noticeForm.ts')],bundle:true,write:false,format:'iife',globalName:'noticeHelpers'});
 const output=path.join(repo,'output/playwright/notice-cycle-warnings');await mkdir(output,{recursive:true});
 let groups=0;
@@ -132,6 +133,7 @@ try{
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/workbench')return ok({records:[{record_id:'recFixture',title:'隔离周期核对',work_type:'maintenance',source_progress:'未开始'}],ongoing:[],records_pagination:{total:1},ongoing_pagination:{total:0}});
     if(url.pathname==='/api/workbench/lite-detail')return ok({fragments:{detail:detail('maintenance',action)}});
+    if(url.pathname==='/api/workbench/dingtalk-options')return ok({robots:[cycleRobot],selected_robot_ids:[]});
     if(url.pathname==='/api/workbench/draft')return ok({draft:request.method()==='GET'?null:{...request.postDataJSON(),version:1}});
     if(url.pathname==='/api/workbench-actions'){submissions.push(request.postDataJSON());return ok({job_id:'isolated-job',phase:'queued'});}
     if(url.pathname==='/api/jobs/isolated-job')return ok({job_id:'isolated-job',phase:'success'});
@@ -151,8 +153,11 @@ try{
    await cycle.fill('每月');await content.fill(values.content);await reason.fill(values.reason);await warnings.first().waitFor();
    await page.screenshot({path:path.join(output,`workspace-${viewport.width}-${action}.png`),fullPage:true});
    const label={start:'开始',update:'更新',end:'结束'}[action];
-   assert(await editor.getByRole('button',{name:'预览并确认'+label,exact:true}).isEnabled());
-   await editor.getByRole('button',{name:'预览并确认'+label,exact:true}).click();
+   const previewButton=editor.getByRole('button',{name:'预览并确认'+label,exact:true});
+   assert(await previewButton.isDisabled(),'a robot is required even when the notice has cycle warnings');
+   await editor.getByRole('checkbox',{name:cycleRobot.name,exact:true}).check();
+   assert(await previewButton.isEnabled());
+   await previewButton.click();
    assert.equal(submissions.length,0,'conflicts must not submit any action');
    assert.equal(await editor.getByRole('button',{name:'确认发送'+label,exact:true}).count(),0);
    assert((await editor.innerText()).includes('修改一致后再发送'));
@@ -162,11 +167,17 @@ try{
    assert(!(await editor.getByLabel('待发送通告全文').innerText()).includes('周期核对提醒'),'preview text unchanged');
    await editor.getByRole('button',{name:'确认发送'+label,exact:true}).click();
    await editor.getByRole('heading',{name:'通告办理完成',exact:true}).waitFor().catch(async error=>{console.error({action,viewport,submissions,errors,text:await editor.innerText()});throw error;});
-   assert.equal(submissions.length,1);assert.equal(submissions[0].action,action);assert.equal(submissions[0].patch.content,'每月例行检查');assert.equal(submissions[0].patch.reason,'按月度计划维护');
+   assert.equal(submissions.length,1);assert.deepEqual(submissions[0].patch.dingtalk_robot_ids,[cycleRobot.id]);assert.equal(submissions[0].action,action);assert.equal(submissions[0].patch.content,'每月例行检查');assert.equal(submissions[0].patch.reason,'按月度计划维护');
    assert(!JSON.stringify(submissions[0]).includes('cycleRules'));assert(!JSON.stringify(submissions[0]).includes('cycle_rules'));assert(!JSON.stringify(submissions[0]).includes('不阻止发送'));
    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
    await page.addScriptTag({content:helper.outputFiles[0].text});
-   const parsed=await page.evaluate(html=>{const h=window.noticeHelpers,f=h.parseNoticeForm(html);return {rules:f.cycleRules,error:h.validateNotice(f,'start',{},[]),command:h.noticeCommand(f,'start','test-operation',0,{},[],[])};},detail('maintenance','start'));
+   const parsed=await page.evaluate(({html,robots})=>{
+    const h=window.noticeHelpers,f=h.parseNoticeForm(html);
+    const missingRobot=h.validateNotice(f,'start',{},[]);
+    f.values.dingtalk_robot_ids=robots;
+    return {rules:f.cycleRules,missingRobot,error:h.validateNotice(f,'start',{},[]),command:h.noticeCommand(f,'start','test-operation',0,{},[],[])};
+   },{html:detail('maintenance','start'),robots:submissions[0].patch.dingtalk_robot_ids});
+   assert.match(parsed.missingRobot,/钉钉/);
    assert.deepEqual(parsed.rules,rules);assert.match(parsed.error,/修改一致后再发送/);assert.equal(parsed.command.patch.content,values.content);
    for(const kind of ['change','repair','polling','power','adjust'])assert.deepEqual(await page.evaluate(html=>window.noticeHelpers.parseNoticeForm(html).cycleRules,detail(kind,'start')),[]);
    assert.deepEqual(errors,[]);await context.close();groups++;

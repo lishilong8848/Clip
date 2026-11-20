@@ -1,6 +1,16 @@
 <template>
   <div class="v2-check-overview" aria-label="各楼栋班前检查完成情况">
     <article v-for="building in buildings" :key="building.scope" class="v2-check-building" :class="{'v2-clickable-card':!disabled}" @click="!disabled && activateCard($event) && $emit('select',building.scope)">
+      <template v-if="desk">
+        <header class="ps-building-head"><NButton text :disabled="disabled" :aria-label="'查看'+scopeLabel(building.scope)+'检查'" @click.stop="$emit('select',building.scope)">{{scopeLabel(building.scope)}}<ChevronRight :size="14"/></NButton>
+          <small>{{ building.rows.filter(row=>row.status==='已完成').length }} / {{ building.rows.length }} 班完成</small></header>
+        <section v-for="row in building.rows" :key="row.id" class="ps-shift-line v2-check-building-shift">
+          <div class="ps-shift-state"><strong>{{ row.shift }}班</strong><span :class="{'ps-pending':['待完成','逾期待补做'].includes(row.status)}">{{ row.status }}</span><small v-if="row.total">{{ row.completed }}/{{ row.total }} 项</small></div>
+          <div class="ps-shift-meta"><small>{{row.day}}<template v-if="row.abnormal"> · {{row.abnormal}} 项异常</template></small>
+            <a v-if="row.handover_photo" :href="row.handover_photo.url" target="_blank" rel="noopener noreferrer" @click.stop>本班交接照片</a><small v-else>本班交接照片未上传</small></div>
+          <small v-if="row.submitted_by">{{ row.submitted_by }} · {{ dateLabel(row.submitted_at) }}</small>
+        </section>
+      </template><template v-else>
       <header><NButton text :disabled="disabled" :aria-label="'查看'+scopeLabel(building.scope)+'检查'" @click="$emit('select',building.scope)">{{scopeLabel(building.scope)}}<ChevronRight :size="15" /></NButton><small>{{building.rows.filter(row=>row.status==='已完成').length}} / {{building.rows.length}} 班完成</small></header>
       <section v-for="row in building.rows" :key="row.id" class="v2-check-building-shift">
         <div><strong>{{row.shift}}班</strong><NTag size="small" :bordered="false" :type="row.status==='已完成'?'success':['待完成','逾期待补做'].includes(row.status)?'warning':'default'">{{row.status}}</NTag><span v-if="row.total">{{row.completed}} / {{row.total}} 项</span></div>
@@ -8,6 +18,7 @@
         <p v-if="row.submitted_by">{{row.submitted_by}} · {{dateLabel(row.submitted_at)}}</p>
         <NButton v-if="row.handover_photo" text size="small" tag="a" :href="row.handover_photo.url" target="_blank" rel="noopener noreferrer"><Image :size="14" />本班交接照片</NButton><small v-else>本班交接照片未上传</small>
       </section>
+      </template>
     </article>
     <NEmpty v-if="!buildings.length" description="暂无可查看的楼栋完成情况" size="small" />
   </div>
@@ -18,6 +29,7 @@ import {computed} from 'vue';
 import {NButton,NEmpty,NTag} from 'naive-ui';
 import {ChevronRight,Image} from 'lucide-vue-next';
 import type {Dict} from '../client';
+const desk=document.documentElement.classList.contains('workspace-v2');
 const props=defineProps<{rows:Dict[];disabled:boolean}>();
 defineEmits<{select:[scope:string]}>();
 const buildings=computed(()=>{const result=new Map<string,{scope:string;rows:Dict[]}>();for(const row of props.rows){if(!result.has(row.scope))result.set(row.scope,{scope:row.scope,rows:[]});result.get(row.scope)!.rows.push(row);}return [...result.values()];});
@@ -32,4 +44,10 @@ function dateLabel(value:string){return new Date(value).toLocaleString('zh-CN',{
 .v2-check-building-shift{display:grid;gap:5px;padding:10px 12px}.v2-check-building-shift+.v2-check-building-shift{border-top:1px solid var(--v2-border,#d8e3f1)}
 .v2-check-building-shift>div{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.v2-check-building-shift strong{font-size:13px}.v2-check-building-shift>div>span:last-child{margin-left:auto;font-size:12px;font-variant-numeric:tabular-nums}
 .v2-check-building-shift p{margin:0;line-height:1.6;font-size:12px;overflow-wrap:anywhere}.v2-check-building-shift>.n-button{justify-self:start}.v2-check-building-shift .n-button__content{gap:5px}
+</style>
+
+<style scoped>
+.v2-check-building .ps-building-head{background:var(--soft-field,#eff4f2);padding:.42rem .7rem}.ps-shift-line{display:grid;gap:.18rem;padding:.45rem .7rem;border-inline-start:3px solid var(--v2-palette-selection,#d5e9f3)}.ps-shift-line:has(.ps-pending){border-inline-start-color:#c08a46}
+.ps-shift-state,.ps-shift-meta{display:flex;align-items:center;justify-content:space-between;gap:.25rem .5rem;flex-wrap:wrap}.ps-shift-state span{color:var(--v2-ink,#27453c);font-size:.8rem}.ps-shift-state .ps-pending{font-weight:600}
+.ps-shift-line .ps-shift-meta{color:var(--v2-muted,#56665d);font-size:.78rem}.ps-shift-meta a{color:var(--v2-blue,#3a718c)}
 </style>

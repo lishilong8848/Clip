@@ -1,0 +1,169 @@
+<section class="ops-desk ops-events" aria-label="事件管理">
+  <header class="ops-head">
+    <div class="ops-heading">
+      <VnetBackButton v-if="showingDetails && !['ALL','CAMPUS'].includes(detailScope)" within-module title="返回楼栋概览"
+        @click="eventDetailsOpen = false; returnToOverview()" />
+      <div><h1 class="ops-title">事件管理</h1><p class="ops-meta">{{ showingDetails ? detailScopeLabel : '有权限楼栋' }}</p></div>
+    </div>
+    <div class="ops-actions event-command-actions">
+      <span :title="lastRefreshText" class="ops-meta">{{ lastRefreshCompactText }}</span>
+      <button v-if="isAdmin" type="button" class="ops-button source-refresh" :disabled="refreshing || loading || !!eventRange.error" @click="refreshEvents">{{ refreshing ? '正在刷新…' : '刷新事件' }}</button>
+      <span data-v2-layout-tools="events"></span>
+    </div>
+  </header>
+
+  <div class="ops-toolbar v2-event-controls" aria-label="楼栋和日期范围">
+    <WorkspaceScopePicker :key="props.scope"
+      @vue:before-mount="() => { detailRequested = true; detailScope = normalizeScope(props.scope) }" />
+    <EventPeriodFilter v-model="eventPeriod" v-model:month="selectedMonth" v-model:dates="eventDates" :range="eventRange" :disabled="refreshing" />
+  </div>
+  <p v-if="errorText" class="ops-alert is-error" role="alert">{{ errorText }}</p>
+  <p v-if="configMissing || configError" class="ops-alert" role="status">{{ configError || '事件数据源尚未配置。' }}</p>
+  <p v-if="lastFailedError" class="ops-alert">最近一次源数据更新失败 · {{ lastFailedError }}</p>
+  <p v-if="detailUnknownTimeCount" class="ops-alert">{{ detailUnknownTimeCount }} 条记录缺少有效的事件发生时间，未计入所选范围。</p>
+
+  <EventStatsCards :cards="statCards" :loading="loading" :failed="!!errorText"
+    @select="key => { if (!showingDetails) { detailRequested = true; detailScope = normalizeScope(props.scope) } openMetricRecords(key) }" />
+
+  <PageCanvas page="events" label="事件管理" :blocks="[
+    { id:'overview',title:'楼栋概览',w:12,h:4,minH:2 },
+    { id:'trend',title:'事件趋势',w:12,h:6,minH:2 },
+    { id:'records',title:'事件分诊',w:12,h:10,minH:2 }
+  ]">
+    <template #overview>
+      <section class="ops-panel" aria-label="楼栋概览">
+        <header class="ops-panel-head"><h2>楼栋概览</h2><small>按所选日期统计</small></header>
+        <div class="ops-building-list">
+          <button v-for="b in buildingCards" :key="b.code" type="button" class="ops-building" :disabled="!b.allowed || loading"
+            :aria-pressed="activeBuildingCode === b.code" @click="openBuilding(b.code); showEventRows()">
+            <strong>{{ b.label }}</strong><b>{{ b.total }} 件</b>
+            <span>处理中 {{ b.processing }} · 检修中 {{ b.underRepair }}</span><small>{{ b.statusLabel }}</small>
+          </button>
+          <p v-if="!buildingCards.length" class="ops-empty">{{ loading ? '正在读取楼栋…' : '暂无楼栋记录' }}</p>
+        </div>
+      </section>
+    </template>
+    <template #trend>
+      <EventCharts :records="detailEvents" :range="eventRange" :loading="loading" :failed="!!errorText"
+        @date="drillEventDate" @level="drillEventLevel" />
+    </template>
+    <template #records>
+      <section class="ops-panel ops-triage" aria-label="事件分诊">
+        <header class="ops-panel-head"><div><h2>事件分诊</h2><p class="ops-meta">{{ eventRange.caption }} · {{ showingDetails ? detailScopeLabel : scopeLabel }}</p></div>
+          <div class="ops-actions">
+            <button type="button" class="ops-pill-button" :aria-pressed="stateFilter === 'processing'"
+              @click="clearFilters(); stateFilter = 'processing'; showEventRows()">查看处理中事件</button>
+            <button type="button" class="ops-pill-button" @click="clearFilters(); showEventRows()">全部事件 {{ detailEvents.length }}</button>
+            <button v-if="canUseModule('repair_management')" type="button" class="ops-pill-button" @click="openRepairManagementForScope">检修管理</button>
+            <button type="button" class="ops-button is-primary" :aria-expanded="eventDetailsOpen" aria-controls="v2-event-list"
+              @click="eventDetailsOpen ? eventDetailsOpen = false : showEventRows()">{{ eventDetailsOpen ? '收起事件明细' : '展开事件明细' }}</button>
+          </div>
+        </header>
+        <div v-if="priorityEvents.length" class="ops-priority">
+          <h3>优先关注</h3>
+          <button v-for="item in priorityEvents" :key="eventRecordId(item) || item.title" type="button" @click="selectedEvent = item">
+            <span class="ops-state" :data-tone="levelTone(item.level)">{{ item.level || '未填写等级' }}</span>
+            <strong>{{ item.title || item.alarm_desc }}</strong><small>{{ item.building }} · {{ item.status }}</small>
+          </button>
+        </div>
+      </section>
+    </template>
+  </PageCanvas>
+
+  <section v-if="eventDetailsOpen" id="v2-event-list" class="ops-panel event-list-panel" aria-label="事件明细"
+    @vue:before-mount="() => { if (!showingDetails) { detailRequested = true; detailScope = normalizeScope(props.scope) } }">
+    <header class="ops-panel-head"><div><h2>事件明细</h2><small>{{ filteredEvents.length }} / {{ detailEvents.length }} 件</small></div>
+      <button type="button" class="ops-button" @click="eventDetailsOpen = false">收起明细</button>
+    </header>
+    <div class="ops-filters">
+      <label class="ops-field ops-search">搜索事件<input v-model="searchText" type="search" aria-label="搜索事件" placeholder="标题、描述、楼栋或专业"></label>
+      <label class="ops-field">楼栋<select v-model="buildingFilter"><option value="">全部楼栋</option><option v-for="code in allowedBuildingCodes" :key="code" :value="code">{{ scopeText(code) }}</option></select></label>
+      <label class="ops-field">状态<select v-model="statusFilter" @change="stateFilter = ''"><option value="">全部状态</option><option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option></select></label>
+      <label class="ops-field">等级<select v-model="levelFilter"><option value="">全部等级</option><option v-for="level in levelOptions" :key="level" :value="level">{{ level }}</option></select></label>
+      <label class="ops-field">来源<select v-model="sourceFilter"><option value="">全部来源</option><option v-for="source in sourceOptions" :key="source" :value="source">{{ source }}</option></select></label>
+      <label class="ops-field">专业<select v-model="specialtyFilter"><option value="">全部专业</option><option v-for="s in specialtyOptions" :key="s" :value="s">{{ s }}</option></select></label>
+    </div>
+    <div class="ops-filter-summary">
+      <span v-for="item in visibleFilterSummaryItems" :key="item.label" class="ops-chip">{{ item.label }} · {{ item.value }}</span>
+      <button type="button" class="ops-text-button" :disabled="!activeFilterCount" @click="clearFilters">清空筛选</button>
+    </div>
+    <p v-if="loading" class="ops-empty" role="status">正在读取事件明细…</p>
+    <div v-else-if="filteredEvents.length && filteredEvents.length <= 50" class="ops-event-ledger">
+      <div class="ops-event-columns" aria-hidden="true"><span>等级</span><span>事件 / 位置</span><span>状态</span><span>发生时间</span></div>
+      <button v-for="item in filteredEvents" :key="eventRecordId(item) || item.title + item.occurrence_time"
+        class="ops-event-row event-row" type="button" @click="selectedEvent = item">
+        <span class="ops-badge" :data-tone="levelTone(item.level)">{{ item.level || '未定级' }}</span>
+        <span class="ops-event-name"><strong>{{ item.title || item.alarm_desc || '未命名事件' }}</strong>
+          <small>{{ [item.building, item.specialty, item.source].filter(Boolean).join(' · ') }}</small>
+          <small v-if="item.progress || item.latest_progress || (item.alarm_desc && item.alarm_desc !== item.title)">{{ item.progress || item.latest_progress || item.alarm_desc }}</small>
+        </span>
+        <span>{{ item.status || '未标注' }}<small v-if="eventUnderRepair(item)">检修中</small></span>
+        <time>{{ item.occurrence_time || '—' }}</time>
+      </button>
+    </div>
+    <EventVirtualList v-else-if="filteredEvents.length" :records="filteredEvents" :scope-label="detailScopeLabel || scopeLabel" @select="item => selectedEvent = item || null" />
+    <p v-else-if="!errorText" class="ops-empty">{{ activeFilterCount ? '当前筛选下没有事件' : '所选范围暂无事件' }}</p>
+  </section>
+
+  <dialog v-if="metricModalKey" class="ops-overlay ops-events-overlay" aria-labelledby="ops-metric-title"
+    @vue:mounted="node => node.el?.showModal()" @cancel.prevent="closeMetricRecords" @click.self="closeMetricRecords">
+    <article class="ops-dialog event-metric-dialog">
+      <header class="ops-dialog-head"><div><small>{{ metricModalScopeLabel }} · {{ eventRange.caption }}</small><h2 id="ops-metric-title">{{ metricModalTitle }} <small v-if="!metricLoading">（{{ metricFilteredRecords.length }} 件）</small></h2></div>
+        <button type="button" class="ops-button" @click="closeMetricRecords">关闭</button></header>
+      <div class="ops-dialog-body">
+        <p v-if="metricErrorText" class="ops-alert is-error" role="alert">{{ metricErrorText }}</p>
+        <p v-if="metricLoading" class="ops-empty" role="status">正在读取指标记录…</p>
+        <div v-else-if="metricFilteredRecords.length && metricFilteredRecords.length <= 50" class="ops-short-records">
+          <button v-for="item in metricFilteredRecords" :key="eventRecordId(item) || item.title + item.occurrence_time" type="button" class="ops-record-card event-row" @click="selectMetricEvent(item)">
+            <span class="ops-badge" :data-tone="levelTone(item.level)">{{ item.level || '未定级' }}</span>
+            <strong>{{ item.title || item.alarm_desc || '未命名事件' }}</strong>
+            <small>{{ [item.building, item.status, item.occurrence_time].filter(Boolean).join(' · ') }}</small>
+          </button>
+        </div>
+        <EventVirtualList v-else-if="metricFilteredRecords.length" :records="metricFilteredRecords" :scope-label="metricModalScopeLabel" @select="selectMetricEvent" />
+        <p v-else-if="!metricErrorText" class="ops-empty">暂无符合此指标的事件</p>
+      </div>
+    </article>
+  </dialog>
+
+  <dialog v-if="selectedEvent" class="ops-overlay ops-events-overlay ops-drawer-overlay" aria-labelledby="ops-event-title"
+    @vue:mounted="node => node.el?.showModal()" @cancel.prevent="!eventTransferBusy && (selectedEvent = null)" @click.self="!eventTransferBusy && (selectedEvent = null)">
+    <article class="ops-dialog ops-drawer event-drawer">
+      <header class="ops-dialog-head ops-event-head"><div><small>{{ selectedEvent.building || scopeLabel }} · {{ selectedEvent.level || '未定级' }} · {{ selectedEvent.status || '未标注状态' }}</small><h2 id="ops-event-title">{{ selectedEvent.title || selectedEvent.alarm_desc || '未命名事件' }}</h2></div>
+      <div class="ops-tabs" role="group" aria-label="详情视图">
+        <button type="button" :aria-pressed="selectedEventDetailTab === 'summary'" @click="selectedEventDetailTab = 'summary'">事件概况</button>
+        <button type="button" :aria-pressed="selectedEventDetailTab === 'timeline'" @click="selectedEventDetailTab = 'timeline'">时间线</button>
+        <button v-if="isAdmin" type="button" :aria-pressed="selectedEventDetailTab === 'fields'" @click="selectedEventDetailTab = 'fields'">原表字段</button>
+      </div><button type="button" class="ops-button" :disabled="eventTransferBusy" @click="selectedEvent = null">关闭</button></header>
+      <div class="ops-dialog-body">
+        <template v-if="selectedEventDetailTab === 'summary'">
+          <p v-if="selectedEvent.alarm_desc && selectedEvent.alarm_desc !== selectedEvent.title" class="ops-description">{{ selectedEvent.alarm_desc }}</p>
+          <NoticeAlertTags v-if="eventRecordId(selectedEvent)" :record-id="eventRecordId(selectedEvent)" work-type="event" />
+          <dl class="ops-facts"><div v-for="field in detailFields" :key="field.key"><dt>{{ field.label }}</dt><dd>{{ field.value || '—' }}</dd></div></dl>
+          <section class="ops-flow event-repair-actions">
+            <header class="ops-panel-head">
+              <div><h3>检修办理</h3><strong>{{ eventRepairFlowLabel(selectedEvent) }}</strong></div>
+              <div class="ops-actions">
+                <button v-if="!eventTransferEnabled(selectedEvent)" type="button" class="ops-button is-primary" :disabled="eventTransferBusy || !eventRecordId(selectedEvent)" @click="markSelectedEventTransferred">{{ eventTransferBusy ? '正在标记…' : '标记转检修' }}</button>
+                <button v-if="eventTransferEnabled(selectedEvent) && canUseModule('repair_management')" type="button" class="ops-button is-primary" @click="openRepairManagementForSelectedEvent">填写维修单</button>
+                <button v-if="canUseModule('repair_management')" type="button" class="ops-button" @click="openRepairManagementForScope">打开检修管理</button>
+              </div>
+            </header>
+            <RepairFlowSteps context="event" :event="selectedEvent" :actions="canUseModule('repair_management') ? ['project'] : []"
+              :busy="eventTransferBusy" @select="openRepairManagementForSelectedEvent" />
+            <p class="ops-meta">{{ eventRepairFlowHint(selectedEvent) }}</p>
+          </section>
+        </template>
+        <ol v-else-if="selectedEventDetailTab === 'timeline'" class="ops-timeline"><li v-for="entry in timelineItems" :key="entry.label" :class="{ 'has-time': !!entry.value }"><b>{{ entry.label }}</b><time>{{ entry.value || '暂无记录' }}</time></li></ol>
+        <section v-else-if="isAdmin">
+          <div class="ops-panel-head"><h3>原表业务字段</h3>
+            <a v-if="String(selectedEvent.source_record_url || '').startsWith('https://')" class="ops-text-button" :href="selectedEvent.source_record_url" target="_blank" rel="noopener noreferrer">打开来源表</a>
+          </div>
+          <dl v-if="visibleDisplayFields.length" class="ops-facts ops-source-fields"><div v-for="field in visibleDisplayFields" :key="field.key"><dt>{{ field.key }}</dt><dd>{{ field.value }}</dd></div></dl>
+          <p v-else class="ops-empty">暂无可展示字段</p>
+        </section>
+        <p v-if="errorText" class="ops-alert is-error" role="alert">{{ errorText }}</p>
+      </div>
+    </article>
+  </dialog>
+</section>

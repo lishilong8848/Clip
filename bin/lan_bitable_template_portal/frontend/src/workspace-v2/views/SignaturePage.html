@@ -1,0 +1,19 @@
+<section class="serenity-desk sign-desk" aria-label="手写签名">
+  <header class="serenity-heading"><div><h1>手写签名</h1><p v-if="selectedPerson">{{ selectedPerson.name }} · {{ selectedPerson.employee_no || '临时签名' }}</p></div></header>
+  <p v-if="message" :role="messageType==='failed'?'alert':'status'" :class="'sign-notice '+messageType">{{ message }}
+    <button v-if="readRetryable" type="button" @click="loadPeople()">重新读取</button></p>
+  <section v-if="!linkMode" class="serenity-panel">
+    <label>查找签名人员<input v-model="query" type="search" placeholder="姓名、工号或楼栋" @input="schedulePeopleSearch"></label>
+    <p role="status">{{ searchStatusText }}</p>
+    <div class="sign-people"><button v-for="person in people" :key="personKey(person)" type="button"
+      :aria-pressed="personKey(person)===selectedRecordId" @click="selectPerson(person)">
+      <b>{{ person.name }}</b><small>{{ person.employee_no }} · {{ personHasUsableSignature(person)?'已登记':'待签名' }}</small>
+    </button></div>
+  </section>
+  <section class="serenity-panel sign-paper">
+    <header><h2>签名区</h2><button type="button" :disabled="saving||!hasInk" @click="clearCanvas">重新书写</button></header>
+    <canvas ref="canvasRef" data-orientation="upright" aria-label="手写签名画布" @pointerdown="startDraw" @pointermove="moveDraw" @pointerup="endDraw" @pointercancel="endDraw"></canvas>
+    <label v-if="managedRequestId && selectedPerson && selectedPerson.status!=='completed'"><input v-model="confirmedSelf" type="checkbox">确认由 {{ selectedPerson.name }} 本人签名</label>
+    <footer><small role="status">{{ saveDisabledReason }}</small><button type="button" :disabled="!!saveDisabledReason" @click="saveSignature">{{ saving?'正在保存':'保存签名' }}</button></footer>
+  </section>
+</section>

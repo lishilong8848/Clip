@@ -1,0 +1,39 @@
+<div class="evt-board" data-v2-inline-feedback>
+  <header v-if="!focusEventId" class="evt-bar">
+    <div><h1>事件通告</h1><small>{{ ['ALL','CAMPUS'].includes(scope)?'授权楼栋':/^[A-EH]$/.test(scope)?scope+'楼':scope }} · I3 事件推送飞书 I3 群，钉钉按默认机器人发送</small></div>
+    <div class="evt-actions">
+      <button type="button" :disabled="!options.user_id || defaultsBusy" @click="openDefaults">默认钉钉机器人 · {{defaultNames}}</button>
+      <button type="button" :disabled="loading || !options.user_id" @click="load(true)">{{loading?'读取中…':'刷新'}}</button>
+    </div>
+  </header>
+  <p v-if="error" class="evt-error" role="alert">{{error}} <button type="button" @click="initialize">重试读取</button></p>
+  <p v-if="warning" class="evt-warning" role="status">{{warning}}</p>
+  <template v-if="focusEventId">
+    <EventNoticeRawCard v-if="focused && options.user_id" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
+    <p v-else-if="!error" role="status">{{loading || !options.user_id?'正在读取这条事件通告…':'当前范围内找不到这条事件通告。'}}</p>
+  </template>
+  <template v-else>
+    <div v-if="!options.user_id" class="evt-pending">
+      <h3>新建事件通告</h3>
+      <label>本次通告原文<textarea v-model="pendingText" maxlength="15000" rows="4" placeholder="粘贴完整事件通告"></textarea></label>
+      <small>{{error?'暂未取得操作权限，请重试读取。':'正在读取权限和默认机器人，完成后即可发送。'}}</small>
+    </div>
+    <template v-else>
+      <EventNoticeRawCard :key="context+':new'" creation :initial-text="pendingText" :options="options" :scope="scope" @changed="changed" @accepted="pendingText=''" />
+      <EventDeskBrowser :key="context" :ongoing="ongoing" :history="history" :loading="loading" :failed="!!error" :title-of="historyTitle" :date-of="historyDate">
+        <template #month><label class="evt-month">历史月份 <input v-model="month" type="month" /></label></template>
+        <template #record="{row}"><EventNoticeRawCard :row="row" :scope="scope" :options="options" @changed="changed" /></template>
+      </EventDeskBrowser>
+    </template>
+  </template>
+  <EventDeskDialog v-if="defaultsOpen" title="默认钉钉机器人" :locked="defaultsBusy" @close="defaultsOpen=false">
+    <p>新增、更新和结束通告使用以下机器人，可多选。已受理任务仍向原对象重试。</p>
+    <div class="evt-robots"><label v-for="robot in options.robots || []" :key="robot.id">
+      <input v-model="selected" type="checkbox" :value="robot.id" :disabled="defaultsBusy" />
+      <span><b>{{robot.name}}</b><small v-if="robot.remark">{{robot.remark}}</small></span>
+    </label></div>
+    <p v-if="!options.robots?.length">暂无可用机器人，可由管理员在“系统设置 → 钉钉推送”中配置。</p>
+    <p v-if="defaultsError" role="alert" class="evt-error">{{defaultsError}}</p>
+    <template #actions><small>已选 {{selected.length}} 个</small><button :disabled="defaultsBusy" @click="defaultsOpen=false">取消</button><button class="evt-primary" :disabled="defaultsBusy" @click="saveDefaults">保存默认选择</button></template>
+  </EventDeskDialog>
+</div>

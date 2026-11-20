@@ -19,7 +19,9 @@ try {
     await context.route('**/*', route => new URL(route.request().url()).origin === server.origin ? route.continue() : route.abort());
     const page = await context.newPage(); page.on('pageerror', error => errors.push(error.message));
     const button = name => page.getByRole('button', { name, exact: true });
-    const drawer = () => page.locator('.n-drawer-content').filter({ has: page.locator('.document-detail') });
+    const drawer = () => page.locator('.n-drawer-content').filter({
+      has: page.locator(version === 'v2' ? '.sdoc-detail' : '.document-detail'),
+    });
     await page.goto(server.origin + '/?version=' + version);
     await page.getByText('3 条缓存记录', { exact: false }).waitFor();
     await button('打开数据表：电气技术资料').click();
@@ -34,8 +36,9 @@ try {
     await page.keyboard.press('Escape');
     await page.locator('.document-preview').waitFor({ state: 'hidden' });
     await drawer().getByRole('button', { name: '编辑资料', exact: true }).click();
-    await drawer().getByLabel('生效日期', { exact: true }).fill('2026-10-24 09:40');
-    await drawer().getByLabel('生效日期', { exact: true }).press('Enter');
+    const effectiveDate = drawer().locator('[data-field-id="fldDate"]').getByRole('textbox');
+    await effectiveDate.fill('2026-10-24 09:40');
+    await effectiveDate.press('Enter');
     await drawer().getByLabel('资料名称', { exact: true }).click();
     await drawer().getByLabel('变更原因', { exact: true }).fill('核对日期时间');
     await drawer().getByRole('button', { name: '保存资料', exact: true }).click();
@@ -75,13 +78,20 @@ try {
     assert.equal(fixture.pendingOperations.length, 0);
     checks.push(version + ': recovery survives reload and never repeats a mutation');
 
+    if (version === 'v2') await page.getByText('数据表管理', { exact: true }).click();
     await button('本地附件缓存').click();
-    await page.getByText('可安全清理', { exact: true }).waitFor();
+    const storage = version === 'v2'
+      ? page.getByRole('dialog', { name: '本地附件缓存', exact: true })
+      : page.locator('.document-storage');
+    await storage.getByText('可安全清理', { exact: true }).waitFor();
     await button('清理无引用缓存').click();
-    await page.waitForFunction(() => document.querySelector('.document-storage')?.textContent.includes('0 个'));
+    await storage.filter({ hasText: '0 个' }).waitFor();
     assert.equal(fixture.storage.removed, 1);
     await page.getByRole('button', { name: '关闭', exact: true }).click();
     await button('查看资料：刷新后核验的资料').click();
+    await drawer().getByRole('button', { name: '编辑资料', exact: true }).waitFor();
+    // The drawer mounts asynchronously; measure it after its slide-in transition.
+    await page.locator('.n-drawer[class*="-enter-"]').waitFor({ state: 'detached' });
     for (const viewport of [{ name: 'MacBookPro', width: 1440, height: 900 }, { name: 'iPhone17Pro', width: 402, height: 874 },
         { name: 'iPhone17ProMax', width: 440, height: 956 }, { name: 'small', width: 360, height: 640 }]) {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
@@ -89,7 +99,8 @@ try {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1);
       assert.equal(overflow, false, version + ' global overflow ' + viewport.name);
       const close = await drawer().getByRole('button', { name: '关闭', exact: true }).boundingBox();
-      assert(close && close.x >= 0 && close.x + close.width <= viewport.width + 1 && close.y >= 0 && close.y + close.height <= viewport.height + 1, 'Drawer actions remain visible');
+      assert(close && close.x >= 0 && close.x + close.width <= viewport.width + 1 && close.y >= 0 && close.y + close.height <= viewport.height + 1,
+        `${version} ${viewport.name}: drawer close button must stay in the viewport, got ${JSON.stringify(close)}`);
       await page.screenshot({ path: path.join(folder, version + '-' + viewport.name + '.png'), fullPage: true });
     }
     checks.push(version + ': PC and phone controls remain reachable');

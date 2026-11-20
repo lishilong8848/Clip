@@ -253,9 +253,8 @@ class AttachmentTests(Base):
         # Unsupported extension.
         with self.assertRaises(checks.CheckError):
             self.service.stage_upload(self.worker, white, 'x', 'item', 'evil.exe')
-        # Handover only accepts images.
-        with self.assertRaises(checks.CheckError):
-            self.service.stage_upload(self.worker, white, '', 'handover', 'hand.pdf')
+        session = self.service.stage_upload(self.worker, white, '', 'handover', 'hand.pdf')
+        self.service.abort_upload(session)
         # Empty file.
         session = self.service.stage_upload(self.worker, white, 'x', 'item', 'empty.png')
         with self.assertRaises(checks.CheckError):

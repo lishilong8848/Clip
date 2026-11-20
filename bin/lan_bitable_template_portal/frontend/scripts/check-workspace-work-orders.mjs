@@ -58,7 +58,7 @@ try{
  assert.equal(await page.getByRole('button',{name:'回退上一步',exact:true}).count(),0,'operator cannot roll back reviewer steps');
  for(const width of [1440,390]){await page.setViewportSize({width,height:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);}
  await page.getByRole('button',{name:'返回工单',exact:true}).click();await page.getByRole('button',{name:'进入步骤',exact:true}).waitFor();assert.equal(writes.filter(p=>p.endsWith('/release')).length,0,'return after confirmation cannot release selection');
- state.role='reviewer';state.role_label='现场审核人';state.current_run_index=1;
+ state.role='reviewer';state.role_label='现场审核人';state.current_run_index=1;state.can_rollback_previous=true;
  for(const surface of ['new','legacy']){
   await page.goto(surface==='new'?origin+'/assets/workspace-v2/index.html?__page=/polling-work-order/steps&token=fixture_token':origin+'/polling-work-order/steps?token=fixture_token&run_index=1');
   const input=page.locator(surface==='new'?'.v2-order-upload input':'.photo-upload input');
@@ -69,6 +69,14 @@ try{
   assert.equal(await attachment.locator('img').count(),0);
   await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-order-photos img,.photos img')).every(img=>img.complete&&img.naturalWidth>0));
   for(const width of [1440,402,440]){await page.setViewportSize({width,height:width===402?874:width===440?956:900});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);await page.screenshot({path:path.join(output,`${surface}-${width}.png`)});}
+  if(surface==='new'){
+   await page.getByRole('button',{name:'回退上一步',exact:true}).click();
+   const confirm=page.getByRole('dialog',{name:'回退上一步'});
+   await confirm.getByText(/确认记录、操作照片将被清空/).waitFor();
+   await page.screenshot({path:path.join(output,'confirm-rollback-mobile.png')});
+   await confirm.getByRole('button',{name:'取消',exact:true}).click();
+   assert.equal(writes.some(path=>path.endsWith('/rollback')),false);
+  }
  }
  assert.equal(writes.filter(p=>p.endsWith('/photo')).length,3);
  assert.deepEqual(errors,[]);console.log('PASS: new signed work-order page, original token/version API, photo gate, operator confirmation and responsive layout.');

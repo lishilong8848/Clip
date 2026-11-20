@@ -1,0 +1,13 @@
+<Teleport to="body">
+  <div v-if="open" class="serenity-scrim" @click.self="emit('resolve',false)">
+    <section ref="dialog" tabindex="-1" role="dialog" aria-modal="true" :aria-labelledby="titleId" :aria-describedby="titleId+'-message'"
+      class="serenity-decision" :data-tone="tone">
+      <header><span v-if="kicker && kicker!=='操作确认'">{{ kicker }}</span>
+        <h2 :id="titleId">{{ title }}</h2><button type="button" aria-label="关闭确认弹窗" @click="emit('resolve',false)">×</button></header>
+      <p :id="titleId+'-message'">{{ message }}</p>
+      <ul v-if="details.length"><li v-for="(item,index) in details" :key="index">{{ item }}</li></ul>
+      <footer><button v-if="!hideCancel" type="button" @click="emit('resolve',false)">{{ cancelLabel }}</button>
+        <button type="button" class="decision-submit" :class="confirmClass" @click="emit('resolve',true)">{{ confirmLabel }}</button></footer>
+    </section>
+  </div>
+</Teleport>

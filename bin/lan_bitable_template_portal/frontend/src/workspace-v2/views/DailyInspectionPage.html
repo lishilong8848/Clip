@@ -1,0 +1,44 @@
+<section class="ins-desk ins-page">
+  <header v-if="!props.immersive || !state" class="ins-head ins-hero"><div><h1>日常巡检</h1>
+    <small>{{ duty ? dutyLabel(duty) : '巡检工作簿与历史归档' }}<template v-if="state"> · 已归档 {{ archivedRounds }}/{{ state.round_limit }} 轮</template></small></div>
+    <div class="ins-actions"><button v-if="!props.embedded" @click="back()">返回</button>
+      <button :disabled="!!busy" @click="load()">刷新状态</button></div>
+  </header>
+  <p v-if="!state && !error">正在读取巡检状态…</p>
+  <div v-if="error || pollError || collectionStatus || state?.duty_warning || message || previewError || autoError || storageError" class="ins-panel" role="status">
+    <p v-if="error">{{ error }}</p><p v-if="pollError">{{ pollError }}</p><p v-if="collectionStatus">{{ collectionStatus }}</p><p v-if="state?.duty_warning">{{ state.duty_warning }}</p>
+    <p v-if="message">{{ message }}</p><div v-if="previewError" class="ins-head"><span>{{ previewError }}</span><button :disabled="previewBusy" @click="refreshPreview()">重读设备数据</button></div>
+    <div v-if="autoError" class="ins-head"><span>{{ autoError }}</span><button :disabled="autoSaving || readOnly || !!conflicts.size || !!orphanedDrafts.length" @click="retryAutoSave()">重试共享草稿</button></div>
+    <p v-if="storageError">本机草稿保存失败，请保持页面打开直至修改保存。</p></div>
+  <DailyInspectionWorkbook v-if="state && (state.history_scopes?.length || state.view_scopes?.length || duty)" ref="workbookPage"
+    :immersive="props.immersive" :scopes="state.history_scopes?.length ? state.history_scopes : state.view_scopes?.length ? state.view_scopes : duty ? [duty.scope] : []"
+    :default-scope="state.view_scope || duty?.scope || state.history_scopes?.[0]" :default-date="duty?.date" :default-shift="duty?.shift" :next-round="nextRound"
+    :source-time="batch?.source_time ?? preview?.source_time" :template-version="state.template_version" :archive-revision="state.archive_revision"
+    :active="active || undefined" :planned-groups="state.planned_sheet_groups" :parent-busy="!!busy" :read-only="readOnly || !duty"
+    @changed="load" @scope="scope=>(state?.view_scopes || []).includes(scope) && switchView(scope)" @exit="back" @round-state="acceptRoundState">
+    <template v-if="state.history.length" #archive-trigger="{target}">
+      <InspectionDeskArchive compact :target="target" :records="state.history" :duty-label="dutyLabel" :time="time"/>
+    </template>
+    <template #round-start="{current,target,locked}">
+      <span v-if="collectionStatus || error" role="status">{{ collectionStatus || error }}</span>
+      <template v-if="current && duty && (!active || active.source_locked===false) && !readOnly && !active?.pending">
+        <small v-if="waitingForSlot">{{ time(state.opens_at) }} 开放</small>
+        <InspectionDeskStart v-if="canStartRound || active" v-model="selectedProfessions" :duty="dutyLabel(duty)" :round="active?.round || nextRound" :options="inspectionProfessions"
+          :label="busy==='start'?'正在准备本轮':'开始本轮巡检'" :disabled="locked || !!busy || waitingForSlot" :target="target" @start="start"/>
+      </template>
+    </template>
+  </DailyInspectionWorkbook>
+  <section v-if="orphanedDrafts.length || conflicts.size || recoveries.length" class="ins-panel"><h2>本机修改核对</h2>
+    <p v-if="orphanedDrafts.length">当前设备清单中找不到 {{ orphanedDrafts.length }} 项本机修改。</p>
+    <article v-for="id in conflicts" :key="id" class="ins-record"><div class="ins-head"><strong>{{ drafts[id].label || id }}</strong><div class="ins-actions"><button @click="resolveConflict(id,false)">采用共享版本</button><button @click="resolveConflict(id,true)">保留本机填写</button></div></div>
+      <details><summary>对照填写内容</summary><p v-for="(value,key) in drafts[id].values" :key="key">{{ drafts[id].parameterLabels?.[key] || key }} · 本机 {{ value }} · 共享 {{ savedReview(id).values[key] || '—' }}</p><p>本机 {{ drafts[id].result }} {{ drafts[id].note }} · 共享 {{ savedReview(id).result }} {{ savedReview(id).note }}</p></details></article>
+    <div v-for="item in recoveries" :key="item.key" class="ins-head ins-record"><div><strong>{{ dutyLabel(item.duty) }} · 第 {{ item.round }} 轮</strong><details><summary>查看 {{ Object.keys(item.drafts).length }} 项本机留存</summary>
+      <div v-for="(d,id) in item.drafts" :key="id">{{ d.label || id }} · {{ d.result }} {{ d.note }}<p v-for="(v,k) in d.values" :key="k">{{ d.parameterLabels?.[k] || k }} · {{ v }}</p></div></details></div><button @click="recoveryRemoval=item">清理本机留存</button></div>
+  </section>
+  <section v-if="state?.history.length" class="ins-panel ins-archive-list"><h2>巡检归档记录</h2>
+    <InspectionDeskArchive :records="state.history" :duty-label="dutyLabel" :time="time"/>
+  </section>
+  <p v-if="state && !duty && !state.history.length && !state.history_scopes?.length" class="ins-empty">当前没有可办理的当班巡检。</p>
+  <NModal :show="!!recoveryRemoval" preset="card" title="清理本机留存" style="width:min(430px,94vw)" @update:show="!$event && (recoveryRemoval=undefined)"><div v-if="recoveryRemoval" class="ins-desk ins-head"><p>{{ dutyLabel(recoveryRemoval.duty) }} · 第 {{ recoveryRemoval.round }} 轮的本机草稿将被清除。</p><button @click="clearRecovery()">确认清除</button></div></NModal>
+  <NModal :show="!!leaveAction" preset="card" title="本机草稿尚未保存" style="width:min(430px,94vw)" @update:show="!$event && (leaveAction=undefined)"><div class="ins-desk ins-head"><p>离开将丢失尚未留存的修改。</p><div class="ins-actions"><button @click="leaveAction=undefined">继续填写</button><button @click="leaveWithoutDraft()">放弃并离开</button></div></div></NModal>
+</section>

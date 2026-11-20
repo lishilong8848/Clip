@@ -2,9 +2,11 @@
   <NModal :show="true" preset="card" title="修改检查记录" class="check-record-editor" :mask-closable="false" :close-on-esc="false" :closable="!saving&&!uploading" :auto-focus="false" @update:show="value=>{if(!value)requestClose()}" @esc="requestClose">
     <NSkeleton v-if="!record&&loading" text :repeat="4" />
     <template v-if="record">
-      <div class="check-record-meta"><strong>{{record.scope==='110'?'110站':record.scope+'楼'}} · {{record.day}} · {{record.shift}}班</strong><span>原提交：{{record.actor_name}} · {{dateLabel(record.submitted)}}</span><span v-if="record.revision>1&&record.updated_at">最近修改：{{record.updated_by_name||record.updated_by}} · {{dateLabel(record.updated_at)}}</span></div>
+      <div class="check-record-meta"><strong>{{record.scope==='110'?'110站':record.scope+'楼'}} · {{record.day}} · {{record.shift}}班</strong><small v-if="desk">{{ record.items.length }} 项 · 版本 {{ record.revision }}</small><span>原提交：{{record.actor_name}} · {{dateLabel(record.submitted)}}</span><span v-if="record.revision>1&&record.updated_at">最近修改：{{record.updated_by_name||record.updated_by}} · {{dateLabel(record.updated_at)}}</span></div>
       <NAlert v-if="!record.can_edit" type="info" :bordered="false">当前账号不可修改该次检查。</NAlert>
-      <div class="check-record-items" role="group" aria-label="修改检查项目">
+      <PreShiftCheckForm v-if="desk" :task="record" record-editor :locked="locked" :uploading="uploading" :answer-for="id=>answers[id]"
+        @status="(id,value)=>answers[id].status=value" @note="(id,value)=>answers[id].note=value" @busy="uploading=$event" @changed="attachmentChanged"/>
+      <div v-else class="check-record-items" role="group" aria-label="修改检查项目">
         <fieldset v-for="(item,index) in record.items" :key="item.id" class="check-record-item">
           <legend>{{index+1}}. {{item.text}}</legend>
           <div class="v2-check-result"><NRadioGroup v-model:value="answers[item.id].status" :name="'edit-'+record.id+'-'+item.id" :disabled="locked" :aria-label="item.text"><NRadioButton class="v2-check-normal" value="normal">无异常</NRadioButton><NRadioButton class="v2-check-abnormal" value="abnormal">异常</NRadioButton></NRadioGroup></div>
@@ -12,7 +14,7 @@
           <CheckAttachments :task-id="record.id" :item-id="item.id" kind="item" :files="record.files.filter((file:Dict)=>file.item_id===item.id)" :revision="record.revision" :locked="locked" :allow-upload="record.can_edit" @busy="uploading=$event" @changed="attachmentChanged" />
         </fieldset>
       </div>
-      <section class="check-record-handover"><h3>交接班照片</h3><CheckAttachments :task-id="record.id" kind="handover" :files="record.handover_photo?[record.handover_photo]:[]" :revision="record.revision" :locked="locked" :allow-upload="record.can_edit" @busy="uploading=$event" @changed="attachmentChanged" /></section>
+      <section class="check-record-handover"><h3 v-if="!desk">交接班附件</h3><CheckAttachments :task-id="record.id" kind="handover" :files="record.handover_photo?[record.handover_photo]:[]" :revision="record.revision" :locked="locked" :allow-upload="record.can_edit" @busy="uploading=$event" @changed="attachmentChanged" /></section>
     </template>
     <template #footer><div class="check-record-footer"><span :role="error?'alert':'status'" :class="{'has-error':!!error}">{{error||status}}</span><NButton attr-type="button" :disabled="saving||uploading" @click="requestClose">关闭</NButton><NButton v-if="conflict||!record" attr-type="button" secondary :loading="loading" :disabled="saving||uploading" @click="reload">重新读取</NButton><NButton attr-type="button" type="primary" :loading="saving" :disabled="locked||!record" @click="save"><template #icon><Save :size="16" /></template>保存检查结果</NButton></div></template>
   </NModal>
@@ -24,8 +26,10 @@ import {NAlert,NButton,NInput,NModal,NRadioButton,NRadioGroup,NSkeleton,useDialo
 import {Save} from 'lucide-vue-next';
 import {requestJson,type Dict} from '../client';
 import {registerNavigationGuard} from '../navigation';
+import PreShiftCheckForm from './PreShiftCheckForm.vue';
 import CheckAttachments from './CheckAttachments.vue';
 
+const desk=document.documentElement.classList.contains('workspace-v2');
 const props=defineProps<{taskId:string;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
 const emit=defineEmits<{close:[];changed:[]}>();
 const record=ref<Dict>(),answers=ref<Record<string,{status:string;note:string}>>({});
@@ -90,3 +94,4 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();removeGuard();window.remo
 .check-record-handover{padding-top:12px}.check-record-handover h3{font-size:14px;margin:0 0 8px}.check-record-footer{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}.check-record-footer>span{margin-right:auto;font-size:12px;color:var(--v2-muted)}.check-record-footer .n-button{min-height:44px}
 @media(max-width:600px){.check-record-editor.n-card{width:calc(100vw - 16px);max-height:calc(100dvh - 16px)}.check-record-editor .n-card__content,.check-record-editor .n-card-content,.check-record-editor .n-card__footer,.check-record-editor .n-card-header{padding:12px}.check-record-footer>span{flex-basis:100%}.check-record-item .n-radio-group{display:flex;flex:1}.check-record-item .n-radio-button{flex:1;justify-content:center}}
 </style>
+

@@ -1,34 +1,3 @@
-<template>
-  <section class="v2-learning-portrait" :aria-busy="loading">
-    <div class="v2-learning-metrics">
-      <div v-for="item in metrics" :key="item.label"><NSkeleton v-if="loading && !ready" height="58px" /><NButton v-else text data-v2-navigation :disabled="disabled || !ready" :aria-label="item.label+'，'+item.value+'，'+item.action" @click="metricAction(item.kind)"><span>{{item.label}}</span><strong>{{item.value}}</strong><small>{{item.action}}<ChevronRight :size="12" /></small></NButton></div>
-    </div>
-    <div v-if="ready" class="v2-learning-today">
-      <template v-if="person"><span>{{learningProgressLabel(personProgress)}}<small v-if="learningProgressDetail(personProgress)">{{learningProgressDetail(personProgress)}}</small></span><span>复习 {{numberText(summary.practice_count)}} 次</span><NButton v-if="showContinue" data-v2-navigation type="primary" size="small" :disabled="disabled || !data.published" @click="emit('continue')">{{today.papers?'继续今日答题':'开始今日答题'}}</NButton></template>
-      <template v-else><span>今日已答 {{numberText(today.learning_activity_people??today.answered_people)}} 人</span><span>已完成 {{numberText(today.completed_people)}} 人</span><span>当班尚未开始 {{numberText(today.not_started_people)}} 人</span></template>
-      <NTag v-if="failed" size="small" type="warning">本次读取失败，显示上次数据</NTag>
-    </div>
-    <div class="v2-learning-chart-head" data-v2-navigation><h2>学习分析</h2><NSelect v-model:value="chart" :options="chartOptions" aria-label="学练统计维度" :disabled="disabled" /><NRadioGroup v-if="chart==='trend'" v-model:value="metric" size="small" aria-label="趋势指标"><NRadioButton value="answered">{{person?'作答次数':'参与人数'}}</NRadioButton><NRadioButton value="accuracy">正确率</NRadioButton></NRadioGroup><NRadioGroup v-if="chart==='wrong'" v-model:value="classification" size="small" aria-label="错题分类"><NRadioButton value="banks">按题库</NRadioButton><NRadioButton value="topics">按专业</NRadioButton></NRadioGroup></div>
-    <NSkeleton v-if="loading && !ready" height="260px" />
-    <NEmpty v-else-if="!ready" :description="failed?'统计暂未读取成功':'暂无已读取的统计数据'" />
-    <template v-else>
-      <LearningTrend v-if="chart==='trend'" :items="trend" :unit="metric==='accuracy'?'%':person?'次':'人'" :percentage="metric==='accuracy'" :loading="loading" @select="item=>emit('drill',{date:item.label})" />
-      <MotionChart v-else title="" :items="chartItems" :view="chartView" :unit="chart==='distribution'?'人':'题'" :loading="loading" @select="chartSelect" />
-      <p v-if="chart==='method'" class="v2-learning-definition">独立作答首次正确率 {{methodRates.independent}} · 提示后首次正确率 {{methodRates.assisted}}</p>
-      <p class="v2-learning-definition">{{chartNote}}</p>
-      <p v-if="data.from && data.to" class="v2-learning-definition">统计区间 {{data.from}} 至 {{data.to}} · 正确率按有效选择题首次作答计算</p>
-    </template>
-    <section v-if="!person" ref="peopleHost" class="v2-learning-people" aria-label="人员学习汇总">
-      <header data-v2-navigation><h2>{{allScopes?'全员学习汇总':'人员学习汇总'}} <small>{{filtered.length}} 人</small></h2><NInput v-model:value="search" placeholder="姓名 / 工号" aria-label="搜索人员" clearable @update:value="page=1"><template #prefix><Search :size="15" /></template></NInput><NSelect v-model:value="sort" :options="sortOptions" aria-label="人员汇总排序" @update:value="page=1" /><NCheckbox v-model:checked="includeUnanswered" @update:checked="page=1">{{allScopes?'包括未作答人员':'包括已领取未作答'}}</NCheckbox><NButton v-if="bucket" text @click="bucket='';page=1">{{bucket}} · 清除筛选<X :size="13" /></NButton></header>
-      <NDataTable v-if="!mobile" size="small" :columns="columns" :data="visible" :row-key="row=>row.person_id" :loading="loading" :scroll-x="allScopes?860:780" />
-      <div v-else class="v2-learning-person-list">
-        <article v-for="row in visible" :key="row.person_id"><div class="v2-learning-person-title"><strong>{{row.name}}</strong><span>{{row.scope?row.scope+'楼':''}}</span><NButton text type="primary" data-v2-navigation :disabled="disabled" :aria-label="'查看'+row.name+'个人画像'" @click="selectPerson(row)">个人画像<ChevronRight :size="14" /></NButton></div><div class="v2-learning-person-values"><span><b>{{learningProgressLabel(row.today)}}</b><small v-if="learningProgressDetail(row.today)">{{learningProgressDetail(row.today)}}</small></span><span>正确率 <b>{{percent(row.summary?.accuracy)}}</b></span><span>答题 <b>{{numberText(row.summary?.answered)}}</b></span></div><details><summary>更多记录</summary><p>工号 {{row.employee_no || '未填写'}} · 错题 {{numberText(row.summary?.wrong)}} · 复习 {{numberText(row.summary?.practice_count)}} 次</p><p>最近作答 {{String(row.last_answered_at||'尚未作答').replace('T',' ').slice(0,16)}}</p></details></article>
-        <NSkeleton v-if="loading && !ready" height="110px" /><NEmpty v-else-if="!visible.length" description="没有匹配人员" />
-      </div>
-      <footer data-v2-navigation><span>每页20人</span><NPagination v-model:page="page" :item-count="filtered.length" :page-size="20" :page-slot="mobile?3:7" :show-quick-jumper="!mobile" :disabled="loading" /></footer>
-    </section>
-  </section>
-</template>
 <script setup lang="ts">
 import {computed,h,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {NButton,NCheckbox,NDataTable,NEmpty,NInput,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NTag,type DataTableColumns} from 'naive-ui';
@@ -110,3 +79,5 @@ watch(()=>props.data,()=>page.value=1);
 watch(()=>props.allScopes,value=>{includeUnanswered.value=!!value;bucket.value='';},{immediate:true});
 watch(()=>props.person?.id,()=>{chart.value='trend';bucket.value='';search.value='';page.value=1;});
 </script>
+<template src="./LearningDashboard.html"></template>
+<style src="./learningDesk.css"></style>

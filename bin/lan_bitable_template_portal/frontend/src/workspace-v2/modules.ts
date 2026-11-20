@@ -8,6 +8,9 @@ export const zhihangDataModule: ModuleEntry = { id: 'zhihang_data', label: '智�
 export function canManageZhihangData(user: {role?: string; modules?: string[]; impersonation?: unknown}): boolean {
   return user.role === 'admin' && Array.isArray(user.modules) && user.modules.includes('accounts') && !user.impersonation;
 }
+export function canReviewHandover(user: {role?: string; modules?: string[]; impersonation?: unknown}): boolean {
+  return user.role !== 'guest' && !user.impersonation && user.modules?.includes('handover') === true;
+}
 export const modules: ModuleEntry[] = [
   { id: 'event', label: '事件管理', group: '运行管理', path: '/?mode=events&detail=1', icon: 'event' },
   { id: 'cold_source', label: '冷源运行状态', group: '运行管理', path: '/cold-source-monitor', icon: 'activity', permission: 'daily' },

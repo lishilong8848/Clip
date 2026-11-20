@@ -1,0 +1,6 @@
+<form class="serenity-panel settings-form" @submit.prevent="$emit('save')">
+  <header class="serenity-heading"><div><h2>维护单归档表</h2><p>维护单附件上传与名称匹配使用以下配置。</p></div>
+    <div class="serenity-actions"><button type="button" :disabled="busy" @click="$emit('refresh')">刷新</button><button type="submit" class="entry-primary" :disabled="busy">保存配置</button></div></header>
+  <div class="settings-fields"><label v-for="field in fields" :key="field.key"><b>{{ field.label }}</b>
+    <input :value="settings[field.key]" :placeholder="field.placeholder" :disabled="busy" spellcheck="false" @input="$emit('update-field',field.key,($event.target as HTMLInputElement).value)"></label></div>
+</form>

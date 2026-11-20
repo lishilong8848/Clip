@@ -141,6 +141,69 @@ class WorkspaceTests(unittest.TestCase):
             'signature': self.signature(), 'action': 'approve',
             'items': [{'asset_id': item['id'], 'revision': item['order_revision']} for item in session['items']]})
 
+    def test_general_cells_survive_restart_review_and_each_archived_workbook(self):
+        from bin.lan_bitable_template_portal.tool_form_titles import restore_titles, title_anchors
+        from openpyxl.styles import Border, Side
+        source = (TEMPLATES/'folder_imports'/'暖通自检记录单'/'温湿度仪自检记录.xlsx').read_bytes()
+        workbook = load_workbook(io.BytesIO(source))
+        form, cover = workbook.worksheets[-1], workbook['封面']
+        sheet_name = form.title
+        cover.merge_cells('K20:L21')
+        cover['K20'] = '附件[][]［ ］☐'
+        cover['K22'] = '年 月 日 时 分'
+        cover['N24'].border = Border(bottom=Side(style='thin'))
+        buf = io.BytesIO()
+        workbook.save(buf)
+        workbook.close()
+        self.cloud.content = restore_titles(source, buf.getvalue(), sheet_name, {})
+        session = self.complete(self.open())
+        title_key, = title_anchors(self.cloud.content, sheet_name)
+        item, other = session['items']
+        form_title = sheet_name+'!'+title_key
+        checked_at = sheet_name+'!G11'
+        yesterday = (dt.datetime.now(TZ).date()-dt.timedelta(days=1)).isoformat()
+        changes = {'封面!C3':'验收版 02', '封面!K20':'附件[][√]［√］☑', '封面!N24':'边缘空格',
+                   '封面!K22':'2026-10-01T09:17', '封面!G4':'2026-10-05',
+                   sheet_name+'!B4':'本次检查标签', form_title:'本次仪器复核', checked_at:yesterday+'T10:38'}
+        item['values'].update(changes)
+        saved = self.service.workspace_save(self.filler, session['id'], {'revision':session['revision'], 'items':[item]})
+        # A previously cached layout must update by reading the same immutable template bytes.
+        with self.service.connect(True) as db:
+            db.execute("UPDATE tool_workspace_templates SET layout=json_set(layout,'$.editable_grid_version',1)")
+        self.service = self.restart()
+        reopened = self.service.workspace_get(self.filler, session['id'])
+        reopened_item = next(i for i in reopened['items'] if i['id']==item['id'])
+        self.assertEqual({key:reopened_item['values'][key] for key in changes}, changes)
+        self.assertEqual(reopened_item['template']['editable_grid_version'],2)
+        pending = self.service.workspace_submit(self.filler, session['id'], {'revision':saved['revision']})
+        self.approve(pending)
+        while self.service.sync_one():
+            pass
+        self.assertEqual(len(self.cloud.writes),2)
+        item_by_asset = {item['asset_id']:True,other['asset_id']:False}
+        for order, _, data, _, _ in self.cloud.writes.values():
+            edited = item_by_asset[order['asset_id']]
+            book = load_workbook(io.BytesIO(data))
+            try:
+                self.assertEqual(book['封面']['K20'].value,changes['封面!K20'] if edited else '附件[][]［ ］☐')
+                self.assertIn('K20:L21',{str(region) for region in book['封面'].merged_cells.ranges})
+                self.assertEqual(book['封面']['N24'].value,'边缘空格' if edited else None)
+                if edited:
+                    self.assertEqual(book['封面']['C3'].value,'验收版 02')
+                    self.assertEqual(book['封面']['K22'].value,'2026年10月01日09时17分')
+                    self.assertEqual(book[sheet_name]['G11'].value,dt.date.fromisoformat(yesterday).strftime('%Y年%m月%d日')+'10时38分')
+                    self.assertEqual(book[sheet_name]['B4'].value,'本次检查标签')
+                    from openpyxl.utils.datetime import from_excel
+                    self.assertEqual(from_excel(book['封面']['G4'].value,book.epoch).date(),dt.date(2026,10,5))
+                    anchor, = title_anchors(data,sheet_name).values()
+                    self.assertEqual(''.join(node.text or '' for node in anchor.findall('.//{*}t')),'本次仪器复核')
+            finally:
+                book.close()
+        archived = self.service.workspace_get(self.filler,session['id'])
+        self.assertFalse(any(entry['can_edit'] for entry in archived['items']))
+        with self.assertRaises(RiskError):
+            self.service.workspace_save(self.filler,session['id'],{'revision':archived['revision'],'items':[item]})
+
     def test_followup_removal_hides_the_same_workbench_item_only(self):
         saved = self.complete(self.open(), ('repair', 'normal'))
         submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
@@ -357,8 +420,8 @@ class WorkspaceTests(unittest.TestCase):
         card = failed[0][1]['body']['elements']
         self.assertEqual([e['behaviors'][0]['default_url'] for e in card if e['tag']=='button'],
             [f"https://fixture.test/A?tool_session={pending['id']}&tool_asset={i['id']}" for i in pending['items']])
-        self.assertIn('重新填写', card[0]['text']['content'])
-        self.assertIn('请补充测量值', card[0]['text']['content'])
+        self.assertIn('重新填写', card[1]['content'])
+        self.assertIn('请补充测量值', card[2]['text']['content'])
         detail = self.service.workspace_get(inspector, pending['id'])
         self.assertTrue(all(i['can_edit'] and '飞书未确认送达' in i['result_notice'] for i in detail['items']))
         with self.assertRaises(RiskError):
@@ -386,7 +449,7 @@ class WorkspaceTests(unittest.TestCase):
             pass
         sent = self.result_deliveries()
         self.assertEqual([c[0] for c in sent], [inspector['open_id']])
-        self.assertIn('后续检修', sent[0][1]['body']['elements'][0]['text']['content'])
+        self.assertIn('后续检修', sent[0][1]['body']['elements'][1]['content'])
         self.assertNotIn('已归档', str(sent))
         self.cloud.failures.clear()
         with self.service.connect(True) as db:
@@ -394,7 +457,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(self.service.sync_one())
         sent = self.result_deliveries()
         self.assertEqual(len(sent), 1)
-        self.assertIn('检查记录已归档', sent[0][1]['body']['elements'][0]['text']['content'])
+        self.assertIn('检查记录已归档', sent[0][1]['body']['elements'][1]['content'])
 
     def test_batch_rejection_keeps_inspectors_and_record_links_separate(self):
         from bin.lan_bitable_template_portal.tool_result_notices import result_notice_one
@@ -420,9 +483,9 @@ class WorkspaceTests(unittest.TestCase):
             detail = self.service.workspace_get(person, draft['id'])
             self.assertEqual([i['id'] for i in detail['items']], [original['id']])
             card = calls[person['open_id']]['body']['elements']
-            self.assertEqual(len(card), 2)
-            self.assertIn('已被驳回', card[0]['text']['content'])
-            self.assertTrue(card[1]['behaviors'][0]['default_url'].endswith('tool_asset='+original['id']))
+            self.assertEqual(len(card), 4)
+            self.assertIn('已被驳回', card[1]['content'])
+            self.assertTrue(card[-1]['behaviors'][0]['default_url'].endswith('tool_asset='+original['id']))
 
     def test_manager_results_private_to_inspector_and_actual_reviewer_with_shared_role_dedup(self):
         inspector, pending = self.result_fixture(('scrap','scrap'), inspector=self.leader)
@@ -452,7 +515,26 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(self.service.sync_one())
         sent = self.result_deliveries()
         self.assertEqual([c[0] for c in sent], [inspector['open_id']])
-        self.assertEqual(len(sent[0][1]['body']['elements']), 4)
+        self.assertEqual(len(sent[0][1]['body']['elements']), 8)
+
+    def test_mixed_decisions_colour_each_tools_own_result(self):
+        from bin.lan_bitable_template_portal.tool_result_notices import RESULTS, make_card
+        rows = []
+        for event in ('rejected', 'normal', 'repair', 'scrap'):
+            data = dict(tool='工具'+event, model='测试型号', scope='A', session='同一批次', asset=event,
+                        by='审核员', at='2026-11-20T09:30:00', note='保留原意见')
+            rows.append(dict(event=event, order_id=event, payload=json.dumps(data)))
+        card, members = make_card(rows, lambda scope, session, asset: '/test/'+asset, None)
+        self.assertEqual(members, rows)
+        for index, row in enumerate(rows):
+            event = row['event']
+            name, result, details, button = card['body']['elements'][index*4:index*4+4]
+            self.assertIn('工具'+event, name['text']['content'])
+            color = 'red' if event == 'rejected' else 'green'
+            self.assertEqual(result, {'tag':'markdown','content':f'<font color="{color}">{RESULTS[event]}</font>'})
+            self.assertEqual(details['text']['content'], '审核人：审核员\n审核时间：2026-11-20 09:30:00（北京时间）\n意见：保留原意见')
+            self.assertEqual(button['text']['content'], '打开原记录重新填写' if event=='rejected' else '查看记录')
+            self.assertEqual(button['behaviors'][0]['default_url'], '/test/'+event)
 
     def test_manager_card_uses_signer_after_one_tool_is_reassigned(self):
         inspector, pending = self.result_fixture(('scrap','scrap'))

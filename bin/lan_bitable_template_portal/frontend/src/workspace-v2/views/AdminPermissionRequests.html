@@ -1,0 +1,22 @@
+<section class="serenity-desk access-inbox" aria-label="权限申请">
+  <header class="serenity-heading console-heading"><h2>权限申请 <small>{{ pendingCount }} 条待审批</small></h2>
+    <div class="serenity-actions"><label class="serenity-search"><input v-model="searchModel" type="search" aria-label="搜索权限申请" placeholder="姓名、楼栋或申请原因"></label>
+      <select v-model="statusModel" aria-label="申请状态" @change="emit('load')"><option value="pending">待审批</option><option value="approved">已通过</option><option value="rejected">已拒绝</option><option value="all">全部状态</option></select>
+      <button type="button" :disabled="busy" @click="emit('load')">刷新申请</button></div></header>
+  <div v-if="pendingCount" class="account-queries"><label><input type="checkbox" :disabled="busy" :checked="allFilteredPendingSelected" @change="emit('toggle-all',($event.target as HTMLInputElement).checked)">选择全部待审批</label>
+    <label class="serenity-search"><input v-model="rejectReasonModel" :disabled="busy" type="text" aria-label="拒绝原因" placeholder="拒绝原因"></label>
+    <button type="button" :disabled="!!batchDisabledReason" :title="batchActionTitle" @click="emit('approve-selected')">批量通过 · {{ selectedPendingCount }}</button>
+    <button type="button" :disabled="!!batchDisabledReason" :title="batchActionTitle" @click="emit('reject-selected')">批量拒绝</button></div>
+  <div class="account-directory"><article v-for="item in items" :key="item.request_id">
+    <header><label><input v-if="item.status==='pending'" type="checkbox" :checked="selectedIds.has(item.request_id)" :disabled="busy" @change="emit('toggle-selection',item.request_id,($event.target as HTMLInputElement).checked)">
+      <strong>{{ item.name }}</strong></label><small>{{ statusLabel(item.status) }}</small></header>
+    <span>{{ item.reason || '未填写申请原因' }}</span><small>当前范围 · {{ currentScopeLabels(item) }}<br>申请范围 · {{ requestScopeLabels(item) }}</small>
+    <p v-if="item.requested_access">申请 {{ item.requested_access.level }} · {{ item.requested_access.category }} · {{ (item.requested_access.modules || []).join('、') }}</p>
+    <fieldset v-if="item.status==='pending' && !item.requested_access"><legend>核准楼栋</legend><label v-for="scope in scopeOptions" :key="scope.value">
+      <input type="checkbox" :disabled="busy" :checked="reviewScopes(item).includes(scope.value)" @change="emit('toggle-review-scope',item,scope.value,($event.target as HTMLInputElement).checked)">{{ scope.label }}</label></fieldset>
+    <small>{{ item.created_at }}</small><p v-if="item.notification_error" role="status">{{ item.notification_error }}</p>
+    <p v-if="item.reject_reason">{{ item.reject_reason }}</p>
+    <div v-if="item.status==='pending'" class="serenity-actions"><button type="button" class="decision-submit" :disabled="busy||!reviewScopes(item).length" @click="emit('approve',item)">通过申请</button>
+      <button type="button" :disabled="busy" @click="emit('reject',item)">拒绝申请</button></div>
+  </article></div><p v-if="!items.length" role="status">{{ busy?'正在读取权限申请…':'当前没有符合条件的申请' }}</p>
+</section>

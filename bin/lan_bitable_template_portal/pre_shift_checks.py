@@ -28,7 +28,8 @@ REMINDER_LEAD_SECONDS = 600
 CLOUD_DETAIL_VERSION = 1
 
 from .pre_shift_photo import UPLOAD_IMAGE_EXTS as IMAGE_EXTS
-ALLOWED_EXTS = IMAGE_EXTS | {'.pdf', '.doc', '.docx', '.xls', '.xlsx', '.md', '.txt', '.csv'}
+ACTIVE_EXTS = {'.exe', '.com', '.msi', '.dll', '.scr', '.cpl', '.jar', '.bat', '.cmd', '.ps1',
+               '.js', '.jse', '.vbs', '.vbe', '.wsf', '.wsh', '.hta', '.lnk', '.url', '.html', '.htm'}
 MAX_FILE_BYTES = 20 * 1024 * 1024          # 20 MiB per file
 MAX_TASK_BYTES = 100 * 1024 * 1024         # 100 MiB per task
 MAX_FILES_PER_ITEM = 10
@@ -43,6 +44,10 @@ class CheckError(Exception):
 
 
 class CheckDeliveryUncertain(CheckError):
+    pass
+
+
+class CheckPhotoRenderError(CheckError):
     pass
 
 
@@ -91,10 +96,6 @@ def _sanitize_name(name):
     if not name or len(name) > 200:
         raise CheckError('文件名无效。')
     return name
-
-
-def _image_ext(path):
-    return Path(path).suffix.lower() in IMAGE_EXTS
 
 
 class CheckService:
@@ -853,13 +854,10 @@ class CheckService:
                 or not re.fullmatch(r'[a-f0-9]{32}', replace_file_id)):
             raise CheckError('替换照片标识无效。')
         name = _sanitize_name(name)
-        ext = Path(name).suffix.lower()
-        if ext not in ALLOWED_EXTS:
+        if Path(name).suffix.lower() in ACTIVE_EXTS:
             raise CheckError('不允许该文件类型。')
-        if kind == 'handover' and ext not in IMAGE_EXTS:
-            raise CheckError('交接班照片仅支持图片。')
-        if not isinstance(captured, bool) or captured and ext not in IMAGE_EXTS:
-            raise CheckError('拍照仅支持图片。')
+        if not isinstance(captured, bool):
+            raise CheckError('拍照参数无效。')
         if kind == 'item' and not task_id:
             raise CheckError('缺少检查任务标识。')
         with self.connection() as conn:
@@ -976,7 +974,9 @@ class CheckService:
     def retain_photo_preview(self, actor, session, size, current=None):
         current = current or now()
         self.cleanup_photo_previews(current)
-        info = self.commit_upload(actor, session, size, current, preview=True)
+        info = self.commit_upload(actor, session, size, current, preview=True, save_as_file=True)
+        if 'id' in info:
+            return info
         size = Path(session['path']).stat().st_size
         preferences = self.photo_preferences(actor)
         session = {**session, 'photo_inspection': {key: info[key] for key in ('original_time', 'time_origin', 'time_source')},
@@ -1103,7 +1103,7 @@ class CheckService:
             except sqlite3.Error:
                 logging.exception('Photo preview lease will expire automatically')
 
-    def commit_upload(self, actor, session, size, current=None, *, preview=False):
+    def commit_upload(self, actor, session, size, current=None, *, preview=False, save_as_file=False):
         """Re-validate and commit a streamed upload. ``size`` is final byte count."""
         current = current or now()
         staging = Path(session['path'])
@@ -1124,74 +1124,75 @@ class CheckService:
         if actual > MAX_FILE_BYTES:
             self.abort_upload(session)
             raise CheckError('单个附件不能超过20MiB。')
+        ext = Path(name).suffix.lower()
+        normalized = staging.with_suffix('.image')
+        keep_stage = False
+        commit = self._commit_item_file if kind == 'item' else self._commit_handover
         try:
-            if Path(name).suffix.lower() in IMAGE_EXTS:
-                from .pre_shift_photo import prepare_upload
+            if ext in IMAGE_EXTS:
+                from .pre_shift_photo import inspect_photo, prepare_upload
                 try:
-                    name = session['name'] = prepare_upload(staging, name)
-                except ValueError as exc:
-                    raise CheckError(str(exc)) from None
-                size = staging.stat().st_size
-                if size > MAX_FILE_BYTES:
-                    raise CheckError('处理后的照片超过20MiB，请缩小照片后上传。', 413)
-            self._verify_file(staging, name)
-        except CheckError:
-            self.abort_upload(session)
-            raise
-        except Exception:
-            self.abort_upload(session)
-            raise CheckError('无法读取文件内容，文件可能损坏或照片格式不支持；请从相册导出为JPG后重试。') from None
+                    photo_name = prepare_upload(staging, name, normalized_path=normalized)
+                    photo_path = normalized if normalized.is_file() else staging
+                    photo_size = photo_path.stat().st_size
+                    if photo_size > MAX_FILE_BYTES:
+                        raise ValueError('照片转换后的大小超限。')
+                    self._verify_image(photo_path, Path(photo_name).suffix.lower())
+                    if preview:
+                        info = inspect_photo(photo_path, session['scope'], current, session.get('photo_weather'),
+                                             handover=kind == 'handover', capture=session.get('photo_capture'))
+                except Exception:
+                    photo_path = None
+                if photo_path is not None:
+                    if preview:
+                        with self.connection() as conn:
+                            task, _, _ = self._upload_context(conn, actor, session, current)
+                        keep_stage = True
+                        return {**info, 'task_id': task['id'], 'revision': task['revision']}
+                    try:
+                        photo_session = {**session, 'name': photo_name, 'is_image': True}
+                        self._prepare_photo_options(actor, photo_session, photo_path, current)
+                        return commit(actor, photo_session, photo_path, photo_size, current)
+                    except CheckPhotoRenderError:
+                        pass
+            if preview and not save_as_file:
+                raise CheckError('无法预览此文件，可上传原文件。')
+            self._verify_document(staging, ext)
+            return commit(actor, {**session, 'is_image': False}, staging, actual, current)
+        finally:
+            self.abort_upload({'path': str(normalized)})
+            if not keep_stage:
+                self.abort_upload(session)
+
+    def _prepare_photo_options(self, actor, session, staging, current):
+        from .pre_shift_photo import photo_options
+        from PIL import Image
         try:
-            from .pre_shift_photo import inspect_photo, photo_options
+            options = photo_options((session.get('photo_capture') or {}).get('watermark'))
+        except ValueError as exc:
+            raise CheckError(str(exc)) from None
+        capture = {key: value for key, value in (session.get('photo_capture') or {}).items() if key != '_time_audit'}
+        if options is not None:
+            from .pre_shift_photo import _photo_time, watermark_details, time_audit
+            info = session.get('photo_inspection')
             try:
-                options = photo_options((session.get('photo_capture') or {}).get('watermark'))
-                if options is not None and options['enabled'] and Path(name).suffix.lower() in IMAGE_EXTS:
-                    from PIL import Image
-                    with Image.open(staging) as image:
-                        marker = image.info.get('comment', b'')
-                    if isinstance(marker, bytes) and marker.startswith(b'ClipFlowWatermark:'):
-                        options = {**options, 'enabled':False, 'existing':True}
-            except ValueError as exc:
-                raise CheckError(str(exc)) from None
-            if preview:
-                if Path(name).suffix.lower() not in IMAGE_EXTS:
-                    raise CheckError('照片预览仅支持图片。')
-                with self.connection() as conn:
-                    task, _, _ = self._upload_context(conn, actor, session, current)
-                return {**inspect_photo(staging,session['scope'],current,session.get('photo_weather'),
-                                     handover=kind=='handover',capture=session.get('photo_capture')),
-                        'task_id': task['id'], 'revision': task['revision']}
-            session['photo_options'] = options
-            capture = {key: value for key, value in (session.get('photo_capture') or {}).items() if key != '_time_audit'}
-            if options is not None and Path(name).suffix.lower() in IMAGE_EXTS:
-                from PIL import Image
-                from .pre_shift_photo import _photo_time, watermark_details, time_audit
-                info = session.get('photo_inspection')
-                if not info:
-                    with Image.open(staging) as image:
+                with Image.open(staging) as image:
+                    marker = image.info.get('comment', b'')
+                    if options['enabled'] and isinstance(marker, bytes) and marker.startswith(b'ClipFlowWatermark:'):
+                        options = {**options, 'enabled': False, 'existing': True}
+                    if not info:
                         original = _photo_time(image.getexif(), current)
                         details = watermark_details(session['scope'], current, exif=image.getexif(), capture=capture)
-                    origin = 'exif' if original else 'camera' if details['time'] != '未获取' else 'unknown'
-                    original = original or (details['time'].replace('.', '-') if details['time'] != '未获取' else '')
-                    info = {'original_time': original, 'time_origin': origin,
-                            'time_source': '照片拍摄信息' if original else '未识别拍摄时间'}
-                display_time = options['time'] if options['enabled'] and not options['existing'] else info.get('original_time', '')
-                session['photo_audit'] = time_audit(info, display_time, actor, current)
-                capture['_time_audit'] = session['photo_audit']
-            session['photo_capture'] = capture
-            if kind == 'item':
-                return self._commit_item_file(actor, session, staging, size, current)
-            return self._commit_handover(actor, session, staging, size, current)
-        except Exception:
-            self.abort_upload(session)
-            raise
-
-    def _verify_file(self, path, name):
-        ext = Path(name).suffix.lower()
-        if ext in IMAGE_EXTS:
-            self._verify_image(path, ext)
-        else:
-            self._verify_document(path, ext)
+                        origin = 'exif' if original else 'camera' if details['time'] != '未获取' else 'unknown'
+                        original = original or (details['time'].replace('.', '-') if details['time'] != '未获取' else '')
+                        info = {'original_time': original, 'time_origin': origin,
+                                'time_source': '照片拍摄信息' if original else '未识别拍摄时间'}
+            except (ValueError, OSError) as exc:
+                raise CheckPhotoRenderError(str(exc)) from exc
+            display_time = options['time'] if options['enabled'] and not options['existing'] else info.get('original_time', '')
+            session['photo_audit'] = time_audit(info, display_time, actor, current)
+            capture['_time_audit'] = session['photo_audit']
+        session.update(photo_capture=capture, photo_options=options)
 
     def _verify_image(self, path, ext):
         from PIL import Image
@@ -1218,7 +1219,10 @@ class CheckService:
 
     def _verify_document(self, path, ext):
         with open(path, 'rb') as fh:
-            header = fh.read(8)
+            header = fh.read(1024)
+        if header.startswith((b'MZ', b'\x7fELF')) or header.lstrip(b'\xef\xbb\xbf \t\r\n').lower().startswith(
+                (b'<html', b'<!doctype html', b'<script')):
+            raise CheckError('不允许上传可执行文件或网页文件。')
         if ext == '.pdf':
             if not header.startswith(b'%PDF-'):
                 raise CheckError('PDF文件格式无效。')
@@ -1243,13 +1247,14 @@ class CheckService:
             raise CheckError('上传身份已变化，请重新上传。', 409)
         with open(staging, 'rb') as fh:
             content_hash = hashlib.file_digest(fh, 'sha256').hexdigest()
-        ext = Path(session['name']).suffix.lower()
+        is_image = session['is_image']
+        ext = Path(session['name']).suffix.lower() if is_image else '.bin'
         file_id = uuid.uuid4().hex
         watermark = None
         rendered = self.staging_dir / f'{file_id}.jpg'
         name = session['name']
         options = session.get('photo_options')
-        stamp_enabled = options['enabled'] and not options['existing'] if options is not None else session.get('captured')
+        stamp_enabled = is_image and (options['enabled'] and not options['existing'] if options is not None else session.get('captured'))
         if options is not None:
             content_hash = hashlib.sha256((content_hash + dump(options)).encode()).hexdigest()
         if stamp_enabled:
@@ -1258,10 +1263,12 @@ class CheckService:
             try:
                 watermark = render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'), handover=False, capture=session.get('photo_capture'))
                 ext, size = '.jpg', rendered.stat().st_size
+                if size > MAX_FILE_BYTES:
+                    raise ValueError('水印照片大小超限。')
                 name = Path(name).stem[:100] + '_班前检查水印.jpg'
             except (ValueError, OSError) as exc:
                 rendered.unlink(missing_ok=True)
-                raise CheckError('检查照片水印生成失败：' + str(exc)) from exc
+                raise CheckPhotoRenderError(str(exc)) from exc
         final = self.files_dir / f'{file_id}{ext}'
         try:
             with self.connection(True) as conn:
@@ -1290,12 +1297,12 @@ class CheckService:
                     "INSERT INTO files(id,task_id,item_id,kind,day,scope,shift,name,size,is_image,disk_name,uploader_id,uploader_name,created,content_hash) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (file_id, session['task_id'], session.get('item_id'), 'item', task['day'], task['scope'],
-                     task['shift'], name, size, 1 if ext in IMAGE_EXTS else 0, final.name,
+                     task['shift'], name, size, int(is_image), final.name,
                      actor['id'], actor['name'], created, content_hash))
                 if watermark:
                     conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
                                  (file_id, actor['id'], dump(watermark)))
-                elif options is not None and ext in IMAGE_EXTS:
+                elif options is not None and is_image:
                     watermark = {'applied':False,'existing':options['existing'], 'audit': session.get('photo_audit', {})}
                     conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
                                  (file_id, actor['id'], dump(watermark)))
@@ -1311,7 +1318,6 @@ class CheckService:
             raise
         finally:
             rendered.unlink(missing_ok=True)
-            self.abort_upload(session)
         if watermark or task['submitted']:
             self.wake.set()
         return result
@@ -1322,11 +1328,13 @@ class CheckService:
         with open(staging, 'rb') as fh:
             content_hash = hashlib.file_digest(fh, 'sha256').hexdigest()
         file_id = uuid.uuid4().hex
+        is_image = session['is_image']
         options = session.get('photo_options')
-        stamp_enabled = options['enabled'] and not options['existing'] if options is not None else True
+        stamp_enabled = is_image and (options is None or options['enabled'] and not options['existing'])
         if options is not None:
             content_hash = hashlib.sha256((content_hash + dump(options)).encode()).hexdigest()
-        final = self.files_dir / (file_id + ('.jpg' if stamp_enabled else Path(session['name']).suffix.lower()))
+        ext = Path(session['name']).suffix.lower() if is_image else '.bin'
+        final = self.files_dir / (file_id + ('.jpg' if stamp_enabled else ext))
         rendered = self.staging_dir / f'{file_id}.jpg'
         name = Path(session['name']).stem[:100] + '_交接班水印.jpg' if stamp_enabled else session['name']
         try:
@@ -1334,12 +1342,12 @@ class CheckService:
             from .pre_shift_photo import render_handover
             try:
                 watermark = (render_handover(staging, rendered, session['scope'], current, session.get('photo_weather'), capture=session.get('photo_capture'))
-                             if stamp_enabled else {'applied':False,'existing':options['existing'], 'audit': session.get('photo_audit', {})})
+                             if stamp_enabled else {'applied':False,'existing':bool(options and options['existing']), 'audit': session.get('photo_audit', {})})
             except (ValueError, OSError) as exc:
-                raise CheckError('交接班照片水印生成失败：' + str(exc)) from exc
+                raise CheckPhotoRenderError(str(exc)) from exc
             size = (rendered if stamp_enabled else staging).stat().st_size
             if size > MAX_FILE_BYTES:
-                raise CheckError('单个附件不能超过20MiB。', 413)
+                raise CheckPhotoRenderError('水印照片大小超限。')
             with self.connection(True) as conn:
                 task, request_hash, prior = self._upload_context(conn, actor, session, current, content_hash=content_hash)
                 if prior is not None:
@@ -1366,7 +1374,7 @@ class CheckService:
                     "INSERT INTO files(id,task_id,item_id,kind,day,scope,shift,name,size,is_image,disk_name,uploader_id,uploader_name,created,content_hash) "
                     "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (file_id, session['task_id'], '', 'handover', task['day'], task['scope'],
-                     task['shift'], name, size, 1, final.name,
+                     task['shift'], name, size, int(is_image), final.name,
                      actor['id'], actor['name'], created, content_hash))
                 conn.execute('INSERT INTO photo_deliveries(file_id,recipient,watermark) VALUES(?,?,?)',
                              (file_id, actor['id'], dump(watermark)))
@@ -1382,7 +1390,6 @@ class CheckService:
             raise
         finally:
             rendered.unlink(missing_ok=True)
-            self.abort_upload(session)
         self.wake.set()
         return result
 
@@ -1536,7 +1543,7 @@ class CheckService:
             if self.stop_event.is_set():
                 return
             with self.connection(True) as conn:
-                row = conn.execute('''SELECT p.*,f.disk_name,f.name FROM photo_deliveries p
+                row = conn.execute('''SELECT p.*,f.disk_name,f.name,f.is_image FROM photo_deliveries p
                     JOIN files f ON f.id=p.file_id WHERE f.archived=0 AND p.sent=0 AND p.retry_at<=? AND p.lease<=?
                     ORDER BY f.created,p.file_id LIMIT 1''', (current.timestamp(), current.timestamp())).fetchone()
                 if row is None:

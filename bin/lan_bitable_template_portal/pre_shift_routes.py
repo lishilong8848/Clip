@@ -10,7 +10,7 @@ from urllib.parse import urlsplit, unquote
 from fastapi import Request
 from fastapi.responses import JSONResponse, FileResponse
 
-from .pre_shift_checks import CheckError, CheckService, scopes_for
+from .pre_shift_checks import CheckError, CheckService, IMAGE_EXTS, scopes_for
 
 _IMAGE_TYPES = {'.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp'}
 _LOCATION_RETRY_SECONDS = 300
@@ -258,7 +258,9 @@ def install_pre_shift_routes(app, controller, runtime):
                         await asyncio.to_thread(fp.write, chunk)
                 finally:
                     await asyncio.to_thread(fp.close)
-                if kind == 'handover' or capture == '1' or request.url.path.endswith('/photo-preview') or 'watermark' in photo_capture:
+                if Path(session['name']).suffix.lower() in IMAGE_EXTS and (
+                        kind == 'handover' or capture == '1'
+                        or request.url.path.endswith('/photo-preview') or 'watermark' in photo_capture):
                     mapper = await asyncio.to_thread(get_location)
                     photo_capture['_location_name'] = await asyncio.to_thread(mapper.resolve, photo_capture)
                     try:
@@ -277,7 +279,7 @@ def install_pre_shift_routes(app, controller, runtime):
                 actor = await asyncio.to_thread(actor_for, request)
                 if retain == '1':
                     result = await asyncio.to_thread(svc.retain_photo_preview, actor, session, size)
-                    retained = True
+                    retained = bool(result.get('preview_id'))
                 else:
                     result = await asyncio.to_thread(svc.commit_upload, actor, session, size,
                                                     preview=request.url.path.endswith('/photo-preview'))

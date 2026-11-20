@@ -1,0 +1,34 @@
+.release-journal-desk,.rj-desk-overlay {
+  --rj-face:var(--soft-face,#f4f7f8); --rj-field:var(--soft-field,#e8eff1); --rj-ink:var(--v2-ink,#243c44);
+  --rj-line:color-mix(in srgb,var(--rj-ink) 16%,var(--rj-face)); --rj-muted:color-mix(in srgb,var(--rj-ink) 74%,var(--rj-face)); color:var(--rj-ink);
+}
+.release-journal-desk { display:grid;align-content:start;gap:12px;min-width:0; }
+.release-journal-desk :is(h1,p,ul),.rj-desk-overlay :is(h2,p,ul) { margin:0; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-head,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-heading,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-toolbar,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-head,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-meta,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-item-head,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-commit { display:flex;align-items:center;gap:6px 10px;min-width:0; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-head { justify-content:space-between;flex-wrap:wrap;padding:12px 14px;border:1px solid var(--rj-line);border-radius:14px;background:linear-gradient(110deg,color-mix(in srgb,#add8f0 30%,var(--rj-face)),color-mix(in srgb,#ade0c8 32%,var(--rj-face))); }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-heading h1 { font-size:1.3rem; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-heading small,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-entry small,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-entry time,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-meta { color:var(--rj-muted);font-size:.82rem; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-toolbar { flex:1 1 370px;justify-content:flex-end;flex-wrap:wrap; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-search { flex:1 1 145px;max-width:320px; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-module { flex:1 1 110px;max-width:170px; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-toolbar .release-journal-refresh { --n-color:#166c4e !important; --n-color-hover:#125c43 !important; --n-text-color:white !important; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-list { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,440px),1fr));list-style:none;gap:8px;padding:0; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-entry { display:grid;align-items:center;grid-template-columns:auto minmax(0,1fr) auto auto;gap:6px 12px;text-align:left;cursor:pointer;width:100%;height:100%;padding:11px 13px;font:inherit;color:inherit;border-radius:12px;border:1px solid var(--rj-line);background:var(--rj-face);box-shadow:var(--soft-raised,1px 2px 6px #1c3a4c10); }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-entry:hover { background:var(--rj-field); }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-entry:focus-visible { outline:2px solid var(--v2-blue,#377d9f); }
+:where(.release-journal-desk,.rj-desk-overlay) .rj-version,:where(.release-journal-desk,.rj-desk-overlay) .rj-copy,:where(.release-journal-desk,.rj-desk-overlay) .rj-dates { min-width:0;display:grid;overflow-wrap:anywhere;gap:3px; }:where(.release-journal-desk,.rj-desk-overlay) .rj-copy b { font-weight:550; }:where(.release-journal-desk,.rj-desk-overlay) .rj-dates { text-align:right; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-state,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-pager { display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:9px;padding:10px; }
+.rj-desk-overlay.n-card { width:min(760px,calc(100vw - 18px));max-height:90dvh;overflow:auto;border-radius:14px;background:var(--rj-face); }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-head,:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-meta { flex-wrap:wrap; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-meta em { font-style:normal; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-modal-body { display:grid;gap:12px; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-item-head { flex-wrap:wrap;overflow-wrap:anywhere; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-field-value { white-space:pre-wrap;overflow-wrap:anywhere; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-field-label { color:var(--rj-muted);font-size:.82rem; }
+:where(.release-journal-desk,.rj-desk-overlay) .release-journal-item-body { padding:8px 10px;background:var(--rj-field);border-radius:8px; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-commits { display:grid;gap:4px;list-style:none;padding:0; }:where(.release-journal-desk,.rj-desk-overlay) .release-journal-commit { overflow-wrap:anywhere;align-items:baseline; }
+.release-journal-desk .release-journal-entry { grid-template-columns: minmax(0,1fr) auto; gap: 4px 8px; }
+.release-journal-desk .release-journal-entry :is(.rj-copy,.rj-version,.rj-dates) { grid-column: 1; display: flex; flex-wrap: wrap; align-items: baseline; gap: 3px 9px; text-align: start; }
+.release-journal-desk .release-journal-entry > svg { grid-column: 2; grid-row: 1 / span 3; }
+@media(max-width:650px) {
+  .release-journal-desk .release-journal-head { display: grid; grid-template-columns: minmax(0,1fr) auto auto; }
+  .release-journal-desk .release-journal-heading { grid-column: 1 / 3; }
+  .release-journal-desk .release-journal-toolbar { display: contents; }
+  .release-journal-desk .release-journal-refresh { grid-column: 3; grid-row: 1; justify-self: end; }
+  .release-journal-desk .release-journal-search,.release-journal-desk .release-journal-module { width: 100%; max-width: none; }
+  .release-journal-desk .release-journal-module { grid-column: 2 / 4; width: min(31vw,135px); }
+}

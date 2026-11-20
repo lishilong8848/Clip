@@ -153,6 +153,19 @@ class LearningRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/learning/papers/p/answer", json={}).status_code, 200)
         self.auth.scope_allowed.assert_not_called()
 
+    def test_issue_question_routes_bind_target_to_path_and_logged_in_actor(self):
+        with patch("lan_bitable_template_portal.learning_issue_cards.review_question", return_value={"editable":True}) as review:
+            url = "/api/learning/issues/issue-one/question?review_ticket=ticket-one"
+            self.assertEqual(self.client.get(url).status_code, 200)
+            args = review.call_args.args
+            self.assertEqual(args[2]["id"],"building-H")
+            self.assertEqual(args[3:],("issue-one","ticket-one",None))
+            self.assertEqual(self.client.put(url,json={"id":"injected","version":"v1","stem":"changed"}).status_code,200)
+            self.assertEqual(review.call_args.args[3],"issue-one")
+            self.assertEqual(review.call_args.args[-1]["id"],"issue-one")
+            self.assertEqual(self.client.put(url,json={},headers={"Origin":"https://elsewhere.invalid"}).status_code,403)
+            self.assertEqual(review.call_count,2)
+
     def test_workbench_summary_respects_role_module_and_authorized_buildings(self):
         learning_completion = importlib.import_module("lan_bitable_template_portal.learning_completion")
 
@@ -484,6 +497,10 @@ class LearningSourceContractTests(unittest.TestCase):
             question = dispatch("question.save", payload)
             dispatch("questions.list", query={"scope": ""})
             dispatch("question.get", {"id": question["id"]})
+            revision = dispatch("question.revision.get", {"id": question["id"]})
+            question = dispatch("question.revision.save", {"id": question["id"], "version": revision["question"]["version"],
+                                                            "analysis": "Verified explanation"})["question"]
+            self.assertEqual(question["analysis"], "Verified explanation")
             question = dispatch("question.status", {"id": question["id"], "version": question["version"], "status": "disabled"})
             dispatch("question.copy", {"id": question["id"]})
             dispatch("import", {"questions": [payload], "preview": True})
@@ -512,6 +529,7 @@ class LearningSourceContractTests(unittest.TestCase):
             self.assertEqual({row['person_id'] for row in daily['items']}, {'person-A', 'person-H'})
             dispatch("attempts", who=actor, query={})
             issue = dispatch("issue.create", {"paper_id": "paper-H", "person_id": "person-H", "question_id": question["id"], "description": "Check this question"}, actor)
+            self.assertEqual(dispatch("issues.pending_questions")["items"][0]["question_id"], question["id"])
             issue = dispatch("issue.update", {"id": issue["id"], "version": issue["version"], "remark": "More detail"}, actor)
             dispatch("issues.list", who=actor, query={"scope": ""})
             self.assertEqual(dispatch("issue.get", {"id": issue["id"]}, actor)["id"], issue["id"])
@@ -533,7 +551,7 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("publish")
             dispatch("paper.delete", {"id": "paper-H"})
             self.assertEqual(actions, {action for methods in routes.ROUTES.values() for action in methods.values()} -
-                             {"bootstrap", "attachments", "attachment", "export", "workbench_summary"})
+                             {"bootstrap", "attachments", "attachment", "export", "workbench_summary", "issue.question.get", "issue.question.save"})
             self.assertEqual(cloud.mock_calls, [])
 
     def test_real_disabled_service_start_waits_without_cloud_io(self):
@@ -757,7 +775,7 @@ class LearningPackagingTests(unittest.TestCase):
     def test_route_module_import_does_not_import_core_or_runtime(self):
         import importlib.util
 
-        spec = importlib.util.spec_from_file_location("isolated_learning_routes", BIN / "lan_bitable_template_portal/learning_routes.py")
+        spec = importlib.util.spec_from_file_location("lan_bitable_template_portal.isolated_learning_routes", BIN / "lan_bitable_template_portal/learning_routes.py")
         module = importlib.util.module_from_spec(spec)
         with patch("socket.create_connection", side_effect=AssertionError("Network at import")):
             spec.loader.exec_module(module)
@@ -777,7 +795,7 @@ class LearningPackagingTests(unittest.TestCase):
                         return routes
                     return original_import(name, *args, **kwargs)
 
-                spec = importlib.util.spec_from_file_location("isolated_learning_routes", BIN / "lan_bitable_template_portal/learning_routes.py")
+                spec = importlib.util.spec_from_file_location("lan_bitable_template_portal.isolated_learning_routes", BIN / "lan_bitable_template_portal/learning_routes.py")
                 module = importlib.util.module_from_spec(spec)
                 with patch("builtins.__import__", side_effect=import_module):
                     if missing == "python_multipart":

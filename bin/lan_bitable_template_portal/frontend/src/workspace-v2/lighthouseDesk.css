@@ -1,0 +1,115 @@
+.ld-layer {
+  position: fixed; inset: 0; z-index: 2200; isolation: isolate; border: 0; padding: 0; margin: 0;
+  width: 100%; height: 100%; max-width: none; max-height: none; background: transparent; pointer-events: none;
+  --ld-face: var(--soft-face,#f4f7f7); --ld-field: var(--soft-field,#e8eff0);
+  --ld-ink: var(--v2-ink,#203640); --ld-muted: color-mix(in srgb,var(--ld-ink) 77%,var(--ld-face));
+  --ld-line: color-mix(in srgb,var(--ld-ink) 18%,var(--ld-face));
+  --ld-wash: linear-gradient(108deg,color-mix(in srgb,#a6d4ed 37%,var(--ld-face)),color-mix(in srgb,#aedfc7 38%,var(--ld-face)));
+  color: var(--ld-ink); font: inherit; line-height: 1.45;
+}
+.ld-layer:popover-open { display: block; }
+.ld-layer>[role="dialog"],.ld-layer>.ld-overlay { pointer-events:auto; }
+.ld-shell .ld-sr { position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%); white-space:nowrap; }
+.ld-shell .assistant-thinking { display:inline-flex; gap:7px; align-items:center; color:var(--ld-muted); font-size:.84rem; }
+.ld-shell .thinking-dots { display:inline-flex; gap:3px; }
+.ld-shell .thinking-dots i { width:5px; height:5px; border-radius:50%; background:currentColor; }
+.ld-shell .process[open] .process-chevron { transform:rotate(90deg); }
+.ld-shell .ld-active { padding:5px 8px; border-bottom:1px solid var(--ld-line); }
+.ld-shell .ld-photo-drop:focus-visible { outline:2px solid var(--v2-blue,#377d9f); }
+@media(prefers-reduced-motion:no-preference) {
+  .ld-shell .thinking-dots i { animation:ld-wait 1.15s ease-in-out infinite alternate; }
+  .ld-shell .thinking-dots i:nth-child(2) { animation-delay:.18s; }
+  .ld-shell .thinking-dots i:nth-child(3) { animation-delay:.36s; }
+}
+@keyframes ld-wait { from { opacity:.35; } to { opacity:1; } }
+.ld-layer .ld-launcher { position: fixed; right: 16px; bottom: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; pointer-events: auto; cursor: pointer; }
+.ld-layer .ld-launcher[hidden] { display: none; }
+.ld-launcher:focus-visible { outline: 2px solid var(--bot-color); outline-offset: 4px; }
+.ld-title>svg { color: var(--bot-color); }
+.ld-page-host { min-width: 0; }
+.ld-layer.ld-page-layer { position: relative; inset: auto; z-index: auto; pointer-events: auto; block-size: max(340px,calc(100dvh - var(--head-height,60px) - 92px)); }
+.ld-page-layer.ld-layer .ld-root { position: relative; inset: auto; width: 100%; height: 100%; max-width: none; max-height: none; }
+.ld-page-layer .ld-shell { box-sizing: border-box; }
+.ld-page-layer .assistant-header { touch-action: auto; }
+@media (max-width:760px),(hover:none) and (max-width:1024px) {
+  .ld-layer.ld-page-layer { block-size: max(280px,calc(100dvh - var(--head-height,0px) - 90px - env(safe-area-inset-bottom,0px))); }
+}
+@media (min-width:761px) and (max-width:1024px) {
+  .ld-layer.ld-page-layer { block-size: max(280px,calc(100dvh - 132px - env(safe-area-inset-bottom,0px))); }
+}
+.ld-layer .ld-root { position: fixed; right: 24px; bottom: 18px; max-width: calc(100vw - 16px); max-height: calc(100dvh - 16px); pointer-events: auto; }
+.ld-shell { display: flex; align-items: stretch; isolation: isolate; position: relative; width: 100%; height: 100%; min-height: 0; overflow: hidden; border: 1px solid var(--ld-line); border-radius: 17px; background: var(--ld-face); box-shadow: 0 12px 56px #152d3e33; }
+.ld-main { display: flex; flex: 1 1 auto; min-width: 0; min-height: 0; flex-direction: column; }
+.ld-shell :is(h1,h2,h3,h4,p,ul,ol,dl,dd) { margin-block: 0; }
+.ld-shell :is(h2,h3) { font-size: 1rem; }
+.ld-shell :is(h4,.ld-label,.ld-muted,.ld-activity) { font-size: .82rem; }
+.ld-shell .ld-muted,.ld-shell .ld-label { color: var(--ld-muted); }
+.ld-tools,.ld-title,.ld-actions,.ld-file,.ld-files,.ld-switches,.ld-composer-bar,.ld-meta,.ld-plan-head,.ld-form-fields,.ld-setting-head { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; min-width: 0; }
+.ld-tools,.ld-setting-head,.ld-plan-head,.ld-composer-bar { justify-content: space-between; }
+.ld-tools { flex: none; gap: 6px; padding: 8px 12px; background: var(--ld-wash); border-bottom: 1px solid var(--ld-line); user-select: none; touch-action: none; }
+.ld-title { font-weight: 680; }
+.ld-title small { font-weight: 500; }
+.ld-shell .ld-button,.ld-shell .ld-tools button,.ld-shell .ld-actions>button,.ld-shell .ld-file>button,.ld-shell .ld-file>a,.ld-shell .ld-status-button,.ld-shell .ld-composer-bar button {
+  display: inline-flex; align-items: center; justify-content: center; min-height: 30px; gap: 4px;
+  padding: 4px 8px; border: 1px solid var(--ld-line); border-radius: 8px; color: inherit; background: var(--ld-face); font: inherit; font-size: .83rem; cursor: pointer;
+}
+.ld-shell button:disabled { opacity: .53; cursor: not-allowed; }
+.ld-shell :is(.ld-actions,.ld-composer-bar,.ld-tools)>.ld-primary,.ld-shell .ld-primary { background: #11694b; color: #fff; border-color: #105f46; }
+.ld-shell :is(button,select,textarea,input,a,summary,[tabindex]):focus-visible,.ld-launcher:focus-visible { outline: 2px solid var(--v2-blue,#3a7d9e); outline-offset: 2px; }
+.ld-shell .ld-input,.ld-plan select,.ld-plan .ld-field>textarea,.ld-plan .ld-field>input:not([type=checkbox],[type=radio]),.ld-settings label>input:not([type=checkbox]),.ld-settings label>select { max-width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid var(--ld-line); border-radius: 7px; background: var(--ld-field); color: inherit; font: inherit; box-sizing: border-box; }
+.ld-shell .ld-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; }
+.ld-thread { flex: 1 1 auto; padding: 12px clamp(10px,2vw,24px); }
+.ld-thread .turn { display: grid; gap: 8px; padding-bottom: 15px; min-width: 0; }
+.ld-thread .user-bubble { justify-self: end; max-width: min(89%,620px); border-radius: 12px 12px 3px 12px; padding: 9px 12px; background: var(--ld-wash); white-space: pre-wrap; overflow-wrap: anywhere; }
+.ld-thread .answer { display: grid; min-width: 0; gap: 7px; overflow-wrap: anywhere; }
+.ld-shell summary { cursor: pointer; }
+.ld-thread .process,.ld-sources,.ld-inline-box { border-inline-start: 2px solid var(--ld-line); padding-inline-start: 8px; color: var(--ld-muted); font-size: .82rem; }
+.ld-thread .process ol { padding-inline-start: 1.4em; }
+.ld-thread .ld-empty { display: grid; justify-items: start; align-content: center; min-height: 90px; gap: 6px; }
+.ld-shell .ld-composer { display: grid; flex: none; min-width: 0; gap: 5px; padding: 8px 12px 10px; border-top: 1px solid var(--ld-line); background: var(--ld-face); }
+.ld-shell .ld-composer>textarea { width: 100%; min-width: 0; min-height: 37px; resize: none; box-sizing: border-box; }
+.ld-shell .ld-files { max-width: 100%; gap: 4px; }
+.ld-shell .ld-file { padding: 3px 6px; border-radius: 7px; background: var(--ld-field); max-width: 100%; overflow-wrap: anywhere; }
+.ld-shell .ld-file>a { min-width: 0; border: 0; background: transparent; color: inherit; }
+.ld-shell .ld-file img { width: 34px; height: 34px; object-fit: contain; }
+.ld-alert { padding: 6px 9px; border-inline-start: 3px solid #ae7131; background: var(--ld-field); overflow-wrap: anywhere; }
+.ld-plan,.ld-settings,.ld-profile,.ld-subpanel,.ld-field,.ld-form-fields>label { display: grid; align-content: start; gap: 6px; min-width: 0; }
+.ld-plan { border: 1px solid var(--ld-line); border-radius: 11px; padding: 10px; }
+.ld-plan-head { border-bottom: 1px solid var(--ld-line); padding-bottom: 6px; }
+.ld-plan form,.ld-form-stack,.ld-settings form { display: grid; gap: 8px; min-width: 0; }
+.ld-shell .ld-field { padding: 6px 0; }
+.ld-shell .ld-field>.ld-label { font-weight: 650; }
+.ld-shell .ld-choice { display: inline-flex; align-items: center; gap: 5px; }
+.ld-plan fieldset,.ld-settings fieldset { border: 1px solid var(--ld-line); border-radius: 8px; padding: 8px; min-width: 0; }
+.ld-plan .ld-pre,.ld-thread .ld-pre { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; font: inherit; }
+.ld-plan .ld-pairs,.ld-settings .model-list { display: grid; list-style: none; padding: 0; grid-template-columns: repeat(auto-fit,minmax(min(205px,100%),1fr)); gap: 6px; }
+.ld-pairs>div,.ld-profile,.ld-subpanel { padding: 8px; border-radius: 9px; background: var(--ld-field); }
+.ld-pairs dt { color: var(--ld-muted); font-size: .78rem; }
+.ld-shell .ld-settings,.ld-shell .ld-aux { flex: 1; min-width: 0; min-height: 0; overflow: auto; padding: 12px; }
+.ld-settings .ld-form-fields>label { flex: 1 1 180px; }
+.ld-aside { flex: none; display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--ld-line); overflow: auto; }
+.ld-aside>.ld-tools { touch-action: auto; }
+.ld-shell .ld-resize { position: absolute; z-index: 5; bottom: 0; inset-inline-end: 0; width: 16px; height: 16px; cursor: nwse-resize; touch-action: none; border: 0; background: linear-gradient(135deg,transparent 58%,var(--ld-muted) 59% 64%,transparent 65% 73%,var(--ld-muted) 74% 79%,transparent 80%); }
+.ld-shell .ld-resize.from-left { inset-inline-start: 0; inset-inline-end: auto; transform: scaleX(-1); cursor: nesw-resize; }
+.ld-shell .ld-menu { position: relative; }
+.ld-shell .ld-menu-panel { position: absolute; z-index: 12; right: 0; top: 100%; display: grid; gap: 4px; padding: 7px; min-width: 9rem; border: 1px solid var(--ld-line); border-radius: 9px; background: var(--ld-face); }
+.ld-shell .ld-photo-drop { padding: 8px; border: 1px dashed var(--ld-line); border-radius: 8px; }
+.ld-shell .ld-photo-drop img { width: 70px; height: 54px; object-fit: contain; }
+@media (max-width: 700px) {
+  .ld-layer .ld-root { max-width: calc(100vw - 12px); right: 6px; bottom: 6px; }
+  .ld-tools,.ld-shell .ld-composer { padding: 6px 8px; }
+  .ld-shell .ld-button,.ld-shell .ld-actions>button,.ld-shell .ld-tools button,.ld-shell .ld-composer-bar button { min-height: 38px; }
+  .ld-shell .ld-aside { position: absolute; inset: 0; width: 100% !important; background: var(--ld-face); z-index: 8; }
+  .ld-shell .ld-resize { display: none; }
+}
+
+.ld-shell .ld-profile { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px 10px; }
+.ld-profile-info { min-width: 0; flex: 1 1 140px; overflow-wrap: anywhere; }
+.ld-shell .ld-aside > .artifact-preview { min-width: 0; max-width: 100%; box-sizing: border-box; }
+@media (max-width: 700px) {
+  .ld-composer-bar { gap: 4px; }
+  .ld-composer-bar .ld-actions { gap: 4px; }
+  .ld-composer-bar .ld-actions:first-child { flex: 1 1 220px; }
+  .ld-composer-bar .ld-model { flex: 1 1 65px; min-width: 0; }
+  .ld-composer-bar .ld-model select { width: 100%; min-width: 0; }
+}

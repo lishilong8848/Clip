@@ -471,7 +471,7 @@ class ToolWorkspaceMixin:
                 layouts[key] = json.loads(db.execute(
                     "SELECT layout FROM tool_workspace_templates WHERE cache_key=?", (key,),
                 ).fetchone()[0])
-                if not layouts[key].get("editable_grid_version"):
+                if layouts[key].get("editable_grid_version") != 2:
                     content = db.execute("SELECT content FROM tool_workspace_templates WHERE cache_key=?", (key,)).fetchone()[0]
                     layouts[key] = json.loads(_legacy_grid(content))
             order = orders.get(item['order_id'])
@@ -602,7 +602,7 @@ class ToolWorkspaceMixin:
             row = db.execute("SELECT * FROM tool_workspace_templates WHERE cache_key=?", (cache_key,)).fetchone()
         if row:
             layout = json.loads(row["layout"])
-            if layout.get('editable_grid_version'):
+            if layout.get('editable_grid_version') == 2:
                 return cache_key, row["content"], layout
             content = row["content"]
         else:

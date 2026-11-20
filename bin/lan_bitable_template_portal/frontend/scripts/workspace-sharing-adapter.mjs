@@ -2,6 +2,7 @@ import { modernizeControls } from './workspace-learning-adapter.mjs';
 
 // Keep the shared controller; V2 exposes every mode and protects hidden manual questions.
 export function adaptLearningSharing(source) {
+  source = source.replace("from './ConfirmDialog.vue'", "from '../workspace-v2/LearningConfirmation.vue'");
   source = source.replace('<NRadioButton v-if="importing" value="import">', '<NRadioButton value="import">');
   source = source.replace('<section v-if="manualEditing" class="sharing-manual-create"', `<p v-if="!manualEditing && filledManualQuestions.length" class="sharing-hint" role="status">已保留 {{ filledManualQuestions.length }} 道手工题目。切回手工出题可继续编辑；如要改用资料出题或文件导入，请先处理这些题目。</p>
         <section v-if="manualEditing" class="sharing-manual-create"`);

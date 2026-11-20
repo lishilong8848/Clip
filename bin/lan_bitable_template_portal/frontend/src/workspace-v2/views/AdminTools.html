@@ -1,0 +1,27 @@
+<section v-if="open" class="serenity-desk platform-desk admin-shell" aria-label="平台运维">
+  <AdminWorkspaceChrome v-if="systemAdmin" :tabs="adminTabs" :active-tab="tab" :advanced-visible="advancedDiagnosticsVisible" @select-tab="selectAdminTab"/>
+  <header v-else class="serenity-heading"><h1>账号与权限</h1><button type="button" @click="closeAdmin">返回个人信息</button></header>
+  <MessageBanner v-if="message" :text="message"/>
+  <AdminAccounts v-if="tab==='permissions'||!systemAdmin" :pending-count="systemAdmin?pendingPermissionRequestCount:0" :permissions="systemAdmin?permissions.users:[]" @changed="loadPermissions">
+    <AdminPermissionPane v-if="systemAdmin" :busy="busy" :pending-request-count="pendingPermissionRequestCount"
+      v-model:request-search="permissionRequestSearch" v-model:request-status="permissionRequestStatus" v-model:reject-reason="permissionRejectReason"
+      :request-items="filteredPermissionRequests" :scope-options="scopeOptions" :selected-request-ids="selectedRequestIds" :all-filtered-pending-selected="allFilteredPendingSelected"
+      :selected-pending-count="selectedPendingRequestIds.length" :request-status-label="permissionRequestStatusLabel" :request-scope-labels="requestScopeLabels"
+      :current-scope-labels="currentScopeLabels" :review-scopes="reviewScopes" :users="permissions.users" @load-permissions="loadPermissions"
+      @load-requests="loadPermissionRequests" @approve-selected="approveSelectedPermissionRequests" @reject-selected="rejectSelectedPermissionRequests"
+      @toggle-all="toggleAllFilteredPermissionRequests" @toggle-selection="togglePermissionRequestSelection" @toggle-review-scope="toggleReviewScope"
+      @approve="approvePermissionRequest" @reject="rejectPermissionRequest"/>
+  </AdminAccounts>
+  <template v-else-if="tab==='status'"><p v-if="statusUnavailable" role="alert">{{ statusUnavailable }}</p>
+    <AdminStatusPane :stats="stats" :perf="perf" :queues="queues" :consistency="consistency" :busy="busy||statusLoading" :recent-jobs="recentJobs" :operation-audits="operationAudits"
+      :notice-diagnostic="noticeDiagnostic" :notice-diagnostic-loading="noticeDiagnosticLoading" v-model:notice-diagnostic-query="noticeDiagnosticQuery"
+      @refresh="loadStatus" @run-notice-diagnostic="runNoticeDiagnostic" @repair-notice-projection="repairNoticeProjection" @preflight="runPreflight" @cleanup="cleanupJobs"
+      @open-history-memory="openHistoryMemory" @retry-job="retryJob" @clear-job="clearJob" @mark-stuck-failed="markStuckFailed"/></template>
+  <AdminHandoverPane v-else-if="tab==='handover'" :building-scopes="buildingScopes" :links="handoverLinks" :password="handoverPassword" :busy="busy"
+    @update-link="updateHandoverLink" @update-password="updateHandoverPassword" @refresh="loadHandover" @save="saveHandover"/>
+  <AdminMopSettingsPane v-else-if="tab==='mop'" :settings="mopSettings" :busy="busy" @update-field="updateMopSettingField" @refresh="loadMopSettings" @save="saveMopSettings"/>
+  <FeishuAssistantSettings v-else-if="tab==='feishu'"/><DingTalkNoticeSettings v-else-if="tab==='dingtalk'" ref="dingTalkSettings"/>
+  <ReleaseJournalPage v-else-if="tab==='development'"/><AdminPressurePane v-else-if="tab==='pressure'" :pressure="pressure" :pressure-result="pressureResult" :busy="busy" @update-pressure="updatePressureField" @run="runMockPressure"/>
+  <ConfirmDialog :open="confirmDialog.open" :tone="confirmDialog.tone" :title="confirmDialog.title" :kicker="confirmDialog.kicker" :message="confirmDialog.message"
+    :details="confirmDialog.details" :confirm-label="confirmDialog.confirmLabel" :cancel-label="confirmDialog.cancelLabel" :confirm-class="confirmDialog.confirmClass" @resolve="resolveConfirm"/>
+</section>

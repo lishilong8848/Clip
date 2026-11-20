@@ -133,8 +133,8 @@ try {
   await page.getByText('A楼BA系统资料维护',{exact:true}).first().waitFor();
   assert.equal(new URL(page.url()).pathname,entry);
   assert.equal(await page.evaluate(()=>localStorage.getItem('clipflow:frontend-version:ou_v2_fixture')),'workspace');
-  assert.equal(await page.locator('.v2-sidebar').getByRole('menuitem',{name:'通告办理',exact:true}).count(),1);
-  assert.equal(await page.locator('.v2-sidebar').getByRole('menuitem',{name:/^(维保通告|变更通告|检修通告|设备轮巡|设备调整|上下电通告|灯塔助手|楼栋待办)$/}).count(),0,'no duplicate module entries');
+  assert.equal(await page.locator('.v2-topnav').getByRole('menuitem',{name:'通告办理',exact:true}).count(),1);
+  assert.equal(await page.locator('.v2-topnav').getByRole('menuitem',{name:/^(维保通告|变更通告|检修通告|设备轮巡|设备调整|上下电通告|灯塔助手|楼栋待办)$/}).count(),0,'no duplicate module entries');
   assert.equal(await page.locator('.v2-metrics,.v2-charts,.v2-business-overviews,.v2-priority,.v2-functions').count(),0,'home is an action surface, without dashboard panels or duplicate lists');
   assert.equal(await page.getByRole('navigation',{name:'常用操作'}).getByRole('button').count(),4);
   assert.equal(await page.getByText('已结束验收通告',{exact:true}).count(),0);
@@ -178,7 +178,7 @@ try {
     console.error('Customization geometry:',await page.locator('.grid-stack-item').evaluateAll(items=>items.map(el=>({id:el.dataset.widgetId,attributes:[...el.attributes].filter(a=>a.name.startsWith('gs-')).map(a=>[a.name,a.value]),node:el.gridstackNode&&{x:el.gridstackNode.x,y:el.gridstackNode.y,w:el.gridstackNode.w,h:el.gridstackNode.h,minH:el.gridstackNode.minH},box:{top:el.getBoundingClientRect().top,bottom:el.getBoundingClientRect().bottom}}))));
     throw error;
   }
-  assert.equal(await page.locator('.v2-sidebar').getByRole('menuitem',{name:'账号与权限',exact:true}).count(),0,'settings lives in the personal page');
+  assert.equal(await page.locator('.v2-topnav').getByRole('menuitem',{name:'账号与权限',exact:true}).count(),0,'settings lives in the personal page');
   await page.getByRole('button',{name:'打开个人页面',exact:true}).click();
   await page.getByRole('heading',{name:'验收管理员',exact:true}).waitFor();
   await page.getByRole('button',{name:'退出登录',exact:true}).waitFor();
@@ -351,13 +351,13 @@ try {
   user={open_id:'ou_assistant_fixture',name:'会话验收',role:'building',level:'L4',category:'operator',modules:['assistant']};scopes=[{value:'A',label:'A楼'}];
   assistantTurn={operation_id:'isolated-turn',question:'展示隔离验收消息',status:'pending',answer:'',process:[]};
   const chatContext=await context(),chatPage=await chatContext.newPage();await chatPage.goto(origin+entry);
-  assert.equal(await chatPage.locator('.v2-sidebar').getByRole('menuitem',{name:'灯塔助手',exact:true}).count(),0);
+  assert.equal(await chatPage.locator('.v2-topnav').getByRole('menuitem',{name:'灯塔助手',exact:true}).count(),0);
   await chatPage.getByRole('button',{name:'打开灯塔助手',exact:true}).click();await chatPage.locator('.assistant-shell').waitFor();await chatPage.getByText('展示隔离验收消息',{exact:true}).waitFor();
   for(const width of [1440,390]){await chatPage.setViewportSize({width,height:width<700?844:1000});await chatPage.screenshot({path:path.join(output,`assistant-${width}.png`),fullPage:true});const box=await chatPage.locator('.assistant-shell').boundingBox();assert(box.x>=0&&box.x+box.width<=width+1,'assistant remains within viewport');}
   await chatPage.getByRole('button',{name:'收起助手',exact:true}).click();await chatPage.locator('.assistant-shell').waitFor({state:'hidden'});await chatContext.close();assistantTurn=null;
 
   user={open_id:'guest_fixture',name:'机柜访客',role:'guest',category:'other',level:'',modules:['cabinet']};scopes=[{value:'A',label:'A楼'}];
-  const guests=await context(),guest=await guests.newPage();await guest.goto(origin+entry);await guest.locator('.cabinet-page').waitFor();assert.equal(await guest.getByRole('button',{name:'一键导出/上传所有楼栋'}).count(),0);assert.equal(await guest.getByRole('button',{name:'打开灯塔助手'}).count(),0);assert.equal(await guest.locator('.v2-sidebar,.v2-mobile-nav').count(),0,'guest has no irrelevant module navigation');await guests.close();
+  const guests=await context(),guest=await guests.newPage();await guest.goto(origin+entry);await guest.locator('.cabinet-page').waitFor();assert.equal(await guest.getByRole('button',{name:'一键导出/上传所有楼栋'}).count(),0);assert.equal(await guest.getByRole('button',{name:'打开灯塔助手'}).count(),0);assert.equal(await guest.locator('.v2-topnav,.v2-mobile-nav').count(),0,'guest has no irrelevant module navigation');await guests.close();
 
   loggedIn=false;
   const anonymous=await context(),login=await anonymous.newPage();

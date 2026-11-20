@@ -25,13 +25,15 @@ from openpyxl.drawing.image import Image as WorkbookImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles.colors import COLOR_INDEX
+from openpyxl.styles.numbers import is_datetime
 from openpyxl.utils.cell import column_index_from_string, get_column_letter
+from openpyxl.utils.datetime import from_excel, to_excel
 from openpyxl.utils.units import EMU_to_pixels, pixels_to_EMU, points_to_pixels
 from PIL import Image, ImageChops, UnidentifiedImageError
 
 from .drill_management import _theme_colors
 from .risk_inspection import RiskError, text
-from .tool_self_check import RESULTS, parse_template, timestamp
+from .tool_self_check import RESULTS, checked_pair, parse_template, timestamp
 from .tool_form_titles import display_titles, restore_titles, title_anchors
 
 
@@ -218,7 +220,8 @@ def _images(sheet, columns, heights):
 
 def _grid_size(sheet):
     populated = [cell for cell in sheet._cells.values()
-                 if cell.value is not None and (not isinstance(cell.value, str) or cell.value.strip())]
+                 if (cell.value is not None and str(cell.value).strip())
+                 or (cell.row <= 113 and cell.column <= 24)]
     max_row = max((cell.row for cell in populated), default=1)
     max_col = max((cell.column for cell in populated), default=1)
     for region in sheet.merged_cells.ranges:
@@ -232,8 +235,80 @@ def _review_cells(schema):
     return {*_review_addresses(schema).values(), f'E{schema["result_row"]}'}
 
 
+# Only recognize complete placeholders, so prose such as “每日检查时间” stays text.
+_SLOT = r'[\s\d＿_年月日时分秒:：/.-]*'
+_CALENDAR = re.compile(rf'{_SLOT}年{_SLOT}月{_SLOT}')
+_CLOCK = re.compile(rf'{_SLOT}时{_SLOT}分{_SLOT}')
+
+
+def _input_kind(cell):
+    value = str(cell.value or '').strip()
+    if _CALENDAR.fullmatch(value):
+        return 'datetime-local' if '时' in value else 'date' if '日' in value else 'month'
+    if _CLOCK.fullmatch(value):
+        return 'time'
+    fmt = is_datetime(cell.number_format)
+    if fmt == 'date' and 'd' not in cell.number_format.lower() and 'm' in cell.number_format.lower():
+        return 'month'
+    return {'datetime': 'datetime-local', 'date': 'date', 'time': 'time'}.get(fmt)
+
+
+def _date_targets(sheet):
+    """Read adjacent form labels, including the right edge of merged labels."""
+    right = {(area.min_row, area.min_col): area.max_col for area in sheet.merged_cells.ranges}
+    targets = {}
+    for cell in sheet._cells.values():
+        if not isinstance(cell.value, str):
+            continue
+        label = ''.join(cell.value.split()).rstrip('：:')
+        if not label.endswith(('日期', '时刻', '时间')):
+            continue
+        col = right.get((cell.row, cell.column), cell.column) + 1
+        target = sheet._cells.get((cell.row, col))
+        if target is None or isinstance(target, MergedCell) or target.value is None or isinstance(target.value, (int, float, date, time)):
+            targets[(cell.row, col)] = 'date' if label.endswith('日期') else 'time' if label.endswith('时刻') else 'datetime-local'
+    return targets
+
+
+def _write_input(cell, value, label_kind=None):
+    """Keep native Excel dates numeric and text placeholders in their original notation."""
+    kind = _input_kind(cell) or label_kind
+    if kind and value:
+        try:
+            if kind == 'month':
+                parsed = date.fromisoformat(value[:7] + '-01') if len(value) == 7 else date.fromisoformat(value)
+            elif kind == 'time':
+                parsed = time.fromisoformat(value)
+            else:
+                parsed = datetime.fromisoformat(value)
+            if getattr(parsed, 'tzinfo', None) is not None:
+                raise ValueError
+        except ValueError:
+            pass  # Existing literal overrides and old drafts remain exportable.
+        else:
+            if is_datetime(cell.number_format):
+                cell.value = parsed.date() if kind == 'date' and isinstance(parsed, datetime) else parsed
+                return
+            if label_kind and isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
+                cell.value = to_excel(parsed, cell.parent.parent.epoch)
+                return
+            original = str(cell.value or '')
+            if _CALENDAR.fullmatch(original.strip()) or _CLOCK.fullmatch(original.strip()):
+                if kind == 'datetime-local' and len(value) == 10:
+                    original = original[:original.index('日')+1] if '日' in original else original
+                units = {'年': '%Y', '月': '%m', '日': '%d', '时': '%H', '分': '%M', '秒': '%S'}
+                value = re.sub(r'[\s\d＿_]*([年月日时分秒])', lambda m: parsed.strftime(units[m[1]]) + m[1], original).strip()
+                if kind == 'datetime-local' and '分' not in original and parsed.minute:
+                    value += parsed.strftime('%M分')
+                if kind in {'datetime-local', 'time'} and '秒' not in original and parsed.second:
+                    value += parsed.strftime('%S秒')
+    cell.value = value
+    cell.data_type = 's'
+
+
 def _describe_sheet(sheet, editable, checks, theme, reserved=()):
     max_row, max_col = _grid_size(sheet)
+    targets = _date_targets(sheet)
     merges = {(area.min_row, area.min_col): (area.size['rows'], area.size['columns'])
               for area in sheet.merged_cells.ranges}
     columns = [_column_width(sheet, index) for index in range(1, max_col + 1)]
@@ -251,7 +326,16 @@ def _describe_sheet(sheet, editable, checks, theme, reserved=()):
             style = _style(cell, theme)
             if can_edit and _invisible_input_ink(cell, theme):
                 style['color'] = '#000000'
+            kind = _input_kind(cell) or targets.get((index,column))
+            picker_default = None
+            if kind and type(cell.value) in (int, float):
+                try:
+                    picker_default = from_excel(cell.value, sheet.parent.epoch).isoformat()
+                except (ValueError, OverflowError):
+                    kind = None
             cells.append({'address': cell.coordinate, 'value': _preview_value(cell.value),
+                          **({'input_kind': kind} if kind else {}),
+                          **({'picker_default': picker_default} if picker_default else {}),
                           'rowspan': rowspan, 'colspan': colspan, 'style': style,
                           'editable': can_edit, 'text_editable': not can_edit and cell.coordinate not in reserved,
                           **({'check': True} if check else {})})
@@ -277,11 +361,14 @@ def describe(content):
         for sheet in book.worksheets:
             if sheet.title == schema['sheet']:
                 model = _describe_sheet(sheet, editable, checks, theme, _review_cells(schema))
-                model['titles'] = display_titles(title_anchors(content, sheet.title), model, theme)
                 sheets.append(model | {'review': _review_addresses(schema)})
             elif sheet.sheet_state == 'visible':
                 sheets.append(_describe_sheet(sheet, set(), set(), theme))
-        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest, 'editable_grid_version': 1,
+            else:
+                continue
+            model = sheets[-1]
+            model['titles'] = display_titles(title_anchors(content, sheet.title), model, theme)
+        return {'sheets': sheets, 'schema': schema, 'template_sha256': digest, 'editable_grid_version': 2,
                 'prefill_fields': {'assets': assets, 'inspector': inspector, 'checked_at': checked_at,
                                    'inspector_default': inspector_default}}
     finally:
@@ -354,12 +441,13 @@ def _input_layout(content, expected_sha256):
     book = load_workbook(io.BytesIO(content), keep_links=False)
     try:
         _, check_cells, _ = _layout(book[schema['sheet']], schema)
-        allowed = {schema['sheet'] + '!' + key for key in title_anchors(content, schema['sheet'])}
+        allowed = set()
         for sheet in book.worksheets:
             form = sheet.title == schema['sheet']
             if not form and sheet.sheet_state != 'visible':
                 continue
             reserved = check_cells | _review_cells(schema) if form else set()
+            allowed.update(_key(sheet, key) for key in title_anchors(content, sheet.title))
             height, width = _grid_size(sheet)
             for row in sheet.iter_rows(max_row=height, max_col=width):
                 for cell in row:
@@ -488,6 +576,7 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
         with ZipFile(io.BytesIO(content)) as package:
             theme = _theme_colors(package)
         fields = _asset_values(asset, asset_fields)
+        targets = {tab.title: _date_targets(tab) for tab in book.worksheets}
         for key, value in values.items():
             sheet_name, address = key.rsplit('!', 1)
             if address.startswith('@title'):
@@ -496,19 +585,22 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
                 fields[address] = value
             else:
                 cell = book[sheet_name][address]
-                cell.value = value
-                cell.data_type = 's'
+                _write_input(cell, value, targets[sheet_name].get((cell.row, cell.column)))
         for address, answer in answers.items():
-            fields[address] = '是[√]  否[ ]' if answer == '是' else '是[ ]  否[√]'
+            fields[address] = checked_pair(sheet[address].value, answer == '是')
         completed = completion == 'completed' if completion else all(answer == '是' for answer in answers.values())
-        fields[f'E{schema["result_row"]}'] = '已完成[√]            未完成[ ]' if completed else '已完成[ ]            未完成[√]'
+        result_address = f'E{schema["result_row"]}'
+        fields[result_address] = checked_pair(sheet[result_address].value, completed, ('已完成', '未完成'))
         review = _review_addresses(schema)
         fields[review['reviewer_address']] = reviewer
         fields[review['reviewed_at_address']] = reviewed_at.replace('T', ' ')
         for address, value in fields.items():
             cell = sheet[address]
-            cell.value = value
-            cell.data_type = 's'
+            if address in _review_cells(schema):
+                cell.value = value
+                cell.data_type = 's'
+            else:
+                _write_input(cell, value, targets[sheet.title].get((cell.row, cell.column)))
             if _invisible_input_ink(cell, theme):
                 font = copy(cell.font)
                 font.color = '000000'
@@ -520,6 +612,9 @@ def fill(content, values, reviewer, reviewed_at, signature, checks, asset, *, ex
             original_sheet.column_dimensions.max_outline = original_sheet.sheet_format.outlineLevelCol
         output = io.BytesIO()
         book.save(output)
-        return restore_titles(content, output.getvalue(), sheet.title, values)
+        saved = output.getvalue()
+        for original_sheet in book.worksheets:
+            saved = restore_titles(content, saved, original_sheet.title, values)
+        return saved
     finally:
         book.close()

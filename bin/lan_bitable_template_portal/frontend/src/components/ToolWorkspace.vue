@@ -227,7 +227,10 @@
                           </select>
                           <input v-else-if="reviewCell(cell) === 'time' && item.can_review" type="datetime-local"
                             aria-label="审核年月日时" :value="reviewDates[item.id] || ''" :disabled="!!busy" @input="setReviewDate" />
-                          <input v-else-if="cell.editable" :type="editCellType(cell)" :value="inputCellValue(cell)"
+                          <ToolWorkbookInput v-else-if="!reviewCell(cell) && item.can_edit && editable && specialCell(cell)" :key="cellKey(cell)"
+                            :kind="cellDateKind(cell)" :label="'填写 '+cellKey(cell)" :value="String(inputCellValue(cell))" :original="String(cell.value ?? '')"
+                            :disabled="!!busy" @change="value=>setCellValue(cell,value)"/>
+                          <input v-else-if="cell.editable" type="text" :value="inputCellValue(cell)"
                             :disabled="!item.can_edit || !!busy" :aria-label="'填写 ' + cellKey(cell)" @input="setCell(cell, $event)" />
                           <template v-else-if="reviewCell(cell)">
                             <span v-if="isSignatureCell(cell) && isPng(item.signature || reviewSignatures[item.id])" class="signed-cell">
@@ -243,7 +246,7 @@
                           <button v-else-if="cell.text_editable && item.can_edit" type="button" class="sheet-text-button"
                             :aria-label="'编辑 ' + cellKey(cell) + ' ' + inputCellValue(cell)" :disabled="!!busy"
                             @click="editingText = item.id + ':' + cellKey(cell)">{{ inputCellValue(cell) }}</button>
-                          <span v-else>{{ item.values[cellKey(cell)] ?? cell.value }}</span>
+                          <span v-else>{{ sheetText(cell) }}</span>
                         </td>
                       </tr>
                     </tbody>
@@ -373,6 +376,8 @@
 
 <script setup lang="ts">
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue';
+import ToolWorkbookInput from './ToolWorkbookInput.vue';
+import {boxParts,displayToolDate,type ToolDateKind} from './toolWorkbookFields';
 import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadio, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { requestBinaryJson, requestJson } from '../api/client';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
@@ -384,7 +389,7 @@ type Asset = { id: string; name: string; scope: string; model?: string; brand?: 
   disabled_reason?: string };
 type Template = { id: string; name?: string; label?: string };
 type Cell = { address: string; value: string | number | boolean | null; rowspan: number; colspan: number;
-  style?: Record<string, string | number>; editable?: boolean; text_editable?: boolean; check?: boolean };
+  style?: Record<string, string | number>; editable?: boolean; text_editable?: boolean; check?: boolean; input_kind?:ToolDateKind; picker_default?:string };
 type Sheet = { name: string; columns: number[]; rows: { index: number; height: number; cells: Cell[] }[];
   titles?: {key:string;text:string;x:number;y:number;width:number;height:number;size:number;color?:string;background?:string}[];
   review?: { reviewer_address: string; reviewed_at_address: string; signature_address: string };
@@ -674,15 +679,23 @@ function reviewText(cell: Cell) {
     default: return cell.value;
   }
 }
-function editCellType(cell: Cell) {
+function cellDateKind(cell: Cell):ToolDateKind|undefined {
+  if (cell.input_kind) return cell.input_kind;
   const layout = item.value?.template;
-  if (!layout || layout.schema?.sheet !== activeSheet.value?.name) return 'text';
+  if (!layout || layout.schema?.sheet !== activeSheet.value?.name) return;
   const dateAddress = layout.prefill_fields?.checked_at || (layout.schema?.layout === 'hvac' ? 'G11' : 'G8');
-  return cell.address === dateAddress ? 'date' : 'text';
+  if (cell.address === dateAddress) return String(cell.value).includes('时') ? 'datetime-local' : 'date';
 }
 function inputCellValue(cell: Cell) {
-  const value = item.value?.values[cellKey(cell)] ?? cell.value ?? '';
-  return editCellType(cell) === 'date' ? String(value).slice(0, 10) : value;
+  return item.value?.values[cellKey(cell)] ?? cell.picker_default ?? cell.value ?? '';
+}
+function sheetText(cell:Cell) {
+  const value = inputCellValue(cell);
+  const kind = cellDateKind(cell);
+  return kind ? displayToolDate(kind,String(value),String(cell.value ?? '')) : value;
+}
+function specialCell(cell:Cell) {
+  return !!cellDateKind(cell) || boxParts(String(cell.value ?? '')).parts.length>0 || boxParts(String(inputCellValue(cell))).parts.length>0;
 }
 function setCompletion(event: Event) {
   if (item.value?.can_edit) item.value.completion = (event.target as HTMLSelectElement).value;
@@ -723,7 +736,10 @@ function normalFill() {
   current.outcome = 'normal';
 }
 function setCell(cell: Pick<Cell,'address'>, event: Event) {
-  if (item.value && editable.value) item.value.values[cellKey(cell)] = (event.target as HTMLInputElement).value;
+  setCellValue(cell,(event.target as HTMLInputElement).value);
+}
+function setCellValue(cell: Pick<Cell,'address'>, value:string) {
+  if (item.value?.can_edit && editable.value && !busy.value) item.value.values[cellKey(cell)] = value;
 }
 function setCheck(cell: Cell, event: Event) {
   if (!item.value || !editable.value) return;
@@ -1334,7 +1350,7 @@ onBeforeUnmount(() => {
 .sheet-frame { position: relative; }
 .sheet-table { border-collapse: collapse; table-layout: fixed; width: 100%; background: #fff; color: #141414; font-size: 13px; }
 .sheet-table td { border: 1px solid #cbd1d8; vertical-align: middle; white-space: pre-wrap; overflow-wrap: anywhere; }
-.sheet-table input, .sheet-table select { box-sizing: border-box; width: 100%; min-width: 0; min-height: 22px; padding: 1px 3px; border: 1px solid #9ab6e7; border-radius: 2px !important; color: #182333; background: #eff6ff; font: inherit; }
+.sheet-table input, .sheet-table select, .sheet-table :deep(.tool-workbook-input input:not([type=checkbox]):not([type=radio])) { box-sizing: border-box; width: 100%; min-width: 0; min-height: 22px; padding: 1px 3px; border: 1px solid #9ab6e7; border-radius: 2px !important; color: #182333; background: #eff6ff; font: inherit; }
 .sheet-frame > img { position: absolute; object-fit: contain; pointer-events: none; }
 .form-title-box { position:absolute;display:grid;align-items:center;text-align:center;white-space:pre-wrap;line-height:1.2;font-weight:700;color:#171717; }
 .sheet-text-button,.sheet-text-editor { display:block;box-sizing:border-box;width:100%;min-width:0;min-height:1.4em;padding:0 2px;font:inherit;color:inherit;text-align:inherit;white-space:pre-wrap;overflow-wrap:anywhere; }

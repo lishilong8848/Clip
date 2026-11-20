@@ -53,7 +53,7 @@ export function logicalUrl(value = window.location.href): URL {
 
 export function loginVersionUrl(version: FrontendVersion): string {
   const current = logicalUrl();
-  const selected = document.querySelector('.login-tabs [aria-selected="true"]')?.id.replace('login-tab-', '');
+  const selected = document.querySelector('[id^="login-tab-"][aria-selected="true"]')?.id.replace('login-tab-', '');
   if (selected && ['feishu', 'password', 'guest'].includes(selected)) current.searchParams.set('login', selected);
   current.searchParams.set('frontend', version);
   const fallback = new URL(current);

@@ -1,7 +1,36 @@
-<template><NModal :show="true" preset="card" class="v2-notice-confirm" title="本机办理记录" :mask-closable="!busy" :closable="!busy" :close-on-esc="!busy" @update:show="emit('close')"><NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert><NAlert v-if="missing" type="warning" :bordered="false">{{ missing }} 条本机历史记录暂未查到原任务。</NAlert><NSpin :show="loading"><NList><NListItem v-for="item in visible.slice((page-1)*10,page*10)" :key="item.job_id"><strong>{{ item.title }}</strong><p>{{ item.scope }} · {{ item.updated_at||item.created_at }} · {{ item.request?.action==='end'?'结束通告 · ':'' }}{{ phaseLabel(item.phase) }}</p><NAlert v-if="item.phase==='failed' && (item.error||item.upload_message)" type="error" :bordered="false">{{ item.error||item.upload_message }}</NAlert><p v-if="item.work_order_hint">{{ item.work_order_hint }}</p><NButton v-if="item.phase==='failed'&&item.error_retryable&&item.can_retry!==false" :disabled="busy" @click="retry(item)">重试原任务</NButton></NListItem></NList><NEmpty v-if="!loading&&!visible.length&&!error" description="本机暂无已确认的办理记录" /></NSpin><template #footer><div class="v2-dialog-actions"><NPagination v-model:page="page" :page-size="10" :item-count="visible.length" simple /><NButton :loading="loading" :disabled="busy" @click="load">刷新状态</NButton><NButton :disabled="busy" @click="emit('close')">关闭</NButton></div></template></NModal></template>
+<template>
+  <NModal :show="true" preset="card" class="v2-notice-confirm task-records" aria-label="本机办理记录"
+    :mask-closable="!busy" :closable="!busy" :close-on-esc="!busy" @update:show="emit('close')">
+    <template #header><header class="task-bar">
+      <strong>本机办理记录</strong>
+      <NButton size="small" :loading="loading" :disabled="busy" @click="load">刷新状态</NButton>
+    </header></template>
+    <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
+    <NAlert v-if="missing" type="warning" :bordered="false">{{ missing }} 条本机历史记录暂未查到原任务。</NAlert>
+    <NSpin :show="loading">
+      <ul v-if="visible.length" class="task-list">
+        <li v-for="item in visible.slice((page-1)*10,page*10)" :key="item.job_id">
+          <header class="task-bar">
+            <strong>{{ item.title }}</strong>
+            <span class="task-phase" :data-phase="item.phase">{{ phaseLabel(item.phase) }}</span>
+            <NButton v-if="item.phase==='failed' && item.error_retryable && item.can_retry!==false" size="small" :disabled="busy" @click="retry(item)">重试原任务</NButton>
+          </header>
+          <small>{{ item.scope }} · {{ item.updated_at||item.created_at }}{{ item.request?.action==='end'?' · 结束通告':'' }}</small>
+          <NAlert v-if="item.phase==='failed' && (item.error||item.upload_message)" type="error" :bordered="false">{{ item.error||item.upload_message }}</NAlert>
+          <p v-if="item.work_order_hint">{{ item.work_order_hint }}</p>
+        </li>
+      </ul>
+      <NEmpty v-else-if="!loading&&!error" description="本机暂无已确认的办理记录" />
+    </NSpin>
+    <template #footer><div class="task-bar">
+      <NPagination v-model:page="page" :page-size="10" :item-count="visible.length" simple />
+      <NButton :disabled="busy" @click="emit('close')">关闭</NButton>
+    </div></template>
+  </NModal>
+</template>
 <script setup lang="ts">
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
-import {NAlert,NButton,NEmpty,NList,NListItem,NModal,NPagination,NSpin,useMessage} from 'naive-ui';
+import {NAlert,NButton,NEmpty,NModal,NPagination,NSpin,useMessage} from 'naive-ui';
 import {requestJson,type Dict} from './client';
 import {noticeTasks} from './noticeTasks';
 import {registerNavigationGuard} from './navigation';
@@ -17,3 +46,13 @@ function visibility(){if(document.hidden)clearTimeout(timer);else void load();}
 const stop=registerNavigationGuard(()=>{if(!busy.value)return true;message.warning('正在提交重试，请等待结果');return false;});
 onMounted(()=>{void load();document.addEventListener('visibilitychange',visibility);});onBeforeUnmount(()=>{disposed=true;clearTimeout(timer);controller?.abort();stop();document.removeEventListener('visibilitychange',visibility);});
 </script>
+<style scoped>
+.task-bar {display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 10px;min-width:0}
+.task-list {list-style:none;margin:0;padding:0}
+.task-list li {padding:9px 0;border-bottom:1px solid var(--soft-edge);overflow-wrap:anywhere}
+.task-list .task-bar strong {flex:1 1 8em}
+.task-list small {color:var(--v2-muted)}
+.task-list p {margin:3px 0}
+.task-phase {padding:2px 8px;background:var(--soft-field);border-radius:8px;font-size:12px}
+.task-phase[data-phase=failed] {font-weight:650}
+</style>

@@ -1,0 +1,113 @@
+<section ref="rulesElement" class="sp-rules pc-rules" aria-label="规则配置">
+  <fieldset :disabled="disabled || busy || saving" class="sp-rule-form">
+    <header class="sp-bar"><h2>{{ draftOnly?'会话规则草稿':'规则配置' }}</h2>
+      <template v-if="!draftOnly"><label>规则集<select :value="currentSetId || ''" aria-label="选择要编辑的规则集" @change="selectSet(Number(($event.target as HTMLSelectElement).value)); ($event.target as HTMLSelectElement).value=String(currentSetId || '')"><option disabled value="">请选择</option><option v-for="s in sets" :key="s.id" :value="s.id">{{ s.name }}（{{ s.item_count || 0 }} 项）</option></select></label>
+        <button data-v2-refresh :disabled="setsLoading" @click="v2RefreshSets($event)">刷新规则集</button>
+        <template v-if="isAdmin"><input v-model="newSetName" aria-label="新规则集名称" placeholder="新规则集名称" @keydown.enter.prevent="createSet"/><button class="sp-primary" :disabled="!newSetName.trim() || setsLoading" @click="createSet">新建规则集</button></template>
+      </template><span v-else>修改将进入助手操作清单，确认后保存。</span>
+    </header>
+    <p v-if="setsError" role="alert">{{ setsError }}</p>
+    <p v-if="!draftOnly && !setsLoading && !setsError && !sets.length">暂无规则集</p>
+    <template v-if="hasCurrentSet">
+      <section class="sp-card"><header class="sp-bar"><label>名称<input v-model="name" :readonly="!isAdmin" aria-label="规则集名称"/></label><label>备注<input v-model="remark" aria-label="规则集备注" :readonly="!isAdmin"/></label>
+        <template v-if="!draftOnly"><button data-v2-refresh @click="v2ReloadSet($event)">读取最新规则</button><button :disabled="expanding" @click="previewExpand">展开覆盖设备</button>
+          <button v-if="isAdmin" class="sp-primary" @click="saveSet">保存规则集</button><button v-if="isAdmin" @click="deleteSet">删除规则集</button></template>
+        <small v-if="dirty">有未保存的修改</small></header>
+        <div class="sp-tools"><h3>屏蔽条目</h3><small>{{ drafts.length }} 组 · {{ allDraftItems(drafts).length }} 项</small>
+          <button v-if="isAdmin" :disabled="mergeSel.length<2" @click="mergeSelected">合并普通条目（{{ mergeSel.length }}）</button>
+          <button v-if="isAdmin" :disabled="!drafts.length" @click="clearAll">清除全部</button></div>
+        <div class="sp-grid"><article v-for="(d,i) in drafts" :key="i" class="sp-item">
+          <label>条目名称<input v-model="d.label" :readonly="!isAdmin" :aria-label="'条目名称 '+(i+1)"/></label>
+          <div class="sp-tools"><button :disabled="!isAdmin" :aria-label="'切换条目类型 '+(i+1)" @click="toggleCommon(i)">{{ d.rule_type==='common'?'公共':'普通' }}</button>
+            <label v-if="isAdmin && d.rule_type==='normal'"><input type="checkbox" :checked="mergeSel.includes(i)" @change="toggleMergeSel(i)"/>选入合并</label>
+            <button @click="openGroupDetail(i)"><Eye :size="14"/>详情（{{ d.items.length }} 项）</button>
+            <button v-if="isAdmin" @click="removeGroup(i)">移除</button></div>
+        </article></div><p v-if="!drafts.length">当前规则集还没有屏蔽条目。</p>
+      </section>
+      <section v-if="isAdmin" class="sp-card"><header class="sp-bar"><h2>选择屏蔽范围</h2><small>预计 {{ selectionItemCount(objSelCount,roomSelCount,devSelCount,ptSelCount) }} 项 / 上限 500</small>
+        <button @click="resetPicker()">重置选择</button><button class="sp-primary" @click="addEntry">添加屏蔽范围</button></header>
+        <div class="sp-columns">
+        <section class="sp-picker-card">
+          <header class="sp-tools"><h3>设备类型</h3><small>已选 {{ objSelCount }}</small>
+            <button v-if="isAdmin" :disabled="saving || busy || objLoading || !objsFiltered.length" @click="toggleColAll('obj')">{{ objAllChecked?'取消全选':'全选结果' }}</button></header>
+          <input v-model="objKw" type="search" aria-label="搜索设备类型" placeholder="搜索设备类型"/>
+          
+          <p v-if="objError" role="alert">{{ objError }} <button @click="loadTypes()">重试</button></p>
+          <p v-if="objLoading" role="status">正在读取设备类型…</p>
+          <div class="sp-options"><div v-for="(item,i) in objPageItems" :key="item.obj_name" class="sp-option">
+            <label><input type="checkbox" :disabled="!isAdmin || busy || saving || objLoading" :checked="item._checked" @change="onObjCheck(item,$event)"/><span>{{ item.obj_name || item.obj_name }} <small>{{ item.devices }} 台</small></span></label>
+            
+          </div></div>
+          <p v-if="!objLoading && !objError && !objsFiltered.length">{{ '暂无匹配设备类型' }}</p>
+          <small v-if="objHasMore">仅显示已加载的候选，可缩小搜索范围。</small>
+          <div v-if="objPagesCount>1" class="sp-tools"><button :disabled="objPage<=1" @click="objPage--">上一页</button>{{ objPage }} / {{ objPagesCount }}<button :disabled="objPage>=objPagesCount" @click="objPage++">下一页</button></div>
+        </section>
+
+        <section class="sp-picker-card">
+          <header class="sp-tools"><h3>空间</h3><small>已选 {{ roomSelCount }}</small>
+            <button v-if="isAdmin" :disabled="saving || busy || roomLoading || !roomFiltered.length" @click="toggleColAll('room')">{{ roomAllChecked?'取消全选':'全选结果' }}</button></header>
+          <input v-model="roomKw" type="search" aria-label="搜索空间" placeholder="搜索空间"/>
+          <nav class="sp-tools" aria-label="空间路径"><button :disabled="!drill.zone" @click="crumbTo('root')">全部空间</button><button v-if="drill.zone" @click="crumbTo('zone')">{{ drill.zone }}</button><button v-if="drill.building" @click="crumbTo('building')">{{ drill.building }}</button><span>{{ drill.floor }}</span></nav>
+          <p v-if="roomError" role="alert">{{ roomError }} <button @click="loadRoomLevel(rooms.filter(r=>r._checked))">重试</button></p>
+          <p v-if="roomLoading" role="status">正在读取空间…</p>
+          <div class="sp-options"><div v-for="(item,i) in roomPageItems" :key="roomNodeKey(item)" class="sp-option">
+            <label><input type="checkbox" :disabled="!isAdmin || busy || saving || roomLoading" :checked="item._checked" @change="onRoomCheck(item,$event)"/><span>{{ item.name || item.key }} <small>{{ item.level }}</small></span></label>
+            <button v-if="item.level!=='room'" :aria-label="'进入 '+item.name" @click="drillDown(item)">进入</button>
+          </div></div>
+          <p v-if="!roomLoading && !roomError && !roomFiltered.length">{{ '暂无匹配空间' }}</p>
+          <small v-if="roomHasMore">仅显示已加载的候选，可缩小搜索范围。</small>
+          <div v-if="roomPagesCount>1" class="sp-tools"><button :disabled="roomPage<=1" @click="roomPage--">上一页</button>{{ roomPage }} / {{ roomPagesCount }}<button :disabled="roomPage>=roomPagesCount" @click="roomPage++">下一页</button></div>
+        </section>
+
+        <section class="sp-picker-card">
+          <header class="sp-tools"><h3>设备</h3><small>已选 {{ devSelCount }}</small>
+            <button v-if="isAdmin" :disabled="saving || busy || devLoading || !devFiltered.length" @click="toggleColAll('dev')">{{ devAllChecked?'取消全选':'全选结果' }}</button></header>
+          <input v-model="devKw" type="search" aria-label="搜索设备" placeholder="搜索设备"/>
+          
+          <p v-if="devError" role="alert">{{ devError }} <button @click="reloadRemote('dev')">重试</button></p>
+          <p v-if="devLoading" role="status">正在读取设备…</p>
+          <div class="sp-options"><div v-for="(item,i) in devPageItems" :key="devKey(item)" class="sp-option">
+            <label><input type="checkbox" :disabled="!isAdmin || busy || saving || devLoading" :checked="item._checked" @change="onDevCheck(item,$event)"/><span>{{ item.inst_name || item.ins_id }} <small>{{ item.position }}</small></span></label>
+            <button :aria-label="'详情 '+item.inst_name" @click="openDevDetail(item)"><Eye :size="14"/></button>
+          </div></div>
+          <p v-if="!devLoading && !devError && !devFiltered.length">{{ !hasObjCtx && !hasRoomCtx ? '先选择类型或空间' : '暂无匹配设备' }}</p>
+          <small v-if="devHasMore">仅显示已加载的候选，可缩小搜索范围。</small>
+          <div v-if="devPagesCount>1" class="sp-tools"><button :disabled="devPage<=1" @click="devPage--">上一页</button>{{ devPage }} / {{ devPagesCount }}<button :disabled="devPage>=devPagesCount" @click="devPage++">下一页</button></div>
+        </section>
+
+        <section class="sp-picker-card">
+          <header class="sp-tools"><h3>告警规则</h3><small>已选 {{ ptSelCount }}</small>
+            <button v-if="isAdmin" :disabled="saving || busy || ptLoading || !ptFiltered.length" @click="toggleColAll('pt')">{{ ptAllChecked?'取消全选':'全选结果' }}</button></header>
+          <input v-model="ptKw" type="search" aria-label="搜索告警规则" placeholder="搜索告警规则"/>
+          
+          <p v-if="ptError" role="alert">{{ ptError }} <button @click="reloadRemote('pt')">重试</button></p>
+          <p v-if="ptLoading" role="status">正在读取告警规则…</p>
+          <div class="sp-options"><div v-for="(item,i) in ptPageItems" :key="ptKey(item)" class="sp-option">
+            <label><input type="checkbox" :disabled="!isAdmin || busy || saving || ptLoading" :checked="item._checked" @change="onPtCheck(item,$event)"/><span>{{ item.alarm_name || item.alarm_config_id }} <small>{{ item.classify_model }}</small></span></label>
+            <button :aria-label="'详情 '+item.alarm_name" @click="openPtDetail(item)"><Eye :size="14"/></button>
+          </div></div>
+          <p v-if="!ptLoading && !ptError && !ptFiltered.length">{{ !hasObjCtx && !hasDevCtx && !hasRoomCtx ? '先选择设备、类型或空间' : '暂无匹配告警规则' }}</p>
+          <small v-if="ptHasMore">仅显示已加载的候选，可缩小搜索范围。</small>
+          <div v-if="ptPagesCount>1" class="sp-tools"><button :disabled="ptPage<=1" @click="ptPage--">上一页</button>{{ ptPage }} / {{ ptPagesCount }}<button :disabled="ptPage>=ptPagesCount" @click="ptPage++">下一页</button></div>
+        </section>
+        </div>
+        <div v-if="devSel.length || ptSel.length" class="sp-tools"><span>已勾选</span>
+          <label v-for="d in devSel" :key="devKey(d)"><input type="checkbox" :checked="d._checked" @change="onDevCheck(d,$event)"/>{{ d.inst_name }}</label>
+          <label v-for="p in ptSel" :key="ptKey(p)"><input type="checkbox" :checked="p._checked" @change="onPtCheck(p,$event)"/>{{ p.alarm_name }}</label></div>
+      </section>
+    </template>
+  </fieldset>
+  <div v-if="toast.msg" class="sp-alert" :role="toast.type==='error'?'alert':'status'">{{ toast.msg }} <button aria-label="关闭提示" @click="toast.msg=''">关闭</button></div>
+  <Teleport to="body">
+    <div v-if="preview.open" class="sp-modal-backdrop" @mousedown.self="closePreview">
+      <section ref="modalElement" tabindex="-1" role="dialog" aria-modal="true" :aria-label="preview.title" class="sp-modal" :style="previewTheme">
+        <header class="sp-bar"><h2>{{ preview.title }}</h2><button @click="closePreview" aria-label="关闭规则详情"><X :size="16"/></button></header>
+        <div class="sp-modal-body"><p v-if="previewKindNote">{{ previewKindNote }}</p>
+          <dl v-if="preview.kind==='kv'"><div v-for="pair in preview.kv" :key="pair.label"><dt>{{ pair.label }}</dt><dd>{{ pair.value }}</dd></div></dl>
+          <template v-else><dl v-for="(row,i) in previewRows" :key="i" class="sp-dialog-row"><div v-for="(col,j) in preview.headers" :key="j"><dt>{{ col }}</dt><dd>{{ row[j] || '—' }}</dd></div></dl><p v-if="!previewRows.length">暂无明细</p></template>
+        </div><footer v-if="previewPages>1" class="sp-tools"><button :disabled="previewPage<=1" @click="previewPage--">上一页详情</button>{{ previewPage }} / {{ previewPages }}<button :disabled="previewPage>=previewPages" @click="previewPage++">下一页详情</button></footer>
+      </section>
+    </div>
+  </Teleport>
+  <ConfirmDialog :open="confirm.open" :title="confirm.title" :tone="confirm.tone" :message="confirm.message" :details="confirm.details" :confirm-label="confirm.confirmLabel" :cancel-label="confirm.cancelLabel" @resolve="onConfirmResolve"/>
+</section>

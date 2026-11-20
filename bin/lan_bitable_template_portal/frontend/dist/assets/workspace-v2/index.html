@@ -8,7 +8,7 @@
     for (const state of ['ready', 'finished', 'updateCallbackDone']) event.viewTransition?.[state]?.catch(() => {});
   });
 </script><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>灯塔 · 个人工作台</title><link rel="icon" href="/assets/clipflow-favicon.svg"><link rel="stylesheet" href="/assets/page-navigation.css"><script src="/assets/connection-guard.js" data-workspace-v2="1" defer></script>
-<style>body{margin:0;background:#f5f5f7;color:#1d1d1f;font:14px system-ui,sans-serif}.entry-loading{min-height:80vh;display:grid;place-content:center;gap:16px;text-align:center;padding:20px}.entry-loading a{color:#0071e3}.entry-loading button{justify-self:center;min-height:44px;padding:0 20px;border:0;border-radius:8px;background:#0071e3;color:#fff;font:inherit;cursor:pointer}.entry-loading button[hidden]{display:none}.entry-loading strong{max-width:32em;line-height:1.7}.entry-spinner{width:24px;height:24px;border:3px solid #e5e5ea;border-top-color:#0071e3;border-radius:50%;animation:spin 1s linear infinite;margin:auto}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}</style></head>
+<style>body{margin:0;background:#f4f5f6;color:#2d3748;font:14px system-ui,sans-serif}.entry-loading{min-height:80vh;display:grid;place-content:center;gap:16px;text-align:center;padding:20px}.entry-loading a{color:#146541}.entry-loading button{justify-self:center;min-height:44px;padding:0 20px;border:0;border-radius:8px;background:#146541;color:#fff;font:inherit;cursor:pointer}.entry-loading button[hidden]{display:none}.entry-loading strong{max-width:32em;line-height:1.7}.entry-spinner{width:24px;height:24px;border:3px solid #e5e5ea;border-top-color:#146541;border-radius:50%;animation:spin 1s linear infinite;margin:auto}@keyframes spin{to{transform:rotate(360deg)}}@media(prefers-reduced-motion:reduce){.entry-spinner{animation:none}}</style></head>
 <body><div id="app"><div class="entry-loading" role="status" aria-live="polite"><span class="entry-spinner"></span><strong id="entry-status">正在打开新版工作台</strong><button id="entry-retry" type="button" hidden>重新加载新版</button><a href="/?frontend=legacy">返回旧版</a></div></div>
 
 <script type="module">
@@ -20,13 +20,28 @@
     if (!response.ok) throw new Error('entry');
     const manifest = await response.json();
     const safe = name => typeof name === 'string' && /^[a-zA-Z0-9_-]+\.(js|css)$/.test(name);
-    if (!safe(manifest.entry) || !manifest.entry.endsWith('.js') || !Array.isArray(manifest.css) || !manifest.css.every(safe)) throw new Error('manifest');
-    for (const name of manifest.css) { const link = document.createElement('link'); link.rel = 'stylesheet'; link.href = base + name; document.head.append(link); }
+    if (!safe(manifest.entry) || !manifest.entry.endsWith('.js') || !Array.isArray(manifest.css) || !manifest.css.every(name => safe(name) && name.endsWith('.css'))) throw new Error('manifest');
+    const script = document.createElement('link');
+    script.rel = 'modulepreload';
+    script.href = base + manifest.entry;
+    document.head.append(script);
+    const styles = manifest.css.map(name => new Promise((resolve, reject) => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = base + name;
+      link.onload = resolve;
+      link.onerror = () => reject(new Error('stylesheet'));
+      document.head.append(link);
+    }));
+    if (controller.signal.aborted) throw new Error('timeout');
+    // Mount only after the page geometry is available, even on cold mobile connections.
+    await Promise.race([Promise.all(styles), new Promise((_, reject) =>
+      controller.signal.addEventListener('abort', () => reject(new Error('stylesheet timeout')), {once:true}))]);
     await import(base + manifest.entry);
   } catch (error) {
     console.error('Workspace resources did not load', error);
     const status = document.getElementById('entry-status');
-    if (status) status.textContent = '新版资源未完整加载。请重新加载；若仍失败，请重新更新程序或返回旧版。';
+    if (status) status.textContent = '新版页面未能完整加载。请重新加载，或返回旧版继续办理。';
     document.querySelector('.entry-spinner')?.remove();
     const retry = document.getElementById('entry-retry');
     if (retry) { retry.hidden = false; retry.onclick = () => window.location.reload(); }

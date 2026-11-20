@@ -1,0 +1,192 @@
+<NConfigProvider :locale="zhCN" :date-locale="dateZhCN">
+  <section class="rd-desk risk-page rk-desk" aria-label="专项排查" @vue:before-mount="import('../workspace-v2/drillRiskDesk.css')">
+    <header class="rd-header">
+      <div class="rd-heading">
+        <div class="rd-title-icon"><Search :size="21" /></div>
+        <div><h1 data-v2-page-title>专项排查</h1><span v-if="libraryMode" class="rd-muted">{{ editor==='choose'?'选择发布模板':editor==='base'?'基础模板':'历史模板库' }}</span></div>
+      </div>
+      <div class="rd-actions">
+        <button v-if="detail || editor" type="button" class="rd-btn" :disabled="busy || !!pendingPublication" @click="back"><ArrowLeft :size="15" />{{ viewLabel }}</button>
+        <button v-if="!libraryMode" type="button" class="rd-btn" aria-label="刷新" :disabled="busy || loading || dirty || !!pendingPublication || !!fieldEditor" @click="reload"><RefreshCw :size="15" />刷新</button>
+        <template v-if="!detail && !editor && isManager && activeView==='published'">
+          <button class="rd-btn" :disabled="busy" @click="openEditor('base')"><Library :size="15" />基础模板</button>
+          <button class="rd-btn" :disabled="busy" @click="openEditor('history')">历史模板库</button>
+          <button class="rd-btn rd-primary" :disabled="busy" @click="openEditor('publish')"><Plus :size="16" />发布排查</button>
+        </template>
+      </div>
+    </header>
+    <p v-if="error && !feedbackOpen && !confirmation && !fieldEditor" class="rd-notice rd-error" role="alert">{{ error }}</p>
+    <p v-if="message && !feedbackOpen && !confirmation" class="rd-notice" role="status">{{ message }}</p>
+
+    <template v-if="!editor && !detail">
+      <section class="rd-panel rk-queue">
+        <div class="rd-section-head">
+          <div class="rk-view-switch" role="tablist" aria-label="排查工作区">
+            <button v-if="isManager" role="tab" :aria-selected="activeView==='published'" :disabled="busy" @click="changeView('published')">发布管理</button>
+            <button role="tab" :aria-selected="activeView==='mine'" :disabled="busy" @click="changeView('mine')">我的排查任务</button>
+            <button role="tab" :aria-selected="activeView==='review'" :disabled="busy" @click="changeView('review')">我的审核任务</button>
+          </div>
+          <div class="rd-toolbar rk-filters">
+            <NInput v-model:value="taskSearch" :input-props="{'aria-label':'搜索排查任务'}" placeholder="任务名称或审核人" clearable :disabled="busy"><template #prefix><Search :size="15" /></template></NInput>
+            <NSelect v-model:value="taskState" aria-label="任务状态" :options="taskStateOptions" clearable placeholder="全部状态" :disabled="busy" />
+            <button v-if="taskSearch || taskState" class="rd-link" :disabled="busy" @click="taskSearch='';taskState=null">清除筛选</button>
+          </div>
+        </div>
+        <table v-if="filteredTasks.length" class="risk-task-list rk-tasks" aria-label="排查任务">
+          <thead class="rk-table-head"><tr><th scope="col">任务与审核人</th><th scope="col">反馈进度</th><th scope="col">截止时间</th><th scope="col">操作</th></tr></thead>
+          <tbody class="risk-mobile-tasks"><tr v-for="task in filteredTasks" :key="task.id" class="rk-task rd-row risk-mobile-task" @click="taskRowProps(task).onClick($event)">
+            <td class="rk-task-title"><span class="rd-badge">{{ task.total==null || task.approved==null ? '状态待核验' : taskStatus(task) }}</span>
+              <button class="risk-task-name rd-name" :disabled="busy" @click="openTask(task.id)">{{ task.name }}</button>
+              <p><small>审核人 {{ riskReviewerNames(task) || '待确认' }}</small></p>
+            </td>
+            <td class="rk-progress"><span>已反馈 <b>{{ task.submitted ?? '—' }}</b> / {{ task.total ?? '—' }}</span>
+              <progress v-if="task.total>0 && Number.isFinite(task.submitted)" :value="task.submitted" :max="task.total" aria-label="已反馈事项"></progress>
+              <small>已通过 {{ task.approved ?? '—' }} 项 · {{ task.people_count ?? '—' }} 人</small>
+            </td>
+            <td class="rk-deadline"><small>反馈截止</small><time>{{ Number.isFinite(task.deadline)?date(task.deadline):'暂未提供' }}</time></td>
+            <td class="rd-actions"><button class="rd-btn rd-go" :disabled="busy" @click="openTask(task.id)">{{ taskAction(task) }}</button>
+              <button v-if="activeView==='published' && task.can_delete_release" class="rd-icon rd-danger" :aria-label="'删除任务：'+task.name" :disabled="busy" @click="ask('delete_release',task)"><Trash2 :size="15" /></button></td>
+          </tr></tbody>
+        </table>
+        <p v-else class="rd-empty" role="status">{{ taskEmptyText }}</p>
+        <footer class="rd-footer risk-list-footer"><span>{{ loading?'正在查询任务':error?'任务数量待核验':'共 '+total+' 个排查任务' }}</span>
+          <NPagination v-if="total>20" :page="page" :item-count="total" :page-size="20" :page-slot="5" :disabled="busy || loading" @update:page="changePage" />
+        </footer>
+      </section>
+    </template>
+
+    <section v-else-if="libraryMode" class="rd-panel rk-library" :aria-label="editor==='choose'?'选择发布模板':'模板管理'">
+      <RiskInspectionTemplateLibrary :key="editor" ref="historyLibrary" :kind="editor==='history'?'history':'base'" :selecting="editor==='choose'" :can-edit-library="canEditTemplate" workspace-v2 @reuse="reuseHistory" />
+    </section>
+
+    <section v-else-if="editor==='publish'" class="rd-panel risk-publish">
+      <header class="rd-section-head rd-hero">
+        <div><h2>{{ publish.name || '发布专项排查' }}</h2><p>{{ publish.base_template_id?'基础模板':'历史模板' }}：{{ template?.name || '读取中' }}<template v-if="template?.revision"> · V{{ template.revision }}</template></p></div>
+        <div class="rd-actions"><button class="rd-btn" :disabled="publicationLocked" @click="openEditor('publish')">更换基础模板</button>
+          <button class="rd-btn rd-primary" :disabled="publicationLocked || !publishValid" @click="ask('publish')">确认发布</button></div>
+      </header>
+      <div v-if="pendingPublication" class="rd-notice rd-section-head" role="status"><span>发布结果尚未确认，原内容已锁定保留。</span><div class="rd-actions"><button class="rd-btn" :disabled="busy" @click="checkPublication">核验发布结果</button><button class="rd-btn" :disabled="busy" @click="publishNow">按原内容重试</button></div></div>
+      <div class="rd-form-grid risk-fields">
+        <label class="rd-field"><span>排查表名</span><NInput v-model:value="publish.name" aria-label="排查表名" :disabled="publicationLocked" /></label>
+        <label class="rd-field"><span>反馈截止时间</span><NDatePicker v-model:value="publish.deadline" aria-label="反馈截止时间" type="datetime" clearable :disabled="publicationLocked" /></label>
+        <label class="rd-field"><span>审核人</span><NSelect v-model:value="publish.reviewer_ids" aria-label="审核人" multiple filterable clearable :options="peopleOptions" :disabled="publicationLocked" /></label>
+        <label class="rd-field"><span>接收人员</span><NSelect v-model:value="selectedPeople" aria-label="接收人员" multiple filterable clearable :options="peopleOptions" :disabled="publicationLocked" /></label>
+        <label class="rd-field"><span>接收经理</span><NSelect v-model:value="publish.manager_ids" aria-label="接收经理" multiple filterable clearable :options="managerOptions" :disabled="publicationLocked" /></label>
+      </div>
+      <details v-if="selectedRows.length" class="rd-fold risk-recipients"><summary>核对接收楼栋 <span>{{ recipientSummary }}</span></summary>
+        <div class="rd-form-grid"><label v-for="p in selectedRows" :key="p.id" class="rd-field"><span>{{ p.name }}</span>
+          <NSelect multiple :aria-label="p.name+'的接收楼栋'" :options="riskRecipientScopes(p).map(value=>({value,label:scopeLabel(value)}))"
+            :value="riskAssignedScopes(publish.people.find((row:Dict)=>row.id===p.id)||{})" :disabled="publicationLocked" @update:value="scopes=>setScopes(p.id,scopes)" />
+        </label></div>
+      </details>
+      <div class="rd-section-head"><div><h3>排查事项</h3><small>{{ publish.items.length }} 个事项 · {{ assignmentCount }} 项楼栋人员分派</small></div>
+        <button class="rd-btn" :disabled="publicationLocked || publish.items.length>=100" @click="publish.items.push({title:'',values:{}})"><Plus :size="15" />添加事项</button></div>
+      <RiskInspectionSheet v-if="template" :fields="template.fields" :items="publish.items" :disabled="publicationLocked" @update:items="publish.items=$event" />
+      <ul v-if="publishProblems.length" class="rd-problems" aria-label="待补充的发布信息"><li v-for="problem in publishProblems" :key="problem">{{ problem }}</li></ul>
+    </section>
+
+    <section v-else-if="editor && template" class="rd-panel">
+      <div class="rd-section-head"><h2>模板字段</h2><button v-if="canEditTemplate" class="rd-btn" :disabled="busy" @click="editField()">添加字段</button></div>
+      <RiskInspectionSheet :fields="template.fields" schema :can-edit="canEditTemplate" :disabled="busy" @edit="editField" @remove-field="field=>ask('delete_field',field)" @required-change="changeRequired" />
+    </section>
+
+    <template v-else-if="detail && feedbackDetail">
+      <section class="rd-panel rd-hero rk-brief">
+        <div class="rd-section-head"><div class="risk-role-view"><span class="rd-badge">{{ viewLabel }}</span><h2>{{ detail.name }}</h2></div>
+          <div class="rd-actions">
+            <button v-if="activeView!=='mine' && hasOwnTask" class="rd-btn" :disabled="busy" @click="changeView('mine',detail.id)">切换到我的排查</button>
+            <button v-if="activeView!=='review' && detail.is_reviewer" class="rd-btn" :disabled="busy" @click="changeView('review',detail.id)">进入审核任务</button>
+            <button v-if="activeView!=='published' && detail.is_manager" class="rd-btn" :disabled="busy" @click="changeView('published',detail.id)">进入发布管理</button>
+            <template v-if="activeView==='published'">
+              <button v-if="detail.can_manage_release" class="rd-btn" :disabled="busy" @click="openReviewer">更换审核人</button>
+              <a v-if="detail.url && /^https?:\/\//i.test(detail.url)" class="rd-btn" :href="detail.url" target="_blank" rel="noopener noreferrer">结果表 <ExternalLink :size="14" /></a>
+              <button v-if="detail.can_delete_release" class="rd-icon rd-danger" :disabled="busy" :aria-label="'删除任务：'+detail.name" @click="ask('delete_release',detail)"><Trash2 :size="15" /></button>
+            </template>
+          </div>
+        </div>
+        <dl class="rd-facts"><div><dt>发起人</dt><dd>{{ detail.owner || '未提供' }}</dd></div>
+          <div><dt>审核人</dt><dd>{{ riskReviewerNames(detail) || '未提供' }}</dd></div>
+          <div><dt>反馈截止</dt><dd>{{ Number.isFinite(detail.deadline)?date(detail.deadline):'未提供' }}</dd></div>
+          <div v-if="detail.final_managers?.length"><dt>接收经理</dt><dd>{{ detail.final_managers.map((p:Dict)=>p.name).join('、') }}</dd></div>
+        </dl>
+      </section>
+      <section v-if="activeView==='mine' && detail.can_claim" class="rd-panel rd-section-head">
+        <div><h3>领取本人任务</h3><small>选择本次填写的楼栋</small></div>
+        <div class="rd-actions"><NSelect v-model:value="claimScope" aria-label="领取楼栋" :options="detail.claim_scopes.map((value:string)=>({value,label:scopeLabel(value)}))" :disabled="busy" />
+          <button class="rd-btn rd-primary" :disabled="busy || !claimScope" @click="ask('claim')">领取本人任务</button></div>
+      </section>
+      <p v-if="activeView==='review' && !detail.is_reviewer" class="rd-notice" role="status">你不是本次排查的当前审核人</p>
+      <section v-else-if="feedbackDetail.people.length" class="rd-panel rk-feedback-list"><RiskInspectionTable :detail="feedbackDetail" :busy="busy" :view="activeView" @open="openFeedback" /></section>
+      <p v-else-if="!detail.can_claim || activeView!=='mine'" class="rd-empty">当前工作区没有可办理的反馈。</p>
+      <details v-if="incompleteJobs.length" class="rd-panel rd-fold"><summary>同步进度 <span>{{ incompleteJobs.length }} 项未结束</span></summary>
+        <div v-for="job in incompleteJobs" :key="job.id" class="rd-row"><strong>{{ jobLabel(job.kind) }}</strong><span>{{ job.error || job.status }}</span></div>
+        <div v-if="activeView==='published' && detail.can_manage_release && failedJobs.length" class="rd-section-head"><span>{{ failedJobs.length }} 项需要核对</span><button class="rd-btn" :disabled="busy" @click="ask('retry')">核对并重试同步</button></div>
+      </details>
+      <details v-if="detail.audit?.length" class="rd-panel rd-fold"><summary>操作记录 <span>{{ detail.audit.length }} 条</span></summary>
+        <ul class="rk-history"><li v-for="(row,i) in detail.audit" :key="i"><b>{{ actionName(row.action) }}</b><span>{{ auditName(row) }}</span><time>{{ row.at?date(row.at*1000):'时间未提供' }}</time></li></ul>
+      </details>
+    </template>
+
+    <NDrawer :trap-focus="!confirmation && !discard" :show="feedbackOpen" class="risk-feedback-drawer rd-feedback-drawer" width="min(680px, 100vw)" :mask-closable="!busy" :close-on-esc="!busy && !confirmation && !discard" @update:show="!$event && closeFeedback()">
+      <NDrawerContent v-if="person && detail" :title="person.name+' · '+scopeLabel(focusedItems[0]?.scope || person.scope)" closable>
+        <section ref="feedbackForm" class="risk-feedback rd-desk rd-feedback">
+          <p v-if="error && !confirmation" class="rd-notice rd-error" role="alert">{{ error }} <button class="rd-link" :disabled="busy" @click="readLatest">重新读取，保留填写</button></p>
+          <p v-if="message && !confirmation" class="rd-notice" role="status">{{ message }}</p>
+          <article v-for="item in focusedItems" :key="item.id" class="risk-response">
+            <div class="rd-section-head"><div><h2>{{ item.title }}</h2><small>{{ personProgress(person) }}</small></div><NTag size="small">{{ statusName(item.status) }}</NTag></div>
+            <p v-if="item.reason" class="rd-notice">{{ item.reason }}</p>
+            <div v-if="validationItem===item.id && missingFields(item).length" class="rd-notice rd-error risk-missing-summary"><strong>还有 {{ missingFields(item).length }} 项必填信息待补充</strong>
+              <button v-for="field in missingFields(item)" :key="field.key" class="rd-link" @click="focusField(field.key)">{{ field.field_name }}</button></div>
+            <RiskInspectionFields :fields="detail.fields" :system-values="item.system_values" :values="drafts[item.id] || item.values" :files="item.files"
+              :disabled="busy || !editable(item)" :invalid-fields="validationItem===item.id?missingFields(item).map((f:Dict)=>f.key):[]"
+              @update:values="values=>{if(!busy && editable(item))drafts[item.id]=values}" @files="(field,files)=>uploadFiles(item,field,files)" />
+            <div class="rk-feedback-actions rd-section-head">
+              <span class="rd-muted">{{ dirty?'有未保存的填写':statusName(item.status) }}</span>
+              <div class="rd-actions"><template v-if="editable(item)">
+                <button v-if="drafts[item.id]" class="rd-link" :disabled="busy" @click="discardDraft(item.id)">放弃本项填写</button>
+                <button class="rd-btn" :disabled="busy" @click="act('save',item)">保存草稿</button>
+                <button class="rd-btn rd-primary" :disabled="busy" @click="ask('submit',item)">提交审核</button>
+              </template>
+              <template v-if="activeView==='review' && detail.is_reviewer && detail.status==='active' && !person.revoked && item.status==='submitted'">
+                <button class="rd-btn" :disabled="busy" @click="ask('return',item)">退回修改</button>
+                <button class="rd-btn rd-primary" :disabled="busy" @click="ask('approve',item)">审核通过</button>
+              </template>
+              <template v-if="activeView==='published' && detail.is_manager && detail.status==='active' && !person.revoked">
+                <button v-if="item.status!=='revoked'" class="rd-btn rd-danger" :disabled="busy" @click="ask('revoke_item',item)">撤销事项</button>
+                <button class="rd-btn rd-danger" :disabled="busy" @click="ask('revoke_person')">撤销该人员</button>
+              </template></div>
+            </div>
+            <p v-if="item.reviewed_by" class="rd-muted">审核人 {{ item.reviewed_by }} <time v-if="item.reviewed_at">{{ date(item.reviewed_at*1000) }}</time></p>
+          </article>
+        </section>
+      </NDrawerContent>
+    </NDrawer>
+
+    <NModal :trap-focus="!confirmation && !discard" :show="!!fieldEditor" :close-on-esc="!busy && !confirmation && !discard" :mask-closable="!busy" @update:show="!$event && closeFieldEditor()">
+      <section v-if="fieldEditor" class="rd-dialog rd-desk" role="dialog" aria-modal="true" aria-label="编辑模板字段">
+        <div class="rd-section-head"><h2>编辑模板字段</h2><button class="rd-link" :disabled="busy" @click="closeFieldEditor">取消</button></div>
+        <label class="rd-field">字段名称<NInput v-model:value="fieldEditor.field_name" :disabled="busy" /></label>
+        <label class="rd-field">字段类型<NSelect v-model:value="fieldEditor.type" :options="typeOptions" :disabled="busy" /></label>
+        <label v-if="[3,4].includes(fieldEditor.type)" class="rd-field">选项（每行一个）<NInput v-model:value="fieldEditor.optionsText" type="textarea" :disabled="busy" /></label>
+        <div class="rd-section-head"><label>必填 <NSwitch v-model:value="fieldEditor.required" :disabled="busy" /></label><button class="rd-btn rd-primary" :disabled="busy || !fieldEditor.field_name?.trim() || !canEditTemplate" @click="ask('save_field')">保存字段</button></div>
+        <p v-if="error && !confirmation" role="alert">{{ error }}</p>
+      </section>
+    </NModal>
+    <dialog v-if="confirmation" class="risk-decision-layer" :aria-label="confirmTitle" @vue:mounted="node=>node.el?.showModal()" @vue:before-unmount="node=>node.el?.close()" @cancel.prevent="!busy && (confirmation=null)" @click.self="!busy && (confirmation=null)">
+      <section v-if="confirmation" class="risk-confirm rd-dialog rd-desk" >
+        <div class="rd-section-head"><h2>{{ confirmTitle }}</h2><button class="rd-link" autofocus :disabled="busy" @click="confirmation=null">取消</button></div><div class="rd-section-head"><p>{{ confirmation.action==='delete_release'?deleteDescription:confirmText }}</p><button class="rd-btn" :class="confirmation.action==='delete_release'?'rd-danger':'rd-primary'"
+          :disabled="busy || (needsReason && !reason.trim()) || (confirmation.action==='reviewer' && !!reviewerIssue(newReviewers,people))" @click="confirm">{{ confirmation.action==='delete_release'?'确认删除':'确认' }}</button></div>
+        <label v-if="needsReason" class="rd-field">原因<NInput v-model:value="reason" :input-props="{'aria-label':'原因'}" type="textarea" :maxlength="2000" :disabled="busy" /></label>
+        <label v-if="confirmation.action==='reviewer'" class="rd-field">新审核人<NSelect v-model:value="newReviewers" :to="false" aria-label="新审核人" :options="peopleOptions" multiple clearable filterable :disabled="busy" /></label>
+        <p v-if="error" role="alert" class="rd-notice rd-error">{{ error }}</p>
+        
+      </section>
+    </dialog>
+    <NModal v-if="discard" :show="true" :mask-closable="false" @update:show="shown=>{if(!shown)discard=null}">
+      <div class="rd-dialog rd-desk" role="dialog" aria-modal="true" aria-label="放弃修改">
+        <div class="rd-section-head"><h2>有未保存的修改</h2><button class="rd-btn rd-primary" @click="discard=null">继续填写</button></div>
+        <div class="rd-section-head"><p>{{ discard.message }}</p><button class="rd-btn rd-danger" @click="discardChanges">放弃修改</button></div>
+      </div>
+    </NModal>
+  </section>
+</NConfigProvider>

@@ -18,13 +18,20 @@ try {
       const page = await context.newPage(), errors = [];
       page.on('pageerror', error => errors.push(error.message));
       const target = version === 'v2' ? '/assets/workspace-v2/index.html?scope=ALL&__page=%2Fdocument-library' : '/document-library?scope=ALL&frontend=legacy';
+      const firstCall = server.fixture.calls.length;
       await page.goto(server.origin + target);
       await page.getByRole('button', { name: '打开数据表：电气技术资料', exact: true }).click();
-      await page.locator('.document-pagination').waitFor();
-      const calls = server.fixture.calls.filter(call => call.method === 'GET' && call.path.endsWith('/records'));
+      const pagination = version === 'v2'
+        ? page.getByRole('navigation', { name: '资料分页', exact: true })
+        : page.locator('.document-pagination');
+      await pagination.waitFor();
+      const calls = server.fixture.calls.slice(firstCall).filter(call => call.method === 'GET' && call.path.endsWith('/records'));
       assert(calls.length);
       assert.equal(calls.at(-1).query.scope || '', '', version + ': ALL must become an unrestricted authorized query');
-      assert.equal(await page.locator('.document-table tbody tr').count(), 2);
+      const records = version === 'v2'
+        ? page.getByRole('article').filter({ has: page.getByRole('button', { name: /^查看资料：/ }) })
+        : page.locator('.document-table tbody tr');
+      assert.equal(await records.count(), 2);
       assert.equal(await page.getByText('楼栋范围无效。', { exact: true }).count(), 0);
       assert.deepEqual(errors, []);
       console.log('PASS ' + version + ': all authorized buildings display without an invalid-scope request');

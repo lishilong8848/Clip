@@ -32,8 +32,11 @@ class ActiveNoticeDelegate(QStyledItemDelegate):
         right -= 56
         label = ActiveNoticeModel.action_label_for_record(record)
         if label:
-            buttons["action"] = QRect(right - 76, y, 76, 26)
-            right -= 84
+            width = 76
+            if record.get("_event_delivery_pending"):
+                width = max(width, min(rect.width() - 78, option.fontMetrics.horizontalAdvance(label) + 16))
+            buttons["action"] = QRect(right - width, y, width, 26)
+            right -= width + 8
         if ActiveNoticeModel.supports_today_progress(record):
             buttons["today"] = QRect(right - 88, y, 88, 26)
         return buttons

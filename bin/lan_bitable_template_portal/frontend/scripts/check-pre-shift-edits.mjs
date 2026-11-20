@@ -11,8 +11,8 @@ import {chromium} from 'playwright';
 // PREVIEW_ONLY=1 skips assertions; fixture/scenario/legacy/role query parameters select a view.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const project = path.resolve(root, '../../..');
-const outDir = path.join(project, 'output/pre-shift-edits-build');
-const output = path.join(project, 'output/playwright/pre-shift-edits');
+const outDir = process.env.PRESHIFT_RESULTS_ROOT ? path.join(process.env.PRESHIFT_RESULTS_ROOT,'edits-build') : path.join(project, 'output/pre-shift-edits-build');
+const output = process.env.PRESHIFT_RESULTS_ROOT ? path.join(process.env.PRESHIFT_RESULTS_ROOT,'edits') : path.join(project, 'output/playwright/pre-shift-edits');
 const keepPreview = process.env.KEEP_PREVIEW === '1';
 await mkdir(output, {recursive: true});
 const python = path.join(project, 'bin/.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
@@ -60,6 +60,10 @@ function fixtureFor(params) {
     fixtures.set(key, {key, editable, tasks: {
       current: makeTask('current', params.get('scenario') !== 'pending' && params.has('scenario'), editable),
       history: makeTask('history', true, editable, true)}, requests: [], stages: new Map(), serial: 0, conflictNext: false});
+    if(params.get('scenario')==='attachments'){
+      const fixture=fixtures.get(key);
+      fixture.rawFiles=new Map([[fixture.tasks.current.handover_photo.id,Buffer.from('unreadable historical photo')]]);
+    }
     if (params.get('scenario') === 'completed-missing') {
       fixtures.get(key).tasks.current.handover_photo = null;
       fixtures.get(key).tasks.current.can_upload_handover = editable;
@@ -90,6 +94,19 @@ async function fixtureApi(req, res, next) {
   };
   const taskFor = id => {assert(Object.hasOwn(fixture.tasks, id), `unknown task ${id}`); return fixture.tasks[id];};
   const revisionOK = (task, value) => !task.submitted || Number(value) === task.revision && value !== null;
+  function commitRaw(q,bytes){
+    const task=taskFor(q.task_id);
+    if(!revisionOK(task,q.revision))return send('记录版本已变更，请重新读取。',409);
+    assert(q.kind==='handover' ? q.item_id==='' : items.some(item=>item.id===q.item_id));
+    if(q.kind==='handover' && task.handover_photo)assert.equal(q.replace_file_id,task.handover_photo.id);
+    bump(task);
+    const id='raw-'+(++fixture.serial);
+    const file={id,name:q.name,kind:q.kind,item_id:q.item_id,size:bytes.length,is_image:false,
+      can_delete:true,revision:task.revision,url:'/api/pre-shift-checks/files/'+id};
+    fixture.rawFiles??=new Map();fixture.rawFiles.set(id,bytes);
+    if(q.kind==='handover'){task.handover_photo=file;task.can_upload_handover=false;}else task.files.push(file);
+    return send(file);
+  }
   try {
     if (req.method !== 'GET' && !fixture.editable) return send('当前账号不可修改该次检查。', 403);
     if (url.pathname === '/api/pre-shift-checks' && req.method === 'GET') {
@@ -99,7 +116,10 @@ async function fixtureApi(req, res, next) {
     }
     if (url.pathname === '/api/pre-shift-checks/history' && req.method === 'GET') {
       assert.equal(url.searchParams.get('scope'), 'A'); assert.equal(url.searchParams.get('page_size'), '20');
-      return send({scope: 'A', page: 1, page_size: 20, total: 1, items: [fixture.tasks.history]});
+      const records = params.get('scenario') === 'attachments'
+        ? [fixture.tasks.current, fixture.tasks.history]
+        : [fixture.tasks.history];
+      return send({scope: 'A', page: 1, page_size: 20, total: records.length, items: records});
     }
     const taskMatch = url.pathname.match(/^\/api\/pre-shift-checks\/tasks\/([^/]+)$/);
     if (taskMatch) {
@@ -126,7 +146,9 @@ async function fixtureApi(req, res, next) {
       assert(['item', 'handover'].includes(q.kind)); assert.equal(q.retain, '1');
       assert(q.kind === 'handover' ? q.item_id === '' : items.some(item => item.id === q.item_id));
       if (q.replace_file_id) assert.equal(task.handover_photo?.id, q.replace_file_id);
-      const source = await bodyOf(req); assert(source.equals(sourcePhoto), 'real filechooser supplies the synthetic image once');
+      const source = await bodyOf(req);
+      if(q.name.startsWith('原文件-'))return commitRaw(q,source);
+      assert(source.equals(sourcePhoto), 'real filechooser supplies the synthetic image once');
       const id = `preview-${++fixture.serial}`; fixture.stages.set(id, {...q, source});
       return send({preview_id: id, preferences: {version: 0, style: {}}, original_time: '2026-10-14 09:00',
         time_origin: 'exif', time_source: '照片拍摄信息', image: `data:image/png;base64,${photos.source}`,
@@ -135,7 +157,9 @@ async function fixtureApi(req, res, next) {
           time: '2026-10-14 09:00', weather: '', location: '', logo: ''}});
     }
     if (url.pathname === '/api/pre-shift-checks/files') {
-      assert.equal(req.method, 'POST'); const body = JSON.parse((await bodyOf(req)).toString()); event.body = body;
+      assert.equal(req.method, 'POST');
+      if(event.query.task_id)return commitRaw(event.query,await bodyOf(req));
+      const body = JSON.parse((await bodyOf(req)).toString()); event.body = body;
       assert.deepEqual(Object.keys(body).sort(), ['preview_id', 'remember_style', 'watermark']);
       const stage = fixture.stages.get(body.preview_id); assert(stage, 'preview is consumed exactly once');
       const task = taskFor(stage.task_id);
@@ -166,6 +190,11 @@ async function fixtureApi(req, res, next) {
         bump(task); return send({revision: task.revision});
       }
       assert.equal(req.method, 'GET'); event.status = 200;
+      if(fixture.rawFiles?.has(id)){
+        res.setHeader('Content-Type','application/octet-stream');
+        res.setHeader('Content-Disposition','attachment');
+        return res.end(fixture.rawFiles.get(id));
+      }
       res.setHeader('Content-Type', 'image/jpeg'); res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Disposition', "inline; filename*=UTF-8''fixture-watermarked.jpg"); return res.end(stampedPhoto);
     }
@@ -269,7 +298,7 @@ async function upload(page, zone, fixture, label, expectedTask, expectedItem, re
   const previews = count(fixture, 'POST', '/photo-preview'), commits = count(fixture, 'POST', '/files');
   const oldRevision = fixture.tasks[expectedTask].revision;
   const [chooser] = await Promise.all([page.waitForEvent('filechooser'),
-    clickUncovered(zone.getByRole('button', {name: replaceId ? '替换照片' : '上传照片', exact: true}))]);
+    clickUncovered(zone.getByRole('button', {name: replaceId ? '替换文件' : '添加文件', exact: true}))]);
   assert.equal(await chooser.element().getAttribute('capture'), null, 'album picker is not forced camera');
   await chooser.setFiles({name: `${label}.png`, mimeType: 'image/png', buffer: sourcePhoto});
   const editor = page.locator('.v2-photo-editor'); await editor.waitFor();
@@ -333,7 +362,7 @@ async function pendingCase(page, fixture, label) {
   const last = rows.last(); assert.match(await last.locator('legend').innerText(), new RegExp(lastItem.text));
   await last.getByRole('button', {name: `${lastItem.text}附件`, exact: true}).click();
   const zone = last.getByRole('group', {name: '检查附件上传区', exact: true});
-  await zone.getByRole('button', {name: '上传照片', exact: true}).waitFor();
+  await zone.getByRole('button', {name: '添加文件', exact: true}).waitFor();
   await layout(page, `${label}-last-expanded`);
   const fileId = await upload(page, zone, fixture, label, 'current', lastItem.id);
   await last.locator('.v2-check-photo-thumb').waitFor();
@@ -377,7 +406,7 @@ async function completedCase(page, fixture, label) {
   await note.fill('附件保存时仍未提交的草稿');
   const fileId = await upload(page, last.getByRole('group', {name: '检查附件上传区', exact: true}), fixture, `${label}-edit`, 'current', lastItem.id);
   await editor.getByRole('status').filter({hasText: '附件已保存'}).waitFor();
-  await last.getByRole('button', {name: '上传照片', exact: true}).waitFor();
+  await last.getByRole('button', {name: '添加文件', exact: true}).waitFor();
   assert.equal(await note.inputValue(), '附件保存时仍未提交的草稿');
   assert.deepEqual(fixture.tasks.current.answers, savedAnswers, 'photo commit does not save answer draft');
   assert.equal(count(fixture, 'PUT', '/tasks/current'), 2);
@@ -405,9 +434,9 @@ async function completedCase(page, fixture, label) {
   assert.deepEqual(fixture.tasks.current.answers, savedAnswers);
   const oldHandover = fixture.tasks.current.handover_photo.id;
   const handover = editor.locator('.check-record-handover');
-  await handover.getByRole('button', {name: '替换照片', exact: true}).waitFor();
+  await handover.getByRole('button', {name: '替换文件', exact: true}).waitFor();
   const replacement = await upload(page, handover, fixture, `${label}-replace`, 'current', '', oldHandover);
-  await handover.getByRole('button', {name: '替换照片', exact: true}).waitFor();
+  await handover.getByRole('button', {name: '替换文件', exact: true}).waitFor();
   assert.equal(fixture.tasks.current.handover_photo.id, replacement);
   assert.equal(await handover.locator('.v2-check-photo-thumb').count(), 1, 'replacement does not duplicate handover');
   assert.deepEqual(fixture.tasks.current.answers, savedAnswers);
@@ -444,10 +473,68 @@ async function readonlyCase(page, fixture, label) {
   assert.equal(await page.getByRole('button', {name: '修改记录', exact: true}).count(), 0);
   const history = await openHistory(page); await history.getByText('原交接班照片.jpg', {exact: true}).waitFor();
   assert.equal(await page.getByRole('button', {name: '修改记录', exact: true}).count(), 0);
-  assert.equal(await page.getByRole('button', {name: /^(上传照片|替换照片|保存检查结果)$/}).count(), 0);
+  assert.equal(await page.getByRole('button', {name: /^(添加文件|替换文件|保存检查结果)$/}).count(), 0);
   assert.equal(await page.locator('input[type=file]:enabled').count(), 0, 'no enabled hidden uploader');
   assert.equal(fixture.requests.filter(event => event.method !== 'GET').length, 0, 'readonly makes no hidden write requests');
   await layout(page, `${label}-readonly`);
+}
+async function attachmentsCase(page,fixture,label){
+  const task=fixture.tasks.current, editor=await openCurrent(page),last=editor.locator('.check-record-item').last();
+  await selectAbnormal(last);const note=last.getByRole('textbox');await note.fill('附件测试中的未保存备注');
+  const item=last.locator('.v2-check-attachments'),shared=editor.locator('.check-record-handover .v2-check-attachments');
+  const before=clone(task.answers);
+  async function verifyDownload(link, name, bytes) {
+    const [download] = await Promise.all([page.waitForEvent('download'), link.click()]);
+    assert.equal(download.suggestedFilename(), name);
+    const chunks = [];
+    for await (const chunk of await download.createReadStream()) chunks.push(chunk);
+    assert.deepEqual(Buffer.concat(chunks), bytes);
+  }
+  // A historical record may still be marked as an image even though the thumbnail fails to decode.
+  await shared.locator('a[download]').waitFor();
+  assert.equal(await shared.getByRole('link',{name:task.handover_photo.name}).getAttribute('download'),task.handover_photo.name);
+  assert.equal(await shared.locator('.v2-check-photo-thumb').count(),0);
+  for(const [zone,kind,name,mime,endpoint] of [
+    [item,'item','巡检记录.json','application/json','/files'],
+    [item,'item','原文件-损坏.jpg','image/jpeg','/photo-preview'],
+    [shared,'handover','值班交接包.7z','application/octet-stream','/files'],
+    [shared,'handover','原文件-设备导出','image/unknown','/photo-preview'],
+  ]){
+    const previous=task.revision, replaced=task.handover_photo.id, first=fixture.requests.length;
+    const control=zone.getByRole('button',{name:kind==='handover'?'替换文件':'添加文件',exact:true});
+    const [chooser]=await Promise.all([page.waitForEvent('filechooser'),clickUncovered(control)]);
+    const picker=chooser.element();
+    assert.equal(await picker.getAttribute('accept'),null);
+    assert.equal(await picker.getAttribute('capture'),null);
+    assert.equal(chooser.isMultiple(),kind==='item');
+    assert.equal(await zone.locator('input[capture]').getAttribute('capture'),'environment');
+    const bytes=Buffer.from('{"synthetic":"'+name+'"}','utf8');
+    await chooser.setFiles({name,mimeType:mime,buffer:bytes});
+    const link=zone.getByRole('link',{name,exact:true});await link.waitFor();await editorReady(page);
+    assert.equal(await link.getAttribute('download'),name);
+    assert.equal(await zone.locator('img').count(),0);
+    assert.equal(await page.locator('.v2-photo-editor,.v2-check-photo-preview').count(),0);
+    const mutations=fixture.requests.slice(first).filter(e=>e.method!=='GET');
+    assert.equal(mutations.length,1,'raw files commit once, including photo fallback');
+    assert.equal(mutations[0].path,'/api/pre-shift-checks'+endpoint);
+    const q=mutations[0].query;
+    assert.equal(q.task_id,task.id);assert.equal(q.kind,kind);assert.equal(q.item_id,kind==='item'?lastItem.id:'');
+    assert.equal(q.retain,endpoint==='/photo-preview'?'1':'0');assert.equal(q.revision,String(previous));
+    assert.equal(q.replace_file_id,kind==='handover'?replaced:undefined);
+    assert.equal(task.revision,previous+1);
+    if(kind==='handover')assert.equal(await zone.getByRole('link').count(),1);
+    await verifyDownload(link, name, bytes);
+    assert.equal(await note.inputValue(),'附件测试中的未保存备注');
+  }
+  assert.deepEqual(task.answers,before);assert.equal(fixture.stages.size,0);assert.equal(count(fixture,'PUT','/tasks/current'),0);
+  await layout(page,label+'-files',editor);
+  await closeEditor(page, editor, true);
+  const history = await openHistory(page);
+  for (const file of [...task.files, task.handover_photo]) {
+    const link = history.getByRole('link', {name: file.name, exact: true});
+    assert.equal(await link.getAttribute('download'), file.name);
+    await verifyDownload(link, file.name, fixture.rawFiles.get(file.id));
+  }
 }
 async function missingHandoverCase(page, fixture, label) {
   await page.getByText('本次已完成', {exact: true}).waitFor();
@@ -459,7 +546,7 @@ async function missingHandoverCase(page, fixture, label) {
   assert.equal(count(fixture, 'GET', '/tasks/current'), 0);
   assert.equal(count(fixture, 'PUT', '/tasks/current'), 0);
   assert.deepEqual(fixture.tasks.current.answers, answers);
-  assert.equal(await page.locator('.v2-check-handover').getByRole('button', {name: /^(上传照片|替换照片)$/}).count(), 0);
+  assert.equal(await page.locator('.v2-check-handover').getByRole('button', {name: /^(添加文件|替换文件)$/}).count(), 0);
   assert.equal(await page.evaluate(() => window.__fixtureSubmits), 0);
   await layout(page, `${label}-main-uploaded`);
 }
@@ -470,9 +557,9 @@ try {
     browser = await chromium.launch({headless: true});
     for (const legacy of [false, true]) for (const viewport of [
       {width: 402, height: 874}, {width: 440, height: 956}, {width: 1440, height: 900}, {width: 360, height: 640},
-    ]) for (const scenario of ['pending', 'completed', 'completed-missing', 'readonly']) {
+    ]) for (const scenario of ['pending', 'completed', 'completed-missing', 'readonly','attachments']) {
       const label = `${legacy ? 'legacy' : 'v2'}-${viewport.width}x${viewport.height}-${scenario}`;
-      if (process.env.CHECK_CASE && process.env.CHECK_CASE !== label) continue;
+      if (process.env.CHECK_CASE && !process.env.CHECK_CASE.split(',').includes(label)) continue;
       const context = await browser.newContext({viewport, reducedMotion: 'reduce', timezoneId: 'Asia/Shanghai', serviceWorkers: 'block'});
       const errors = [], external = [];
       await context.route('**/*', route => {
@@ -486,7 +573,7 @@ try {
       const fixture = fixtureFor(params);
       try {
         await page.goto(`${origin}/?${params}`);
-        await ({pending: pendingCase, completed: completedCase, 'completed-missing': missingHandoverCase, readonly: readonlyCase}[scenario])(page, fixture, label);
+        await ({pending: pendingCase, completed: completedCase, 'completed-missing': missingHandoverCase, readonly: readonlyCase, attachments: attachmentsCase}[scenario])(page, fixture, label);
         assert.deepEqual(errors, []); assert.deepEqual(external, []);
         assert.deepEqual(report.apiErrors.filter(error => error.fixture === label), []);
         assert.deepEqual(report.layoutIssues.filter(issue => issue.label.startsWith(label + '-')), [], 'layout assertions');

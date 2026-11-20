@@ -1,0 +1,17 @@
+<section class="mop-desk-attachment" aria-label="已选 MOP 表格">
+  <header class="mop-desk-panelbar">
+    <div><small>{{ isLocalUpload ? '本地上传' : '已选 MOP 表格' }}</small><h3>{{ title }}</h3></div>
+    <button type="button" class="btn blue" :disabled="!canPreview || busy" :title="disabledReason" @click="$emit('open')">{{ buttonText }}</button>
+  </header>
+  <div class="mop-desk-attachment-row">
+    <label v-if="attachments.length"><span>表格附件</span><select :value="selectedAttachmentToken" aria-label="表格附件" @change="emitAttachmentChange">
+      <option v-for="attachment in attachments" :key="attachmentKey(attachment)" :value="attachmentKey(attachment)">{{ attachment.name || 'MOP表格' }}</option>
+    </select></label>
+    <small v-else>该 MOP 记录暂未识别到 xlsx/csv 附件</small>
+    <small>{{ attachmentCountText }}</small>
+  </div>
+  <small v-if="!attachments.length && attachmentLabel">{{ attachmentLabel }}</small>
+  <p v-if="localWarnings.length" role="status">{{ localWarnings[0] }}</p>
+  <p v-if="bindingStatus" role="status">{{ bindingStatus }}</p><p v-else-if="bindingError" role="alert">{{ bindingError }}</p>
+  <DisabledReason v-if="disabledReason && !busy" :text="disabledReason" />
+</section>

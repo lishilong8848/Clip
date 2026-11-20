@@ -1,0 +1,25 @@
+<InspectionDeskDialog :show="settingsOpen" title="表格设置" :target="dialogRoot" :locked="saving || exemptionSaving" @close="settingsOpen=false">
+  <template #actions><button :disabled="!preferencesReady || actionLocked" @click="openSort()">调整顺序</button></template>
+  <p v-if="preferencesError" role="alert">{{ preferencesError }} <button @click="loadPreferences()">重试</button></p>
+  <section class="ins-panel"><div class="ins-head"><h3>免填范围</h3><div class="ins-actions"><label>楼栋<select data-native-select :value="scope" :disabled="actionLocked || exemptionSaving" @change="changeExemptionScope(($event.target as HTMLSelectElement).value)"><option v-for="s in props.scopes" :key="s">{{ s }}</option></select></label>
+    <label>工作表<select data-native-select :value="exemptionSheet" :disabled="exemptionSaving" @change="selectExemptionSheet(($event.target as HTMLSelectElement).value)"><option v-for="s in exemptionOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select></label></div></div>
+    <p>{{ exemptionSummary }}</p><div v-if="report?.can_edit_exemptions" class="ins-line"><label>单元格范围<input v-model="exemptionInput" placeholder="例如 A1 或 C3:D5" :disabled="exemptionSaving"/></label>
+      <button :disabled="actionLocked || exemptionSaving || exemptionSheet!==currentPage?.baseKey" @click="pickExemptionCell()">表中点选</button>
+      <button :disabled="!canSaveExemption" @click="saveExemption('remove')">取消免填</button><button class="ins-primary" :disabled="!canSaveExemption" @click="saveExemption('add')">设置免填</button></div>
+    <p v-if="exemptionNotice" role="status">{{ exemptionNotice }}</p>
+  </section>
+  <section ref="groupPanel" class="ins-panel"><div class="ins-head"><h3>工作表专业归属</h3><button :aria-expanded="showGroups" @click="showGroups=!showGroups">{{ showGroups?'收起':'查看归属' }}</button></div>
+    <template v-if="showGroups"><div class="ins-grid"><label v-for="page in basePages" :key="page.key">{{ page.name }}<select data-native-select :value="groupValue(page)" :disabled="!canGroup || actionLocked" @change="stageGroup(page,$event)"><option v-for="p in professions" :key="p">{{ p }}</option></select></label></div>
+      <div v-if="canGroup" class="ins-head"><small>待调整 {{ Object.keys(groupDraft).length }} 张</small><div class="ins-actions"><button :disabled="actionLocked" @click="restoreGroups()">恢复默认归属</button><button :disabled="actionLocked || !Object.keys(groupDraft).length" class="ins-primary" @click="requestGroupSave()">保存归属</button></div></div>
+    </template></section>
+  <InspectionCollectionSettings v-if="report?.can_edit_exemptions"/>
+  <p v-if="error" role="alert">{{ error }}</p>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="sortOpen" title="调整工作表顺序" :target="dialogRoot" :locked="saving" @close="sortOpen=false">
+  <template #actions><small>{{ scope }}楼 · {{ professionView==='ALL'?'全部专业':professionView }}</small><button class="ins-primary" :disabled="saving || !preferencesReady" @click="saveSort()">保存顺序</button></template>
+  <div v-for="(key,i) in sortDraft" :key="key" class="ins-head ins-record"><span>{{ i+1 }} · {{ basePages.find(p=>p.key===key)?.name }}</span><div class="ins-actions"><button :disabled="saving || !i" @click="shiftSort(i,-1)">上移</button><button :disabled="saving || i===sortDraft.length-1" @click="shiftSort(i,1)">下移</button></div></div>
+  <p v-if="preferencesError" role="alert">{{ preferencesError }}</p>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="pendingSwap" title="核对专业归属变更" :target="dialogRoot" @close="pendingSwap=false">
+  <div class="ins-head"><p>{{ swapWarning }}</p><button class="ins-primary" @click="applySwap()">确认调整</button></div>
+</InspectionDeskDialog>

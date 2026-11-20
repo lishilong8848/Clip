@@ -1,0 +1,94 @@
+<section ref="root" class="serenity-desk scene-desk" aria-label="EOP 场景维护" data-v2-inline-feedback>
+  <header class="serenity-heading">
+    <div><p v-if="record">{{ record.fields['场景编号'] }} · {{ record.fields['专业'] }}</p>
+      <h1 ref="heading" tabindex="-1">{{ record?.fields['场景名称'] || 'EOP 场景维护' }}</h1>
+      <p v-if="!record">当前 {{ filtered.length }} 个场景</p></div>
+    <div class="serenity-actions">
+      <NButton v-if="record" :disabled="busy" @click="headerBack">返回场景列表</NButton>
+      <NButton :loading="loading" :disabled="busy||dirty" @click="refresh">刷新</NButton>
+      <NButton v-if="record?.editable && !editing" type="primary" @click="editing=true">编辑场景</NButton>
+      <NButton v-if="editing" :disabled="busy" @click="leave(finishEditing)">取消编辑</NButton>
+      <NButton v-if="editing" type="primary" :disabled="!dirty||busy" :loading="saving" @click="save">保存修改</NButton>
+    </div>
+  </header>
+  <NAlert v-if="error" type="error">{{ error }}</NAlert><p v-if="message||progress" role="status">{{ progress||message }}</p>
+  <template v-if="!record">
+    <div class="scene-queries"><div class="serenity-segment" aria-label="场景范围">
+      <button type="button" :aria-pressed="listMode==='p0'" @click="changeListMode('p0')">P0 场景</button>
+      <button type="button" :aria-pressed="listMode==='other'" @click="changeListMode('other')">其他等级</button></div>
+      <label class="serenity-search"><Search :size="15"/><input v-model="search" type="search" placeholder="搜索名称、编号或设备" aria-label="搜索场景"></label>
+      <NSelect v-model:value="specialty" :options="specialties" aria-label="专业"/><NSelect v-if="listMode==='other'" v-model:value="priority" :options="priorities" aria-label="优先级"/>
+      <NSelect v-model:value="missing" :options="missingOptions" aria-label="资料完整性"/></div>
+    <div class="scene-catalog"><button v-for="row in shown" :key="row.id" :data-eop-id="row.id" type="button" :disabled="!!opening"
+      class="scene-tile eop-list-row" @click="openFromList(row.id,$event)">
+      <span class="scene-index">{{ row.fields['场景编号'] || '暂无编号' }}</span>
+      <strong>{{ row.fields['场景名称'] || '未命名场景' }}</strong>
+      <small>{{ [row.fields['专业'],row.fields['系统/设备'],row.fields['原优先级']].filter(Boolean).join(' · ') }}</small>
+      <span class="scene-readiness">{{ row.has_steps?'有步骤':'缺少步骤' }} · {{ row.has_template?'有模板':'缺少模板' }} · {{ row.has_images?'有图片':'缺少图片' }}</span>
+    </button></div>
+    <NEmpty v-if="!loading&&!shown.length" description="当前条件下没有场景"/>
+    <NPagination v-if="filtered.length>pageSize" v-model:page="page" :item-count="filtered.length" :page-size="pageSize" aria-label="场景分页"/>
+  </template>
+  <template v-else>
+    <div class="scene-references"><details v-for="field in referenceFields" :key="field" class="serenity-panel"><summary>{{ field }}</summary>
+      <NInput v-if="editing && !record.readonly_fields?.includes(field)" v-model:value="record.fields[field]" type="textarea" :input-props="{'aria-label':field}"/>
+      <p v-else class="scene-prose">{{ record.fields[field] || '暂无内容' }}</p></details></div>
+    <details ref="metaDetails" class="serenity-panel"><summary>场景资料</summary>
+      <div class="scene-fields"><label v-for="field in metaFields" :key="field"><span>{{ field }}</span>
+        <NSelect v-if="editing && selectFields.includes(field) && !record.readonly_fields?.includes(field)" v-model:value="record.fields[field]"
+          :options="choices(field).map(value=>({value,label:value}))" :aria-label="field"/>
+        <NInput v-else-if="editing && !record.readonly_fields?.includes(field)" v-model:value="record.fields[field]" :input-props="{'aria-label':field}"/>
+        <strong v-else>{{ record.fields[field]||'—' }}</strong></label></div></details>
+    <section class="serenity-panel scene-playbook" @paste="pastePictures($event,'')" @dragover="overFiles" @drop="dropFiles($event,'')">
+      <header class="serenity-heading"><h2>处置步骤 <small>{{ record.steps.length }}</small></h2><div class="serenity-actions">
+        <select v-if="record.steps.length>1" aria-label="定位步骤" @change="jumpToStep"><option value="">跳到步骤</option><option v-for="(step,i) in record.steps" :key="step.key" :value="step.key">步骤 {{ i+1 }}</option></select>
+        <NButton v-if="editing" :disabled="busy" @click="addStep">添加步骤</NButton></div></header>
+      <article v-for="(step,index) in record.steps" :id="'eop-step-'+step.key" :key="step.key" class="eop-step scene-step"
+        @paste.stop="pastePictures($event,step.key)" @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop.stop="dropPicture(step.key,$event)">
+        <h3 tabindex="-1">{{ index+1 }}</h3><div>
+          <NInput v-if="editing" v-model:value="step.text" type="textarea" :input-props="{'aria-label':'步骤 '+(index+1)}" :disabled="busy"/>
+          <p v-else class="scene-prose">{{ step.text }}</p>
+          <div class="scene-gallery"><template v-for="photo in stepPictures(step)" :key="photo.token">
+            <button type="button" :draggable="editing" @dragstart="startPictureDrag(photo.token,$event)" @dragend="clearPictureDrag"
+              @click="openPreview(photo,stepPictures(step),'步骤 '+(index+1),$event)">
+              <img :src="photo.url" :alt="photo.name" loading="lazy"></button>
+            <button v-if="editing" type="button" :disabled="busy" @click="step.images=step.images.filter(token=>token!==photo.token)">移回待分配</button>
+          </template></div>
+          <div v-if="editing" class="serenity-actions"><NButton size="small" :disabled="busy" @click="choosePictures(step.key)">加图片</NButton>
+            <NButton size="small" :disabled="busy||index===0" @click="moveStep(index,-1)">上移</NButton><NButton size="small" :disabled="busy||index===record.steps.length-1" @click="moveStep(index,1)">下移</NButton>
+            <NButton size="small" type="error" secondary :disabled="busy" @click="record.steps.splice(index,1)">移除步骤</NButton></div>
+        </div>
+      </article>
+    </section>
+    <section v-if="editing||unassigned.length" class="serenity-panel" @paste="pastePictures($event,'')" @dragover="overFiles" @drop="dropFiles($event,'')">
+      <header class="serenity-heading"><h2 ref="poolHeading" tabindex="-1">待分配图片 · {{ unassigned.length }}</h2><NButton v-if="editing" :disabled="busy" @click="choosePictures('')">添加图片</NButton></header>
+      <div class="scene-gallery"><figure v-for="photo in unassigned" :key="photo.token">
+        <button type="button" :draggable="editing" @dragstart="startPictureDrag(photo.token,$event)" @dragend="clearPictureDrag" @click="openPreview(photo,unassigned,'待分配图片',$event)"><img :src="photo.url" :alt="photo.name" loading="lazy"></button>
+        <figcaption v-if="editing"><select :aria-label="'将 '+photo.name+' 分配至步骤'" @change="assign(photo.token,$event)"><option value="">选择步骤</option><option v-for="(step,i) in record.steps" :key="step.key" :value="step.key">步骤 {{ i+1 }}</option></select>
+          <NButton size="tiny" :disabled="busy" @click="removePicture(photo)">移除图片</NButton></figcaption></figure></div>
+    </section>
+    <details class="serenity-panel"><summary>处置正文（原文）</summary>
+      <NInput v-if="editing && !record.readonly_fields?.includes(dispositionField)" v-model:value="record.fields[dispositionField]" type="textarea" :input-props="{'aria-label':'处置正文'}"/>
+      <EopDisposition v-else :groups="dispositionGroups"/></details>
+    <div v-for="field in Object.keys(record.fields).filter(name=>!metaFields.includes(name)&&!referenceFields.includes(name)&&name!==dispositionField)" :key="field" class="scene-source">
+      <h3>{{ field }}</h3><NInput v-if="editing&&!record.readonly_fields?.includes(field)" v-model:value="record.fields[field]" type="textarea" :input-props="{'aria-label':field}"/>
+      <p v-else class="scene-prose">{{ record.fields[field]||'—' }}</p>
+    </div>
+    <input ref="fileInput" type="file" accept="image/*" multiple hidden @change="uploadPictures">
+  </template>
+  <NModal :show="!!preview" preset="card" class="scene-lightbox" :title="previewTitle" @update:show="v=>{if(!v)closePreview()}" @after-leave="restorePreviewFocus">
+    <figure v-if="preview" style="margin:0">
+      <img v-if="!previewError" :src="preview.url" :alt="preview.name" @error="previewError=true">
+      <p v-else role="status">图片未能加载</p>
+      <figcaption class="serenity-actions" style="margin-top:8px">
+        <span style="flex:1 1 8rem;min-width:0;overflow-wrap:anywhere">{{ preview.name }}</span>
+        <template v-if="previewPhotos.length>1">
+          <NButton size="small" :disabled="previewIndex===0" @click="changePreview(-1)">上一张</NButton>
+          <NButton size="small" :disabled="previewIndex+1>=previewPhotos.length" @click="changePreview(1)">下一张</NButton>
+        </template>
+      </figcaption>
+    </figure>
+  </NModal>
+  <NModal :show="!!discardAction" preset="dialog" title="放弃本次修改？" content="场景资料或步骤中有尚未保存的内容。" positive-text="放弃修改" negative-text="继续编辑"
+    @positive-click="discard" @negative-click="discardAction=undefined" @update:show="v=>{if(!v)discardAction=undefined}"/>
+</section>

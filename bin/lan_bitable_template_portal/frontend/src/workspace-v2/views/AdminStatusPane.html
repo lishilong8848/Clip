@@ -1,0 +1,28 @@
+<section class="serenity-desk status-desk" aria-label="后台状态">
+  <header class="serenity-heading console-heading"><div><h2>运行监测</h2><p>{{ statusWarnings.length?'有 '+statusWarnings.length+' 项需要关注':'已读取后台运行指标' }}</p></div>
+    <div class="serenity-actions"><button type="button" :disabled="busy" @click="emit('refresh')">刷新状态</button><button type="button" :disabled="busy" @click="emit('preflight')">真实联调预检</button>
+      <button type="button" @click="emit('open-history-memory')">打开历史记忆</button></div></header>
+  <div class="status-facts"><article><span>Qt 连接</span><b>{{ stats.qt_bridge?.connected?'已连接':'未连接' }}</b></article><article><span>附件暂存</span><b>{{ formatBytes(stats.upload_attachments?.total_bytes) }}</b></article>
+    <article><span>源表快照</span><b>{{ stats.source_snapshot?.active?.status||'待核对' }}</b></article><article><span>近期慢任务</span><b>{{ slowJobs.length }}</b></article></div>
+  <div v-if="statusWarnings.length" class="serenity-panel"><p v-for="text in statusWarnings" :key="text">{{ text }}</p></div>
+  <section class="serenity-panel"><header class="serenity-heading"><h2>最近任务</h2><button type="button" :disabled="busy" @click="emit('cleanup')">清理已完成任务</button></header>
+    <div class="platform-jobs"><article v-for="job in recentJobItems" :key="job.job_id"><b>{{ job.title||workTypeLabel(job.work_type)||shortId(job.job_id) }}</b>
+      <p>{{ actionLabel(job.action) }} · {{ job.status }} · {{ shortId(job.job_id) }}</p><small v-if="job.error">{{ job.error }}</small>
+      <div class="serenity-actions"><button v-if="job.can_retry" type="button" :disabled="busy" @click="emit('retry-job',job)">重试原任务</button>
+        <button v-if="job.can_mark_stuck_failed" type="button" :disabled="busy" @click="emit('mark-stuck-failed',job)">标记卡住任务</button>
+        <button v-if="job.can_clear" type="button" :disabled="busy" @click="emit('clear-job',job)">清理</button></div></article></div>
+    <p v-if="!recentJobItems.length">暂无任务记录</p></section>
+  <section class="serenity-panel"><header class="serenity-heading"><h2>通告链路自检</h2><div class="serenity-actions">
+    <label class="serenity-search"><input :value="noticeDiagnosticQuery" type="search" aria-label="检索通告" placeholder="标题或记录 ID" @input="emit('update:noticeDiagnosticQuery',($event.target as HTMLInputElement).value)"></label>
+    <button type="button" :disabled="busy||noticeDiagnosticLoading" @click="emit('run-notice-diagnostic')">检查链路</button></div></header>
+    <details v-for="item in noticeDiagnosticItems" :key="item.key"><summary>{{ item.title||item.identity_id||item.key }}</summary><pre class="settings-json">{{ pretty(item) }}</pre></details>
+    <details><summary>Qt 与网页记录一致性</summary><p v-for="issue in consistencyIssueItems" :key="issue.key">{{ issue.label }} · {{ issue.title }}</p>
+      <button type="button" :disabled="busy" @click="emit('repair-notice-projection')">修复本地映射</button></details></section>
+  <section class="serenity-panel"><h2>操作审计</h2><div v-for="(audit,i) in operationAuditItems" :key="i" class="transfer-item">
+    <strong>{{ auditDomainLabel(audit.domain) }} · {{ auditActionLabel(audit.action) }}</strong><span>{{ auditStatusLabel(audit.status) }} · {{ auditResultLabel(audit) }}</span></div>
+    <p v-if="!operationAuditItems.length">暂无操作审计</p></section>
+  <details class="serenity-panel"><summary>性能、队列与维护明细</summary>
+    <h3>队列</h3><pre class="settings-json">{{ pretty(queues) }}</pre><h3>性能</h3><pre class="settings-json">{{ pretty(perf) }}</pre>
+    <p>{{ sqliteMaintenanceText }}</p><div class="serenity-actions"><span v-for="item in cleanupCards" :key="item.key">{{ item.label }} {{ item.count }}</span></div>
+    <pre v-if="stats.preflight" class="settings-json">{{ pretty(stats.preflight) }}</pre></details>
+</section>

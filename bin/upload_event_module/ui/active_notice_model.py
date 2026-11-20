@@ -99,7 +99,7 @@ class ActiveNoticeModel(QAbstractListModel):
     def action_for_record(cls, record: dict[str, Any] | None) -> str:
         if not isinstance(record, dict):
             return ""
-        if record.get("_event_wait_job_id"):
+        if record.get("_event_wait_job_id") and not (record.get("_event_delivery_pending") and record.get("_queued_after_upload")):
             return ""
         if bool(record.get("_upload_verification_pending")):
             return ""
@@ -125,12 +125,15 @@ class ActiveNoticeModel(QAbstractListModel):
             info = {}
         if info.get("status") == "结束":
             return "end"
-        if not cls.is_placeholder_record(record):
+        if not cls.is_placeholder_record(record) or record.get("_event_delivery_sent"):
             return "update"
         return "upload"
 
     @classmethod
     def action_label_for_record(cls, record: dict[str, Any] | None) -> str:
+        if isinstance(record, dict) and record.get("_event_delivery_pending"):
+            next_action = cls.action_for_record(record)
+            return {"update": "更新", "end": "结束"}.get(next_action, record["_event_delivery_pending"])
         if isinstance(record, dict) and record.get("_event_wait_job_id"):
             return "后台处理中" if record.get("_event_wait_released") else "等待事件结束"
         if isinstance(record, dict) and bool(record.get("_upload_verification_pending")):
@@ -142,6 +145,8 @@ class ActiveNoticeModel(QAbstractListModel):
         if cls.has_upload_error(record) and not cls.is_uploaded_record(record):
             return "失败可重试"
         if cls.is_uploaded_record(record):
+            if record.get("_event_delivery_sent"):
+                return "群消息已发送"
             return "已上传"
         action = cls.action_for_record(record)
         if action == "end":

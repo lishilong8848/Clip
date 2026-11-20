@@ -18,7 +18,6 @@ const special=[
   {id:'learning',label:'画像学练',path:'/learning',api:'/api/learning',surface:'.learning-page'},
   {id:'plan_convergence',label:'计划收敛审查',path:'/plan-convergence',api:'/api/plan-convergence',surface:'.pc-page'},
 ];
-const v2Labels=['专项排查','计划收敛审查','人员工作交接'];
 const toolLabels=['共享知识库','南通文件','每日任务清单','上/下电通告','设备轮巡','设备调整','交接班审核页'];
 const fullModules=['maintenance','critical_guard','daily','knowledge','power','polling','adjust','handover',...special.map(item=>item.id)];
 const viewports=[{width:1440,height:900},{width:402,height:874},{width:440,height:956}];
@@ -48,22 +47,16 @@ async function assertSpecialMenu(expected){
   for(const item of special)assert.equal(await page.getByRole('button',{name:'选择'+item.label,exact:true}).count(),expected.includes(item.label)?1:0,item.id+': legacy grant filtering');
   assert.equal(await page.getByRole('button',{name:'选择重保管理',exact:true}).count(),0,'critical guard is not a special task');
 }
-async function assertV2Groups(expected){
+async function assertV2Groups(){
   await page.getByRole('heading',{name:'全部功能',exact:true}).waitFor();
-  const group=page.locator('.v2-sidebar .n-menu-item-group').filter({has:page.locator('.n-menu-item-group-title[aria-label="专项功能"]')});
-  const functions=page.locator('.v2-function-groups > section').filter({has:page.getByRole('heading',{name:'专项功能',exact:true})});
-  assert.equal(await group.count(),expected.length?1:0,'sidebar group requires at least one grant');
-  assert.equal(await functions.count(),expected.length?1:0,'mobile function group requires at least one grant');
-  assert.deepEqual((await group.locator('.n-menu-item-content-header').allTextContents()).map(text=>text.trim()),expected);
-  assert.deepEqual((await functions.getByRole('button').allTextContents()).map(text=>text.trim()),expected);
+  const rail=page.getByRole('navigation',{name:'功能导航',exact:true});
+  const categories={risk_inspection:'应急保障',plan_convergence:'通告中心',work_handover:'运行值守',learning:'知识中心'};
   for(const item of special){
-    assert.equal(await page.locator('.v2-sidebar .n-menu-item').filter({hasText:item.label}).count(),modules.includes(item.id)?1:0,item.id+': V2 sidebar grant filtering');
-    assert.equal(await page.locator('.v2-functions').getByRole('button',{name:item.label,exact:true}).count(),modules.includes(item.id)?1:0,item.id+': V2 function grant filtering');
+    const count=modules.includes(item.id)?1:0;
+    const section=page.locator('.directory-results > section').filter({has:page.getByRole('heading',{name:categories[item.id],exact:true})});
+    assert.equal(await section.locator('[data-nav-entry="'+item.id+'"]').count(),count,item.id+': grouped and authorized');
+    if(await rail.count())assert.equal(await rail.locator('[data-nav-entry="'+item.id+'"]').count(),count,item.id+': sidebar grant filtering');
   }
-  const learning=page.locator('.v2-function-groups > section').filter({has:page.getByRole('heading',{name:'学习与资料',exact:true})});
-  assert.equal(await learning.getByRole('button',{name:'画像学练',exact:true}).count(),modules.includes('learning')?1:0,'learning remains in learning/resources');
-  const learningNav=page.locator('.v2-sidebar .n-menu-item-group').filter({has:page.locator('.n-menu-item-group-title[aria-label="学习与资料"]')});
-  assert.equal(await learningNav.locator('.n-menu-item').filter({hasText:'画像学练'}).count(),modules.includes('learning')?1:0);
 }
 try{
   const context=await browser.newContext({viewport:viewports[0],reducedMotion:'reduce',serviceWorkers:'block'});
@@ -161,16 +154,16 @@ try{
     await legacyBack('/?entry=tools');
     await page.getByRole('button',{name:'选择每日任务清单',exact:true}).waitFor();
     await page.goto(v2Url('/?view=functions'));
-    await assertV2Groups(v2Labels);
+    await assertV2Groups();
     await fitAndCapture('v2-groups-'+width);
     for(const item of special){
-      const entry=width>760?page.locator('.v2-sidebar .n-menu-item').filter({hasText:item.label}):page.locator('.v2-functions').getByRole('button',{name:item.label,exact:true});
+      const entry=page.locator('.v2-functions').getByRole('button',{name:item.label,exact:true});
       await clickVisible(entry,'V2 '+item.label);
       await page.waitForFunction(path=>new URL(location.href).searchParams.get('__page')===path,item.path);
-      await page.locator(item.surface).waitFor();
+      await page.locator(item.id==='plan_convergence'?'.sp-page':item.id==='work_handover'?'.transfer-desk':item.surface).waitFor();
       assert.equal(new URL(page.url()).searchParams.has('entry'),false,'V2 never navigates to the legacy group');
       await fitAndCapture('v2-'+item.id+'-'+width);
-      await page.goto(v2Url('/?view=functions'));await assertV2Groups(v2Labels);
+      await page.goto(v2Url('/?view=functions'));await assertV2Groups();
     }
     category='engineer';
     for(const allowed of [...special.map(item=>[item.id]),['critical_guard','daily','knowledge'],[]]){
@@ -193,7 +186,7 @@ try{
       await page.getByRole('heading',{name:'选择其它功能入口',exact:true}).waitFor();
       assert.deepEqual(await page.locator('.tool-card').evaluateAll(nodes=>nodes.map(node=>node.getAttribute('aria-label'))),allowed.includes('knowledge')?['选择共享知识库','选择南通文件','选择每日任务清单']:[],caseName+': other-tools grants stay separate');
       await page.goto(v2Url('/?view=functions'));
-      await assertV2Groups(v2Labels.filter(label=>expected.some(item=>item.label===label)));
+      await assertV2Groups();
       await fitAndCapture('v2-permission-'+caseName+'-'+width);
       // Direct links must remain guarded, not merely disappear from navigation.
       for(const item of special.filter(item=>!allowed.includes(item.id))){

@@ -7,7 +7,10 @@
       <template v-if="editing"><NButton size="small" data-v2-navigation :disabled="saving" @click="cancel">取消</NButton><NButton size="small" data-v2-navigation :disabled="saving" @click="restore">恢复默认</NButton><NButton size="small" data-v2-navigation :disabled="saving" @click="library=true"><Plus :size="14" />添加组件</NButton><NButton size="small" type="primary" :loading="saving" :disabled="saving" @click="save"><Check :size="14" />保存布局</NButton></template>
     </header>
     <NAlert v-if="error" type="warning" :bordered="false">{{error}} <NButton text data-v2-navigation :disabled="saving||loading" @click="reload">重新读取</NButton></NAlert>
-    <WidgetGrid :items="visible" :editing="editing&&!saving" :inert="saving||undefined" :cell-height="64" :label="label+'布局'" :content-sized-ids="contentSizedIds" adaptive @layout="positions">
+    <div v-if="workModes.length>1" class="serenity-segment board-view-selector" role="group" :aria-label="label+'视图'">
+      <button v-for="mode in workModes" :key="mode.label" type="button" :aria-pressed="mode===workMode" @click="chosenMode=mode.label">{{ mode.label }}</button>
+    </div>
+    <WidgetGrid :items="visible" :flow="defaultGeometry && !editing" :zones="workZones" :shown="shownBlocks" :editing="editing&&!saving" :inert="saving||undefined" :cell-height="64" :label="label+'布局'" :content-sized-ids="contentSizedIds" adaptive @layout="positions">
       <template #tools="{item}">
         <slot v-if="item.builtin&&!editing" :name="'header-'+item.id.slice(6)" />
         <NButton v-if="!toolsTarget&&!editing&&item.id===visible[0]?.id" size="tiny" text data-v2-navigation :disabled="!ready||loading" :aria-label="'自定义'+label+'布局'" title="自定义布局" @click="edit"><SlidersHorizontal :size="14" />自定义布局</NButton>
@@ -41,6 +44,7 @@ import { defaultPageLayout,extraKinds,PAGE_WIDGET_LIMIT,pageContext,pageLayoutKe
 import { navigate,registerNavigationGuard } from './navigation';
 import { embeddedContextKey } from './embeddedContext';
 import { useLayoutSync } from './useLayoutSync';
+import {businessViews} from './businessViews';
 const props=withDefaults(defineProps<{page:string;label:string;blocks:PageBlock[];active?:boolean;plain?:boolean}>(),{active:true,plain:false});
 const contentSizedIds=computed(()=>props.page==='repair'?['block_records']:props.page==='events'?['block_overview','block_trend','block_records']:props.page==='daily'?['block_summary']:undefined);
 const context=inject(pageContext)!;
@@ -50,12 +54,30 @@ function findTools(){const next=embedded||props.plain?null:document.querySelecto
 onMounted(findTools);onUpdated(findTools);
 const dialog=useDialog(),message=useMessage(),editing=ref(false),library=ref(false),selectedId=ref<string|null>(null);
 const layout=ref<PageLayout>(defaultPageLayout(props.blocks,context.user.value)),presentations=ref<Record<string,string>>({});
+const defaultItems=computed(()=>defaultPageLayout(props.blocks,context.user.value).items);
+const defaultGeometry=computed(()=>{
+  const defaults=defaultItems.value;
+  return defaults.length===layout.value.items.length && defaults.every((block,index)=>{
+    const item=layout.value.items[index];
+    return item?.id===block.id && item.x===block.x && item.y===block.y && item.w===block.w && item.h===block.h;
+  });
+});
 // GridStack replaces item objects; keep the settings panel attached by stable ID.
 const selected=computed<PageWidget|null>({get:()=>layout.value.items.find(item=>item.id===selectedId.value)||null,set:item=>{selectedId.value=item?.id||null;}});
 const scopeOptions=computed(()=>context.scopes.value.map(value=>({value,label:value==='ALL'?'全部楼栋':value+'楼'})));
 let saved='',removeGuard:(()=>void)|undefined;
 const snapshot=()=>JSON.stringify({layout:layout.value,presentations:presentations.value});
 const visible=computed(()=>layout.value.items.filter(item=>!item.builtin||props.blocks.some(block=>'block_'+block.id===item.id&&block.when!==false)));
+const chosenMode=ref('');
+const presentation=computed(()=>!editing.value && defaultGeometry.value?businessViews[props.page]:undefined);
+const workZones=computed(()=>presentation.value?.zones);
+const workModes=computed(()=>(presentation.value?.views||[]).filter(mode=>visible.value.some(block=>mode.blocks.includes(block.id.slice(6)))));
+const workMode=computed(()=>workModes.value.find(mode=>mode.label===chosenMode.value)||workModes.value[0]);
+const shownBlocks=computed(()=>{
+  if(!workMode.value)return undefined;
+  const assigned=new Set(workModes.value.flatMap(mode=>mode.blocks));
+  return visible.value.filter(item=>!assigned.has(item.id.slice(6))||workMode.value!.blocks.includes(item.id.slice(6))).map(item=>item.id);
+});
 const missing=computed(()=>props.blocks.filter(block=>block.when!==false&&!layout.value.items.some(item=>item.id==='block_'+block.id)));
 const additions=computed(()=>catalog.filter(entry=>extraKinds(context.module.value,context.user.value).includes(entry.kind)));
 function normalize(value:any){

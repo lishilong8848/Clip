@@ -1,0 +1,1151 @@
+<section class="cabinet-batch-page cab-desk">
+
+  <header class="cab-head">
+    <div class="cab-head-main">
+      <VnetBackButton class="cab-back" :to="backTarget" title="返回机柜用电" />
+      <div class="cab-heading">
+        <h1 class="cab-title">
+          <ClipboardList v-if="mode === 'new'" :size="18" aria-hidden="true" />
+          <Files v-else-if="batchId" :size="18" aria-hidden="true" />
+          <FileText v-else :size="18" aria-hidden="true" />
+          {{ mode === 'new' ? '新建用电待办' : batchId ? '上下电待办详情' : '用电待办' }}
+        </h1>
+        <p v-if="batchId" class="cab-subtitle cab-inline-chips">
+          <span class="cab-chip" :class="'st-' + batch.status">{{ statusLabel(batch.status) }}</span>
+          <span v-if="batch.source" class="cab-chip">{{ sourceLabel(batch.source) }}</span>
+          <span v-if="batch.version" class="cab-chip cab-muted">v{{ batch.version }}</span>
+          <span v-if="dirtyCount" class="cab-chip is-warning">未保存更正 {{ dirtyCount }}</span>
+          <span v-if="saving" class="cab-chip is-info"><Loader2 :size="12" class="cab-spin" aria-hidden="true" /> 保存中</span>
+          <span v-else-if="saveFailed" class="cab-chip is-danger">保存失败</span>
+        </p>
+      </div>
+    </div>
+    <div class="cab-actions cab-actions-inline">
+      <button type="button" class="cab-btn" :disabled="loading" :aria-busy="loading ? 'true' : 'false'" @click="reload">
+        <Loader2 v-if="loading" :size="15" class="cab-spin" aria-hidden="true" />
+        <RefreshCw v-else :size="15" aria-hidden="true" />
+        <span>{{ loading ? '刷新中…' : '刷新' }}</span>
+      </button>
+      <button v-if="!batchId && mode !== 'new'" type="button" class="cab-btn cab-primary" :disabled="loading" @click="openNew">
+        <Plus :size="15" aria-hidden="true" /><span>新建待办</span>
+      </button>
+    </div>
+  </header>
+
+  <div v-if="error" class="cab-alert" :class="saveFailed ? 'is-danger' : 'is-warning'" role="alert">
+    <AlertTriangle :size="15" aria-hidden="true" /><span>{{ error }}</span>
+  </div>
+  <div v-if="message" class="cab-alert is-info" role="status" aria-live="polite">{{ message }}</div>
+
+
+
+  <template v-if="batchId">
+
+    <section v-if="batch.source_notice" class="cab-panel"><header class="cab-section-head"><h2>{{ batch.source_notice.title || '关联上下电通告' }}</h2><span>{{ batch.source_notice.notice_type }} · {{ batch.source_notice.scope }}楼</span></header>
+      <p v-if="batch.source_notice.deleted_at || batch.source_notice.rollback_error" class="cab-alert">{{ batch.source_notice.rollback_error || '原通告已删除' }}</p>
+      <details v-if="batch.source_notice.cabinet"><summary>查看通告中的机柜</summary><p>{{ batch.source_notice.cabinet }}</p></details>
+    </section>
+
+    <section class="cab-panel" aria-labelledby="cab-batch-actions">
+      <header class="cab-panel-head">
+        <h2 id="cab-batch-actions" class="cab-panel-title">批次操作</h2><button type="button" :disabled="saving || !batch.version" @click="revalidate">重新校验</button>
+        <dl class="cab-metrics cab-metrics-inline">
+          <div class="cab-metric"><dt>总行</dt><dd>{{ batch.stats?.total ?? '—' }}</dd></div>
+          <div class="cab-metric"><dt>可确认</dt><dd>{{ batch.stats?.confirmable ?? '—' }}</dd></div>
+          <div class="cab-metric"><dt>重复</dt><dd>{{ batch.stats?.duplicate ?? '—' }}</dd></div>
+          <div class="cab-metric"><dt>冲突</dt><dd>{{ batch.stats?.conflict ?? '—' }}</dd></div>
+          <div class="cab-metric"><dt>无效</dt><dd>{{ batch.stats?.invalid ?? '—' }}</dd></div>
+          <div class="cab-metric"><dt>失败</dt><dd>{{ batch.stats?.failed ?? '—' }}</dd></div>
+          <div class="cab-metric" :class="{ 'is-warning': attentionCount }"><dt>需关注</dt><dd>{{ attentionCount }}</dd></div>
+          <div class="cab-metric"><dt>可回退</dt><dd>{{ rollbackableCount }}</dd></div>
+          <div class="cab-metric"><dt>有效截图</dt><dd>{{ activeImages.length }}</dd></div>
+          <div class="cab-metric"><dt>已移除截图</dt><dd>{{ deletedImages.length }}</dd></div>
+        </dl>
+      </header>
+
+      <div class="cab-actions cab-actions-inline">
+        <button type="button" class="cab-btn cab-primary" :disabled="saving || !(batch.can_confirm_all && batch.stats?.confirmable && !warningsPending)" @click="confirmDialog='all'">
+          确认整批
+        </button>
+        <button type="button" class="cab-btn" :disabled="saving || warningsPending || !(batch.rows || []).filter(r=>selectedRows.includes(r.row_id) && r.confirmable).length" @click="confirmRows({row_ids:(batch.rows || []).filter(r=>selectedRows.includes(r.row_id) && r.confirmable).map(r=>r.row_id)})">
+          确认已选（{{ (batch.rows || []).filter(r=>selectedRows.includes(r.row_id) && r.confirmable).length }}）
+        </button>
+        <button type="button" class="cab-btn" :disabled="saving || !restorableSelectedCount" @click="restoreSelected">
+          恢复已选
+        </button>
+        <button type="button" class="cab-btn" :disabled="saving || !excludableSelectedCount" @click="excludeSelected">
+          排除已选
+        </button>
+        <button v-if="rollbackableCount" type="button" class="cab-btn" :disabled="saving" @click="requestRollback('')">
+          回退全部可回退
+        </button>
+        <button v-if="(batch.rows || []).some(r=>r.status==='duplicate' && r.editable)" type="button" class="cab-btn" :disabled="saving" @click="confirmDialog='overlap'">
+          清空重叠行
+        </button>
+        <button v-if="cancellableCount && (props.isAdmin || batch.owner_id===props.userId)" type="button" class="cab-btn" :disabled="saving" @click="confirmDialog='cancel'">
+          作废未提交行
+        </button>
+        <button v-if="(batch.source==='image' && batch.rows?.length===0 && !recognizingEvidence && (props.isAdmin || batch.owner_id===props.userId))" type="button" class="cab-btn" :disabled="saving" @click="confirmDialog='delete_empty'">
+          <Trash2 :size="14" aria-hidden="true" /><span>删除空批次</span>
+        </button>
+        <button v-if="(batch.rows || []).some(r=>r.editable)" type="button" class="cab-btn" :disabled="saving" @click="openTextFill">
+          <ScanText :size="14" aria-hidden="true" /><span>文本回填</span>
+        </button>
+        <button v-if="(batch.rows || []).some(r=>r.issues?.length || r.error)" type="button" class="cab-btn" :disabled="saving" @click="nextProblemRow">
+          <ChevronRight :size="14" aria-hidden="true" /><span>下一问题行</span>
+        </button>
+        <span class="cab-chip cab-muted">已选 {{ selectedRows.length }}</span>
+      </div>
+
+      <div v-if="confirmProgress.done || confirmProgress.total > 1 || batch.status==='running'" class="cab-progress progress-copy" aria-live="polite">
+        <div class="cab-progress-row">
+          <span class="cab-progress-label">写入进度</span>
+          <progress class="v2-motion-progress" aria-label="写入进度" :aria-valuenow="Math.round(confirmProgress.done/confirmProgress.total*100)" :value="Math.round(confirmProgress.done/confirmProgress.total*100)" max="100"></progress><span class="v2-progress-value">{{ Math.round(confirmProgress.done/confirmProgress.total*100) }}%</span>
+          <span class="cab-muted">{{ confirmProgress.done }} / {{ confirmProgress.total }}</span>
+        </div>
+      </div>
+      <div v-if="rollbackProgress.done || rollbackProgress.active" class="cab-progress" aria-live="polite">
+        <div class="cab-progress-row">
+          <span class="cab-progress-label">回退进度</span>
+          <progress :value="rollbackProgress.done" :max="rollbackProgress.total"></progress>
+          <span class="cab-muted">{{ rollbackProgress.done }} / {{ rollbackProgress.total }}</span>
+        </div>
+      </div>
+    </section>
+
+    <div v-if="batch.blocking_warnings?.length || saveConflicts.length" class="cab-grid cab-grid-2 cab-grid-top">
+      <section v-if="batch.blocking_warnings?.length" class="cab-panel cab-panel-warn" aria-labelledby="cab-warnings">
+        <header class="cab-panel-head">
+          <h2 id="cab-warnings" class="cab-panel-title">
+            <AlertTriangle :size="15" aria-hidden="true" /> 阻断警告（{{ batch.blocking_warnings.length }}）
+          </h2>
+          <span class="cab-chip" :class="batch.warnings_acknowledged ? 'is-ok' : 'is-warning'">
+            {{ batch.warnings_acknowledged ? '已人工核对' : '待人工核对' }}
+          </span>
+          <button type="button" class="cab-btn cab-primary" :disabled="saving || batch.warnings_acknowledged" @click="confirmDialog='warnings'">
+            确认已核对
+          </button>
+        </header>
+        <ul class="cab-list cab-scroll">
+          <li v-for="(warning, index) in batch.blocking_warnings" :key="index">
+            <span>{{ warning.message || warning.code || warning }}</span>
+          </li>
+        </ul>
+
+      </section>
+
+      <section v-if="saveConflicts.length" class="cab-panel cab-panel-warn" aria-labelledby="cab-conflicts">
+        <header class="cab-panel-head">
+          <h2 id="cab-conflicts" class="cab-panel-title">保存冲突（{{ saveConflicts.length }}）</h2>
+          <span class="cab-muted">逐项选择保留本地或云端</span>
+        </header>
+        <div class="cab-list cab-scroll">
+          <div v-for="conflict in saveConflicts" :key="conflict.row_id + ':' + conflict.key" class="cab-conflict">
+            <div class="cab-fields cab-fields-inline">
+              <strong>{{ conflict.title }}</strong>
+              <span class="cab-chip">{{ fieldLabels[conflict.key] || conflict.key }}</span>
+            </div>
+            <div class="cab-actions cab-actions-inline">
+              <button type="button" class="cab-btn cab-btn-sm" :disabled="!conflict.canKeep || saving" @click="resolveSaveConflict(conflict, true)">
+                保留本地：{{ conflict.local || '（空）' }}
+              </button>
+              <button type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="resolveSaveConflict(conflict, false)">
+                采用云端：{{ conflict.remote || '（空）' }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <section class="cab-panel" aria-labelledby="cab-rows">
+      <header class="cab-panel-head">
+        <h2 id="cab-rows" class="cab-panel-title">机柜明细（{{ filteredRows.length }} / {{ batch.rows?.length || 0 }}）</h2>
+        <span class="cab-chip cab-muted">已选 {{ selectedRows.length }}</span>
+      </header>
+
+      <form class="cab-fields cab-fields-inline row-filters" @submit.prevent>
+        <label class="cab-field">
+          <span>楼栋</span>
+          <select v-model="rowScopeFilter">
+            <option value="">全部楼栋</option>
+            <option v-for="option in buildingOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>状态</span>
+          <select v-model="rowStatusFilter">
+            <option value="">全部状态</option>
+            <option v-for="status in Array.from(new Set((batch.rows || []).map(r=>r.status)))" :key="status" :value="status">{{ statusLabel(status) }}</option><option value="excluded">所有排除行</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>快速筛选</span>
+          <select v-model="rowQuickFilter">
+            <option value="">无</option>
+            <option value="missing_actual">缺实际时间</option>
+            <option value="evidence_pending">缺截图</option>
+            <option value="issues">有问题</option>
+          </select>
+        </label>
+      </form>
+
+      <div class="cab-table-wrap cab-scroll">
+        <table class="cab-table row-table cab-record-table">
+          <thead>
+            <tr>
+              <th scope="col" class="cab-check">
+                <input type="checkbox" aria-label="全选当前页可选行" :checked="allVisibleSelected" :disabled="!pagedRows.some(r=>r.editable || r.confirmable || r.restorable)" @change="toggleVisible">
+              </th>
+              <th scope="col">#</th>
+              <th v-if="showRackColumn" scope="col">{{ fieldLabels.scope }} / {{ fieldLabels.room }} / {{ fieldLabels.rack }}</th>
+              <th v-if="showSupplierRackColumn" scope="col">{{ fieldLabels.supplier_rack }}</th>
+              <th scope="col">{{ fieldLabels.action }}</th>
+              <th v-if="showExpectedColumn" scope="col">{{ fieldLabels.expected }}</th>
+              <th scope="col">{{ fieldLabels.actual }}</th>
+              <th scope="col">{{ fieldLabels.result }}</th>
+              <th scope="col">状态</th>
+              <th scope="col">截图</th>
+              <th scope="col" class="cab-col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(row, index) in pagedRows" :key="row.row_id"
+              :class="{ 'is-editing': editingRowId === row.row_id, 'is-excluded': String(row.status).startsWith('excluded_'), 'is-dirty': dirtyCount && row.editable }">
+              <td class="cab-check">
+                <input type="checkbox" :value="row.row_id" v-model="selectedRows"
+                  :disabled="!(row.editable || row.confirmable || row.restorable)"
+                  :aria-label="'选择 ' + row.scope + '楼 ' + row.room + ' ' + row.rack">
+              </td>
+              <td class="cab-muted" data-label="序号">{{ (rowPage - 1) * 50 + index + 1 }}</td>
+              <td v-if="showRackColumn" class="cab-row-identity">
+                <span class="cab-chip">{{ row.scope }}</span>
+                {{ row.room }} · {{ row.rack }}
+                <span v-if="row.rack_type" class="cab-muted">{{ row.rack_type }}</span>
+                <span v-if="corrected(row, 'rack') || corrected(row, 'room')" class="cab-chip is-warning">已更正</span>
+              </td>
+              <td v-if="showSupplierRackColumn" :data-label="fieldLabels.supplier_rack">{{ hasCabinetValue(row.supplier_rack) ? row.supplier_rack : '—' }}</td>
+              <td :data-label="fieldLabels.action">
+                <span v-if="row.action">{{ row.action }}</span>
+                <span v-else class="cab-muted">待填写</span>
+                <span v-if="row.type_detail" class="cab-muted"> · {{ row.type_detail }}</span>
+                <span v-if="row.type_resolution" class="cab-chip is-info">{{ row.type_resolution }}</span>
+              </td>
+              <td v-if="showExpectedColumn" :data-label="fieldLabels.expected">{{ tableDate(row.expected) }}</td>
+              <td :data-label="fieldLabels.actual">
+                <span :class="{ 'cab-chip is-warning': !row.actual }">{{ tableDate(row.actual) }}</span>
+              </td>
+              <td :data-label="fieldLabels.result">
+                <span v-if="row.result" class="cab-chip" :class="row.result === '成功' ? 'is-ok' : 'is-danger'">{{ row.result }}</span>
+                <span v-else class="cab-muted">待填写</span>
+                <span v-if="row.result === '失败' && row.failure_reason" class="cab-muted"> · {{ row.failure_reason }}</span>
+              </td>
+              <td data-label="状态">
+                <span class="cab-chip" :class="'st-' + row.status">{{ statusLabel(row.status) }}</span>
+                <span v-if="row.error" class="cab-chip is-danger">{{ row.error }}</span>
+              </td>
+              <td data-label="截图">
+                <button v-if="row.evidence_images?.length" type="button" class="cab-btn cab-btn-sm" @click="openProofImages(row)">
+                  <Eye :size="13" aria-hidden="true" /><span>{{ row.evidence_images.length }}</span>
+                </button>
+                <span v-else class="cab-muted">无</span>
+              </td>
+              <td class="cab-col-actions">
+                <div class="cab-row-actions">
+                  <button type="button" class="cab-btn cab-btn-sm"
+                    :disabled="saving"
+                    :aria-expanded="editingRowId === row.row_id ? 'true' : 'false'"
+                    @click="toggleRowEditor(row, $event)">
+                    <Pencil :size="13" aria-hidden="true" />
+                    <span>{{ editingRowId === row.row_id ? '收起' : row.editable ? '编辑' : '详情' }}</span>
+                  </button>
+                  <button type="button" class="cab-btn cab-btn-sm" :disabled="saving || !row.editable" @click="toggleExcluded(row, !String(row.status).startsWith('excluded_'))">
+                    {{ String(row.status).startsWith('excluded_') ? '取消排除' : '排除' }}
+                  </button>
+                  <button v-if="row.confirmable" type="button" class="cab-btn cab-btn-sm cab-primary"
+                    :disabled="saving || warningsPending" @click="confirmRows({row_ids:[row.row_id]})">
+                    确认
+                  </button>
+                  <button v-if="row.restorable" type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="restoreRows([row.row_id])">
+                    恢复
+                  </button>
+                  <button v-if="row.rollbackable" type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="requestRollback(row.row_id)">
+                    回退
+                  </button>
+                </div>
+              </td>
+            </tr>
+            <tr v-if="!pagedRows.length">
+              <td :colspan="(9 + Number(showRackColumn) + Number(showSupplierRackColumn) + Number(showExpectedColumn))" class="cab-muted cab-empty">
+                没有符合筛选条件的机柜行。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <nav v-if="rowPageCount > 1" class="cab-pager" aria-label="明细分页">
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="rowPage <= 1" @click="rowPage = rowPage - 1">
+          <ChevronLeft :size="14" aria-hidden="true" /><span>上一页</span>
+        </button>
+        <button v-for="page in rowPages" :key="'rp' + page" type="button" class="cab-btn cab-btn-sm"
+          :class="{ 'cab-primary': page === rowPage }" :aria-current="page === rowPage ? 'page' : undefined"
+          @click="rowPage = page">{{ page }}</button>
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="rowPage >= rowPageCount" @click="rowPage = rowPage + 1">
+          <span>下一页</span><ChevronRight :size="14" aria-hidden="true" />
+        </button>
+      </nav>
+    </section>
+
+    <section v-if="(batch.rows || []).some(r=>selectedRows.includes(r.row_id) && r.editable)" class="cab-panel" aria-labelledby="cab-bulk">
+      <header class="cab-panel-head">
+        <h2 id="cab-bulk" class="cab-panel-title">批量更新</h2>
+        <span class="cab-muted">仅写入已勾选且可编辑的行，留空不修改</span>
+      </header>
+      <form class="cab-fields cab-fields-inline" @submit.prevent="applyBulk">
+        <label class="cab-field">
+          <span>操作类型</span>
+          <select v-model="bulk.action" :disabled="saving">
+            <option value="">不修改</option>
+            <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>期望完成时间</span>
+          <input type="datetime-local" v-model="bulk.expected" :disabled="saving">
+        </label>
+        <label class="cab-field">
+          <span>实际完成时间</span>
+          <input type="datetime-local" v-model="bulk.actual" :disabled="saving">
+        </label>
+        <label class="cab-field">
+          <span>结果</span>
+          <select v-model="bulk.result" :disabled="saving">
+            <option value="">不修改</option>
+            <option value="成功">成功</option>
+            <option value="失败">失败</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>类型处理</span>
+          <select v-model="bulk.type_resolution" :disabled="saving"><option value="">不修改</option><option value="keep_current">沿用目录类型</option><option value="sync_current">按本行类型更新目录</option></select>
+        </label>
+        <label class="cab-field cab-field-wide">
+          <span>失败原因</span>
+          <input type="text" v-model="bulk.failure_reason" :disabled="saving || bulk.result === '成功'">
+        </label>
+        <button type="submit" class="cab-btn cab-primary" :disabled="saving">
+          应用到已选（{{ (batch.rows || []).filter(r=>selectedRows.includes(r.row_id) && r.editable).length }}）
+        </button>
+      </form>
+    </section>
+
+    <section class="cab-panel" aria-labelledby="cab-evidence">
+      <header class="cab-panel-head">
+        <h2 id="cab-evidence" class="cab-panel-title">截图证明</h2>
+        <span v-if="recognizingEvidence" class="cab-chip is-info">
+          <Loader2 :size="12" class="cab-spin" aria-hidden="true" />
+          识别中 {{ recognitionProgress.done }}/{{ recognitionProgress.total }}
+          <template v-if="recognitionProgress.current"> · {{ recognitionProgress.current }}</template>
+        </span>
+        <span v-if="recognitionProgress.failed" class="cab-chip is-danger">识别失败 {{ recognitionProgress.failed }}</span>
+        <button type="button" class="cab-btn cab-btn-sm" :aria-expanded="showProofPanel ? 'true' : 'false'" :disabled="!((props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled') || (batch.rows?.length>0 && !selectableImageRows.length)" @click="showProofPanel = !showProofPanel">
+          <Eye :size="14" aria-hidden="true" /><span>{{ showProofPanel ? '收起上传区' : '展开上传区' }}</span>
+        </button>
+      </header>
+
+      <div v-if="imageUploadTotal" class="cab-progress" aria-live="polite">
+        <div class="cab-progress-row">
+          <span class="cab-progress-label">上传</span>
+          <progress :value="imageUploadDone" :max="imageUploadTotal"></progress>
+          <span class="cab-muted">{{ imageUploadDone }} / {{ imageUploadTotal }}</span>
+        </div>
+      </div>
+
+      <div v-if="showProofPanel" class="cab-evidence-upload">
+        <label class="cab-drop"
+          :class="{ 'is-dragging': evidenceDragging, 'is-busy': uploadingEvidence || saving }"
+          @dragover.prevent="evidenceDragging = true"
+          @dragleave.prevent="evidenceDragging = false"
+          @drop.prevent="dropEvidence">
+          <Upload :size="18" aria-hidden="true" />
+          <span>拖拽或选择确认截图（JPG / PNG / WebP，单张 ≤10MiB）</span>
+          <input ref="imageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple
+            :disabled="uploadingEvidence || saving" @change="selectEvidence">
+        </label>
+      </div>
+
+      <div v-if="activeImages.length" class="cab-evidence-grid cab-grid cab-grid-3">
+        <article v-for="image in pagedActiveImages" :key="image.image_id" class="cab-evidence-item">
+          <button type="button" class="cab-thumb" :title="image.name" @click="openImage(image.image_id)">
+            <img :src="imageUrl(image.image_id)" :alt="image.name || '确认截图'" loading="lazy">
+          </button>
+          <div class="cab-evidence-meta">
+            <span class="cab-chip" :class="'st-' + image.status">{{ statusLabel(image.status) }}</span>
+            <span class="cab-muted cab-ellipsis">{{ image.name }}</span>
+            <span v-if="imageLocked(image)" class="cab-chip is-info">已关联正式记录</span>
+          </div>
+          <div class="cab-actions cab-actions-inline cab-row-actions">
+            <button v-if="batch.source==='image' && !imageLocked(image) && (props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled'" type="button" class="cab-btn cab-btn-sm"
+              :disabled="saving || uploadingEvidence" @click="openCorrection(image, {}, -1)">
+              <Pencil :size="13" aria-hidden="true" /><span>补全机柜</span>
+            </button>
+            <button v-if="image.status === 'failed' && ((props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled')" type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="retryImage(image)">
+              <RefreshCw :size="13" aria-hidden="true" /><span>重新识别</span>
+            </button>
+            <button v-if="(props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled'" type="button" class="cab-btn cab-btn-sm" :disabled="saving || uploadingEvidence || imageLocked(image)" @click="requestImageDelete(image.image_id)">
+              <Trash2 :size="13" aria-hidden="true" /><span>删除截图</span>
+            </button>
+          </div>
+          <p v-if="image.error" class="cab-alert">{{ image.error }}</p>
+          <details v-if="(selectableImageRows.length || image.suggestions?.length) && !imageLocked(image) && batch.status!=='cancelled'"><summary>核对候选并关联到待办</summary>
+            <div v-for="(candidate,index) in image.suggestions?.length ? image.suggestions : [null]" :key="index" class="cab-item">
+              <span v-if="candidate">{{ candidate.scope }}楼 · {{ candidate.room }} · {{ candidate.rack }} · {{ candidate.action }} {{ candidate.actual }}</span>
+              <label>查找目标行<input type="search" v-model="imageSearches[image.image_id+':'+index]"></label>
+              <label>关联到<select v-model="imageSelections[image.image_id+':'+index]"><option value="">选择批次记录</option><option v-for="r in candidateRows(image.image_id+':'+index)" :key="r.row_id" :value="r.row_id">{{ r.scope }}楼 · {{ r.room }} / {{ r.rack }} · {{ r.action }}</option></select></label>
+              <div class="cab-actions"><button :disabled="saving || !imageSelections[image.image_id+':'+index]" @click="applyEvidence(image,imageSelections[image.image_id+':'+index],candidate,candidate ? index : -1)">关联原图</button>
+                <button v-if="candidate && batch.source==='image' && ((props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled')" :disabled="saving" @click="openCorrection(image,candidate,index)">修正识别结果</button></div>
+            </div>
+          </details>
+        </article>
+      </div>
+      <p v-else class="cab-muted cab-empty">暂无有效截图。</p>
+
+      <nav v-if="imagePageCount > 1" class="cab-pager" aria-label="截图分页">
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="imagePage <= 1" @click="imagePage = imagePage - 1">
+          <ChevronLeft :size="14" aria-hidden="true" /><span>上一页</span>
+        </button>
+        <span class="cab-muted">{{ imagePage }} / {{ imagePageCount }}</span>
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="imagePage >= imagePageCount" @click="imagePage = imagePage + 1">
+          <span>下一页</span><ChevronRight :size="14" aria-hidden="true" />
+        </button>
+      </nav>
+
+      <details v-if="deletedImages.length && ((props.isAdmin || batch.can_download_files && batch.can_confirm_all) && batch.status!=='cancelled')" class="cab-details" :open="true">
+        <summary>已移除截图（{{ deletedImages.length }}），可撤回删除</summary>
+        <ul class="cab-list cab-scroll">
+          <li v-for="image in deletedImages" :key="image.image_id">
+            <span class="cab-muted">{{ image.name }}</span>
+            <button type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="restoreEvidence(image.image_id)">
+              撤回删除
+            </button>
+          </li>
+        </ul>
+      </details>
+
+      <form v-if="correction" class="cab-panel cab-subpanel image-correction" @submit.prevent="submitCorrection">
+        <header class="cab-panel-head">
+          <h3 class="cab-panel-title">
+            <Pencil :size="14" aria-hidden="true" />
+            更正截图 {{ correction.candidate_index >= 0 ? '候选 ' + (correction.candidate_index + 1) : '并补全机柜' }}
+          </h3>
+          <button type="button" class="cab-btn cab-btn-sm" @click="correction = null">
+            <X :size="13" aria-hidden="true" /><span>取消</span>
+          </button>
+        </header>
+        <div class="cab-fields">
+          <label class="cab-field">
+            <span>{{ fieldLabels.scope }}</span>
+            <select v-model="correction.scope" :disabled="saving" @change="loadCorrectionDirectory">
+              <option v-for="option in buildingOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.room }}</span>
+            <input type="text" v-model="correction.room" :disabled="saving" list="cab-correction-rooms">
+            <datalist id="cab-correction-rooms">
+              <option v-for="item in correctionDirectory" :key="'room-' + item.room" :value="item.room"></option>
+            </datalist>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.rack }}</span>
+            <input type="text" v-model="correction.rack" :disabled="saving" list="cab-correction-racks">
+            <datalist id="cab-correction-racks">
+              <option v-for="item in correctionDirectory" :key="'rack-' + item.room + '/' + item.rack" :value="item.rack">{{ item.room }}</option>
+            </datalist>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.supplier_rack }}</span>
+            <input type="text" v-model="correction.supplier_rack" :disabled="saving">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.rack_type }}</span>
+            <input type="text" v-model="correction.rack_type" :disabled="saving">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.type_detail }}</span>
+            <input type="text" v-model="correction.type_detail" :disabled="saving">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.action }}</span>
+            <select v-model="correction.action" :disabled="saving">
+              <option value="">请选择</option>
+              <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.expected }}</span>
+            <input type="datetime-local" v-model="correction.expected" :disabled="saving">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.actual }}</span>
+            <input type="datetime-local" v-model="correction.actual" :disabled="saving">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.result }}</span>
+            <select v-model="correction.result" :disabled="saving">
+              <option value="">请选择</option>
+              <option value="成功">成功</option>
+              <option value="失败">失败</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.type_resolution }}</span>
+            <select v-model="correction.type_resolution" :disabled="saving"><option value="">选择类型处理</option><option value="keep_current">沿用目录类型</option><option value="sync_current">按本行类型更新目录</option></select>
+          </label>
+          <label class="cab-field cab-field-wide">
+            <span>{{ fieldLabels.failure_reason }}</span>
+            <input type="text" v-model="correction.failure_reason" :disabled="saving || correction.result === '成功'">
+          </label>
+        </div>
+        <p v-if="correction.error" class="cab-alert is-danger" role="alert">{{ correction.error }}</p>
+        <div class="cab-actions cab-actions-inline">
+          <button type="submit" class="cab-btn cab-primary" :disabled="saving">保存并关联原图</button>
+        </div>
+      </form>
+    </section>
+
+
+    <div v-if="editingRowId" v-show="!confirmDialog && !previewImage && !discardOpen" class="cab-modal-wrap row-editor-overlay" @click.self="closeRowEditor">
+      <template v-for="row in batch.rows" :key="'editor-' + row.row_id">
+        <form v-if="row.row_id === editingRowId" class="cab-dialog row-editor" role="dialog" aria-modal="true" :aria-label="row.editable ? '编辑机柜待办行' : '机柜待办行详情'" tabindex="-1" @submit.prevent="closeRowEditor">
+          <header class="cab-panel-head">
+            <h3 class="cab-panel-title">
+              <span class="cab-chip">{{ row.scope }}</span>
+              {{ row.room }} / {{ row.rack }}
+              <span class="cab-chip" :class="'st-' + row.status">{{ statusLabel(row.status) }}</span>
+              <span v-if="saving" class="cab-chip is-info"><Loader2 :size="12" class="cab-spin" aria-hidden="true" /> 保存中</span>
+            </h3>
+            <button type="button" class="cab-btn cab-btn-sm" @click="closeRowEditor"><X :size="13" aria-hidden="true" /><span>关闭</span></button>
+          </header>
+
+          <dl v-if="!row.editable" class="cab-row-facts">
+            <div v-for="key in ['scope','room','rack','rack_type','supplier_rack','type_detail','action','expected','actual','result','type_resolution','failure_reason']" :key="key">
+              <dt>{{ fieldLabels[key] }}</dt>
+              <dd v-if="key==='expected' || key==='actual'">{{ tableDate(row[key]) }}</dd>
+              <dd v-else-if="key==='type_resolution'">{{ ({ keep_current:'沿用目录类型', sync_current:'按本行类型更新目录' })[row[key]] || row[key] || '—' }}</dd>
+              <dd v-else>{{ row[key] || '—' }}</dd>
+            </div>
+          </dl>
+          <div v-else class="cab-fields">
+            <label class="cab-field">
+              <span>{{ fieldLabels.scope }}</span>
+              <select v-model="row.scope" :disabled="saving || !row.editable" @change="queueAutoSave()">
+                <option v-for="option in buildingOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+              </select>
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.room }}</span>
+              <input type="text" v-model="row.room" :disabled="saving || !row.editable" @input="queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.rack }}</span>
+              <input type="text" v-model="row.rack" :disabled="saving || !row.editable" @input="queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.supplier_rack }}</span>
+              <input type="text" v-model="row.supplier_rack" :disabled="saving || !row.editable" @input="queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.rack_type }}</span>
+              <input type="text" v-model="row.rack_type" :disabled="saving || !row.editable" @input="queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.type_detail }}</span>
+              <input type="text" v-model="row.type_detail" :disabled="saving || !row.editable" @input="queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.action }}</span>
+              <select v-model="row.action" :disabled="saving || !row.editable" @change="queueAutoSave()">
+                <option value="">请选择</option>
+                <option v-for="action in allowedRowActions(row)" :key="action" :value="action">{{ action }}</option>
+              </select>
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.expected }}</span>
+              <input type="datetime-local" :value="localDate(row.expected)" :disabled="saving || !row.editable" @input="row.expected = inputDate($event); queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.actual }}</span>
+              <input type="datetime-local" :value="localDate(row.actual)" :disabled="saving || !row.editable" @input="row.actual = inputDate($event); queueAutoSave()">
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.result }}</span>
+              <select v-model="row.result" :disabled="saving || !row.editable" @change="queueAutoSave()">
+                <option value="">请选择</option>
+                <option value="成功">成功</option>
+                <option value="失败">失败</option>
+              </select>
+            </label>
+            <label class="cab-field">
+              <span>{{ fieldLabels.type_resolution }}</span>
+              <select v-model="row.type_resolution" :disabled="saving || !row.editable" @input="queueAutoSave()"><option value="">选择类型处理</option><option value="keep_current">沿用目录类型</option><option value="sync_current">按本行类型更新目录</option></select>
+            </label>
+            <label class="cab-field cab-field-wide">
+              <span>{{ fieldLabels.failure_reason }}</span>
+              <input type="text" v-model="row.failure_reason" :disabled="saving || !row.editable || row.result === '成功'" @input="queueAutoSave()">
+            </label>
+          </div>
+
+          <p v-if="row.error" class="cab-alert is-danger" role="alert">{{ row.error }}</p>
+          <ul v-if="row.issues?.length" class="cab-list cab-alert is-warning">
+            <li v-for="(issue, issueIndex) in row.issues" :key="issueIndex">{{ issue.message || issue.code || issue }}</li>
+          </ul>
+
+          <div v-if="row.editable" class="cab-actions cab-actions-inline">
+            <button type="submit" class="cab-btn cab-primary" :disabled="saving">
+              <Save :size="14" aria-hidden="true" /><span>保存并收起</span>
+            </button>
+            <button type="button" class="cab-btn" :disabled="saving || !(batch.rows || []).some(r=>r.issues?.length || r.error)" @click="nextProblemRow">
+              <ChevronRight :size="14" aria-hidden="true" /><span>下一问题行</span>
+            </button>
+            <button v-if="row.confirmable" type="button" class="cab-btn" :disabled="saving || warningsPending" @click="closeRowEditor(); confirmRows({row_ids:[row.row_id]})">
+              <Save :size="14" aria-hidden="true" /><span>确认本行</span>
+            </button>
+          </div>
+
+          <div v-if="row.proof_files?.length" class="cab-actions"><template v-for="doc in row.proof_files" :key="doc.file_id"><a v-if="doc.available && doc.can_download" :href="proofFileUrl(doc.file_id)" target="_blank" rel="noopener">{{ doc.name || 'PDF 原件' }}</a><span v-else>{{ doc.name || 'PDF 原件' }} · 不可下载</span></template></div>
+          <details class="cab-details">
+            <summary>详情与审计</summary>
+            <dl class="cab-grid cab-grid-2">
+              <dt>当前电源状态</dt><dd>{{ powerStateLabel(row.current_power_state) }}</dd>
+              <dt>应用编号</dt><dd>{{ row.application_ids?.length ? applicationSummary(row) : '—' }}</dd>
+              <dt>{{ fieldLabels.excluded }}</dt><dd>{{ String(row.status).startsWith('excluded_') ? statusLabel(row.status) : '未排除' }}</dd>
+              <dt>{{ fieldLabels.evidence_time_review }}</dt><dd>{{ row.evidence_time_review || '未核对' }}</dd>
+            </dl>
+
+            <div v-if="row.evidence_images?.length" class="cab-actions cab-actions-inline">
+              <button type="button" class="cab-btn cab-btn-sm" @click="openProofImages(row)">
+                <Eye :size="13" aria-hidden="true" /><span>查看截图（{{ row.evidence_images.length }}）</span>
+              </button>
+              <button type="button" class="cab-btn cab-btn-sm" :disabled="saving || !row.editable" @click="reviewProofTimes(row)">核对截图时间</button>
+              <button type="button" class="cab-btn cab-btn-sm" :disabled="saving || !row.editable" @click="reviewProofBusiness(row)">核对操作与结果</button>
+            </div>
+
+            <table v-if="visibleEdits(row).length" class="cab-table">
+              <thead>
+                <tr><th scope="col">字段</th><th scope="col">原值</th><th scope="col">现值</th><th scope="col">时间</th><th scope="col">来源</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="(edit, editIndex) in visibleEdits(row)" :key="editIndex">
+                  <td>{{ fieldLabels[edit.field] || edit.field }}</td>
+                  <td class="cab-muted">{{ edit.before || '—' }}</td>
+                  <td>{{ edit.after || '—' }}</td>
+                  <td class="cab-muted">{{ tableDate(edit.at) }}</td>
+                  <td class="cab-muted">{{ edit.source || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </details>
+        </form>
+      </template>
+    </div>
+
+    <section v-if="(batch.files || []).length" class="cab-panel" aria-labelledby="cab-files">
+      <header class="cab-panel-head">
+        <h2 id="cab-files" class="cab-panel-title">原确认单</h2>
+      </header>
+      <ul class="cab-list">
+        <li v-for="file in batch.files" :key="file.file_id" class="cab-file-row">
+          <FileText :size="14" aria-hidden="true" />
+          <a v-if="batch.can_download_files && (!file.cleaned_at || file.cloud_file_token)" :href="proofFileUrl(file.file_id)" target="_blank" rel="noopener">{{ file.name || file.file_id }}</a>
+          <span v-else class="cab-muted">{{ file.name || file.file_id }}</span>
+          <span v-if="file.size" class="cab-muted">{{ formatBytes(file.size) }}</span>
+          <span v-if="file.cleaned_at" class="cab-chip is-info">已清理</span>
+          <button v-else-if="batch.can_download_files" type="button" class="cab-btn cab-btn-sm" :disabled="saving" @click="requestFileCleanup(file.file_id)">
+            清理原确认单
+          </button>
+        </li>
+      </ul>
+    </section>
+  </template>
+
+
+
+  <template v-else-if="mode === 'new'">
+    <section class="cab-panel" aria-labelledby="cab-new">
+      <header class="cab-panel-head">
+        <h2 id="cab-new" class="cab-panel-title">选择创建方式</h2>
+        <div class="cab-actions"><button type="button" :class="{active:createMode==='text'}" :disabled="uploading" @click="createMode='text'">粘贴文本识别</button>
+          <NDropdown trigger="click" :disabled="uploading" :options="[{label:'PDF识别',key:'pdf'},{label:'图片识别',key:'image'},{label:'手工登记',key:'manual'}]" @select="key=>{createMode=key;if(key==='manual')loadDirectory()}"><button type="button" :disabled="uploading">其他录入方式</button></NDropdown></div>
+      </header>
+
+      <form v-if="createMode === 'text'" class="cab-panel cab-subpanel" @submit.prevent="appendText(textInput)">
+        <label class="cab-field cab-field-wide">
+          <span>粘贴上下电确认文本（单段 ≤200KB，每批 ≤2000 段 / ≤1MiB）</span>
+          <textarea v-model="textInput" rows="4" aria-label="粘贴机柜确认文本"
+            placeholder="可直接在此粘贴，或在页面任意处 Ctrl+V" :disabled="uploading"
+            @paste="pasteConfirmationText"></textarea>
+        </label>
+        <div class="cab-actions cab-actions-inline">
+          <button type="submit" class="cab-btn cab-primary" :disabled="uploading || !textInput.trim() || textFragments.length >= 2000">
+            <ScanText :size="14" aria-hidden="true" /><span>识别并分段</span>
+          </button>
+          <span v-if="textPending" class="cab-chip is-info"><Loader2 :size="12" class="cab-spin" aria-hidden="true" /> 识别中 {{ textPending }} 段</span>
+          <span v-if="textFragments.length" class="cab-chip">共 {{ textRows.length }} 行</span>
+          <span v-if="textFragments.length" class="cab-chip" :class="{ 'is-warning': textIssueCount }">问题 {{ textIssueCount }}</span>
+          <span v-if="textHasSupplier" class="cab-chip is-info">含供应商机柜号</span>
+          <button v-if="textFragments.length" type="button" class="cab-btn cab-primary" :disabled="uploading || textPending || !textRows.length" @click="createFromText">
+            <Plus :size="13" aria-hidden="true" /><span>确认并创建待办（{{ textRows.length }}）</span>
+          </button>
+        </div>
+        <p v-if="textError" class="cab-alert is-danger" role="alert">{{ textError }}</p>
+
+        <div v-if="textFragments.length" class="cab-fields cab-fields-inline">
+          <label class="cab-field">
+            <span>来源段</span>
+            <select v-model="textSource">
+              <option value="">全部段</option>
+              <option v-for="fragment in textFragments" :key="fragment.id" :value="fragment.id">
+                第 {{ textFragments.indexOf(fragment) + 1 }} 段（{{ fragment.rows.length }} 行）
+              </option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>搜索</span>
+            <input type="search" aria-label="搜索粘贴记录" v-model="textSearch" placeholder="楼栋 / 包间 / 机柜 / 操作">
+          </label>
+          <label class="cab-field">
+            <span>核对筛选</span>
+            <select v-model="textReview">
+              <option value="">全部</option>
+              <option value="ready">可创建</option>
+              <option value="review_only">待复核</option>
+              <option value="duplicates">重复</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>每页</span>
+            <select v-model.number="textPageSize">
+              <option :value="25">25</option>
+              <option :value="50">50</option>
+              <option :value="100">100</option>
+            </select>
+          </label>
+        </div>
+
+        <DataBars v-if="textRows.length" title="识别结果分布" unit="条" :items="[{label:'可创建',value:textScopeRows.length-textIssueCount},{label:'待复核',value:textIssueCount-textScopeDuplicateCount},{label:'重复',value:textScopeDuplicateCount}]" @select="item=>{textReview=({'可创建':'ready','待复核':'review_only','重复':'duplicates'})[item.label];textPage=1}"/>
+        <div v-if="textPagedRows.length" ref="textTable" class="cab-table-wrap cab-scroll">
+          <table class="cab-table">
+            <thead>
+              <tr>
+                <th scope="col">段</th>
+                <th scope="col">{{ fieldLabels.scope }} / {{ fieldLabels.room }} / {{ fieldLabels.rack }}</th>
+                <th v-if="textHasSupplier" scope="col">{{ fieldLabels.supplier_rack }}</th>
+                <th scope="col">{{ fieldLabels.action }}</th>
+                <th scope="col">{{ fieldLabels.actual }}</th>
+                <th scope="col">{{ fieldLabels.result }}</th>
+                <th scope="col">来源系统</th>
+                <th scope="col">核对</th>
+                <th scope="col" class="cab-col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in textPagedRows" :key="row.row_id"
+                :class="{ 'is-dirty': textDuplicateIds.has(row.row_id) || Boolean(textRowMessage(row)), 'is-edited': row._edited }">
+                <td class="cab-muted">{{ row._fragmentNumber }}</td>
+                <td><div class="cab-fields"><select aria-label="文本记录楼栋" v-model="row.scope" :disabled="uploading" @change="textEdited(row)"><option v-for="s in buildingOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+                  <input aria-label="文本记录包间" v-model.trim="row.room" :disabled="uploading" @input="textEdited(row)"><input aria-label="文本记录机柜" v-model.trim="row.rack" :disabled="uploading" @input="textEdited(row)"></div></td>
+                <td v-if="textHasSupplier"><input aria-label="供应商机柜号" v-model.trim="row.supplier_rack" :disabled="uploading" @input="textEdited(row)"></td>
+                <td>
+                  <select v-model="row.action" :aria-label="'操作类型 ' + row.rack" :disabled="uploading || textPending" @change="textEdited(row)">
+                    <option value="">请选择</option>
+                    <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
+                  </select>
+                </td>
+                <td>
+                  <input type="datetime-local" :value="localDate(row.actual)" :aria-label="'实际时间 ' + row.rack"
+                    :disabled="uploading || textPending" @input="row.actual = inputDate($event); textEdited(row)">
+                </td>
+                <td>
+                  <select v-model="row.result" :aria-label="'结果 ' + row.rack" :disabled="uploading || textPending" @change="textEdited(row)">
+                    <option value="">请选择</option>
+                    <option value="成功">成功</option>
+                    <option value="失败">失败</option>
+                  </select>
+                  <input v-if="row.result === '失败'" type="text" v-model="row.failure_reason" placeholder="失败原因"
+                    :aria-label="'失败原因 ' + row.rack" :disabled="uploading || textPending" @input="textEdited(row)">
+                </td>
+                <td>{{ row.source_system_name || '—' }}<details><summary>其他字段</summary>
+                  <label>期望时间<input type="datetime-local" :value="localDate(row.expected)" :disabled="uploading" @input="row.expected=inputDate($event);textEdited(row)"></label>
+                  <label v-for="f in ['rack_type','type_detail','supplier_rack']" :key="f">{{ fieldLabels[f] }}<input v-model="row[f]" :disabled="uploading" @input="textEdited(row)"></label>
+                  <label>类型处理<select v-model="row.type_resolution" :disabled="uploading" @change="textEdited(row)"><option value="">未指定</option><option value="keep_current">沿用目录类型</option><option value="sync_current">更新目录类型</option></select></label></details></td>
+                <td>
+                  <span v-if="textRowMessage(row)" class="cab-chip" :class="textDuplicateIds.has(row.row_id) ? 'is-danger' : 'is-warning'">
+                    {{ textRowMessage(row) }}
+                  </span>
+                  <span v-else class="cab-chip is-ok">可创建</span>
+                </td>
+                <td class="cab-col-actions">
+                  <button type="button" class="cab-btn cab-btn-sm" :disabled="uploading || textPending" @click="removeTextRow(row)">
+                    <Trash2 :size="13" aria-hidden="true" /><span>移除</span>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <nav v-if="textPageCount > 1" class="cab-pager text-footer" aria-label="文本预览分页">
+          <button type="button" class="cab-btn cab-btn-sm" :disabled="textPage <= 1" @click="textPage = textPage - 1">
+            <ChevronLeft :size="14" aria-hidden="true" /><span>上一页</span>
+          </button>
+          <span class="cab-muted">{{ textPage }} / {{ textPageCount }}</span>
+          <button type="button" class="cab-btn cab-btn-sm" :disabled="textPage >= textPageCount" @click="textPage = textPage + 1">
+            <span>下一页</span><ChevronRight :size="14" aria-hidden="true" />
+          </button>
+        </nav>
+
+        <details v-if="textFragments.length" class="cab-details">
+          <summary>已粘贴的文本段（{{ textFragments.length }}）</summary>
+          <ul class="cab-list cab-scroll">
+            <li v-for="fragment in textFragments" :key="fragment.id" class="cab-fragment">
+              <span class="cab-chip">{{ fragment.rows.length }} 行</span>
+              <span v-if="fragment.loading" class="cab-chip is-info">识别中</span>
+              <span v-if="fragment.error" class="cab-chip is-danger">{{ fragment.error }}</span>
+              <span class="cab-muted cab-ellipsis">{{ fragment.text.slice(0, 80) }}…</span>
+              <button type="button" class="cab-btn cab-btn-sm" :disabled="uploading || textPending" @click="textDeleteId=fragment.id">
+                移除本段
+              </button>
+            </li>
+          </ul>
+        </details>
+      </form>
+
+      <form v-else-if="createMode === 'pdf'" class="cab-panel cab-subpanel" @submit.prevent="recognize">
+        <h3>上传确认单</h3>
+        <label class="cab-drop" :class="{ 'is-dragging': dragging, 'is-busy': uploading }"
+          @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="dropFiles">
+          <FileText :size="18" aria-hidden="true" />
+          <span>拖拽或选择 PDF 确认单（单份 ≤10MiB，最多 10 份 / 合计 ≤30MiB）</span>
+          <input ref="fileInput" type="file" accept="application/pdf,.pdf" multiple :disabled="uploading" @change="selectFiles">
+        </label>
+        <ul v-if="pdfFiles.length" class="cab-list">
+          <li v-for="file in pdfFiles" :key="file.name + file.size + file.lastModified">
+            <FileText :size="14" aria-hidden="true" />
+            <span>{{ file.name }}</span>
+            <span class="cab-muted">{{ formatBytes(file.size) }}</span>
+          </li>
+        </ul>
+        <div class="cab-actions cab-actions-inline">
+          <button type="submit" class="cab-btn cab-primary" :disabled="uploading || !pdfFiles.length">
+            <Upload :size="14" aria-hidden="true" /><span>{{ uploading ? '上传识别中…' : '上传并识别' }}</span>
+          </button>
+          <span class="cab-muted">已选 {{ pdfFiles.length }} 份</span>
+        </div>
+      </form>
+
+      <form v-else-if="createMode === 'image'" class="cab-panel cab-subpanel" @submit.prevent="createFromImages">
+        <label class="cab-drop" :class="{ 'is-dragging': dragging, 'is-busy': uploading }"
+          @dragover.prevent="dragging = true" @dragleave.prevent="dragging = false" @drop.prevent="dropCreateImages">
+          <Upload :size="18" aria-hidden="true" />
+          <span>拖拽或选择确认截图（JPG / PNG / WebP，单张 ≤10MiB，最多 200 张）</span>
+          <input ref="createImageInput" type="file" accept="image/png,image/jpeg,image/webp" multiple :disabled="uploading" @change="selectCreateImages">
+        </label>
+        <ul v-if="imageFiles.length" class="cab-list cab-scroll">
+          <li v-for="file in imageFiles" :key="file.name + file.size + file.lastModified">
+            <img class="cab-thumb-sm" :src="filePreview(file)" :alt="file.name">
+            <span>{{ file.name }}</span>
+            <span class="cab-muted">{{ formatBytes(file.size) }}</span>
+            <button type="button" class="cab-btn cab-btn-sm" :disabled="uploading" @click="removeCreateImage(file)">
+              <X :size="13" aria-hidden="true" /><span>移除</span>
+            </button>
+          </li>
+        </ul>
+        <p v-if="imageBatchId" class="cab-muted">已创建图片批次，可继续重试上传。</p>
+        <div class="cab-actions cab-actions-inline">
+          <button type="submit" class="cab-btn cab-primary" :disabled="uploading || !imageFiles.length">
+            <Upload :size="14" aria-hidden="true" /><span>{{ uploading ? '上传中…' : imageBatchId ? '继续上传' : '上传并创建' }}</span>
+          </button>
+          <span class="cab-muted">已选 {{ imageFiles.length }} 张</span>
+        </div>
+      </form>
+
+      <form v-else-if="createMode === 'manual'" class="cab-panel cab-subpanel" @submit.prevent="createManual">
+        <div class="cab-fields cab-fields-inline">
+          <label class="cab-field">
+            <span>楼栋</span>
+            <select v-model="manualScope" @change="loadDirectory">
+              <option v-for="option in buildingOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.action }}</span>
+            <select v-model="common.action">
+              <option value="">请选择</option>
+              <option v-for="action in actions" :key="action" :value="action">{{ action }}</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.actual }}</span>
+            <input type="datetime-local" v-model="common.actual" @change="defaultExpected">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.expected }}</span>
+            <input type="datetime-local" v-model="common.expected">
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.result }}</span>
+            <select v-model="common.result">
+              <option value="成功">成功</option>
+              <option value="失败">失败</option>
+            </select>
+          </label>
+          <label class="cab-field">
+            <span>{{ fieldLabels.failure_reason }}</span>
+            <input type="text" v-model="common.failure_reason" :disabled="common.result !== '失败'">
+          </label>
+          <button type="button" class="cab-btn" :disabled="!manualRows.length" @click="applyManualCommon">应用到已添加行</button>
+        </div>
+
+        <div class="cab-grid cab-grid-2 cab-grid-top">
+          <div class="cab-panel cab-subpanel">
+            <header class="cab-panel-head">
+              <h3 class="cab-panel-title">从目录选择</h3>
+              <input type="search" v-model="directorySearch" aria-label="筛选包间或机柜" placeholder="筛选包间 / 机柜">
+            </header>
+            <div class="cab-list cab-scroll directory-picker">
+              <label v-for="item in filteredDirectory" :key="item.room + '/' + item.rack" class="cab-check">
+                <input type="checkbox" :value="item.room + '/' + item.rack" v-model="pickedRacks">
+                <span>{{ item.room }} · {{ item.rack }}</span>
+                <span v-if="item.rack_type" class="cab-muted">{{ item.rack_type }}</span>
+              </label>
+              <p v-if="!filteredDirectory.length" class="cab-muted cab-empty">目录为空或未匹配。</p>
+            </div>
+            <div class="cab-actions cab-actions-inline">
+              <button type="button" class="cab-btn cab-primary" :disabled="!pickedRacks.length" @click="addPicked">
+                <Plus :size="14" aria-hidden="true" /><span>添加已选（{{ pickedRacks.length }}）</span>
+              </button>
+            </div>
+          </div>
+
+          <div class="cab-panel cab-subpanel">
+            <header class="cab-panel-head">
+              <h3 class="cab-panel-title">粘贴行</h3>
+            </header>
+            <label class="cab-field cab-field-wide">
+              <span>每行「包间, 机柜」</span>
+              <textarea v-model="pastedRows" rows="5" aria-label="粘贴包间与机柜行" placeholder="例如：2-01,R01"></textarea>
+            </label>
+            <div class="cab-actions cab-actions-inline">
+              <button type="button" class="cab-btn" :disabled="!pastedRows.trim()" @click="addPasted">添加到列表</button>
+            </div>
+          </div>
+        </div>
+
+        <div v-if="manualRows.length" class="cab-table-wrap cab-scroll">
+          <table class="cab-table">
+            <thead>
+              <tr>
+                <th scope="col">{{ fieldLabels.scope }}</th>
+                <th scope="col">{{ fieldLabels.room }}</th>
+                <th scope="col">{{ fieldLabels.rack }}</th>
+                <th scope="col">{{ fieldLabels.rack_type }}</th>
+                <th scope="col">{{ fieldLabels.action }}</th>
+                <th scope="col">{{ fieldLabels.actual }}</th>
+                <th scope="col">{{ fieldLabels.result }}</th>
+                <th scope="col" class="cab-col-actions">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="row in manualRows" :key="row._id">
+                <td class="cab-muted">{{ row.scope }}</td>
+                <td>{{ row.room }}</td>
+                <td>{{ row.rack }}</td>
+                <td class="cab-muted">{{ row.rack_type || '—' }}</td>
+                <td>{{ row.action || '—' }}</td>
+                <td>{{ tableDate(row.actual) }}</td>
+                <td>{{ row.result || '—' }}</td>
+                <td class="cab-col-actions">
+                  <button type="button" class="cab-btn cab-btn-sm" @click="manualRows = manualRows.filter(item => item._id !== row._id)">
+                    <X :size="13" aria-hidden="true" /><span>移除</span>
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="cab-actions cab-actions-inline">
+          <button type="submit" class="cab-btn cab-primary" :disabled="uploading || !manualRows.length">
+            <Plus :size="14" aria-hidden="true" /><span>{{ uploading ? '创建中…' : '创建手工批次（' + manualRows.length + '）' }}</span>
+          </button>
+        </div>
+      </form>
+    </section>
+  </template>
+
+
+
+  <template v-else>
+    <section class="cab-panel" aria-labelledby="cab-list">
+      <header class="cab-panel-head">
+        <h2 id="cab-list" class="cab-panel-title">批次列表</h2>
+        <span v-if="list.total" class="cab-chip">{{ list.total }} 个批次</span>
+        <div class="cab-actions cab-actions-inline">
+          <button v-if="isAdmin" type="button" class="cab-btn cab-btn-sm" :disabled="handoffRetrying || loading" @click="retryHandoffs">
+            <RefreshCw :size="13" :class="{ 'cab-spin': handoffRetrying }" aria-hidden="true" /><span>重试联动</span>
+          </button>
+        </div>
+      </header>
+
+      <details v-if="props.isAdmin && list.handoff_errors?.length"><summary>通告联动失败（{{ list.handoff_errors.length }}）</summary><div class="cab-scroll"><table class="cab-table"><thead><tr><th>来源</th><th>操作</th><th>重试次数</th><th>返回信息</th><th>更新时间</th></tr></thead><tbody><tr v-for="issue in list.handoff_errors" :key="issue.event_id"><td>{{ issue.source }}</td><td>{{ issue.notice_type }} {{ issue.event_action }}</td><td>{{ issue.attempts }}</td><td>{{ issue.error }}</td><td>{{ issue.updated_at }}</td></tr></tbody></table></div></details>
+      <form class="cab-fields cab-fields-inline" @submit.prevent="loadList(1)">
+        <label class="cab-field">
+          <span>楼栋</span>
+          <select v-model="listScope" @change="loadList(1)">
+            <option value="">全部楼栋</option>
+            <option v-for="option in buildingOptions" :key="option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>状态</span>
+          <select v-model="listStatus" @change="loadList(1)">
+            <option value="">全部</option>
+            <option value="todo">待办</option><option value="notice_rollback_error">通告回退异常</option><option v-for="status in ['recognizing','pending','running','partial','completed','failed','cancelled']" :key="status" :value="status">{{ statusLabel(status) }}</option>
+          </select>
+        </label>
+        <label class="cab-field">
+          <span>起始日期</span>
+          <input type="date" v-model="listFrom" @change="loadList(1)">
+        </label>
+        <label class="cab-field">
+          <span>结束日期</span>
+          <input type="date" v-model="listTo" @change="loadList(1)">
+        </label>
+        <button type="submit" class="cab-btn" :disabled="loading">
+          <Search :size="14" aria-hidden="true" /><span>检索</span>
+        </button>
+      </form>
+
+      <div class="cab-table-wrap cab-scroll">
+        <table class="cab-table cab-record-table cab-batch-list">
+          <thead>
+            <tr>
+              <th scope="col">批次</th>
+              <th scope="col">来源</th>
+              <th scope="col">状态</th>
+              <th scope="col">楼栋</th>
+              <th scope="col">行数 / 可确认</th>
+              <th scope="col">创建时间</th>
+              <th scope="col" class="cab-col-actions">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in (list.items || [])" :key="entry.batch_id">
+              <td>
+                <button type="button" class="cab-btn cab-btn-link" @click="openBatch(entry.batch_id)">{{ entry.title || entry.batch_id }}</button><small v-if="entry.pending_rows"> · 待办 {{ entry.pending_rows }} 行</small><p v-if="entry.error || entry.notice_rollback_error">{{ entry.error || '通告回退待核查' }}</p>
+              </td>
+              <td data-label="来源">{{ sourceLabel(entry.source) }}</td>
+              <td data-label="状态"><span class="cab-chip" :class="'st-' + entry.status">{{ statusLabel(entry.status) }}</span></td>
+              <td class="cab-muted" data-label="楼栋">{{ entry.scopes?.map(s=>s+'楼').join('、') || '—' }}</td>
+              <td data-label="行数 / 可确认">{{ entry.stats?.total ?? '—' }} / {{ entry.stats?.confirmable ?? '—' }}</td>
+              <td class="cab-muted" data-label="创建时间">{{ entry.created_at ? tableDate(entry.created_at) : '—' }}</td>
+              <td class="cab-col-actions">
+                <button type="button" class="cab-btn cab-btn-sm" @click="openBatch(entry.batch_id)">
+                  <Eye :size="13" aria-hidden="true" /><span>进入</span>
+                </button>
+              </td>
+            </tr>
+            <tr v-if="!(list.items || []).length">
+              <td colspan="7" class="cab-muted cab-empty">
+                {{ loading ? '加载中…' : '暂无批次，点击「新建待办」。' }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <nav v-if="listPageCount > 1" class="cab-pager" aria-label="批次分页">
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="loading || (list.page || 1) <= 1" @click="loadList((list.page || 1) - 1)">
+          <ChevronLeft :size="14" aria-hidden="true" /><span>上一页</span>
+        </button>
+        <button v-for="page in listPages" :key="'lp' + page" type="button" class="cab-btn cab-btn-sm"
+          :class="{ 'cab-primary': page === (list.page || 1) }" :aria-current="page === (list.page || 1) ? 'page' : undefined"
+          :disabled="loading" @click="loadList(page)">{{ page }}</button>
+        <button type="button" class="cab-btn cab-btn-sm" :disabled="loading || (list.page || 1) >= listPageCount" @click="loadList((list.page || 1) + 1)">
+          <span>下一页</span><ChevronRight :size="14" aria-hidden="true" />
+        </button>
+      </nav>
+    </section>
+  </template>
+
+
+
+  <div v-if="previewImage" class="cab-modal-wrap image-preview" role="dialog" aria-modal="true" aria-label="截图预览" @click.self="previewImage = ''">
+    <div class="cab-dialog cab-dialog-wide">
+      <header class="cab-panel-head">
+        <span class="cab-muted">{{ previewIndex + 1 }} / {{ previewGallery.length }}</span>
+        <button type="button" class="cab-btn cab-btn-sm image-close" @click="previewImage = ''"><X :size="14" aria-hidden="true" /><span>关闭</span></button>
+      </header>
+      <div class="cab-preview">
+        <button type="button" class="cab-btn" :disabled="previewIndex <= 0" aria-label="上一张" @click="moveProof(-1)">
+          <ChevronLeft :size="16" aria-hidden="true" />
+        </button>
+        <img :src="previewImage" alt="确认截图大图">
+        <button type="button" class="cab-btn" :disabled="previewIndex >= previewGallery.length - 1" aria-label="下一张" @click="moveProof(1)">
+          <ChevronRight :size="16" aria-hidden="true" />
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <CabinetBatchTextFill
+    v-if="textFillMounted"
+    ref="textFill"
+    :batch-id="batchId"
+    :open="textFillOpen"
+    :disabled="saving"
+    @close="closeTextFill"
+    @applied="textFillApplied" />
+
+  <ConfirmDialog
+    :open="Boolean(confirmDialog)"
+    :tone="confirmDialog === 'cancel' || confirmDialog === 'delete_empty' || confirmDialog === 'image' ? 'danger' : confirmDialog === 'warnings' ? 'warning' : 'primary'"
+    kicker="上下电待办"
+    :title="confirmTitle"
+    :message="confirmMessage"
+    :confirm-label="confirmLabel"
+    cancel-label="取消"
+    @resolve="resolveConfirm" />
+
+  <ConfirmDialog
+    :open="Boolean(textDeleteId)"
+    tone="warning"
+    kicker="文本预览"
+    title="移除此文本段及其预览行？"
+    message="此段文本将从当前创建草稿移除。"
+    confirm-label="移除"
+    cancel-label="保留"
+    @resolve="resolveTextDelete" />
+
+  <ConfirmDialog
+    :open="draftRestoreOpen"
+    tone="warning"
+    kicker="会话草稿"
+    title="发现未保存的更正"
+    message="上次离开该批次时有未保存的更正或字段冲突，是否恢复到当前页面并继续自动保存？"
+    confirm-label="恢复更正"
+    cancel-label="丢弃草稿"
+    @resolve="resolveBatchDraft" />
+
+  <ConfirmDialog
+    :open="discardOpen"
+    tone="warning"
+    kicker="离开确认"
+    title="有未保存的内容"
+    message="自动保存未完成或存在未保存的更正/文本，离开将丢弃这些内容。是否继续离开？"
+    confirm-label="放弃并离开"
+    cancel-label="留在本页"
+    @resolve="resolveDiscard" />
+</section>

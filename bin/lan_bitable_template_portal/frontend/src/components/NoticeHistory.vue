@@ -1,7 +1,8 @@
 <template>
-  <dialog ref="dialog" class="notice-history" :aria-labelledby="titleId" @cancel.prevent="requestClose" @close="nativeClosed">
+  <dialog ref="dialog" class="notice-history" :class="{'nh-workspace':workspace}" :aria-labelledby="titleId" @cancel.prevent="requestClose" @close="nativeClosed">
     <header class="nh-header">
-      <div><h2 :id="titleId" ref="heading" tabindex="-1">{{ target ? '通告详情' : '历史通告' }}</h2><p>{{ target ? '查看全部字段 · 保存仅修改表格，不发送消息' : '按实际开始月份查看所有已开始通告，包含进行中 · 北京时间' }}</p></div>
+      <div><h2 :id="titleId" ref="heading" tabindex="-1">{{ target ? '通告详情' : '历史通告' }}</h2><p v-if="!workspace || !target">{{ target ? '查看全部字段 · 保存仅修改表格，不发送消息' : '按实际开始月份查看所有已开始通告，包含进行中 · 北京时间' }}</p></div>
+      <span v-if="workspace && target" ref="detailActions"></span>
       <button type="button" class="nh-close" :disabled="saving" @click="requestClose">关闭</button>
     </header>
 
@@ -31,7 +32,13 @@
       </template>
 
       <template v-else>
-        <div class="nh-detail-tools"><button type="button" :disabled="saving" @click="backToList">返回列表</button><button type="button" :disabled="detailLoading || saving || unresolved" @click="refreshDetail">{{ detailLoading ? '正在读取…' : '刷新详情，保留填写' }}</button><span v-if="contextChanged" class="nh-muted">外层范围已变化；当前详情仍属于 {{ scopeLabel(target.scope) }}，返回列表后应用新范围。</span></div>
+        <Teleport :to="detailActions || 'body'" :disabled="!detailActions">
+          <div class="nh-detail-tools">
+            <button type="button" :disabled="saving" @click="backToList">返回列表</button>
+            <button type="button" :disabled="detailLoading || saving || unresolved" :title="workspace?'刷新详情，保留填写':undefined" @click="refreshDetail">{{ detailLoading ? '正在读取…' : workspace ? '刷新详情' : '刷新详情，保留填写' }}</button>
+          </div>
+        </Teleport>
+        <p v-if="contextChanged" class="nh-muted">外层范围已变化；当前详情仍属于 {{ scopeLabel(target.scope) }}，返回列表后应用新范围。</p>
         <div v-if="detailError" class="nh-feedback nh-error" role="alert">{{ detailError }}</div>
         <div v-if="notice" class="nh-feedback" role="status">{{ notice }}</div>
         <p v-if="detailLoading && !detail" class="nh-empty" role="status">正在读取全部字段…</p>
@@ -123,7 +130,8 @@ type SaveBody = Target & { operation_id: string; expected_revision: string | num
 type OperationAction = 'save' | 'retry' | 'abandon';
 type Attempt = { id: string; body: SaveBody | null; result: Operation | null; rejected?: boolean; action?: OperationAction };
 
-const props = withDefaults(defineProps<{ scope: string; workType?: string; show?: boolean }>(), { workType: 'all', show: true });
+const props = withDefaults(defineProps<{ scope: string; workType?: string; show?: boolean; workspace?:boolean }>(), { workType: 'all', show: true });
+const detailActions = ref<HTMLElement|null>(null);
 const emit = defineEmits<{ close: []; changed: [] }>();
 const uid = useId(), formId = `notice-history-form-${uid}`, titleId = `notice-history-title-${uid}`, confirmId = `notice-history-confirm-${uid}`;
 const dialog = ref<HTMLDialogElement | null>(null), confirmation = ref<HTMLDialogElement | null>(null);
@@ -415,4 +423,15 @@ onBeforeUnmount(() => { disposed = true; abortRequests(); confirmation.value?.cl
 @media(min-width:1200px){.nh-fields{grid-template-columns:repeat(4,minmax(0,1fr))}}
 @media(max-width:900px){.nh-filters{grid-template-columns:repeat(3,minmax(0,1fr))}.nh-search{grid-column:span 2}.nh-fields{grid-template-columns:repeat(2,minmax(0,1fr))}.nh-summary dl{grid-template-columns:repeat(3,minmax(0,1fr))}.nh-list-head,.notice-history .nh-row{grid-template-columns:minmax(120px,1.3fr) minmax(110px,1fr) minmax(110px,1fr) 62px;gap:8px}}
 @media(max-width:600px){.notice-history{width:calc(100vw - 12px);max-width:calc(100vw - 12px);height:calc(100dvh - 12px);max-height:calc(100dvh - 12px);border-radius:8px}.nh-header,.nh-footer{padding:10px 12px;gap:8px}.nh-header h2{font-size:17px}.nh-body{padding:10px 12px;scrollbar-gutter:auto}.notice-history button{min-height:44px}.notice-history input:not([type=checkbox]),.notice-history select,.notice-history textarea{min-height:44px;font-size:16px;width:100%;max-width:100%}.nh-filters{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.nh-filters .nh-search{grid-column:1/-1;grid-row:2}.nh-filters>button{grid-column:2;grid-row:3}.nh-filters>label:nth-child(3){grid-row:3}.nh-list-head{display:none}.notice-history .nh-row{grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:12px}.nh-row:first-of-type{border-top:0}.nh-row-title{grid-column:1/-1}.nh-time{grid-column:1;display:flex;flex-wrap:wrap;gap:6px}.nh-time small{display:inline;color:var(--nh-muted);font-size:12px}.nh-status{grid-column:2;grid-row:2/span 2}.nh-fields{grid-template-columns:minmax(0,1fr);gap:12px}.nh-wide{grid-column:auto}.nh-summary dl{grid-template-columns:repeat(2,minmax(0,1fr))}.nh-comparison dl{grid-template-columns:minmax(0,1fr);gap:8px}.nh-footer>span{flex:1 1 100%}.nh-footer nav{justify-content:space-between;width:100%}.nh-footer>.nh-primary{width:100%}.nh-multiple label,.nh-checkbox{min-height:44px}.nh-confirm{width:calc(100vw - 32px);max-width:440px;height:auto;padding:18px}.nh-confirm-actions button{flex:1}.nh-attachments a{padding:12px 0}.nh-detail-tools button{flex:1}.nh-header .nh-close{align-self:flex-start}}
+/* The workspace header hosts the detail actions next to the record context. */
+.nh-workspace {--nh-bg:var(--soft-face);--nh-soft:var(--soft-field);--nh-border:var(--soft-edge);--nh-accent:var(--v2-blue);border-radius:16px}
+.nh-workspace .nh-header {flex-wrap:wrap;background:var(--soft-field)}
+.nh-workspace .nh-detail-tools {margin:0}
+.nh-workspace .nh-header>div {min-width:10em}
+@media(max-width:600px){
+  .nh-workspace .nh-header:has(.nh-detail-tools)>div {min-width:4em}
+  .nh-workspace .nh-footer:has(.nh-primary)>span {flex:1 1 9em}
+  .nh-workspace .nh-footer>.nh-primary {width:auto}
+  .nh-workspace .nh-detail-tools button {flex:none;min-height:44px}
+}
 </style>

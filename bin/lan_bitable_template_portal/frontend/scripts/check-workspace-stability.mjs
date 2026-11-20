@@ -78,7 +78,7 @@ try{
   await pendingAuth.route.fulfill({json:{ok:true,data:pendingAuth.data}}).catch(()=>{});
   await page.waitForTimeout(250);
   assert.equal(await page.getByRole('button',{name:'打开个人页面',exact:true}).count(),0,'late auth response resurrected the signed-out account');
-  assert.equal(await page.locator('.v2-sidebar').count(),0);
+  assert.equal(await page.locator('.v2-topnav').count(),0);
   await page.screenshot({path:path.join(output,'stability-logout.png')});
 
   // The same route must not show the previous person's review links while loading.

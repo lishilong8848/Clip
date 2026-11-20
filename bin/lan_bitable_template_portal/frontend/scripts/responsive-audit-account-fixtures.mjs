@@ -305,7 +305,7 @@ export async function accountFixture({url, method = 'GET', body} = {}) {
     if (method === 'PUT') appearance = {...appearance, ...pick(payload, ['shape', 'color', 'size', 'snap_back'])};
     return ok(appearance);
   }
-  if (path === '/api/assistant/icon-weather' && method === 'GET') return ok({available: true, city: '演示城市',
+  if (path === '/api/assistant/icon-weather' && method === 'GET' && !url.searchParams.has('detail')) return ok({available: true, city: '演示城市',
     weather: '多云', condition: 'cloudy', temperature: 22, temp_c: 22, is_day: true, timezone: 'Asia/Shanghai', observed_at: now, source: 'synthetic-fixture'});
   if (path === '/api/assistant/conversation' && ['GET', 'PATCH', 'DELETE'].includes(method)) {
     if (method === 'DELETE') turns.splice(0);

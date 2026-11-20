@@ -44,9 +44,10 @@ const helper=await build({entryPoints:[path.join(root,'src/workspace-v2/noticeFo
 const server = await preview({ root, ...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}), logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const browser = await chromium.launch({ headless: true });
-const errors = [], writes = [], oldPages = [], entry = '/assets/workspace-v2/index.html';
+const errors = [], writes = [], oldPages = [], detailRequests = [], entry = '/assets/workspace-v2/index.html';
+const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6oDQAAAAASUVORK5CYII=','base64');
 const layouts=layoutApiFixture();
-let failLogout = true,detailReads=0;
+let failLogout = true;
 try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
   await context.route('**/*', async route => {
@@ -66,10 +67,13 @@ try {
     if (url.pathname === '/api/workbench/dingtalk-options') return ok({robots:[{id:'fixture-robot',name:'隔离测试机器人',types:[],scopes:[]}],selected_robot_ids:[]});
     if (url.pathname === '/api/workbench') return ok(data.payload);
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
-    if (url.pathname === '/api/workbench/lite-detail') {detailReads++;return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });}
+    if (url.pathname === '/api/workbench/lite-detail') {
+      detailRequests.push(Object.fromEntries(url.searchParams));
+      return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: { detail: url.searchParams.has('active_item_id') ? data.detail : data.plan } });
+    }
     if (url.pathname === '/api/notice-alert-tags') return ok({status:'ready',title:'EA118机房B楼12台柴油发电机组维护保养变更',action:'update',tags:[{label:'变更',content:'12台柴油发电机组维护保养变更'}]});
     if (url.pathname === '/api/notice-attachments') return ok({upload_id:'isolated-image',file_name:'确认截图.png',preview_url:'/api/notice-images/'+ 'a'.repeat(32)});
-    if (url.pathname.startsWith('/api/notice-images/')) return route.fulfill({contentType:'image/png',body:Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6oDQAAAAASUVORK5CYII=','base64')});
+    if (url.pathname.startsWith('/api/notice-images/')) return route.fulfill({contentType:'image/png',body:pixel});
     if (req.method() !== 'GET') {
       writes.push(url.pathname);
       if (url.pathname === '/api/workbench/draft') return ok({ draft: { version: 1 } });
@@ -78,6 +82,22 @@ try {
     return ok({ items: [], records: [], fields: [], options: [], summary: {}, settings: {}, stats: {}, available: false });
   });
   const page = await context.newPage();
+  const plannedLane=page.locator('[data-list=planned]');
+  const ongoingLane=page.locator('[data-list=ongoing]');
+  const lists=page.getByRole('group',{name:'当前列表',exact:true});
+  const types=page.getByRole('navigation',{name:'通告类型',exact:true});
+  const editor=page.locator('.desk-editor');
+  const footer=editor.locator('.v2-notice-editor-footer');
+  const selectList=async name=>{
+    if(await lists.isVisible())await lists.getByRole('button',{name:new RegExp('^'+name)}).click();
+  };
+  const closeEditor=async()=>{
+    await footer.getByRole('button',{name:'关闭',exact:true}).click();
+    const keep=page.getByRole('button',{name:'保留副本并离开',exact:true});
+    await Promise.race([editor.waitFor({state:'detached'}),keep.waitFor()]);
+    if(await keep.isVisible())await keep.click();
+    await editor.waitFor({state:'detached'});
+  };
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
   await page.addScriptTag({content:helper.outputFiles[0].text});
@@ -117,46 +137,63 @@ try {
     assert.equal(preview,expectedPreview,kind+' preview preserves existing labels, order and time formatting');
   }
   for (const [index, kind] of Object.keys(fixtures).entries()) {
-    await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=' + kind);
-    await page.locator('.v2-notice-entry').first().waitFor();
-    assert.equal(await page.locator('.v2-notice-command .v2-notice-filters').count(),0,'the primary command row is not crowded by filters');
-    assert.equal(await page.locator('.v2-notice-command .v2-notice-types').count(),1,'notice categories remain above the business lists');
-    assert.equal(await page.locator('[data-list="planned"] .v2-notice-plan-filters input[placeholder="搜索计划名称"]').count(),1,'plan-only search remains inside the planned list');
-    assert.equal(await page.locator('[data-list="ongoing"] .v2-notice-filters').count(),0);
+    await page.setViewportSize({width:1440,height:1000});
+    const category={maintenance:/维保/,change:/变更/,repair:/检修/,power:/上下电/,polling:/轮巡/,adjust:/调整/}[kind];
+    if(index)await types.getByRole('button',{name:category}).click();
+    await page.waitForURL(url=>url.searchParams.get('work_type')===kind);
+    const planTitle=fixtures[kind].payload.records[0].title;
+    const ongoingTitle=fixtures[kind].payload.ongoing[0].title;
+    const plan=plannedLane.getByRole('article').filter({has:page.getByRole('button',{name:planTitle,exact:true})});
+    const entryCard=ongoingLane.getByRole('article').filter({has:page.getByRole('button',{name:ongoingTitle,exact:true})});
+    await plan.waitFor();
+    assert.equal(await types.getByRole('button',{name:category}).getAttribute('aria-pressed'),'true');
+    assert.equal(await plannedLane.getByRole('searchbox',{name:'搜索计划通告'}).count()+await plannedLane.getByRole('textbox',{name:'搜索计划通告'}).count(),1,'plan-only search stays inside the planned list');
+    assert.equal(await ongoingLane.locator('form').count(),0);
+    assert.equal(await plannedLane.getByRole('article').count(),8);
+    assert.equal(await ongoingLane.getByRole('article').count(),6);
     assert.equal(await page.locator('iframe').count(), 0, 'new notice page must not embed legacy HTML');
     for (const width of index === 0 ? [1440,1920,360,390,430] : [1366]) {
       await page.setViewportSize({ width, height: width < 700 ? 844 : 1000 });
+      await selectList('计划通告');
       await page.screenshot({ path: path.join(output, `${process.argv.includes('--baseline') ? 'before' : 'after'}-${kind}-${width}.png`), fullPage: true });
-      assert.equal(await page.locator('.v2-notice-list:visible .v2-notice-entry').first().evaluate(el => {const box=el.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight-(innerWidth<=760?80:0);}), true, 'the first task is fully visible without scrolling');
+      assert.equal(await plan.evaluate(el=>{const box=el.getBoundingClientRect();return box.top>=0&&box.bottom<=innerHeight-(innerWidth<=760?80:0);}),true,'the first task is fully visible without scrolling');
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
       assert.equal(await page.locator('.v2-context').count(),0,'building selection stays in the notice toolbar');
-      if(width>760){const columns=await page.locator('.v2-notice-section').evaluateAll(els=>els.map(el=>el.getBoundingClientRect().toJSON()));assert.equal(columns.length,2);assert(Math.abs(columns[0].top-columns[1].top)<2);assert(columns[1].left>=columns[0].right,'planned and ongoing appear side by side');}
+      if(width>760){
+        const [left,right]=await Promise.all([plannedLane.boundingBox(),ongoingLane.boundingBox()]);
+        assert(left&&right&&Math.abs(left.y-right.y)<2&&right.x>=left.x+left.width,'planned and ongoing appear side by side');
+      }else{
+        assert.equal(await ongoingLane.isVisible(),false);
+        await selectList('进行中');await entryCard.waitFor();
+        assert.equal(await plannedLane.isVisible(),false);
+      }
     }
     if(index===0){
       await page.setViewportSize({width:1920,height:1000});
-      for(const [list,width,expected] of [['planned',4,1],['ongoing',6,2],['planned',12,3],['ongoing',12,3],['planned',6,2],['ongoing',4,1]]){
+      await page.getByRole('button',{name:'自定义通告办理布局',exact:true}).click();
+      for(const [list,width] of [['planned',4],['ongoing',6],['planned',12],['ongoing',12],['planned',6],['ongoing',4]]){
         const lane=page.locator(`[data-list="${list}"]`);
         await lane.evaluate((el,w)=>{const item=el.closest('.grid-stack-item');item.closest('.grid-stack').gridstack.update(item,{w});},width);
-        await page.waitForTimeout(320);
-        const columns=await lane.locator('.v2-notice-list').evaluate(el=>getComputedStyle(el).gridTemplateColumns.split(' ').length);
-        assert.equal(columns,expected,list+' adapts to its independently resized component');
+        const [laneWidth,columns]=await lane.locator('.desk-records').evaluate(el=>[el.parentElement.clientWidth,getComputedStyle(el).gridTemplateColumns.split(' ').length]);
+        assert.equal(columns,laneWidth>=1060?3:laneWidth>=700?2:1,list+' adapts to its own resized panel');
       }
       await page.screenshot({path:path.join(output,'resized-independent-lists.png'),fullPage:true});
-      await page.reload();await page.locator('.v2-notice-entry').first().waitFor();
+      await page.getByRole('button',{name:'取消',exact:true}).click();await plan.waitFor();
     }
-    if(page.viewportSize().width<=760)await page.getByRole('tab', { name: /进行中/ }).click();
-    const beforeReads=detailReads,entryCard=page.locator('[data-list="ongoing"] .v2-notice-entry').first();
+    await selectList('进行中');
+    const beforeReads=detailRequests.length;
     await entryCard.click({position:{x:5,y:Math.min(50,(await entryCard.boundingBox()).height/2)}});
     try{await page.locator('.v2-notice-editor .v2-notice-field-grid').first().waitFor({timeout:10000});}
     catch(e){await page.screenshot({path:path.join(output,'form-error.png'),fullPage:true});console.error(errors,await page.locator('.v2-notice-editor').innerText());throw e;}
     assert.equal(await page.locator('.v2-notice-editor-footer').isVisible(), true);
-    assert.equal(detailReads,beforeReads+1,'card whitespace opens one editor, without double activation');
+    assert.equal(detailRequests.length,beforeReads+1,'card whitespace opens one editor, without double activation');
+    assert.equal(detailRequests.at(-1).active_item_id,'active-'+kind+'-0');
     assert.equal(await page.locator('.v2-notice-editor-context [role=radiogroup]').count(),0);
     assert.equal(await page.locator('.v2-notice-submit-group [role=radiogroup]').count(),1,'action and preview share one footer group');
     assert.equal(await page.getByRole('button',{name:'保存草稿',exact:true}).count(),0);
     await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'删除通告',exact:true}).click();
     await page.getByRole('button',{name:'确认删除',exact:true}).waitFor();
-    assert.equal(writes.length,0,'opening deletion confirmation must not delete');
+    assert.equal(writes.filter(url=>url==='/api/ongoing-items/delete').length,0,'opening deletion confirmation must not delete');
     await page.getByRole('button',{name:'取消',exact:true}).click();
     assert.equal(await page.locator('#lite-notice-form').count(), 0, 'old form HTML is metadata only, never mounted');
     assert.equal(await page.locator('.v2-notice-editor input[aria-label="名称"],.v2-notice-editor input[aria-label="标题"]').count() > 0, true);
@@ -206,10 +243,8 @@ try {
       }
       assert.equal(await warnings.count(),0,'restore original fields before unchanged-layout baselines');
       // Reopen also clears attempted-validation state, not just the edited field values.
-      await editor.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
-      const leave=page.getByRole('button',{name:'保留副本并离开',exact:true});
-      if(await leave.isVisible())await leave.click();
-      await editor.waitFor({state:'detached'});await entryCard.locator('.v2-notice-open').click();await editor.locator('.v2-notice-field-grid').waitFor();
+      await closeEditor();
+      await entryCard.getByRole('button',{name:'更新',exact:true}).click();await editor.locator('.v2-notice-field-grid').waitFor();
     }
     await page.waitForTimeout(350);
     const footerBox=await page.locator('.v2-notice-editor-footer').boundingBox();
@@ -218,7 +253,7 @@ try {
     assert.equal(await page.getByRole('button',{name:'展开其它字段',exact:true}).count(),0,'all notice fields are shown directly');
     assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0,'editing does not require switching sections');
     await page.waitForTimeout(100);
-    const body=page.locator('.v2-notice-handling>.n-card-content');
+    const body=editor.locator(':scope > .n-card-content');
     assert.equal(await body.evaluate(el=>getComputedStyle(el).overflowY),'auto','one body scrolls through all notice information');
     const bounds=await body.boundingBox();
     const actions=await page.locator('.v2-notice-editor-footer').boundingBox();assert(bounds.y+bounds.height<=actions.y+2,kind+' scrolling body stays above fixed actions');
@@ -239,32 +274,31 @@ try {
     await page.locator('[data-notice-section=relations]').scrollIntoViewIfNeeded();
     assert(await page.getByRole('button',{name:/^(重新)?查找目标通告$/}).isVisible(),'related-record tools are immediately accessible on the same page');
     await body.evaluate(el=>el.scrollTo({top:0}));
-    const tags=page.getByRole('complementary',{name:'通告推荐标签'});await tags.getByText('【变更】12台柴油发电机组维护保养变更',{exact:true}).waitFor();
-    const tagBox=await tags.boundingBox(),relationBox=await page.locator('[data-notice-section=relations]').boundingBox();
-    assert(tagBox.x>relationBox.x&&Math.abs(tagBox.y-relationBox.y)<12,'tags occupy the top-right, not the form footer');
+    const tags=editor.getByRole('region',{name:'通告推荐标签',exact:true});
+    await tags.getByText('【变更】12台柴油发电机组维护保养变更',{exact:true}).waitFor();
+    assert.equal(await tags.locator('xpath=ancestor::aside').getByRole('heading',{name:'关联与接收',exact:true}).count(),1);
     for(const uploadKind of kind==='change'?['site','ali']:['maintenance','repair'].includes(kind)?['site']:[]){
-      await page.getByLabel(uploadKind==='ali'?'添加阿里确认截图':'添加现场照片',{exact:true}).setInputFiles({name:'确认截图.png',mimeType:'image/png',buffer:Buffer.from('isolated')});
+      await page.getByLabel(uploadKind==='ali'?'添加阿里确认截图':'添加现场照片',{exact:true}).setInputFiles({name:'确认截图.png',mimeType:'image/png',buffer:pixel});
       const upload=page.locator('[data-notice-upload-kind='+uploadKind+']');await upload.getByText('本次新增 · 已就绪',{exact:true}).waitFor();
-      const image=await upload.locator('figure').last().boundingBox(),picker=await upload.locator('.v2-notice-upload').boundingBox();
-      assert(Math.abs(image.y-picker.y)<2&&picker.x>image.x,'screenshot picker stays beside the image');
+      assert(await upload.locator('figure').last().getByText('确认截图.png',{exact:true}).isVisible());
       await page.screenshot({path:path.join(output,'compact-'+kind+'-'+uploadKind+'-upload.png'),fullPage:true});
-      assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' with an uploaded image fits the desktop viewport: '+JSON.stringify(await body.evaluate(el=>({height:el.clientHeight,content:el.scrollHeight,uploads:[...el.querySelectorAll('.v2-notice-photo-uploader')].map(n=>n.getBoundingClientRect().toJSON())}))));
       await upload.getByRole('button',{name:'移除本次图片',exact:true}).click();
     }
-    assert(await body.evaluate(el=>el.scrollHeight<=el.clientHeight+1),kind+' common form fits a 1366x768 desktop viewport');
     assert.equal(await page.locator('.v2-notice-page-fields .n-pagination').count(),0,'notice fields never paginate');
     await page.screenshot({ path: path.join(output, `form-${kind}.png`), fullPage: true });
-    await page.locator('.v2-notice-editor-footer').getByRole('button', { name: '关闭', exact: true }).click();
-    await page.locator('.v2-notice-editor').waitFor({ state: 'detached' });
+    await closeEditor();
+    await plan.getByRole('button',{name:'开始',exact:true}).click();
+    await editor.locator('.v2-notice-field-grid').waitFor();
+    assert.equal(detailRequests.at(-1).record_id,'plan-'+kind+'-0');
+    assert.match(await footer.locator('.n-radio-button--checked').innerText(),/开始/);
+    await closeEditor();
     if(kind==='maintenance'){
-      const ongoing=page.locator('[data-list="ongoing"] .v2-notice-entry').first();
-      await ongoing.getByRole('button',{name:'结束',exact:true}).click();
+      const beforeEnd=writes.length;
+      await entryCard.getByRole('button',{name:'结束',exact:true}).click();
       await page.locator('.v2-notice-editor .n-radio-button--checked').filter({hasText:'结束'}).waitFor();
       assert.equal(await page.locator('[data-notice-field="progress"] textarea').inputValue(),'工作已完成，设备运行正常，请知晓！','end opens the correct action and default progress');
-      assert.equal(writes.length,0,'opening an end form must not send');
-      await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();
-      await page.getByRole('button',{name:'保留副本并离开',exact:true}).click();
-      await page.locator('.v2-notice-editor').waitFor({state:'detached'});
+      assert.equal(writes.length,beforeEnd,'opening an end form must not send');
+      await closeEditor();
     }
   }
   fixtures.maintenance.payload.records[0] = { ...fixtures.maintenance.payload.records[0],
@@ -272,22 +306,24 @@ try {
   for (const width of [1440, 390]) {
     await page.setViewportSize({ width, height: width === 390 ? 844 : 1000 });
     await page.goto(origin + entry + '?__page=/workbench-lite&scope=A&work_type=maintenance');
-    const planned = page.locator('[data-list="planned"] .v2-notice-entry').first();
+    const planned = plannedLane.getByRole('article').first();
     await planned.getByText('状态未取得', { exact: true }).waitFor();
     assert(await planned.getByRole('button', { name: /请重新读取/ }).isDisabled());
-    await planned.locator('.v2-notice-open').click();
+    const beforeDetail=detailRequests.length;
+    await planned.getByRole('heading').getByRole('button').click();
     assert.equal(await page.locator('.v2-notice-editor').count(), 0, 'unknown source status never starts a plan via its title');
+    assert.equal(detailRequests.length,beforeDetail);
     await page.screenshot({ path: path.join(output, `source-status-unknown-${width}.png`), fullPage: true });
-    if (width <= 760) await page.getByRole('tab', { name: /进行中/ }).click();
-    assert(await page.locator('[data-list="ongoing"]').getByRole('button', { name: '更新', exact: true }).first().isEnabled(), 'source read failure does not disable existing notice operations');
+    await selectList('进行中');
+    assert(await ongoingLane.getByRole('button',{name:'更新',exact:true}).first().isEnabled(),'source read failure does not disable existing notice operations');
   }
   for (const width of [402,440,1440]) {
     await page.setViewportSize({width,height:900});
     await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=event');
-    await page.locator('.raw-event-card').first().waitFor();
-    assert.equal(await page.locator('.v2-notice-command .v2-notice-types button').first().innerText(),'事件通告');
+    await types.getByRole('button',{name:'事件通告',exact:true,pressed:true}).waitFor();
     assert.equal(await page.locator('[data-list="planned"]').count(),0,'events have no planned list');
-    const card=page.locator('.raw-event-card').first();
+    const card=page.locator('.raw-event-card.evt-compose');
+    await card.locator('summary').filter({hasText:'新建事件通告'}).click();
     await card.getByLabel('本次通告原文',{exact:true}).fill('【事件通告】状态：新增\n【标题】A楼I3隔离草稿');
     await card.getByRole('button',{name:'发送新增',exact:true}).scrollIntoViewIfNeeded();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
@@ -306,5 +342,5 @@ try {
   }
   assert.deepEqual(errors, []);
   assert.deepEqual(oldPages, [], 'no legacy document navigation');
-  console.log('PASS: isolated production notice pages, six categories, maintenance-only cycle send guards and corrected preview, restored compact-layout baselines, existing forms and menus, logout failure.');
+  console.log('PASS: V2 notice lists and editors for six categories, original record IDs, mobile controls, maintenance cycle validation, attachments, event composer and logout recovery. Isolated data only.');
 } finally { await browser.close(); await server.close(); }

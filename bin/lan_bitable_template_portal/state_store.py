@@ -3622,6 +3622,11 @@ class LanPortalStateStore:
                                SELECT 1 FROM notice_actions a
                                WHERE json_extract(a.payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
                                  AND instr(a.payload_json, notice_upload_attachments.upload_id) > 0
+                               UNION ALL
+                               SELECT 1 FROM json_documents q WHERE q.namespace = 'qt_event_delivery_operations'
+                                 AND json_extract(q.payload_json, '$.delivery_state') != 'failed'
+                                 AND COALESCE(json_extract(q.payload_json, '$.archive_state'), '') != 'synced'
+                                 AND instr(q.payload_json, notice_upload_attachments.upload_id) > 0
                            )
                         """,
                         (now,),
@@ -3674,7 +3679,12 @@ class LanPortalStateStore:
                     pinned = conn.execute(
                         """SELECT 1 FROM notice_actions WHERE
                            json_extract(payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
-                           AND instr(payload_json, ?) > 0 LIMIT 1""", (upload_id,),
+                           AND instr(payload_json, ?) > 0
+                           UNION ALL
+                           SELECT 1 FROM json_documents WHERE namespace = 'qt_event_delivery_operations'
+                             AND json_extract(payload_json, '$.delivery_state') != 'failed'
+                             AND COALESCE(json_extract(payload_json, '$.archive_state'), '') != 'synced'
+                             AND instr(payload_json, ?) > 0 LIMIT 1""", (upload_id, upload_id),
                     ).fetchone()
                     if not pinned:
                         return None
@@ -3774,6 +3784,11 @@ class LanPortalStateStore:
                         SELECT 1 FROM notice_actions a
                         WHERE json_extract(a.payload_json, '$.phase') NOT IN ('success', 'failed', 'cancelled')
                           AND instr(a.payload_json, notice_upload_attachments.upload_id) > 0
+                        UNION ALL
+                        SELECT 1 FROM json_documents q WHERE q.namespace = 'qt_event_delivery_operations'
+                          AND json_extract(q.payload_json, '$.delivery_state') != 'failed'
+                          AND COALESCE(json_extract(q.payload_json, '$.archive_state'), '') != 'synced'
+                          AND instr(q.payload_json, notice_upload_attachments.upload_id) > 0
                       )
                     """,
                     (cutoff, used_cutoff),
@@ -13367,6 +13382,7 @@ class LanPortalStateStore:
         *,
         limit: int = 1,
         lease_seconds: int = 30,
+        respect_retry_at: bool = False,
     ) -> list[dict[str, Any]]:
         channel = self._text(channel)
         if not channel or not self.db_path.exists():
@@ -13375,9 +13391,11 @@ class LanPortalStateStore:
         lease_seconds = max(5, int(lease_seconds or 30))
         now = time.time()
         stale_before = now - lease_seconds
+        retry_filter = " AND COALESCE(json_extract(payload_json, '$._outbox_retry_at'), 0) <= ?" if respect_retry_at else ""
+        retry_params = (now,) if respect_retry_at else ()
         due_sql = (
             "SELECT 1 FROM event_outbox WHERE channel = ? AND "
-            "(status = 'pending' OR (status = 'leased' AND updated_at < ?)) LIMIT 1"
+            "(status = 'pending' OR (status = 'leased' AND updated_at < ?))" + retry_filter + " LIMIT 1"
         )
         with self._lock:
             if self._initialized:
@@ -13385,7 +13403,7 @@ class LanPortalStateStore:
                 try:
                     with closing(sqlite3.connect(self.db_path.absolute().as_uri() + "?mode=ro",
                             uri=True, timeout=self.busy_timeout_ms / 1000.0)) as reader:
-                        due = reader.execute(due_sql, (channel, stale_before)).fetchone()
+                        due = reader.execute(due_sql, (channel, stale_before, *retry_params)).fetchone()
                     if due is None:
                         return []
                 except sqlite3.OperationalError:
@@ -13394,7 +13412,7 @@ class LanPortalStateStore:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
                 # Idle SSE polls must not acquire a write lock for an empty outbox.
-                due = conn.execute(due_sql, (channel, stale_before)).fetchone()
+                due = conn.execute(due_sql, (channel, stale_before, *retry_params)).fetchone()
                 if due is None:
                     return []
                 conn.execute(
@@ -13406,14 +13424,14 @@ class LanPortalStateStore:
                     (now, channel, stale_before),
                 )
                 rows = conn.execute(
-                    """
+                    f"""
                     SELECT id, channel, status, payload_json, attempts, last_error, created_at, updated_at
                     FROM event_outbox
-                    WHERE channel = ? AND status = 'pending'
+                    WHERE channel = ? AND status = 'pending'{retry_filter}
                     ORDER BY id ASC
                     LIMIT ?
                     """,
-                    (channel, limit),
+                    (channel, *retry_params, limit),
                 ).fetchall()
                 ids = [int(row["id"] or 0) for row in rows if int(row["id"] or 0) > 0]
                 if ids:
@@ -13452,6 +13470,7 @@ class LanPortalStateStore:
         error: str = "",
         max_attempts: int = 3,
         count_attempt: bool = True,
+        retry_at: float | None = None,
     ) -> dict[str, Any] | None:
         try:
             event_id = int(event_id or 0)
@@ -13492,6 +13511,9 @@ class LanPortalStateStore:
                     """,
                     (final_status, attempts, error, now, event_id),
                 )
+                if retry_at is not None and final_status == "pending":
+                    conn.execute("UPDATE event_outbox SET payload_json=json_set(payload_json, '$._outbox_retry_at', ?) WHERE id=?",
+                                 (retry_at, event_id))
                 conn.commit()
                 row = conn.execute(
                     """

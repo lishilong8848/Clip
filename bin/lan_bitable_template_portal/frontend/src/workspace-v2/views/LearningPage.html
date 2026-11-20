@@ -1,0 +1,236 @@
+<section class="lp-desk learning-page" :aria-busy="loading || busy">
+  <header class="lp-head" :class="{'lp-study-heading': isLearningHub || tab === 'pending'}">
+    <div class="lp-title">
+      <VnetBackButton v-if="viewMode==='overview' && learner" within-module :disabled="busy" @click="handleBack" />
+      <span class="lp-emblem"><BookOpen :size="22" aria-hidden="true" /></span>
+      <div><h1>画像学练</h1><small>{{ learner?.name || scopeLabel || '学练工作台' }}<template v-if="date"> · <time :datetime="date">{{ date }}</time></template></small></div>
+    </div>
+    <div class="lp-tools">
+      <button v-if="ready && canViewBuildings && boot.can_answer && viewMode === 'practice' && (isLearningHub || tab === 'pending')" type="button" class="lp-mode-link" :disabled="busy" @click="goOverview">学习管理</button>
+      <div v-else-if="ready && canViewBuildings && boot.can_answer" class="lp-switch" role="group" aria-label="工作模式">
+        <button :aria-pressed="viewMode==='practice'" :disabled="busy" @click="goPractice">个人学习</button>
+        <button :aria-pressed="viewMode==='overview'" :disabled="busy" @click="goOverview">学习管理</button>
+      </div>
+      <label v-if="ready && viewMode==='overview'" class="lp-field">范围<select :value="scope" :disabled="busy" @change="v2Building(($event.target as HTMLSelectElement).value)"><option v-for="s in overviewScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
+      <button v-if="ready && viewMode==='overview' && canViewBuildings" class="lp-btn" :disabled="busy" @click="openPeople">选择人员</button>
+      <button v-if="isLearningHub || tab === 'pending'" type="button" class="lp-mode-link" aria-label="刷新当前页面" title="刷新当前页面" :disabled="loading || busy || pendingLoading" @click="refreshView"><RefreshCw :size="16" aria-hidden="true" /></button>
+      <button v-else class="lp-btn" :disabled="loading || busy" @click="refreshView"><RefreshCw :size="14" aria-hidden="true" />刷新</button>
+    </div>
+  </header>
+  <p v-if="error && !modalKind" class="lp-msg error" role="alert">{{ error }}</p>
+  <p v-if="notice && !modalKind" class="lp-msg" role="status">{{ notice }}</p>
+  <p v-if="storageWarning || identityIssue" class="lp-msg warn">{{ [identityIssue,storageWarning].filter(Boolean).join(' · ') }}</p>
+  <p v-if="!ready && loading" class="lp-empty" role="status">正在读取学习权限和题单…</p>
+  <template v-if="ready">
+    <nav v-if="isAdmin && (isLearningHub || tab === 'pending')" class="lp-study-nav" aria-label="学练页面">
+      <button v-if="viewMode === 'practice'" type="button" :aria-current="tab === 'home' ? 'page' : undefined" :disabled="busy" @click="switchTab('home')">个人学习</button>
+      <button v-else type="button" :aria-current="tab === 'profile' ? 'page' : undefined" :disabled="busy" @click="switchTab('profile')">管理总览</button>
+      <button type="button" :aria-current="tab === 'pending' ? 'page' : undefined" :disabled="busy" @click="switchTab('pending')">{{ pendingTab.label }}</button>
+      <button type="button" :disabled="busy" @click="switchTab('questions')">题库管理</button>
+    </nav>
+    <nav v-else-if="!isLearningHub" class="lp-tabs" aria-label="学练页面">
+      <label v-if="v2Mobile" class="lp-mobile-section">当前功能<select aria-label="切换学练功能" :value="tab" :disabled="busy" @change="v2OpenSection(($event.target as HTMLSelectElement).value)"><option v-for="entry in tabs" :key="entry.id" :value="entry.id">{{ entry.label }}</option></select></label>
+      <template v-else>
+      <button v-for="entry in tabs" :key="entry.id" :aria-current="tab === entry.id ? 'page' : undefined" :disabled="busy" @click="v2OpenSection(entry.id)">{{ entry.label }}</button>
+      </template>
+    </nav>
+    <LearningHome v-if="isLearningHub" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || (!profile.today_summary && tab === 'home') || (!!error && viewMode === 'overview')"
+      :management="viewMode==='overview'" :is-admin="isAdmin" :exemption-date="boot.daily_exemption?.resume_date" @open="openLearning" @refresh="refreshView" />
+    <LearningPendingQuestions v-if="isAdmin && tab === 'pending'" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
+
+    <section v-if="isLearningHub && viewMode === 'overview' && isAdmin" class="lp-panel lp-pending" aria-label="待处理">
+      <header class="lp-heading"><h2>待处理</h2><small>{{ scopeLabel || '当前范围' }}</small></header>
+      <div class="lp-queue">
+        <button v-if="isAdmin" :disabled="busy || loading" @click="filters.problems=true; pages.questions=1; switchTab('questions')"><span>题库异常</span><strong>{{ boot.question_problem_count ?? '—' }} 题</strong></button>
+        <button v-if="isAdmin" :disabled="busy || loading" @click="switchTab('settings')"><span>待同步</span><strong>{{ boot.sync?.pending ?? '—' }} 项</strong></button>
+      </div>
+    </section>
+
+    <section v-if="tab==='today' || (reading && ['history','review'].includes(tab))" class="lp-reader" aria-label="题单与作答">
+      <header class="lp-panel lp-heading"><div><h2>{{ tab==='today' ? studyMode==='practice' ? '自主练习' : '当班题单' : '题单回顾' }}</h2>
+        <small>{{ paper?.person?.name || learner?.name }} · {{ paper?.date || date }}<template v-if="paper"> · 已答 {{ answered }} / {{ validCount }} 题</template></small></div>
+        <div class="lp-tools">
+          <div v-if="tab==='today' && viewMode==='practice'" class="lp-switch" role="group" aria-label="题单类型"><button :disabled="busy || loading" :aria-pressed="studyMode==='daily'" @click="switchStudyMode('daily')">当班题单</button><button :disabled="busy || loading" :aria-pressed="studyMode==='practice'" @click="switchStudyMode('practice')">自主练习</button></div>
+          <button v-if="tab==='today' && studyMode==='practice' && boot.can_answer" class="lp-btn" :disabled="busy || loading" @click="v2NewPractice">新练习15题</button>
+          <button v-if="tab==='today' && studyMode==='daily' && !paper && boot.can_answer && learner && !boot.daily_exemption" class="lp-btn primary" :disabled="busy || loading" @click="v2Resume('daily')">查看今日题单</button>
+          <span v-if="paper && current" data-v2-layout-tools="learning-practice"></span>
+          <button v-if="completionReturn" class="lp-btn" :disabled="busy" @click="returnToCompletion">返回每日完成</button>
+          <button v-else-if="tab!=='today'" class="lp-btn" :disabled="busy" @click="saveDraft(); reading=false; loadView()">返回记录列表</button>
+        </div>
+      </header>
+      <p v-if="startWarning" class="lp-msg warn">{{ startWarning }} <button class="lp-btn" :disabled="busy" @click="markStarted">重试计时</button></p>
+      <p v-if="paper && shortageText(paper.shortage)" class="lp-msg warn">{{ shortageText(paper.shortage) }}</p>
+      <p v-if="loading && !paper" class="lp-empty">正在读取题单…</p>
+      <p v-else-if="!paper || !current" class="lp-empty">{{ tab==='today' && studyMode==='daily' && boot.daily_exemption ? '当前免答，恢复日期 ' + (boot.daily_exemption.resume_date || '待确认') : studyMode==='practice' ? '暂无自主练习，可新建一份练习。' : '当前没有可作答的题目。' }}</p>
+      <template v-else>
+        <PageCanvas page="learning-practice" label="我的答题" :blocks="[{id:'questions',title:'题单进度',w:4,h:9},{id:'answer',title:'当前题目',w:8,h:14}]">
+          <template #questions>
+            <section class="lp-panel lp-index">
+              <header class="lp-heading"><b>题号导航</b><button v-if="v2Mobile" class="lp-btn" :aria-expanded="v2AnswerCard" @click="v2AnswerCard=!v2AnswerCard">题号 {{ index+1 }} / {{ paper.questions.length }}</button><small v-else>{{ index+1 }} / {{ paper.questions.length }}</small></header>
+              <progress aria-label="有效题目完成进度" :value="answered" :max="Math.max(1,validCount)"></progress>
+              <div v-if="!v2Mobile || v2AnswerCard" class="question-numbers lp-numbers" role="group" aria-label="按题号跳转">
+                <button v-for="(q,i) in paper.questions" :key="questionId(q)" :disabled="busy || loading" :aria-current="index===Number(i)?'step':undefined"
+                  :data-state="q.invalid?'invalid':q.needs_review?'review':q.attempt?'done':'todo'" :aria-label="'第 '+(Number(i)+1)+' 题，'+(q.invalid?'已失效':q.needs_review?'待复核':q.attempt?'已作答':'未作答')" @click="v2Question(Number(i))">{{ Number(i)+1 }}</button>
+              </div>
+              <small>已答 {{ answered }} · 待答 {{ Math.max(0,validCount-answered) }}</small>
+            </section>
+          </template>
+          <template #answer>
+            <article class="lp-panel lp-question">
+              <header class="lp-heading"><div class="lp-tools"><b>第 {{ index+1 }} 题</b><span class="lp-badge">{{ typeLabels[current.type] || current.type }}</span><small>{{ bankLabels[current.bank] || current.bank }}</small></div>
+                <div class="lp-tools"><small>{{ current.needs_review ? '题目已更正，需复核' : resultText(current,displayedAttempt) }}</small><button v-if="isAdmin" type="button" class="lp-btn lp-edit-current" :disabled="busy || loading" @click="editCurrentQuestion"><Pencil :size="16" />编辑本题</button></div></header>
+              <h3 class="stem">{{ current.stem }}</h3>
+              <div v-if="current.attachments?.length" class="lp-tools"><button v-for="a in current.attachments" :key="a.id" class="lp-btn" @click="showAttachment(a)">{{ attachmentLabels[a.kind] || '资料' }} · {{ a.name }}</button></div>
+              <div v-if="current.type!=='interview'" class="lp-options" role="group" aria-label="作答选项">
+                <button v-for="(o,i) in current.options" :key="o.id" :aria-pressed="draft.option_ids.includes(o.id)" :disabled="locked || busy || loading" @click="chooseOption(o.id)"><b>{{ String.fromCharCode(65+Number(i)) }}</b><span>{{ o.text }}</span></button>
+              </div>
+              <div v-else class="lp-interview"><label class="lp-field">我的回答<textarea v-model="draft.answer_text" :disabled="locked || busy || loading" rows="3" /></label>
+                <div class="lp-tools"><span>掌握程度</span><button v-for="r in ratingLabels" :key="r" class="lp-btn" :aria-pressed="draft.self_rating===r" :disabled="locked || busy || loading" @click="draft.self_rating=r">{{ r }}</button></div></div>
+              <Teleport to="body" :disabled="!v2Mobile || !!modalKind || confirm.open">
+              <div class="lp-answer-actions" :class="{ 'lp-mobile-answer': v2Mobile && !modalKind && !confirm.open }" role="group" aria-label="答题操作"><span>{{ !canAnswer ? '只读题单' : draftRestored ? '草稿已恢复' : practice ? '复习作答' : current.invalid ? '题目已失效' : current.attempt ? '已记录作答' : '首次作答' }}</span>
+                <div class="lp-tools"><button class="lp-btn" :disabled="busy || loading || !index" @click="v2Question(index-1)">上一题</button>
+                <button v-if="!locked" class="lp-btn primary" :disabled="busy || loading" @click="submitAnswer">{{ busy ? '正在保存…' : '确认作答' }}</button>
+                <button v-else-if="current.invalid || current.attempt" class="lp-btn" disabled>{{ current.invalid ? '题目已失效' : '已确认作答' }}</button>
+                <button class="lp-btn" :disabled="busy || loading || index+1>=paper.questions.length" @click="v2Question(index+1)">下一题</button></div>
+              </div>
+              </Teleport>
+              <div class="lp-tools lp-reader-tools">
+                <button v-if="canAnswer && current.attempt && !current.invalid && !practice" class="lp-btn" :disabled="busy || loading" @click="startPractice">重新练习</button>
+                <button v-if="canAnswer && !current.invalid && current.has_hint!==false" class="lp-btn" :disabled="busy" @click="v2AnswerTool('hint')">思路提示</button>
+                <button v-if="canAnswer && !current.invalid && !current.answer?.correct_option_ids" class="lp-btn" :disabled="busy" @click="reveal('answer')">查看参考答案</button>
+                <button v-if="canAnswer && !current.invalid && !current.answer?.analysis" class="lp-btn" :disabled="busy" @click="reveal('analysis')">查看解析</button>
+                <button v-if="canAnswer" class="lp-btn" :disabled="busy" :aria-pressed="!!current.favorite" @click="saveNotes({favorite:!current.favorite})">{{ current.favorite?'取消收藏':'收藏' }}</button>
+                <button class="lp-btn" :aria-expanded="v2NotesOpen" @click="v2NotesOpen=!v2NotesOpen">学习笔记</button>
+                <button v-if="canAnswer" class="lp-btn" :disabled="busy" @click="openIssue()">题目反馈</button>
+              </div>
+              <div v-if="current.answer" class="lp-answer-info"><p v-if="current.answer.hint"><b>提示</b>{{ current.answer.hint }}</p><p v-if="current.answer.correct_option_ids?.length || current.answer.answer_text"><b>参考答案</b>{{ current.answer.answer_text || answerLabels(current.answer.correct_option_ids,current) }}</p><p v-if="current.answer.analysis"><b>解析</b>{{ current.answer.analysis }}</p>
+                <button v-for="a in current.answer.attachments || []" :key="a.id" class="lp-btn" @click="showAttachment(a)">{{ a.name }}</button>
+              </div>
+              <div v-if="v2NotesOpen" class="notes lp-notes"><label class="lp-field">学习笔记<textarea v-model="note" rows="2" :readonly="!canAnswer" :disabled="busy" /></label><button v-if="canAnswer" class="lp-btn" :disabled="busy || !noteDirty" @click="saveNotes()">保存笔记</button></div>
+              <details v-if="current.attempt" class="lp-attempts"><summary>作答记录（{{ attemptRecords(current).length }}）</summary><div v-for="(a,i) in attemptRecords(current)" :key="i" class="lp-line"><b>{{ a.label }}</b><span>{{ a.resultText }} · {{ a.selectedText }}</span><small>{{ timeLabel(a.submitted_at) }}</small></div></details>
+            </article>
+          </template>
+        </PageCanvas>
+        <section v-if="v2Completed && !v2CompletionHidden" class="lp-result"><div><strong>本份题单已答完</strong><small>选择题答对 {{ v2PaperStats.correct }} / {{ v2PaperStats.choices }} · 面试作答 {{ v2PaperStats.interviews }}</small></div>
+          <div class="lp-tools"><button class="lp-btn" @click="v2CompletionHidden=true">回顾作答</button><button class="lp-btn primary" :disabled="busy || loading" @click="switchTab('completion')">查看每日完成</button></div>
+        </section>
+      </template>
+    </section>
+
+    <section v-if="tab==='profile'" class="lp-panel lp-profile">
+      <header class="lp-heading"><h2>画像统计</h2>
+        <div class="lp-tools"><label class="lp-field">统计周期<select :value="filters.period" :disabled="busy" @change="v2Period(($event.target as HTMLSelectElement).value)"><option value="7">近 7 天</option><option value="30">近 30 天</option><option value="90">近 90 天</option><option value="">自定义</option></select></label>
+        <template v-if="!filters.period"><label class="lp-field">开始日期<input type="date" v-model="filters.from"></label><label class="lp-field">结束日期<input type="date" v-model="filters.to"></label><button class="lp-btn" :disabled="busy || loading || !filters.from || !filters.to || filters.from>filters.to" @click="loadView">查询</button></template>
+        <button v-if="isAdmin" class="lp-btn" :disabled="busy || loading" @click="exportData('report')">导出报表</button></div>
+      </header>
+      <LearningDashboard :data="profile" :person="learner" :all-scopes="allPortrait" :show-continue="viewMode==='practice' && !!learner && boot.can_answer" :disabled="busy || loading" :failed="!!error" :loading="loading"
+        @continue="continueLearning" @select="selectLearner" @drill="v2Drill" />
+      <details class="lp-details"><summary>分项统计</summary><div class="lp-tools"><label class="lp-field">统计项<select v-model="profileSection" @change="pages.profile=1"><option v-for="s in profileSections" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
+        <small>{{ profileRows.length }} 条</small><button class="lp-btn" :disabled="pages.profile<=1" @click="pages.profile--">上一页</button><button class="lp-btn" :disabled="pages.profile*20>=profileRows.length" @click="pages.profile++">下一页</button></div>
+        <div v-for="(r,i) in visibleProfileRows" :key="i" class="lp-line"><b>{{ r.scope || r.label || r.topic || r.stem || '未分类' }}</b><span>已答 {{ r.answered ?? r.summary?.answered ?? '—' }}</span><span>错题 {{ r.wrong ?? r.summary?.wrong ?? '—' }}</span><span>正确率 {{ percent(r.accuracy ?? r.summary?.accuracy) }}</span></div><p v-if="!profileRows.length" class="lp-empty">暂无分项记录</p>
+      </details>
+    </section>
+    <LearningSharing v-if="tab==='sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty=$event" @busy="busy=$event" />
+    <LearningCompletion v-if="tab==='completion'" :scope="scope" :person-id="learner?.id" :can-view-buildings="canViewBuildings" :refresh-key="completionRefresh" @open-paper="openCompletionPaper" />
+
+    <section v-if="!reading && ['review','history'].includes(tab)" class="lp-panel">
+      <header class="lp-heading"><h2>{{ tab==='review'?'复习记录':'学习历史' }}</h2><div class="lp-tools">
+        <template v-if="tab==='review'"><label class="lp-field">分类<select v-model="filters.review" @change="filterChanged"><option v-for="(label,key) in reviewLabels" :key="key" :value="key">{{ label }}</option></select></label>
+          <label class="lp-field">题库<select v-model="filters.reviewBank" @change="filterChanged"><option value="">全部题库</option><option v-for="(label,key) in bankLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="lp-field">关键词<input type="search" v-model="filters.search" @change="filterChanged"></label>
+        </template><template v-else><label class="lp-field">开始<input v-model="filters.from" type="date" @change="filterChanged"></label><label class="lp-field">结束<input v-model="filters.to" type="date" @change="filterChanged"></label>
+          <label v-if="isAdmin" class="lp-check"><input type="checkbox" v-model="legacyHistory" @change="filterChanged">旧版题单</label><button v-if="isAdmin" class="lp-btn" :disabled="busy" @click="exportData('history')">导出学习记录</button></template>
+        <button class="lp-btn" :disabled="busy" @click="clearFilters">重置</button></div></header>
+      <div v-if="rows.length" class="lp-list"><article v-for="(r,i) in rows" :key="r.id || (r.paper_id+'-'+i)" class="lp-row">
+        <div><strong>{{ tab==='review'?r.question?.stem || r.stem : (r.person?.name || r.person_name || scopeLabel) + ' · ' + (r.mode==='practice'?'自主练习':'当班题单') }}</strong>
+          <small>{{ r.date }} · {{ r.scope }}楼 <template v-if="tab==='review'"> · 错题次数 {{ r.mistake_count ?? '—' }}</template><template v-else> · {{ r.stats?.answered ?? r.answered ?? '—' }} / {{ r.stats?.total ?? r.total ?? '—' }} 题 · {{ r.status==='completed' ? '已完成' : '待完成' }}</template></small></div>
+        <div class="lp-tools"><button class="lp-btn" :disabled="busy || loading" @click="loadPaper(r.paper_id || r.id,tab==='review' ? r.question_id || r.question?.id : '')">{{ tab==='review'?'查看题目':'查看题单' }}</button><button v-if="isAdmin && tab==='history'" class="lp-btn danger" :disabled="busy" @click="deletePaper(r.id)">删除题单</button></div>
+      </article></div><p v-else class="lp-empty">{{ loading?'正在读取…':'所选范围暂无记录' }}</p>
+    </section>
+    <section v-if="tab==='issues'" class="lp-panel">
+      <header class="lp-heading"><h2>题目反馈 <small>{{ total }} 条</small></h2><div class="lp-tools">
+        <label class="lp-field">楼栋<select v-model="filters.issueScope" @change="filterChanged"><option value="">全部范围</option><option v-for="(label,key) in issueScopes" :key="key" :value="key">{{ label }}</option></select></label>
+        <label class="lp-field">处理状态<select v-model="filters.issue" @change="filterChanged"><option value="">全部状态</option><option v-for="(label,key) in issueLabels" :key="key" :value="key">{{ label }}</option></select></label>
+        <label class="lp-field">搜索反馈<input v-model="filters.search" type="search" @change="filterChanged"></label><button class="lp-btn" :disabled="busy" @click="clearFilters">清空筛选</button>
+      </div></header>
+      <div class="lp-list"><article v-for="r in rows" :key="r.id" class="lp-row"><div><strong>{{ r.current_stem || r.snapshot?.stem || r.question?.stem || r.title || r.description }}</strong><p>{{ r.description || r.content }}</p><small>{{ [r.category,r.scope_label || issueScopes[r.scope],r.person_name,timeLabel(r.created_at)].filter(Boolean).join(' · ') }}</small></div><div class="lp-tools"><span class="lp-badge">{{ issueLabels[r.status] || r.status }}</span><button v-if="isAdmin && r.question_id" class="lp-btn primary" :disabled="busy" @click="openReview(r.id)">修改题目与答案</button><button class="lp-btn" :disabled="busy" @click="openIssue({},r)">{{ r.can_update ? '处理反馈' : '查看反馈' }}</button></div></article></div>
+      <p v-if="!rows.length" class="lp-empty">{{ loading?'正在读取反馈…':'当前筛选下没有反馈' }}</p>
+    </section>
+    <section v-if="tab==='questions' && isAdmin" class="lp-panel">
+      <header class="lp-heading"><h2>题库管理 <small>{{ total }} 题</small></h2><div class="lp-tools">
+        <button class="lp-btn primary" :disabled="busy" @click="editQuestion()">新建题目</button><button class="lp-btn" :disabled="busy" @click="modalKind='import'">导入题目</button><button class="lp-btn" @click="downloadTemplate">下载模板</button><button class="lp-btn" :disabled="busy" @click="exportData('questions')">导出题库</button>
+      </div></header>
+      <div class="lp-tools"><label class="lp-field">题库<select v-model="filters.bank" @change="filterChanged"><option value="">全部题库</option><option v-for="(label,key) in bankLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="lp-field">状态<select v-model="filters.status" @change="filterChanged"><option value="">全部状态</option><option v-for="(label,key) in statusLabels" :key="key" :value="key">{{ label }}</option></select></label><label class="lp-field">关键词<input type="search" v-model="filters.search" @change="filterChanged"></label><label class="lp-check"><input type="checkbox" v-model="filters.problems" @change="filterChanged">仅待修正</label><button class="lp-btn" @click="clearFilters">清空筛选</button></div>
+      <div v-if="rows.length" class="lp-tools lp-batch"><label class="lp-check"><input type="checkbox" :checked="rows.every(r=>selected.includes(r.id))" :disabled="busy" @change="selected=($event.target as HTMLInputElement).checked?rows.map(r=>r.id):[]">全选本页</label><span>已选 {{ selected.length }} 题</span><button v-for="(label,key) in statusLabels" :key="key" class="lp-btn" :disabled="busy || !selected.length" @click="setQuestionStatus(rows.filter(r=>selected.includes(r.id)),String(key))">设为{{ label }}</button></div>
+      <div class="lp-list"><article v-for="q in rows" :key="q.id" class="lp-row"><input type="checkbox" v-model="selected" :value="q.id" :aria-label="'选择 '+q.stem" :disabled="busy"><div class="lp-grow"><strong>{{ q.stem }}</strong><small>{{ bankLabels[q.bank] }} · {{ q.type_label || typeLabels[q.type] }} · {{ statusLabels[q.status] }}</small><p v-if="q.problems?.length" class="lp-msg warn">{{ q.problems.join('、') }}</p></div><div class="lp-tools"><button class="lp-btn" :disabled="busy" @click="editQuestion(q.id)">编辑</button><button class="lp-btn" :disabled="busy" @click="copyQuestion(q)">复制</button></div></article></div><p v-if="!rows.length" class="lp-empty">{{ loading?'正在读取题库…':'当前筛选下没有题目' }}</p>
+    </section>
+    <section v-if="tab==='settings' && isAdmin" class="lp-panel lp-settings">
+      <header class="lp-heading"><h2>发布与提醒</h2><div class="lp-tools"><span class="lp-badge">{{ syncLabel }} · 待同步 {{ boot.sync?.pending ?? '—' }}</span><button class="lp-btn" :disabled="busy || jobRunning" @click="runJob('refresh')">同步题库</button><button class="lp-btn" :disabled="busy || jobRunning || !boot.silent_manual_publish" :title="boot.silent_manual_publish?'':'请重启主程序后使用静默发布'" @click="runJob('publish')">手动发布题单</button><button class="lp-btn primary" :disabled="busy || loading" @click="saveSettings">保存设置</button></div></header>
+      <p v-if="boot.sync?.error" class="lp-msg error">{{ boot.sync.error }}</p>
+      <div v-if="boot.sync?.history_issue_count" class="lp-panel"><header class="lp-heading"><h3>历史人员待核对 <small>{{ boot.sync.history_issue_count }} 条</small></h3><button class="lp-btn" :disabled="busy" @click="exportData('history_identity')">导出核对清单</button></header>
+        <div v-for="i in boot.sync.history_issues" :key="i.record_id" class="lp-line"><b>{{ i.name }}</b><span>{{ i.date }} · {{ i.scope }} · {{ i.reason }}</span><small v-if="i.candidates?.length">{{ i.candidates.map((p:Dict)=>[p.name,p.employee_no].filter(Boolean).join(' ')).join('、') }}</small></div>
+      </div>
+      <div class="lp-tools"><label class="lp-check"><input v-model="settingsForm.enabled" type="checkbox" :disabled="busy">每日自动发布</label><label class="lp-check"><input v-model="settingsForm.reminder_enabled" type="checkbox" :disabled="busy">催学提醒</label><label v-if="settingsForm.reminder_enabled" class="lp-field">提醒时间<LearningDateField v-model="settingsForm.reminder_time" type="time" aria-label="提醒时间" :disabled="busy" /></label><label class="lp-check"><input v-model="settingsForm.timeout_reminder_enabled" type="checkbox" :disabled="busy">超时提醒</label><label class="lp-check"><input v-model="settingsForm.weekly_report_enabled" type="checkbox" :disabled="busy">周报通知</label></div>
+      <div class="lp-list"><article v-for="s in publishShifts" :key="s.key" class="lp-shift"><header class="lp-heading"><h3>{{ s.key }}班投递</h3><label class="lp-field">{{ s.label }}<LearningDateField v-model="settingsForm[s.field]" type="time" :aria-label="s.label" :disabled="busy" /></label></header>
+        <p class="lp-meta">已发送 {{ shiftStatus(s.key).sent ?? '—' }} · 待发送 {{ shiftStatus(s.key).pending ?? '—' }} · 失败 {{ shiftStatus(s.key).failed ?? '—' }} · 免答 {{ shiftStatus(s.key).exempt ?? '—' }}</p>
+        <ul v-if="shiftStatus(s.key).issues?.length || shiftStatus(s.key).entry_date_issues?.length"><li v-for="(i,n) in [...(shiftStatus(s.key).issues||[]),...(shiftStatus(s.key).entry_date_issues||[])]" :key="n">{{ [i.name,i.reason || i.message || i].filter(Boolean).join(' · ') }}</li></ul></article></div>
+    </section>
+    <nav v-if="!reading && ['history','review','questions','issues'].includes(tab) && total" aria-label="记录分页" class="lp-tools lp-pages"><span>共 {{ total }} 条 · 第 {{ pageNumber }} / {{ pageCount }} 页</span><button class="lp-btn" :disabled="busy || loading || pageNumber<=1" @click="turnPage(-1)">上一页</button><button class="lp-btn" :disabled="busy || loading || pageNumber>=pageCount" @click="turnPage(1)">下一页</button><label class="lp-field">跳至页<input type="number" min="1" :max="pageCount" v-model.number="jumpPage" @keyup.enter="gotoPage(jumpPage)"></label><button class="lp-btn" :disabled="busy || loading" @click="gotoPage(jumpPage)">跳转</button></nav>
+  </template>
+  <Teleport to="body">
+    <div v-if="modalKind" class="lp-modal-wrap" @click.self="closeModal">
+      <section ref="modalElement" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="lp-dialog-title" class="lp-modal" @paste="['question','issue'].includes(modalKind) && pasteFiles($event)">
+        <header class="lp-modal-head"><h2 id="lp-dialog-title">{{ modalKind==='question' ? editor.id?'编辑题目':'新建题目' : modalKind==='issue' ? issue.id?'处理反馈':'提交题目反馈' : modalKind==='import'?'批量导入题目':modalKind==='people'?'选择人员':'附件预览' }}</h2><div class="lp-tools"><small v-if="modalDirty">有未保存内容</small>
+          <button v-if="modalKind==='question' && !questionReadOnly" class="lp-btn primary" :disabled="busy || (!!reviewContext && !modalDirty)" @click="saveQuestion">保存题目</button>
+          <button v-if="modalKind==='issue' && canEditIssue" class="lp-btn primary" :disabled="busy" @click="submitIssue">提交反馈</button>
+          <button v-if="modalKind==='import' && isAdmin" class="lp-btn primary" :disabled="busy || !importRows.length || importErrors>0" @click="commitImport">确认导入</button>
+          <a v-if="modalKind==='attachment'" class="lp-btn" :href="attachmentUrl(preview)" :download="preview.name">下载附件</a>
+          <button class="lp-btn" :disabled="busy" @click="closeModal">关闭</button></div></header>
+        <div class="modal-scroll lp-modal-body">
+          <p v-if="error" class="lp-msg error" role="alert">{{ error }}</p><p v-if="notice" class="lp-msg" role="status">{{ notice }}</p>
+          <p v-if="conflicted" class="lp-msg warn">数据版本已变化。<button class="lp-btn" :disabled="busy" @click="reloadConflict">读取最新版本</button></p>
+          <fieldset v-if="modalKind==='question'" class="lp-form" :disabled="busy">
+            <div v-if="!reviewContext" class="lp-tools">
+              <label class="lp-field">题库<select v-model="editor.bank" :disabled="!!editor.id"><option v-for="(v,k) in bankLabels" :key="k" :value="k">{{ v }}</option></select></label>
+              <label class="lp-field">题型<select :value="editor.type==='multiple' ? editor.type_label==='不定项'?'不定项':'多选题' : typeLabels[editor.type]" @change="setEditorType(($event.target as HTMLSelectElement).value)"><option v-for="v in ['单选题','多选题','不定项','面试题']" :key="v">{{ v }}</option></select></label>
+              <label class="lp-field">状态<select v-model="editor.status"><option v-for="(v,k) in statusLabels" :key="k" :value="k">{{ v }}</option></select></label>
+            </div>
+            <LearningQuestionFields :reason="reviewContext?.reason" :question="editor" :disabled="busy || questionReadOnly" />
+            <details v-if="!reviewContext"><summary>思路提示</summary><textarea aria-label="思路提示" v-model="editor.hint" rows="2" maxlength="5000" /></details>
+            <details v-if="editor.audit?.length"><summary>变更记录</summary><p v-for="(a,i) in editor.audit" :key="i">{{ [timeLabel(a.at || a.created_at),a.actor || a.actor_name,a.action,a.reason].filter(Boolean).join(' · ') }}</p></details>
+          </fieldset>
+          <template v-if="modalKind==='issue'"><header class="lp-heading"><h3>{{ issue.current_stem || issue.snapshot?.stem || issue.question?.stem || issue.question_id }}</h3><button v-if="isAdmin && issue.question_id" class="lp-btn" :disabled="busy" @click="editIssueQuestion">编辑原题</button></header>
+            <label class="lp-field">反馈分类<select v-model="issue.category" :disabled="busy || !!issue.id || !canEditIssue"><option v-for="v in categoryLabels" :key="v">{{ v }}</option></select></label>
+            <label class="lp-field">问题说明<textarea v-model="issue.description" :readonly="!!issue.id || !canEditIssue" :disabled="busy" rows="3" /></label>
+            <label class="lp-field">建议答案或依据<textarea v-model="issue.suggestion" :readonly="!!issue.id || !canEditIssue" :disabled="busy" rows="2" /></label>
+            <template v-if="issue.id"><small>当前状态 · {{ issueLabels[issue.status] || issue.status }}</small>
+              <div v-for="(c,i) in issue.comments || []" :key="i" class="lp-line"><strong>{{ c.actor_name || c.name || c.actor }}</strong><span>{{ c.remark || c.text }}</span><small>{{ timeLabel(c.at || c.created_at) }}</small></div>
+              <template v-if="canEditIssue"><label class="lp-field">处理状态<select v-model="issueNextStatus" :disabled="busy"><option v-for="v in issueStatusOptions" :key="v" :value="keyFor(issueLabels,v)">{{ v }}</option></select></label><label class="lp-field">补充说明或处理结论<textarea v-model="issueComment" :disabled="busy" rows="3" /></label></template>
+            </template>
+          </template>
+          <section v-if="modalKind==='issue' || (modalKind==='question' && isAdmin && !reviewContext)" class="lp-form">
+            <header class="lp-heading"><h3>附件</h3><div v-if="modalKind==='question' || canEditIssue" class="lp-tools">
+              <label v-if="modalKind==='question'" class="lp-field">归属<select v-model="attachmentKind" :disabled="busy"><option v-for="(v,k) in attachmentLabels" :key="k" :value="k">{{ v }}</option></select></label>
+              <label class="lp-field">选取文件<input type="file" multiple :disabled="busy" @change="pickFiles"></label>
+              <button v-if="uploadFiles.length && (modalKind==='question' ? editor.id : issue.id)" class="lp-btn" :disabled="busy" @click="perform(()=>uploadAttachments(modalKind==='question'?'question':'issue'),'附件已上传。')">上传附件</button>
+            </div></header>
+            <div v-for="a in (modalKind==='question'?editor.attachments:issue.attachments) || []" :key="a.id" class="lp-line">
+              <a :href="attachmentUrl(a)" target="_blank" rel="noopener noreferrer">{{ a.name }}</a><small>{{ attachmentLabels[a.kind] }}</small><button v-if="modalKind==='question' || canEditIssue" class="lp-btn" :disabled="busy" @click="deleteAttachment(a)">删除附件</button>
+            </div><div v-for="(file,i) in uploadFiles" :key="file.name+i" class="lp-line"><span>待上传 · {{ file.name }}</span><button class="lp-btn" :disabled="busy" @click="uploadFiles.splice(i,1)">移除</button></div>
+          </section>
+          <template v-if="modalKind==='import' && isAdmin"><header class="lp-heading"><label class="lp-field">选择 JSON 或 CSV<input type="file" accept=".json,.csv" :disabled="busy" @change="importFile"></label><button class="lp-btn" @click="downloadTemplate">下载模板</button></header><small>{{ importName }} · {{ importRows.length }} 题 · 异常 {{ importErrors }} 行</small>
+            <article v-for="(r,i) in importVisible" :key="i" class="lp-line"><small>{{ (importPage-1)*20+Number(i)+1 }}</small><strong>{{ r.question.stem }}</strong><span>{{ bankLabels[r.question.bank] }} · {{ typeLabels[r.question.type] }}</span><span v-if="r.errors.length" class="lp-msg error">{{ r.errors.join('、') }}</span></article>
+            <div v-if="importRows.length>20" class="lp-tools lp-pages"><button class="lp-btn" :disabled="importPage<=1" @click="importPage--">上一页</button><small>{{ importPage }} / {{ Math.ceil(importRows.length/20) }}</small><button class="lp-btn" :disabled="importPage*20>=importRows.length" @click="importPage++">下一页</button></div>
+          </template>
+          <template v-if="modalKind==='attachment'"><p>{{ preview.name }} · {{ attachmentLabels[preview.kind] || '附件' }}</p><img v-if="isImage(preview)" :src="attachmentUrl(preview)" :alt="preview.name"></template>
+          <template v-if="modalKind==='people'"><header class="lp-heading"><label class="lp-field">姓名或工号<input v-model="peopleSearch" type="search" @keyup.enter="peoplePage=1;loadPeople()"></label><button class="lp-btn" :disabled="peopleLoading" @click="peoplePage=1;loadPeople()">搜索人员</button></header>
+            <p v-if="peopleLoading" role="status">正在读取人员…</p><p v-else-if="!peopleReady" class="lp-msg warn">人员目录尚未就绪</p>
+            <div v-for="(i,n) in peopleIssues" :key="n" class="lp-msg warn">{{ typeof i==='string'?i:[i.name,i.reason||i.message].filter(Boolean).join(' · ') }}</div>
+            <div class="lp-list"><button v-for="p in peopleRows" :key="p.id" class="lp-person" :disabled="busy" @click="selectLearner(p)"><strong>{{ p.name }}</strong><span>{{ p.employee_no }}</span><span>{{ p.scopes?.join('、') || p.scope }}</span></button></div>
+            <p v-if="!peopleRows.length && !peopleLoading" class="lp-empty">没有匹配人员</p><div class="lp-tools lp-pages"><small>{{ peopleTotal }} 人 · 第 {{ peoplePage }} 页</small><button class="lp-btn" :disabled="peopleLoading || peoplePage<=1" @click="peoplePage--;loadPeople()">上一页</button><button class="lp-btn" :disabled="peopleLoading || peoplePage*20>=peopleTotal" @click="peoplePage++;loadPeople()">下一页</button></div>
+          </template>
+        </div>
+      </section>
+    </div>
+  </Teleport>
+  <ConfirmDialog :open="confirm.open" :title="confirm.title" :message="confirm.message" :tone="confirm.tone" @resolve="confirmed" />
+</section>

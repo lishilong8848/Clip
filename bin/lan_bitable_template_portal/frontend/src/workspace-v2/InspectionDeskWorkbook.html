@@ -1,0 +1,62 @@
+<section ref="rootElement" class="inspection-workbook inspection-theme ins-workbook" aria-label="巡检电子工作簿"
+  :class="{'full-height':mobileSheet,'rotate-landscape':rotation==='landscape','rotate-portrait':rotation==='portrait','compact-editor-view':mobileSheet && editing && (availableHeight<260 || rotatedWidth<300)}"
+  :style="{'--available-height':availableHeight+'px','--rotated-width':rotatedWidth+'px'}">
+  <div class="ins-toolbar"><header class="ins-bar ins-head">
+    <div class="ins-title"><strong>{{ currentPage?.name || '巡检工作簿' }}</strong><small>{{ scope }}楼 · {{ mobilePhase || day }}</small></div>
+    <div class="ins-actions">
+      <slot name="round-start" :current="isCurrentDate" :target="dialogRoot" :locked="actionLocked"/>
+      <button v-if="mobileSheet" :aria-expanded="compactMenu" @click="compactMenu=!compactMenu">{{ compactMenu?'收起操作':'轮次与选表' }}</button>
+      
+      <button v-if="!mobileSheet" @click="openSettings()" :disabled="!!abnormal || exemptionSaving">表格设置</button>
+      
+    </div>
+  </header>
+  <div v-show="!mobileSheet || compactMenu" class="ins-controls">
+    <div class="ins-line">
+      <label>楼栋<select data-native-select :value="scope" :disabled="actionLocked || !!lockReason || exemptionSaving" @change="changeScope"><option v-for="s in props.scopes" :key="s" :value="s">{{ s }}楼</option></select></label>
+      <label>日期<input type="date" :value="day" :disabled="actionLocked || !!lockReason" @change="changeDay"/></label>
+      <template v-if="mobileSheet"><button @click="openSettings()" :disabled="!!abnormal || exemptionSaving">表格设置</button><button v-if="mobileSheet" @click="toggleScreenLayout()">转{{ screenLayout==='portrait'?'横':'竖' }}屏</button><button v-if="mobileSheet" @click="allowNavigation() && emit('exit')">返回</button></template>
+      <slot v-if="mobileSheet" name="archive-trigger" :target="dialogRoot"/>
+      <div class="ins-rounds" aria-label="巡检轮次"><button v-for="slot in roundStates" :key="slot.slot" :aria-pressed="shownSlot===slot.slot" :disabled="!!abnormal || saving" @click="selectSlot(slot.slot)">
+        {{ slot.slot }} <small>{{ slot.label }} {{ slot.sourceClock || slot.scheduledClock }}</small></button></div>
+    </div>
+    <div class="ins-line"><label>专业<select data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部专业</option><option v-for="p in professions" :key="p">{{ p }}</option></select></label>
+      <label class="ins-sheet-choice">工作表<select data-native-select :value="pageKey" :disabled="!!abnormal" @change="selectPage(($event.target as HTMLSelectElement).value)">
+        <option v-for="s in sheetOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
+      <button v-if="nextUnvisited" @click="openPage(nextUnvisited.key)">下一张未查看</button>
+      <button @click="openLookup('search')">查找单元格</button><button @click="openLookup('abnormal')">异常 {{ roundAbnormal.length }}</button>
+      <button v-if="pendingRows.length && !props.readOnly && viewedRound?.round_id===activeRound?.round_id" :disabled="!!abnormal || saving" @click="gotoNextEmpty()">下一待填格 · {{ pendingRows.length }}</button>
+      <button :disabled="!sheetLoaded || !activeRound || viewedRound?.round_id!==activeRound.round_id" @click="openComparison()">本表复核</button>
+      <button :disabled="!report?.rounds.length || report.archive_incomplete || exporting || dirty || saving || !!editing" @click="download()">导出工作簿</button>
+    </div>
+    <div v-if="currentActive && viewedRound?.round_id===currentActive.id && !awaitingStart" class="ins-line">
+      <strong>本轮确认</strong><small>已查看 {{ visitedCount }}/{{ requiredPages.length }}</small>
+      <template v-for="p in selectedProfessions" :key="p"><span v-if="confirmedProfessions.includes(p)" class="ins-chip">{{ p }} · {{ confirmationLabel(p) }}</span>
+        <button v-else :disabled="actionLocked || props.readOnly || currentActive.pending || !hasViewed(p)" @click="deskProfession=p">{{ p }} · {{ progressLabel(p) }}</button></template>
+      <button v-for="p in joinableProfessions" :key="p" :disabled="actionLocked || props.readOnly || currentActive.pending" @click="joinProfession(p)">加入{{ p }}</button>
+      <button class="ins-primary" :disabled="actionLocked || props.readOnly || !canSubmit" :title="submitReason" @click="confirmSubmit=true">{{ currentActive.pending?'重试归档':'确认归档' }}</button>
+    </div>
+  </div></div>
+  <div v-if="loading || error || preferencesError || report?.archive_warning || invalidationText || needsFreeRound || exemptionPicking || dirty" class="ins-line ins-status" role="status">
+    <span v-if="loading">正在读取工作表…</span><span v-if="dirty">{{ saving?'正在保存单元格':'有待保存单元格' }}</span>
+    <span v-if="error">{{ error }}</span><span v-if="preferencesError">{{ preferencesError }}</span><span v-if="report?.archive_warning">{{ report.archive_warning }}</span>
+    <span v-if="invalidationText">{{ invalidationText }}</span><span v-if="needsFreeRound">请选择轮次后修改历史表格。</span>
+    <template v-if="exemptionPicking">请选择要免填的单元格。<button @click="endExemptionPick()">取消点选</button></template>
+    <button v-if="error && dirty" :disabled="saving || loading" @click="flush()">重试保存</button>
+    <button v-if="error && dirty" :disabled="saving || loading" @click="compareLatest()">核对共享版本</button>
+    <button v-if="error && !dirty" :disabled="saving || loading" @click="load(true)">重试读取</button>
+  </div>
+  <div v-if="editCell && mobileSheet" class="ins-line ins-editbar">
+    <strong>{{ editing }}</strong><!-- mobile cell editor --><button :disabled="!editNeighbors[0]" @click="moveEdit(-1)">上一格</button><button :disabled="!editNeighbors[1]" @click="moveEdit(1)">下一格</button>
+    <button @click="cancelEdit()">取消</button><button class="ins-primary" @click="completeEdit()">完成编辑</button>
+  </div>
+  <!-- worksheet -->
+  <p v-if="!currentPage && !loading" class="ins-empty">当前楼栋、日期和专业下暂无工作表。</p>
+  <footer class="ins-foot ins-head"><small><span v-if="props.sourceTime" data-inspection-source-time>采集 {{ new Date(props.sourceTime).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false}) }} · </span>{{ frozenProfession || currentPage?.profession }} · {{ sheetLoaded?'工作表已载入':'等待工作表数据' }} {{ props.readOnly?'· 当前楼栋只读':'' }}</small>
+    <div class="ins-actions"><small v-if="presence.length">{{ presence.map(p=>p.actor).join('、') }} 在线</small>
+      <button aria-label="缩小工作表" :disabled="zoom<=7" @click="resizeSheet(-1)">−</button><small>{{ Math.round(scale*100) }}%</small><button aria-label="放大工作表" :disabled="zoom>=28" @click="resizeSheet(1)">＋</button>
+    </div>
+  </footer>
+  <!-- settings -->
+  <!-- dialogs -->
+</section>

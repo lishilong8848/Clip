@@ -755,15 +755,31 @@ class DailyReportTests(unittest.TestCase):
             oid, card, identity = send.call_args_list[0].args
             summary = card['body']['elements']
             self.assertIn('质疑原因', summary[2]['text']['content'])
-            value = summary[-1]['behaviors'][0]['value']
+            link = summary[-1]['behaviors'][0]
+            self.assertEqual(link['type'], 'open_url')
+            from urllib.parse import urlsplit, parse_qs
+            url = urlsplit(link['default_url'])
+            self.assertEqual(url.path, '/learning')
+            self.assertEqual(parse_qs(url.query)['review_ticket'], [identity])
+            self.assertEqual(parse_qs(url.query)['issue_id'], ['issue1'])
+            ticket = self.service._get('local', identity)
+            # Already-delivered callback buttons still work, without creating another form.
+            value = {'ticket':identity, 'token':ticket['token'], 'kind':issue_cards.KIND, 'action':'open'}
             payload = {'header': {'app_id': 'cli_current', 'event_type': 'card.action.trigger'},
                        'event': {'operator': {'open_id': oid}, 'action': {'value': value},
                                  'context': {'open_message_id': 'om_0', 'open_chat_id': 'oc_0'}}}
-            editor = issue_cards.apply(self.service, auth, payload, 'cli_current')['card']
-            controls = editor['body']['elements'][1]['elements']
-            self.assertEqual(controls[0]['default_value'], question['stem'])
+            reopened = issue_cards.apply(self.service, auth, payload, 'cli_current')['card']
+            self.assertEqual(reopened['body']['elements'][-1]['behaviors'], [link])
+            self.assertNotIn('form', [e['tag'] for e in reopened['body']['elements']])
+            actor = {'id': oid, 'name':'reviewer'}
+            read = issue_cards.review_question(self.service, auth, actor, 'issue1', identity)
+            for denied in [{**actor,'shared_account':True},{'id':'ou_outsider'}]:
+                with self.assertRaises(core.LearningError):
+                    issue_cards.review_question(self.service, auth, denied, 'issue1', identity)
+            with self.assertRaises(core.LearningError):
+                issue_cards.review_question(self.service, auth, actor, 'unrelated', identity)
             action = payload['event']['action']
-            action['value'] = controls[-1]['behaviors'][0]['value']
+            action['value'] = {**value, 'action':'save', 'version':question['version'], 'issues':read['issues_version']}
             action['form_value'] = {'remark': '修正选项', 'delete_options': ['A'], 'new_options': '正确的选项', 'correct': 'A'}
             with self.assertRaises(core.LearningError):
                 issue_cards.apply(self.service, auth, payload, 'cli_current')
@@ -785,6 +801,73 @@ class DailyReportTests(unittest.TestCase):
             self.assertEqual(self.service._get('issue', 'issue1')['status'], 'resolved')
             issue_cards.apply(self.service, auth, payload, 'cli_current')
             self.assertEqual(len(self.service._all('audit')), 1)
+
+    def test_ticket_revision_checks_recipient_expiry_and_only_resolves_assigned_issues(self):
+        q = self.put('question', self.question(7))
+        for key,scope in [('i-a','A'),('i-b','B')]:
+            self.issue(key, q, scope=scope, version=1, question_version=q['version'])
+        name = issue_cards.REVIEWERS[0]
+        oid = 'ou_testreviewer'
+        identity = 'issue-card:'+'a'*64
+        self.directory['person-reviewer'] = {'name':name, 'selectable':True, 'login_ids':[oid]}
+        self.put('local',{'id':identity,'name':name,'target':oid,'status':'sent','app_id':'cli_current',
+                          'created_at':NOW.timestamp(),'issue_ids':['i-a'],'question_id':q['id']})
+        actor={'id':oid,'name':name}
+        auth=SimpleNamespace(current_feishu_app_id=lambda:'cli_current',account_profile=lambda _: {'enabled':True,'modules':['learning']})
+        with patch.object(issue_cards,'current_directory',return_value=(self.directory,True,'cli_current')), patch.object(issue_cards,'expired') as expired:
+            expired.return_value=True
+            with self.assertRaises(core.LearningError):
+                issue_cards.review_question(self.service,auth,actor,'i-a',identity)
+            expired.return_value=False
+            with self.assertRaises(core.LearningError):
+                issue_cards.review_question(self.service,auth,actor,'i-b',identity)
+            opened=issue_cards.review_question(self.service,auth,actor,'i-a',identity)
+            edits={'version':q['version'],'analysis':'已核对最新版说明','issues_version':opened['issues_version']}
+            saved=issue_cards.review_question(self.service,auth,actor,'i-a',identity,edits)
+            self.assertFalse(saved['editable'])
+            self.assertEqual(saved['question']['analysis'],'已核对最新版说明')
+            self.assertEqual(self.service._get('issue','i-b')['status'],'pending')
+            self.assertEqual(self.service._get('issue','i-a')['status'],'resolved')
+            self.assertEqual(issue_cards.review_question(self.service,auth,actor,'i-a',identity,edits)['question'],saved['question'])
+            self.assertEqual(len(self.service._all('audit')),1)
+
+    def test_web_issue_revision_returns_live_bank_and_freezes_paper(self):
+        q = self.put('question', self.question(2))
+        self.issue(question=q, scope='A', version=1, question_version=q['version'])
+        paper = self.put('paper', {**self.service._get('paper','paper:p1'),'questions':[q],'scope':'A'})
+        self.answer('p1', count=1, correct=1)
+        previous_answers = self.service._get('record', paper['id'])
+        admin = {'id':'admin','is_admin':True}
+        def review(edits=None):
+            return issue_cards.review_question(self.service, None, admin, 'issue1', '', edits)
+        read = review()
+        for actor in [{'id':'shared','shared_account':True,'scope':'A'}, {'id':'author','person_id':'p'}]:
+            with self.assertRaises(core.LearningError):
+                issue_cards.review_question(self.service,None,actor,'issue1','')
+        payload = {'version':q['version'],'issues_version':read['issues_version'],'stem':'修订后的设备题目',
+                   'options':[q['options'][0],{'id':'extra','text':'切换前核实状态'}],'correct_option_ids':['extra'],
+                   'analysis':'对照实际反馈信号','bank':'supplemental','status':'deleted'}
+        with self.assertRaises(core.LearningError):
+            review({**payload,'issues_version':'stale'})
+        self.assertEqual(self.service._get('question',q['id'])['version'],q['version'])
+        saved = review(payload)
+        self.assertTrue(saved['resolved'])
+        self.assertNotEqual(saved['question']['version'],q['version'])
+        self.assertEqual(saved['question']['stem'],payload['stem'])
+        self.assertEqual(saved['question']['answer_text'],'切换前核实状态')
+        self.assertEqual(saved['question']['bank'],q['bank'])
+        self.assertEqual(review()['question'],saved['question'])
+        self.assertEqual(review(payload)['question'],saved['question'])
+        self.assertEqual(len(self.service._all('audit')),1)
+        with self.assertRaises(core.LearningError) as stale:
+            review({**payload,'issues_version':saved['issues_version']})
+        self.assertEqual(stale.exception.status,409)
+        self.assertEqual(self.service._get('paper',paper['id'])['questions'],[q])
+        self.assertEqual(self.service._get('record',paper['id']),previous_answers)
+        row = self.service.list_issues(admin,{'search':'修订后的设备'})['items'][0]
+        self.assertEqual(row['current_stem'],payload['stem'])
+        self.assertEqual(row['question']['stem'],q['stem'])
+        self.assertEqual(row['question_version'],q['version'])
 
     def test_question_only_report_sends_once_without_daily_assignments(self):
         self.roster = []; self.save_roster()

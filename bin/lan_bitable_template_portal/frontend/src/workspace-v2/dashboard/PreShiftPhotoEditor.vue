@@ -1,12 +1,12 @@
 <template>
-  <NModal show preset="card" title="照片与水印" class="v2-photo-editor" :mask-closable="false" :close-on-esc="!busy" @close="!busy&&emit('cancel')" @update:show="value=>{if(!value&&!busy)emit('cancel')}">
+  <NModal show preset="card" title="照片与水印" class="v2-photo-editor" :class="{'ps-photo-studio':desk}" :mask-closable="false" :close-on-esc="!busy" @close="!busy&&emit('cancel')" @update:show="value=>{if(!value&&!busy)emit('cancel')}">
     <div class="v2-photo-editor-grid">
-      <div class="v2-photo-editor-picture"><div class="v2-photo-canvas-wrap" :style="{'--photo-ratio':info.width/info.height}">
+      <div class="v2-photo-editor-picture"><div v-if="desk" class="ps-photo-caption"><strong>上传效果</strong><small>{{ info.width }} × {{ info.height }} · {{ form.enabled&&!form.existing?'将添加水印':'保留原图' }}</small></div><div class="v2-photo-canvas-wrap" :style="{'--photo-ratio':info.width/info.height}">
         <canvas ref="canvas" aria-label="照片水印预览" />
         <button v-if="form.enabled&&!form.existing&&bounds" type="button" class="v2-photo-stamp-handle" :class="{'is-dragging':dragging}" :style="handleStyle" aria-label="移动水印" title="移动水印" :disabled="busy" data-v2-navigation @pointerdown="startDrag" @pointermove="moveStamp" @pointerup="stopDrag" @pointercancel="stopDrag" @lostpointercapture="stopDrag" @keydown.left.prevent="nudge(-.02,0)" @keydown.right.prevent="nudge(.02,0)" @keydown.up.prevent="nudge(0,-.02)" @keydown.down.prevent="nudge(0,.02)"><Move :size="16" aria-hidden="true" /></button>
       </div></div>
       <div class="v2-photo-editor-fields">
-        <div class="v2-photo-editor-toggle"><strong>添加水印</strong><NSwitch :value="form.enabled&&!form.existing" :disabled="busy||form.existing||info.can_watermark===false" aria-label="添加水印" @update:value="form.enabled=$event" /></div>
+        <div class="v2-photo-editor-toggle"><span><strong>添加水印</strong> <small v-if="desk">{{ info.time_source }}</small></span><NSwitch :value="form.enabled&&!form.existing" :disabled="busy||form.existing||info.can_watermark===false" aria-label="添加水印" @update:value="form.enabled=$event" /></div>
         <p v-if="info.can_watermark===false" class="v2-photo-editor-hint">照片过窄，当前保留原图。</p>
         <p v-if="info.preferences?.warning" class="v2-photo-editor-hint">{{info.preferences.warning}}</p>
         <NCheckbox v-model:checked="form.existing" :disabled="busy||info.existing_locked" @update:checked="value=>{if(value)form.enabled=false}">照片已有水印</NCheckbox>
@@ -46,6 +46,7 @@ import {ref,computed,onMounted,watch,onBeforeUnmount} from 'vue';
 import {NModal,NInput,NDatePicker,NSlider,NSwitch,NCheckbox,NButton,NRadioGroup,NRadioButton} from 'naive-ui';
 import {ImagePlus,Move,ArrowUpLeft,ArrowUpRight,ArrowDownLeft,ArrowDownRight} from 'lucide-vue-next';
 import type {Dict} from '../client';
+const desk=document.documentElement.classList.contains('workspace-v2');
 const props=defineProps<{info:Dict;busy:boolean;error:string}>();
 const emit=defineEmits<{save:[options:Dict,remember:boolean];cancel:[]}>();
 const style=props.info.preferences?.style||{},initial=props.info.options;
@@ -144,4 +145,11 @@ onBeforeUnmount(()=>{disposed=true;});
 .v2-photo-logo-field{display:flex;flex-direction:column;gap:6px;font-size:13px}.v2-photo-logo-upload{display:flex;align-items:center;gap:8px}.v2-photo-logo-upload img{max-width:120px;height:32px;object-fit:contain;background:white;border:1px solid var(--v2-border,#dce2ea);border-radius:4px}.v2-photo-logo-input{position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}
 .v2-photo-logo-field .n-radio-group{display:flex;align-self:flex-start}
 @media(max-width:700px){.v2-photo-editor-grid{grid-template-columns:minmax(0,1fr);gap:12px}.v2-photo-editor-picture{position:relative}.v2-photo-canvas-wrap{width:min(100%,calc(38dvh * var(--photo-ratio)))}.v2-photo-editor-footer .n-button,.v2-photo-logo-upload .n-button{min-height:44px}.v2-photo-editor .n-card-header,.v2-photo-editor .n-card-content,.v2-photo-editor .n-card__footer{padding:12px}.v2-photo-editor-fields fieldset{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.v2-photo-editor-fields fieldset>label:first-child,.v2-photo-logo-field,.v2-photo-position-field,.v2-photo-editor-time,.v2-photo-editor-fields fieldset>small,.v2-photo-editor-fields fieldset>label:last-child{grid-column:1/-1}.v2-photo-logo-field .n-radio-group,.v2-photo-position-field .n-radio-group{--n-height:44px!important}}
+</style>
+
+<style scoped>
+.ps-photo-caption{display:flex;align-items:center;justify-content:space-between;gap:.4rem;flex-wrap:wrap;width:100%;text-align:left;padding:.4rem .5rem;background:var(--soft-field,#edf4f2);box-sizing:border-box;border-radius:6px}
+.ps-photo-caption small{font-size:.78rem;color:var(--v2-muted,#52645d)}.ps-photo-studio .v2-photo-editor-picture{display:flex;flex-direction:column;justify-content:flex-start;align-items:center;gap:.45rem}
+.ps-photo-studio .v2-photo-editor-toggle{padding:.35rem 0;border-bottom:1px solid var(--v2-palette-border,#cedbd7)}
+.ps-photo-studio .v2-photo-editor-fields fieldset{background:var(--soft-face,#fff);border-radius:8px}
 </style>

@@ -1,6 +1,6 @@
 <template>
   <section v-if="view==='tasks'" class="v2-todo-standalone"><NAlert v-if="error" type="warning" :bordered="false">{{error}}<NButton v-if="todoPending" text :disabled="saving" @click="saveTodoSelection">重试保存选择</NButton><NButton text :disabled="saving" @click="reload">重新读取布局</NButton></NAlert><BusinessTodos :widget-id="primaryTodo?.id||'workspace-tasks'" :selection="primaryTodo?.taskKinds" :user="user" :scopes="scopes" :scope="scope" :preferences-busy="!ready||loading||saving" @selection="chooseTodos(primaryTodo?.id||'', $event)" /></section>
-  <TaskWorkspace v-else-if="view!=='home'" v-bind="props" :initial-kind="initialKind" @open="$emit('open',$event)" />
+  <FeatureDirectory v-else-if="view==='functions'" :groups="menuGroups" @select="$emit('selectMenu',$event)" />
   <WorkbenchHome v-else :user="user" :scopes="scopes" :scope="scope" :explicit-scope="explicitScope" :search-links="searchLinks" @open="$emit('open',$event)" />
 </template>
 
@@ -8,16 +8,17 @@
 import { computed, onBeforeUnmount, ref } from 'vue';
 import { NAlert, NButton, useDialog, useMessage } from 'naive-ui';
 import type { Dict } from './client';
+import type { SidebarGroup } from './sidebarSections';
 import { registerNavigationGuard, requestEmbeddedChange } from './navigation';
-import TaskWorkspace from './TaskWorkspace.vue';
+import FeatureDirectory from './FeatureDirectory.vue';
 import BusinessTodos from './BusinessTodos.vue';
 import { todoSelection, type TodoKind } from './businessTodos';
 import { defaults, sanitize, layoutKey, widget, type Layout } from './dashboard/layout';
 import { useLayoutSync } from './useLayoutSync';
 import WorkbenchHome from './workbench/WorkbenchHome.vue';
 
-const props=withDefaults(defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;initialKind?:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[]}>(),{explicitScope:true});
-defineEmits<{open:[url:string]}>();
+const props=withDefaults(defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;view:string;initialKind?:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[];menuGroups:SidebarGroup[]}>(),{explicitScope:true});
+defineEmits<{open:[url:string];selectMenu:[key:string]}>();
 
 const dialog=useDialog(), message=useMessage();
 const layout=ref<Layout>(defaults(props.user));

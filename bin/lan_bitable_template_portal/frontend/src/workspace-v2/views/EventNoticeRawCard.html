@@ -1,0 +1,82 @@
+<component :is="creation?'details':'article'" class="evt-record raw-event-card" :class="{'evt-compose':creation}"
+  :open="creation?composeExpanded:undefined" @toggle="event=>{if(creation)composeExpanded=event.target.open}">
+  <summary v-if="creation" class="evt-compose-head">
+    <span class="evt-plus" aria-hidden="true">＋</span><strong>新建事件通告</strong>
+    <small>{{frozen?'原发送待核验':text.trim()?'已保留填写':'粘贴通告原文'}}</small>
+    <span aria-hidden="true">{{composeExpanded?'收起':'展开'}}</span>
+  </summary>
+  <header v-else class="evt-record-head">
+    <div><small>{{[stateLabel,metadata.level,metadata.specialty].filter(Boolean).join(' · ')}}</small><h3>{{title}}</h3></div>
+    <button v-if="options.can_delete" class="evt-delete" type="button" :disabled="busy" @click="deleteOpen=true">删除</button>
+  </header>
+
+  <div class="evt-work">
+    <section class="evt-message" aria-label="事件通告原文">
+      <header class="evt-section-heading"><h4>{{creation?'首次通告原文':editingAction==='end'?'本次结束通告':editingAction==='update'?'本次更新通告':'最近通告原文'}}</h4>
+        <div class="evt-size" role="group" aria-label="原文显示高度">
+          <button type="button" aria-label="缩小事件卡片" title="缩小原文区" :disabled="cardHeight<=360" @click="cardHeight=Math.max(360,cardHeight-120)">−</button>
+          <button type="button" aria-label="放大事件卡片" title="放大原文区" :disabled="cardHeight>=960" @click="cardHeight=Math.min(960,cardHeight+120)">＋</button>
+        </div>
+        <div v-if="!creation && !editingAction && current.state==='active'" class="evt-send-actions">
+          <button type="button" :disabled="busy" @click="edit('end')">结束</button>
+          <button type="button" class="evt-primary" :disabled="busy" @click="edit('update')">更新</button>
+        </div>
+      </header>
+      <template v-if="creation || editingAction">
+        <details v-if="!creation && current.text" class="evt-original"><summary>对照上次通告</summary><pre>{{current.text}}</pre></details>
+        <textarea ref="textBox" v-model="text" aria-label="本次通告原文" maxlength="15000" :disabled="busy || !!frozen"
+          :style="{height:Math.round(cardHeight/3)+'px'}" placeholder="粘贴本次完整事件通告" @input="scheduleParse"></textarea>
+        <footer class="evt-send-actions">
+          <small>{{text.length}} / 15000</small>
+          <button v-if="!creation && !frozen" type="button" :disabled="busy" @click="editingAction='';persist()">收起，保留填写</button>
+          <button class="evt-primary" type="button" :disabled="busy || !text.trim()" @click="send">{{busy?'正在受理…':frozen?'核验并重试原发送':creation?'发送新增':editingAction==='end'?'发送结束':'发送更新'}}</button>
+        </footer>
+      </template>
+      <template v-else>
+        <pre tabindex="0" :style="{maxHeight:cardHeight+'px'}">{{current.text}}</pre>
+
+      </template>
+      <p v-if="frozen && !error" class="evt-warning" role="status">原发送结果待核验，重试将沿用原文和原操作编号。</p>
+      <p v-if="error && !deleteOpen && !retryOpen" class="evt-error" role="alert">{{error}}</p>
+      <section v-if="current.delivery" class="evt-delivery" aria-label="群消息发送结果">
+        <header class="evt-section-heading"><h4>{{({start:'新增',update:'更新',end:'结束'})[current.delivery.action] || '群消息'}} · 投递回执</h4><span :data-state="current.delivery.state">{{deliveryLabels[current.delivery.state] || '处理中'}}</span>
+          <button v-if="current.delivery.state==='failed'" type="button" :disabled="busy" @click="retry(false)">重试未送达的群</button>
+        </header>
+        <ul><li v-for="(target,index) in current.delivery.targets" :key="target.channel+index">
+          <small>{{target.channel==='feishu'?'飞书':'钉钉'}}</small><b>{{target.name}}</b>
+          <span :data-state="target.state">{{target.state==='failed'?'未送达':deliveryLabels[target.state] || '等待发送'}}</span><p v-if="target.reason">{{target.reason}}</p>
+        </li></ul>
+      </section>
+    </section>
+
+    <details class="evt-meta" :open="metadataOpen" @toggle="metadataOpen=($event.target as HTMLDetailsElement).open">
+      <summary><b>事件资料</b><span>{{unfilled.length?'待补 '+unfilled.length+' 项':'资料已补齐'}}</span></summary>
+      <div class="evt-meta-fields">
+        <label class="evt-wide">告警描述<textarea v-model="metadata.summary" rows="2" maxlength="5000" @input="markManual('summary')"></textarea></label>
+        <label>楼栋<select v-model="metadata.building" aria-label="事件资料楼栋" @change="markManual('building')"><option value="">待补充</option><option v-if="metadata.building&&!options.scopes.includes(metadata.building)" :value="metadata.building">{{metadata.building}}</option><option v-for="code in options.scopes" :key="code" :value="code">{{code==='110'?'110站':code+'楼'}}</option></select></label>
+        <label>专业<select v-model="metadata.specialty" aria-label="事件资料专业" @change="markManual('specialty')"><option value="">待补充</option><option v-for="name in options.specialties||['电气','暖通','消防','弱电']" :key="name" :value="name">{{name}}</option></select></label>
+        <label>等级<select v-model="metadata.level" aria-label="事件资料等级" @change="markManual('level')"><option value="">待补充</option><option v-for="name in options.levels" :key="name" :value="name">{{name}}</option></select></label>
+        <label>来源<select v-model="metadata.event_source" aria-label="事件资料来源" @change="markManual('event_source')"><option value="">待补充</option><option v-for="name in options.sources" :key="name" :value="name">{{name}}</option></select></label>
+        <label class="evt-wide">事件发生时间<input type="datetime-local" :value="datetime(metadata.occurrence_time)" @input="setDate('occurrence_time',$event)" /></label>
+        <label class="evt-wide">事件恢复时间（选填）<input type="datetime-local" :value="datetime(metadata.recover_time)" @input="setDate('recover_time',$event)" /></label>
+        <label class="evt-wide evt-check"><input v-model="metadata.transfer_to_overhaul" type="checkbox" @change="markManual('transfer_to_overhaul')" />转检修</label>
+      </div>
+      <small v-if="unfilled.length">待补充 · {{unfilled.join('、')}}</small>
+      <p role="status" :class="{'evt-error':saveError}">{{saving?'正在保存资料…':saveError||syncLabel}}</p>
+      <p v-for="(message,key) in current.metadata_issues||{}" :key="key" class="evt-error">{{fields[String(key)]||key}} · {{message}}</p>
+    </details>
+  </div>
+  <EventDeskDialog v-if="!creation && options.can_delete && deleteOpen" title="删除事件通告" alert :locked="busy" @close="deleteOpen=false">
+    <strong>{{title}}</strong><p>删除这条事件记录后，已发出的群消息仍保留。后台确认成功后移除记录。</p>
+    <p v-if="error" class="evt-error" role="alert">{{error}}</p>
+    <template #actions><button :disabled="busy" @click="deleteOpen=false">保留</button><button class="evt-destructive" :disabled="busy" @click="options.can_delete && remove()">{{busy?'正在删除…':'确认删除'}}</button></template>
+  </EventDeskDialog>
+  <EventDeskDialog v-if="retryOpen" title="核对未送达的群" alert :locked="busy" @close="retryOpen=false">
+    <strong>{{title}}</strong><p>请先在以下群核对消息。回执不明的群可能已经收到，确认未收到后再重发。</p>
+    <ul class="evt-target-check"><li v-for="(target,index) in (current.delivery?.targets||[]).filter(t=>['posting','uncertain','failed'].includes(t.state))" :key="index">
+      <b>{{target.channel==='feishu'?'飞书':'钉钉'}} · {{target.name}}</b><span :data-state="target.state">{{target.state==='failed'?'未送达':deliveryLabels[target.state]}}</span><small v-if="target.reason">{{target.reason}}</small>
+    </li></ul>
+    <p v-if="error" role="alert" class="evt-error">{{error}}</p>
+    <template #actions><button :disabled="busy" @click="retryOpen=false">暂不重发</button><button class="evt-primary" :disabled="busy" @click="retry(true)">已核对，确认重发</button></template>
+  </EventDeskDialog>
+</component>

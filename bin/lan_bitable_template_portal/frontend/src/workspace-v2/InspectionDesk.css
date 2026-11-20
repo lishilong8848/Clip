@@ -1,0 +1,53 @@
+/* Only the work controls use these surfaces. Workbook cells, paper artwork and coordinates keep their native rendering. */
+.ins-desk,.ins-workbook{--ins-face:var(--soft-face,#fff);--ins-field:var(--soft-field,#eef3f2);--ins-ink:var(--v2-ink,#203c38);--ins-edge:color-mix(in srgb,var(--ins-ink) 16%,var(--ins-face));--ins-mint:color-mix(in srgb,var(--ins-face) 80%,#81d4ac);--ins-green:#176449;color:var(--ins-ink);min-width:0}
+.ins-desk :is(h1,h2,h3,p),.ins-workbook :is(.ins-bar,.ins-controls,.ins-status,.ins-foot) :is(h2,h3,p){margin:0}
+.ins-desk h1{font-size:clamp(1.28rem,2.4vw,1.9rem)}.ins-desk h2{font-size:1.16rem}.ins-desk h3{font-size:1rem}
+.ins-desk :is(.ins-head,.ins-line,.ins-actions,.ins-rounds,.ins-options),.ins-workbook :is(.ins-head,.ins-line,.ins-actions,.ins-rounds){display:flex;align-items:center;flex-wrap:wrap;gap:.4rem .65rem}
+.ins-desk .ins-head,.ins-workbook .ins-head{justify-content:space-between}
+.ins-desk small,.ins-workbook :is(.ins-bar,.ins-controls,.ins-foot) small{color:color-mix(in srgb,var(--ins-ink) 75%,var(--ins-face));font-size:.81rem}
+.ins-title,.ins-record>div:first-child,.ins-audit-row>div:first-child{display:grid;gap:.1rem}
+.ins-desk .ins-panel,.ins-desk.ins-modal,.ins-desk .ins-hero{background:var(--ins-face);padding:clamp(12px,1.6vw,20px);border:1px solid var(--ins-edge);border-radius:14px}
+.ins-desk .ins-panel,.ins-desk.ins-modal,.ins-page{display:grid;gap:.65rem;align-content:start}
+.ins-desk .ins-hero{padding:.3rem .45rem;background:transparent;border:0;box-shadow:none}
+.ins-page .inspection-workbook.ins-workbook, .inspection-workbook.ins-workbook.ins-workbook{display:flex;flex-direction:column;box-sizing:border-box;min-height:0;max-width:100%;border:1px solid var(--ins-edge);border-radius:14px;background:var(--ins-face);overflow:hidden}
+.ins-workbook.full-height{border-radius:0;max-width:none}
+/* Anchor fixed dialog layers to the unrotated workbook inside the immersive page transition. */
+.ins-workbook.full-height:not(.rotate-portrait):not(.rotate-landscape){transform:translate(0)}
+.ins-workbook:not(.full-height){height:max(380px,var(--available-height,65vh))}
+.ins-workbook .book-scroll{flex:1 1 0;min-height:0}
+.ins-bar,.ins-controls,.ins-foot,.ins-status,.ins-editbar{flex:none;padding:.48rem .8rem}.ins-bar{background:var(--ins-mint);border-bottom:1px solid var(--ins-edge)}
+.ins-controls{display:grid;gap:.45rem;max-height:38vh;overflow:auto;border-bottom:1px solid var(--ins-edge)}
+.ins-foot{border-top:1px solid var(--ins-edge)}.ins-status{background:var(--v2-palette-selection,#e0eef9)}.ins-record,.ins-audit-row{border-top:1px solid var(--ins-edge);padding:.55rem 0}
+.ins-desk :is(.ins-head,.ins-line,.ins-actions,.ins-panel,.ins-options,.ins-record,.ins-audit-row) button,.ins-workbook :is(.ins-bar,.ins-controls,.ins-status,.ins-editbar,.ins-foot) button,.ins-desk.ins-modal>header button{
+  display:inline-flex;align-items:center;justify-content:center;gap:.28rem;min-height:34px;padding:.34rem .65rem;border-radius:9px;border:1px solid var(--ins-edge);background:var(--ins-face);color:var(--ins-ink);font:inherit;font-size:.88rem;cursor:pointer}
+:is(.ins-desk,.ins-workbook) :is(.ins-head,.ins-line,.ins-actions,.ins-options) button.ins-primary{background:var(--ins-green);color:white;border-color:var(--ins-green)}
+.ins-workbook .ins-rounds button[aria-pressed=true]{background:var(--ins-mint);border-color:var(--ins-green)}
+.ins-desk button:disabled,.ins-workbook :is(.ins-bar,.ins-controls,.ins-foot) button:disabled{opacity:.55;cursor:default}
+.ins-desk :is(.ins-head,.ins-field,.ins-line,.ins-panel,.ins-grid) :is(select,input:not([type=checkbox]),textarea),.ins-workbook .ins-controls :is(select,input){
+ max-width:100%;min-width:0;min-height:34px;box-sizing:border-box;padding:.35rem .55rem;border:1px solid var(--ins-edge);border-radius:8px;background:var(--ins-field);color:var(--ins-ink);font:inherit;font-size:.88rem;box-shadow:var(--soft-inset)}
+.ins-field,.ins-grid label{display:grid;gap:.3rem}.ins-line label,.ins-head label{display:inline-flex;align-items:center;flex-wrap:wrap;gap:.35rem;max-width:100%}.ins-options{border:1px solid var(--ins-edge);padding:.6rem;border-radius:10px}
+.ins-modal.ins-modal{box-sizing:border-box;width:min(720px,calc(100% - 24px));max-height:88%;overflow:auto;overscroll-behavior:contain;box-shadow:var(--soft-raised)}
+.ins-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:.55rem}.ins-audit-row{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr) auto;align-items:center;gap:.6rem;overflow-wrap:anywhere}
+.ins-chip,.ins-empty{padding:.3rem .6rem;border-radius:8px;background:var(--ins-mint)}.ins-empty{background:var(--ins-field)}
+.ins-workbook .ins-sheet-choice select{max-width:min(24rem,65vw)}
+.ins-workbook .ins-editbar{background:var(--ins-field)}
+@media(max-width:700px){.ins-audit-row{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.ins-bar,.ins-controls,.ins-foot{padding:.3rem .45rem}.ins-workbook .ins-bar .ins-actions{gap:.2rem}}
+@media(max-height:500px){.ins-controls{max-height:40vh}.ins-foot{padding-block:.12rem}}
+
+.ins-workbook.compact-editor-view > :is(.ins-controls,.ins-bar,.ins-foot){display:none}.ins-editbar input,.ins-editbar select{max-width:45%;min-width:4em}
+
+.ins-toolbar{display:contents}
+.ins-workbook:not(.full-height)>.ins-toolbar{
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;
+  gap:.45rem 1rem;padding:.5rem .8rem;flex:none;border-bottom:1px solid var(--ins-edge)
+}
+.ins-workbook:not(.full-height) .ins-toolbar>.ins-bar,
+.ins-workbook:not(.full-height) .ins-toolbar>.ins-controls{display:contents}
+.ins-workbook:not(.full-height) .ins-toolbar .ins-title{grid-area:1/1}
+.ins-workbook:not(.full-height) .ins-toolbar .ins-bar>.ins-actions{grid-area:1/3}
+.ins-workbook:not(.full-height) .ins-toolbar .ins-controls>.ins-line{grid-column:1/-1}
+.ins-workbook:not(.full-height) .ins-toolbar .ins-controls>.ins-line:first-child{grid-area:1/2}
+.ins-page:has(>.ins-workbook.full-height)>.ins-archive-list{display:none}
+/* Keep the fixed workbook anchored to the viewport throughout page transitions. */
+.v2-shell.is-inspection-immersive .v2-main>.ins-page{animation:none;transform:none}
+.ins-workbook.compact-editor-view .ins-toolbar{display:none}

@@ -22,6 +22,24 @@ TEMPLATES = Path(__file__).resolve().parents[1] / 'resources' / 'tool_self_check
 MAX_FILE = 2 * 1024 * 1024
 MAX_RECORDS = 20
 RESULTS = ('是', '否')
+_CHECK_BOX = r'(?:\[\s*[√✓✔]?\s*\]|［\s*[√✓✔]?\s*］|【\s*[√✓✔]?\s*】|[□☐☑☒])'
+YES_NO = re.compile(rf'是\s*{_CHECK_BOX}\s*否\s*{_CHECK_BOX}')
+
+
+def checked_pair(original, first, labels=('是', '否')):
+    """Preserve imported full-width boxes and glyphs, keep the standard export spelling."""
+    source = str(original or '')
+    if any(mark in source for mark in '［【□☐☑☒') and len(re.findall(_CHECK_BOX, source)) == 2:
+        states = iter((first, not first))
+        def tick(match):
+            mark = match.group()
+            selected = next(states)
+            if len(mark) == 1:
+                return '☑' if selected else ('□' if mark == '□' else '☐')
+            return mark[0] + ('√' if selected else ' ') + mark[-1]
+        return re.sub(_CHECK_BOX, tick, source)
+    gap = '  ' if labels == ('是', '否') else '            '
+    return labels[0] + ('[√]' if first else '[ ]') + gap + labels[1] + ('[ ]' if first else '[√]')
 ELECTRICAL_HEADER = ('自检项目', '操作方法', '合格标准', '完成情况')
 HVAC_HEADER = ('自检项目', '检查内容', '', '完成情况')
 HVAC_FIELDS = {'C3': '仪器名称', 'C4': '规格／型号', 'G4': '制造厂商', 'C10': '建议下次校准日期'}
@@ -103,7 +121,7 @@ def parse_template(data):
                                         'fields': {f'E{row}': '校准点', f'G{row}': '示值', f'I{row}': '修正值'}})
                     continue
                 if not ((group and method if hvac else name and method and standard)
-                        and re.fullmatch(r'是\s*\[\s*\]\s*否\s*\[\s*\]', completion)):
+                        and YES_NO.fullmatch(completion)):
                     raise RiskError(f'模板第 {row} 行的检查项目或是／否栏不完整。')
                 in_calibration = False
                 checks.append({'row': row, 'name': text(group if hvac else name, 300, True),
@@ -151,7 +169,8 @@ def fill_template(content, schema, record, scope):
         if record['reviewed_at']:
             fields[f'G{review}'] = record['reviewed_at'].replace('T', ' ')
         for item, answer in zip(schema['checks'], record['checks'], strict=True):
-            fields[f'I{item["row"]}'] = '是[√]  否[ ]' if answer == '是' else '是[ ]  否[√]'
+            address = f'I{item["row"]}'
+            fields[address] = checked_pair(sheet[address].value, answer == '是')
         for address, value in fields.items():
             sheet[address] = value
             sheet[address].data_type = 's'

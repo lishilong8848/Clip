@@ -1,0 +1,8 @@
+<form class="serenity-panel settings-form" @submit.prevent="save">
+  <header class="serenity-heading"><div><h2>飞书应用连接</h2><p>{{ hasSecret?'应用密钥已配置':'尚未配置应用密钥' }}</p></div>
+    <div class="serenity-actions"><button type="button" :disabled="busy" @click="load">刷新状态</button><button type="submit" class="entry-primary" :disabled="busy||!loaded">保存连接设置</button></div></header>
+  <p v-if="error" role="alert">{{ error }}</p><p v-if="message" role="status">{{ message }}</p>
+  <div class="settings-fields"><label><b>应用 App ID</b><input v-model="appId" :disabled="busy||!loaded" spellcheck="false" autocomplete="off"></label>
+    <label><b>消息接入</b><span><input v-model="enabled" type="checkbox" :disabled="busy||!loaded">启用飞书智能体</span></label></div>
+  <p v-if="restartRequired" role="status">连接配置已变更，等待切换。</p>
+</form>

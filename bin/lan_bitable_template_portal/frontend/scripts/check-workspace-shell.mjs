@@ -42,34 +42,29 @@ const shot=async name=>{await page.waitForTimeout(250);await page.screenshot({pa
 async function shellGeometry(){
   const rects=await page.evaluate(()=>{
     const box=selector=>{const r=document.querySelector(selector).getBoundingClientRect();return {x:r.x,y:r.y,right:r.right,bottom:r.bottom};};
-    return {header:null,side:box('.v2-sidebar'),main:box('.v2-main'),height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1};
+    return {header:box('.v2-topnav'),main:box('.v2-main'),height:innerHeight,overflow:document.documentElement.scrollWidth>innerWidth+1};
   });
   assert.equal(rects.overflow,false,'no page-wide overflow');
-  assert(Math.abs(rects.side.y)<=1&&Math.abs(rects.main.y)<=1,'business area uses the full height without a top bar');
-  assert(Math.abs(rects.main.x-72)<=1,'floating navigation never shifts the business area');
+  assert(rects.header.bottom<=rects.main.y+1,'top navigation is above the business area');
+  assert(Math.abs(rects.main.x)<=1,'full width content under the top navigation');
   assert(Math.abs(rects.main.bottom-rects.height)<=1,'content scroll region ends at viewport');
 }
 try{
   if(!process.argv.includes('--bot-only')){
   await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
   await shot('profile');await shellGeometry();
-  await selectWorkspaceAccount(page,'系统设置');await selectWorkspaceSetting(page,'账号与权限');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
+  await selectWorkspaceSetting(page,'账号与权限');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
   await shot('accounts');await shellGeometry();
   assert.equal(await page.locator('.admin-workspace-tabs').count(),0,'settings has no second navigation');
-  const nav=await page.locator('.v2-settings-picker').boundingBox(),content=await page.locator('.admin-settings-content').boundingBox();
-  assert(nav.y+nav.height<=content.y+1,'admin sections are above the account table, not a second sidebar');
-  const contentCard=await page.locator('.v2-widget').filter({has:page.locator('.admin-settings-content')}).boundingBox();assert(Math.abs(nav.x-contentCard.x)<=1,'settings heading aligns with the outside of the padded content card');
+  assert(await page.locator('.platform-desk .accounts').isVisible(),'accounts open in the settings desk');
   await addScrollFixture();await page.mouse.move(1100,650);await main.evaluate(el=>el.scrollTo({top:400,behavior:'instant'}));await page.waitForFunction(()=>document.querySelector('.v2-main').scrollTop>100);
   await shellGeometry();assert.equal(await page.evaluate(()=>window.scrollY),0,'desktop scrolling never moves the header');
-  const before=await main.evaluate(el=>el.scrollTop);
   await page.setViewportSize({width:1366,height:480});await page.waitForTimeout(250);
-  await openWorkspaceRail(page);await page.mouse.move(100,300);await page.mouse.wheel(0,400);await page.waitForFunction(()=>document.querySelector('.v2-rail-scroll').scrollTop>0);
-  assert.equal(await main.evaluate(el=>el.scrollTop),before,'sidebar scroll does not move the business area');
-  await page.locator('.v2-rail-scroll').evaluate(el=>el.scrollTop=0);
-  await page.mouse.move(1000,100);
-  for(let frame=0;frame<6;frame++){await shellGeometry();await page.waitForTimeout(35);}
-  await openWorkspaceRail(page);
-  for(let frame=0;frame<6;frame++){await shellGeometry();await page.waitForTimeout(35);}
+  const before=await main.evaluate(el=>el.scrollTop);
+  const topNav=await openWorkspaceRail(page),menu=topNav.locator('[data-group="administration"]');
+  await menu.click();await page.locator('#nav-panel-administration').waitFor();
+  assert.equal(await main.evaluate(el=>el.scrollTop),before,'opening a category preserves the work position');
+  await page.keyboard.press('Escape');await shellGeometry();
   await removeScrollFixture();
   for(const width of [360,390,430]){
     await page.setViewportSize({width,height:844});await shot('accounts-'+width);
@@ -87,13 +82,13 @@ try{
   assert(profileHeading.y>=0,'switching modules never inherits the prior scroll offset');
   await page.goto(entry+'?__page=/plan-convergence');await page.getByText('A楼冷机检修屏蔽',{exact:true}).waitFor();
   await shot('plan-review');await shellGeometry();
-  const filters=page.locator('.pc-page');
+  const filters=page.getByRole('region',{name:'计划收敛',exact:true});
   await page.getByRole('button',{name:'检修核对',exact:true}).click();await page.getByText('A楼冷机检修',{exact:true}).waitFor();
-  await page.waitForFunction(()=>document.querySelector('.pc-tabs [aria-current=page]')?.textContent.includes('检修核对'));
+  await page.waitForFunction(()=>document.querySelector('.pc-tabs [aria-pressed=true]')?.textContent.includes('检修核对'));
   await shot('plan-maintenance');
   assert.equal(await filters.getByRole('searchbox').count(),1,'only the active business tab exposes a search field');
   assert.equal(await filters.getByRole('searchbox',{name:'搜索屏蔽记录'}).count(),0,'hidden review filters must not escape through Teleport');
-  await filters.getByRole('searchbox').fill('无匹配项');await page.getByText('暂无匹配的检修记录',{exact:true}).waitFor();
+  await filters.getByRole('searchbox').fill('无匹配项');await page.getByText('没有符合条件的检修记录',{exact:true}).waitFor();
   await page.getByRole('button',{name:'变更核对',exact:true}).click();await page.getByRole('searchbox',{name:'搜索变更记录'}).waitFor();
   assert.equal(await filters.getByRole('searchbox').count(),1);
   for(const width of [360,390,430,1024,1366,1920]){
@@ -117,7 +112,7 @@ try{
   await page.goto(entry+'?view=my');
   await page.locator('.lighthouse-bot .weather-lighthouse-mini').first().waitFor();
   assert.equal(Math.round((await page.locator('.assistant-launcher').boundingBox()).width),120,'reset keeps the existing icon size even before the service responds');
-  assert.equal(await page.locator('.lighthouse').evaluate(el=>getComputedStyle(el).getPropertyValue('--bot-color').trim()),'#3b93f0','reset does not erase the chat theme');
+  assert.equal(await page.locator('[data-lighthouse-surface=launcher]').evaluate(el=>getComputedStyle(el).getPropertyValue('--bot-color').trim()),'#3b93f0','reset does not erase the chat theme');
   appearanceUnavailable=false;botAppearance={shape:'weather-lighthouse-mini',color:'bleu',size:120,snap_back:false,weather_city:'石家庄'};
   await page.reload();await page.waitForFunction(()=>JSON.parse(localStorage.getItem('lighthouse_appearance:shell-fixture')||'{}')._shape_reset==='mini-20261015');
   botAppearance={shape:'nuage'};await page.reload();

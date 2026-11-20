@@ -1,0 +1,7 @@
+<form class="serenity-panel settings-form" @submit.prevent="$emit('save')">
+  <header class="serenity-heading"><div><h2>楼栋审核地址</h2><p>个人工作台按授权楼栋显示已配置的地址。</p></div>
+    <div class="serenity-actions"><button type="button" :disabled="busy" @click="$emit('refresh')">刷新</button><button type="submit" class="entry-primary" :disabled="busy">保存配置</button></div></header>
+  <div class="settings-fields"><label v-for="scope in buildingScopes" :key="scope.value"><b>{{ scope.label }}</b>
+    <input type="url" :value="links[scope.value]" :disabled="busy" placeholder="https://" @input="$emit('update-link',scope.value,inputValue($event))"></label>
+    <label><b>配置密码</b><input type="password" autocomplete="off" :value="password" :disabled="busy" @input="$emit('update-password',inputValue($event))"></label></div>
+</form>

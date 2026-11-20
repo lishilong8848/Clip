@@ -283,14 +283,26 @@ export async function coreFixture({ url, method = 'GET', body }) {
     const next = { revision: current.revision + 1, value: data.value }; layouts.set(p, next); return ok(next);
   }
   if (p === '/api/assistant/appearance') return ok({ shape: 'weather-lighthouse-mini', color: 'encre', size: 56 });
-  if (p === '/api/assistant/icon-weather') return ok({ available: false, city: '' });
+  if (p === '/api/assistant/icon-weather') return ok({available:true,city:'南通',date:day,temperature:18,humidity:61,description:'多云',forecast:[{date:day,minimum:13,maximum:20,description:'多云'}]});
+  if (p === '/api/personal-calendar/weather') return ok({warning_ready:true,alerts:[],guard_level:'',guard_actions:[]});
+  if (p === '/api/learning/workbench-summary') {
+    const buildings=['ALL','CAMPUS'].includes(q.get('scope'))?[...'ABCDEH']:[scope];
+    return ok({scopes:buildings,summary:{已完成:buildings.length*2,待答:buildings.length,答题中:0,逾期:0,待核对:0,未到时:0}});
+  }
+  if (p === '/api/personal-calendar') {
+    const month=q.get('month'),today=month===day.slice(0,7);
+    const chosen=q.get('scope'), buildings=codes.filter(code=>!chosen||chosen==='ALL'||chosen==='CAMPUS'||chosen===code);
+    const names=[['林晨','顾遥','季川','沈安','陈远','徐舟','季宁'],['陶原','周宇','程松','何朗','赵琪','江宁','林清']];
+    const staff=buildings.flatMap(code=>['白班','夜班'].map((shift,i)=>({scope:code,shift,names:[names[i][codes.indexOf(code)]]})));
+    return ok({month,unavailable:[],roster_dates:today?[day]:[],days:today?{[day]:{staff,items:[{kind:'维保',title:'冷机传感器校验',start:day+'T14:30:00+08:00',scope:buildings[0]}]}}:{}});
+  }
   if (p === '/api/assistant/conversation') return ok({ conversation_id: 'responsive-audit', configured: false, enabled: false, busy: false, turns: [], model_options: [] });
   if (p === '/api/scope-overview') return ok({ scopes: Object.fromEntries(['ALL', ...codes].map(code => [code, {
     event_total: code === 'ALL' ? 21 : 3, event_processing: code === 'ALL' ? 14 : 2,
     ...Object.fromEntries(kinds.flatMap(kind => [[kind + '_pending', code === 'ALL' ? 21 : 3], [kind + '_ongoing', code === 'ALL' ? 21 : 3]])),
     ongoing_titles: [], ongoing_title_count: code === 'ALL' ? 126 : 18,
   }])), scope_options: scopes, source_snapshot_ready: true, last_loaded_at: stamp });
-  if (p === '/api/history-summary') return ok({ days: [{ date: day, items: kinds.map((work_type, i) => ({ record_id: 'audit-history-' + i, title: scope + '楼' + labels[i] + '历史操作核验', work_type, status: i === 1 ? '已结束' : '开始', scope, time: stamp })) }] });
+  if (p === '/api/history-summary') return ok({scope:q.get('scope')||scope,month:q.get('month'),days: [{ date: day,stats:{started:1},items: kinds.map((work_type, i) => ({ record_id: 'audit-history-' + i, title: scope + '楼' + labels[i] + '历史操作核验', work_type, status: i === 1 ? '已结束' : '开始', scope, time: stamp })) }] });
   if (p === '/api/bootstrap') {
     const pages = await noticesFor(scope), records = Object.values(pages).flatMap(page => page.payload.records), ongoing = Object.values(pages).flatMap(page => page.payload.ongoing);
     return ok({ scope, scope_label: scope + '楼', scope_options: scopes, default_scope: 'A', default_work_type: 'maintenance', source_snapshot_ready: true,
@@ -310,7 +322,7 @@ export async function coreFixture({ url, method = 'GET', body }) {
     if (p === '/workbench-lite') return { status: 200, contentType: 'text/html; charset=utf-8', body: page.html };
     if (p === '/api/workbench') {
       if (q.get('work_type') !== 'all') return ok(page.payload);
-      const all = Object.values(pages); return ok({ records: all.flatMap(v => v.payload.records), ongoing: all.flatMap(v => v.payload.ongoing), records_pagination: { total: 18, page: 1, page_size: 30 }, ongoing_pagination: { total: 18, page: 1, page_size: 30 } });
+      const all = Object.values(pages); return ok({ records: all.flatMap(v => v.payload.records), ongoing: all.flatMap(v => v.payload.ongoing), records_pagination: { total: 18, page: 1, page_size: 30, total_pages: 1 }, ongoing_pagination: { total: 18, page: 1, page_size: 30, total_pages: 1 } });
     }
     const id = q.get('active_item_id') || q.get('record_id');
     const detail = page.details[q.get('manual') === '1' ? '_manual' : id] || page.details['audit-plan-' + scope + '-' + kind + '-0'];
@@ -356,7 +368,7 @@ export async function coreFixture({ url, method = 'GET', body }) {
     if (p.includes('/attachments/') && method === 'DELETE') { rows[index].attachments = rows[index].attachments.filter(file => file.attachment_id !== p.split('/')[5]); rows[index].version++; }
     return ok(rows[index]);
   }
-  if (p === '/api/events/monthly') { const records = eventsFor(url).filter(row => inScope(row, q.get('scope'))); return ok({ records, stats: eventStats(records), snapshot_exists: true, last_refreshed_at: now, unknown_time_count: 0 }); }
+  if (p === '/api/events/monthly') { const records = eventsFor(url).filter(row => inScope(row, q.get('scope'))); return ok({scope:q.get('scope')||scope,month:q.get('month'),records, stats: eventStats(records), snapshot_exists: true, last_refreshed_at: now, unknown_time_count: 0 }); }
   if (p === '/api/events/overview') { const records = eventsFor(url); return ok({ stats: eventStats(records), building_stats: codes.map(code => ({ scope: code, building: code + '楼', ...eventStats(records.filter(row => row.scope === code)) })), last_refreshed_at: now, snapshot_exists: true, unknown_time_count: 0 }); }
   if (p === '/api/events/transfer-repair' || p === '/api/events/refresh') return ok({ mock_external: true, completed: true });
 
@@ -380,7 +392,7 @@ export async function coreFixture({ url, method = 'GET', body }) {
 
   if (p === '/api/repair-management/stream') return blank();
   if (p === '/api/repair-management/changes') return ok({ changes: [], cursor: 0 });
-  if (p === '/api/repair-management/status') { const records = projects.filter(row => inScope(row, q.get('scope'))); return ok({ stats: { total: records.length, without_followup: records.filter(row => !row.followup_count).length, in_progress: records.filter(row => row.followup_count).length, completed_total: 0 }, records: [], total: records.length }); }
+  if (p === '/api/repair-management/status') { const records = projects.filter(row => inScope(row, q.get('scope'))), offset=Number(q.get('offset'))||0, limit=Number(q.get('limit'))||50; return ok({ stats: { total: records.length, without_followup: records.filter(row => !row.followup_count).length, in_progress: records.filter(row => row.followup_count).length, completed_total: 0 }, records: records.slice(offset,offset+limit), total: records.length }); }
   if (p === '/api/repair-management/records' && method === 'GET') return ok({ fields: projectFields, ...paginate(projects.filter(row => inScope(row, q.get('scope')) && (q.get('state') !== 'completed' || row.is_completed)), url) });
   if (/^\/api\/repair-management\/records\/[^/]+$/.test(p)) { const row = projects.find(item => item.record_id === p.split('/')[4]); if (!row) return failure('隔离维修项目不存在'); if (method === 'GET') return ok({ record: fullProject(row) }); if (method === 'PUT') return ok({ record_id: row.record_id, fields: data.fields, record_version: 'audit-v2' }); if (method === 'DELETE') return ok({ record_id: row.record_id, deleted: true }); }
   if (p === '/api/repair-management/followups') { if (method === 'GET') return ok({ fields: followupFields, records: followups, total: followups.length, shared_fields: {}, brand_model_options: {}, device_brand_model_options: {} }); if (method === 'POST') return ok({ record_id: 'audit-followup-created-' + (++serial), fields: data.fields, record_version: 'audit-v2' }); }

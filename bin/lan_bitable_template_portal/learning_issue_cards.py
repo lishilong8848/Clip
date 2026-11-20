@@ -1,12 +1,12 @@
 """Private question-review cards on the existing learning worker and Feishu bridge."""
 import asyncio
 import hmac
-import json
 import logging
 import re
 import secrets
 from collections import defaultdict
 from contextlib import closing
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
 from . import learning as core
@@ -51,13 +51,6 @@ def card(title, elements, theme='orange'):
             'header': {'title': plain(title), 'template': theme}, 'body': {'elements': elements}}
 
 
-def button(ticket, title, action, *, style='primary', **values):
-    return {'tag': 'button', 'text': plain(title), 'type': style,
-            'behaviors': [{'type': 'callback', 'value': {
-                'kind': KIND, 'ticket': ticket['id'], 'token': ticket['token'], 'action': action, **values,
-            }}]}
-
-
 def reasons(issues):
     comments = [core.text(text).strip() for item in issues for text in
                 [item.get('description'), *(c.get('text') for c in item.get('comments', []) if not c.get('is_admin'))]]
@@ -73,49 +66,22 @@ def answer(question):
                     if option['id'] in selected) or '未设置'
 
 
-def summary(ticket, question, issues):
+def web_button(service, ticket, issue_id):
+    base = service.portal_url()
+    if not base:
+        raise core.LearningError('请配置学练门户地址后再打开题目。', 503)
+    url = base + '/learning?' + urlencode({'tab': 'issues', 'issue_id': issue_id, 'review_ticket': ticket['id']})
+    return {'tag': 'button', 'text': plain('修改题目与答案'), 'type': 'primary',
+            'behaviors': [{'type': 'open_url', 'default_url': url}]}
+
+
+def summary(service, ticket, question, issues):
     return card('学练题目质疑', [
         block('题目：' + (question.get('stem') or '题干待核对')[:1000]),
         block('当前答案：' + answer(question)[:1000]),
         block('质疑原因：' + reasons(issues)[:1000]),
-        button(ticket, '在卡片中编辑', 'open'),
+        web_button(service, ticket, issues[0]['id']),
     ])
-
-
-def input_box(name, label, value='', *, rows=2):
-    return {'tag': 'input', 'name': name, 'input_type': 'multiline_text', 'rows': rows,
-            'max_length': MAX_INPUT, 'label': plain(label), 'default_value': value, 'placeholder': plain(label)}
-
-
-def editor(ticket, question, issues):
-    options = question.get('options', [])
-    fields = [('stem', '题干'), ('analysis', '解析')]
-    if question['type'] == 'interview':
-        fields.insert(1, ('answer_text', '参考答案'))
-    text_values = [core.text(question.get(name)) for name, _ in fields] + [o['text'] for o in options]
-    if (any(len(value.encode('utf-16-le')) // 2 > MAX_INPUT for value in text_values)
-            or len(json.dumps(text_values, ensure_ascii=False).encode()) > 14000):
-        return card('学练题目质疑', [block('这道题的正文超出飞书卡片可编辑范围，请在灯塔「画像学练 → 题目质疑」完整编辑。')])
-    form = [input_box(name, label, core.text(question.get(name))) for name, label in fields]
-    if question['type'] != 'interview':
-        labels = [chr(65 + i) for i in range(len(options))]
-        for index, (label, option) in enumerate(zip(labels, options)):
-            form.append(input_box(f'option_{index}', f'选项 {label}', option['text'], rows=1))
-        if options:
-            form.append({'tag': 'multi_select_static', 'name': 'delete_options', 'required': False,
-                         'placeholder': plain('选择要删除的选项（可选）'),
-                         'options': [{'text': plain(label), 'value': label} for label in labels]})
-        form.append(input_box('new_options', '新增选项（每行一项，编号 N1、N2…）'))
-        selected = set(question.get('correct_option_ids') or [])
-        correct = '、'.join(label for label, option in zip(labels, options) if option['id'] in selected)
-        form.append(input_box('correct', '正确选项（例如 A、C 或 N1）', correct, rows=1))
-    form.append(input_box('remark', '处理说明'))
-    submit = button(ticket, '保存修改并处理质疑', 'save', version=question.get('version'), issues=issue_version(issues))
-    submit.update(name='save', form_action_type='submit')
-    form.append(submit)
-    reload_button = button(ticket, '读取最新版本', 'open', style='default')
-    return card('编辑质疑题目', [block('质疑原因：' + reasons(issues)[:700]),
-                              {'tag': 'form', 'name': 'edit_question', 'elements': form}, reload_button])
 
 
 def changes(question, fields):
@@ -151,7 +117,7 @@ def changes(question, fields):
 
 def send_due(service, auth):
     """Send each pending question once per recipient and revision of its issues."""
-    if not service.settings()['enabled'] or service._stop.is_set():
+    if not service.settings()['enabled'] or service._stop.is_set() or not service.portal_url():
         return
     from .portal_service import external_real_write_guard
     guard = external_real_write_guard()
@@ -199,11 +165,12 @@ def deliver(service, current, name, oid, app_id, qid, issues):
         if not ticket:
             ticket = {'id': identity, 'question_id': qid, 'target': oid, 'name': name, 'app_id': app_id,
                       'token': secrets.token_urlsafe(32), 'created_at': timestamp}
-            ticket['card'] = summary(ticket, question, live)
         if ticket.get('status') == 'sending':
             ticket.update(status='needs_review')
             service._put('local', identity, ticket, conn, False)
             return False
+        ticket['issue_ids'] = [item['id'] for item in live]
+        ticket['card'] = summary(service, ticket, question, live)
         ticket.update(status='sending', retry_at=timestamp + 300)
         service._put('local', identity, ticket, conn, False)
     receipts = []
@@ -228,6 +195,77 @@ def deliver(service, current, name, oid, app_id, qid, issues):
     if ticket['status'] == 'needs_review':
         LOGGER.warning('学练质疑卡片回执待核对 id=%s', identity)
     return True
+
+
+def save_revision(service, conn, question, issues, actor, edits, version, issues_version, remark):
+    if version != question['version'] or issues_version != issue_version(issues):
+        raise core.LearningError('题目或质疑已更新，请保留填写并读取最新版本核对。', 409)
+    fields = {k: edits[k] for k in ('stem', 'options', 'correct_option_ids', 'answer_text', 'analysis') if k in edits}
+    updated = service._save_question({**fields, 'id': question['id'], 'version': version, 'reason': remark},
+                                     actor, conn, require_valid=True, correct_papers=False)
+    for issue in issues:
+        service._update_issue({'id': issue['id'], 'version': issue['version'], 'status': 'resolved', 'remark': remark},
+                              {**actor, 'is_admin': True}, conn)
+    return updated
+
+
+def review_question(service, auth, actor, issue_id, ticket_id, edits=None, *, group=False):
+    """Read/save the same bank revision from the web list or a private review link."""
+    if actor.get('shared_account') or not actor.get('id') or not (actor.get('is_admin') or ticket_id):
+        raise core.LearningError('当前账号无权修改此题。', 403)
+    if group and (ticket_id or not actor.get('is_admin')):
+        raise core.LearningError('仅管理员可处理同题的全部反馈。', 403)
+    if not service.settings()['enabled']:
+        raise core.LearningError('画像学练暂未启用。', 503)
+    if ticket_id:
+        directory, ready, app_id = current_directory(service)
+        if not ready or not app_id or not authorized(auth, actor['id'], app_id):
+            raise core.LearningError('当前账号无权处理此质疑。', 403)
+    with service.transaction() as conn:
+        item = service._get('issue', issue_id, conn)
+        if ticket_id:
+            ticket = service._get('local', ticket_id, conn) if re.fullmatch(r'issue-card:[a-f0-9]{64}', ticket_id) else None
+            if (not ticket or ticket.get('status') != 'sent' or ticket.get('app_id') != app_id
+                    or ticket.get('target') != actor['id'] or ticket.get('name') not in REVIEWERS
+                    or reviewer_open_id(directory, ticket['name'], app_id) != actor['id']
+                    or not item or ticket.get('question_id') != item.get('question_id')
+                    or issue_id not in ticket.get('issue_ids', [])):
+                raise core.LearningError('只能打开本人收到的质疑题目。', 403)
+            if expired(ticket.get('sent_at') or ticket['created_at']):
+                raise core.LearningError(EXPIRED_CARD_MESSAGE, 403)
+        elif not item:
+            raise core.LearningError('质疑记录不存在。', 404)
+        question = service._question(item['question_id'], conn)
+        if question.get('status') == 'deleted':
+            raise core.LearningError('题目已删除，请核对质疑记录。', 409)
+        pending = service.open_question_issues(conn, question['id'])
+        if ticket_id:
+            pending = [i for i in pending if i['id'] in ticket['issue_ids']]
+        elif not group:
+            pending = [i for i in pending if i['id'] == issue_id]
+        editable = bool(pending) or (actor.get('is_admin') and not ticket_id and not group)
+        if edits is not None:
+            receipt_id = 'issue-revision:' + core.digest([issue_id, actor['id'], ticket_id, 'group'] if group else [issue_id, actor['id'], ticket_id])
+            fingerprint = core.digest(edits)
+            receipt = service._get('local', receipt_id, conn) or {}
+            replay = receipt.get('request') == fingerprint and receipt.get('saved_version') == question['version']
+            if not replay:
+                if not editable:
+                    raise core.LearningError('该题的质疑已处理，请读取最新版本。', 409)
+                question = save_revision(service, conn, question, pending, actor, edits, edits.get('version'),
+                                         edits.get('issues_version'), '已修订题目与答案')
+                service._put('local', receipt_id, {'request':fingerprint, 'saved_version':question['version']}, conn, False)
+                pending = []
+        fields = {k:question.get(k) for k in ('id','version','bank','status','type','type_label','stem','options',
+                                               'correct_option_ids','answer_text','analysis')}
+        # An answer attachment can satisfy interview validation. Its URL or token is not needed here.
+        fields['attachments'] = [{'kind':'answer'} for a in question.get('attachments', []) if a.get('kind') == 'answer']
+        reports = {'feedback': [{key: i.get(key, '') for key in ('id', 'scope', 'description', 'suggestion', 'created_at')}
+                                for i in pending]} if group else {}
+        return {'question': fields, 'issues_version': issue_version(pending), 'reason': item.get('description',''),
+                'editable': bool(pending) or bool(actor.get('is_admin') and not ticket_id and not group), 'resolved': not pending,
+                **reports,
+                'sync_pending': bool(question.get('sync_pending') or question.get('_dirty'))}
 
 
 def apply(service, auth, payload, app_id):
@@ -262,23 +300,21 @@ def apply(service, auth, payload, app_id):
         qid = ticket['question_id']
         question = service._get('question', qid, conn)
         issues = service.open_question_issues(conn, qid)
+        if 'issue_ids' in ticket:
+            issues = [i for i in issues if i['id'] in ticket['issue_ids']]
         if not issues:
             return {'ok': True, 'toast': '该题的质疑已处理。', 'card': card('质疑已关闭', [
-                block((question or {}).get('stem', '')[:1000])], 'green')}
+                block((question or {}).get('stem', '')[:1000]), block('当前答案：' + answer(question or {})[:1000])], 'green')}
         if not question or question.get('status') == 'deleted':
             raise core.LearningError('原题已移除或题库暂未同步，请在灯塔核对质疑记录。', 409)
         if value['action'] == 'open':
-            return {'ok': True, 'card': editor(ticket, question, issues), 'toast': '已打开题目'}
-        if value.get('version') != question.get('version') or value.get('issues') != issue_version(issues):
-            raise core.LearningError('题目或质疑已更新。请先保留你的修改，再点「读取最新版本」核对。', 409)
+            if 'issue_ids' not in ticket:
+                ticket['issue_ids'] = [i['id'] for i in issues]
+                service._put('local', identity, ticket, conn, False)
+            return {'ok': True, 'card': summary(service, ticket, question, issues), 'toast': '请点「修改题目与答案」打开最新版'}
         edits, remark = changes(question, action.get('form_value'))
-        # The dedicated grant is bound to this recipient, card, and disputed question.
-        actor = {'id': oid, 'name': ticket['name'], 'is_admin': True}
-        updated = service._save_question({'id': qid, 'version': question['version'], 'reason': remark, **edits},
-                                         actor, conn, require_valid=True)
-        for issue in issues:
-            service._update_issue({'id': issue['id'], 'version': issue['version'], 'status': 'resolved',
-                                   'remark': remark}, actor, conn)
+        updated = save_revision(service, conn, question, issues, {'id': oid, 'name': ticket['name']},
+                                edits, value.get('version'), value.get('issues'), remark)
     return {'ok': True, 'toast': '题目已保存，质疑已处理。', 'card': card('质疑已处理', [
         block(updated['stem'][:1000]), block('修订后答案：' + answer(updated)[:1000])], 'green')}
 

@@ -9,7 +9,7 @@ import {coreFixture} from './responsive-audit-core-fixtures.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/notice-photo-paste');
 await mkdir(output,{recursive:true});
-const server=await preview({root,configFile:false,build:{outDir:'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,configFile:false,build:{outDir:process.env.CLIPFLOW_NOTICE_PREVIEW_SITE || 'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
 const errors=[],uploads=[],unexpected=[];
@@ -45,11 +45,11 @@ try{
   page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));
   let chooserCount=0;page.on('filechooser',()=>chooserCount++);
   await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope='+scope+'&work_type=change');
-  if(width<=760)await page.getByRole('tab',{name:/进行中/}).click();
+  if(width<=760)await page.getByRole('group',{name:'当前列表'}).getByRole('button',{name:/进行中/}).click();
   await page.locator('[data-list=ongoing]').getByRole('button',{name:'更新',exact:true}).first().click();
   const site=page.getByRole('group',{name:'现场照片上传区',exact:true}),ali=page.getByRole('group',{name:'阿里确认截图上传区',exact:true});
   await site.waitFor();await ali.waitFor();
-  const topClose=page.locator('.v2-notice-handling>.n-card-header .n-card-header__close');
+  const editor=page.locator('.v2-notice-editor'),topClose=editor.locator('.n-card-header__close');
   const top=await topClose.boundingBox();
   assert(top.width>=44&&top.height>=44&&top.x>=0&&top.x+top.width<=width&&top.y+top.height<=height,'top close is a visible 44px target');
   assert(await topClose.evaluate(el=>{const r=el.getBoundingClientRect();return el.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2));}),'top close is not covered');
@@ -100,7 +100,7 @@ try{
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
   for(const area of [site,ali])assert(await area.evaluate(el=>el.scrollWidth<=el.clientWidth+1),'uploaded images and picker fit their area');
   await page.screenshot({path:path.join(output,`photos-${width}${dark?'-dark':''}.png`)});
-  await page.locator('.v2-notice-handling>.n-card-content').evaluate(el=>el.scrollTo({top:0}));
+  await editor.locator(':scope > .n-card-content').evaluate(el=>el.scrollTo({top:0}));
   await page.screenshot({path:path.join(output,`close-${width}${dark?'-dark':''}.png`)});
   const content=page.getByRole('textbox',{name:'内容',exact:true});
   const draftText='未提交内容 '+width+(dark?' dark':' light');
@@ -111,7 +111,7 @@ try{
   assert.equal(await content.inputValue(),draftText,'cancel close keeps manual edits');
   assert.equal(await site.locator('figure').count(),2);assert.equal(await ali.locator('figure').count(),1);
   await close.click();await page.getByRole('button',{name:'保留副本并离开',exact:true}).click();
-  await page.locator('.v2-notice-handling').waitFor({state:'detached'});
+  await editor.waitFor({state:'detached'});
   const stored=await receiptIds();assert(stored);
   const retained={site:stored.snapshot.photos.map(photo=>photo.upload_id),ali:stored.snapshot.aliPhotos.map(photo=>photo.upload_id)};
   assert.equal(retained.site.length,2);assert.equal(retained.ali.length,1);
@@ -121,9 +121,9 @@ try{
   await content.waitFor();assert.notEqual(await content.inputValue(),draftText,'another notice does not restore this draft');
   assert.equal(await site.getByText('本次新增 · 已就绪',{exact:true}).count(),0);
   assert.equal(await ali.getByText('本次新增 · 已就绪',{exact:true}).count(),0);
-  await close.click();await page.locator('.v2-notice-handling').waitFor({state:'detached'});
+  await close.click();await editor.waitFor({state:'detached'});
   await page.reload();
-  if(width<=760)await page.getByRole('tab',{name:/进行中/}).click();
+  if(width<=760)await page.getByRole('group',{name:'当前列表'}).getByRole('button',{name:/进行中/}).click();
   await page.locator('[data-list=ongoing]').getByRole('button',{name:'更新',exact:true}).first().click();
   await content.waitFor();assert.equal(await content.inputValue(),draftText,'reopening after reload restores unsubmitted text');
   assert.equal(await site.getByText('本次新增 · 已就绪',{exact:true}).count(),2);
@@ -135,7 +135,7 @@ try{
    for(const button of [topClose,close]){
     await button.click();await page.getByRole('button',{name:'保留副本并离开',exact:true}).click();
     await page.getByRole('button',{name:'继续填写',exact:true}).waitFor();
-    assert(await page.locator('.v2-notice-handling').isVisible(),'failed storage must not close the editor');
+    assert(await editor.isVisible(),'failed storage must not close the editor');
     await page.getByRole('button',{name:'继续填写',exact:true}).click();
     await page.locator('.n-dialog').filter({hasText:'当前填写尚未保存'}).waitFor({state:'detached'});
     assert.equal(await content.inputValue(),draftText+' storage failure','failed storage keeps current input, not the older saved copy');
@@ -150,14 +150,14 @@ try{
    assert.equal(await content.inputValue(),draftText+' storage failure');
    await page.evaluate(()=>{Storage.prototype.setItem=window.restoreNoticeStorage;});
    await close.click();await page.getByRole('button',{name:'保留副本并离开',exact:true}).click();
-   await page.locator('.v2-notice-handling').waitFor({state:'detached'});
+   await editor.waitFor({state:'detached'});
    assert.equal((await receiptIds()).snapshot.values.content,draftText+' storage failure','storage recovery saves the latest text');
    await page.evaluate(()=>{Storage.prototype.setItem=window.failNoticeStorage;});
    await page.getByRole('navigation',{name:'通告类型',exact:true}).getByRole('button',{name:'维保通告',exact:true}).click();
    await page.waitForURL(url=>url.searchParams.get('work_type')==='maintenance');
    await page.locator('[data-list=ongoing]').getByRole('button',{name:'更新',exact:true}).first().click();
    await content.waitFor();await close.click();
-   await page.locator('.v2-notice-handling').waitFor({state:'detached'});
+   await editor.waitFor({state:'detached'});
    await page.evaluate(()=>{Storage.prototype.setItem=window.restoreNoticeStorage;delete window.restoreNoticeStorage;delete window.failNoticeStorage;});
   }
   await context.close();

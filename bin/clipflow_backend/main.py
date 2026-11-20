@@ -8823,9 +8823,12 @@ class FastAPIPortalController:
             deny = self._local_only_response(request)
             if deny is not None:
                 return deny
-            operation = PortalRuntime.state_store.get_notice_remote_operation(
-                str(operation_id or "").strip()
-            )
+            from lan_bitable_template_portal.qt_event_delivery import QtEventDelivery
+            operation_id = str(operation_id or "").strip()
+            delivery = QtEventDelivery(PortalRuntime).status(operation_id)
+            if delivery:
+                return {"ok": True, "data": delivery}
+            operation = PortalRuntime.state_store.get_notice_remote_operation(operation_id)
             if not isinstance(operation, dict):
                 return {"ok": True, "data": None}
             return {
@@ -8894,7 +8897,18 @@ class FastAPIPortalController:
                         except PortalConfirmationRequiredError as exc:
                             return {'ok': True, 'data': {'ok': False, 'message': str(exc), 'details': exc.details,
                                 'confirmation_required': True, 'record_id': data_dict.get('record_id', '')}}
-                    audit_id = begin_business_audit(
+                    delivery = None
+                    delivery_replay = False
+                    if notice_type == "事件通告" and command != "notice_archive" and command_payload.get("operation_id"):
+                        from lan_bitable_template_portal.account_impersonation import CURRENT_IMPERSONATION
+                        from lan_bitable_template_portal.qt_event_delivery import QtEventDelivery
+                        if not CURRENT_IMPERSONATION.get():
+                            candidate = QtEventDelivery(PortalRuntime)
+                            operation_id = str(command_payload["operation_id"]).strip()
+                            delivery_replay = bool(candidate.operation(operation_id))
+                            if delivery_replay or not PortalRuntime.state_store.get_notice_remote_operation(operation_id):
+                                delivery = candidate
+                    audit_id = "" if delivery_replay else begin_business_audit(
                         PortalRuntime.state_store,
                         domain=(
                             "event"
@@ -8934,10 +8948,10 @@ class FastAPIPortalController:
                         },
                     )
                     try:
-                        data = await asyncio.to_thread(
-                            PortalRuntime.execute_local_notice_upload,
-                            command_payload,
-                        )
+                        if delivery:
+                            data = await asyncio.to_thread(delivery.submit, command_payload, audit_id)
+                        else:
+                            data = await asyncio.to_thread(PortalRuntime.execute_local_notice_upload, command_payload)
                     except Exception as exc:
                         operation_id = str(command_payload.get("operation_id") or data_dict.get("operation_id") or "")
                         operation = {}
@@ -8948,14 +8962,15 @@ class FastAPIPortalController:
                         saved_result = operation.get("result") or {}
                         remote_written = operation.get("status") in {"remote_written", "completed"}
                         saved_target = str(operation.get("target_record_id") or saved_result.get("record_id") or "")
-                        finish_business_audit(
-                            PortalRuntime.state_store,
-                            audit_id,
-                            success=False,
-                            error=str(exc),
-                            error_stage="execute",
-                            remote_written=remote_written,
-                        )
+                        if audit_id:
+                            finish_business_audit(
+                                PortalRuntime.state_store,
+                                audit_id,
+                                success=False,
+                                error=str(exc),
+                                error_stage="execute",
+                                remote_written=remote_written,
+                            )
                         fail_record_id = str(
                             data_dict.get("target_record_id")
                             or data_dict.get("record_id")
@@ -8977,6 +8992,8 @@ class FastAPIPortalController:
                                 "retry_same_operation": remote_written or operation.get("status") == "executing" or bool(saved_result.get("retry_same_operation")),
                             },
                         }
+                    if delivery:
+                        return {"ok": True, "data": data}
                     if data.get("queued"):
                         PortalRuntime.service.mark_job(data["job_id"], business_audit_id=audit_id)
                         return {"ok": True, "data": data}
@@ -13643,9 +13660,12 @@ class FastAPIPortalController:
         scheduler = BackgroundScheduler(
             timezone="Asia/Shanghai",
             daemon=True,
-            executors={"maintenance": SchedulerThreadPool(
-                max_workers=1, pool_kwargs={"initializer": lower_current_thread_priority,
-                                           "thread_name_prefix": "ClipFlowMaintenance"})},
+            executors={
+                "maintenance": SchedulerThreadPool(max_workers=1, pool_kwargs={
+                    "initializer": lower_current_thread_priority, "thread_name_prefix": "ClipFlowMaintenance"}),
+                "qt_event_messages": SchedulerThreadPool(max_workers=2, pool_kwargs={
+                    "thread_name_prefix": "ClipFlowEventMessages"}),
+            },
         )
         scheduler.add_job(self._run_notice_panel, "interval", seconds=10,
                           id="notice_panel", max_instances=1, coalesce=True)
@@ -13686,6 +13706,13 @@ class FastAPIPortalController:
                           id="notice_manual_binding_wait", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(PortalRuntime.process_notice_robot_messages, "interval", seconds=5,
                           id="notice_robot", replace_existing=True, max_instances=1, coalesce=True)
+        from lan_bitable_template_portal.qt_event_delivery import QtEventDelivery
+        qt_event_delivery = QtEventDelivery(PortalRuntime)
+        scheduler.add_job(qt_event_delivery.process_messages, "interval", seconds=2,
+                          executor="qt_event_messages", id="qt_event_group_messages", replace_existing=True,
+                          max_instances=2, coalesce=True)
+        scheduler.add_job(qt_event_delivery.process_archives, "interval", seconds=5,
+                          id="qt_event_archives", replace_existing=True, max_instances=1, coalesce=True)
         scheduler.add_job(
             self._run_scheduled_sqlite_maintenance,
             "interval",

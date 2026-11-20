@@ -41,8 +41,9 @@ try {
   await page.goto(entry + '?__page=/workbench-lite&work_type=maintenance');
   await page.locator('.v2-notice-entry').first().waitFor();
   assert.equal(queries.at(-1),'E','single-building account defaults to its authorized building');
-  await page.locator('.v2-brand img').evaluate(img => img.decode());
-  assert(await page.locator('.v2-brand img').evaluate(img => img.naturalWidth > 0));
+  const brand=page.getByRole('navigation',{name:'功能导航'}).getByRole('button',{name:'个人工作台'}).locator('img');
+  await brand.evaluate(img => img.decode());
+  assert(await brand.evaluate(img => img.naturalWidth > 0));
   for (const width of [1440, 1366, 1920, 390, 360]) {
     await page.setViewportSize({ width, height: width < 700 ? 844 : 1000 });
     if (width < 700) await page.getByRole('tab', { name: /计划通告/ }).click();
@@ -65,16 +66,19 @@ try {
     assert.doesNotMatch(await active.innerText(), /2026-10-15|T09:30|T10:45/);
     const boxes = await active.locator('.v2-notice-entry').evaluateAll(elements => elements.filter(el=>el.getClientRects().length).map(el => ({
       top: el.getBoundingClientRect().top, bottom: el.getBoundingClientRect().bottom,
+      left: el.getBoundingClientRect().left, right: el.getBoundingClientRect().right,
       border: getComputedStyle(el).borderTopWidth, width: el.clientWidth, content: el.scrollWidth,
       copyRight: el.querySelector('.v2-notice-entry-copy').getBoundingClientRect().right,
       stateLeft: el.querySelector('.v2-notice-entry-state').getBoundingClientRect().left,
+      copyBottom: el.querySelector('.v2-notice-entry-copy').getBoundingClientRect().bottom,
+      stateTop: el.querySelector('.v2-notice-entry-state').getBoundingClientRect().top,
     })));
     assert(boxes.length>0,'the current group must contain visible records');
     for (const [i, box] of boxes.entries()) {
       assert.equal(box.border, '1px');
       assert(box.content <= box.width + 1, 'row content must fit');
-      assert(box.copyRight < box.stateLeft, 'actions must not overlap text: '+width+' '+JSON.stringify(box));
-      if (i) assert(box.top - boxes[i - 1].bottom >= 7, 'each notice needs visible separation');
+      assert(box.copyRight <= box.stateLeft || box.copyBottom <= box.stateTop, 'actions must not overlap text: '+width+' '+JSON.stringify(box));
+      for (const other of boxes.slice(0,i)) assert(Math.max(box.left-other.right,other.left-box.right,box.top-other.bottom,other.top-box.bottom)>=7, 'each notice needs visible separation');
     }
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth + 1), false);
     await page.screenshot({ path: path.join(output, `ongoing-${width}.png`), fullPage: true });
@@ -92,11 +96,10 @@ try {
   user = {...user,role:'admin',level:'L1'};
   scopeOptions = [{value:'ALL',label:'全部'},...['110',...'ABCDEH'].map(value=>({value,label:value==='110'?'110站':value+'楼'}))];
   await page.goto(entry+'?view=my&scope=E');
-  await page.locator('.v2-sidebar').getByText('通告办理',{exact:true}).click();
+  await page.getByRole('navigation',{name:'功能导航'}).getByRole('button',{name:'通告中心',exact:true}).click();
   await page.locator('.v2-notice-entry').first().waitFor();
   assert.equal(queries.at(-1),'ALL','all-building access defaults to ALL rather than the previous module scope');
-  assert.match(await page.locator('.v2-notice-heading').innerText(),/全部楼栋/);
-  assert.match(await page.getByLabel('通告楼栋',{exact:true}).innerText(),/全部楼栋/);
+  assert.match(await page.getByLabel('通告楼栋',{exact:true}).innerText(),/全部授权楼栋/);
   await page.screenshot({path:path.join(output,'all-buildings-desktop.png'),fullPage:true});
   await page.setViewportSize({width:390,height:844});
   await page.goto(entry+'?view=functions&scope=E');
@@ -108,7 +111,7 @@ try {
   await page.locator('.n-base-select-option').getByText('E楼',{exact:true}).click();
   await page.keyboard.press('Escape');
   await page.waitForFunction(()=>new URL(location.href).searchParams.get('scope')==='E');
-  await page.waitForFunction(()=>document.querySelector('.v2-notice-heading p')?.textContent.startsWith('E楼'));
+  await page.getByLabel('通告楼栋',{exact:true}).getByText('E楼',{exact:true}).waitFor();
   await page.reload();await page.locator('.v2-notice-entry').first().waitFor();
   assert.equal(queries.at(-1),'E','an explicitly selected building/deep link is preserved');
 

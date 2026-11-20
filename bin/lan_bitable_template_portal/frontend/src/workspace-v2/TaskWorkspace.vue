@@ -32,7 +32,25 @@
         </section>
       </div>
     </template>
-    <section v-if="view === 'functions'" class="v2-functions functions-page"><div class="v2-section-title"><h1>全部功能</h1></div><div class="v2-function-groups"><section v-for="group in featureGroups" :key="group.name"><h2>{{ group.name }}</h2><div class="v2-feature-grid"><NButton v-for="entry in group.items" :key="entry.id" class="v2-feature-entry" :bordered="false" quaternary @click="open(moduleUrl(entry,scope))"><span class="v2-feature-icon"><component :is="moduleIcons[entry.icon as keyof typeof moduleIcons]" :size="20" /></span><span>{{ entry.label }}</span><ChevronRight :size="16" /></NButton></div></section></div><NEmpty v-if="!featureGroups.length" description="暂无已授权功能" /></section>
+    <section v-if="view === 'functions'" class="v2-functions functions-page">
+      <div class="v2-section-title"><h1>全部功能</h1></div>
+      <div class="v2-function-groups">
+        <section v-for="group in featureGroups" :key="group.key">
+          <h2 v-if="group.direct?.label !== group.label">{{ group.label }}</h2>
+          <div v-for="branch in group.branches" :key="branch.key" class="v2-function-branch">
+            <h3 v-if="branch.label">{{ branch.label }}</h3>
+            <div class="v2-feature-grid">
+              <NButton v-for="entry in branch.entries" :key="entry.key" class="v2-feature-entry" :data-nav-entry="entry.key" :bordered="false"
+                quaternary @click="emit('selectMenu',entry.key)">
+                <span class="v2-feature-icon"><component :is="entry.icon || group.icon" :size="20" /></span>
+                <span>{{ entry.label }}</span><ChevronRight :size="16" />
+              </NButton>
+            </div>
+          </div>
+        </section>
+      </div>
+      <NEmpty v-if="!featureGroups.length" description="暂无已授权功能" />
+    </section>
   </div>
 </template>
 <script setup lang="ts">
@@ -42,15 +60,15 @@ import { useCapacity } from './pageLayout';
 import { NAlert, NButton, NDataTable, NEmpty, NList, NListItem, NSelect, NSpin, NTag, type DataTableColumns } from 'naive-ui';
 import { ArrowRight, ChevronRight, FileText, MessageSquarePlus, PencilLine, Play, RefreshCw, SquareCheck } from 'lucide-vue-next';
 import { requestJson, type Dict } from './client';
-import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count, moduleUrl, canManageZhihangData, zhihangDataModule } from './modules';
-import { canViewInspectionHistory } from '../inspectionAccess';
+import { modules, moduleIcons, navigationModules, NOTICE_IDS, beijingDate, count, moduleUrl } from './modules';
+import type { SidebarGroup } from './sidebarSections';
 import { eventStatusTone } from '../eventManagementUtils';
 import { personaFor, personaTitles } from './persona';
 import OverviewPanel from './OverviewPanel.vue';
-const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;selectedScopes?:string[];view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean;headerToolsId?:string}>();
+const props=defineProps<{user:Dict;scopes:{value:string;label:string}[];scope:string;selectedScopes?:string[];view:string;embedded?:boolean;initialKind?:string;brief?:boolean;presentation?:string;actionMode?:boolean;headerToolsId?:string;menuGroups?:SidebarGroup[]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
-const emit=defineEmits<{open:[url:string]}>();
+const emit=defineEmits<{open:[url:string];selectMenu:[key:string]}>();
 const open=(url:string)=>emit('open',url);
 const today=beijingDate(), greeting=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',weekday:'long'}).format(new Date());
 const permitted=computed<string[]>(()=>props.user.modules || []);
@@ -90,11 +108,9 @@ const columns=computed<DataTableColumns<Dict>>(()=>[
 ].filter(column=>column.key==='scope'?widgetCapacity.value.width>=600:column.key==='time'?widgetCapacity.value.width>=800:true));
 function dueTime(value:string){const normalized=String(value).replace(' ','T');return Date.parse(/(?:Z|[+-]\d{2}:\d{2})$/.test(normalized)?normalized:normalized+'+08:00');}
 function dueLabel(row:Dict){if(!row.dueAt||!Number.isFinite(dueTime(row.dueAt)))return '';return dueTime(row.dueAt)<Date.now()?'已过期':String(row.dueAt).slice(0,10)===today?'今日到期':'';}
-const featureGroups = computed(() => {
-  const entries = navigationModules(permitted.value, props.user.tool_management_enabled === true, canViewInspectionHistory(props.user));
-  if (canManageZhihangData(props.user)) entries.push(zhihangDataModule);
-  return [...new Set(entries.map(item => item.group))].map(name => ({name, items: entries.filter(item => item.group === name)}));
-});
+const featureGroups = computed(() => (props.menuGroups || []).filter(group => group.key !== 'home').map(group => ({
+  ...group, branches: group.branches || (group.direct ? [{ key: group.key, label: '', entries: [group.direct] }] : []),
+})));
 function text(value:any):string {return Array.isArray(value)?value.map(text).join('、'):value&&typeof value==='object'?String(value.text||value.name||''):String(value??'');}
 function items(value:unknown):Dict[]{if(!Array.isArray(value))throw new Error('待办资料未完整返回，请重试或进入业务列表核对。');return value;}
 function rowControls(row:Dict){

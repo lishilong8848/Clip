@@ -1,23 +1,25 @@
 <template>
-  <section class="check-history" aria-label="历史检查记录" data-v2-navigation>
+  <section class="check-history" :class="{'ps-history':desk}" aria-label="历史检查记录" data-v2-navigation>
     <header><span>历史检查记录<small v-if="data">共 {{data.total}} 次</small></span><NButton quaternary circle :loading="loading" aria-label="刷新历史检查记录" @click="load(page)"><RefreshCw :size="16" /></NButton></header>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{error}}<NButton text @click="load(page)">重试</NButton></NAlert>
     <NSkeleton v-if="!data&&loading" text :repeat="4" />
     <template v-else-if="data">
       <NCollapse v-if="data.items.length" :key="scope+':'+page" accordion>
         <NCollapseItem v-for="row in data.items" :key="row.id" :name="row.id">
-          <template #header><div class="check-history-heading"><strong>{{row.day}} · {{row.shift}}班</strong><span>{{row.actor_name}}</span><NTag size="small" :bordered="false" :type="row.abnormal_count?'warning':'success'">{{row.abnormal_count?'存在异常':'全部正常'}}</NTag><small>正常 {{row.normal_count}} · 异常 {{row.abnormal_count}}</small></div></template>
-          <div class="check-history-meta"><span>提交时间 {{dateLabel(row.submitted)}}</span><span>计划时间 {{dateLabel(row.due*1000)}}</span><span>{{row.sync_status==='synced'?'已同步飞书':'本地已保存，待同步飞书'}}</span></div>
-          <div v-if="row.can_edit||row.revision>1" class="check-history-edit"><span v-if="row.revision>1&&row.updated_at">最近修改：{{row.updated_by_name||row.updated_by}} · {{dateLabel(row.updated_at)}}</span><NButton v-if="row.can_edit" size="small" secondary @click="emit('edit',row.id)"><template #icon><Pencil :size="15" /></template>修改记录</NButton></div>
+          <template #header><div v-if="desk" class="ps-history-heading"><strong>{{ row.day }} · {{ row.shift }}班</strong><span>{{ row.actor_name }}</span>
+            <span class="ps-answer-tally" :class="{warn:row.abnormal_count}">正常 {{ row.normal_count }} · 异常 {{ row.abnormal_count }}</span><small>{{ row.sync_status==='synced'?'已同步飞书':'待同步飞书' }}</small></div>
+            <div v-else class="check-history-heading"><strong>{{row.day}} · {{row.shift}}班</strong><span>{{row.actor_name}}</span><NTag size="small" :bordered="false" :type="row.abnormal_count?'warning':'success'">{{row.abnormal_count?'存在异常':'全部正常'}}</NTag><small>正常 {{row.normal_count}} · 异常 {{row.abnormal_count}}</small></div></template>
+          <div :class="{'ps-history-detail':desk}"><div class="check-history-meta"><span>提交时间 {{dateLabel(row.submitted)}}</span><span>计划时间 {{dateLabel(row.due*1000)}}</span><span v-if="!desk">{{row.sync_status==='synced'?'已同步飞书':'本地已保存，待同步飞书'}}</span></div>
+          <div v-if="row.can_edit||row.revision>1" class="check-history-edit"><span v-if="row.revision>1&&row.updated_at">最近修改：{{row.updated_by_name||row.updated_by}} · {{dateLabel(row.updated_at)}}</span><NButton v-if="row.can_edit" size="small" secondary @click="emit('edit',row.id)"><template #icon><Pencil :size="15" /></template>修改记录</NButton></div></div>
           <NAlert v-if="row.sync_error" type="warning" :bordered="false">{{row.sync_error}}</NAlert>
-          <ol class="check-history-answers">
+          <ol class="check-history-answers" :class="{'ps-answer-grid':desk}">
             <li v-for="answer in row.answers" :key="answer.id" :class="{'is-abnormal':answer.status==='abnormal'}">
               <div><strong>{{answer.text}}</strong><NTag size="small" :bordered="false" :type="answer.status==='abnormal'?'warning':'success'">{{answer.status==='abnormal'?'异常':'正常'}}</NTag></div>
               <p v-if="answer.note">备注：{{answer.note}}</p>
               <CheckAttachments v-if="row.files.some((file:Dict)=>file.item_id===answer.id)" :task-id="row.id" :item-id="answer.id" kind="item" :files="row.files.filter((file:Dict)=>file.item_id===answer.id)" locked :allow-upload="false" />
             </li>
           </ol>
-          <section v-if="row.handover_photo" class="check-history-photo"><strong>交接班照片</strong><CheckAttachments :task-id="row.id" kind="handover" :files="[row.handover_photo]" locked :allow-upload="false" /></section>
+          <section v-if="row.handover_photo" class="check-history-photo"><strong v-if="!desk">交接班附件</strong><CheckAttachments :task-id="row.id" kind="handover" :files="[row.handover_photo]" locked :allow-upload="false" /></section>
         </NCollapseItem>
       </NCollapse>
       <NEmpty v-else description="本楼暂无历史检查记录" size="small" />
@@ -31,6 +33,7 @@ import {NAlert,NButton,NCollapse,NCollapseItem,NEmpty,NPagination,NSkeleton,NTag
 import {Pencil,RefreshCw} from 'lucide-vue-next';
 import {requestJson,type Dict} from '../client';
 import CheckAttachments from './CheckAttachments.vue';
+const desk=document.documentElement.classList.contains('workspace-v2');
 const props=defineProps<{scope:string}>();
 const emit=defineEmits<{edit:[id:string]}>();
 const data=ref<Dict>(),page=ref(1),loading=ref(false),error=ref('');
@@ -57,4 +60,12 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();window.removeEventListene
 .check-history-heading{display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;min-width:0;line-height:1.6}.check-history-heading strong{font-size:13px}.check-history-heading>span{font-size:13px}.check-history-meta{display:flex;flex-wrap:wrap;gap:4px 18px;font-size:12px;color:var(--v2-muted,#647487);line-height:1.6;margin-bottom:10px}
 .check-history-answers{margin:0;padding-left:24px}.check-history-answers>li{padding:9px 0;border-bottom:1px solid var(--v2-border,#d8e3f1);overflow-wrap:anywhere}.check-history-answers>li>div:first-child{display:flex;align-items:flex-start;gap:10px;justify-content:space-between}.check-history-answers strong{font-size:13px;font-weight:500;line-height:1.6}.check-history-answers p{white-space:pre-wrap;margin:6px 0;font-size:13px;line-height:1.6}.check-history-answers .is-abnormal p{color:var(--warning-color,#985719)}.check-history-photo{display:grid;gap:8px;margin-top:12px;font-size:13px}.check-history>.n-pagination{justify-self:end;max-width:100%}
 @media(max-width:600px){.check-history-heading{gap:5px 8px}.check-history-heading>small{flex-basis:100%}.check-history :deep(.n-collapse-item__header){min-height:44px}.check-history>header .n-button{min-width:44px;min-height:44px}}
+</style>
+
+<style scoped>
+.ps-history-detail{display:flex;align-items:center;flex-wrap:wrap;gap:.3rem .8rem;margin-bottom:.6rem}.ps-history-detail .check-history-meta{margin:0}.ps-history-detail .check-history-edit{margin:0 0 0 auto}
+.ps-history-heading{width:100%;display:grid;grid-template-columns:minmax(9em,1.4fr) minmax(4.5em,.8fr) auto auto;gap:.4rem .75rem;align-items:center;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.ps-answer-tally{justify-self:start;padding:.1rem .45rem;background:var(--soft-field,#eaf3eb);border-radius:5px}.ps-answer-tally.warn{background:color-mix(in srgb,var(--soft-face,#fff) 84%,#e3a15d)}
+.ps-answer-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr));gap:.5rem}.ps-answer-grid>li{border-left:3px solid var(--v2-palette-selection,#d3e6f0);padding:.45rem .65rem;background:var(--soft-field,#eff4f2)}.ps-answer-grid>li.is-abnormal{border-left-color:#b97642}
+@container shift-check (max-width:550px){.ps-history-heading{grid-template-columns:minmax(0,1fr) auto;gap:.25rem}}
 </style>

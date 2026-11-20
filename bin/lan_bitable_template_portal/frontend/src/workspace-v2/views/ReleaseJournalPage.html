@@ -1,0 +1,172 @@
+<section class="release-journal-desk">
+    <header class="release-journal-head">
+      <div class="release-journal-heading">
+        <span class="release-journal-mark" aria-hidden="true"><NotebookPen :size="18" :stroke-width="1.8" /></span>
+        <div class="release-journal-title"><h1>平台版本发布记录</h1><small v-if="!loading && !error">共 {{ total }} 个版本</small></div>
+      </div><div class="release-journal-toolbar">
+      <NInput
+        v-model:value="query"
+        class="release-journal-search"
+        size="small"
+        clearable
+        placeholder="搜索版本号、问题或解决方法"
+        :input-props="{ 'aria-label': '搜索更新记录' }"
+      >
+        <template #prefix><Search :size="14" :stroke-width="1.8" /></template>
+      </NInput>
+
+      <NSelect
+        v-model:value="moduleFilter"
+        class="release-journal-module"
+        size="small"
+        clearable
+        filterable
+        placeholder="全部模块" aria-label="筛选发布模块"
+        :options="moduleOptions"
+        :consistent-menu-width="false"
+      />
+
+      <NButton
+        class="release-journal-refresh"
+        size="small"
+        type="primary"
+        :loading="loading"
+        :disabled="loading"
+        @click="load(true)"
+      >
+        <template #icon><RefreshCw :size="14" :stroke-width="1.9" /></template>
+        刷新
+      </NButton>
+    </div></header>
+
+    <NAlert
+      v-if="error"
+      class="release-journal-alert"
+      type="warning"
+      :show-icon="true"
+      closable
+      @close="error = ''"
+    >
+      {{ error }}
+    </NAlert>
+
+    <div class="release-journal-body">
+      <NSpin :show="loading && items.length > 0" size="small">
+        <ul v-if="items.length" class="release-journal-list" :aria-busy="loading">
+          <li v-for="entry in items" :key="entry.id"><ReleaseDeskEntry :version="entry.version" :patch="entry.patch"
+            :published="publishedAt(entry.published_at)" :issue-count="entry.items?.length ?? 0"
+            :summary="summary(entry)" :modules="Array.from(new Set((entry.items || []).map(issue=>issue.module).filter(Boolean)))"
+            @open="openDetail(entry)"/></li>
+        </ul>
+
+        <div v-else-if="loading" class="release-journal-state">
+          <NSpin size="small" />
+          <span>正在读取更新记录…</span>
+        </div>
+
+        <NEmpty
+          v-else-if="!error"
+          class="release-journal-empty"
+          :description="query.trim() || moduleFilter ? '没有匹配的发布记录' : '还没有已发布的版本'"
+        >
+          <template #icon><NotebookPen :size="26" :stroke-width="1.4" /></template>
+        </NEmpty>
+      </NSpin>
+    </div>
+
+    <footer v-if="total > pageSize" class="release-journal-pager">
+      <NPagination
+        v-model:page="page"
+        :page-size="pageSize"
+        :item-count="total"
+        size="small"
+        :page-slot="5"
+        show-quick-jumper
+      />
+    </footer>
+
+    <NModal
+      v-model:show="detailVisible"
+      class="release-journal-modal rj-desk-overlay"
+      preset="card"
+      :bordered="false"
+      size="medium"
+      close-on-esc
+      mask-closable
+      :title="detail ? `${detail.version}` : '更新详情'"
+    >
+      <template #header>
+        <div class="release-journal-modal-head">
+          <span class="release-journal-modal-title">{{ detail?.version || '发布详情' }}</span>
+          <span v-if="detail" class="release-journal-modal-meta">
+            <em class="release-journal-modal-patch">补丁 {{ detail.patch }}</em>
+            <em>{{ publishedAt(detail.published_at) }}</em>
+            <em>{{ (detail.items || []).length }} 条更新</em>
+          </span>
+        </div>
+      </template>
+
+      <div class="release-journal-modal-body">
+        <div v-if="detailLoading" class="release-journal-state">
+          <NSpin size="small" />
+          <span>正在读取详情…</span>
+        </div>
+
+        <NAlert v-else-if="detailError" class="release-journal-modal-error" type="error" :show-icon="true">
+          {{ detailError }}
+        </NAlert>
+
+        <NCollapse v-else-if="detail && detail.items.length" class="release-journal-collapse" :default-expanded-names="detail.items.map((_, i) => String(i))" arrow-placement="right">
+          <NCollapseItem
+            v-for="(item, index) in detail.items"
+            :key="index"
+            :name="String(index)"
+            class="release-journal-item"
+          >
+            <template #header>
+              <span class="release-journal-item-head">
+                <NTag v-if="item.module" size="small" :bordered="false" class="release-journal-item-module">
+                  {{ item.module }}
+                </NTag>
+                <span class="release-journal-item-problem">{{ item.problem || '未记录问题描述' }}</span>
+              </span>
+            </template>
+            <div class="release-journal-item-body">
+
+              <div class="release-journal-field release-journal-field--solution">
+                <span class="release-journal-field-label">解决方法</span>
+                <p class="release-journal-field-value">{{ item.solution || '未记录' }}</p>
+              </div>
+            </div>
+          </NCollapseItem>
+        </NCollapse>
+
+        <NEmpty
+          v-else-if="detail"
+          class="release-journal-empty"
+          description="该版本没有记录问题条目"
+        />
+
+        <NCollapse v-if="detail && detail.commits && detail.commits.length" class="release-journal-collapse"  arrow-placement="right">
+          <NCollapseItem name="commits" class="release-journal-item">
+            <template #header>
+              <span class="release-journal-item-head">
+                <span class="release-journal-item-problem">关联提交</span>
+                <NTag size="small" :bordered="false" class="release-journal-item-module">{{ detail.commits.length }}</NTag>
+              </span>
+            </template>
+            <ul class="release-journal-commits">
+              <li v-for="(commit, ci) in detail.commits" :key="ci" class="release-journal-commit">
+                <code class="release-journal-commit-id">{{
+                  (commit.id || commit.hash || commit.sha || '').slice(0, 7) || '—'
+                }}</code>
+                <span class="release-journal-commit-title">{{
+                  commit.title || commit.subject || commit.message || '无提交说明'
+                }}</span>
+              </li>
+            </ul>
+          </NCollapseItem>
+        </NCollapse>
+      </div>
+    </NModal>
+  </section>

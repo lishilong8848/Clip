@@ -22,11 +22,13 @@ const fixture = `<template><NConfigProvider><NDialogProvider><NMessageProvider>
   import {ref,nextTick} from 'vue';
   import {NConfigProvider,NDialogProvider,NMessageProvider} from 'naive-ui';
   import WorkbenchHome from '/src/workspace-v2/workbench/WorkbenchHome.vue';
+  import {applyNightMode} from '/src/workspace-v2/theme';
   ${styles}
   document.documentElement.classList.add('workspace-v2');
   const user=ref({}),scope=ref('A'),scopes=ref([]);
   window.setAccount=async account=>{user.value=account;scopes.value=(account.testScopes||['A']).map(value=>({value,label:value+'楼'}));scope.value='A';await nextTick();};
   window.setScope=async value=>{scope.value=value;await nextTick();};
+  window.setNightMode=async value=>{applyNightMode(value);await nextTick();};
   const opened=url=>{window.opened=url;};
   </script>`;
 const entry = `import {createApp} from 'vue';import Fixture from '/@role-layout.vue';createApp(Fixture).mount('#app');`;
@@ -48,15 +50,28 @@ try {
   const requests=[], unexpected=[], errors=[], checks=[];
   page.on('pageerror', error=>errors.push(error.stack||error.message));
   let empty=false, failure=0, partial=false, permissionVersion=1, repairSize=1, riskSize=1, noticeSize=1;
+  let truncatedRepairPage=false,liveGuard=false;
   await page.route('**/*', async route=>{
     const request=route.request(), url=new URL(request.url()), scope=url.searchParams.get('scope')||'A';
     if (url.origin!==origin) { unexpected.push('external '+url.origin); return route.abort(); }
     if (url.pathname==='/fixture') return route.fulfill({contentType:'text/html',body:
-      '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="app"></div><script type="module" src="/@role-layout.js"></script>'});
+      '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="page-back-slot"></div><div id="app"></div><script type="module" src="/@role-layout.js"></script>'});
     if (!url.pathname.startsWith('/api/')) return route.continue();
     requests.push([request.method(),url.pathname]);
     if (request.method()!=='GET') {unexpected.push(request.method()+' '+url.pathname); return route.abort();}
     const ok=data=>route.fulfill({json:{ok:true,data}});
+    if(url.pathname==='/api/repair-management/health')return ok({clean:true});
+    if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
+    if(url.pathname==='/api/repair-management/sync-status')return ok({status:'completed'});
+    if (url.pathname==='/api/repair-management/records' || url.pathname.startsWith('/api/repair-management/records/repair-'+scope)) {
+      const record={record_id:url.searchParams.get('focus_record_id')||url.pathname.split('/records/')[1]||'repair-'+scope,title:'隔离维修待办',building:scope,workflow:'维修中',
+        fields:{'维修名称':'隔离维修待办','所属数据中心/楼栋-使用':scope+'楼'},raw_fields:{}};
+      return ok(url.pathname.endsWith('/records')?{fields:[],records:[record],total:1}:{record});
+    }
+    if(url.pathname==='/api/repair-management/followups')return ok({fields:[],records:[],total:0,shared_fields:{}});
+    if (url.pathname==='/api/assistant/icon-weather') return ok({available:false});
+    if (url.pathname==='/api/personal-calendar/weather') return ok({warning_ready:true,alerts:[],guard_actions:[]});
+    if (url.pathname==='/api/personal-calendar') return ok({month:url.searchParams.get('month'),days:{},roster_dates:['2026-11-18'],unavailable:[]});
     if (url.pathname.startsWith('/api/workspace-layouts/')) return ok({revision:1,value:{version:1,widgets:[
       {kind:'shortcuts',links:['accounts','learning','event','learning','cabinet']},
     ]}});
@@ -66,11 +81,19 @@ try {
         id:'event-'+scope,title:'隔离处理中事件',status:'处理中',occurrence_time:'2026-11-18 10:00',level:'I2',
       }]});
     }
+    if (url.pathname==='/api/events/overview') return ok({scope,records:[],stats:{},items:[]});
     if (url.pathname==='/api/repair-management/status') {
-      const next=Number(url.searchParams.get('offset')||0)>0;
-      return ok({total:empty?0:partial?100:repairSize,records:empty?[]:Array.from({length:partial?1:repairSize},(_,i)=>({
-        record_id:next?'next-page':'repair-'+scope+(i?'-'+i:''),title:next?'隔离维修下一页':'隔离维修待办'+(i?' '+(i+1):''),building:scope,workflow:'维修中',
-      }))});
+      const limit=Number(url.searchParams.get('limit')), offset=Number(url.searchParams.get('offset')||0);
+      assert.ok(limit>0);
+      const total=empty?0:partial?2*limit+1:repairSize;
+      const records=Array.from({length:Math.max(0,Math.min(limit,total-offset))},(_,i)=>{
+        // A non-final API page must be full. Completed records occupy slots but are not todos.
+        const completed=partial && (i>0 || offset===2*limit);
+        return {record_id:'repair-'+scope+(offset+i?'-'+(offset+i):''),
+          title:offset===limit&&i===0?'隔离维修下一页':'隔离维修待办'+(i?' '+(i+1):''),
+          building:scope,workflow:completed?'已完成':'维修中',is_completed:completed};
+      });
+      return ok({total,records:truncatedRepairPage?records.slice(0,1):records});
     }
     if (url.pathname==='/api/workbench') return ok({ongoing:empty?[]:Array.from({length:noticeSize},(_,i)=>
       noticeSize===1?{active_item_id:'change-live',work_type:'change',title:'隔离变更只读项',scope,status:'开始'}
@@ -79,7 +102,7 @@ try {
       ongoing_pagination:{total_pages:1},records_pagination:{total_pages:1}});
     if (url.pathname==='/api/workbench-events') return ok({items:empty?[]:[{event_id:'notice-live',state:'active',metadata:{summary:'隔离事件通告'}}]});
     if (url.pathname==='/api/risk-inspections') return ok({total:empty?0:riskSize,items:empty?[]:Array.from({length:riskSize},(_,i)=>({id:'risk-'+i,name:'隔离专项排查'+(i?' '+(i+1):''),total:2,approved:1,submitted:1,status:'active'}))});
-    if (url.pathname==='/api/critical-guard/tasks') return ok({tasks:[{task_id:'guard-done',title:'隔离已完成重保',complete:true,status:'published'}]});
+    if (url.pathname==='/api/critical-guard/tasks') return ok({tasks:[...(liveGuard?[{task_id:'guard-active',title:'现场重保',complete:false,status:'published'}]:[]),{task_id:'guard-done',title:'隔离已完成重保',complete:true,status:'published'}]});
     if (url.pathname==='/api/cabinet-power/batches') return ok({total:1,items:[{batch_id:'cab-done',title:'隔离已完成机柜',is_todo:false}]});
     if (url.pathname==='/api/drills') return ok({items:[{drill_id:'drill-done',name:'隔离已完成演练',status:'published',execution:{status:'synced'}}]});
     if (url.pathname==='/api/engineer/mop/bootstrap') return ok({notices:[]});
@@ -102,31 +125,73 @@ try {
   const actor=(id,category,modules=full,extra={})=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true,...extra});
   const settle=()=>page.waitForFunction(()=>{
     const home=document.querySelector('.wb-home');
-    return home&&!/正在读取|待加载/.test(home.textContent);
+    return home&&!home.querySelector('.wb-todo-panel[aria-busy="true"]')&&!/正在读取|待加载/.test(home.textContent);
   });
   const set=async account=>{await page.evaluate(account=>window.setAccount(account),account);await settle();};
-  const todo=page.getByRole('region',{name:/待办事项/});
-  const overview=page.locator('.wb-focus');
-  const focusCard=label=>overview.locator('.wb-focus-card').filter({has:page.getByText(label,{exact:true})});
-  const taskModule=id=>todo.locator('.wb-task-module[data-source="'+id+'"]');
-  const moduleRows=id=>taskModule(id).locator('.wb-task-row').count();
-  const counts=async(shown,total)=>{
-    assert.equal(await todo.locator('.wb-task-row').count(),shown);
-    assert.match(await todo.locator('.wb-todo-toolbar .wb-task-count').innerText(),new RegExp('已显示 '+shown+' / '+total+' 项'));
-  };
+  const todo=page.getByRole('region',{name:'待办办理',exact:true});
+  const queue=todo.getByRole('list',{name:'待办模块',exact:true});
+  const tiles=queue.locator('.wb-task-tile');
+  const tile=key=>queue.locator('.wb-task-tile[data-group="'+key+'"]');
+  const dialog=page.getByRole('dialog',{name:'模块待办条目',exact:true});
+  const rowsOf=id=>dialog.locator('.wb-task-row[data-source="'+id+'"]');
+  const health=todo.locator('.queue-health');
+  const more=todo.getByRole('button',{name:'读取更多待办',exact:true});
+  async function open(key){
+    await tile(key).waitFor();
+    if(await tile(key).getAttribute('aria-expanded')!=='true')await tile(key).click();
+    await dialog.waitFor();
+  }
+  async function close(){
+    await dialog.getByRole('button',{name:'关闭待办条目'}).click();await dialog.waitFor({state:'hidden'});
+  }
+  async function counts(total){
+    assert.equal(await tiles.evaluateAll(items=>items.reduce((n,item)=>n+Number(item.dataset.count),0)),total);
+    assert.equal(await todo.locator('.queue-title .wb-task-count').getAttribute('aria-label'),'已读取 '+total+' 项');
+  }
+  async function checkInlineRepair(scope){
+    await open('repair_management');
+    const before=page.url();
+    const focused=page.waitForRequest(request=>{
+      const url=new URL(request.url());
+      return url.pathname==='/api/repair-management/records' && url.searchParams.get('scope')===scope
+        && url.searchParams.get('focus_record_id')==='repair-'+scope;
+    });
+    await todo.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click();
+    await focused;
+    const panel=page.getByRole('region',{name:'办理 隔离维修待办',exact:true});
+    await panel.locator('[data-module-widget="repair_management"]').waitFor();
+    assert.equal(page.url(),before,'opening an exact record keeps the current workbench');
+    await page.getByRole('button',{name:'关闭维修项目',exact:true}).click();
+    await panel.getByRole('button',{name:'独立页面',exact:true}).click();
+    await page.waitForURL(url=>url.searchParams.get('__page')==='/repair-management');
+    const params=new URL(page.url()).searchParams;
+    assert.equal(params.get('scope'),scope);
+    assert.equal(params.get('record_id'),'repair-'+scope);
+    assert.equal(params.get('workbench_return'),scope);
+    await page.goBack();
+    await panel.getByRole('button',{name:'关闭待办办理',exact:true}).click();
+    await panel.waitFor({state:'detached'});
+  }
 
   await set(actor('manager-single','manager'));
   assert.match(await page.locator('.wb-identity').innerText(),/园区经理/);
   assert.equal(await todo.getByText('隔离维保计划',{exact:true}).count(),0,'single-building manager must retain the manager notice boundary');
-  assert.equal(await todo.getByRole('button',{name:/隔离变更只读项/}).count(),0);
-  assert.ok(await todo.locator('.wb-read-only').count()>0);
-  await focusCard('通告信息').click();
-  const drawer=page.locator('.n-drawer');
-  await drawer.getByText('隔离变更只读项',{exact:true}).waitFor();
-  assert.equal(await drawer.getByRole('button',{name:/办理|开始|更新|打开原模块/}).count(),0);
-  await page.keyboard.press('Escape');
-  checks.push('single-building manager classification, maintenance exclusion and read-only notice drawer');
+  assert.equal(await tile('notices:维保').count(),0);
+  await open('notices:变更');
+  const managerNotice=rowsOf('notices').filter({hasText:'隔离变更只读项'});
+  const viewNotice=managerNotice.getByRole('button',{name:'查看 隔离变更只读项',exact:true});
+  assert.equal(await managerNotice.getByRole('button').count(),1,'manager has only the read action on this notice');
+  await viewNotice.click();
+  const readOnlyDetail=page.getByRole('region',{name:'查看 隔离变更只读项',exact:true});
+  await readOnlyDetail.getByText('开始时间',{exact:true}).waitFor();
+  assert.deepEqual(await readOnlyDetail.getByRole('button').evaluateAll(buttons=>buttons.map(button=>button.getAttribute('aria-label'))),['关闭只读详情']);
+  assert.equal(await page.locator('[data-module-widget]').count(),0,'viewing a notice must not mount a business editor');
+  await readOnlyDetail.getByRole('button',{name:'关闭只读详情'}).click();
+  checks.push('single-building manager classification, maintenance exclusion and read-only notice details');
 
+  liveGuard=true;
+  await set(actor('group-priority','manager'));
+  assert.deepEqual((await tiles.evaluateAll(items=>items.map(item=>item.dataset.group))).slice(0,4),['events','critical_guard','notices:变更','risk_inspection']);
   const dutyStart=requests.length;
   await set(actor('shared-duty','duty'));
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
@@ -134,10 +199,15 @@ try {
   assert.equal(await page.getByText(/画像|个人学练/).count(),0);
   assert.ok(!requests.slice(dutyStart).some(([,url])=>url.startsWith('/api/learning/')));
   assert.equal(await page.getByText('隔离已完成演练',{exact:true}).count(),0);
-  assert.equal(await focusCard('待完成演练').count(),0);
-  assert.equal(await todo.getByRole('list',{name:'计划通告',exact:true}).count(),1);
-  assert.equal(await todo.getByRole('list',{name:'进行中通告',exact:true}).count(),1);
-  checks.push('shared duty hides learning including saved preferences; completed sources collapse; notice groups preserved');
+  assert.equal(await rowsOf('drills').count(),0);
+  await open('notices:维保');
+  assert.deepEqual((await tiles.evaluateAll(items=>items.map(item=>item.dataset.group))).slice(0,3),['events','critical_guard','notices:变更'],'one event tile leads the duty desk');
+  assert.equal(await tile('event_notices').count(),0);
+  liveGuard=false;
+  await rowsOf('notices').getByRole('button',{name:'开始 隔离维保计划',exact:true}).waitFor();
+  await open('notices:变更');
+  await rowsOf('notices').getByRole('button',{name:'更新／结束 隔离变更只读项',exact:true}).waitFor();
+  checks.push('shared duty hides learning including saved preferences and retains both notice actions in their own tiles');
 
   for (const [category,scopes,expected] of [
     ['manager',['A','B'],['事件管理','维修项目','画像学练','重保管理','专项排查']],
@@ -152,155 +222,156 @@ try {
     assert.deepEqual(labels.map(label=>label.trim()).sort(),expected.sort());
     assert.equal(new Set(labels).size,labels.length);
     assert.equal(await page.locator('.wb-source-card').count(),0,'one business overview replaces separate source cards');
-    assert.equal(await overview.count(),1);
-    const sourceLabels=await overview.locator('.wb-focus-card > span').allTextContents();
-    assert.equal(new Set(sourceLabels).size,sourceLabels.length);
+    assert.equal(await queue.count(),1);
+    assert.equal(await todo.getByLabel('业务分类').count(),0);
     for (const width of [1800,1440,1024,800,390]) {
       await page.setViewportSize({width,height:1100}); await settle();
       const geometry=await page.evaluate(()=>{
         const rect=element=>{const r=element.getBoundingClientRect();return {top:r.top,bottom:r.bottom,left:r.left,right:r.right,height:r.height,width:r.width};};
         return {overflow:document.documentElement.scrollWidth>innerWidth,
-          controls:[...document.querySelectorAll('.wb-shortcut,.wb-task-row,.wb-task-filters select,.wb-task-filters input')].map(rect),
+          controls:[...document.querySelectorAll('.wb-shortcut,.wb-task-tile,.queue-filters input')].map(rect),
           emptyCheck:document.querySelector('.wb-check-panel .v2-check-task > .n-empty')?rect(document.querySelector('.wb-check-panel')):null,
-          grids:[...document.querySelectorAll('.wb-module-grid')].map(grid=>({width:grid.getBoundingClientRect().width,
-            cards:[...grid.querySelectorAll('.wb-task-module,.wb-period-card,.wb-cold-status,.wb-focus,.wb-check-panel,.wb-shortcut-panel')].map(rect),
-            bars:[...grid.querySelectorAll('.wb-todo-toolbar,.wb-period-header,.wb-todo-panel > .wb-queue-status,.wb-todo-panel > .wb-list-footer')].map(rect)}))};
+          rows:[...document.querySelectorAll('.wb-task-tile')].map(rect)};
       });
       assert.equal(geometry.overflow,false,category+' overflow at '+width);
       assert.ok(geometry.controls.every(rect=>rect.height<=96),category+' controls must stay compact at '+width);
-      if (geometry.emptyCheck) assert.ok(geometry.emptyCheck.height<=140,'empty pre-shift check stays compact and keeps its controls');
-      for (const grid of geometry.grids) {
-        const columns=new Set(grid.cards.map(card=>Math.round(card.left))).size;
-        if ([1800,1440,390].includes(width)) assert.equal(columns,Math.min(grid.cards.length,width===1800?3:width===1440?2:1),category+' module columns at '+width);
-        const boxes=[...grid.cards,...grid.bars];
-        for (let i=0;i<boxes.length;i++) for (let j=i+1;j<boxes.length;j++) {
-          const a=boxes[i],b=boxes[j];
-          assert.ok(a.right<=b.left+1||b.right<=a.left+1||a.bottom<=b.top+1||b.bottom<=a.top+1,'module cards never overlap');
-        }
-        if (columns>1) assert.ok(grid.cards.every(card=>card.width<grid.width*.8),'business modules must not span full rows');
-      }
+      if (geometry.emptyCheck) assert.ok(geometry.emptyCheck.height<=140,category+' empty pre-shift check at '+width+': '+geometry.emptyCheck.height+'px');
+      const boxes=geometry.rows;
+      assert.ok(boxes.length,category+' has tasks to measure');
+      assert.equal(new Set(boxes.map(box=>Math.round(box.left))).size>1,boxes.length>1,'available tiles share a row');
+      assert.ok(boxes.every((box,i)=>boxes.slice(i+1).every(next=>box.right<=next.left+1||box.bottom<=next.top+1)),'module tiles never overlap');
       if ([1800,1440,390].includes(width)) await page.screenshot({path:path.join(output,category+'-'+scopes.length+'-'+width+'.png'),fullPage:true,animations:'disabled'});
     }
   }
-  checks.push('six role/scope combinations: 1800 three-column, 1440 two-column, 390 single-column modules; 1024/800 overflow and compact controls; chart/cold/overview cards share the grid');
+  checks.push('six role/scope combinations at five widths: one tile grid, no overlaps or horizontal overflow, compact controls');
 
   await set(actor('engineer-restricted','engineer',['event','learning','cabinet','accounts']));
   assert.equal(await page.locator('.wb-shortcut').count(),0,'job recommendations cannot create module grants');
   assert.equal(await todo.count(),0);
-  assert.equal(await overview.count(),0);
   await set(actor('engineer-action','engineer',['repair_management','risk_inspection']));
-  await todo.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click();
-  assert.match(await page.evaluate(()=>window.opened),/record_id=repair-A.*workbench_return=A/);
+  await checkInlineRepair('A');
   checks.push('recommendations require real module grants; exact-record action and return scope preserved');
 
-  repairSize=7; riskSize=7;
+  repairSize=12; riskSize=7;
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
-  await counts(8,14);
-  assert.equal(await moduleRows('repair_management'),4); assert.equal(await moduleRows('risk_inspection'),4);
+  await counts(19);
   const localReads=requests.length;
-  await taskModule('repair_management').getByRole('button',{name:'显示更多待跟进维修',exact:true}).click();
-  await counts(11,14);
-  assert.equal(await moduleRows('risk_inspection'),4,'one module expansion leaves the other limit alone');
-  assert.equal(requests.length,localReads,'expanding already-loaded rows makes no API calls');
-  await todo.getByLabel('业务分类').selectOption('repair_management');
-  await todo.getByLabel('搜索待办').fill('7');
-  await counts(1,1);
-  assert.equal(await todo.locator('.wb-task-module').count(),1);
-  await todo.getByLabel('搜索待办').fill(''); await todo.getByLabel('业务分类').selectOption('');
-  await counts(8,14);
-  await todo.getByRole('button',{name:'只看逾期',exact:true}).click();
-  assert.equal(await todo.locator('.wb-task-row').count(),0);
-  await todo.getByRole('button',{name:'只看逾期',exact:true}).click(); await counts(8,14);
-  await todo.getByRole('button',{name:'显示更多待办',exact:true}).click(); await counts(14,14);
-  assert.equal(await todo.getByRole('button',{name:/显示更多/}).count(),0);
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(14,14);
-  for (const width of [1440,1800,390]) {
-    await page.setViewportSize({width,height:1100}); await settle();
-    await page.screenshot({path:path.join(output,'dense-modules-'+width+'.png'),fullPage:true,animations:'disabled'});
+  await open('risk_inspection');assert.equal(await rowsOf('risk_inspection').count(),7);
+  await open('repair_management');assert.equal(await rowsOf('repair_management').count(),12);
+  const titles=await dialog.locator('.task-title strong').allTextContents();
+  assert.deepEqual(titles.map(s=>s.length),titles.map(s=>s.length).sort((a,b)=>a-b),'short titles lead equally important rows');
+  assert.equal(requests.length,localReads,'opening loaded groups makes no requests');
+  const lastTitle='隔离维修待办 12';
+  const selectedRequest=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/repair-management/records' && new URL(req.url()).searchParams.get('focus_record_id')==='repair-A-11');
+  await dialog.getByRole('button',{name:'办理 '+lastTitle,exact:true}).click();await selectedRequest;
+  const lastCase=page.getByRole('region',{name:'办理 '+lastTitle,exact:true});
+  await lastCase.locator('[data-module-widget=repair_management]').waitFor();
+  await page.getByRole('button',{name:'关闭维修项目',exact:true}).click();
+  await lastCase.getByRole('button',{name:'关闭待办办理',exact:true}).click();await settle();
+  await todo.getByLabel('搜索待办').fill('维修 7');await counts(1);
+  await open('repair_management');assert.equal(await rowsOf('repair_management').count(),1);await close();
+  await todo.getByLabel('搜索待办').fill('');await counts(19);
+  assert.equal(await more.count(),0);
+  await open('repair_management');
+  repairSize=11;
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));await settle();
+  assert.equal(await rowsOf('repair_management').count(),11);
+  assert.equal(await tile('repair_management').getAttribute('data-count'),'11','refresh updates both open group and tile');
+  assert.equal(await dialog.getByRole('button',{name:'办理 '+lastTitle,exact:true}).count(),0);
+  repairSize=12;
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));await settle();
+  assert.equal(await rowsOf('repair_management').count(),12);
+  for (const width of [1440,1800,390]){
+    await page.setViewportSize({width,height:1000});await settle();
+    const rect=await dialog.boundingBox();assert(rect.x>=0 && rect.x+rect.width<=width+1);
+    await page.screenshot({path:path.join(output,'dense-modules-'+width+'.png'),animations:'disabled'});
   }
   await set(actor('multi-scope-counts','engineer',['repair_management','risk_inspection'],{testScopes:['A','B']}));
-  await todo.getByRole('button',{name:'显示更多待办',exact:true}).click(); await counts(14,14);
-  await page.evaluate(()=>window.setScope('B')); await settle(); await counts(8,14);
-  await todo.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click();
-  assert.match(await page.evaluate(()=>window.opened),/scope=B&record_id=repair-B.*workbench_return=B/);
-  checks.push('per-source visible counts, independent expansion, filtering/search/overdue reset, refresh persistence and scope reset match rendered rows');
+  await counts(19);await open('repair_management');
+  await page.evaluate(()=>window.setScope('B')); await settle(); await counts(19);
+  assert.equal(await dialog.count(),0,'changing scope closes the previous group');
+  await checkInlineRepair('B');
+  checks.push('all loaded rows accessible beyond eight, short titles first, search, refresh, no overflow, and scope reset');
 
   noticeSize=7;
   const beforeDuty=requests.length;
-  await set(actor('combined-notices','duty'));
-  await counts(4,14);
-  assert.equal(await todo.locator('.wb-task-module').count(),1);
-  assert.equal(await todo.getByRole('list',{name:'计划通告',exact:true}).count(),1);
-  assert.equal(await todo.getByRole('list',{name:'进行中通告',exact:true}).count(),1);
-  assert.equal(await todo.getByText('隔离维保计划',{exact:true}).count(),1,'linked plan and active notice stay deduplicated');
+  await set(actor('combined-notices','duty'));await counts(15);
   const noticeReads=requests.length;
-  for (let i=0;i<3;i++) await taskModule('notices').getByRole('button',{name:'显示更多通告待办',exact:true}).click();
-  await counts(14,14);
+  await open('events');await rowsOf('events').getByRole('button',{name:'办理 隔离处理中事件'}).waitFor();
+  assert.equal(await tile('events').getAttribute('data-count'),'2');
+  await rowsOf('event_notices').getByRole('button',{name:'办理 隔离事件通告'}).waitFor();
+  await open('notices:维保');assert.equal(await rowsOf('notices').count(),13);
+  assert.equal(await rowsOf('notices').getByText('隔离维保计划',{exact:true}).count(),1,'linked plan and active notice appear once');
+  await close();
   assert.equal(requests.length,noticeReads);
-  assert.equal(await todo.getByRole('button',{name:/显示更多/}).count(),0);
+  assert.equal(await more.count(),0);
   assert.ok(!requests.slice(beforeDuty).some(([,url])=>url.startsWith('/api/learning/')));
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(14,14);
-  await todo.getByLabel('业务分类').selectOption('event_notices'); await counts(1,1);
-  assert.equal(await todo.getByRole('list',{name:'计划通告',exact:true}).count(),0);
-  checks.push('duty notice subgroups share a four-row initial budget, keep both states discoverable, deduplicate linked notices and expand without phantom pagination');
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(15);
+  await todo.getByLabel('搜索待办').fill('事件通告'); await counts(1);
+  await open('events');assert.equal(await rowsOf('event_notices').count(),1);
+  checks.push('both event sources appear under one tile, linked notices deduplicate, duty grants and module keyword search preserved');
   noticeSize=1; repairSize=1; partial=true;
   await set(actor('mixed-pagination','engineer',['repair_management','risk_inspection']));
-  await counts(5,8);
+  await counts(8);
   const repairPages=requests.filter(([,url])=>url==='/api/repair-management/status').length;
   const riskPages=requests.filter(([,url])=>url==='/api/risk-inspections').length;
-  await todo.getByRole('button',{name:'显示更多待办',exact:true}).click();
-  await todo.getByRole('button',{name:'办理 隔离维修下一页',exact:true}).waitFor(); await settle();
-  await counts(9,9);
+  await open('repair_management');
+  await dialog.getByRole('button',{name:'继续读取'}).click();
+  await dialog.getByRole('button',{name:'办理 隔离维修下一页',exact:true}).waitFor();await settle();
+  await counts(9);
   assert.ok(requests.filter(([,url])=>url==='/api/repair-management/status').length>repairPages);
-  assert.equal(requests.filter(([,url])=>url==='/api/risk-inspections').length,riskPages,'local rows in another module do not trigger its API');
-  assert.match(await taskModule('repair_management').locator('.wb-task-count').innerText(),/已读取/);
-  checks.push('global display-more expands local rows and independently reads the paginated module; partial counts remain explicitly loaded counts');
+  assert.equal(requests.filter(([,url])=>url==='/api/risk-inspections').length,riskPages,'another group makes no extra API reads');
+  await close();await more.click();await settle();assert.equal(await more.count(),0);
+  checks.push('open-group remote pagination and globally discoverable remaining pages');
   riskSize=1;
-  partial=true;
-  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
-  assert.equal(await focusCard('待跟进维修').locator('strong').innerText(),'—','partial page is never a total');
-  await focusCard('待跟进维修').click();
-  const repairReads=requests.filter(([,url])=>url==='/api/repair-management/status').length;
-  await drawer.getByRole('button',{name:'读取更多明细',exact:true}).click();
-  await page.waitForFunction(()=>!document.querySelector('.n-drawer')?.textContent.includes('正在读取'));
-  assert.ok(requests.filter(([,url])=>url==='/api/repair-management/status').length>repairReads);
-  await page.keyboard.press('Escape');
+  truncatedRepairPage=true;
+  await set(actor('truncated-repair','engineer',['repair_management']));
+  assert.equal(await todo.locator('.queue-title .wb-task-count').count(),0,'a truncated non-final page must not appear as zero');
+  assert.equal(await rowsOf('repair_management').count(),0,'unverified rows from an incomplete response must not become todos');
+  await health.locator('summary').click();
+  truncatedRepairPage=false;
+  await health.getByRole('button',{name:'重试待跟进维修',exact:true}).click();
+  await open('repair_management');await dialog.getByText('隔离维修待办',{exact:true}).waitFor();
   partial=false; empty=true;
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
-  assert.equal(await overview.count(),0,'empty/completed overview does not reserve rail space');
-  assert.equal(await page.locator('.wb-task-module').count(),0);
-  await todo.getByRole('status').getByText('当前没有未完成的待办。',{exact:true}).waitFor();
-  checks.push('partial counts are unknown; empty/completed business overview and rail collapse');
+  assert.equal(await queue.count(),0);
+  await todo.getByRole('status').filter({hasText:'暂无待办'}).waitFor();
+  checks.push('truncated pages cannot create tasks and are retryable; empty queue is compact');
 
   empty=false; failure=500;
   await set(actor('failed-source','manager',['event']));
-  assert.equal(await focusCard('处理中事件').locator('strong').innerText(),'—');
-  await focusCard('处理中事件').click();
-  await drawer.getByRole('button',{name:'重试',exact:true}).waitFor();
-  failure=0; await drawer.getByRole('button',{name:'重试',exact:true}).click();
-  await drawer.getByText('隔离处理中事件',{exact:true}).waitFor();
-  await page.keyboard.press('Escape');
+  await health.locator('summary').click();
+  failure=0; await health.getByRole('button',{name:'重试处理中事件',exact:true}).click();
+  await open('events');await dialog.getByText('隔离处理中事件',{exact:true}).waitFor();
   failure=403;
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
-  assert.equal(await focusCard('处理中事件').isDisabled(),true);
+  assert.equal(await health.count(),0,'revoked source no longer offers retry');
   assert.equal(await todo.getByText('隔离处理中事件',{exact:true}).count(),0);
-  checks.push('failed sources remain visible with retry; permission denial clears stale rows and disables details');
+  checks.push('failed sources remain visible with retry; permission denial clears stale rows and removes the details action');
   failure=0;
 
   await set(actor('admin-permission','administrator',['accounts'],{can_manage_accounts:true}));
-  await todo.getByRole('button',{name:'办理 隔离权限申请 1',exact:true}).waitFor();
+  await open('accounts');await dialog.getByRole('button',{name:'办理 隔离权限申请 1',exact:true}).waitFor();
   await set(actor('admin-permission','administrator',['accounts'],{can_manage_accounts:false}));
   assert.equal(await page.getByText('隔离权限申请 1',{exact:true}).count(),0);
   permissionVersion=2;
   await set(actor('admin-permission','administrator',['accounts'],{can_manage_accounts:true}));
-  await todo.getByRole('button',{name:'办理 隔离权限申请 2',exact:true}).waitFor();
+  await open('accounts');await dialog.getByRole('button',{name:'办理 隔离权限申请 2',exact:true}).waitFor();
   checks.push('account-management grant changes reset and reload the same-account workbench');
 
   await page.setViewportSize({width:1440,height:1100});
   await set(actor('theme-check','supervisor'));
-  const light=await overview.evaluate(element=>getComputedStyle(element).backgroundColor);
-  await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
-  const dark=await overview.evaluate(element=>getComputedStyle(element).backgroundColor);
+  const urgent=page.getByRole('region',{name:'紧急事项',exact:true});
+  await urgent.getByRole('button',{name:'I2事件，办理 隔离处理中事件',exact:true}).click();
+  const eventPanel=page.getByRole('region',{name:'办理 隔离处理中事件',exact:true});
+  await eventPanel.locator('[data-module-widget="event"]').waitFor();
+  await eventPanel.getByRole('button',{name:'关闭待办办理',exact:true}).click();
+  await eventPanel.waitFor({state:'hidden'});
+  checks.push('I2 events remain prominent and open the matching record');
+  const surface=todo;
+  const light=await surface.evaluate(element=>getComputedStyle(element).backgroundColor);
+  await page.evaluate(()=>window.setNightMode(true));
+  const dark=await surface.evaluate(element=>getComputedStyle(element).backgroundColor);
   assert.notEqual(light,dark,'workbench follows existing dark theme');
   await page.screenshot({path:path.join(output,'dark-1440.png'),fullPage:true,animations:'disabled'});
   checks.push('existing light/dark theme surface is inherited');

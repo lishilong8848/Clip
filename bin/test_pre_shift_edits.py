@@ -206,11 +206,11 @@ class SubmittedEditTests(Base):
     def test_invalid_replacement_and_lease_or_commit_failure_leave_old_photo_active(self):
         self.submit_task()
         old = self.upload(kind='handover', revision=1)
-        for failure in ('mime', 'lease', 'transaction'):
+        for failure in ('unsafe_content', 'lease', 'transaction'):
             with self.subTest(failure=failure):
                 session = self.staged(kind='handover', revision=2, replace_file_id=old['id'], content=self.image('blue'))
-                if failure == 'mime':
-                    Path(session['path']).write_bytes(b'not an image')
+                if failure == 'unsafe_content':
+                    Path(session['path']).write_bytes(b'<html>unexpected content</html>')
                 if failure == 'lease':
                     with self.service.connection(True) as conn:
                         conn.execute('UPDATE photo_deliveries SET lease=? WHERE file_id=?', (self.current.timestamp() + 60, old['id']))

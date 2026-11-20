@@ -1,0 +1,109 @@
+/* V2 screen surfaces. Workbook cells, documents and print layouts keep their own formatting. */
+@media screen {
+  html.workspace-v2[data-v2-theme] {
+    --soft-face: var(--v2-palette-surface);
+    --soft-field: var(--v2-palette-soft);
+    --soft-edge: var(--v2-palette-border);
+    --soft-glint: rgb(255 255 255 / .96);
+    --soft-shade: rgb(135 143 160 / .25);
+    --soft-raised: -3px -3px 8px var(--soft-glint), 4px 4px 10px var(--soft-shade);
+    --soft-key: inset 0 1px 0 var(--soft-glint), 0 2px 3px var(--soft-shade);
+    --soft-inset: inset 2px 2px 4px var(--soft-shade), inset -2px -2px 3px var(--soft-glint);
+    --soft-radius: 12px;
+    --v2-surface-shadow: var(--soft-raised);
+    --v2-record-shadow: inset 0 1px 0 var(--soft-glint);
+    --v2-record-hover-shadow: var(--soft-key);
+  }
+  html.workspace-v2[data-v2-theme=dark] {
+    --soft-glint: rgb(180 222 214 / .09);
+    --soft-shade: rgb(4 12 15 / .53);
+  }
+  html.workspace-v2[data-v2-theme] .v2-shell:not(.is-print) {
+    background: var(--v2-bg);
+    --v2-nav-color: var(--v2-palette-accent);
+  }
+  html.workspace-v2 .v2-main { font-variant-numeric: tabular-nums; }
+  html.workspace-v2[data-v2-theme] .v2-shell:not(.is-print,.is-inspection-immersive) > .v2-main {
+    padding-inline: clamp(10px, 1.35vw, 22px);
+    padding-top: 12px;
+  }
+  html.workspace-v2 .v2-breadcrumb {
+    display:flex;align-items:center;gap:8px;min-height:28px;margin-bottom:6px;
+    color:var(--v2-muted);font-size:12px;
+  }
+  .v2-breadcrumb button {
+    display:grid;place-items:center;width:32px;height:28px;cursor:pointer;
+    border:0;border-radius:6px;background:var(--soft-field);color:var(--v2-blue);
+  }
+  .v2-breadcrumb strong {color:var(--v2-ink);font-weight:650}
+
+  html.workspace-v2[data-v2-theme] .v2-mobile-nav > button {
+    display:grid;place-content:center;justify-items:center;gap:2px;min-width:0;min-height:48px;
+    border:0;background:transparent;color:var(--v2-muted);font-weight:600;line-height:1.2;
+    font-family:inherit;font-size:12px;cursor:pointer;
+  }
+  html.workspace-v2 .mobile-nav-icon {display:grid;place-items:center;width:44px;height:25px;border-radius:8px}
+  html.workspace-v2 .v2-mobile-nav > button[aria-current=page] {color:var(--v2-blue);font-weight:700}
+  html.workspace-v2 .v2-mobile-nav > button[aria-current=page] .mobile-nav-icon {background:var(--v2-palette-selection);box-shadow:var(--soft-inset)}
+  html.workspace-v2 .v2-shell.is-mobile-workspace .v2-mobile-nav {
+    display:grid;grid-template-columns:repeat(4,minmax(0,1fr));background:var(--soft-face);
+    border-top:1px solid var(--soft-edge);box-shadow:0 -2px 9px var(--soft-shade);
+  }
+
+  /* Shared physical layers: the container is raised, the data is flat, inputs are recessed. */
+  html.workspace-v2[data-v2-theme] :is(.v2-main .grid-stack-item > .v2-widget,.n-modal.n-card,.n-drawer-content,
+    .v2-main .wb-panel,.v2-profile-identity,.v2-profile-access,.v2-main .eop-panel,.v2-main .tool-edit-panel,
+    .v2-main .zhihang-panel,.v2-main .login-panel,.v2-main .request-panel,.v2-main .v2-task-section) {
+    background:var(--soft-face);border:1px solid var(--soft-edge);border-radius:var(--soft-radius);box-shadow:var(--soft-raised);
+  }
+  html.workspace-v2[data-v2-theme] .v2-main .v2-widget-head {
+    min-height:34px;padding-inline:12px;background:var(--soft-face);border-bottom:1px solid var(--soft-edge);
+  }
+  html.workspace-v2[data-v2-theme] .v2-main :is(.v2-command-row,.v2-sop-filters,.eop-toolbar,.tool-tabs,.building-toolbar) {
+    gap:6px;margin-block:4px 8px;
+  }
+  html.workspace-v2[data-v2-theme] :is(.n-input:not(.n-input--disabled),.n-base-selection:not(.n-base-selection--disabled)) {
+    background:var(--soft-field);border-radius:8px;box-shadow:var(--soft-inset);
+  }
+  html.workspace-v2[data-v2-theme] .n-button:not(.n-button--text-type,.n-button--quaternary,.n-button--disabled,.n-button--ghost) {
+    box-shadow:var(--soft-key);
+  }
+  html.workspace-v2[data-v2-theme] .n-button:not(:disabled,.n-button--text-type,.n-button--disabled):active {
+    box-shadow:var(--soft-inset);
+  }
+  html.workspace-v2[data-v2-theme] :is(.n-base-select-menu,.n-dropdown-menu,.n-popover,.desk-popover) {
+    border:1px solid var(--soft-edge);box-shadow:var(--soft-raised);
+  }
+  html.workspace-v2[data-v2-theme] :is(button,a[href],input,select,textarea,[tabindex="0"]):focus-visible {
+    outline:2px solid var(--v2-blue);outline-offset:2px;
+  }
+
+  /* An untouched business layout follows its data; saved sizes and the layout editor use GridStack. */
+  html.workspace-v2 .v2-page-canvas > .v2-flow-grid {
+    display:grid;grid-template-columns:repeat(12,minmax(0,1fr));gap:12px;align-items:start;
+    height:auto!important;min-height:0!important;
+  }
+  html.workspace-v2 .v2-flow-grid > .grid-stack-item {
+    position:relative!important;inset:auto!important;width:auto!important;height:auto!important;
+    min-height:0;min-width:0;grid-column:span var(--widget-span);order:var(--widget-order);transform:none;
+  }
+  html.workspace-v2 .v2-flow-grid > .grid-stack-item > .v2-widget {position:relative;inset:auto;height:auto;min-height:0}
+  html.workspace-v2 .v2-flow-grid .v2-responsive-body {height:auto;min-height:0;max-width:100%}
+  @container (max-width:760px) {
+    html.workspace-v2 .v2-page-canvas > .v2-flow-grid > .grid-stack-item {grid-column:1/-1}
+  }
+  html.workspace-v2 .v2-functions .v2-function-groups {
+    display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,265px),1fr));gap:12px;align-items:start;
+  }
+  html.workspace-v2 .v2-functions .v2-function-groups > section {
+    padding:12px;background:var(--soft-face);border:1px solid var(--soft-edge);border-radius:var(--soft-radius);box-shadow:var(--soft-raised);
+  }
+  html.workspace-v2 .v2-functions .v2-function-groups h2 {color:var(--v2-ink);font-size:15px;margin:0 0 8px}
+  html.workspace-v2 .v2-functions .v2-feature-grid {grid-template-columns:minmax(0,1fr);gap:4px}
+  html.workspace-v2 .v2-functions .v2-feature-entry {min-width:0;height:42px;background:var(--soft-field);border:0;border-radius:8px}
+  html.workspace-v2 .v2-functions .v2-feature-icon {height:27px;background:var(--v2-palette-selection);color:var(--v2-blue)}
+  @media(max-width:600px){
+    html.workspace-v2 .v2-functions .v2-feature-grid {grid-template-columns:repeat(2,minmax(0,1fr))}
+    html.workspace-v2 .v2-functions .v2-feature-entry {min-height:44px;height:auto}
+  }
+}

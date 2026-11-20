@@ -44,9 +44,12 @@ ROUTES = {
     "completion": {"GET": "completion"},
     "workbench-summary": {"GET": "workbench_summary"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
+    "issues/pending-questions": {"GET": "issues.pending_questions"},
+    "issues/{id}/question": {"GET": "issue.question.get", "PUT": "issue.question.save"},
     "issues/{id}": {"GET": "issue.get", "PATCH": "issue.update"},
     "questions": {"GET": "questions.list", "POST": "question.save"},
     "questions/{id}": {"GET": "question.get", "PUT": "question.save"},
+    "questions/{id}/revision": {"GET": "question.revision.get", "PUT": "question.revision.save"},
     "questions/{id}/status": {"POST": "question.status"},
     "questions/{id}/copy": {"POST": "question.copy"},
     "attachments": {"POST": "attachments"},
@@ -343,6 +346,11 @@ def install_learning_routes(app, controller, runtime):
             if action == "bootstrap":
                 scope = query.get("scope", "" if actor["is_admin"] else actor["scope"])
                 data = await asyncio.to_thread(current.bootstrap, scope, actor)
+            elif action in {"issue.question.get", "issue.question.save"}:
+                from .learning_issue_cards import review_question
+                data = await asyncio.to_thread(review_question, current, runtime.auth_manager, actor, request.path_params["id"],
+                                               query.get("review_ticket", ""), payload if action.endswith(".save") else None,
+                                               group=query.get("group") == "1")
             elif action == "profile" and request.query_params.get("view") == "participation":
                 from .learning_personal import participation
                 data = await asyncio.to_thread(participation, current, actor, query)

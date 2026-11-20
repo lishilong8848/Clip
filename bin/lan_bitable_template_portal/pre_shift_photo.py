@@ -29,7 +29,7 @@ UPLOAD_IMAGE_EXTS = {'.jpg', '.jpeg', '.jpe', '.jfif', '.png', '.webp', '.heic',
                      '.psd', '.tga', '.pcx', '.ppm', '.pgm', '.pbm', '.pnm', '.qoi'}
 
 
-def prepare_upload(source, name):
+def prepare_upload(source, name, *, normalized_path=None):
     """Normalize common photo formats while preserving capture time and orientation."""
     if Path(name).suffix.lower() in {'.heic', '.heif', '.hif'} and register_heif_opener is None:
         raise ValueError('HEIC照片解码组件尚未就绪，请等待程序更新组件完成后重试；其他格式照片仍可上传。')
@@ -52,10 +52,12 @@ def prepare_upload(source, name):
                 converted.save(temporary, format='PNG' if ext == '.png' else 'JPEG', quality=95, exif=exif, comment=comment)
                 # Close the original Windows file before replacing it.
                 image.close()
-                temporary.replace(source)
+                temporary.replace(normalized_path or source)
             finally:
                 converted.close()
                 temporary.unlink(missing_ok=True)
+        else:
+            image.load()
         suffix = Path(name).suffix.lower()
         return name if suffix == ext or suffix == '.jpeg' and ext == '.jpg' else str(Path(name).with_suffix(ext))
 

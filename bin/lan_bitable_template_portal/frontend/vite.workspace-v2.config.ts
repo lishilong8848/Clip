@@ -1,4 +1,13 @@
 import { defineConfig } from 'vite';
+import {parse as parseComponent} from '@vue/compiler-sfc';
+// @ts-ignore V2-only presentation adapters are exercised in the browser build.
+import {adaptWorkspaceLibraryDesign} from './scripts/workspace-library-design.mjs';
+// @ts-ignore V2-only tool management templates share the existing controllers.
+import workspaceToolDesign from './scripts/workspace-tool-design.mjs';
+// @ts-ignore Builds the week/shift UI around the existing editable worksheet.
+import workspaceInspectionDesign from './scripts/workspace-inspection-design.mjs';
+// @ts-ignore V2 procedure forms reuse their original business controllers.
+import {adaptProcedureDesign} from './scripts/workspace-procedure-design.mjs';
 import vue from '@vitejs/plugin-vue';
 import { fileURLToPath, URL } from 'node:url';
 import { existsSync, readFileSync, readdirSync, unlinkSync } from 'node:fs';
@@ -54,7 +63,7 @@ export default defineConfig({
   root, publicDir:false, base: '/assets/workspace-v2/',
   css:{postcss:{plugins:[workspaceNightTheme()]}},
   preview: { proxy: { '/api': 'http://127.0.0.1:18766', '/workbench-lite': 'http://127.0.0.1:18766', '/sop-work-order': 'http://127.0.0.1:18766' } },
-  plugins: [{
+  plugins: [workspaceToolDesign(),workspaceInspectionDesign(), {
     name: 'workspace-business-imports', enforce: 'pre',
     resolveId(source, importer) {
       if(importer?.replace(/\\/g,'/').startsWith(root+'src/')&&source.endsWith('/VnetSelect.vue')&&!importer.includes('/workspace-v2/SingleSelect.vue'))return root+'src/workspace-v2/SingleSelect.vue';
@@ -72,6 +81,8 @@ export default defineConfig({
       const path=id.replace(/\\/g,'/');
       if(path===root+'src/api/client.ts')return {code:adaptNoticeParserClient(code),map:null};
       if(!path.startsWith(root+'src/')||!path.endsWith('.vue'))return;
+      const library=adaptWorkspaceLibraryDesign(code,path,(file:string)=>this.addWatchFile(file));
+      if(library!==null)return {code:adaptEmbeddedNavigation(library,path),map:null};
       let result=code;
       if(path===root+'src/components/LighthouseAssistant.vue')result=adaptAssistantLayout(result);
       if(path===root+'src/components/RiskInspectionPage.vue')result=result.replace('aria-label="风险排查"','aria-label="专项排查"').replace("'发布风险排查'", "'发布专项排查'").replace("detail?.name||'风险排查'", "detail?.name||'专项排查'");
@@ -107,7 +118,20 @@ export default defineConfig({
       result=adaptMotionControls(result);
       result=markFeedbackAlerts(result);
       result=portalFloatingControls(result);
+      result=adaptProcedureDesign(result,path,(file:string)=>this.addWatchFile(file));
       result=adaptSingleSelects(result,path);
+      // An independent V2 template consumes the same controller contract as its
+      // legacy counterpart. Only this build resolves these presentations.
+      const viewPath=join(root,'src/workspace-v2/views',path.split('/').pop()!.replace(/\.vue$/,'.html'));
+      if(path.startsWith(root+'src/components/') && existsSync(viewPath)){
+        this.addWatchFile(viewPath);
+        const {script,scriptSetup:controller}=parseComponent(result).descriptor;
+        if(!controller)throw new Error('Missing controller for '+viewPath);
+        const moduleScript=script?'<script lang="ts">'+script.content+'</script>\n':'';
+        const imports=path.endsWith('/CriticalGuardPage.vue')?'import {NModal} from "naive-ui";\n':
+          path.endsWith('/DingTalkNoticeSettings.vue')?'import ConfirmDialog from "./ConfirmDialog.vue";\n':'';
+        result=moduleScript+'<template>\n'+readFileSync(viewPath,'utf8')+'\n</template>\n<script setup lang="ts">\n'+imports+controller.content+'\n</script>';
+      }
       if(result!==code)return {code:result,map:null};
     },
   }, vue(), {

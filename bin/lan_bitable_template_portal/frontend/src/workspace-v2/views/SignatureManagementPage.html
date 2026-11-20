@@ -1,0 +1,131 @@
+<section class="ssig signature-management" aria-label="签名管理">
+  <section class="directory-panel" :aria-busy="loading || checking">
+    <header class="ssig-bar">
+      <VnetBackButton to="/"/>
+      <h1>签名管理</h1>
+      <template v-if="loggedIn && !checking">
+        <label class="ssig-search"><Search :size="16"/><input v-model="query" type="search" aria-label="搜索签名人员" placeholder="姓名、工号或岗位" @keydown.enter.prevent="load()"/></label>
+        <select v-model="source" aria-label="人员来源"><option value="">全部来源</option><option value="staff">正式人员</option><option value="external">临时人员</option></select>
+        <select v-model="scope" aria-label="楼栋范围"><option value="">全部楼栋</option><option v-for="b in buildings" :key="b" :value="b">{{ buildingLabel(b) }}</option></select>
+        <select v-model="status" aria-label="签名状态"><option value="">全部状态</option><option value="signed">已有签名</option><option value="unsigned">未签名</option><option value="resign">需重新签名</option><option value="restricted">签名受限</option></select>
+        <button v-if="hasFilters" @click="clearFilters">清除筛选</button>
+        <button :disabled="loading || sending" aria-label="刷新签名" @click="load(true)"><RefreshCw :size="15"/>刷新</button>
+        <button v-if="canCreateTemporary" class="primary" :disabled="sending" @click="openCreate"><Plus :size="15"/>新增临时人员</button>
+      </template>
+    </header>
+    <p v-if="checking" role="status">正在确认登录状态…</p>
+    <div v-else-if="!loggedIn" class="ssig-line"><strong>登录后管理人员签名</strong><a :href="loginUrl">前往登录</a></div>
+    <template v-else>
+      <p v-if="notice" :role="noticeError?'alert':'status'">{{ notice }}</p>
+      <div class="ssig-line">
+        <strong>{{ resultRange }}</strong>
+        <span v-for="key in ['signed','unsigned','resign']" :key="key" v-show="counts[key]!=null">{{ stateLabel(key) }} {{ counts[key] }}</span>
+        <details v-if="Object.keys(sources).length" class="source-status"><summary>{{ Object.values(sources).some(s=>!s.ok)?'来源读取异常':'来源状态' }}</summary>
+          <span v-for="(s,key) in sources" :key="key">{{ key==='staff'?'正式人员表':'临时人员表' }} · {{ s.ok?'正常':'异常' }} · {{ dateText(s.loaded_at) }} {{ s.error }}</span>
+        </details>
+        <button v-if="canManageDirectory" :disabled="duplicateBusy || sending" @click="loadDuplicates">重复人员核对</button>
+      </div>
+      <div v-if="people.length" class="people" aria-label="人员目录">
+        <article v-for="p in people" :key="p.person_key || p.source+':'+p.record_id" class="person-card">
+          <div class="ssig-person"><div class="person-info"><strong>{{ p.name || '姓名未填写' }}</strong><small>{{ [p.source==='staff'?'正式人员':'临时人员',p.building,p.employee_no,p.position,p.team,p.specialty].filter(Boolean).join(' · ') }}</small></div>
+            <span class="state" :data-state="p.signature_status">{{ stateLabel(p.signature_status) }}</span></div>
+          <small v-if="p.origin_staff_record_id">已关联正式人员 {{ p.official_name || p.origin_staff_record_id }}</small>
+          <small v-if="p.identity_warning">{{ p.identity_warning }}</small>
+          <small v-if="p.effective_has_signature && p.effective_source && p.effective_source!==p.source">当前可用签名来自{{ p.effective_source==='staff'?'正式':'临时' }}人员档案</small>
+          <small v-if="p.signature_reason">{{ p.signature_reason }}</small>
+          <small v-if="p.request">{{ requestLabel(p.request.status) }}<template v-if="p.request.recipient_label"> · {{ p.request.recipient_label }}</template>
+            <template v-if="p.request.saved_at || p.request.sent_at"> · {{ dateText(p.request.saved_at || p.request.sent_at) }}</template><template v-if="p.request.error"> · {{ p.request.error }}</template></small>
+          <div class="ssig-actions">
+            <button v-if="p.can_preview && p.has_signature && p.record_id" @click="openPreview(p)"><Eye :size="14"/>查看签名</button>
+            <button v-if="p.can_request" :disabled="sending" @click="openSend(p)"><Link2 :size="14"/>{{ p.invite_only || p.directory_only ? '发送签名邀请' : p.has_signature ? '重新签名':'发送签名链接' }}</button>
+            <button v-if="canManageDirectory && p.source==='external' && p.record_id" :disabled="sending" @click="openAssociate(p)">关联正式人员</button>
+          </div>
+        </article>
+      </div>
+      <p v-else-if="loading" role="status">正在读取人员目录…</p><p v-else-if="!noticeError">没有符合条件的人员</p>
+      <nav v-if="totalPages>1" class="ssig-pager" aria-label="人员分页">
+        <button :disabled="loading || page<=1" @click="page--">上一页</button><span>{{ page }} / {{ totalPages }}</span><button :disabled="loading || page>=totalPages" @click="page++">下一页</button>
+      </nav>
+    </template>
+  </section>
+  <section v-if="loggedIn && canManageDirectory && showDuplicates" class="ssig-duplicates" aria-label="重复人员核对">
+    <div class="ssig-line"><h2>重复人员预检</h2><button :disabled="duplicateBusy" @click="loadDuplicates">重新读取</button><button :disabled="duplicateBusy" @click="showDuplicates=false">收起</button></div>
+    <p v-if="!duplicateGroups.length">未发现重复人员。</p>
+    <article v-for="(g,gi) in duplicateGroups" :key="g.version || gi" class="dup-group">
+      <h3>{{ g.name }} · {{ g.people.length }} 条记录</h3><p v-if="g.warning || g.reason">{{ g.warning || g.reason }}</p>
+      <div class="dup-grid"><div v-for="p in g.people" :key="p.record_id" class="duplicate-row">
+        <label><input v-model="g.selected" :disabled="duplicateBusy" type="checkbox" :value="p.record_id"/>{{ duplicatePersonLabel(p) }}</label>
+        <div class="ssig-actions">
+          <label><input v-model="g.keep" type="radio" :name="'sig-keep-'+gi" :value="p.record_id" :disabled="duplicateBusy || !g.selected.includes(p.record_id)"/>保留记录</label>
+          <label v-if="p.has_signature"><input v-model="g.signature" type="radio" :name="'sig-ink-'+gi" :value="p.record_id" :disabled="duplicateBusy || !g.selected.includes(p.record_id)"/>保留签名</label>
+          <button v-if="p.has_signature && p.can_preview && p.record_id" :disabled="duplicateBusy" @click="openPreview(p)">查看签名</button>
+        </div>
+      </div></div>
+      <div class="ssig-line"><label><input v-model="g.confirmed" type="checkbox" :disabled="duplicateBusy"/>已核实所选记录属于同一人</label>
+        <label><input v-model="g.upgraded" type="checkbox" :disabled="duplicateBusy"/>所有电脑均已升级</label>
+        <button :disabled="duplicateBusy || !g.confirmed || !g.upgraded || g.selected.length<2 || g.selected.length>20 || !g.selected.includes(g.keep) || !g.selected.includes(g.signature)" @click="confirmMerge=g">合并所选记录</button></div>
+    </article>
+    <ConfirmDialog :open="!!confirmMerge" title="确认合并重复人员" tone="danger" confirm-label="确认合并"
+      :message="'将合并 '+(confirmMerge?.selected?.length || 0)+' 条人员记录，清理其余重复记录。'"
+      :details="confirmMerge?['保留记录 '+duplicatePersonLabel(confirmMerge.people.find((p:Dict)=>p.record_id===confirmMerge?.keep)),'保留签名 '+duplicatePersonLabel(confirmMerge.people.find((p:Dict)=>p.record_id===confirmMerge?.signature))]:[]"
+      @resolve="(ok:boolean)=>resolveMerge(ok && loggedIn && canManageDirectory && !duplicateBusy)"/>
+  </section>
+
+  <dialog ref="dialog" class="signature-dialog" :aria-label="dialogAriaLabel" data-v2-inline-feedback @cancel.prevent="closeModal">
+    <form v-if="modal && loggedIn" @submit.prevent="(modal!=='associate' || canManageDirectory) && submitModal()">
+      <header><div><small>签名管理</small><h2>{{ modalTitle }}</h2></div><button type="button" aria-label="关闭" :disabled="sending" @click="closeModal"><X :size="17"/></button></header>
+      <div class="ssig-body">
+        <fieldset v-if="modal==='create'" :disabled="sending || !canCreateTemporary" class="ssig-fields">
+          <label>姓名<input v-model="draft.name" type="text" autofocus autocomplete="off"/></label>
+          <label>楼栋<NativeSingleSelect><select v-model="draft.building" aria-label="楼栋"><option value="">请选择</option><option v-for="opt in createScopeOptions" :key="opt.value" :value="opt.label">{{ opt.label }}</option></select></NativeSingleSelect></label>
+          <label>工号<input v-model="draft.employee_no" type="text" autocomplete="off"/></label><label>专业<input v-model="draft.specialty" type="text" autocomplete="off"/></label>
+        </fieldset>
+
+        <fieldset v-else-if="modal==='associate' && canManageDirectory" :disabled="sending">
+          <p>临时人员：{{ duplicatePersonLabel(selectedPerson || undefined) }}</p>
+          <label class="ssig-field">正式人员<input v-model="staffQuery" type="search" autofocus placeholder="搜索姓名、工号、岗位或楼栋"/></label>
+          <p v-if="staffLoading" role="status">正在读取正式人员…</p>
+          <div v-else class="staff-results" aria-label="正式人员候选">
+            <button v-for="p in staffChoices" type="button" :key="p.record_id" :aria-pressed="staffId===p.record_id" @click="staffId=p.record_id; samePerson=false">{{ p.name }} <small>{{ [p.employee_no,p.building,p.position].filter(Boolean).join(' · ') }}</small></button>
+            <p v-if="!staffChoices.length && !modalError">没有匹配的正式人员</p>
+          </div>
+          <button v-if="modalError" type="button" :disabled="staffLoading" @click="searchStaff">重新读取正式人员</button>
+          <label><input v-model="samePerson" type="checkbox" :disabled="!staffId"/>已核实临时人员与所选正式人员为同一人</label>
+        </fieldset>
+
+        <template v-else-if="modal==='preview'">
+          <p>{{ duplicatePersonLabel(selectedPerson || undefined) }}</p>
+          <div class="preview-area">
+            <img v-if="canPreview && previewSrc" :key="previewSrc" :src="previewSrc" :class="{hidden:previewLoading || !!previewError}" :alt="(selectedPerson?.name || '')+'的签名'" @load="previewLoaded" @error="previewFailed"/>
+            <p v-if="previewLoading" role="status">正在读取签名图片…</p><p v-if="previewError" role="alert">{{ previewError }} <button type="button" @click="loadPreview">重试</button></p>
+          </div>
+        </template>
+
+        <fieldset v-else-if="modal==='send' && selectedPerson" :disabled="sending">
+          <p><strong>签名人</strong> {{ duplicatePersonLabel(selectedPerson) }}</p>
+          <button v-if="selectedPerson.can_receive_message" type="button" :aria-pressed="recipient==='direct'" @click="recipient='direct'">发送给本人 · {{ selectedPerson.name }}</button>
+          <template v-if="canChooseRecipient">
+            <div v-if="selectedRelayBuildings.length" class="recipient-pinned" role="group" aria-label="值班账号代收"><b>值班账号代收</b>
+              <button v-for="b in selectedRelayBuildings" :key="b" type="button" :aria-pressed="recipient==='duty:'+b" @click="recipient='duty:'+b">{{ buildingLabel(b) }}</button>
+            </div>
+            <label class="ssig-field">VNET 人员代收<input v-model="relayQuery" type="search" placeholder="搜索姓名、工号、岗位或楼栋"/></label>
+            <p v-if="relayLoading" role="status">正在读取接收人员…</p>
+            <p v-else-if="relayError" role="alert">{{ relayError }} <button type="button" @click="searchRelayPeople">重新读取接收人员</button></p>
+            <div v-else-if="relayReady" class="staff-results" aria-label="可代收人员">
+              <button v-for="p in relayPeople" :key="p.record_id" type="button" :aria-pressed="recipient==='staff:'+p.record_id" @click="recipient='staff:'+p.record_id">
+                {{ p.name }} <small>{{ [p.employee_no,p.building,p.position,p.team].filter(Boolean).join(' · ') }}</small>
+              </button><p v-if="!relayPeople.length">没有匹配的接收人员</p>
+            </div>
+          </template>
+          <p v-else-if="!selectedPerson.can_receive_message">此人员当前没有可用的本人接收渠道。</p>
+          <p v-if="validRecipient" class="chosen">接收人：{{ recipient==='direct'?selectedPerson.name:recipient.startsWith('duty:')?buildingLabel(recipient.slice(5))+'值班账号':relayDirectory.find(p=>'staff:'+p.record_id===recipient)?.name }}</p>
+        </fieldset>
+        <p v-if="modalError" role="alert">{{ modalError }}</p>
+      </div>
+      <footer v-if="modal==='preview'"><button type="button" @click="closeModal">关闭</button>
+        <button v-if="selectedPerson?.can_request" type="button" class="primary" @click="switchPreviewToSend">重新签名</button></footer>
+      <footer v-else><button type="button" :disabled="sending" @click="closeModal">取消</button>
+        <button type="submit" class="primary" :disabled="modalSubmitDisabled || (modal==='associate' && !canManageDirectory)">{{ sending?'处理中…':modalSubmitLabel }}</button></footer>
+    </form>
+  </dialog>
+</section>

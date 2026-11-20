@@ -1,4 +1,4 @@
-import { eventStatusTone } from '../../eventManagementUtils';
+import { eventI2OrHigher, eventStatusTone, isHighLevelEvent } from '../../eventManagementUtils';
 import { beijingDate } from '../modules';
 import { todoOptions, todoSources, sortTodos, todoTimestamp, type TodoContext, type TodoRead, type TodoRow } from '../businessTodos';
 import type { Dict } from '../client';
@@ -6,7 +6,7 @@ import type { Role, Section } from './recipes';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
 export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
-export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean };
+export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; referencedScopes?:string[]; readOnly?:boolean; urgentEvent?:string };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
 export type Source = {
   id: SourceId;
@@ -114,6 +114,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
             key:'event:'+id,kind:'events',module:'event',title,
             scope:typeof record.building==='string'&&record.building?record.building:scope,status:'处理中',
             time:String(record.occurrence_time||''),dueAt:todoTimestamp(record.deadline),
+            urgentEvent:eventI2OrHigher(record)||isHighLevelEvent(record)?String(record.level||'高等级').trim()||'高等级':undefined,
             url:link('/',{scope,mode:'events',detail:'1',event_id:String(id)}),
           }];
         });

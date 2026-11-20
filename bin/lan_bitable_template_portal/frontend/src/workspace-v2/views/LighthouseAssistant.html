@@ -1,0 +1,232 @@
+<Teleport :to="nativeModal || 'body'">
+  <div ref="launcherLayer" class="lighthouse-layer ld-layer ld-launcher-layer" data-assistant-control="true" data-lighthouse-surface="launcher" :style="{'--bot-color':botColor}" :popover="nativeModal ? 'manual' : undefined">
+    <button ref="launcher" class="lighthouse-launcher assistant-launcher ld-launcher" type="button"
+      :hidden="!!pageHost || v2BusinessModal && !open" :aria-label="open?'收起灯塔助手':'打开灯塔助手'" :aria-expanded="open"
+      :style="{width:shownAppearance.size+'px',height:shownAppearance.size+'px',...(launcherView.position && !launcherView.appearance.snap_back ? {left:launcherView.position.x+'px',top:launcherView.position.y+'px',bottom:'auto',right:'auto'} : {})}" @click="onLauncherClick">
+      <LighthouseBot :appearance="launcherView.appearance" :position="launcherView.position" :visible="!pageHost && (!v2BusinessModal || open)" :interactive="true" :mood="botMood" :motion-key="props.userId" @moved="saveBotPosition"/>
+    </button>
+  </div>
+</Teleport>
+<Teleport :to="pageHost || panelHost || 'body'">
+  <div ref="assistantLayer" class="lighthouse-layer ld-layer ld-conversation-layer" :class="{'ld-page-layer':pageHost}" data-assistant-control="true" data-lighthouse-surface="conversation" :style="{'--bot-color':botColor}" :popover="!pageHost && panelHost ? 'manual' : undefined">
+    <section v-if="open" ref="root" class="ld-root" :class="{'lighthouse is-open':!pageHost}" aria-label="灯塔助手" :style="pageHost ? undefined : {width:expectedPanelSize().w+'px',height:expectedPanelSize().h+'px'}">
+      <div class="assistant-shell ld-shell" :class="{resizing:resizeActive,dragging:dragActive}">
+        <div class="assistant-panel ld-main" :role="pageHost?'region':'dialog'" :aria-modal="pageHost?undefined:'false'" aria-label="灯塔助手会话">
+          <header class="assistant-header ld-tools" :tabindex="pageHost?undefined:0" :aria-label="pageHost?'灯塔助手':'灯塔助手，可用方向键移动窗口'"
+            @pointerdown="!pageHost && onHeaderPointerDown($event)" @lostpointercapture="onDragCaptureLost" @keydown="!pageHost && onHeaderKeydown($event)">
+            <div class="ld-title"><Bot :size="18" aria-hidden="true"/><h2>灯塔助手</h2><small role="status">{{ headerStatus }}</small></div>
+            <div class="ld-actions">
+              <button v-if="hasSidebarAccess && desktopNotices && !settingsOpen && !workspaceOpen && !skillsOpen" type="button" :aria-pressed="sidebarVisible" @click="toggleSidebar">业务资料</button>
+              <details class="ld-menu" @click.stop>
+                <summary class="ld-button" aria-label="助手工具">工具</summary>
+                <div class="ld-menu-panel" @click="($event.currentTarget as HTMLElement).closest('details')?.removeAttribute('open')">
+                  <button v-if="!pageHost" type="button" @click="toggleDeskSize">{{ deskRestoreSize?'还原会话':'展开会话' }}</button>
+                  <button type="button" @click="showAppearanceSettings">助手外观</button>
+                  <button v-if="props.userId" type="button" :disabled="settingsOpen" @click="workspaceOpen=!workspaceOpen;skillsOpen=false">文件与工作空间</button>
+                  <button type="button" :disabled="settingsOpen" @click="skillsOpen=!skillsOpen;workspaceOpen=false">技能与工具</button>
+                  <button type="button" :disabled="busy || uploading || !state.turns?.length" @click="clearOpen=true">清空会话</button>
+                </div>
+              </details>
+              <button v-if="state.can_manage_settings" type="button" aria-label="模型设置" :disabled="busy" @click="showSettings"><Settings :size="16"/></button>
+              <button v-if="!pageHost" type="button" aria-label="收起助手" @click="requestPanelClose"><X :size="16"/></button>
+            </div>
+          </header>
+          <p v-if="error" class="ld-alert" role="alert">{{ error }} <button type="button" class="ld-button" :disabled="loading" @click="readState(true,true)">重新读取会话</button></p>
+          <template v-if="settingsOpen"><div class="ld-settings ld-scroll" aria-label="模型设置">
+  <header class="ld-setting-head"><h3>模型设置</h3><div class="ld-actions">
+    <button v-if="modelSettings.can_manage_shared" :disabled="busy" @click="addStart(true)">添加默认模型</button>
+    <button :disabled="busy" @click="addStart(false)">添加模型</button><button @click="requestCloseSettings">返回会话</button></div></header>
+  <p v-if="settingsError" class="ld-alert" role="alert">{{ settingsError }}</p>
+  <label class="ld-choice"><input type="checkbox" :checked="modelSettings.enabled" :disabled="busy" @change="toggleEnabled">启用灯塔助手</label>
+  <ul class="model-list"><li v-for="m in adminModels" :key="m.id" class="model-card ld-profile">
+    <div class="ld-profile-info"><div class="ld-meta"><strong>{{ m.name }}</strong><small>{{ m.shared?'共享默认':'个人模型' }}</small><small v-if="isDefault(m)">当前默认</small></div><small class="ld-muted">{{ m.model }}</small></div>
+    <div class="ld-actions"><button v-if="!isDefault(m)" :disabled="busy || m.configured===false" @click="setDefault(m)">设为默认</button>
+      <template v-if="canEditModel(m)"><button :disabled="busy" @click="beginEditAction({kind:'edit',id:m.id})">编辑</button><button :disabled="busy" @click="requestDelete(m)">删除</button></template></div>
+  </li></ul>
+  <form v-if="editProfile" class="profile-form ld-subpanel" @submit.prevent="saveModel">
+    <header class="ld-setting-head"><strong>{{ editingExisting?'编辑模型':editProfile.shared?'添加共享默认模型':'添加个人模型' }}</strong>
+      <button type="submit" class="ld-button ld-primary" :disabled="!canSaveProfile || busy">{{ savingProfile?'保存中…':'保存' }}</button></header>
+    <fieldset :disabled="busy"><legend>连接信息</legend><div class="ld-form-fields">
+      <label>显示名称<input v-model="editProfile.name" required></label><label>模型名称<input v-model="editProfile.model" required></label>
+      <label>接口地址<input v-model="editProfile.endpoint" required></label><label>API Key<input v-model="editProfile.api_key" type="password" autocomplete="new-password" :placeholder="editingExisting?'留空保留原密钥':''"></label>
+    </div></fieldset>
+    <fieldset :disabled="busy"><legend>模型能力</legend><div class="ld-switches">
+      <label class="ld-choice"><input type="checkbox" v-model="editProfile.tool_calls">工具调用</label><label class="ld-choice"><input type="checkbox" v-model="editProfile.image_input" :disabled="textOnlyProfile">图片输入</label>
+      <label class="ld-choice"><input type="checkbox" :checked="editProfile.reasoning" @change="onReasoningToggle">思考模式</label><label class="ld-choice"><input type="checkbox" v-model="editProfile.custom_protocol">自定义协议</label></div>
+      <div v-if="editProfile.reasoning" class="ld-form-stack"><div class="ld-switches"><label class="ld-choice"><input type="checkbox" v-model="editProfile.reasoning_only" @change="normalizeEffortChoice">仅思考模式</label>
+        <label class="ld-choice"><input type="checkbox" :disabled="editProfile.reasoning_only" v-model="editProfile.allow_reasoning_off" @change="normalizeEffortChoice">允许关闭思考</label>
+        <label v-for="opt in EFFORT_OPTIONS" :key="opt.value" class="ld-choice"><input type="checkbox" :checked="editProfile.reasoning_efforts.includes(opt.value)" @change="toggleEffort(opt.value,$event)">{{ opt.label }}</label></div>
+        <label>默认思考强度<select v-model="editProfile.reasoning_effort"><option v-for="opt in effortDropdownOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></label></div></fieldset>
+  </form>
+</div></template>
+          <div v-else-if="workspaceOpen" class="ld-aux"><LighthouseWorkspace :user-id="props.userId" :files="workspaceFiles" :voice-configuration="voiceConfiguration" @close="workspaceOpen=false" @voice-configured="refreshVoiceCapabilities"/></div>
+          <div v-else-if="skillsOpen" class="ld-aux"><LighthouseSkills @close="skillsOpen=false" @use="chooseManagedSkill" @changed="commandsMenu?.refresh()"/></div>
+          <template v-else>
+            <div v-if="activePlans.length" class="ld-meta ld-active" aria-label="后台处理中"><button v-for="plan in activePlans" :key="plan.id" class="ld-status-button" @click="locatePlan(plan.id)">{{ plan.title }} · {{ planStatusText(plan) }}</button></div>
+            <div ref="thread" class="thread ld-scroll ld-thread" @scroll.passive="onThreadScroll">
+              <button v-if="hasOlder && state.turns?.length" class="ld-button" :disabled="historyLoading" @click="loadHistory">{{ historyLoading?'读取中…':'更早的会话' }}</button>
+              <div v-if="!state.turns?.length" class="ld-empty" role="status"><strong>{{ loading?'正在读取会话…':state.enabled===false?'助手已关闭':state.configured===false?'尚未配置模型':'开始会话' }}</strong></div>
+              <article v-for="turn in state.turns" :key="turn.operation_id" class="turn" :data-operation-id="turn.operation_id">
+                <div class="user-bubble"><p>{{ turn.question }}</p>
+                  <div v-if="turn.commands?.length" class="ld-meta"><small v-for="cmd in turn.commands" :key="cmd.id">{{ cmd.label || cmd.name }}</small></div>
+                  <LighthouseDeskFiles :files="turn.attachments || []" :safe-url="safeAttachmentUrl" @preview="openArtifact"/>
+                  <button v-if="turn.preview_file && safeAttachmentUrl(turn.preview_file.url)" class="ld-button" @click="openArtifact(turn.preview_file)">引用文件 · {{ turn.preview_file.name }}</button>
+                </div>
+                <div class="answer">
+                  <details v-if="turn.process?.length" class="process ld-activity"><summary><ChevronRight class="process-chevron" :size="12" aria-hidden="true"/>处理过程 · {{ turn.process.length }} 项</summary>
+                    <ol class="process-rows"><li v-for="(step,i) in turn.process" :key="i">{{ step.label }}</li></ol></details>
+                  <div v-if="turn.status==='pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i/><i/><i/></span>{{ assistantProgressText(turn) }}</div>
+                  <AnimatedReply v-if="turn.answer" :text="turn.answer" :streaming="turn.status==='pending'"/>
+                  <p v-if="turn.error" class="failure ld-alert">{{ turn.error }}</p>
+                  <LighthouseDeskFiles :files="turn.output_files || []" :safe-url="safeAttachmentUrl" @preview="openArtifact"/>
+                  <LighthouseDownloads v-if="turn.downloads?.length" :items="turn.downloads"/>
+                  <LighthouseQuestion v-if="turn.clarification" :id="turn.operation_id" :question="turn.clarification" :disabled="busy || turn.operation_id!==state.turns.at(-1)?.operation_id" @reply="answer=>answerQuestion(turn,answer)"/>
+                  <details v-if="turn.sources?.length" class="sources ld-sources"><summary>参考来源 · {{ turn.sources.length }}</summary><ul><li v-for="(source,i) in turn.sources" :key="i">
+                    <a v-if="safeSourceLink(source.url || source.link)" :href="safeSourceLink(source.url || source.link)" target="_blank" rel="noopener" @click="openSource($event,source.url || source.link)">{{ source.title || source.label || source.url || source.link }}</a><span v-else>{{ source.title || source.label }}</span>
+                  </li></ul></details>
+                  <div v-if="turnIsComplete(turn) && visibleInteractions(turn).length" class="interactions ld-actions"><button v-for="item in visibleInteractions(turn)" :key="item.url" @click="runInteraction(item)">{{ item.label }}</button></div>
+                  <section v-if="turn.plan" class="operation-plan ld-plan" :data-plan-id="turn.plan.id" :data-plan-status="turn.plan.status" :aria-label="turn.plan.title || '操作清单'">
+  <header class="ld-plan-head"><div><small class="ld-label">{{ planStatusText(turn.plan) }}</small><h3>{{ turn.plan.title || '操作清单' }}</h3></div>
+    <button v-if="planIsFinished(turn.plan)" type="button" class="ld-button" :aria-expanded="!!expandedPlans[turn.plan.id]" @click="expandedPlans[turn.plan.id]=!expandedPlans[turn.plan.id]">{{ expandedPlans[turn.plan.id]?'收起明细':'查看明细' }}</button>
+  </header>
+  <template v-if="!planIsFinished(turn.plan) || expandedPlans[turn.plan.id]">
+    <p v-if="turn.plan.explanation">{{ turn.plan.explanation }}</p>
+    <p v-if="turn.plan.error" class="ld-alert" role="alert">{{ turn.plan.error }}</p>
+    <div v-if="turn.plan.planned_notice?.selected" class="planned-notice-selected ld-subpanel">
+      <strong>{{ turn.plan.planned_notice.selected.title }}</strong><small>{{ turn.plan.planned_notice.selected.building }} · {{ turn.plan.planned_notice.selected.work_type }} · {{ turn.plan.planned_notice.selected.progress }}</small>
+      <button v-if="['needs_input','awaiting_confirmation'].includes(turn.plan.status) && !turn.history_loaded" type="button" class="ld-button" :disabled="isPlanBusy(turn.plan)" @click="plannedReset[turn.plan.id]=true">重新选择计划</button>
+      <ConfirmDialog :open="!!plannedReset[turn.plan.id]" title="重新选择计划？" message="将返回计划选择并清除本次计划填写。" cancel-label="保留填写" confirm-label="重新选择" @resolve="yes=>yes?resetPlannedNotice(turn):(plannedReset[turn.plan.id]=false)"/>
+    </div>
+    <div v-if="turn.plan.planned_notice?.text" class="planned-notice-text ld-pre">{{ turn.plan.planned_notice.text }}</div>
+    <details v-if="turn.plan.planned_notice?.recommendations?.length"><summary>可参考的历史填写</summary>
+      <div v-for="(rec,ri) in turn.plan.planned_notice.recommendations" :key="ri" class="ld-inline-box"><strong>{{ rec.title || rec.label || '历史记录' }}</strong>
+        <dl class="ld-pairs"><div v-for="(value,key) in rec.suggested_values" :key="key"><dt>{{ noticeRecommendationLabel(turn.plan,String(key)) }}</dt><dd>{{ value }}</dd></div></dl>
+        <button v-if="turn.plan.status==='needs_input' && !turn.history_loaded" class="ld-button" @click="applyNoticeRecommendation(turn.plan,rec)">填入空白项</button>
+      </div>
+    </details>
+    <form v-if="turn.plan.status==='needs_input' && planTurns.get(turn.plan.id)===turn && !turn.history_loaded" class="plan-form" @submit.prevent="!isPlanBusy(turn.plan) && !planInputIncomplete(turn.plan) && amendPlan(turn)">
+      <fieldset v-for="field in visiblePlanFields(turn.plan).filter(f=>!f.hidden)" :key="field.name" class="plan-field ld-field" :disabled="isPlanBusy(turn.plan) || field.read_only || field.readonly || field.disabled">
+        <label class="ld-label" :for="planFieldId(turn.plan,field)">{{ field.label || field.name }}<span v-if="field.required" aria-hidden="true"> *</span></label>
+        <small v-if="field.description || field.hint" class="ld-muted">{{ field.description || field.hint }}</small>
+        <div v-if="field.options_source && !['array','object'].includes(field.type)" class="ld-actions">
+          <input type="search" class="ld-input" aria-label="查找可选记录" v-model="planValues[turn.plan.id+':search:'+field.name]"
+            :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @keydown.enter.prevent="loadPlanOptions(turn,field)">
+          <button type="button" :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @click="loadPlanOptions(turn,field)">查找</button>
+        </div>
+        <LighthouseStructuredField v-if="['object','array'].includes(field.type)" :id="planFieldId(turn.plan,field)" :field="planControl(turn.plan,field)"
+          :plan-id="turn.plan.id" :plan-version="turn.plan.version" :disabled="isPlanBusy(turn.plan) || !!(field.disabled || field.read_only || field.readonly)"
+          v-model="planValues[turn.plan.id+':'+field.name]" :notice-warning="repairPrefills[turn.plan.id+':'+field.name]?.warning || ''"
+          @load-options="choice=>loadPlanOptions(turn,field,choice.scope,choice.q)"/>
+        <LighthousePlannedChoices v-else-if="field.native_planned_choice" :id="planFieldId(turn.plan,field)" :field="field"
+          :disabled="isPlanBusy(turn.plan) || !!(field.disabled || field.read_only)" :model-value="planValues[turn.plan.id+':'+field.name] || ''" @update:model-value="value=>choosePlanOption(turn.plan,field,value)"/>
+        <div v-else-if="field.type==='select' && !field.options_source && smallSingleChoice(field.options)" role="radiogroup" :aria-label="field.label" class="ld-switches">
+          <label v-for="(opt,i) in labelledOptions(field.options)" :key="String(opt.value)" class="ld-choice"><input type="radio" :name="planFieldId(turn.plan,field)" :id="i===0 ? planFieldId(turn.plan,field) : undefined"
+            :aria-label="opt.label" :checked="planValues[turn.plan.id+':'+field.name]===opt.value" :required="field.required" :disabled="isPlanBusy(turn.plan) || opt.disabled || field.disabled || field.read_only" @change="choosePlanOption(turn.plan,field,opt.value)">{{ opt.label }}</label>
+        </div>
+        <select v-else-if="field.type==='select'" :id="planFieldId(turn.plan,field)" :aria-label="field.label" :required="field.required"
+          :value="String(planValues[turn.plan.id+':'+field.name] ?? '')" :disabled="isPlanBusy(turn.plan) || field.disabled || field.read_only"
+          @change="choosePlanOption(turn.plan,field,(field.options || []).find(opt=>String(opt.value)===($event.target as HTMLSelectElement).value)?.value ?? '')">
+          <option value="">请选择</option><option v-for="opt in labelledOptions(field.options)" :key="String(opt.value)" :value="String(opt.value)" :disabled="opt.disabled">{{ opt.label }}</option>
+        </select>
+        <div v-else-if="field.type==='multiselect'" role="group" class="ld-switches" :aria-label="field.label">
+          <label v-for="opt in labelledOptions(field.options)" :key="String(opt.value)" class="ld-choice"><input type="checkbox" :checked="planChoices(turn.plan,field).includes(opt.value)"
+            :disabled="isPlanBusy(turn.plan) || opt.disabled || field.disabled || field.read_only || (field.maxItems!=null && planChoices(turn.plan,field).length>=field.maxItems && !planChoices(turn.plan,field).includes(opt.value))"
+            @change="togglePlanChoice(turn.plan,field,opt.value,($event.target as HTMLInputElement).checked)">{{ opt.label }}</label>
+          <button v-if="planChoices(turn.plan,field).length" class="ld-button" type="button" :disabled="isPlanBusy(turn.plan) || field.disabled || field.read_only" :aria-label="'清空'+field.label" @click="clearPlanChoice(turn.plan,field)">清空</button>
+        </div>
+        <div v-else-if="field.type==='file'" class="ld-photo-drop" tabindex="0" role="group" :aria-label="field.label+'上传区域'"
+          @click="focusNoticePhotoArea($event,isPlanBusy(turn.plan) || field.disabled || field.read_only || field.readonly)"
+          @paste="!field.disabled && !field.read_only && !field.readonly && pastePlanFiles($event,turn.plan,field)" @dragover.prevent
+          @drop="!field.disabled && !field.read_only && !field.readonly && dropPlanFiles($event,turn.plan,field)">
+          <input type="file" :id="planFieldId(turn.plan,field)" :aria-label="field.label" :multiple="field.maxItems!==1" :accept="field.accept"
+            :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @change="uploadPlanFiles($event,turn.plan,field)">
+          <p v-if="planUploadProgress[turn.plan.id]?.key===turn.plan.id+':'+field.name" role="status">{{ planUploadProgress[turn.plan.id].name }} · 已上传 {{ planUploadProgress[turn.plan.id].done }}/{{ planUploadProgress[turn.plan.id].total }}</p>
+          <div class="ld-files"><span v-for="file in selectedPlanFiles(turn.plan,field)" :key="file.id" class="plan-file ld-file">
+            <a v-if="safeAttachmentUrl(file.url) && !file.unavailable" :href="safeAttachmentUrl(file.url)" target="_blank" rel="noopener"><img v-if="file.is_image" :src="safeAttachmentUrl(file.url)" alt="">{{ file.name }}</a><span v-else>{{ file.name }}{{ file.unavailable?' · 不可用':'' }}</span>
+            <button type="button" :aria-label="'移除'+file.name" :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @click="togglePlanChoice(turn.plan,field,file.id,false)">移除</button></span></div>
+        </div>
+        <input v-else-if="field.type==='checkbox'" :id="planFieldId(turn.plan,field)" type="checkbox" v-model="planValues[turn.plan.id+':'+field.name]" :aria-label="field.label" :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @change="planSelectionChanged(turn.plan,field)">
+        <textarea v-else-if="field.type==='textarea'" :id="planFieldId(turn.plan,field)" v-model="planValues[turn.plan.id+':'+field.name]" rows="3"
+          :required="field.required" :maxlength="field.maxLength" :aria-label="field.label" :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled"/>
+        <input v-else :id="planFieldId(turn.plan,field)" :type="['date','time','number','month','datetime-local','email','url','password'].includes(field.type)?field.type:'text'"
+          v-model="planValues[turn.plan.id+':'+field.name]" :aria-label="field.label" :required="field.required" :min="field.min" :max="field.max" :step="field.step" :maxlength="field.maxLength"
+          :disabled="isPlanBusy(turn.plan) || field.read_only || field.disabled" @change="planSelectionChanged(turn.plan,field)">
+        <p v-if="repairPrefills[turn.plan.id+':'+field.name]?.error || repairPrefills[turn.plan.id+':'+field.name]?.warning" class="repair-prefill-state ld-alert">
+          {{ repairPrefills[turn.plan.id+':'+field.name].error || repairPrefills[turn.plan.id+':'+field.name].warning }}
+          <button v-if="field.native_repair_prefill || field.native_notice_prefill" type="button" class="ld-button" :disabled="isPlanBusy(turn.plan)" @click="field.native_notice_prefill ? prefillNotice(turn.plan,field) : prefillRepair(turn.plan,field)">重新读取关联资料</button>
+        </p>
+      </fieldset>
+      <div class="ld-actions"><button type="submit" class="ld-primary" :disabled="isPlanBusy(turn.plan) || planInputIncomplete(turn.plan)">补充并继续</button></div>
+    </form>
+    <div v-for="(op,i) in turn.plan.operations || []" :key="op.api_id+':'+i" class="ld-subpanel"><b>{{ op.name || op.label || op.api_id }}</b>
+      <dl class="ld-pairs"><div v-for="(pair,idx) in operationPreview(op,turn.plan.status==='needs_input')" :key="idx"><dt>{{ pair.label }}</dt><dd>{{ pair.value }}</dd></div></dl>
+      <a v-if="isSafeLocalPath(op.page_url || '')" :href="safeLink(op.page_url)" @click="openSource($event,op.page_url)">查看业务页面</a>
+    </div>
+    <div v-if="planTurns.get(turn.plan.id)===turn && !turn.history_loaded" class="ld-actions">
+      <button v-if="['awaiting_confirmation','awaiting_second_confirmation'].includes(turn.plan.status)" class="ld-primary" type="button" :disabled="isPlanBusy(turn.plan)" @click="confirmPlan(turn)">
+        {{ turn.plan.confirm_label || (turn.plan.status==='awaiting_second_confirmation'?'再次确认执行':'确认操作清单') }}</button>
+      <button v-if="turn.plan.can_edit" :disabled="isPlanBusy(turn.plan)" @click="editPlan(turn)">返回修改</button>
+      <button v-if="turn.plan.can_retry" :disabled="isPlanBusy(turn.plan)" @click="retryPlan(turn)">重试原任务</button>
+      <button v-if="['needs_input','awaiting_confirmation','awaiting_second_confirmation'].includes(turn.plan.status)" :disabled="isPlanBusy(turn.plan)" @click="cancelPlan(turn)">取消操作</button>
+    </div>
+  </template>
+  <div v-if="turn.plan.results?.length" class="plan-results ld-form-stack">
+    <div v-for="(result,index) in turn.plan.results" :key="index"><strong>{{ result.name || result.api_id }}</strong><p>{{ resultStatusText(result,turn.plan) }}</p>
+      <p v-if="result.query_reply" class="ld-pre">{{ result.query_reply }}</p>
+      <a v-if="morningDownloadUrl(result)" :href="morningDownloadUrl(result)" target="_blank" rel="noopener">下载晨会文件</a>
+      <LighthouseDownloads v-if="result.downloads?.length" :items="result.downloads"/>
+    </div>
+  </div>
+  <p v-if="planErrors[turn.plan.id]" class="ld-alert" role="alert">{{ planErrors[turn.plan.id] }}</p>
+</section>
+                  <div v-if="turn.answer || ['stopped','failed','interrupted'].includes(turn.status) || turn.resume_available" class="message-actions ld-actions">
+                    <button v-if="turn.answer" @click="copyAnswer(turn)">复制</button>
+                    <button v-if="turnIsComplete(turn)" :disabled="!!synthesisReason" :title="synthesisReason" @click="readReply(turn.operation_id,turn.answer)">{{ playingId===turn.operation_id?'停止朗读':'朗读' }}</button>
+                    <button v-if="turnIsComplete(turn) && !turn.history_loaded" :disabled="busy || uploading" @click="editQuestion(turn)">编辑问题</button>
+                    <button v-if="turnIsComplete(turn) && !turn.history_loaded" class="retry" :disabled="busy || uploading || !state.enabled" @click="send(turn,true)">重新生成回答</button>
+                    <button v-if="!turn.history_loaded && ['stopped','failed','interrupted'].includes(turn.status)" class="retry" :disabled="busy || uploading" @click="send(turn)">{{ turn.status==='stopped'?'继续回答':'重试原问题' }}</button>
+                    <button v-if="turn.resume_available" :disabled="!!resumeRun || busy" @click="resumeResearch(turn)">继续研究</button>
+                  </div>
+                </div>
+              </article>
+            </div>
+            <button v-if="hasNewContent" class="ld-status-button" @click="thread?.scrollTo({top:thread.scrollHeight});hasNewContent=false"><ArrowDown :size="14"/>查看最新回复</button>
+            <form ref="composerElement" class="composer ld-composer" @submit.prevent="send()" @dragover="onFileDragOver" @drop="onFileDrop">
+              <p v-if="draftWarning || voiceError" class="ld-alert" role="status">{{ draftWarning || voiceError }}</p>
+              <div v-if="draftFiles.length" class="draft-files ld-files"><span v-for="file in draftFiles" :key="file.localId" class="ld-file">
+                <img v-if="file.preview" :src="file.preview" :alt="file.name"><span>{{ file.name }}{{ file.uploading?' · 上传中':file.error?' · '+file.error:'' }}</span>
+                <button type="button" :aria-label="'移除'+file.name" :disabled="sending" @click="removeDraftFile(file.localId)"><X :size="12"/></button></span></div>
+              <LighthouseCommands ref="commandsMenu" v-model="selectedCommands" v-model:draft="draft" @manage="skillsOpen=true" @focus="focusComposer"/>
+              <textarea ref="input" id="assistant-question" v-model="draft" rows="1" maxlength="12000" class="ld-input" aria-label="询问灯塔助手" placeholder="询问灯塔助手…" @input="resizeComposer" @keydown="composerKeydown" @paste="onComposerPaste"/>
+              <div class="composer-footer ld-composer-bar"><div class="ld-actions">
+                <label v-if="modelNames.length" class="ld-model"><span class="ld-sr">会话模型</span><select id="assistant-model" class="ld-input" :value="state.model_name" :disabled="busy" @change="switchModel(($event.target as HTMLSelectElement).value)"><option v-for="name in modelNames" :key="name">{{ name }}</option></select></label>
+                <button type="button" aria-label="添加附件" :disabled="sending || uploading" @click="attachmentInput?.click()"><Paperclip :size="15"/></button>
+                <input ref="attachmentInput" type="file" multiple hidden aria-label="选择附件" @change="onAttachmentChange">
+                <button type="button" aria-label="插入技能或工具" @click="insertCommand"><Slash :size="15"/></button>
+                <button type="button" :title="researchReason" :disabled="!!researchReason || busy" @click="insertResearch">深入研究</button>
+                <button type="button" :title="microphoneReason" :aria-label="voicePhase==='recording'?'停止录音':'语音输入'" :disabled="!!microphoneReason || !['idle','recording'].includes(voicePhase)" @click="toggleRecording"><Mic :size="15"/><span v-if="voicePhase==='recording'">{{ voiceElapsed }}s</span></button>
+              </div><div class="ld-actions">
+                <button v-if="state.active_run_id && state.busy" class="stop" type="button" :disabled="stopping" @click="stopAnswer"><Square :size="12"/>停止生成</button>
+                <button type="submit" class="ld-primary" aria-label="发送问题" :disabled="sending || loading || uploading || state.enabled===false || !state.configured || (!draft.trim() && !draftFiles.some(f=>f.id))"><ArrowUp :size="15"/>发送</button>
+              </div></div>
+            </form>
+          </template>
+        </div>
+        <aside v-if="artifactFile" class="ld-aside" :style="{width:artifactWidth+'px'}"><LighthouseArtifactPreview :file="artifactFile" @close="artifactFile=null"/></aside>
+        <aside v-if="!settingsOpen && !workspaceOpen && !skillsOpen && hasSidebarAccess && desktopNotices" v-show="sidebarVisible" class="ld-aside" :style="{width:noticeWidth+'px'}">
+          <div class="ld-tools"><div class="ld-actions"><button v-if="hasNoticeAccess" @click="selectSidebarTab('notices')">通告</button><button v-if="canUseModule('knowledge')" @click="selectSidebarTab('knowledge')">知识库</button></div><button aria-label="收起业务资料" @click="toggleSidebar"><X :size="14"/></button></div>
+          <LighthouseNoticePanel v-if="hasNoticeAccess" v-show="sidebarTab==='notices'" :user-id="props.userId" :active="open && sidebarTab==='notices'" @availability="value=>noticeAvailable=value" @edition="onNoticeEdition"/>
+          <LighthouseKnowledge v-if="canUseModule('knowledge') && sidebarTab==='knowledge'" :active="sidebarVisible"/>
+        </aside>
+        <button v-if="!pageHost" type="button" class="resize-handle ld-resize" :class="{'from-left':resizeFromLeft}" aria-label="调整会话窗口大小" @pointerdown="onResizeStart" @lostpointercapture="onResizeCaptureLost" @keydown="onResizeKeydown"/>
+      </div>
+      <LighthouseBotSettings :open="appearanceOpen" :appearance="appearance" :target="assistantLayer || 'body'" :theme-source="root" @close="appearanceOpen=false" @preview="value=>previewAppearance=value" @saved="value=>{saveAppearance(value);appearanceOpen=false}"/>
+      <ConfirmDialog :open="clearOpen" title="清空当前会话？" message="这将清除当前账号的会话和输入草稿。" confirm-label="清空" tone="danger" @resolve="clearConversation"/>
+      <ConfirmDialog :open="deleteModelOpen" title="删除模型？" :message="deleteMessage" confirm-label="确认" tone="danger" @resolve="confirmDeleteModel"/>
+      <ConfirmDialog :open="editSwitchOpen" title="切换编辑对象？" message="切换后将丢弃当前模型尚未保存的修改。" @resolve="confirmEditSwitch"/>
+      <ConfirmDialog :open="settingsExitOpen" title="离开模型设置？" message="当前模型有尚未保存的修改。" @resolve="confirmSettingsExit"/>
+      <ConfirmDialog :open="panelExitOpen" title="收起助手？" message="当前模型有尚未保存的修改。" @resolve="confirmPanelExit"/>
+      <ConfirmDialog :open="!!pageExitAction" title="离开助手会话？" :message="settingsOpen && isDirty() ? '离开将丢弃尚未保存的模型设置。' : '当前会话还有未提交的内容，离开后可在助手中继续填写。'" cancel-label="继续填写" confirm-label="离开会话" @resolve="resolvePageExit"/>
+    </section>
+  </div>
+</Teleport>

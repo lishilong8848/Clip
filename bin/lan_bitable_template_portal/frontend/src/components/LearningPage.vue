@@ -9,14 +9,15 @@
           <button v-if="canViewBuildings" :class="{ active: viewMode === 'overview' }" :aria-pressed="viewMode === 'overview'" :disabled="busy" @click="goOverview"><ChartNoAxesCombined :size="14" />学习管理</button>
         </span>
         <span v-if="ready && isAdmin" class="sync-label" :class="{ danger: !!boot.sync?.error, pending: !!boot.sync?.pending }"><Loader2 v-if="syncActive" :size="15" class="spin" />{{ syncLabel }}<template v-if="boot.sync?.pending"> · {{ boot.sync.pending }} 项待同步</template></span>
-        <button v-if="tab !== 'home'" class="icon-button" title="刷新当前页面" aria-label="刷新当前页面" :disabled="busy || loading" @click="refreshView"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
+        <time v-if="tab === 'home'" :datetime="date">{{ date }}</time>
+        <button class="icon-button" title="刷新当前页面" aria-label="刷新当前页面" :disabled="busy || loading" @click="refreshView"><RefreshCw :size="17" :class="{ spin: loading }" /></button>
       </div>
     </header>
 
     <div v-if="ready && tab !== 'sharing' && tab !== 'issues' && viewMode === 'overview' && !learner && canViewBuildings" class="building-tabs" :class="{ 'with-all': isAdmin }" aria-label="学练楼栋"><button v-for="building in overviewScopes" :key="building.value" :class="{ active: scope === building.value }" :disabled="busy" @click="changeScope(building.label)">{{ building.label }}<span>{{ building.value ? '人员学练' : '全员' }}</span></button></div>
     <div v-if="ready && tab !== 'sharing' && viewMode === 'practice' && !learner && identityIssue" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ identityIssue }}</span></div>
     <div v-if="ready && !['sharing', 'home', 'issues'].includes(tab)" class="learner-strip"><div><strong>{{ learner ? learner.name : scopeLabel + '学习汇总' }}</strong><span v-if="learner">工号 {{ learner.employee_no || '未填写' }}<template v-if="viewMode === 'practice'"> · 当前答题人</template></span></div><div class="actions"><button v-if="viewMode === 'overview' && canViewBuildings" :disabled="busy" @click="openPeople"><Search :size="16" />{{ learner ? '切换人员' : '选择人员' }}</button></div></div>
-    <nav v-if="ready && !isLearningHub" class="tabs" aria-label="学练页面">
+    <nav v-if="ready && (!isLearningHub || isAdmin)" class="tabs" aria-label="学练页面">
       <button v-for="item in tabs" :key="item.id" :class="{ active: tab === item.id }" :aria-current="tab === item.id ? 'page' : undefined" :disabled="busy" @click="switchTab(item.id as Tab)"><component :is="item.icon" :size="17" />{{ item.label }}</button>
     </nav>
     <div v-if="error && !modalKind" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ error }}</span><button class="icon-button" aria-label="关闭错误提示" @click="error = ''"><X :size="16" /></button></div>
@@ -29,6 +30,7 @@
 
     <template v-else>
       <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" :exemption-date="boot.daily_exemption?.resume_date" @open="openLearning" @refresh="refreshView" />
+      <LearningPendingQuestions v-else-if="isAdmin && tab === 'pending'" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
       <LearningSharing v-else-if="tab === 'sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty = $event" @busy="busy = $event" />
       <LearningCompletion v-else-if="tab === 'completion'" :scope="viewMode === 'overview' ? scope : ''" :person-id="learner?.id" :can-view-buildings="canViewBuildings" :refresh-key="completionRefresh" @open-paper="openCompletionPaper" />
       <template v-else-if="tab === 'today' || (reading && ['review', 'history'].includes(tab))">
@@ -61,7 +63,7 @@
             <div class="rail-legend"><span><CheckCircle2 :size="13" />已答</span><span><AlertCircle :size="13" />错题</span></div>
           </aside>
           <article :key="questionId(current)" class="question-body">
-            <div class="question-meta"><div class="actions"><span class="badge">{{ current.type_label || typeLabels[current.type] }}</span><span>{{ bankLabels[current.bank] }}</span><span v-if="current.topic">{{ current.topic }}</span></div><button v-if="canAnswer" class="icon-button" :class="{ starred: current.favorite }" :aria-label="current.favorite ? '取消收藏' : '收藏题目'" :title="current.favorite ? '取消收藏' : '收藏题目'" :disabled="busy" @click="saveNotes({ favorite: !current.favorite })"><Star :size="18" :fill="current.favorite ? 'currentColor' : 'none'" /></button></div>
+            <div class="question-meta"><div class="actions"><span class="badge">{{ current.type_label || typeLabels[current.type] }}</span><span>{{ bankLabels[current.bank] }}</span><span v-if="current.topic">{{ current.topic }}</span></div><div class="actions"><button v-if="isAdmin" type="button" :disabled="busy || loading" @click="editCurrentQuestion"><Pencil :size="16" />编辑本题</button><button v-if="canAnswer" class="icon-button" :class="{ starred: current.favorite }" :aria-label="current.favorite ? '取消收藏' : '收藏题目'" :title="current.favorite ? '取消收藏' : '收藏题目'" :disabled="busy" @click="saveNotes({ favorite: !current.favorite })"><Star :size="18" :fill="current.favorite ? 'currentColor' : 'none'" /></button></div></div>
             <h2 class="stem"><span class="muted">{{ index + 1 }}.</span> {{ current.stem }}</h2>
             <div v-if="current.invalid" class="alert warning"><AlertCircle :size="17" />{{ current.invalid_reason || '此题已失效，已从评价分母剔除，原作答保留。' }}</div>
             <div v-if="current.correction || current.correction_reason" class="alert warning"><RefreshCw :size="17" />{{ current.correction_reason || current.correction }}</div>
@@ -104,13 +106,13 @@
           <button v-if="isAdmin && tab === 'issues'" type="button" :disabled="busy" @click="filters.problems = true; switchTab('questions')"><AlertCircle :size="16" />题库待核对 {{ boot.question_problem_count ?? '—' }} 题</button><div v-if="tab === 'questions'" class="actions"><button type="button" :disabled="busy" @click="modalKind = 'import'; importRows = []; importName = ''; error = ''"><Upload :size="16" />导入</button><button type="button" :disabled="busy" @click="exportData('questions')"><Download :size="16" />导出</button><button type="button" class="primary" :disabled="busy" @click="editQuestion()"><Plus :size="16" />新增题目</button></div>
           <button v-if="isAdmin && tab === 'history'" type="button" :disabled="busy" @click="exportData('results')"><Download :size="16" />导出学习记录</button>
         </form>
-        <div v-if="tab === 'questions' && selected.length" class="batch-bar"><span>已选 {{ selected.length }} 题</span><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter(q => selected.includes(q.id)), 'published')"><CheckCircle2 :size="16" />批量启用</button><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter(q => selected.includes(q.id)), 'disabled')"><X :size="16" />批量停用</button><button :disabled="busy || loading" @click="selected = []">取消选择</button></div>
+        <div v-if="tab === 'questions' && selected.length" class="batch-bar"><span>已选 {{ selected.length }} 题</span><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter((q:Dict) => selected.includes(q.id)), 'published')"><CheckCircle2 :size="16" />批量启用</button><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter((q:Dict) => selected.includes(q.id)), 'disabled')"><X :size="16" />批量停用</button><button :disabled="busy || loading" @click="selected = []">取消选择</button></div>
         <div v-if="loading" class="loading-line" role="status"><Loader2 :size="16" class="spin" />正在读取…</div>
         <div class="table-wrap" :class="{ stale: loading }" :inert="loading || undefined">
           <table v-if="tab === 'history'"><thead><tr><th>日期 / 类型</th><th>楼栋 / 人员</th><th>完成进度</th><th>正确率</th><th>缺题</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.date }}<small>{{ row.mode === 'practice' ? '自主练习' : '每日题单' }} · {{ timeLabel(row.created_at) }}</small></td><td>{{ row.scope }}楼<small>{{ row.person?.name || '旧楼栋题单' }}</small></td><td>{{ row.stats?.answered ?? row.answered ?? 0 }} / {{ row.stats?.total ?? row.questions?.length ?? row.assigned ?? '—' }}</td><td>{{ percent(row.stats?.accuracy) }}</td><td>{{ shortageText(row.shortage) || '无' }}</td><td>{{ row.status === 'completed' ? '已完成' : '待完成' }}</td><td><div class="row-actions"><button :disabled="loading || busy" @click="loadPaper(row.id)"><Eye :size="15" />查看题单</button><button v-if="isAdmin" class="icon-button danger" :disabled="loading || busy" :aria-label="`删除${row.scope}楼${row.date}题单`" title="删除题单" @click="deletePaper(row.id)"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
           <table v-else-if="tab === 'review'"><thead><tr><th>题目</th><th>题型 / 知识点</th><th>{{ filters.review === 'mistakes' ? '最近答错' : '题单日期' }}</th><th>结果</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="`${row.paper_id}:${questionId(row.question)}`"><td class="stem-cell">{{ row.question.stem }}<small v-if="row.question.note" class="note-excerpt">{{ row.question.note }}</small></td><td>{{ typeLabels[row.question.type] }}<small>{{ row.question.topic }}</small></td><td>{{ row.last_wrong_at ? timeLabel(row.last_wrong_at) : row.date }}</td><td :class="{ danger: row.mistake_count || row.question.attempt?.correct === false }"><template v-if="row.mistake_count">累计答错 {{ row.mistake_count }} 次<small>{{ resultText(row.question, row.question.practice?.at(-1) || row.question.attempt) }}</small></template><template v-else>{{ resultText(row.question) }}</template></td><td><button :disabled="loading || busy" @click="loadPaper(row.paper_id, questionId(row.question))"><BookOpen :size="15" />复习</button></td></tr></tbody></table>
-          <table v-else-if="tab === 'issues'"><thead><tr><th>楼栋 / 时间</th><th>质疑内容</th><th>类别</th><th>原题版本</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.scope }}楼<small>{{ timeLabel(row.created_at) }}</small></td><td class="stem-cell">{{ row.description }}<small>{{ row.stem || row.question?.stem || row.snapshot?.stem }}</small></td><td>{{ categoryLabels[row.category] || row.category }}</td><td>{{ row.question_version }}</td><td><span class="badge" :class="{ 'success-badge': ['resolved', 'no_change'].includes(row.status), 'warning-badge': row.status === 'needs_info' }">{{ issueLabels[row.status] || row.status }}</span></td><td><button :disabled="loading || busy" @click="openIssue({}, row)"><MessageSquare :size="15" />{{ isAdmin ? '处理' : row.can_update ? '查看与补充' : '查看' }}</button></td></tr></tbody></table>
-          <table v-else><thead><tr><th class="check-cell"><input type="checkbox" aria-label="选择当前页题目" :disabled="loading || busy" :checked="rows.length > 0 && selected.length === rows.length" @change="selected = ($event.target as HTMLInputElement).checked ? rows.map(q => q.id) : []" /></th><th>题目</th><th>题库 / 题型</th><th>专业 / 知识点</th><th>年度</th><th>状态 / 问题</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td><input v-model="selected" type="checkbox" :value="row.id" :disabled="loading || busy" :aria-label="`选择题目 ${row.stem}`" /></td><td class="stem-cell"><span class="table-stem" :title="row.stem">{{ row.stem }}</span></td><td>{{ bankLabels[row.bank] }}<small>{{ row.type_label || typeLabels[row.type] }}</small></td><td>{{ row.specialty || '—' }}<small>{{ row.topic || '—' }}</small></td><td>{{ row.year || '—' }}</td><td><span class="badge" :class="{ 'success-badge': row.status === 'published', 'warning-badge': row.status === 'disabled' }">{{ statusLabels[row.status] }}</span><small v-if="row.problems?.length" class="danger">{{ row.problems.join('；') }}</small></td><td><div class="row-actions"><button class="icon-button" aria-label="编辑题目" title="编辑题目" :disabled="busy || loading" @click="editQuestion(row.id)"><Pencil :size="16" /></button><button class="icon-button" aria-label="复制题目" title="复制题目" :disabled="busy || loading" @click="copyQuestion(row)"><Copy :size="16" /></button><button v-if="row.status !== 'deleted'" class="icon-button" :aria-label="row.status === 'published' ? '停用题目' : '发布题目'" :title="row.status === 'published' ? '停用题目' : '发布题目'" :disabled="busy || loading" @click="setQuestionStatus([row], row.status === 'published' ? 'disabled' : 'published')"><X v-if="row.status === 'published'" :size="16" /><Check v-else :size="16" /></button><button v-if="row.status === 'deleted'" class="icon-button" aria-label="恢复为草稿" title="恢复为草稿" :disabled="busy || loading" @click="setQuestionStatus([row], 'draft')"><RotateCcw :size="16" /></button><button v-else class="icon-button danger" aria-label="删除题目" title="移入回收站" :disabled="busy || loading" @click="setQuestionStatus([row], 'deleted')"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
+          <table v-else-if="tab === 'issues'"><thead><tr><th>楼栋 / 时间</th><th>质疑内容</th><th>类别</th><th>原题版本</th><th>状态</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td>{{ row.scope }}楼<small>{{ timeLabel(row.created_at) }}</small></td><td class="stem-cell">{{ row.description }}<small>{{ row.current_stem || row.stem || row.question?.stem || row.snapshot?.stem }}</small></td><td>{{ categoryLabels[row.category] || row.category }}</td><td>{{ row.question_version }}</td><td><span class="badge" :class="{ 'success-badge': ['resolved', 'no_change'].includes(row.status), 'warning-badge': row.status === 'needs_info' }">{{ issueLabels[row.status] || row.status }}</span></td><td><button v-if="isAdmin && row.question_id" :disabled="loading || busy" @click="openReview(row.id)">修改题目与答案</button><button :disabled="loading || busy" @click="openIssue({}, row)"><MessageSquare :size="15" />{{ isAdmin ? '处理' : row.can_update ? '查看与补充' : '查看' }}</button></td></tr></tbody></table>
+          <table v-else><thead><tr><th class="check-cell"><input type="checkbox" aria-label="选择当前页题目" :disabled="loading || busy" :checked="rows.length > 0 && selected.length === rows.length" @change="selected = ($event.target as HTMLInputElement).checked ? rows.map((q:Dict) => q.id) : []" /></th><th>题目</th><th>题库 / 题型</th><th>专业 / 知识点</th><th>年度</th><th>状态 / 问题</th><th>操作</th></tr></thead><tbody><tr v-for="row in rows" :key="row.id"><td><input v-model="selected" type="checkbox" :value="row.id" :disabled="loading || busy" :aria-label="`选择题目 ${row.stem}`" /></td><td class="stem-cell"><span class="table-stem" :title="row.stem">{{ row.stem }}</span></td><td>{{ bankLabels[row.bank] }}<small>{{ row.type_label || typeLabels[row.type] }}</small></td><td>{{ row.specialty || '—' }}<small>{{ row.topic || '—' }}</small></td><td>{{ row.year || '—' }}</td><td><span class="badge" :class="{ 'success-badge': row.status === 'published', 'warning-badge': row.status === 'disabled' }">{{ statusLabels[row.status] }}</span><small v-if="row.problems?.length" class="danger">{{ row.problems.join('；') }}</small></td><td><div class="row-actions"><button class="icon-button" aria-label="编辑题目" title="编辑题目" :disabled="busy || loading" @click="editQuestion(row.id)"><Pencil :size="16" /></button><button class="icon-button" aria-label="复制题目" title="复制题目" :disabled="busy || loading" @click="copyQuestion(row)"><Copy :size="16" /></button><button v-if="row.status !== 'deleted'" class="icon-button" :aria-label="row.status === 'published' ? '停用题目' : '发布题目'" :title="row.status === 'published' ? '停用题目' : '发布题目'" :disabled="busy || loading" @click="setQuestionStatus([row], row.status === 'published' ? 'disabled' : 'published')"><X v-if="row.status === 'published'" :size="16" /><Check v-else :size="16" /></button><button v-if="row.status === 'deleted'" class="icon-button" aria-label="恢复为草稿" title="恢复为草稿" :disabled="busy || loading" @click="setQuestionStatus([row], 'draft')"><RotateCcw :size="16" /></button><button v-else class="icon-button danger" aria-label="删除题目" title="移入回收站" :disabled="busy || loading" @click="setQuestionStatus([row], 'deleted')"><Trash2 :size="16" /></button></div></td></tr></tbody></table>
           <div v-if="!rows.length && !loading" class="empty"><FileText :size="28" /><span>{{ error ? '列表读取失败，请重试。' : '暂无符合条件的记录' }}</span></div>
         </div>
         <footer class="pagination list-pagination"><span>共 {{ total }} 条 · 每页 20 条</span><div class="actions"><button class="icon-button" :disabled="loading || pageNumber <= 1" aria-label="第一页" title="第一页" @click="gotoPage(1)"><ChevronsLeft :size="18" /></button><button class="icon-button" :disabled="loading || pageNumber <= 1" aria-label="上一页" title="上一页" @click="turnPage(-1)"><ChevronLeft :size="18" /></button><span>{{ pageNumber }} / {{ pageCount }}</span><button class="icon-button" :disabled="loading || pageNumber >= pageCount" aria-label="下一页" title="下一页" @click="turnPage(1)"><ChevronRight :size="18" /></button><button class="icon-button" :disabled="loading || pageNumber >= pageCount" aria-label="最后一页" title="最后一页" @click="gotoPage(pageCount)"><ChevronsRight :size="18" /></button><label class="page-jump">跳至<input v-model.number="jumpPage" type="number" min="1" :max="pageCount" aria-label="跳转页码" :disabled="loading" @keydown.enter="gotoPage(jumpPage)" /><button type="button" :disabled="loading || !jumpPage" @click="gotoPage(jumpPage)">跳转</button></label></div></footer>
@@ -173,28 +175,25 @@
       <div v-if="modalKind" class="learning-overlay" @click.self="closeModal">
         <section ref="modalElement" class="learning-modal" :class="{ 'preview-modal': modalKind === 'attachment' }" role="dialog" aria-modal="true" aria-labelledby="learning-modal-title" tabindex="-1" @paste="['question', 'issue'].includes(modalKind) && pasteFiles($event)">
           <header><h2 id="learning-modal-title">{{ modalKind === 'question' ? (editor.id ? '编辑题目' : '新增题目') : modalKind === 'issue' ? (issue.id ? '质疑处理记录' : '题目有疑问') : modalKind === 'import' ? '导入题库' : modalKind === 'people' ? '选择人员' : preview.name }}</h2><button class="icon-button" aria-label="关闭窗口" title="关闭窗口" :disabled="busy" @click="closeModal"><X :size="20" /></button></header>
+          <p v-if="modalKind==='question' && notice" role="status">{{ notice }}</p>
           <div class="modal-scroll" :inert="busy || undefined">
             <div v-if="error" class="alert error" role="alert"><AlertCircle :size="18" /><span>{{ error }}</span><button v-if="conflicted && ['question', 'issue'].includes(modalKind)" :disabled="busy" @click="reloadConflict"><RefreshCw :size="16" />读取最新版本</button></div>
             <template v-if="modalKind === 'people'"><form class="toolbar" @submit.prevent="peoplePage = 1; loadPeople()"><label class="search-field"><Search :size="16" /><input v-model="peopleSearch" aria-label="按姓名或工号搜索人员" placeholder="姓名 / 工号" type="search" /></label><button type="submit" :disabled="peopleLoading"><Search :size="16" />搜索</button><span>{{ scopeLabel }}</span></form><div v-if="peopleLoading" class="loading-line"><Loader2 :size="16" class="spin" />正在读取人员…</div><div class="people-list"><button v-for="person in peopleRows" :key="person.id" :disabled="peopleLoading || busy" @click="selectLearner(person)"><strong>{{ person.name }}</strong><span>工号 {{ person.employee_no || '未填写' }}</span><small>{{ (person.scopes || []).map((s: string) => s + '楼').join('、') }}</small><ChevronRight :size="16" /></button></div><div v-if="!peopleLoading && !peopleRows.length" class="empty">{{ peopleReady ? '没有匹配人员' : '人员目录尚未准备好，请等待后台同步' }}</div><div v-if="peopleIssues.length && isAdmin" class="alert warning"><AlertCircle :size="16" /><span>{{ peopleIssues.length }} 位人员楼栋或身份待核对：{{ peopleIssues.slice(0, 10).map((p: Dict) => p.name).join('、') }}</span></div><div class="pagination"><span>共 {{ peopleTotal }} 人</span><div class="actions"><button class="icon-button" aria-label="人员选择上一页" :disabled="peopleLoading || peoplePage <= 1" @click="peoplePage--; loadPeople()"><ChevronLeft :size="16" /></button><span>{{ peoplePage }} / {{ Math.max(1, Math.ceil(peopleTotal / 20)) }}</span><button class="icon-button" aria-label="人员选择下一页" :disabled="peopleLoading || peoplePage * 20 >= peopleTotal" @click="peoplePage++; loadPeople()"><ChevronRight :size="16" /></button></div></div></template>
             <form v-else-if="modalKind === 'question'" id="learning-question-form" class="editor-form" @submit.prevent="saveQuestion">
-              <div class="form-grid question-basics">
+              <div v-if="!reviewContext" class="form-grid question-basics">
                 <label>题库<VnetSelect input-id="learning-select-8" :model-value="bankLabels[editor.bank]" :options="Object.values(bankLabels)" label="所属题库" :disabled="busy || !!editor.id" @update:model-value="editor.bank = keyFor(bankLabels, $event); editor.type = editor.bank === 'written' ? 'single' : 'interview'" /></label>
                 <label v-if="['written', 'supplemental'].includes(editor.bank)">题型<VnetSelect input-id="learning-select-9" :model-value="editor.type === 'multiple' ? (editor.type_label === '不定项' ? '不定项' : '多选题') : typeLabels[editor.type]" :options="editor.bank === 'supplemental' ? ['单选题', '多选题', '面试题'] : ['单选题', '多选题', '不定项']" label="题目类型" :disabled="busy" @update:model-value="setEditorType" /></label>
-                <label>状态<VnetSelect input-id="learning-select-10" :model-value="statusLabels[editor.status]" :options="Object.values(statusLabels).filter(v => v !== '已删除')" label="编辑状态" :disabled="busy || editor.status === 'deleted'" @update:model-value="editor.status = keyFor(statusLabels, $event)" /></label>
+                <label>状态<VnetSelect input-id="learning-select-10" :model-value="statusLabels[editor.status]" :options="Object.values(statusLabels).filter(v => v !== '已删除')" label="编辑状态" :disabled="busy || editor.status === 'deleted' || (!!reviewContext && !modalDirty)" @update:model-value="editor.status = keyFor(statusLabels, $event)" /></label>
               </div>
-              <label><span class="label-text">题干 <span class="required">*</span></span><textarea v-model="editor.stem" rows="4" maxlength="12000" required /></label>
-              <section v-if="editor.type !== 'interview'" class="option-editor"><div class="section-heading"><h3>选项与正确答案</h3><button type="button" :disabled="busy || editor.options.length >= 26" @click="editor.options.push({ id: uid(), text: '' })"><Plus :size="16" />添加选项</button></div><div v-for="(option, n) in editor.options" :key="option.id" class="option-edit-row"><input :type="editor.type === 'single' ? 'radio' : 'checkbox'" name="correct-answer" :checked="editor.correct_option_ids.includes(option.id)" :aria-label="`选项 ${String.fromCharCode(65 + Number(n))} 为正确答案`" @change="chooseCorrect(option.id)" /><strong>{{ String.fromCharCode(65 + Number(n)) }}</strong><textarea v-model="option.text" rows="2" :aria-label="`选项 ${String.fromCharCode(65 + Number(n))} 内容`" /><button type="button" class="icon-button" :disabled="Number(n) === 0" aria-label="上移选项" title="上移选项" @click="moveOption(Number(n), -1)"><ArrowUp :size="15" /></button><button type="button" class="icon-button" :disabled="Number(n) === editor.options.length - 1" aria-label="下移选项" title="下移选项" @click="moveOption(Number(n), 1)"><ArrowDown :size="15" /></button><button type="button" class="icon-button danger" aria-label="删除选项" title="删除选项" @click="removeOption(option.id)"><Trash2 :size="15" /></button></div></section>
-              <label v-if="editor.type === 'interview'">参考答案<textarea v-model="editor.answer_text" rows="4" maxlength="12000" /></label>
-              <details class="question-extra"><summary>解析与提示</summary><div class="editor-form">
-                <label>解析<textarea v-model="editor.analysis" rows="3" maxlength="12000" /></label><label>提示<textarea v-model="editor.hint" rows="2" maxlength="5000" /></label>
-              </div></details>
+              <LearningQuestionFields :reason="reviewContext?.reason" :question="editor" :disabled="busy || questionReadOnly" />
+              <details v-if="!reviewContext" class="question-extra"><summary>提示</summary><label>思路提示<textarea v-model="editor.hint" rows="2" maxlength="5000" /></label></details>
               <div v-if="editor.status === 'published' && learningQuestionProblems(editor).length" class="alert warning"><AlertCircle :size="17" /><span>发布前待修正：{{ learningQuestionProblems(editor).join('；') }}</span></div>
               <div v-if="editor.problems?.length" class="alert warning"><AlertCircle :size="17" />{{ editor.problems.join('；') }}</div>
             </form>
 
             <div v-else-if="modalKind === 'issue'" class="issue-form">
               <div class="question-meta"><span>{{ issue.scope }}楼</span><span>原题版本 {{ issue.question_version }}</span><span v-if="issue.id" class="badge">{{ issueLabels[issue.status] || issue.status }}</span></div>
-              <details open><summary>{{ issue.attempt || issue.snapshot?.attempt ? '原题与当时作答' : '原题' }}</summary><div class="issue-snapshot"><h3 class="prewrap">{{ issue.snapshot?.stem || issue.question?.stem || issue.stem || '原题见关联题单' }}</h3><p v-for="(option, n) in issue.snapshot?.options || issue.question?.options || []" :key="option.id">{{ String.fromCharCode(65 + Number(n)) }}. {{ option.text }}</p><p v-if="(issue.attempt || issue.snapshot?.attempt)" class="muted">当时回答：{{ (issue.attempt || issue.snapshot?.attempt).answer_text || answerLabels((issue.attempt || issue.snapshot?.attempt).option_ids, issue.question || issue.snapshot) || '未作答' }}</p><button v-if="isAdmin" :disabled="busy" @click="editIssueQuestion()"><Pencil :size="15" />核对并编辑原题</button></div></details>
+              <h3 v-if="issue.current_stem">{{ issue.current_stem }}</h3><details :open="!issue.id"><summary>{{ issue.attempt || issue.snapshot?.attempt ? '提出质疑时的题目与作答' : '提出质疑时的题目' }}</summary><div class="issue-snapshot"><h3 class="prewrap">{{ issue.snapshot?.stem || issue.question?.stem || issue.stem || '原题见关联题单' }}</h3><p v-for="(option, n) in issue.snapshot?.options || issue.question?.options || []" :key="option.id">{{ String.fromCharCode(65 + Number(n)) }}. {{ option.text }}</p><p v-if="(issue.attempt || issue.snapshot?.attempt)" class="muted">当时回答：{{ (issue.attempt || issue.snapshot?.attempt).answer_text || answerLabels((issue.attempt || issue.snapshot?.attempt).option_ids, issue.question || issue.snapshot) || '未作答' }}</p><button v-if="isAdmin" :disabled="busy" @click="editIssueQuestion()"><Pencil :size="15" />核对并编辑原题</button></div></details>
               <template v-if="!issue.id"><label>问题类别<VnetSelect input-id="learning-select-12" :model-value="categoryLabels[issue.category]" :options="Object.values(categoryLabels)" label="问题类别" @update:model-value="issue.category = keyFor(categoryLabels, $event)" /></label><label><span class="label-text">问题说明 <span class="required">*</span></span><textarea v-model="issue.description" rows="4" maxlength="6000" /></label><label>建议答案或依据<textarea v-model="issue.suggestion" rows="3" maxlength="6000" /></label></template>
               <template v-else><h3>{{ categoryLabels[issue.category] }}质疑</h3><p class="prewrap">{{ issue.description }}</p><p v-if="issue.suggestion" class="prewrap">建议：{{ issue.suggestion }}</p><section class="comment-list"><h3>处理与补充记录</h3><article v-for="(comment, n) in issue.comments || []" :key="n" class="comment-entry"><div class="actions"><strong>{{ comment.author || comment.actor?.name || comment.name || (comment.is_admin ? '管理员' : issue.scope + '楼') }}</strong><small>{{ timeLabel(comment.created_at || comment.at) }}</small><span v-if="comment.status" class="badge">{{ issueLabels[comment.status] || comment.status }}</span></div><p class="prewrap">{{ comment.text || comment.comment || comment.content }}</p></article><p v-if="!issue.comments?.length" class="muted">暂无回复</p></section><template v-if="canEditIssue"><label><span class="label-text">补充说明 / 处理结论 <span class="required">*</span></span><textarea v-model="issueComment" rows="4" maxlength="6000" /></label><label>更新状态<VnetSelect input-id="learning-select-13" :model-value="issueLabels[issueNextStatus] || issueNextStatus" :options="issueStatusOptions" label="更新质疑状态" @update:model-value="issueNextStatus = keyFor(issueLabels, $event)" /></label></template></template>
             </div>
@@ -203,12 +202,12 @@
 
             <template v-else-if="modalKind === 'attachment'"><img v-if="isImage(preview)" class="attachment-image" :src="attachmentUrl(preview)" :alt="preview.name" /><iframe v-else-if="/\.pdf$/i.test(preview.name)" class="attachment-frame" :src="attachmentUrl(preview)" :title="preview.name"></iframe><div v-else class="empty"><FileText :size="40" /><span>{{ preview.name }}</span><a :href="attachmentUrl(preview)" target="_blank" rel="noopener">打开附件</a></div></template>
 
-            <details v-if="modalKind === 'question' || (modalKind === 'issue' && (canEditIssue || issue.attachments?.length))" class="attachment-editor" :open="modalKind === 'issue' || !!editor.attachments?.length || !!uploadFiles.length" @dragover.prevent @drop.prevent="addFiles(Array.from($event.dataTransfer?.files || []))">
+            <details v-if="(modalKind === 'question' && !reviewContext) || (modalKind === 'issue' && (canEditIssue || issue.attachments?.length))" class="attachment-editor" :open="modalKind === 'issue' || !!editor.attachments?.length || !!uploadFiles.length" @dragover.prevent @drop.prevent="addFiles(Array.from($event.dataTransfer?.files || []))">
               <summary>附件（选填）</summary><div class="attachments"><div v-for="a in (modalKind === 'question' ? editor.attachments : issue.attachments) || []" :key="a.id" class="attachment-item"><a :href="attachmentUrl(a)" target="_blank" rel="noopener"><Eye :size="15" />{{ a.name }}</a><small>{{ attachmentLabels[a.kind] }}</small><button v-if="isAdmin" class="icon-button danger" aria-label="删除附件" title="删除附件" :disabled="busy" @click="deleteAttachment(a)"><Trash2 :size="15" /></button></div></div>
               <div v-if="modalKind === 'question' || canEditIssue" class="upload-zone"><div class="actions"><VnetSelect input-id="learning-select-14" :model-value="attachmentLabels[attachmentKind]" :options="modalKind === 'issue' ? ['学习资料'] : Object.values(attachmentLabels)" label="附件用途" @update:model-value="attachmentKind = keyFor(attachmentLabels, $event)" /><label class="file-button"><Upload :size="16" />选择附件<input type="file" multiple :disabled="busy" @change="pickFiles" /></label><span class="muted">拖入文件 / 粘贴图片 · 每份 20 MiB，上限 10 份 / 100 MiB</span></div><div v-for="(file, n) in uploadFiles" :key="`${file.name}:${n}`" class="pending-file"><FileText :size="15" /><span>{{ file.name }}</span><small>{{ (file.size / 1024 / 1024).toFixed(2) }} MiB · 待上传</small><button class="icon-button" aria-label="移除待上传附件" title="移除待上传附件" :disabled="busy" @click="uploadFiles.splice(n, 1)"><X :size="15" /></button></div><button v-if="uploadFiles.length && (modalKind === 'question' ? editor.id : issue.id)" :disabled="busy" @click="perform(() => uploadAttachments(modalKind === 'question' ? 'question' : 'issue'), '附件已上传。')"><Upload :size="16" />上传所选附件</button></div>
             </details>
           </div>
-          <footer><span v-if="busy" class="muted actions"><Loader2 :size="16" class="spin" />正在保存…</span><span v-else-if="modalDirty" class="muted">有未保存内容</span><div class="actions"><button :disabled="busy" @click="closeModal">关闭</button><button v-if="modalKind === 'question'" class="primary" type="submit" form="learning-question-form" :disabled="busy || editor.status === 'deleted'"><Save :size="16" />保存题目</button><button v-else-if="modalKind === 'issue' && canEditIssue" class="primary" :disabled="busy" @click="submitIssue"><Send :size="16" />{{ issue.id ? '提交补充与处理' : '提交质疑' }}</button><button v-else-if="modalKind === 'import'" class="primary" :disabled="busy || !importRows.length || !!importErrors" @click="commitImport"><Upload :size="16" />确认导入 {{ importRows.length || '' }}</button><a v-else-if="modalKind === 'attachment'" :href="attachmentUrl(preview)" target="_blank" rel="noopener" download><Download :size="16" />下载附件</a></div></footer>
+          <footer><span v-if="busy" class="muted actions"><Loader2 :size="16" class="spin" />正在保存…</span><span v-else-if="modalDirty" class="muted">有未保存内容</span><div class="actions"><button :disabled="busy" @click="closeModal">关闭</button><button v-if="modalKind === 'question' && !questionReadOnly" class="primary" type="submit" form="learning-question-form" :disabled="busy || editor.status === 'deleted' || (!!reviewContext && !modalDirty)"><Save :size="16" />保存题目</button><button v-else-if="modalKind === 'issue' && canEditIssue" class="primary" :disabled="busy" @click="submitIssue"><Send :size="16" />{{ issue.id ? '提交补充与处理' : '提交质疑' }}</button><button v-else-if="modalKind === 'import'" class="primary" :disabled="busy || !importRows.length || !!importErrors" @click="commitImport"><Upload :size="16" />确认导入 {{ importRows.length || '' }}</button><a v-else-if="modalKind === 'attachment'" :href="attachmentUrl(preview)" target="_blank" rel="noopener" download><Download :size="16" />下载附件</a></div></footer>
         </section>
       </div>
       </UiTransition>
@@ -453,7 +452,7 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { AlertCircle, ArrowDown, ArrowUp, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shuffle, Star, Trash2, Upload, Users, X, ChartNoAxesCombined } from "lucide-vue-next";
+import { AlertCircle, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shuffle, Star, Trash2, Upload, Users, X, ChartNoAxesCombined } from "lucide-vue-next";
 import { ApiError, downloadFile, requestJson } from "../api/client";
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
 import { requestLearning, type LearningApiOptions } from "../api/learning";
@@ -461,15 +460,17 @@ import { beijingDate } from "../workspace-v2/eventPeriod";
 import { navigate, registerNavigationGuard } from "../navigation";
 import { acquireModal } from "../modalState";
 import VnetBackButton from "./VnetBackButton.vue";
+import LearningQuestionFields from "./LearningQuestionFields.vue";
 import VnetSelect from "./VnetSelect.vue";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import LearningDashboard from "./LearningDashboard.vue";
 import LearningHome from "./LearningHome.vue";
 import LearningSharing from "./LearningSharing.vue";
 import LearningCompletion from "./LearningCompletion.vue";
+import LearningPendingQuestions from "./LearningPendingQuestions.vue";
 
 const props = defineProps<{ scope?: string; personId?: string; userId: string }>();
-type Tab = "home" | "today" | "review" | "history" | "issues" | "profile" | "questions" | "settings" | "sharing" | "completion";
+type Tab = "home" | "today" | "review" | "history" | "issues" | "pending" | "profile" | "questions" | "settings" | "sharing" | "completion";
 const completionRefresh = ref(0);
 const completionReturn = ref<{ person:Dict|null }|null>(null);
 const sharingDirty = ref(false);
@@ -481,6 +482,9 @@ const categoryLabels: Dict = Object.fromEntries(["题目", "题干", "选项", "
 const attachmentLabels: Dict = { question: "题面附件", answer: "答案附件", material: "学习资料" };
 const ratingLabels: Dict = Object.fromEntries(["需复习", "部分掌握"].map(v => [v, v]));
 const reviewLabels: Dict = { mistakes: "个人错题集", wrong: "错题与待复习", favorites: "收藏", notes: "笔记", all: "全部复习" };
+const pendingQueue = ref<Dict>({});
+const pendingLoading = ref(false), pendingError = ref("");
+const pendingTab = computed(() => ({ id: "pending", label: `待处理题目${pendingQueue.value.total == null || pendingError.value ? '' : ' ' + pendingQueue.value.total}`, icon: MessageSquare }));
 const tabs = computed(() => {
     if (viewMode.value === "overview") {
       return [
@@ -488,7 +492,7 @@ const tabs = computed(() => {
         { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
         { id: "sharing", label: "分享会练习", icon: Users },
         { id: "completion", label: "每日完成", icon: CheckCircle2 },
-        ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
+        ...(isAdmin.value ? [pendingTab.value, { id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
       ];
     }
     return [
@@ -498,7 +502,7 @@ const tabs = computed(() => {
       { id: "history", label: "学习历史", icon: History }, { id: "issues", label: isAdmin.value ? "问题中心" : "人员质疑", icon: MessageSquare },
       { id: "sharing", label: "分享会练习", icon: Users },
       { id: "completion", label: "每日完成", icon: CheckCircle2 },
-      ...(isAdmin.value ? [{ id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
+      ...(isAdmin.value ? [pendingTab.value, { id: "questions", label: "题库管理", icon: FileText }, { id: "settings", label: "发布设置", icon: Settings }] : []),
     ];
   });
 const boot = ref<Dict>({});
@@ -645,6 +649,16 @@ const learningOptions: LearningApiOptions = {
     schedulePoll();
   },
 };
+async function loadPendingQuestions(page = Number(pendingQueue.value.page || 1)): Promise<void> {
+  if (!isAdmin.value || disposed || pendingLoading.value) return;
+  pendingLoading.value = true;
+  pendingError.value = "";
+  try {
+    pendingQueue.value = await requestLearning(learningOptions, `/issues/pending-questions?page=${page}`);
+  } catch (e) {
+    if (!disposed) pendingError.value = (e as Error).message;
+  } finally { pendingLoading.value = false; }
+}
 async function perform(action: () => Promise<void>, message = ""): Promise<void> {
   if (busy.value) return;
   busy.value = true; error.value = ""; notice.value = "";
@@ -803,6 +817,7 @@ function query(extra: Dict = {}): string {
   return new URLSearchParams(Object.entries({ scope: scope.value, person_id: learner.value?.id, page: pageNumber.value, page_size: 20, ...extra }).filter(([, v]) => v !== "" && v !== undefined).map(([k, v]) => [k, String(v)])).toString();
 }
 async function loadView(): Promise<void> {
+  if (tab.value === 'pending') { ++epoch; readRequest?.abort(); loading.value = false; await loadPendingQuestions(); return; }
   if (tab.value === 'sharing' || tab.value === 'completion') { ++epoch; readRequest?.abort(); loading.value = false; return; }
   const token = ++epoch; readRequest?.abort(); readRequest = new AbortController(); const readOptions = { signal: readRequest.signal }; loading.value = true; error.value = ""; selected.value = [];
   try {
@@ -838,7 +853,7 @@ async function loadView(): Promise<void> {
   finally { if (token === epoch) loading.value = false; }
 }
 async function switchTab(value: Tab): Promise<void> {
-  if (busy.value || value === tab.value) return;
+  if (busy.value || value === tab.value || (value === 'pending' && !isAdmin.value)) return;
   if (tab.value === 'sharing' && sharingDirty.value && !await ask('离开分享会练习', '题目修改尚未保存，确认放弃？')) return;
   sharingDirty.value = false;
   if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("离开发布设置", "尚有未保存的设置，确认放弃？")) return;
@@ -958,6 +973,7 @@ async function refreshView(): Promise<void> {
   if (tab.value === 'today' && viewMode.value === 'practice' && !paper.value) await loadTodayPaper();
   else if (reading.value && paper.value && current.value) await loadPaper(paper.value.id, questionId(current.value));
   else await loadView();
+  if (tab.value !== 'pending') void loadPendingQuestions();
   void refreshSync();
 }
 function setPeriod(value: string): void { filters.period = value; filters.from = ""; filters.to = ""; pages.profile = 1; }
@@ -995,7 +1011,21 @@ async function bootstrap(): Promise<void> {
       date.value = typeof boot.value.today === "string" ? boot.value.today : boot.value.today?.date || beijingDate();
       Object.assign(settingsForm, boot.value.settings || {}); settingsSnapshot = JSON.stringify(settingsForm);
       ready.value = true;
-      if (['sharing', 'completion'].includes(new URLSearchParams(window.location.search).get('tab') || '')) {
+      const link=new URLSearchParams(window.location.search);
+      if (isAdmin.value && link.get('tab') !== 'pending') void loadPendingQuestions();
+      if(link.get('issue_id') || link.get('review_ticket')) {
+        tab.value='issues'; await loadView();
+        if(link.get('issue_id')){
+          if(isAdmin.value || link.get('review_ticket')) await openReview(link.get('issue_id')!,link.get('review_ticket')||'');
+          else await perform(async()=>openIssue({},await requestLearning(learningOptions,'/issues/'+encodeURIComponent(link.get('issue_id')!))));
+        }
+      } else if(isAdmin.value && (link.get('edit_question') || link.get('question_id'))) {
+        tab.value='questions'; await loadView(); await editQuestion(link.get('edit_question') || link.get('question_id')!);
+      } else if (isAdmin.value && link.get('tab')==='pending') {
+        tab.value='pending'; await loadView();
+      } else if (link.get('tab')==='issues') {
+        tab.value='issues'; await loadView();
+      } else if (['sharing', 'completion'].includes(link.get('tab') || '')) {
         tab.value = new URLSearchParams(window.location.search).get('tab') as Tab; loading.value = false;
       } else if (viewMode.value === "practice" && boot.value.can_answer === true && learner.value?.id && boot.value.self_scope) {
         const entry = new URLSearchParams(window.location.search);
@@ -1088,52 +1118,79 @@ const modalDirty = computed(() => uploadFiles.value.length > 0 || (modalKind.val
 async function closeModal(): Promise<void> {
   if (busy.value) return;
   if (modalDirty.value && !await ask("关闭窗口", "尚有未保存内容或未上传附件，确认放弃？")) return;
-  modalKind.value = ""; uploadFiles.value = []; error.value = "";
+  modalKind.value = ""; reviewContext.value=null; uploadFiles.value = []; error.value = "";
 }
 async function scrollModalError(): Promise<void> {
   await nextTick();
   const scrollEl = modalElement.value?.querySelector<HTMLElement>(".modal-scroll");
   scrollEl?.scrollTo({ top: 0, behavior: "auto" });
 }
+type ReviewContext = { path:string; issuesVersion:string; editable:boolean; reason:string };
+const reviewContext = ref<ReviewContext|null>(null);
+const questionReadOnly = computed(()=>editor.value.status==='deleted' || reviewContext.value?.editable===false);
+
+function installReview(path:string, data:Dict) {
+  reviewContext.value={path,issuesVersion:data.issues_version,editable:data.editable,reason:data.reason||""};
+  editor.value=copy(data.question);
+  editorSnapshot.value=JSON.stringify(editor.value);
+  uploadFiles.value=[]; conflicted.value=false; modalKind.value="question";
+}
+async function openReview(issueId:string,ticket="",group=false) {
+  if (group && !isAdmin.value) return;
+  const path='/issues/'+encodeURIComponent(issueId)+'/question'+(ticket?'?review_ticket='+encodeURIComponent(ticket):group?'?group=1':'');
+  await perform(async()=>installReview(path,await requestLearning(learningOptions,path)));
+}
+async function editCurrentQuestion(): Promise<void> {
+  if (!isAdmin.value || !current.value || loading.value) return;
+  const id = questionId(current.value);
+  if (!id || id === 'undefined') return;
+  const path = `/questions/${encodeURIComponent(id)}/revision`;
+  await perform(async () => installReview(path, await requestLearning(learningOptions, path)));
+}
 async function editQuestion(id = ""): Promise<void> {
   await perform(async () => {
     editor.value = withoutQuestionMetadata(id ? await requestLearning(learningOptions,`/questions/${encodeURIComponent(id)}`) : { new_id: "q_" + uid(), bank: "written", type: "single", stem: "", options: [{ id: uid(), text: "" }, { id: uid(), text: "" }], correct_option_ids: [], answer_text: "", analysis: "", hint: "", status: "draft", attachments: [] });
-    editorSnapshot.value = JSON.stringify(editor.value); uploadFiles.value = []; attachmentKind.value = "question"; modalKind.value = "question";
+    reviewContext.value=null; editorSnapshot.value = JSON.stringify(editor.value); uploadFiles.value = []; attachmentKind.value = "question"; modalKind.value = "question";
     conflicted.value = false;
   });
 }
 async function editIssueQuestion(): Promise<void> {
   if (modalDirty.value && !await ask("编辑原题", "质疑中尚有未提交内容，确认放弃并打开原题？")) return;
-  await editQuestion(issue.value.question_id);
+  await openReview(issue.value.id);
 }
 async function reloadConflict(): Promise<void> {
   if (modalKind.value === "question") {
-    if (await ask("读取最新题目", "当前题目修改将被最新版本替换，确认后重新编辑。")) await editQuestion(editor.value.id || editor.value.new_id);
+    if (!await ask("读取最新题目", "当前题目修改将被最新版本替换，确认后重新编辑。")) return;
+    const review=reviewContext.value;
+    if(review) await perform(async()=>installReview(review.path,await requestLearning(learningOptions,review.path)));
+    else await editQuestion(editor.value.id || editor.value.new_id);
   } else await perform(async () => {
     const latest = await requestLearning(learningOptions,`/issues/${encodeURIComponent(issue.value.id)}`);
     issue.value = latest; issueNextStatus.value = latest.status; conflicted.value = false;
     notice.value = "已读取最新处理记录，补充说明仍保留，请核对后提交。";
   });
 }
-function moveOption(position: number, delta: number): void {
-  const options = editor.value.options; if (!options[position + delta]) return;
-  [options[position], options[position + delta]] = [options[position + delta], options[position]];
-}
-function removeOption(id: string): void {
-  editor.value.options = editor.value.options.filter((o: Dict) => o.id !== id);
-  editor.value.correct_option_ids = editor.value.correct_option_ids.filter((v: string) => v !== id);
-}
-function chooseCorrect(id: string): void {
-  editor.value.correct_option_ids = editor.value.type === "single" ? [id] : editor.value.correct_option_ids.includes(id) ? editor.value.correct_option_ids.filter((v: string) => v !== id) : [...editor.value.correct_option_ids, id];
-}
 function setEditorType(label: string): void {
   editor.value.type = label === "单选题" ? "single" : label === "面试题" ? "interview" : "multiple";
   editor.value.type_label = label === "不定项" ? "不定项" : label === "多选题" ? "多选" : label === "单选题" ? "单选" : "面试";
 }
 async function saveQuestion(): Promise<void> {
+  if(questionReadOnly.value) return;
   const problems = learningQuestionProblems(editor.value);
   if (!String(editor.value.stem || "").trim() || (editor.value.status === "published" && problems.length)) { error.value = problems.join("；"); void scrollModalError(); return; }
   await perform(async () => {
+    const review=reviewContext.value;
+    if(review) {
+      const {version,stem,options,correct_option_ids,answer_text,analysis}=editor.value;
+      const saved=await requestLearning(learningOptions,review.path,"PUT",{version,stem,options,correct_option_ids,answer_text,analysis,issues_version:review.issuesVersion});
+      installReview(review.path,saved);
+      if (review.path.startsWith('/questions/')) { notice.value="已保存题库最新版。"; return; }
+      if (tab.value === 'pending') { modalKind.value = ""; reviewContext.value = null; }
+      void loadPendingQuestions();
+      if(tab.value==="issues") await loadView();
+      notice.value="已保存最新版，质疑已处理。";
+      return;
+    }
     const id = editor.value.id;
     const payload = withoutQuestionMetadata(editor.value); delete payload.audit;
     editor.value = withoutQuestionMetadata(await requestLearning(learningOptions,id ? `/questions/${encodeURIComponent(id)}` : "/questions", id ? "PUT" : "POST", payload));
@@ -1152,9 +1209,10 @@ async function setQuestionStatus(items: Dict[], status: string): Promise<void> {
   });
 }
 async function copyQuestion(q: Dict): Promise<void> {
-  await perform(async () => { editor.value = withoutQuestionMetadata(await requestLearning(learningOptions,`/questions/${encodeURIComponent(q.id)}/copy`, "POST", { version: q.version })); editorSnapshot.value = JSON.stringify(editor.value); modalKind.value = "question"; uploadFiles.value = []; await loadView(); }, "已复制为草稿。");
+  await perform(async () => { editor.value = withoutQuestionMetadata(await requestLearning(learningOptions,`/questions/${encodeURIComponent(q.id)}/copy`, "POST", { version: q.version })); reviewContext.value=null; editorSnapshot.value = JSON.stringify(editor.value); modalKind.value = "question"; uploadFiles.value = []; await loadView(); }, "已复制为草稿。");
 }
 function openIssue(q: Dict = current.value || {}, existing?: Dict): void {
+  reviewContext.value=null;
   issue.value = existing ? copy(existing) : { person_id: paper.value?.person_id || learner.value?.id, scope: paper.value?.scope || scope.value, paper_id: paper.value?.id, question_id: questionId(q), question_version: q.version, category: "答案", description: "", suggestion: "", snapshot: copy(q), attachments: [] };
   issueSnapshot.value = JSON.stringify(issue.value); issueComment.value = ""; issueNextStatus.value = issue.value.status || "pending"; uploadFiles.value = []; attachmentKind.value = "material"; modalKind.value = "issue";
   conflicted.value = false;
@@ -1170,9 +1228,11 @@ async function submitIssue(): Promise<void> {
     issueComment.value = ""; issueNextStatus.value = issue.value.status; issueSnapshot.value = JSON.stringify(issue.value);
     if (uploadFiles.value.length) await uploadAttachments("issue");
     if (tab.value === "issues") await loadView();
+    void loadPendingQuestions();
   }, "质疑记录已保存。");
 }
 function addFiles(files: File[]): void {
+  if(modalKind.value==="question" && reviewContext.value) return;
   if (modalKind.value === "issue" && !canEditIssue.value) return;
   const currentFiles = modalKind.value === "question" ? editor.value.attachments || [] : issue.value.attachments || [];
   const incoming = files.filter(f => !uploadFiles.value.some(v => v.name === f.name && v.size === f.size && v.lastModified === f.lastModified));

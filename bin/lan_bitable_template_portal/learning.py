@@ -1602,7 +1602,7 @@ class LearningService:
         with self.transaction() as conn:
             return self._save_question(payload, actor, conn)
 
-    def _save_question(self, payload, actor, conn, *, require_valid=False):
+    def _save_question(self, payload, actor, conn, *, require_valid=False, correct_papers=True):
         new_id = payload.get("new_id")
         if not payload.get("id") and new_id:
             if not isinstance(new_id, str) or not re.fullmatch(r"q_[A-Za-z0-9_-]{1,100}", new_id):
@@ -1628,7 +1628,7 @@ class LearningService:
         reason = clean(payload.get("reason", "管理员修改题目"), 2000)
         audit_id = uuid.uuid4().hex
         self._put("audit", audit_id, {"id": audit_id, "question_id": q["id"], "actor": actor["id"], "at": stamp(), "reason": reason, "before": {k: v for k, v in (old or {}).items() if not k.startswith("_")}, "after": copy.deepcopy(q)}, conn)
-        if old:
+        if old and correct_papers:
             self._correct_papers(old, q, reason, conn)
         self._put("question", q["id"], q, conn)
         q["_dirty"] = True
@@ -1718,7 +1718,7 @@ class LearningService:
             raise LearningError("只能补充本人提交的质疑，其他质疑由管理员处理。", 403)
         return item
 
-    def public_issue(self, item, actor):
+    def public_issue(self, item, actor, conn=None):
         can_update = self._can_update_issue(item, actor)
         if not self._can_read_issue_evidence(item, actor):
             value = {key: item.get(key) for key in (
@@ -1742,6 +1742,10 @@ class LearningService:
         value = {k: copy.deepcopy(v) for k, v in item.items() if not k.startswith("_")}
         value["can_update"] = can_update
         q = value["question"]
+        current = self._get("question", item.get("question_id"), conn)
+        if current and current.get("status") != "deleted":
+            value["current_stem"] = current["stem"]
+            value["current_version"] = current["version"]
         if not actor.get("is_admin"):
             for key in ("correct_option_ids", "answer_text", "source_answer", "analysis", "hint", "correction_history"):
                 q.pop(key, None)
@@ -1804,11 +1808,13 @@ class LearningService:
         item["updated_at"] = stamp()
         item["comments"].append({"actor": actor["id"], "name": actor.get("name", ""), "at": stamp(), "text": remark or "撤回质疑", "is_admin": bool(actor.get("is_admin"))})
         self._put("issue", item["id"], item, conn)
+        item["_dirty"] = True
+        visible = self.public_issue(item, actor, conn)
         if actor.get("is_admin"):
             nid = f"issue:{item['id']}:{item['version']}"
-            self._put("notification", nid, {"id": nid, "kind": "issue", "date": now().date().isoformat(), "scope": item["scope"], "status": "pending", "message": f"【画像学练·质疑处理】\n题目：{item['question']['stem'][:150]}\n{remark}"}, conn)
-        item["_dirty"] = True
-        return self.public_issue(item, actor)
+            title = visible.get("current_stem") or item["question"]["stem"]
+            self._put("notification", nid, {"id": nid, "kind": "issue", "date": now().date().isoformat(), "scope": item["scope"], "status": "pending", "message": f"【画像学练·质疑处理】\n题目：{title[:150]}\n{remark}"}, conn)
+        return visible
 
     def open_question_issues(self, conn, question_id=None):
         sql = ("SELECT payload FROM documents WHERE kind='issue' "
@@ -1817,6 +1823,38 @@ class LearningService:
             sql += " AND json_extract(payload,'$.question_id')=?"
         return [json.loads(row[0]) for row in conn.execute(sql + " ORDER BY key",
                 () if question_id is None else (question_id,))]
+
+    def pending_questions(self, actor, query):
+        self._admin(actor)
+        with closing(self._connect()) as conn:
+            rows = conn.execute("""
+                SELECT q.key AS question_id, MIN(i.key) AS issue_id, COUNT(*) AS feedback_count,
+                       json_extract(q.payload,'$.stem') AS stem, json_extract(q.payload,'$.type') AS type,
+                       json_extract(q.payload,'$.type_label') AS type_label
+                FROM documents i JOIN documents q
+                  ON q.kind='question' AND q.key=json_extract(i.payload,'$.question_id')
+                WHERE i.kind='issue' AND json_extract(i.payload,'$.status') IN ('pending','processing','needs_info')
+                  AND json_extract(q.payload,'$.status')<>'deleted'
+                GROUP BY q.key ORDER BY MAX(i.updated) DESC, q.key
+            """).fetchall()
+        result = self._page(rows, query)
+        result["items"] = [dict(row) for row in result["items"]]
+        return result
+
+    def question_revision(self, question_id, actor, edits=None):
+        self._admin(actor)
+        if not self.settings()["enabled"]:
+            raise LearningError("画像学练暂未启用。", 503)
+        with self.transaction() as conn:
+            question = self._question(question_id, conn)
+            if question.get("status") == "deleted":
+                raise LearningError("原题已删除。", 409)
+            if edits is not None:
+                fields = {key: edits[key] for key in ("version", "stem", "options", "correct_option_ids", "answer_text", "analysis") if key in edits}
+                question = self._save_question({**fields, "id": question_id}, actor, conn,
+                                               require_valid=True, correct_papers=False)
+            return {"question": self.admin_question(question), "editable": True,
+                    "sync_pending": bool(question.get("_dirty") or question.get("sync_pending"))}
 
     def list_issues(self, actor, query):
         if not actor.get("id"):
@@ -1831,7 +1869,9 @@ class LearningService:
             items = [i for i in items if i["status"] == query["status"]]
         if query.get("search"):
             term = query["search"].lower()
-            items = [i for i in items if term in (i["question"]["stem"] + i["description"]).lower()]
+            items = [i for i in items if term in (i["question"]["stem"] + i["description"]).lower()
+                     or (self._can_read_issue_evidence(i, actor)
+                         and term in (self._get("question", i.get("question_id")) or {}).get("stem", "").lower())]
         items.sort(key=lambda i: (i["updated_at"], i["id"]), reverse=True)
         result = self._page(items, query)
         result["items"] = [self.public_issue(i, actor) for i in result["items"]]
@@ -2070,6 +2110,10 @@ class LearningService:
             return self.attempt_history(actor, query)
         if action == "issues.list":
             return self.list_issues(actor, query)
+        if action == "issues.pending_questions":
+            return self.pending_questions(actor, query)
+        if action in {"question.revision.get", "question.revision.save"}:
+            return self.question_revision(identity, actor, payload if action.endswith(".save") else None)
         if action == "issue.get":
             return self.public_issue(self.issue(identity, actor), actor)
         if action == "issue.create":

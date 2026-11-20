@@ -72,10 +72,15 @@ def _blockers(store):
     rows = [row for row in store.list_qt_active_items(include_deleted=False)
             if is_event(row.get("payload") or row)]
     documents = {row["key"]: row["payload"] for row in store.list_documents(NAMESPACE)}
+    qt_delivered = {doc["active_item_id"]: key for key, doc in documents.items()
+                    if doc.get("qt_event_id") and doc.get("active_item_id") and doc.get("state") != "linked"}
     live = {}
     for row in rows:
         payload = row.get("payload") or row
         key = event_key(payload)
+        delivered_key = qt_delivered.get(str(payload.get("active_item_id") or row.get("active_item_id") or ""))
+        if delivered_key and key not in documents:
+            continue
         if not key or is_local_record_id(key):
             continue
         live[key] = payload
@@ -91,7 +96,7 @@ def _blockers(store):
             if confirmed:
                 record_result(store, payload, "update", key)
                 documents[key] = store.get_document(NAMESPACE, key)
-    return [summary(live[key]) if key in live else copy.deepcopy(doc["summary"])
+    return [summary(live[key]) if key in live and not doc.get("qt_event_id") else copy.deepcopy(doc["summary"])
             for key, doc in documents.items() if doc.get("state") == "active"]
 
 

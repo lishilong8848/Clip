@@ -106,7 +106,7 @@ try{
   assert(!await page.getByRole('button',{name:'管理员入口',exact:true}).isDisabled(),'building switch leaves the admin view');
  }
  await go('/admin/settings');await page.getByRole('searchbox',{name:'搜索账号',exact:true}).waitFor();
- assert.equal(await page.locator('.admin-workspace-tabs').count(),0);assert.equal(await page.locator('.v2-sidebar').count(),1);
+ assert.equal(await page.locator('.admin-workspace-tabs').count(),0);assert.equal(await page.locator('.v2-topnav').count(),1);
  await page.locator('.v2-settings-picker .n-select').click();await page.locator('.n-base-select-option').filter({hasText:'MOP 配置'}).click();
  await screenshot('settings');assert.equal(await page.locator('.v2-settings-picker').count(),1);
  role='member';await go('/drill-management&scope=A&mode=admin');await page.locator('.drill-page').waitFor();assert.equal(await page.getByRole('button',{name:'管理员入口',exact:true}).count(),0);assert.equal(await page.locator('.drill-page .admin-view').count(),0);

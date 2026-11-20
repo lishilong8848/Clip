@@ -37,7 +37,7 @@ class PhotoPreviewTests(Base):
         tags=Image.Exif(); tags[36867]='2026:10:13 08:31:00'
         Image.new('RGB',(900,700)).save(session['path'],format='JPEG',exif=tags)
         info=self.service.retain_photo_preview(self.worker,session,Path(session['path']).stat().st_size,self.current)
-        self.assertTrue(session['name'].endswith('.jpg'))
+        self.assertEqual(session['name'], '手机照片.png')
         self.assertEqual(info['original_time'],'2026-10-13 08:31')
         result=self.service.commit_photo_preview(self.worker,info['preview_id'],{**info['options'],'enabled':False},current=self.current)
         self.assertTrue(result['name'].endswith('.jpg'))
@@ -55,26 +55,32 @@ class PhotoPreviewTests(Base):
         self.assertGreater(info['height'],info['width'])
         self.assertEqual(Image.MAX_IMAGE_PIXELS,original)
         with Image.open(session['path']) as photo:
-            self.assertLess(photo.width*photo.height,25_000_000)
+            self.assertEqual(photo.size, (8000, 6000))
         result=self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info),current=self.current)
+        with Image.open(self.service.get_file(self.worker, result['id'])['path']) as photo:
+            self.assertLess(photo.width * photo.height, 25_000_000)
         again=self.service.commit_photo_preview(self.worker,info['preview_id'],self.stamped(info),current=self.current)
         self.assertEqual(result['id'],again['id'])
         self.assertEqual(self.counts(),(1,1))
 
-    def test_corrupt_photos_do_not_save_and_size_errors_are_not_masked(self):
+    def test_unreadable_or_over_pixel_limit_photos_keep_original_as_file(self):
         session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','broken.jpg')
         Path(session['path']).write_bytes(b'not a photo')
-        with self.assertRaisesRegex(checks.CheckError,'无法读取文件'):
-            self.service.commit_upload(self.worker,session,len(b'not a photo'))
+        result = self.service.retain_photo_preview(self.worker, session, len(b'not a photo'), self.current)
+        self.assertFalse(result['is_image'])
+        self.assertNotIn('preview_id', result)
+        self.assertEqual(result['name'], 'broken.jpg')
+        stored = self.service.get_file(self.worker, result['id'])
+        self.assertEqual(Path(stored['path']).read_bytes(), b'not a photo')
         session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','too-big.png')
         Path(session['path']).write_bytes(b'placeholder')
         with patch('lan_bitable_template_portal.pre_shift_photo.prepare_upload',side_effect=ValueError('图片像素过大，请缩小照片后上传。')):
-            with self.assertRaisesRegex(checks.CheckError,'像素过大'):
-                self.service.commit_upload(self.worker,session,len(b'placeholder'))
-        self.assertEqual(self.counts(),(0,0))
+            result = self.service.commit_upload(self.worker, session, len(b'placeholder'))
+        self.assertFalse(result['is_image'])
+        self.assertEqual(self.counts(),(2,0))
+        self.assertEqual(list(self.service.staging_dir.iterdir()), [])
 
     def test_common_album_formats_decode_preview_and_preserve_capture_metadata(self):
-        from lan_bitable_template_portal.pre_shift_photo import prepare_upload
         for suffix, fmt in [('heic','HEIF'),('heif','HEIF'),('avif','AVIF'),('png','PNG'),
                             ('webp','WEBP'),('gif','GIF'),('tiff','TIFF'),('bmp','BMP'),('ico','ICO'),('jp2','JPEG2000')]:
             with self.subTest(format=fmt,suffix=suffix):
@@ -84,7 +90,7 @@ class PhotoPreviewTests(Base):
                     photo.save(session['path'],format=fmt,exif=tags)
                 info=self.service.retain_photo_preview(self.worker,session,Path(session['path']).stat().st_size,self.current)
                 self.assertTrue(info['image'].startswith('data:image/jpeg'))
-                self.assertIn(Path(session['name']).suffix,{'.jpg','.png','.webp'})
+                self.assertEqual(session['name'], '相册.' + suffix)
                 if fmt in {'HEIF','AVIF','PNG','WEBP','TIFF'}:
                     self.assertEqual(info['original_time'],'2026-10-13 08:31')
                 self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)
@@ -118,8 +124,9 @@ class PhotoPreviewTests(Base):
             self.service.discard_photo_preview(self.worker,info['preview_id'],self.current)
             session=self.service.stage_upload(self.worker,DAY+':A:白','x','item','photo.heic')
             Path(session['path']).write_bytes(b'heic')
-            with self.assertRaisesRegex(checks.CheckError,'解码组件尚未就绪'):
-                self.service.commit_upload(self.worker,session,4)
+            result = self.service.commit_upload(self.worker,session,4)
+            self.assertFalse(result['is_image'])
+            self.assertEqual(result['name'], 'photo.heic')
 
     def counts(self):
         with self.service.connection() as conn:
@@ -689,15 +696,26 @@ class DeliveryTests(Base):
         restarted.photo_sender.assert_not_called()
         self.assertTrue(Path(restarted.get_file(self.worker, old['id'])['path']).is_file())
 
-    def test_render_failure_keeps_db_clean_and_removes_stage(self):
+    def test_render_failure_saves_original_handover_file_once(self):
         self.save('A', 0, [{'id': 'x', 'text': '检查'}])
         self.prepare(at(DAY+'T09:00:00'))
+        raw = io.BytesIO()
+        Image.new('RGB', (60, 40), 'blue').save(raw, format='GIF')
+        original = raw.getvalue()
+        def upload():
+            stage = self.service.stage_upload(self.worker, DAY+':A:白', '', 'handover', '交接.gif')
+            Path(stage['path']).write_bytes(original)
+            return self.service.commit_upload(self.worker, stage, len(original))
         with patch('lan_bitable_template_portal.pre_shift_photo.render_handover', side_effect=ValueError('字体缺失')):
-            with self.assertRaisesRegex(checks.CheckError, '水印生成失败'):
-                self.upload_again()
+            result = upload()
+            self.assertEqual(upload()['id'], result['id'])
+        self.assertFalse(result['is_image'])
+        self.assertEqual(result['name'], '交接.gif')
+        saved = self.service.get_file(self.worker, result['id'])
+        self.assertEqual(Path(saved['path']).read_bytes(),original)
         with self.service.connection() as conn:
-            self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0], 0)
-            self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0], 0)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM files').fetchone()[0], 1)
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM photo_deliveries').fetchone()[0], 1)
         self.assertEqual(list(self.service.staging_dir.iterdir()), [])
 
     def test_transaction_failure_rolls_back_file_and_delivery_together(self):
@@ -807,6 +825,35 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             result=await self.sender.send('ou_logged_in',None,'png',photo={'path':str(path),'name':'original.png'},checkpoint=Mock())
             self.assertEqual(result,'om_png')
             self.assertEqual(self.client.post.call_args_list[0].kwargs['files']['image'][2],'image/png')
+
+    async def test_attachment_delivery_keeps_original_bytes_and_reuses_checkpoint(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            original = b'broken jpeg bytes'
+            path = Path(folder) / 'stored.bin'
+            path.write_bytes(original)
+            uuid_history = []
+            async def post(url, **kwargs):
+                if url.endswith('/files'):
+                    name, stream, mime = kwargs['files']['file']
+                    self.assertEqual((name, stream.read(), mime), ('现场.jpg', original, 'application/octet-stream'))
+                    self.assertEqual(kwargs['data'], {'file_type':'stream','file_name':'现场.jpg'})
+                    return SimpleNamespace(status_code=200, json=lambda:{'code':0,'data':{'file_key':'file_v2_original'}})
+                body = kwargs['json']
+                self.assertEqual(body['msg_type'], 'file')
+                self.assertEqual(json.loads(body['content']), {'file_key':'file_v2_original'})
+                uuid_history.append(body['uuid'])
+                return SimpleNamespace(status_code=200, json=lambda:{'code':0,'data':{'message_id':'om_file'}})
+            self.client.post.side_effect = post
+            photo = {'path':str(path), 'name':'现场.jpg', 'is_image':False}
+            checkpoint = Mock()
+            result = await self.sender.send('ou_logged_in', None, 'stable-file', photo=photo, checkpoint=checkpoint)
+            self.assertEqual(result, 'om_file')
+            checkpoint.assert_called_once_with('file_v2_original', 'cli_agent')
+            await self.sender.send('ou_logged_in', None, 'stable-file',
+                photo={**photo, 'image_key':'file_v2_original', 'sender_app_id':'cli_agent'}, checkpoint=checkpoint)
+            self.assertEqual(self.client.post.call_count, 3)
+            self.assertEqual(uuid_history[0], uuid_history[1])
 
     async def test_large_original_uses_small_send_copy_and_retry_reuses_image_key(self):
         import tempfile
@@ -1024,6 +1071,111 @@ class PhotoLocationTests(Base):
             self.assertNotIn('32.019000',message)
 
 class PhotoUploadRouteTests(Base):
+    def test_raw_handover_and_corrupt_photo_sync_once_and_download_from_history(self):
+        from fastapi import FastAPI
+        import httpx
+        from lan_bitable_template_portal import pre_shift_routes
+        self.save('A', 0, [{'id':'x', 'text':'检查'}])
+        current = at(DAY+'T09:00:00')
+        self.prepare(current)
+        originals = {'无法解析.heic': b'unsupported photo', '交接报告.pdf': b'%PDF-1.4\n% fixture\n%%EOF'}
+        tokens = {'无法解析.heic': 'token_fixture_photo', '交接报告.pdf': 'token_fixture_report'}
+        uploads, records, writes = [], {}, []
+
+        def upload(*, file_path, file_name, app_token):
+            self.assertEqual(Path(file_path).read_bytes(), originals[file_name])
+            self.assertEqual(app_token, cloudmod.APP_TOKEN)
+            uploads.append(file_name)
+            if file_name == '交接报告.pdf' and uploads.count(file_name) == 1:
+                raise OSError('模拟文件上传失败')
+            return tokens[file_name]
+
+        def table_request(method, path, body=None, params=None):
+            if (method, path) == ('GET', 'fields'):
+                return {'items': [{'field_name': name, 'type': kind} for name, kind in cloudmod.SCHEMA.items()],
+                        'has_more': False}
+            if path == 'records/search':
+                key, = body['filter']['conditions'][0]['value']
+                return {'items': [{'record_id': rid} for rid, fields in records.items() if fields['检查标识'] == key],
+                        'has_more': False}
+            writes.append((method, path))
+            if (method, path) == ('POST', 'records'):
+                records[f'recFixture{len(records) + 1}'] = body['fields']
+                raise TimeoutError('模拟已创建但响应丢失')
+            self.assertEqual((method, path), ('PUT', 'records/recFixture1'))
+            records['recFixture1'] = body['fields']
+            return {}
+
+        def cloud():
+            client = cloudmod.CheckCloud(SimpleNamespace(_upload_bitable_file=upload))
+            client._guard_real_write = Mock()
+            client.request = table_request
+            return client
+
+        async def read_body(request, **_):
+            return await request.json()
+
+        self.service.cloud = cloud()
+        user = {**self.worker, 'open_id':self.worker['id'], 'modules':['maintenance']}
+        controller = SimpleNamespace(_current_session=lambda _: {'user':user}, _request_base_url=lambda _: 'http://fixture',
+                                     _read_json_request=read_body)
+        runtime = SimpleNamespace(service=Mock(), auth_manager=SimpleNamespace(public_user=lambda _: user))
+        with patch.object(pre_shift_routes, 'CheckService', return_value=self.service):
+            app = FastAPI()
+            pre_shift_routes.install_pre_shift_routes(app, controller, runtime)
+            async def exercise():
+                async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://fixture') as client:
+                    for kind, item, name, endpoint in [
+                        ('item', 'x', '无法解析.heic', 'photo-preview'),
+                        ('handover', '', '交接报告.pdf', 'files'),
+                    ]:
+                        params = {'task_id':DAY+':A:白', 'kind':kind, 'item_id':item, 'name':name,
+                                  'retain':'1' if endpoint == 'photo-preview' else '0'}
+                        for _ in range(2):
+                            response = await client.post('/api/pre-shift-checks/' + endpoint, params=params, content=originals[name])
+                            self.assertEqual(response.status_code, 200, response.text)
+                            saved = response.json()['data']
+                        self.assertEqual(saved['name'], name)
+                        self.assertFalse(saved['is_image'])
+                        self.assertNotIn('preview_id', saved)
+
+                    submit = {'task_id': DAY+':A:白', 'version': 1, 'answers': [{'id':'x', 'status':'normal', 'note':''}]}
+                    for already_completed in (False, True):
+                        response = await client.post('/api/pre-shift-checks/submit', json=submit)
+                        self.assertEqual(response.status_code, 200, response.text)
+                        self.assertEqual(response.json()['data']['already_completed'], already_completed)
+
+                    self.service.sync(current)
+                    self.assertEqual(uploads, list(originals))
+                    self.assertFalse(records)
+                    self.assertIn('将自动重试', self.service.history(self.worker, 'A')['items'][0]['sync_error'])
+                    checks.CheckService(self.temp, cloud=cloud()).sync(current + dt.timedelta(minutes=5))
+                    self.assertEqual(writes, [('POST', 'records')])
+                    restarted = checks.CheckService(self.temp, cloud=cloud())
+                    restarted.sync(current + dt.timedelta(minutes=10))
+                    restarted.sync(current + dt.timedelta(minutes=20))
+                    self.assertEqual(uploads, ['无法解析.heic', '交接报告.pdf', '交接报告.pdf'])
+                    self.assertEqual(writes, [('POST', 'records'), ('PUT', 'records/recFixture1')])
+                    fields, = records.values()
+                    self.assertEqual(fields['检查附件'], [{'file_token': tokens['无法解析.heic']}])
+                    self.assertEqual(fields['交接班照片'], [{'file_token': tokens['交接报告.pdf']}])
+
+                    response = await client.get('/api/pre-shift-checks/history', params={'scope':'A'})
+                    self.assertEqual(response.status_code, 200, response.text)
+                    entry, = response.json()['data']['items']
+                    self.assertEqual((entry['sync_status'], entry['sync_error']), ('synced', ''))
+                    refs = [*entry['files'], entry['handover_photo']]
+                    self.assertCountEqual([ref['name'] for ref in refs], originals)
+                    for ref in refs:
+                        self.assertFalse(ref['is_image'])
+                        downloaded = await client.get(ref['url'])
+                        self.assertEqual(downloaded.content, originals[ref['name']])
+                        self.assertEqual(downloaded.headers['content-type'], 'application/octet-stream')
+                        self.assertIn('attachment', downloaded.headers['content-disposition'])
+                        self.assertEqual(downloaded.headers['x-content-type-options'], 'nosniff')
+            asyncio.run(exercise())
+        self.assertEqual(list(self.service.staging_dir.iterdir()), [])
+
     def test_photo_editor_preview_never_commits_and_no_stamp_preserves_original(self):
         from fastapi import FastAPI
         import httpx

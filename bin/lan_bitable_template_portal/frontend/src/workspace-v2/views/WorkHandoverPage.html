@@ -1,0 +1,78 @@
+<section class="serenity-desk transfer-desk" aria-label="人员工作交接" @vue:before-mount="import('../workspace-v2/workHandoverDesk.css')">
+  <header class="serenity-heading"><div><h1>{{ detail?.title || '人员工作交接' }}</h1>
+    <p v-if="detail">{{ detail.owner?.name }} → {{ detail.recipient_name || '待指定接收人' }} · {{ statusLabel(detail.status) }}</p></div>
+    <div class="serenity-actions"><NButton v-if="detail||detailLoading" :disabled="busy" @click="leaveDetail">返回交接清单</NButton>
+      <NButton :disabled="busy" :loading="loading" @click="reload">刷新</NButton><NButton type="primary" :loading="busy" @click="newDraft">发起交接</NButton></div></header>
+  <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert><p v-if="success" role="status">{{ success }}</p>
+  <template v-if="!detail"><div class="serenity-segment" role="group" aria-label="交接范围"><button v-for="tab in views" :key="tab.value" type="button"
+    :aria-pressed="view===tab.value" :disabled="busy" @click="changeView(tab.value)">{{ tab.label }}</button></div>
+    <div class="transfer-ledger"><button v-for="row in list" :key="row.id" type="button" :disabled="busy||detailLoading" @click="select(row.id)">
+      <span class="serenity-symbol"><ArrowRight :size="18"/></span><span><strong>{{ row.title || '交接草稿' }}</strong>
+        <small>{{ row.owner?.name }} → {{ row.recipient_name || '接收人待定' }}</small></span>
+      <span>{{ statusLabel(row.status) }}<small>{{ row.total }} 项 · 待办 {{ row.remaining }} 项</small></span><time>{{ timeText(row.updated_at) }}</time></button></div>
+    <NEmpty v-if="!list.length" :description="loading||detailLoading?'正在读取交接单':'当前没有交接单'"/>
+    <NPagination v-if="total>30" :page="page" :page-size="30" :item-count="total" @update:page="changePage"/>
+  </template>
+  <template v-else>
+    <NAlert v-if="detail.status==='returned'" type="warning">{{ detail.decision_by }}退回了交接单 · {{ detail.decision_reason }}</NAlert>
+    <p v-if="detail.status==='accepted' && detail.decision_at">{{ detail.decision_by }}于 {{ timeText(detail.decision_at) }} 接收了交接单。</p>
+    <section v-if="editable" class="serenity-panel transfer-form"><header class="serenity-heading"><h2>交接信息</h2><div class="serenity-actions"><NButton :disabled="!dirty||busy||defaultsLoading" @click="save">保存草稿</NButton>
+        <NButton type="primary" :disabled="busy||defaultsLoading||!form.recipient_id||!form.items.length" @click="confirmAction='send'">发送交接</NButton>
+        <NButton v-if="detail.status==='draft' && !detail.sent_version" type="error" text :disabled="busy||defaultsLoading" @click="confirmAction='delete_draft'">删除草稿</NButton></div></header><div class="scene-fields">
+      <label>交接名称<NInput v-model:value="form.title" :maxlength="200" :disabled="busy" :input-props="{'aria-label':'交接名称'}"/></label>
+      <label class="transfer-recipient">接收人<NSelect v-model:value="form.recipient_id" filterable :options="peopleOptions" :filter="filterPerson" :loading="peopleLoading" :disabled="busy" aria-label="接收人"/></label>
+      <label>交接说明<NInput v-model:value="form.notes" type="textarea" :maxlength="6000" :disabled="busy" :input-props="{'aria-label':'交接说明'}"/></label></div>
+      <p v-if="peopleError" role="alert">{{ peopleError }} <NButton text @click="reloadPeople">重读人员</NButton></p>
+      <p v-for="warning in peopleWarnings" :key="warning" role="status">{{ warning }}</p>
+      <div v-if="defaultModules.length" class="serenity-actions"><strong>岗位待交接</strong>
+        <NSelect v-if="scopeOptions.length>1" v-model:value="defaultScope" style="width:145px" :options="scopeOptions" aria-label="岗位事项楼栋" :disabled="busy||defaultsLoading"/>
+        <span v-else>{{ scopeLabel(defaultScope) }}</span><NButton :loading="defaultsLoading" :disabled="busy||!defaultScope" @click="loadDefaults">补充岗位事项</NButton></div>
+      <p v-if="defaultsLoading">正在读取默认职责…</p><p v-for="warning in defaultWarnings" :key="warning">{{ warning }}</p>
+      <p v-if="defaultError||defaultFailed" role="alert">{{ defaultError || '部分职责数据未读取完整' }} <NButton text @click="loadDefaults">重试</NButton></p>
+      <p v-else-if="defaultsLoaded && defaultModuleLabels">已纳入 {{ defaultCount }} 项 · {{ scopeLabel(defaultScope) }} · {{ defaultModuleLabels }}</p>
+
+    </section>
+    <div v-else class="serenity-panel"><header class="serenity-heading"><h2>{{ statusLabel(detail.status) }}</h2>
+      <div class="serenity-actions"><template v-if="detail.is_recipient && detail.status==='pending'"><NButton type="primary" :disabled="busy" @click="confirmAction='accept'">确认接收</NButton>
+        <NButton :disabled="busy" @click="confirmAction='return'">退回补充</NButton></template><NButton v-if="detail.is_owner && detail.status==='pending'" :disabled="busy" @click="confirmAction='withdraw'">撤回交接</NButton>
+        <NButton v-if="detail.items.some((item:Dict)=>item.source_id)" :loading="refreshing" :disabled="busy||dirty" @click="refreshSources">核对业务状态</NButton></div></header><p v-if="detail.notes">{{ detail.notes }}</p></div>
+    <section class="serenity-panel"><header class="serenity-heading"><h2>交接事项</h2><div v-if="editable" class="serenity-actions">
+      <NButton :disabled="busy" @click="editItem()">添加事项</NButton><NButton :disabled="busy" @click="sourceOpen=true">从业务添加</NButton></div></header>
+      <div class="serenity-segment"><button v-for="tab in itemTabs" :key="tab.value" type="button" :aria-pressed="itemFilter===tab.value" @click="itemFilter=tab.value">{{ tab.label }} {{ countItems(tab.value) }}</button></div>
+      <article v-for="item in visibleItems" :key="item.id" class="transfer-item" data-handover-item><div><strong>{{ item.title }}</strong>
+        <small>{{ scopeLabel(item.scope) }} · {{ kindLabels[item.kind] }}<template v-if="item.business_status"> · {{ item.business_status }}</template></small><p v-if="item.notes">{{ item.notes }}</p></div>
+        <div class="serenity-actions"><NButton v-if="item.source_url&&!item.restricted" text @click="openBusiness(item.source_url)">打开业务</NButton>
+          <NButton v-if="editable&&!item.restricted" text @click="editItem(item)">编辑</NButton>
+          <NButton v-if="canCheck(item)&&!item.restricted" :disabled="busy" @click="act(item.done?'reopen':'complete',item.id)">{{ item.done?'恢复待办':'确认完成' }}</NButton>
+          <NButton v-if="editable||(!item.restricted&&detail.is_recipient&&detail.status==='accepted')" text :disabled="busy" @click="removeItem(item)">{{ item.removed?'恢复事项':'移除事项' }}</NButton></div></article>
+      <NEmpty v-if="!visibleItems.length" description="此分类暂无事项"/>
+      <NPagination v-if="filteredItems.length>20" v-model:page="itemPage" :item-count="filteredItems.length" :page-size="20"/></section>
+    <section class="serenity-panel" @paste="pasteFiles" @dragover.prevent @drop.prevent="dropFiles"><header class="serenity-heading"><h2>交接附件</h2>
+      <NButton v-if="editable" :disabled="busy||defaultsLoading" @click="fileInput?.click()">添加资料</NButton></header><input ref="fileInput" type="file" multiple hidden @change="pickFiles">
+      <div v-for="file in detail.files" :key="file.id" class="transfer-item"><a :href="base+'/files/'+encodeURIComponent(file.id)" target="_blank" rel="noopener">{{ file.name }}</a>
+        <NButton v-if="editable" text :disabled="busy||defaultsLoading" @click="removeFile(file.id)">移除</NButton></div>
+    </section>
+    <details class="serenity-panel"><summary>办理记录</summary><p v-for="(row,i) in detail.audit" :key="i">{{ timeText(row.time) }} · {{ row.actor }} · {{ confirmLabels[row.action]||row.action }}</p></details>
+    <NAlert v-if="detail.notification_failures?.length" type="warning">通知发送失败 · {{ detail.notification_failures.map((k:string)=>notificationLabels[k]||k).join('、') }} <NButton text :disabled="busy" @click="act('retry-notification')">重试通知</NButton></NAlert>
+  </template>
+  <NModal :show="!!editingItem" preset="card" class="transfer-dialog" title="交接事项" :mask-closable="false" @update:show="show=>{if(!show)editingItem=null}">
+    <template #header-extra><NButton type="primary" :disabled="!editingItem?.title?.trim()||!editingItem?.scope" @click="saveItem">加入清单</NButton></template>
+    <div v-if="editingItem" class="scene-fields"><label>事项名称<NInput v-model:value="editingItem.title" :maxlength="240" :input-props="{'aria-label':'事项名称'}"/></label>
+      <label>楼栋<NSelect v-model:value="editingItem.scope" :options="scopeOptions" :disabled="!!editingItem.source_id"/></label><label>事项类型<NSelect v-model:value="editingItem.kind" :options="kindOptions"/></label>
+      <label>当前进度、下一步与注意事项<NInput v-model:value="editingItem.notes" type="textarea" :maxlength="4000" :input-props="{'aria-label':'当前进度、下一步与注意事项'}"/></label></div>
+</NModal>
+  <NModal v-model:show="sourceOpen" preset="card" class="transfer-dialog transfer-sources" title="从现有业务选择" :mask-closable="false">
+    <template #header-extra><NButton type="primary" :disabled="!sourceSelected.length" @click="addSources">添加已选 {{ sourceSelected.length }} 项</NButton></template>
+    <div class="scene-fields"><label>业务模块<NSelect v-model:value="sourceModule" :options="modules"/></label>
+      <label>楼栋<NSelect v-model:value="sourceScope" :options="scopeOptions"/></label><label>月份<input v-model="sourcePeriod" type="month"></label></div>
+    <div class="serenity-actions"><NButton :loading="sourceLoading" :disabled="!sourceScope||!sourceModule" @click="loadSources">读取业务</NButton>
+      <NInput v-model:value="sourceSearch" placeholder="筛选事项名称"/><NCheckbox v-model:checked="mineOnly">本人参与或岗位负责</NCheckbox></div>
+    <p v-if="sourceError" role="alert">{{ sourceError }}</p><p v-for="warning in sourceWarnings" :key="warning">{{ warning }}</p>
+    <div v-for="row in sourceVisible" :key="row.id" class="transfer-item" data-handover-source><NCheckbox :checked="sourceSelected.includes(row.id)" @update:checked="checked=>toggleSource(row.id,checked)">{{ row.title }}</NCheckbox><span>{{ scopeLabel(row.scope) }}</span></div>
+    <NPagination v-if="sourceFiltered.length>20" v-model:page="sourcePage" :item-count="sourceFiltered.length" :page-size="20"/>
+</NModal>
+  <NModal :show="!!confirmAction" preset="dialog" class="transfer-confirm" :closable="!busy" :close-on-esc="!busy" :title="confirmLabels[confirmAction]||'确认操作'" :positive-text="confirmLabels[confirmAction]" negative-text="取消"
+    :positive-button-props="{loading:busy,disabled:busy||(confirmAction==='return'&&!returnReason.trim())}" :negative-button-props="{disabled:busy}" :mask-closable="false" @positive-click="confirmed" @negative-click="confirmAction=''" @update:show="show=>{if(!show&&!busy)confirmAction=''}">
+    <p>{{ detail?.title }} · {{ detail?.recipient_name || peopleOptions.find(p=>p.value===form.recipient_id)?.label }}</p>
+    <NInput v-if="confirmAction==='return'" v-model:value="returnReason" type="textarea" :maxlength="1000" :disabled="busy" :input-props="{'aria-label':'退回原因'}" placeholder="填写退回原因"/></NModal>
+</section>

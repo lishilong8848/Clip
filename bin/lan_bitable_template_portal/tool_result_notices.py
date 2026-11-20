@@ -170,9 +170,15 @@ def make_card(rows, review_link, order_link):
                       ('审批时间：' if event.startswith('manager_') else '审核时间：') + data['at'][:19].replace('T', ' ') + '（北京时间）'])
         if data['note']:
             lines.append('意见：'+data['note'])
-        item = [{'tag': 'div', 'text': plain('\n'.join(lines))},
-                {'tag': 'button', 'type': 'primary', 'text': plain('打开原记录重新填写' if event == 'rejected' else '查看记录'),
-                 'behaviors': [{'type': 'open_url', 'default_url': url}]}]
+        if event.startswith('manager_'):
+            item = [{'tag': 'div', 'text': plain('\n'.join(lines))}]
+        else:
+            color = 'red' if event == 'rejected' else 'green'
+            item = [{'tag': 'div', 'text': plain(lines[0])},
+                    {'tag': 'markdown', 'content': f'<font color="{color}">{RESULTS[event]}</font>'},
+                    {'tag': 'div', 'text': plain('\n'.join(lines[2:]))}]
+        item.append({'tag': 'button', 'type': 'primary', 'text': plain('打开原记录重新填写' if event == 'rejected' else '查看记录'),
+                     'behaviors': [{'type': 'open_url', 'default_url': url}]})
         size += len(json.dumps(item, ensure_ascii=False).encode())
         if members and size > 28000:
             break

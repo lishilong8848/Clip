@@ -7,8 +7,8 @@ import vue from '@vitejs/plugin-vue';
 import {chromium} from 'playwright';
 
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
-const outDir=path.resolve(root,'../../../output/pre-shift-responsive-build');
-const screenshots=path.resolve(root,'../../../output/playwright/pre-shift-responsive');
+const outDir=process.env.PRESHIFT_RESULTS_ROOT?path.join(process.env.PRESHIFT_RESULTS_ROOT,'responsive-build'):path.resolve(root,'../../../output/pre-shift-responsive-build');
+const screenshots=process.env.PRESHIFT_RESULTS_ROOT?path.join(process.env.PRESHIFT_RESULTS_ROOT,'responsive'):path.resolve(root,'../../../output/playwright/pre-shift-responsive');
 await mkdir(screenshots,{recursive:true});
 await build({root,configFile:false,publicDir:false,logLevel:'error',plugins:[{
   name:'pre-shift-isolated',enforce:'post',resolveId(id){if(id==='virtual:check-preview')return '\0check-preview';},
@@ -31,7 +31,7 @@ const browser=await chromium.launch({headless:true});
 let page;
 const errors=[],items=[{id:'x',text:'核对监控告警及设备状态'},{id:'y',text:'核对机房环境与现场遗留事项'},{id:'z',text:'核对当班作业和工单安排'}];
 const now=Date.parse('2026-10-17T09:00:00+08:00');
-let submitted=false,photo=null,writes=0,historyMalformed=false;
+let submitted=false,photo=null,writes=0,historyMalformed=false,overviewOverride;
 try{
   const context=await browser.newContext({viewport:{width:1366,height:900},reducedMotion:'reduce'});
   await context.route('**/*',async route=>{
@@ -49,7 +49,7 @@ try{
       const scopes=params.has('limited')?['A','B']:manager?['110',...'ABCDEH']:['A'];
       assert(scopes.includes(scope),'no unauthorized building is requested');
       return ok({scope,scopes,can_manage:manager,server_time:new Date(now).toISOString(),definition:{version:1,items},roster_ready:true,roster_error:'',
-        overview:manager?{rows:scopes.flatMap(scope=>['白','夜'].map(shift=>({id:scope+shift,scope,shift,day:'2026-10-17',total:3,completed:scope==='A'&&shift==='白'?3:0,status:shift==='夜'?'未到时间':scope==='A'?'已完成':'待完成',abnormal:0,submitted_by:scope==='A'&&shift==='白'?'人员一':'',submitted_at:'2026-10-17T08:55:00+08:00'})))}:null,
+        overview:manager?overviewOverride??{rows:scopes.flatMap(scope=>['白','夜'].map(shift=>({id:scope+shift,scope,shift,day:'2026-10-17',total:3,completed:scope==='A'&&shift==='白'?3:0,status:shift==='夜'?'未到时间':scope==='A'?'已完成':'待完成',abnormal:0,submitted_by:scope==='A'&&shift==='白'?'人员一':'',submitted_at:'2026-10-17T08:55:00+08:00'})))}:null,
         tasks:['白','夜'].map(shift=>({id:scope+shift,scope,shift,day:'2026-10-17',due:shift==='白'?now/1000-600:now/1000+30000,deadline:now/1000+50000,definition_version:1,items,people:[{name:'人员一'},{name:'人员二'}],submitted:submitted&&shift==='白'?'2026-10-17T09:00:00+08:00':'',actor_name:'人员一',can_submit:(!manager||params.has('editable'))&&!submitted,can_upload_handover:!manager&&!photo,files:[],handover_photo:photo,answers:submitted?items.map(item=>({...item,status:'normal',note:''})):[],sync_status:'synced'}))});
     }
     if(url.pathname==='/api/pre-shift-checks/submit'){writes++;assert.equal(request.postDataJSON().answers.length,3);submitted=true;return ok({completed:true,actor_name:'人员一'});}
@@ -72,10 +72,35 @@ try{
   await page.getByRole('button',{name:'查看A楼检查',exact:true}).click();await page.locator('.v2-check-task').waitFor();
   const nav=await page.locator('.v2-check-shifts').boundingBox(),body=await page.locator('.v2-check-task').boundingBox();assert(nav&&body&&nav.x+nav.width<=body.x,'wide single-building view places shifts left and checklist right');
   await page.screenshot({path:path.join(screenshots,'single-building-pc.png'),fullPage:true});
+  // The all-building controller owns aggregate alerts; the home hosts only the signed-in building.
+  submitted=true;
+  overviewOverride={pending:1,rows:['A','B'].map(scope=>({id:scope+'-day',scope,day:'2026-10-17',shift:'白',status:'已完成',completed:3,total:3}))};
+  const check=page.locator('.v2-shift-check'),alert=check.locator('.v2-check-alert');
+  async function refreshOverview(){
+    await Promise.all([page.waitForResponse(r=>new URL(r.url()).pathname==='/api/pre-shift-checks'),check.getByRole('button',{name:'刷新班前检查',exact:true}).click()]);
+  }
+  await refreshOverview();
+  await check.getByRole('button',{name:'返回楼栋列表',exact:true}).click();
+  assert.equal(await check.locator('.v2-check-building').count(),2);
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:width===390?844:900});
+    assert(await alert.isVisible(),'an outstanding earlier period keeps the aggregate alert active');
+  }
+  overviewOverride.pending=0;await refreshOverview();await alert.waitFor({state:'hidden'});
+  overviewOverride.pending=1;overviewOverride.rows[1].status='待完成';
+  await refreshOverview();await alert.waitFor();
+  await check.getByRole('button',{name:'查看A楼检查',exact:true}).click();
+  await check.locator('.v2-check-choice').filter({hasText:'白班'}).click();
+  await check.getByText('本次已完成',{exact:true}).waitFor();await alert.waitFor({state:'hidden'});
+  await check.getByRole('button',{name:'返回楼栋列表',exact:true}).click();await alert.waitFor();
+  delete overviewOverride.pending;await refreshOverview();await alert.waitFor();
+  overviewOverride.rows[1].status='已完成';await refreshOverview();await alert.waitFor({state:'hidden'});
+  submitted=false;overviewOverride=undefined;
+  await page.setViewportSize({width:1366,height:900});
   await page.goto(origin+'/?role=operator');await page.locator('fieldset').nth(2).waitFor();
   assert.equal(await page.locator('.v2-check-attachments[aria-label="检查附件上传区"]').count(),0,'optional attachment controls are collapsed initially');
   await page.getByRole('button',{name:items[0].text+'附件',exact:true}).click();assert.equal(await page.locator('.v2-check-attachments[aria-label="检查附件上传区"]').count(),1);
-  await page.getByLabel('上传交接班照片',{exact:true}).setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('isolated-photo')});await page.locator('.v2-photo-editor').getByRole('button',{name:'保留原图并上传',exact:true}).click();await page.locator('.v2-check-photo-preview').getByRole('button',{name:'完成',exact:true}).click();await page.getByText('本班已上传',{exact:true}).waitFor();assert.equal(await page.locator('.v2-check-handover').getByRole('button',{name:'上传照片',exact:true}).count(),0,'one photo removes the second-upload control');
+  await page.getByLabel('上传交接班附件',{exact:true}).setInputFiles({name:'交接班.png',mimeType:'image/png',buffer:Buffer.from('isolated-photo')});await page.locator('.v2-photo-editor').getByRole('button',{name:'保留原图并上传',exact:true}).click();await page.locator('.v2-check-photo-preview').getByRole('button',{name:'完成',exact:true}).click();await page.getByText('本班已上传',{exact:true}).waitFor();assert.equal(await page.locator('.v2-check-handover').getByRole('button',{name:'添加文件',exact:true}).count(),0,'one photo removes the second-upload control');
   for(const width of [360,375,390]){await page.setViewportSize({width,height:width===360?640:667});await page.locator('#stage').evaluate(el=>{el.style.width='100%';el.style.height='calc(100dvh - 20px)';});assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(screenshots,'operator-'+width+'.png'),fullPage:true});}
   for(const row of await page.locator('fieldset').all())await row.locator('.n-radio-button').filter({hasText:'无异常'}).click();
   await page.getByRole('button',{name:'提交检查',exact:true}).click();await page.getByText('本次已完成',{exact:true}).waitFor();assert.equal(writes,1);
@@ -86,7 +111,7 @@ try{
   await history.getByText('备注：历史逐项异常备注\n已通知工程师',{exact:true}).waitFor();
   assert.equal(await history.getByText('正常',{exact:true}).count(),1);assert.equal(await history.getByText('异常',{exact:true}).count(),1);
   assert.equal(await history.getByRole('button',{name:'提交检查',exact:true}).count(),0,'history is read-only');
-  assert.equal(await history.getByRole('button',{name:'上传照片',exact:true}).count(),0,'history cannot mutate attachments');
+  assert.equal(await history.getByRole('button',{name:'添加文件',exact:true}).count(),0,'history cannot mutate attachments');
   for(const width of [1366,360,375]){await page.setViewportSize({width,height:width<700?640:900});await page.locator('#stage').evaluate(el=>{el.style.width=innerWidth<700?'100%':'1120px';el.style.height='calc(100dvh - 20px)';});assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));await page.screenshot({path:path.join(screenshots,'history-'+width+'.png'),fullPage:true});}
   await history.locator('.n-pagination-item').filter({hasText:/^2$/}).click();
   await history.getByText('A楼历史检查人22',{exact:true}).waitFor();assert.equal(await history.locator('.n-collapse-item').count(),3,'all old records are accessible, not just the current shift');

@@ -5,7 +5,8 @@ const props=defineProps<{tabs:Array<{key:AdminTabKey;label:string;description:st
 const selected=computed(()=>props.tabs.find(item=>item.key===props.activeTab));
 const mobile=inject<Ref<boolean>>('workspace-mobile-navigation',ref(false));
 const emit=defineEmits<{'select-tab':[tab:AdminTabKey]}>();
-const options=computed(()=>[...props.tabs.map(item=>({value:item.key,label:item.label})),...(props.tabs.some(item=>item.key==='pressure')?[]:[{value:'pressure',label:'高级诊断'}])]);
+const visibleSettings=inject<Ref<Array<{key:string;label:string}>>>('workspace-visible-settings');
+const options=computed(()=>(visibleSettings?.value??props.tabs).map(item=>({value:item.key,label:item.label})));
 function select(event:Event){const value=(event.target as HTMLSelectElement).value;if(options.value.some(item=>item.value===value))emit('select-tab',value as AdminTabKey);}
 </script>
 <template><header class="v2-settings-picker"><div><span>系统设置</span><h1>{{selected?.label||'账号与权限'}}</h1></div><select v-if="mobile" class="v2-mobile-settings-select" aria-label="设置分类" :value="activeTab" @change="select"><option v-for="item in options" :key="item.value" :value="item.value">{{item.label}}</option></select><slot name="admin-tools" /></header></template>

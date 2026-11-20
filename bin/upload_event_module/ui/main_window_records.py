@@ -19,6 +19,7 @@ from ..config import get_field_config
 from ..logger import LOG_FILE, log_error, log_info, log_warning
 from ..utils import WHITESPACE_TRANSLATOR
 from ..core.parser import extract_event_info
+from ..event_delivery_receipt import qt_event_delivery_reply
 from ..time_parser import parse_time_range
 from ..building_normalizer import (
     extract_building_codes,
@@ -176,6 +177,8 @@ class MainWindowRecordsMixin:
     def _upload_operation_for_record(data: dict) -> str:
         original = data.get("_event_inflight_retry_snapshot")
         original = original if isinstance(original, dict) else {}
+        if data.get("_event_delivery_pending") and data.get("_event_wait_job_id"):
+            return str(data["_event_wait_job_id"])
         return str(data.get("_upload_operation_id") or original.get("_upload_operation_id") or "").strip()
 
     def _upload_state_is_busy(self, data: dict) -> bool:
@@ -299,6 +302,18 @@ class MainWindowRecordsMixin:
                     str(operation.get("operation_type") or "upload"),
                 )
                 name = {"upload": "上传", "update": "更新", "end": "结束"}.get(action, "上传")
+                receipt = qt_event_delivery_reply(operation, operation_id, record_id)
+                if receipt is not None:
+                    if receipt.get("event_delivery_pending"):
+                        if not data.get("_event_delivery_pending"):
+                            self._enqueue_ui_mutation("event_delivery_pending", lambda: self._mark_event_delivery_pending(
+                                operation_id, record_id, receipt["message"]))
+                    else:
+                        command = {"action_type": action, "operation_id": operation_id, "data_dict": original}
+                        self._enqueue_ui_mutation("event_delivery_receipt", lambda: self._apply_event_wait_result({
+                            "job_id": operation_id, "attempt": 0, "command": command, "result": receipt,
+                        }))
+                    return
                 target = str(operation.get("target_record_id") or result.get("record_id") or "")
                 settled = status == "completed" or (
                     status == "remote_written"
@@ -360,6 +375,8 @@ class MainWindowRecordsMixin:
             if not self._is_valid_list_item(item) or not isinstance(data, dict):
                 continue
             if data.get("_event_wait_job_id"):
+                if data.get("_event_delivery_pending"):
+                    self._probe_event_upload(data)
                 continue
             is_event = str(data.get("notice_type") or "") == "事件通告"
             queued = False
@@ -1737,8 +1754,13 @@ class MainWindowRecordsMixin:
             updated["_event_wait_job_id"] = existing_data["_event_wait_job_id"]
             updated["_event_wait_attempt"] = int(existing_data.get("_event_wait_attempt") or 0)
             updated["_event_wait_released"] = bool(existing_data.get("_event_wait_released"))
+            if existing_data.get("_event_delivery_pending"):
+                updated["_event_delivery_pending"] = existing_data["_event_delivery_pending"]
             if existing_data.get("_upload_operation_id"):
                 updated["_upload_operation_id"] = existing_data["_upload_operation_id"]
+        for field in ("_event_delivery_sent", "_event_delivery_receipt_id"):
+            if existing_data.get(field):
+                updated.setdefault(field, existing_data[field])
         if bool(existing_data.get("_upload_in_progress")):
             for key in (
                 "_upload_in_progress",

@@ -39,7 +39,7 @@ assert.deepEqual(navigationModules(['knowledge']).map(item=>item.id),['knowledge
 assert.deepEqual(navigationModules([]).map(item=>item.id),['signatures'],'signed-in collection entry does not grant any other module');
 assert.equal(navigationModules(['learning']).some(item=>['knowledge','documents'].includes(item.id)),false);
 assert.equal(moduleUrl(modules.find(item=>item.id==='documents'),'H'),'/document-library');
-const specialIds=['risk_inspection','plan_convergence','work_handover'];
+const specialIds=['risk_inspection','tool_management','eop_scenarios','plan_convergence','work_handover'];
 assert.deepEqual(modules.filter(item=>item.group==='专项功能').map(item=>item.id),specialIds);
 assert.equal(modules.find(item=>item.id==='learning').group,'学习与资料');
 for(const [id,route,scoped] of [['risk_inspection','/risk-inspections',true],['plan_convergence','/plan-convergence',true],['work_handover','/work-handover',false],['learning','/learning',false]]){

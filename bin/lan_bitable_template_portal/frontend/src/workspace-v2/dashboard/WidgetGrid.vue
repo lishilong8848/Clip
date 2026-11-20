@@ -1,7 +1,7 @@
 <template>
-  <div ref="host" class="grid-stack v2-widget-grid" :class="{'is-editing':editing}" :aria-label="label">
+  <div ref="host" class="grid-stack v2-widget-grid" :class="{'is-editing':editing,'v2-flow-grid':flow}" :aria-label="label">
     <TransitionGroup :css="false" @enter="enter" @leave="leave">
-    <div v-for="item in items" :key="item.id" class="grid-stack-item" :style="{'--widget-order':item.y*12+item.x}" :gs-id="item.id" :data-widget-id="item.id" :data-widget-kind="item.kind" :data-widget-display="item.display" :data-content-sized="contentSized(item.id) || undefined">
+    <div v-for="item in items" v-show="!shown || shown.includes(item.id)" :key="item.id" class="grid-stack-item" :style="displayStyle(item)" :gs-id="item.id" :data-widget-id="item.id" :data-widget-kind="item.kind" :data-widget-display="item.display" :data-content-sized="contentSized(item.id) || undefined">
       <section class="grid-stack-item-content v2-widget" :aria-label="item.title">
         <header class="v2-widget-head">
           <button v-if="editing" class="v2-widget-drag" data-v2-navigation type="button" :aria-label="'拖动'+item.title" :title="'拖动'+item.title"><GripVertical :size="16" /></button>
@@ -19,8 +19,13 @@ import { GridStack, type GridItemHTMLElement, type GridStackWidget } from 'grids
 import { GripVertical } from 'lucide-vue-next';
 import 'gridstack/dist/gridstack.min.css';
 import type { Widget } from './layout';
+import type {WorkZone} from '../businessViews';
 import WidgetViewport from '../WidgetViewport.vue';
-const props=withDefaults(defineProps<{items:T[];editing:boolean;cellHeight?:number;label?:string;adaptive?:boolean;contentSizedIds?:string[]}>(),{cellHeight:80,label:'个人工作台组件',adaptive:false});
+const props=withDefaults(defineProps<{items:T[];editing:boolean;cellHeight?:number;label?:string;adaptive?:boolean;flow?:boolean;zones?:WorkZone[];shown?:string[];contentSizedIds?:string[]}>(),{cellHeight:80,label:'个人工作台组件',adaptive:false});
+function displayStyle(item:T){
+  const index=props.zones?.findIndex(zone=>zone.id===item.id)??-1;
+  return {'--widget-order':index>=0?index:item.y*12+item.x,'--widget-span':index>=0?props.zones![index]!.span:item.w};
+}
 const emit=defineEmits<{layout:[items:T[]]}>();
 const host=ref<HTMLElement>();
 let grid:GridStack|null=null,syncing=false,disposed=false;
@@ -35,7 +40,7 @@ function transition(el:Element,done:()=>void,leaving:boolean){
 }
 function enter(el:Element,done:()=>void){transition(el,done,false);}
 function leave(el:Element,done:()=>void){transition(el,done,true);}
-const contentSized=(id:string)=>!props.editing&&props.contentSizedIds?.includes(id);
+const contentSized=(id:string)=>!props.flow&&!props.editing&&props.contentSizedIds?.includes(id);
 const geometry=(w:T):GridStackWidget=>({id:w.id,x:w.x,y:w.y,w:w.w,h:w.h,minW:w.minW||(w.kind==='module'?4:3),minH:w.minH||(w.kind==='module'?6:3),maxH:contentSized(w.id)?0:props.adaptive||w.kind==='module'?30:12,sizeToContent:!!contentSized(w.id),resizeToContentParent:contentSized(w.id)?'.v2-responsive-body':undefined});
 let contentObserver:ResizeObserver|undefined;
 function observeContent(){

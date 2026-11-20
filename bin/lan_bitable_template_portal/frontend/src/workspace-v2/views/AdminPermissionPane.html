@@ -1,0 +1,8 @@
+<AdminPermissionRequests :items="requestItems" :scope-options="scopeOptions" :busy="busy" :selected-ids="selectedRequestIds"
+  :all-filtered-pending-selected="allFilteredPendingSelected" :selected-pending-count="selectedPendingCount"
+  :search="requestSearch" :status="requestStatus" :reject-reason="rejectReason" :status-label="requestStatusLabel"
+  :request-scope-labels="requestScopeLabels" :current-scope-labels="currentScopeLabels" :review-scopes="reviewScopes"
+  @update:search="$emit('update:requestSearch',$event)" @update:status="$emit('update:requestStatus',$event)" @update:reject-reason="$emit('update:rejectReason',$event)"
+  @load="$emit('load-requests')" @toggle-all="$emit('toggle-all',$event)" @toggle-selection="(id,on)=>$emit('toggle-selection',id,on)"
+  @toggle-review-scope="(item,scope,on)=>$emit('toggle-review-scope',item,scope,on)"
+  @approve="$emit('approve',$event)" @reject="$emit('reject',$event)" @approve-selected="$emit('approve-selected')" @reject-selected="$emit('reject-selected')"/>

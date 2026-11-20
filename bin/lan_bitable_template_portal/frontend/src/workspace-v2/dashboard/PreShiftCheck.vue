@@ -1,7 +1,18 @@
 <template>
-  <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing||recordId?'true':undefined">
+  <section class="v2-shift-check" :class="{'has-pending-checks':needsAttention,'ps-desk':compact}" aria-label="班前检查" :data-v2-layout-protected="dirty||busy||uploading||saving||editing||recordId?'true':undefined">
     <Teleport v-if="headerTarget&&!historyOpen" :to="headerTarget"><NButton data-v2-navigation size="small" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16" /></NButton></Teleport>
-    <div class="v2-check-toolbar" data-v2-navigation>
+    <header v-if="compact" class="ps-heading" data-v2-navigation>
+      <div class="ps-context"><strong>{{ overviewOpen && !historyOpen?'楼栋检查进度':historyOpen?'历史记录':(scope==='110'?'110站':scope+'楼')+'班前检查' }}</strong>
+        <small v-if="overviewOpen && !historyOpen && state">{{ state.scopes.length }} 个可见楼栋</small><small v-if="needsAttention" class="v2-check-alert" role="status">待检查</small></div>
+      <div class="ps-controls">
+        <NSelect v-if="state?.can_manage && !fixedScope && (!overviewOpen || historyOpen)" :value="scope" :options="scopeOptions" :disabled="busy||uploading||saving" aria-label="检查楼栋" @update:value="changeScope"/>
+        <NButton v-if="!overviewOpen || historyOpen" size="small" secondary :disabled="busy||uploading||saving||editing" :aria-pressed="historyOpen" @click="historyOpen=!historyOpen">{{ historyOpen?'返回检查清单':'历史检查记录' }}</NButton>
+        <NButton v-if="!historyOpen && !overviewOpen && !fixedScope && state?.can_manage && state.overview?.rows" size="small" quaternary :disabled="busy||uploading||saving" @click="overviewOpen=true">返回楼栋列表</NButton>
+        <NButton v-if="state?.can_manage && !overviewOpen" size="small" quaternary :disabled="busy||uploading||saving" @click="edit">管理清单</NButton>
+        <NButton v-if="!historyOpen && !headerTarget" size="small" quaternary circle :loading="loading" aria-label="刷新班前检查" @click="load(true)"><RefreshCw :size="16"/></NButton>
+      </div>
+    </header>
+    <div v-else class="v2-check-toolbar" data-v2-navigation>
       <NSelect v-if="state?.can_manage&&!fixedScope&&(!compact||!overviewOpen||historyOpen)" :value="scope" :options="scopeOptions" :disabled="busy || uploading || saving" aria-label="检查楼栋" @update:value="changeScope" />
       <span v-else-if="!compact||!overviewOpen||historyOpen">{{ scope === '110' ? '110站' : scope + '楼' }}</span>
       <span v-if="needsAttention" class="v2-check-alert" role="status"><i aria-hidden="true" />待检查</span>
@@ -13,10 +24,17 @@
       <CheckHistory v-if="historyOpen" :key="String(user.open_id)" :scope="scope" @edit="recordId=$event" />
       <CheckOverview v-else-if="overviewOpen&&state.can_manage" :rows="state.overview?.rows||[]" :disabled="busy||uploading||saving" @select="openBuilding" />
       <div v-else class="v2-check-workspace">
-      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy||uploading||saving" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}} · {{row.items.length}} 项</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
+      <div v-if="visibleTasks.length" class="v2-check-shifts" data-v2-navigation><strong v-if="compact" class="ps-shifts-label">检查班次 <small>{{ visibleTasks.length }}</small></strong><button v-for="row in visibleTasks" :key="row.id" type="button" class="v2-check-choice" :class="{'is-selected':task?.id===row.id,'is-done':row.submitted}" :aria-pressed="task?.id===row.id" :disabled="busy||uploading||saving" @click="selectedId=row.id"><span>{{ row.shift }}班<CheckCircle2 v-if="row.submitted" :size="14" /></span><small class="v2-check-window">{{compact?shortDate(row.due*1000):dateLabel(row.due*1000)}} 至 {{compact?shortDate(row.deadline*1000):dateLabel(row.deadline*1000)}}</small><small v-if="row.submitted">{{completionLabel(row)}} · {{row.actor_name}} · {{row.items.length}} 项</small><small v-else>{{row.due>serverNow?(compact?'可提前检查':'未到时间，可提前检查'):row.deadline<=serverNow?(compact?'逾期待补做':'已逾期，可补做'):'待检查'}} · {{row.items.length}} 项</small></button></div>
       <div class="v2-check-task">
       <template v-if="task">
-        <div class="v2-check-status" :class="{'is-complete':task.submitted}">
+        <header v-if="compact" class="ps-receipt v2-check-status" :class="{'is-complete':task.submitted}">
+          <div><strong>{{ task.shift }}班 · <span>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</span></strong>
+            <small>{{ shortDate(task.due*1000) }} 至 {{ shortDate(task.deadline*1000) }}</small></div>
+          <span v-if="task.submitted">{{ completionLabel(task) }} · {{ task.actor_name }} · {{ dateLabel(task.submitted) }}</span>
+          <details v-else class="v2-check-people"><summary>本楼任意一名有权限人员提交即可</summary>{{ task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员' }}</details>
+          <NButton v-if="task.submitted && task.can_edit" size="small" secondary @click="recordId=task.id">修改记录</NButton>
+        </header>
+        <div v-else class="v2-check-status" :class="{'is-complete':task.submitted}">
           <CheckCircle2 v-if="task.submitted" :size="20" /><ClipboardCheck v-else :size="20" />
           <div><strong>{{ task.submitted?'本次已完成':task.due>serverNow?'可提前检查':task.deadline<=serverNow?'逾期待补做':'本次待检查' }}</strong><small v-if="task.submitted||!compact">{{ task.submitted ? completionLabel(task) + ' · ' + task.actor_name + ' · ' + dateLabel(task.submitted) : (task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员') + ' · 任意一人提交即可' }}</small><details v-else class="v2-check-people"><summary>本楼任意一名有权限人员提交即可</summary><small>{{ task.people.map((p:Dict)=>p.name).join('、') || '本楼值班人员' }}</small></details></div>
           <span v-if="!task.submitted">{{ answered }} / {{ task.items.length }}</span>
@@ -25,7 +43,10 @@
         <div v-if="task.submitted" class="v2-check-sync" role="status">{{ task.sync_status==='synced'?'已同步飞书':'本地已保存，飞书同步中' }}<span v-if="task.sync_error"> · {{ task.sync_error }}</span></div>
         <NAlert v-else-if="!task.can_submit" type="info" :bordered="false">仅本楼值班人员、值班账号或有该楼管理权限的上级可提交。</NAlert>
         <form class="v2-check-form" @submit.prevent="submit">
-          <div class="v2-check-items" role="group" aria-label="本次检查项目" tabindex="0">
+          <div v-if="compact" class="ps-form-head"><strong>检查项目</strong><span>{{ task.submitted?task.items.length:answered }} / {{ task.items.length }} 项{{ task.submitted?'已提交':'已确认' }}</span></div>
+          <PreShiftCheckForm v-if="compact" :task="task" :locked="busy" :uploading="uploading" :answer-for="answer" :expanded="attachmentOpen"
+            @status="setAnswer" @note="setNote" @toggle="toggleAttachments" @busy="uploading=$event" @changed="load(true)"/>
+          <div v-else class="v2-check-items" role="group" aria-label="本次检查项目" tabindex="0">
             <fieldset v-for="(item,index) in task.items" :key="item.id" class="v2-check-item">
               <legend><span>{{ index+1 }}</span>{{ item.text }}</legend>
               <div class="v2-check-result">
@@ -44,7 +65,7 @@
           <p v-if="error&&task.can_submit" class="v2-check-form-error" role="alert">{{error}}</p>
           <footer v-if="task.can_submit"><span>{{ answered===task.items.length?'检查项已填完，请核对后提交':'逐项选择检查结果' }}</span><NButton type="primary" attr-type="submit" :loading="busy" :disabled="busy||uploading">提交检查</NButton></footer>
         </form>
-        <section class="v2-check-handover"><h3>交接班照片 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一张'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :revision="task.submitted?task.revision:undefined" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
+        <section class="v2-check-handover" :class="{'ps-evidence':compact}"><h3 v-if="!compact">交接班附件 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一份'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :revision="task.submitted?task.revision:undefined" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
       </template>
       <NEmpty v-else :description="!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
       <ol v-if="!task && state.definition.items.length" class="v2-check-preview"><li v-for="item in state.definition.items" :key="item.id">{{ item.text }}<small> · {{frequencyLabel(item.frequency)}}</small></li></ol>
@@ -52,7 +73,8 @@
       </div>
       <NAlert v-if="state.roster_error" type="warning" :bordered="false">{{ state.roster_error }}</NAlert>
     </template>
-    <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :mask-closable="false" :closable="!saving&&!locationSaving" :close-on-esc="!saving&&!locationSaving">
+    <NModal v-model:show="editing" preset="card" title="班前检查清单" class="v2-check-editor" :class="{'ps-definitions':compact}" :mask-closable="false" :closable="!saving&&!locationSaving" :close-on-esc="!saving&&!locationSaving">
+      <template v-if="compact" #header-extra><NButton size="small" secondary :disabled="saving || items.length>=50" @click="addItem"><template #icon><Plus :size="16"/></template>添加检查项</NButton></template>
       <p class="v2-check-edit-note">{{ scope }}楼 · 保存后立即更新未提交的班次；已提交和历史清单保持原样。</p>
       <NAlert v-if="editError" type="error" :bordered="false">{{ editError }}</NAlert>
       <section v-for="(item,index) in items" :key="item.id" class="v2-check-definition"><div class="v2-check-edit-row" data-v2-navigation>
@@ -61,9 +83,9 @@
       </div><CheckFrequency v-model="item.frequency" :disabled="saving" />
       <div class="v2-check-recipients"><label :id="'check-recipients-'+item.id">固定接收人（留空按排班）</label><NSelect v-model:value="item.fixed_recipients" multiple filterable clearable :options="recipientOptions" :loading="recipientsLoading" :disabled="saving||recipientsLoading||!!recipientError" :aria-labelledby="'check-recipients-'+item.id" placeholder="按当天排班人员发送" /></div></section>
       <NAlert v-if="recipientError" type="warning" :bordered="false">{{recipientError}}<NButton text @click="loadRecipients">重新读取人员</NButton></NAlert>
-      <NButton data-v2-navigation dashed :disabled="saving || items.length>=50" @click="items.push({id:randomHexId(),text:'',frequency:defaultFrequency(),fixed_recipients:[]})"><template #icon><Plus :size="16" /></template>添加检查项</NButton>
+      <NButton v-if="!compact" data-v2-navigation dashed :disabled="saving || items.length>=50" @click="addItem"><template #icon><Plus :size="16" /></template>添加检查项</NButton>
       <PhotoLocationSettings v-if="editing&&state?.can_configure_location" @busy="locationSaving=$event" />
-      <template #footer><div class="v2-check-editor-actions"><NButton :disabled="saving||locationSaving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving||locationSaving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
+      <template #footer><div class="v2-check-editor-actions"><small v-if="compact" class="ps-definition-count">{{ items.length }} / 50 项</small><NButton :disabled="saving||locationSaving" @click="editing=false">取消</NButton><NButton type="primary" :loading="saving" :disabled="saving||locationSaving" data-v2-submit @click="saveDefinition">保存清单</NButton></div></template>
     </NModal>
     <CheckRecordEditor v-if="recordId" :key="user.open_id+':'+recordId" :task-id="recordId" :register-guard="registerGuard" @close="recordId=''" @changed="load(true)" />
   </section>
@@ -76,6 +98,7 @@ import { requestJson,type Dict } from '../client';
 import { randomHexId } from '../../browserStorage';
 import { registerNavigationGuard } from '../navigation';
 import { preShiftSummary } from '../../preShiftUtils';
+import PreShiftCheckForm from './PreShiftCheckForm.vue';
 import CheckFrequency from './CheckFrequency.vue';
 import CheckAttachments from './CheckAttachments.vue';
 import CheckOverview from './CheckOverview.vue';
@@ -126,6 +149,11 @@ async function load(force=false){
 }
 function changeScope(value:string){if(busy.value||uploading.value||saving.value)return;scope.value=value;selectedId.value='';state.value=undefined;void load(true);}
 function openBuilding(value:string){overviewOpen.value=false;changeScope(value);}
+async function addItem(){
+  const id=randomHexId();
+  items.value.push({id,text:'',frequency:defaultFrequency(),fixed_recipients:[]});
+  if(compact){await nextTick();document.getElementById('check-edit-'+id)?.focus();}
+}
 function edit(){if(uploading.value)return;items.value=(state.value?.definition.items||[]).map((item:Dict)=>({id:item.id,text:item.text,frequency:{...(item.frequency||defaultFrequency())},fixed_recipients:[...(item.fixed_recipients||[])]}));version.value=state.value?.definition.version||0;editError.value='';editing.value=true;void loadRecipients();}
 async function loadRecipients(){
   recipientController?.abort();const read=new AbortController();recipientController=read;recipientsLoading.value=true;recipientError.value='';
@@ -206,4 +234,19 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 .v2-check-result .v2-check-attachment-toggle{min-height:44px;min-width:44px;padding-inline:8px}
 .v2-check-attachment-toggle .n-button__content{gap:4px}
 @media(max-width:760px){.workspace-v2 .v2-check-result{justify-self:stretch;justify-content:stretch}.workspace-v2 .v2-check-result .n-radio-group{display:flex;flex:1}.workspace-v2 .v2-check-result .n-radio-button{flex:1}}
+</style>
+
+<style scoped>
+.ps-definition-count{align-self:center;margin-right:auto;color:var(--v2-muted)}
+.ps-desk{min-width:0;container:shift-check / inline-size}.ps-heading,.ps-context,.ps-controls,.ps-receipt,.ps-form-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem .7rem}
+.ps-heading,.ps-receipt,.ps-form-head{justify-content:space-between}.ps-heading{border-bottom:1px solid var(--v2-palette-border,#cedbd7);padding:.3rem 0 .55rem}.ps-heading strong{font-size:1.05rem}
+.ps-context small,.ps-receipt small,.ps-form-head span,.ps-shifts-label small{color:var(--v2-muted,#556d66);font-size:.8rem}.ps-controls .n-select{width:6.8rem;max-width:100%}
+.ps-shifts-label{display:flex;align-items:center;justify-content:space-between;gap:.5rem;font-size:.9rem}
+.ps-desk .v2-check-choice{border-radius:7px;border:0;border-inline-start:3px solid transparent;background:var(--soft-field,#eef3f3)}
+.ps-desk .v2-check-choice.is-selected{background:var(--v2-palette-selection,#e0edf4);border-inline-start-color:var(--v2-blue,#3f7998)}
+.ps-receipt{background:var(--soft-field,#edf4f1);border-radius:8px;padding:.5rem .7rem}.ps-receipt>div{display:grid}.ps-form-head{padding:.4rem .7rem;background:var(--soft-face,#fff);border-block-end:1px solid var(--v2-palette-border,#d2dfda)}
+.ps-desk .v2-check-form{min-width:0}.ps-desk .ps-evidence{background:var(--soft-field,#eef4f1);padding:.55rem .7rem;border-radius:8px}
+@container shift-check (max-width:649px){.ps-shifts-label{grid-column:1 / -1}.ps-heading,.ps-controls{gap:.35rem}.ps-controls .n-select{width:5rem}}
+@container shift-check (min-width:980px){.ps-desk .v2-check-task{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(180px,.85fr);align-items:start}.ps-receipt,.ps-desk .v2-check-sync,.ps-desk .v2-check-task>.n-alert{grid-column:1/-1}.ps-evidence{grid-column:2}.ps-desk .v2-check-form{grid-column:1}}
+.ps-definitions .v2-check-definition{border-inline-start:3px solid var(--v2-blue,#577f95);border-radius:6px;background:var(--soft-face,#fff)}
 </style>

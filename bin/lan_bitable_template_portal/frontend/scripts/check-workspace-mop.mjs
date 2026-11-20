@@ -7,7 +7,7 @@ import { preview } from 'vite';
 import { layoutApiFixture } from './layout-api-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, '../../../output/playwright/workspace-mop');
+const output = path.resolve(root, process.env.CLIPFLOW_MOP_SCREENSHOTS || '../../../output/playwright/workspace-mop');
 const before = process.argv.includes('--before');
 const site = process.env.CLIPFLOW_MOP_PREVIEW_SITE || path.resolve(root, before ? '../../../output/header-polish-build' : 'dist');
 await mkdir(output, { recursive: true });
@@ -92,28 +92,29 @@ try {
   if (!before) {
     assert.equal(await page.locator('.v2-mop-workspace').count(), 1);
     assert.equal(await page.locator('[aria-label="MOP填写流程"]:visible').count(), 0, 'The current compact workspace does not show the retired step strip');
-    const left = await page.locator('.notice-panel').boundingBox(), right = await page.locator('.binding-panel').boundingBox();
+    const left = await page.locator('.mop-desk-notices').boundingBox(), right = await page.locator('.mop-desk-files').boundingBox();
     assert(left.x + left.width <= right.x, 'Desktop keeps notice and MOP selection side by side');
-    const upload = await page.locator('.local-mop-upload').boundingBox();
+    const upload = await page.locator('.mop-desk-local').boundingBox();
     assert(upload.y + upload.height < 900, 'Local-file upload stays in the desktop viewport');
     for (const [width,height] of [[1366,768],[1024,768],[390,844]]) {
       await page.setViewportSize({width,height});
+      if(width<=900)await page.getByRole('button',{name:'2 填写维护单'}).click();
       await page.screenshot({path:path.join(output,`binding-${width}.png`),animations:'disabled'});
       assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'binding page stays within viewport');
-      const panel=await page.locator('.binding-panel').boundingBox(),card=await page.locator('.mop-selected-file-card').boundingBox();
+      const panel=await page.locator('.mop-desk-files').boundingBox(),card=await page.locator('.mop-desk-attachment').boundingBox();
       assert(card.x>=panel.x&&card.x+card.width<=panel.x+panel.width+1,'selected file stays inside its panel');
-      if(width>=1366){const box=await page.locator('.local-mop-upload').boundingBox();assert(box.y+box.height<=height,'local upload must remain reachable on a 768px-high desktop');}
+      if(width>=1366){const box=await page.locator('.mop-desk-local').boundingBox();assert(box.y+box.height<=height,'local upload must remain reachable on a 768px-high desktop');}
     }
     await page.setViewportSize({width:1440,height:900});
     const search = page.getByPlaceholder('搜索通告、楼栋、专业');
-    await search.fill('BA系统'); assert.equal(await page.locator('.notice-row').count(), 2);
-    await page.locator('.notice-row').first().click();
-    await page.locator('.selected-notice').getByText('EA118机房A楼BA系统资料维护', { exact: true }).waitFor();
+    await search.fill('BA系统'); assert.equal(await page.locator('.mop-desk-notice').count(), 2);
+    await page.locator('.mop-desk-notice').first().click();
+    await page.locator('.mop-desk-target').getByText('EA118机房A楼BA系统资料维护', { exact: true }).waitFor();
     await search.fill('');
     await page.getByPlaceholder('搜索 MOP 名称、文件编号、专业').fill('JSNT-MOP-102');
-    assert.equal(await page.locator('.mop-row').count(), 1);
-    await page.locator('.mop-row').click();
-    await page.locator('.attachment-select [role="combobox"]').click();
+    assert.equal(await page.locator('.mop-desk-file').count(), 1);
+    await page.locator('.mop-desk-file').click();
+    await page.locator('.mop-desk-attachment-row [role="combobox"]').click();
     await page.locator('.v2-single-select-menu').getByText('维护计划表.xlsx', {exact:true}).click();
     await page.getByRole('button', { name: '打开填写', exact: true }).click();
     await page.locator('.preview-scroll table').waitFor();
@@ -190,10 +191,11 @@ try {
       for(const button of await page.locator('.floating-upload-action-row button').all()){
         const box=await button.boundingBox();
         assert(box.height>=44&&box.y>=0&&box.y+box.height<=nav.y,'Every action has a visible 44px touch target');
-        assert(await button.evaluate(el=>{const b=el.getBoundingClientRect();return el.contains(document.elementFromPoint(b.x+b.width/2,b.y+b.height/2));}),'Actions are not covered by navigation, warnings or overlays');
+        const coveredBy=await button.evaluate(el=>{const b=el.getBoundingClientRect(),hit=document.elementFromPoint(b.x+b.width/2,b.y+b.height/2);return el.contains(hit)?null:{action:el.innerText,cover:hit?.outerHTML.slice(0,200),width:innerWidth};});
+        assert.equal(coveredBy,null,'An action is covered: '+JSON.stringify(coveredBy));
       }
     }
-    for(const [width,height] of [[360,640],[375,667]]){
+    for(const [width,height] of [[360,640],[375,667],[393,852]]){
       await page.setViewportSize({width,height});
       await page.getByRole('button',{name:'人员与时间',exact:true}).click();
       const form=page.getByRole('region',{name:'维护单快捷填写'});
@@ -206,7 +208,7 @@ try {
         if(!await person.locator('.selected-corner').count())await person.tap();
         await dialog.getByRole('button',{name:'关闭',exact:true}).tap();
         await dialog.waitFor({state:'hidden'});
-        assert.equal(await signatures.getByRole('button').nth(index).locator('.role-title-row b').innerText(),'1/1','Selected signatures survive closing and resizing');
+        assert.equal(await signatures.getByRole('button').nth(index).locator('.role-title-row b').innerText(),'1 个可用','Selected signatures survive closing and resizing');
       }
       await page.getByRole('button',{name:'检查与备注',exact:true}).click();
       await form.getByRole('button',{name:'第10行后全正常',exact:true}).click();
@@ -234,13 +236,35 @@ try {
       await page.locator('.floating-upload-result.success').waitFor();
       await page.locator('.floating-uploaded-at').waitFor();
       await checkActions();
+      for(const label of await signatures.locator('.role-title-row span').all()){
+        assert(await label.evaluate(el=>el.clientWidth>=el.scrollWidth),'the timestamp must leave both signature role names readable');
+      }
       await page.screenshot({path:path.join(output,`completed-${width}x${height}.png`)});
     }
+    await page.setViewportSize({width:1440,height:900});
+    const excel=page.locator('.preview-scroll table:visible');
+    const timeCell=excel.locator('tbody tr').nth(3).locator('td').nth(1);
+    await timeCell.click();
+    const popover=page.locator('.floating-cell-popover:visible');
+    await popover.locator('input[type=datetime-local]').fill('2026-10-16T11:30');
+    await popover.getByRole('button',{name:'填入',exact:true}).click();
+    await timeCell.getByText('2026年10月16日11时30分',{exact:true}).waitFor();
+    await page.screenshot({path:path.join(output,'filled-desktop.png')});
+    const desktopCount=fileActions.filter(item=>item.path.endsWith('/upload-signed')).length;
+    await page.locator('.floating-upload-signed-mop').click();
+    await page.waitForFunction(()=>document.querySelector('.floating-upload-signed-mop').disabled);
+    assert.equal(fileActions.filter(item=>item.path.endsWith('/upload-signed')).length,desktopCount+1);
+    assert(/11:30|11时30分/.test(JSON.stringify(fileActions.at(-1).body.fields)));
+    releaseUpload();
+    await page.locator('.floating-upload-result.success').waitFor();
+    await page.screenshot({path:path.join(output,'completed-desktop.png')});
+    await page.setViewportSize({width:393,height:852});
     await page.getByRole('button',{name:'返回',exact:true}).click();
     await page.getByRole('button', { name: '打开填写', exact: true }).waitFor();
+    if(!await page.getByPlaceholder('搜索通告、楼栋、专业').isVisible())await page.getByRole('button',{name:'1 选择通告'}).click();
     await page.getByPlaceholder('搜索通告、楼栋、专业').fill('冷水');
-    await page.locator('.notice-row').first().click();
-    await page.locator('.selected-notice').getByText('EA118机房A楼冷水机组月度维护', { exact: true }).waitFor();
+    await page.locator('.mop-desk-notice').first().click();
+    await page.locator('.mop-desk-target').getByText('EA118机房A楼冷水机组月度维护', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(output, 'mobile.png') });
     assert.equal(writes.length, 1, 'Choosing notices does not submit a business action');
     await page.getByRole('combobox', { name: '切换楼栋', exact: true }).click();

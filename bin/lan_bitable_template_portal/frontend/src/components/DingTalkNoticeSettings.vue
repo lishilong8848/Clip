@@ -237,7 +237,18 @@ async function save() {
   }
 }
 async function test(robot:Robot){busy.value=true;error.value='';message.value='';try{const result=await requestJson('/api/dingtalk-notices/test',{method:'POST',body:JSON.stringify({robot_id:robot.id,operation_id:localId()})}) as any;message.value=result.state==='sent'?'钉钉已确认接收测试消息。':(result.reason||'测试结果待核验');await load();}catch(e:any){error.value=e.message||'测试结果未确认';}finally{busy.value=false;}}
-async function retry(){const item=retryItem.value;if(!item)return;busy.value=true;error.value='';try{await requestJson('/api/dingtalk-notices/retry',{method:'POST',body:JSON.stringify({id:item.id,confirm_uncertain:true})});retryItem.value=null;await load();}catch(e:any){error.value=e.message||'重试未确认';}finally{busy.value=false;}}
+async function retry(){
+  const item=retryItem.value;
+  if(!item||busy.value)return;
+  retryItem.value=null;
+  busy.value=true;
+  error.value='';
+  try{
+    await requestJson('/api/dingtalk-notices/retry',{method:'POST',body:JSON.stringify({id:item.id,confirm_uncertain:true})});
+    await load();
+  }catch(e:any){error.value=e.message||'重试未确认';}
+  finally{busy.value=false;}
+}
 function canLeave(proceed:()=>void){
   if(leaving)return true;
   if(busy.value){error.value='正在处理，请稍后再离开。';return false;}

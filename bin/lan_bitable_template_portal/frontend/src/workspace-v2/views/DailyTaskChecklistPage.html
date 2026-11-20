@@ -1,0 +1,119 @@
+<section v-if="printMode" class="ops-desk ops-desk--print" aria-label="晨会表格打印">
+  <p v-if="morningPrintLoading" class="ops-state is-loading" role="status" aria-live="polite"><Clock3 aria-hidden="true" />正在准备晨会表格打印内容…</p>
+  <div v-else-if="morningPrintError" class="ops-alert is-error" role="alert"><CircleAlert aria-hidden="true" /><div><strong>晨会表格无法打印</strong><p>{{ morningPrintError }}</p></div></div>
+  <MorningMeetingSheet v-else-if="morningPrintModel.date" :model="morningPrintModel" />
+</section>
+<section v-else class="ops-desk ops-daily" aria-labelledby="ops-desk-title">
+  <header class="ops-head">
+    <div class="ops-heading">
+      <span class="ops-daily-symbol"><ClipboardList aria-hidden="true" :size="23" /></span>
+      <div><h1 id="ops-desk-title">每日任务</h1><p class="ops-meta">{{ scopeLabel }} · {{ selectedDate }}</p></div>
+    </div>
+    <div class="ops-actions">
+      <span v-if="loading" class="ops-meta" role="status">正在读取…</span>
+      <small v-else-if="payload.date === selectedDate && normalizeScope(payload.scope) === scopeCode" class="ops-meta">{{ generatedText }}</small>
+      <button type="button" class="ops-button" :disabled="loading" @click="loadTasks(true)"><RefreshCw :size="15" aria-hidden="true" />刷新</button>
+      <span data-v2-layout-tools="daily"></span>
+    </div>
+  </header>
+  <section class="ops-toolbar ops-daily-tools" aria-label="班次范围与办理">
+    <label class="ops-field">楼栋范围
+      <select :value="scopeCode" @change="switchScope(($event.target as HTMLSelectElement).value)">
+        <option v-for="scope in availableScopes" :key="scope.value" :value="scope.value">{{ scope.label }}</option>
+      </select>
+    </label>
+    <label class="ops-field">工作日期<input type="date" v-model="selectedDate" :max="today" @change="changeDate" /></label>
+    <div class="ops-actions"><button type="button" class="ops-button" aria-label="前一天" @click="moveDate(-1)"><ChevronLeft aria-hidden="true" /></button>
+      <button type="button" class="ops-button" :disabled="selectedDate === today" @click="setToday">今天</button>
+      <button type="button" class="ops-button" aria-label="后一天" :disabled="selectedDate >= today" @click="moveDate(1)"><ChevronRight aria-hidden="true" /></button></div>
+    <div class="ops-actions ops-day-actions">
+      <button v-if="scopeCode === 'H' && selectedDate === today" type="button" class="ops-button" :disabled="morningLoading" @click="openMorningMeeting"><FileSpreadsheet aria-hidden="true" />晨会表格</button>
+      <button type="button" class="ops-button is-primary" :disabled="loading || selectedDate !== today" @click="openSendDialog"><Send aria-hidden="true" />发送今日汇总</button>
+    </div>
+  </section>
+  <div v-if="errorText" class="ops-alert is-error" role="alert"><CircleAlert aria-hidden="true" /><div><strong>任务读取失败</strong><p>{{ errorText }}</p></div><button type="button" class="ops-button" @click="loadTasks(true)" :disabled="loading">重试</button></div>
+
+  <PageCanvas page="daily" label="每日任务" :blocks="[{ id: 'summary', title: '任务概览', w: 12, h: 2, minH: 2 }, { id: 'tasks', title: '当班任务', w: 12, h: 10 }]">
+    <template #summary>
+      <div v-if="payload.date === selectedDate && normalizeScope(payload.scope) === scopeCode" class="ops-metrics" aria-label="任务统计">
+        <article class="ops-metric"><span>任务总数</span><strong>{{ stats.total }}</strong></article>
+        <article class="ops-metric"><span>进行中</span><strong>{{ stats.ongoing }}</strong></article>
+        <article class="ops-metric"><span>已完成</span><strong>{{ stats.completed }}</strong></article>
+        <article class="ops-metric"><span>需关注</span><strong>{{ stats.attention }}</strong></article>
+      </div>
+      <p v-else-if="errorText && !loading" class="ops-state is-error" role="status"><CircleAlert aria-hidden="true" />任务台账读取失败，暂无可显示的统计。</p>
+      <p v-else class="ops-state is-loading" role="status" aria-live="polite"><Clock3 aria-hidden="true" />正在读取任务台账…</p>
+    </template>
+    <template #tasks>
+      <template v-if="payload.date === selectedDate && normalizeScope(payload.scope) === scopeCode">
+        <ul v-if="warnings.length" class="ops-alert is-warning" role="list"><li v-for="(warning, index) in warnings" :key="`warn-${index}`"><Siren aria-hidden="true" />{{ warning }}</li></ul>
+        <div class="ops-category-filter">
+          <h2>任务清单 <small>{{ visibleTaskCount }} 项</small></h2>
+          <div class="ops-tabs" role="group" aria-label="任务分类">
+            <button type="button" :aria-pressed="selectedCategory === 'all'" @click="selectedCategory = 'all'">全部 <span class="ops-meta">{{ stats.total }}</span></button>
+            <button v-for="category in categories" :key="category.key" type="button" :aria-pressed="selectedCategory === category.key" @click="selectedCategory = category.key">{{ category.label }} <span class="ops-meta">{{ category.count }}</span></button>
+          </div>
+        </div>
+        <p v-if="!visibleTaskCount" class="ops-state is-empty"><CheckCircle2 aria-hidden="true" />{{ selectedCategory === "all" ? "当日暂无任务" : "该分类当日没有任务。" }}</p>
+        <section v-for="category in visibleCategories" v-else :key="category.key" class="ops-shift-list" :aria-label="category.label">
+          <header class="ops-task-head"><h3>{{ category.label }}</h3><span class="ops-meta">{{ category.count }} 项</span></header>
+          <ul class="ops-task-list">
+            <li v-for="task in category.tasks" :key="task.task_id" class="ops-task-row">
+              <time class="ops-task-time">{{ task.time || '—' }}</time>
+              <div class="ops-task-main">
+                <strong>{{ task.title }}</strong>
+                <div class="ops-task-labels"><span>{{ task.type_label || task.type_key }}</span><span v-if="task.building">{{ task.building }}</span><span v-if="task.specialty">{{ task.specialty }}</span><span v-if="task.level">{{ task.level }}</span></div>
+                <p v-if="task.action_summary">{{ task.action_summary }}</p>
+                <div v-if="task.progress_percent != null" class="ops-progress"><progress :value="clampProgress(task.progress_percent)" max="100" :aria-label="task.title + '进度'"></progress>{{ clampProgress(task.progress_percent) }}%</div>
+              </div>
+              <span class="ops-badge" :data-tone="task.status_tone">{{ task.status || '未标注状态' }}</span>
+            </li>
+          </ul>
+        </section>
+      </template>
+      <p v-else-if="errorText" class="ops-state is-error" role="status"><CircleAlert aria-hidden="true" />暂无{{ scopeLabel }} · {{ selectedDate }} 的任务数据。</p>
+      <p v-else class="ops-state is-loading" role="status" aria-live="polite"><Clock3 aria-hidden="true" />正在读取任务台账…</p>
+    </template>
+  </PageCanvas>
+  <dialog v-if="sendDialogOpen" class="ops-overlay" aria-labelledby="send-dialog-title" @vue:mounted="node => node.el?.showModal()" @cancel.prevent="closeSendDialog()" @click.self="closeSendDialog()">
+    <article class="ops-dialog">
+    <header class="ops-dialog-head"><div><small>{{ scopeLabel }} · {{ selectedDate }}</small><h2 id="send-dialog-title">发送今日工作汇总</h2></div><div class="ops-actions"><button type="button" class="ops-button is-primary" :disabled="sendBusy || selectedDate !== today || !sendRecipients.length" @click="sendTodayReport()">{{ sendBusy ? "发送中…" : "确认发送" }}</button><button type="button" class="ops-button" aria-label="关闭发送对话框" :disabled="sendBusy" @click="closeSendDialog()">关闭</button></div></header>
+    <div class="ops-dialog-body">
+      <p v-if="sendError" class="ops-alert is-error" role="alert">{{ sendError }}</p>
+      <p v-if="sendSuccess" class="ops-alert is-success" role="status">{{ sendSuccess }}</p>
+      <fieldset class="ops-field" :disabled="sendBusy"><legend>接收名单 · 已选 {{ sendRecipients.length }} 人</legend><RepairPeoplePicker v-model="sendRecipients" :scope="scopeCode" input-id="daily-recipients" label="接收人" :disabled="sendBusy" /></fieldset>
+      <p v-if="sendBusy" class="ops-state is-loading" role="status">正在发送，请勿关闭窗口…</p>
+    </div>
+
+    </article>
+  </dialog>
+  <dialog v-if="morningDialogOpen" class="ops-overlay" aria-labelledby="morning-dialog-title" @vue:mounted="node => node.el?.showModal()" @cancel.prevent="closeMorningMeeting()" @click.self="closeMorningMeeting()">
+    <article class="ops-dialog ops-morning-dialog">
+    <header class="ops-dialog-head"><div><small>{{ selectedDate }} · 晨会预览</small><h2 id="morning-dialog-title">H楼晨会表格</h2></div><div class="ops-actions"><button type="button" class="ops-button is-primary" :disabled="morningBusy || morningLoading || !morningModel" @click="generateMorningMeeting()">{{ morningBusy ? "生成中…" : morningDownloadUrl ? "重新生成" : "生成表格" }}</button><button type="button" class="ops-button" aria-label="关闭晨会表格对话框" :disabled="morningBusy" @click="closeMorningMeeting()">关闭</button></div></header>
+    <div class="ops-dialog-body">
+      <p v-if="morningLoading" class="ops-state is-loading" role="status"><Clock3 aria-hidden="true" />正在读取晨会数据…</p>
+      <template v-else>
+
+        <div v-if="morningError" class="ops-alert is-error" role="alert"><CircleAlert aria-hidden="true" /><p>{{ morningError }}</p></div>
+        <template v-if="morningModel">
+          <p v-if="morningSuccess" class="ops-alert is-success" role="status">{{ morningSuccess }}</p>
+          <p v-if="morningGeneratedAt" class="ops-alert is-success" role="status"><CheckCircle2 aria-hidden="true" />晨会表格已于 {{ morningGeneratedAt }} 生成。</p>
+          <ul v-if="morningWarnings.length" class="ops-alert is-warning" role="list"><li v-for="(warning, index) in morningWarnings" :key="`mwarn-${index}`"><Siren aria-hidden="true" />{{ warning }}</li></ul>
+          <fieldset class="ops-environment" :disabled="morningBusy || !!morningDownloadUrl">
+            <legend>晨会环境读数</legend>
+            <p v-if="morningEnvironmentLoading" class="ops-meta" role="status">正在读取当班天气与温度，可先手动填写。</p>
+            <label>天气<input type="text" v-model="morningModel.weather_condition" @input="morningEnvironmentEdited.add('weather_condition')" /></label>
+            <label>干球温度（℃）<input type="number" step="0.1" v-model.number="morningModel.dry_bulb_temperature" @input="morningEnvironmentEdited.add('dry_bulb_temperature')" /></label>
+            <label>湿球温度（℃）<input type="number" step="0.1" v-model.number="morningModel.wet_bulb_temperature" @input="morningEnvironmentEdited.add('wet_bulb_temperature')" /></label>
+            <p v-if="morningDownloadUrl" class="ops-meta">重新生成时会读取当班最新的天气与干湿球温度。</p>
+          </fieldset>
+          <div class="ops-panel-head"><h3>表格预览</h3><div class="ops-actions"><button type="button" class="ops-button" :disabled="morningBusy || morningLoading || !morningModel || !morningDownloadUrl" :title="morningDownloadUrl ? '下载晨会表格' : '尚未生成可下载文件'" @click="downloadMorningMeeting()"><Download aria-hidden="true" />下载</button><button type="button" class="ops-button" :disabled="morningBusy || morningLoading || !morningModel || !morningPrintUrl" :title="morningPrintUrl ? '打印晨会表格' : '尚未生成可打印文件'" @click="printMorningMeeting()"><Printer aria-hidden="true" />打印</button></div></div>
+          <div class="ops-sheet-wrap" role="region" tabindex="0" aria-label="晨会表格预览"><MorningMeetingSheet :model="morningModel" /></div>
+        </template>
+        <p v-else-if="!morningError" class="ops-state is-empty"><ClipboardCheck aria-hidden="true" />暂未读取到晨会数据，请关闭后重新打开。</p>
+      </template>
+    </div>
+
+    </article>
+  </dialog>
+</section>

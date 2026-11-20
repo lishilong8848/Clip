@@ -265,9 +265,9 @@ async function checkWorksheetLayout() {
   assert(layout.choices.every(choice => choice.bottom <= layout.panel.bottom), 'Choices stay inside editor');
   assert(layout.radii.every(radius => radius === '2px'), 'Original worksheet inputs retain compact corners');
 }
-async function noOverflow() {
-  const metrics = await page.evaluate(() => {
-    const panel = document.querySelector('.tool-workspace');
+async function noOverflow(panelSelector = '.tool-workspace') {
+  const metrics = await page.evaluate(selector => {
+    const panel = document.querySelector(selector);
     const result = { viewport: innerWidth, page: document.documentElement.scrollWidth, panel: panel.getBoundingClientRect().toJSON() };
     if (result.panel.right > innerWidth + 1 || result.page > innerWidth + 1) {
       result.ancestors = [];
@@ -276,7 +276,7 @@ async function noOverflow() {
       }
     }
     return result;
-  });
+  }, panelSelector);
   assert(metrics.page <= metrics.viewport + 1, JSON.stringify(metrics));
   assert(metrics.panel.right <= metrics.viewport + 1, JSON.stringify(metrics));
   return metrics;
@@ -396,7 +396,9 @@ try {
   });
   await check('inspector/date defaults, one-click normal, and explicit completion are editable', async () => {
     assert.equal(await page.getByLabel('填写 '+layouts.electrical.schema.sheet+'!G4',{exact:true}).inputValue(),'本地测试人员');
-    assert.equal(await page.getByLabel('填写 '+layouts.electrical.schema.sheet+'!G8',{exact:true}).inputValue(),'2026-11-12');
+    const checkedAt=page.getByLabel('填写 '+layouts.electrical.schema.sheet+'!G8',{exact:true});
+    assert.equal(await checkedAt.getAttribute('type'),'datetime-local');
+    assert.equal(await checkedAt.inputValue(),'2026-11-12T00:00');
     await button('一键正常').click();
     assert.equal(await page.getByLabel('完成情况',{exact:true}).inputValue(),'completed');
     await page.getByLabel('完成情况',{exact:true}).selectOption('incomplete');
@@ -542,43 +544,63 @@ try {
   });
   await check('V2 desktop and mobile selection/editor; multiple templates remain separate', async () => {
     reset(); await page.goto(v2);
-    await page.getByRole('heading', { name: '工具台账' }).waitFor();
-    await noOverflow();
+    await page.getByRole('heading', { name: '工具办理台', exact: true }).waitFor();
+    await page.getByRole('heading', { name: /^工具清单/ }).waitFor();
+    await noOverflow('.td-page');
     await page.screenshot({ path: path.join(output, 'v2-desktop-selection.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await noOverflow();
+    await noOverflow('.td-page');
     await page.screenshot({ path: path.join(output, 'mobile-selection.png'), fullPage: true });
-    await chooseAssets('电能质量分析仪', '温湿度仪');
-    await openWorkspace();
-    await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
-    const note = page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', { exact: true });
+    for (const [kind, tool, template] of [['electrical', '电能质量分析仪', '电气原表模板'], ['hvac', '温湿度仪', '暖通原表模板']]) {
+      const choice = page.getByRole('checkbox', { name: '选择' + tool, exact: true });
+      await choice.check();
+      await button('配对至' + template).click();
+      assert.equal(await choice.isDisabled(), true);
+      await page.locator('.pair-group[data-group="' + kind + '"]').getByRole('button', { name: '移除' + tool, exact: true }).waitFor();
+    }
+    await clickTwice(button('开始填写自检'));
+    await page.getByRole('heading', { name: '维护自检 · 2 台', exact: true }).waitFor();
+    assert.equal(count('/open'), 1);
+    assert.deepEqual(actions('open')[0].body.template_ids, {e: 'electrical', h: 'hvac'});
+    const currentTool = page.getByRole('combobox', { name: '当前工具', exact: true });
+    const sheet = page.getByRole('combobox', { name: '工作表', exact: true });
+    assert.equal(await sheet.inputValue(), layouts.electrical.schema.sheet);
+    const cellKey = layouts.electrical.schema.sheet + '!C6';
+    await button('表格预览').click();
+    await button('编辑 ' + cellKey).click();
+    const cellEditor = page.getByRole('dialog', { name: '填写 ' + cellKey, exact: true });
+    const note = cellEditor.getByLabel('填写 ' + cellKey, { exact: true });
     await note.fill('手机草稿内容');
-    await checkWorksheetLayout();
-    await noOverflow();
+    await cellEditor.getByRole('button', { name: '关闭弹窗', exact: true }).click();
+    await cellEditor.waitFor({ state: 'hidden' });
+    assert.equal(await button('编辑 ' + cellKey).innerText(), '手机草稿内容');
+    await noOverflow('.td-page');
     await page.screenshot({ path: path.join(output, 'mobile-editor.png'), fullPage: true });
     await page.setViewportSize({ width: 320, height: 700 });
-    await noOverflow();
-    await checkWorksheetLayout();
     const completion = page.getByRole('combobox', { name: '完成情况', exact: true });
-    const reviewer = page.getByRole('combobox', { name: '选择审核人', exact: true });
+    const reviewer = page.getByRole('combobox', { name: '审核人', exact: true });
     await completion.selectOption('completed');
+    await reviewer.focus();
     await reviewer.selectOption('leaderA');
     assert.equal(await completion.inputValue(), 'completed');
     assert.equal(await reviewer.inputValue(), 'leaderA');
-    const footerPadding = await page.locator('.editor-footer').evaluate(node => getComputedStyle(node).paddingInlineEnd);
-    assert.equal(footerPadding, '38px', 'Leave room for the floating assistant on narrow screens');
-    await button('提交审核').scrollIntoViewIfNeeded();
-    assert(await button('提交审核').evaluate(node => {
+    await noOverflow('.td-page');
+    const submitV2 = button('提交自检审核');
+    await submitV2.scrollIntoViewIfNeeded();
+    assert(await submitV2.evaluate(node => {
       const box = node.getBoundingClientRect();
       return [.15, .5, .85].every(offset => node.contains(document.elementFromPoint(
         box.left + box.width * offset, (box.top + box.bottom) / 2)));
-    }), 'Mobile footer stays reachable across the button width');
+    }), 'Mobile submit stays reachable across the button width');
     await page.screenshot({ path: path.join(output, 'mobile-editor-320.png'), fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
-    await button('温湿度仪 · B楼').click();
-    await button('电能质量分析仪 · A楼').click();
-    assert.equal(await note.inputValue(), '手机草稿内容');
-    await chooseRadio('不合格 · 报废');
+    await currentTool.selectOption('h');
+    assert.equal(await sheet.inputValue(), layouts.hvac.schema.sheet);
+    await currentTool.selectOption('e');
+    assert.equal(await sheet.inputValue(), layouts.electrical.schema.sheet);
+    assert.equal(await button('编辑 ' + cellKey).innerText(), '手机草稿内容');
+    const outcome = page.getByRole('combobox', { name: '检查结果', exact: true });
+    await outcome.selectOption('scrap');
     const photo = await page.evaluate(() => {
       const canvas = document.createElement('canvas');
       canvas.width = 600;
@@ -588,12 +610,12 @@ try {
       context.fillRect(0, 0, canvas.width, canvas.height);
       return canvas.toDataURL('image/png').split(',')[1];
     });
-    await page.locator('.scrap-photos input[type=file]').setInputFiles({
+    await page.getByLabel(/报废现场照片（最多/).setInputFiles({
       name: '隔离测试现场照片.png', mimeType: 'image/png', buffer: Buffer.from(photo, 'base64'),
     });
-    const thumbnail = page.getByRole('button', { name: '查看报废现场照片 1', exact: true });
+    const thumbnail = page.getByRole('button', { name: '报废现场照片', exact: true });
     await thumbnail.click();
-    const enlarged = page.locator('.photo-preview');
+    const enlarged = page.getByRole('dialog', { name: '报废现场照片', exact: true }).getByRole('img', { name: '报废现场照片大图' });
     await enlarged.waitFor();
     await enlarged.evaluate(image => image.decode());
     const dimensions = await enlarged.boundingBox();
@@ -602,33 +624,34 @@ try {
     await page.screenshot({ path: path.join(output, 'mobile-scrap-photo.png') });
     await page.keyboard.press('Escape');
     await enlarged.waitFor({ state: 'hidden' });
-    await chooseRadio('合格');
-    await button('保存草稿').click(); await page.getByText('草稿已保存', { exact: true }).waitFor();
+    await outcome.selectOption('normal');
+    const saved = page.waitForResponse(response => new URL(response.url()).pathname.endsWith('/save') && response.request().method() === 'POST');
+    await button('保存草稿').click();
+    assert.equal((await saved).status(), 200);
+    const items = actions('save').at(-1).body.items;
+    assert.deepEqual(items.map(item => item.id), ['e']);
+    assert.equal(items[0].values[cellKey], '手机草稿内容');
   });
-  await check('200 tool tabs stay in one scrollable row on mobile and desktop', async () => {
+  await check('V2 keeps 200 tools reachable in one selector on mobile and desktop', async () => {
     reset();
     state.assets = Array.from({ length: 200 }, (_, index) => ({ ...clone(initialAssets[0]), id: 'bulk-' + index, name: '批量工具' + (index + 1) }));
     await page.goto(v2);
-    await page.getByRole('checkbox', { name: '选择筛选后的工具', exact: true }).click();
-    await openWorkspace();
-    await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor({ timeout: 30000 });
-    assert.equal(await page.locator('.tool-tabs button').count(), 200);
+    await page.getByRole('checkbox', { name: '全选可办', exact: true }).check();
+    await button('沿用各工具已关联模板').click();
+    await clickTwice(button('开始填写自检'));
+    await page.getByRole('heading', { name: '维护自检 · 200 台', exact: true }).waitFor({ timeout: 30000 });
+    const tool = page.getByRole('combobox', { name: '当前工具', exact: true });
+    assert.equal(await tool.locator('option').count(), 200);
     for (const width of [390, 1440]) {
       await page.setViewportSize({ width, height: 1000 });
-      await noOverflow();
-      const layout = await page.evaluate(() => {
-        const tabs = document.querySelector('.tool-tabs');
-        const buttons = [...tabs.querySelectorAll('button')];
-        return { tops: buttons.map(button => button.offsetTop), height: tabs.offsetHeight,
-          clientWidth: tabs.clientWidth, scrollWidth: tabs.scrollWidth };
-      });
-      assert.equal(new Set(layout.tops).size, 1);
-      assert(layout.height < 75 && layout.scrollWidth > layout.clientWidth);
-      await page.screenshot({ path: path.join(output, `tabs-200-${width}.png`), fullPage: true });
+      await noOverflow('.td-page');
+      const target = width === 390 ? 'bulk-199' : 'bulk-0';
+      await tool.selectOption(target);
+      assert.equal(await tool.inputValue(), target);
+      await page.screenshot({ path: path.join(output, `select-200-${width}.png`) });
     }
-    await button('批量工具200 · A楼').click();
-    assert.equal(await button('批量工具200 · A楼').getAttribute('aria-pressed'), 'true');
-    assert.equal(await page.locator('.sheet-scroll').evaluate(element => element.scrollTop), 0);
+    assert.equal(count('/open'), 1);
+    assert.equal(actions('open')[0].body.asset_ids.length, 200);
   });
   await check('one records page deduplicates repair/scrap and waits for deletion confirmation', async () => {
     for (const [location, width] of [[legacy, 1440], [v2, 390]]) {
@@ -640,6 +663,25 @@ try {
         revision: 2, result_label: '合格', tool_status_label: '检修后合格', can_remove_followup: true, sync: [] }];
       await page.setViewportSize({ width, height: 900 });
       await page.goto(location);
+      if (location === v2) {
+        await button('办理记录').click();
+        const order = page.locator('.tool-worklist article').filter({ hasText: '电能质量分析仪' });
+        const history = page.locator('.td-records');
+        await order.waitFor();
+        await history.getByText('未关联工具', { exact: true }).waitFor();
+        assert.equal(await history.getByText('电能质量分析仪', { exact: true }).count(), 0);
+        await noOverflow('.td-page');
+        await order.getByRole('button', { name: '删除记录', exact: true }).click();
+        await page.locator('.n-popconfirm').getByRole('button', { name: '确认', exact: true }).click();
+        await order.getByText('删除结果核验中', { exact: true }).waitFor();
+        assert.equal(await order.getByRole('button', { name: '删除记录', exact: true }).count(), 0);
+        state.removedOrder = id;
+        state.followups = [];
+        await button('刷新').click();
+        await order.waitFor({ state: 'hidden' });
+        await history.getByText('未关联工具', { exact: true }).waitFor();
+        continue;
+      }
       await page.getByRole('navigation', { name: '工具管理分区' }).getByRole('button', { name: '办理记录', exact: true }).click();
       const followups = page.getByRole('table', { name: '检修和报废记录' });
       await followups.getByText('电能质量分析仪', { exact: true }).waitFor();
@@ -671,16 +713,29 @@ try {
       target.review_status = 'rejected';
       target.result_notice = '结果通知待重试 · 飞书未确认送达，将自动重试。';
       await page.goto(location + '&scope=B&tool_session=' + session.id + '&tool_asset=' + target.id);
-      await page.getByText(target.review_note, { exact: true }).waitFor();
-      assert.equal(await button('温湿度仪 · B楼').getAttribute('aria-pressed'), 'true');
-      await page.getByText(target.result_notice, { exact: true }).waitFor();
-      await button('一键正常').click();
+      const isV2 = location === v2;
+      const resubmit = isV2 ? '重新提交本台审核' : '重新提交本台';
+      if (isV2) {
+        await page.getByText(target.review_note).waitFor();
+        assert.equal(await page.getByRole('combobox', { name: '当前工具', exact: true }).inputValue(), target.id);
+        await page.getByText(target.result_notice).waitFor();
+        await button('本表全部正常').click();
+        await page.getByRole('dialog', { name: '本表检查项全部正常？' }).getByRole('button', { name: '确认', exact: true }).click();
+      } else {
+        await page.getByText(target.review_note, { exact: true }).waitFor();
+        assert.equal(await button('温湿度仪 · B楼').getAttribute('aria-pressed'), 'true');
+        await page.getByText(target.result_notice, { exact: true }).waitFor();
+        await button('一键正常').click();
+      }
       const [submitted] = await Promise.all([
         page.waitForResponse(r => new URL(r.url()).pathname.endsWith('/submit') && r.request().method() === 'POST'),
-        submit('重新提交本台'),
+        isV2 ? (async () => {
+          await button(resubmit).click();
+          await page.getByRole('dialog', { name: resubmit + '？' }).getByRole('button', { name: '确认', exact: true }).click();
+        })() : submit(resubmit),
       ]);
       assert.equal(submitted.status(), 200);
-      await button('重新提交本台').waitFor({state:'hidden'});
+      await button(resubmit).waitFor({state:'hidden'});
       assert.equal(actions('submit').at(-1).body.resubmit_asset_id, target.id);
       assert.equal(session.items[0].can_edit, true);
     }

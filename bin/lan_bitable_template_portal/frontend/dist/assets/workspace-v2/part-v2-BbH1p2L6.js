@@ -1,0 +1,1 @@
+function o(r){if(!r)return{};const e=getComputedStyle(r);return Object.fromEntries([...Array.from(e).filter(t=>t.startsWith("--lh-")||t.startsWith("--cf-")),"color-scheme"].map(t=>[t,e.getPropertyValue(t)]))}export{o as i};

@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>参考人生指南</title>
+<style>
+:root {color-scheme:light;--page:#edf2f2;--panel:#f7f9f9;--field:#e7eeef;--ink:#233e47;--sub:#4e666e;--line:#c6d5d8;--sky:#d8ebf7;--mint:#d9eee4;--green:#176f50;--link:#206589;--lift:2px 4px 12px #263f4b10}
+:root.dark {color-scheme:dark;--page:#172428;--panel:#203236;--field:#192b30;--ink:#eef7f6;--sub:#bfd2d4;--line:#496166;--sky:#263f4e;--mint:#24483e;--green:#257e59;--link:#91cfee;--lift:none}
+* {box-sizing:border-box} body {margin:0;background:var(--page);color:var(--ink);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif;overflow-wrap:anywhere} [hidden] {display:none!important}
+main {max-width:1160px;margin:auto;padding:clamp(10px,2vw,24px);display:grid;gap:12px} h1,h2,h3,p,dl,dd {margin:0} h1 {font-size:clamp(22px,3vw,32px);line-height:1.22} h2 {font-size:19px} h3 {font-size:17px} small,label {font-size:13px} button,input,select,summary {font:inherit;color:inherit}
+button,select,summary {cursor:pointer} button,select,.topic-links a {border-radius:9px;border:1px solid var(--line);padding:6px 10px;font-size:13px;background:var(--panel);color:var(--ink)}
+button:hover,select:hover,summary:hover {border-color:var(--green)} button:disabled {opacity:.65;cursor:default} button[aria-pressed=true],button.on,.primary,.todo-btn {background:var(--green);border-color:transparent;color:var(--on-accent,white)}
+input[type=checkbox] {accent-color:var(--green)} :focus-visible {outline:3px solid var(--link);outline-offset:2px} a,.xref,abbr.term {color:var(--link);cursor:pointer}
+.cover,.searchdesk,.tray,.reference,.entry,.overlay-box {border:1px solid var(--line);border-radius:15px;background:var(--panel);box-shadow:var(--lift)}
+.cover {background:linear-gradient(105deg,var(--sky),var(--mint));padding:clamp(14px,2vw,24px);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.cover p,.muted,.metric,.kicker,.intro {font-size:13px;color:var(--sub)} .searchdesk,.tray,.reference {padding:12px 15px}
+.line,.filterrow,.topic-links,.tools,.entry-meta,.entry-head,.source-links,.sec-h {display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.line>label.find {flex:1 1 260px;display:flex;align-items:center;gap:9px}
+.find input,select {min-width:0;max-width:100%;flex:1;background:var(--field);border:1px solid var(--line);border-radius:9px;padding:8px 10px}
+.find input {width:100%;font-size:15px} .tools {margin-top:9px} .tools select {flex:0 1 auto;max-width:min(100%,23rem)}
+#sidebar {display:none;margin-top:10px;padding:10px 0 0;border-top:1px solid var(--line);max-height:52vh;overflow:auto}
+#sidebar.open {display:grid;gap:8px} #f-sec {display:flex;flex-wrap:wrap;align-items:flex-start;gap:5px} #f-sec>.toc-sub {flex-basis:100%;padding:6px 10px;background:var(--field);border-radius:8px}
+.toc-sub a {display:inline-block;margin:3px 10px 3px 0;font-size:13px} .filterrow strong {min-width:5em;font-size:13px}
+.tray header,.result-count,.overlay-box header {display:flex;align-items:center;gap:8px;flex-wrap:wrap}.tray header>strong,.overlay-box header>strong {flex:1}
+#todo-rail.collapsed .tray-body {display:none}.tray-body {margin-top:8px}
+#todo-list {display:flex;flex-wrap:wrap;gap:7px;max-height:150px;overflow:auto} .todo-item {padding:6px;display:flex;align-items:center;gap:8px;cursor:pointer}.tt {flex:1}
+#tm-list .tm-item {display:grid;gap:7px;padding:9px 2px;border-top:1px solid var(--line)}
+.tm-item-h,.tm-badges {display:flex;align-items:baseline;gap:4px 10px;flex-wrap:wrap}.tm-item-h strong {flex:1}.tm-item-h button {margin-inline-start:auto}
+.tm-rows {display:grid;gap:4px}.tm-rows b {margin-inline-end:.5em}
+.reference summary {font-size:14px;font-weight:650}.reference .topic-links,.source-links {margin:8px 0}
+#list {display:grid;gap:24px}.sec-block {display:grid;gap:8px}.sec-h {border-bottom:1px solid var(--line);padding:6px 2px}
+.sec-h span {margin-left:auto}.entry {padding:clamp(12px,1.6vw,18px)} .entry-meta {font-size:12px;color:var(--sub);gap:4px 10px;margin-bottom:4px}
+.entry-head {align-items:flex-start}.entry-head h3 {flex:1;min-width:170px}.human {padding:8px 11px;background:var(--mint);border-radius:8px;margin:7px 0}
+.entry dl {display:grid;grid-template-columns:max-content minmax(0,1fr);gap:4px 12px;font-size:14px}.entry dt {color:var(--sub)}
+.entry details {margin-top:6px;border-top:1px solid var(--line);padding-top:5px;font-size:13px}.entry ol {padding-left:20px}
+#gloss dl {display:grid;grid-template-columns:fit-content(28%) minmax(0,1fr);gap:8px;margin:8px 0;font-size:14px}dt {font-weight:650}
+#empty {text-align:center;padding:20px} .overlay {position:fixed;z-index:4;inset:0;background:#162e3977;display:grid;place-items:center;padding:12px}
+.overlay-box {padding:16px;width:min(900px,100%);max-height:90dvh;display:flex;flex-direction:column;gap:10px}
+dialog.overlay {width:100%;height:100%;max-width:none;max-height:none;border:0;margin:0;color:inherit}
+dialog.overlay:not([open]) {display:none} dialog.overlay::backdrop {background:transparent}
+#dm-toc,#dm-doc,#tm-list {overflow:auto;overscroll-behavior:contain} #dm-toc {max-height:18vh;display:flex;gap:8px;flex-wrap:wrap} #dm-toc a {font-size:13px}
+#dm-doc {padding:4px 9px;min-height:0} #dm-doc p,#dm-doc h2,#dm-doc h3 {margin-block:.7em}
+#pop,#xref-pop,#todo-pop {z-index:5;border:1px solid var(--line);border-radius:10px;background:var(--panel);padding:12px;box-shadow:0 5px 22px #182d4133;max-height:68vh;overflow:auto}
+#pop,#xref-pop {position:absolute;max-width:min(400px,95vw)} #pop span {display:block} #todo-pop {position:fixed;width:min(400px,calc(100vw - 22px))}
+footer {font-size:12px;color:var(--sub)}mark {color:#3f3515;background:#ffe892}
+@media (min-width:761px) and (hover:hover),(min-width:1025px) {#theme {display:none}}
+@media(max-width:620px){main {padding:8px;gap:8px}.searchdesk,.tray,.reference {padding:10px}.line>label.find {flex-basis:100%}.tools>select {width:100%;max-width:100%}button,select {min-height:40px}.filterrow {gap:5px}.filterrow strong {flex-basis:100%}.entry-head h3 {flex-basis:70%}}
+</style>
+<!--SERENITY_STORAGE-->
+</head>
+<body>
+<main>
+  <header class="cover"><h1>参考人生指南</h1><button id="theme" type="button">切换明暗</button></header>
+  <section class="searchdesk" aria-label="查找建议">
+    <div class="line"><label class="find">搜索<input id="q" type="search" placeholder="搜索建议、收益或来源" autocomplete="off"></label>
+      <button id="menu" type="button" class="primary" aria-controls="sidebar" aria-expanded="false">筛选与章节目录</button><button id="reset" type="button">重置</button></div>
+    <div class="tools"><label for="quick-section">快速选章</label><select id="quick-section"><option value="">全部章节</option></select>
+      <label><input id="f-dispute" type="checkbox">仅看有争议</label><label><input id="f-todo" type="checkbox">仅看待核实</label></div>
+    <section id="sidebar" aria-label="筛选条件"><div id="facets"></div><details><summary>章节与条目</summary><div id="f-sec" data-dim="sec"></div></details></section>
+    <div id="backdrop" hidden></div>
+  </section>
+  <section id="todo-rail" class="tray"><header><strong>我的待办 <span id="rail-tcount">0</span></strong>
+    <button id="rail-toggle">展开或收起 <span id="rail-count" hidden></span></button><button id="rail-all">查看全部</button><button id="rail-export">导出待办</button></header>
+    <div class="tray-body"><div id="todo-list"></div></div></section>
+  <details class="reference"><summary>专题长文与术语</summary><nav id="long-reads" class="topic-links" aria-label="专题长文"></nav>
+    <details id="gloss"><summary>术语表</summary><dl></dl></details></details>
+  <div id="status" role="status"><span id="status-t">正在读取正文…</span><i id="status-b"></i></div>
+  <h2 class="result-count">阅读条目 <small class="metric"><span id="cnt" aria-live="polite">…</span> 条</small></h2>
+  <p id="empty" hidden>没有符合条件的条目 <button id="reset2">清除筛选</button></p><div id="list"></div>
+  <footer>正文来自 <a href="https://github.com/eternity4719/HowToLiveBetter" target="_blank" rel="noopener noreferrer">高性价比人生指南</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener noreferrer">CC BY 4.0</a> · <a href="https://github.com/eternity4719/HowToLiveBetter/tree/main/docs/核实记录" target="_blank" rel="noopener noreferrer">核实记录</a></footer>
+</main>
+<div id="pop" hidden><b></b><span></span></div>
+<div id="xref-pop" hidden><header class="xp-h"><b></b> <button class="xp-go">跳到原条目</button> <button class="xp-x" aria-label="关闭引用">关闭</button></header></div>
+<div id="todo-pop" hidden></div>
+<dialog id="todo-mask" class="overlay" aria-label="全部待办" hidden><section class="overlay-box"><header><strong>全部待办 · <span id="tm-cnt"></span></strong><button id="tm-x" autofocus>关闭</button></header><div id="tm-list"></div></section></dialog>
+<dialog id="doc-mask" class="overlay" aria-labelledby="dm-t" hidden><section class="overlay-box"><header class="dm-h"><strong id="dm-t"></strong><button id="dm-x" autofocus>关闭长文</button></header><nav id="dm-toc" aria-label="文章目录"></nav><div id="dm-doc"></div></section></dialog>
+<!--SERENITY_READER-->
+<script>
+window.addEventListener('message', event => {
+  if (event.source !== parent || event.data?.kind !== 'clipflow-life-guide-theme') return;
+  const root = document.documentElement;
+  root.classList.toggle('dark', event.data.dark === true);
+  for (const name of ['page','panel','field','ink','sub','line','green','on-accent']) {
+    const value = event.data.palette?.[name];
+    if (typeof value === 'string' && /^#[\da-f]{6}$/i.test(value)) root.style.setProperty('--'+name,value);
+  }
+});
+// The offline reader owns visibility and cleanup; the native dialog owns focus.
+for (const [id, closer] of [['todo-mask','tm-x'], ['doc-mask','dm-x']]) {
+  const dialog = document.getElementById(id);
+  new MutationObserver(() => {
+    if (dialog.hidden && dialog.open) dialog.close();
+    else if (!dialog.hidden && !dialog.open) dialog.showModal();
+  }).observe(dialog, {attributes:true, attributeFilter:['hidden']});
+  dialog.addEventListener('cancel', event => {
+    event.preventDefault();
+    document.getElementById(closer).click();
+  });
+}
+</script>
+</body>
+</html>

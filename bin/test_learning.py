@@ -691,6 +691,46 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(visible[0]["comments"][-1]["text"], "Corrected")
         self.assertNotEqual(self.dispatch("issue.create", payload)["id"], first["id"])
 
+    def test_pending_question_revision_groups_feedback_and_preserves_issued_results(self):
+        from lan_bitable_template_portal.learning_issue_cards import review_question
+
+        self.enable()
+        paper, question = self.fixture(per_scope=2)
+        other = paper['questions'][1]
+        self.dispatch('paper.answer', self.answer_payload(paper, question))
+        issued_before = self.service._get('paper', paper['id'])
+        record_before = self.service._get('record', paper['id'])
+        first = self.dispatch('issue.create', {'paper_id': paper['id'], 'question_id': question['id'],
+                                              'category': '答案', 'description': '第一条反馈'})
+        second = self.dispatch('issue.create', {'paper_id': paper['id'], 'question_id': other['id'],
+                                               'category': '题干', 'description': '另一道题'})
+        with self.service.transaction() as conn:
+            row = self.service._get('issue', first['id'], conn)
+            self.service._put('issue', 'i_same_question', {**row, 'id': 'i_same_question', 'description': '第二条反馈', 'status': 'processing'}, conn)
+        self.assert_status(403, self.service.pending_questions, ACTOR, {})
+        self.assert_status(403, self.service.question_revision, question['id'], ACTOR)
+        self.assert_status(403, review_question, self.service, None, ACTOR, first['id'], '', group=True)
+        queue = self.service.pending_questions(ADMIN, {'page_size': '1'})
+        self.assertEqual((queue['total'], len(queue['items'])), (2, 1))
+        grouped = next(item for item in self.service.pending_questions(ADMIN, {})['items'] if item['question_id'] == question['id'])
+        self.assertEqual(grouped['feedback_count'], 2)
+        detail = review_question(self.service, None, ADMIN, grouped['issue_id'], '', group=True)
+        self.assertEqual({row['description'] for row in detail['feedback']}, {'第一条反馈', '第二条反馈'})
+        self.assert_status(409, review_question, self.service, None, ADMIN, grouped['issue_id'], '',
+                           {'version': question['version'], 'issues_version': 'stale', 'stem': '不应保存'}, group=True)
+        result = review_question(self.service, None, ADMIN, grouped['issue_id'], '',
+                                 {'version': question['version'], 'issues_version': detail['issues_version'],
+                                  'correct_option_ids': ['o1']}, group=True)
+        self.assertEqual(result['question']['correct_option_ids'], ['o1'])
+        self.assertEqual(self.service._get('issue', first['id'])['status'], 'resolved')
+        self.assertEqual(self.service._get('issue', 'i_same_question')['status'], 'resolved')
+        self.assertEqual(self.service._get('issue', second['id'])['status'], 'pending')
+        self.assertEqual(self.service.pending_questions(ADMIN, {})['total'], 1)
+        direct = self.service.question_revision(question['id'], ADMIN, {'version': result['question']['version'], 'stem': '题库新版题干'})
+        self.assertEqual(direct['question']['stem'], '题库新版题干')
+        self.assertEqual(self.service._get('paper', paper['id']), issued_before)
+        self.assertEqual(self.service._get('record', paper['id']), record_before)
+
     def test_issue_creation_does_not_leak_unrevealed_answer_or_attachment_secrets(self):
         paper, question = self.fixture(attachments=True)
         issue = self.dispatch("issue.create", {"paper_id": paper["id"], "question_id": question["id"],

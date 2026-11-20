@@ -1,82 +1,10 @@
-<template>
-  <section class="v2-history" :class="{'is-reviewing':r.reviewOpen&&r.activeSource}">
-    <header class="v2-history-head"><div><History :size="22" aria-hidden="true" /><h1>历史通告记忆导入</h1></div><span v-if="scanned">{{ scanScope }}</span></header>
-    <NSpin v-if="checking" size="small"><div class="v2-history-auth">正在校验管理员身份</div></NSpin>
-    <NAlert v-else-if="!loggedIn" type="info" :bordered="false">请先登录后使用历史记忆导入。<a :href="loginUrl">登录灯塔</a></NAlert>
-    <NAlert v-else-if="!isAdmin" type="warning" :bordered="false">仅管理员可使用历史通告记忆导入。</NAlert>
-    <template v-else>
-      <form class="v2-history-scan" @submit.prevent="scan">
-        <NFormItem label="历史范围" :show-feedback="false"><NRadioGroup v-model:value="r.months" :disabled="r.busy" aria-label="历史范围"><NRadioButton :value="3">近 3 个月</NRadioButton><NRadioButton :value="6">近 6 个月</NRadioButton></NRadioGroup></NFormItem>
-        <NFormItem label="通告类型" :show-feedback="false"><NCheckboxGroup v-model:value="r.selectedWorkTypes" :disabled="r.busy" aria-label="扫描通告类型"><NCheckbox v-for="type in r.workTypes" :key="type.value" :value="type.value">{{ type.label }}</NCheckbox></NCheckboxGroup></NFormItem>
-        <NButton type="primary" attr-type="submit" data-v2-navigation :loading="r.scanBusy" :disabled="!!r.scanDisabledReason" :title="r.scanDisabledReason"><template #icon><ScanSearch :size="17" /></template>{{ r.scanButtonLabel }}</NButton>
-      </form>
-      <NAlert v-if="r.message&&r.message!==scanMessage" :type="r.messageType==='failed'?'error':r.messageType==='success'?'success':'info'" :bordered="false" role="status">{{ r.message }}</NAlert>
-      <NAlert v-if="r.warnings.length" type="warning" :bordered="false" title="需要注意"><ul class="v2-history-warnings"><li v-for="(warning,index) in r.warnings" :key="index">{{ warning }}</li></ul></NAlert>
-      <div v-if="!scanned&&!r.sourceItems.length" class="v2-history-initial">
-        <template v-if="r.scanBusy"><NSkeleton text :repeat="5" /><span>扫描中 · {{ r.scanElapsedSeconds }} 秒</span></template>
-        <NEmpty v-else :description="r.messageType==='failed'?'历史扫描未完成':'尚未扫描历史通告'"><template #icon><FolderSearch :size="42" /></template></NEmpty>
-      </div>
-      <template v-else>
-        <div class="v2-history-filters">
-          <NInput v-model:value="r.query" clearable placeholder="搜索事项名称、楼栋或专业" :input-props="{'aria-label':'搜索当前月事项'}" :disabled="r.busy"><template #prefix><Search :size="16" /></template></NInput>
-          <NSelect v-model:value="r.filterBuilding" :options="[{label:'全部楼栋',value:''},...r.buildingOptions.map((value:string)=>({label:value,value}))]" :disabled="r.busy" aria-label="筛选楼栋" :to="true" />
-          <NSelect v-model:value="r.filterType" :options="[{label:'全部类型',value:''},...r.workTypes]" :disabled="r.busy" aria-label="筛选通告类型" :to="true" />
-          <NSelect v-model:value="r.filterMatch" :options="matchOptions" :disabled="r.busy" aria-label="筛选匹配状态" :to="true" />
-          <NButton v-if="r.historyFilterCount" quaternary :disabled="r.busy" @click="r.clearHistoryFilters">清空筛选</NButton>
-        </div>
-        <div class="v2-history-summary"><span>当前月事项 <b>{{ r.sourceItems.length }}</b></span><span>历史候选 <b>{{ r.candidates.length }}</b></span><span>推荐可填充 <b>{{ r.recommendedMatchCount }}</b></span></div>
-        <div class="v2-history-workspace" :class="{'is-reviewing':r.reviewOpen&&r.activeSource}" :aria-busy="r.busy">
-          <section class="v2-history-sources" aria-label="当前月事项">
-            <header><h2>当前月事项</h2><span>{{ r.filteredSources.length }} 条</span><NCheckbox :checked="allVisibleSelected" :indeterminate="someVisibleSelected&&!allVisibleSelected" :disabled="r.busy||!r.filteredSources.length" @update:checked="selectVisible">勾选筛选结果</NCheckbox></header>
-            <NVirtualList v-if="r.filteredSources.length" class="v2-history-list" :items="r.filteredSources" :item-size="102" key-field="id">
-              <template #default="{item}">
-                <article :key="item.id" class="v2-history-row" :class="{'is-active':item.id===r.activeSourceId,'is-selected':r.isSelected(item.id)}">
-                  <NCheckbox v-model:checked="r.selectedMap[item.id]" :disabled="r.busy" :aria-label="'勾选保存：'+(item.title||item.memory_name)" @update:checked="dirty=true" />
-                  <button type="button" :disabled="r.busy" :aria-pressed="item.id===r.activeSourceId" @click="r.selectSource(item)"><strong :title="item.title||item.memory_name">{{ item.title||item.memory_name }}</strong><span>{{ r.workTypeLabel(item.work_type) }} · {{ item.building||'楼栋未填写' }} · {{ item.specialty||'专业未填写' }}</span><small><i :class="r.candidateIdFor(item.id)?'has-candidate':'no-candidate'" />{{ r.candidateIdFor(item.id)?'有历史候选':'未匹配候选' }}<span v-if="r.sourceHasMemory(item)">已有记忆</span></small></button>
-                  <ChevronRight :size="16" class="v2-history-row-arrow" aria-hidden="true" />
-                </article>
-              </template>
-            </NVirtualList>
-            <NEmpty v-else :description="r.sourceItems.length?'没有符合筛选条件的事项':'本次扫描没有当前月事项'" />
-          </section>
-          <section v-if="r.activeSource" class="v2-history-review" aria-labelledby="history-review-heading">
-            <NButton class="v2-history-back" quaternary :disabled="r.busy" @click="r.closeReview"><template #icon><ArrowLeft :size="17" /></template>事项列表</NButton>
-            <header><div><span>{{ r.workTypeLabel(r.activeSource.work_type) }} · {{ r.activeSource.building||'楼栋未填写' }}<template v-if="r.activeSource.source_status"> · {{ r.activeSource.source_status }}</template></span><h2 id="history-review-heading">{{ r.activeSource.title||r.activeSource.memory_name }}</h2></div><NTag size="small" :bordered="false">{{ r.activeFieldOriginLabel }}</NTag></header>
-            <div class="v2-history-candidate">
-              <NFormItem label="历史候选" :show-feedback="false"><NSelect v-model:value="candidateChoice" filterable :options="candidateOptions" :disabled="r.busy||!candidateOptions.length" :placeholder="candidateOptions.length?'选择历史候选':'暂无同类型、同楼栋候选'" aria-label="选择历史候选" :to="true" /></NFormItem>
-              <NButton secondary type="primary" :disabled="r.busy||!candidateChoice" @click="applyCandidate"><template #icon><CopyPlus :size="16" /></template>套用此候选</NButton>
-              <span v-if="r.activeCandidateHint">{{ r.activeCandidateHint }}</span>
-            </div>
-            <NForm class="v2-history-fields" :disabled="r.busy" :show-feedback="false" label-placement="top">
-              <NFormItem v-for="field in r.primaryFieldDefs" :key="field.key" :label="field.label" :label-for="'history-field-'+field.key"><NInput v-model:value="r.activeFields[field.key]" :input-props="{id:'history-field-'+field.key}" :type="field.multi?'textarea':'text'" :autosize="field.multi?{minRows:2,maxRows:4}:undefined" :placeholder="field.label" @update:value="edited" /></NFormItem>
-            </NForm>
-            <NCollapse v-if="r.extraFieldDefs.length" class="v2-history-extra"><NCollapseItem :title="'其他字段 · '+r.extraFieldDefs.length+' 项'" name="extra"><NForm class="v2-history-fields" :disabled="r.busy" :show-feedback="false" label-placement="top"><NFormItem v-for="field in r.extraFieldDefs" :key="field.key" :label="field.label" :label-for="'history-field-'+field.key"><NInput v-model:value="r.activeFields[field.key]" :input-props="{id:'history-field-'+field.key}" :type="field.multi?'textarea':'text'" :autosize="field.multi?{minRows:2,maxRows:4}:undefined" :placeholder="field.label" @update:value="edited" /></NFormItem></NForm></NCollapseItem></NCollapse>
-          </section>
-        </div>
-        <footer v-if="r.sourceItems.length||r.candidates.length" class="v2-history-footer">
-          <div><strong>已勾选 {{ r.selectedCount }} 条</strong><span>覆盖已有记忆 {{ r.selectedOverwriteCount }} 条</span></div>
-          <div><NButton secondary :disabled="!!r.fillRecommendedDisabledReason" :title="r.fillRecommendedDisabledReason" @click="fillRecommended"><template #icon><CopyPlus :size="16" /></template>填充推荐并预览</NButton><NButton type="primary" :disabled="!!r.saveSelectedDisabledReason" :title="r.saveSelectedDisabledReason" @click="r.saveSelected"><template #icon><Save :size="16" /></template>预览并保存</NButton></div>
-        </footer>
-      </template>
-      <NModal :show="r.saveConfirmOpen" preset="card" title="确认保存历史记忆" class="v2-history-confirm" :style="{width:'min(760px,calc(100vw - 24px))'}" :mask-closable="!r.busy" :close-on-esc="!r.busy" :closable="!r.busy" @update:show="value=>{if(!value)r.cancelSaveConfirm();}">
-        <div class="v2-history-confirm-summary"><span>本次保存 <b>{{ r.saveSummary.total }}</b></span><span>候选填充 <b>{{ r.saveSummary.candidate }}</b></span><span>覆盖已有记忆 <b>{{ r.saveSummary.overwrite }}</b></span></div>
-        <NAlert v-if="r.saveSummary.overwrite" type="warning" :bordered="false">{{ r.saveSummary.overwrite }} 条已有记忆将被覆盖。</NAlert>
-        <NAlert v-if="r.messageType==='failed'" type="error" :bordered="false" role="alert">{{ r.message }}</NAlert>
-        <ul class="v2-history-save-list"><li v-for="item in r.savePreviewItems" :key="item.key"><strong>{{ item.title }}</strong><span>{{ item.type }} · {{ item.building||'楼栋未填写' }} · {{ item.origin }}</span></li></ul>
-        <p v-if="r.saveSummary.total>r.savePreviewItems.length" class="v2-history-muted">另有 {{ r.saveSummary.total-r.savePreviewItems.length }} 条包含在本次保存中。</p>
-        <template #footer><div class="v2-history-confirm-actions"><NButton :disabled="r.busy" @click="r.cancelSaveConfirm">继续核对</NButton><NButton type="primary" :loading="r.busy" :disabled="r.busy" data-v2-submit @click="save"><template #icon><Save :size="16" /></template>确认保存 {{ r.saveSummary.total }} 条</NButton></div></template>
-      </NModal>
-    </template>
-  </section>
-</template>
-
 <script setup lang="ts">
 import {computed,onBeforeUnmount,ref,watch} from 'vue';
-import {NAlert,NButton,NCheckbox,NCheckboxGroup,NCollapse,NCollapseItem,NEmpty,NForm,NFormItem,NInput,NModal,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTag,NVirtualList,useDialog,useMessage} from 'naive-ui';
-import {ArrowLeft,ChevronRight,CopyPlus,FolderSearch,History,Save,ScanSearch,Search} from 'lucide-vue-next';
+import {NButton,NModal,NSelect,useDialog,useMessage} from 'naive-ui';
+import {ArrowLeft,ScanSearch} from 'lucide-vue-next';
 import {registerNavigationGuard} from './navigation';
 import type {Dict} from '../api/client';
-import './history.css';
+
 
 const props=defineProps<{checking:boolean;loggedIn:boolean;isAdmin:boolean;loginUrl:string;r:any}>();
 const dialog=useDialog(),message=useMessage();
@@ -116,4 +44,84 @@ const stopGuard=registerNavigationGuard((_target,proceed)=>{
 function beforeUnload(event:BeforeUnloadEvent){if(dirty.value||props.r.busy){event.preventDefault();event.returnValue='';}}
 window.addEventListener('beforeunload',beforeUnload);
 onBeforeUnmount(()=>{stopGuard();window.removeEventListener('beforeunload',beforeUnload);});
+
+const historyPage=ref(1);
+const pageSize=9;
+const historyPages=computed(()=>Math.max(1,Math.ceil(props.r.filteredSources.length/pageSize)));
+const historyRows=computed(()=>props.r.filteredSources.slice((historyPage.value-1)*pageSize,historyPage.value*pageSize));
+watch(()=>[props.r.query,props.r.filterType,props.r.filterMatch,props.r.filterBuilding,props.r.sourceItems],()=>{historyPage.value=1;});
+watch(historyPages,pages=>{if(historyPage.value>pages)historyPage.value=pages;});
 </script>
+
+<template>
+  <section class="hm-work v2-history" aria-label="历史通告记忆导入">
+    <p v-if="checking" role="status">正在检查账号…</p>
+    <div v-else-if="!loggedIn"><h2>历史通告记忆导入</h2><a :href="loginUrl">登录灯塔</a></div>
+    <p v-else-if="!isAdmin">仅管理员可使用历史通告记忆导入。</p>
+    <template v-else>
+      <section class="hm-panel">
+        <header class="hm-bar v2-history-scan"><h1>历史通告记忆</h1>
+          <label>回溯<select v-model.number="r.months" :disabled="r.busy"><option v-for="m in 12" :key="m" :value="m">近 {{ m }} 个月</option></select></label>
+          <div class="hm-kinds" aria-label="扫描通告类型"><label v-for="t in r.workTypes" :key="t.value"><input v-model="r.selectedWorkTypes" type="checkbox" :value="t.value" :disabled="r.busy"/>{{ t.label }}</label></div>
+          <button class="hm-primary" :disabled="!!r.scanDisabledReason" :title="r.scanDisabledReason" @click="scan"><ScanSearch :size="15"/>{{ r.scanButtonLabel }}</button>
+        </header>
+        <p v-if="scanned" class="hm-status">{{ scanScope }} · {{ scanMessage }}</p>
+        <p v-if="r.message && (!scanned || r.message!==scanMessage) && !r.saveConfirmOpen" :role="r.messageType==='failed'?'alert':'status'">{{ r.message }}</p>
+        <p v-for="(warning,index) in r.warnings" :key="index" role="alert">{{ warning }}</p>
+        <p v-if="r.scanDisabledReason && !r.busy">{{ r.scanDisabledReason }}</p>
+        <p v-if="scanned && !r.sourceItems.length">本次扫描没有当前月事项</p>
+      </section>
+      <template v-if="r.sourceItems.length">
+        <section class="hm-panel hm-directory" :class="{ 'reviewing':r.reviewOpen }">
+          <header class="hm-bar"><h2>当前月事项</h2><small>{{ r.filteredSources.length }} / {{ r.sourceItems.length }} 条</small>
+            <input v-model="r.query" aria-label="搜索当前月事项" placeholder="名称、楼栋或专业" :disabled="r.busy"/>
+            <NSelect class="hm-select" aria-label="筛选楼栋" v-model:value="r.filterBuilding" :disabled="r.busy" :options="[{label:'全部楼栋',value:''},...r.buildingOptions.map((value:string)=>({label:value,value}))]"/>
+            <select v-model="r.filterType" aria-label="筛选通告类型" :disabled="r.busy"><option value="">全部类型</option><option v-for="t in r.workTypes" :key="t.value" :value="t.value">{{ t.label }}</option></select>
+            <select v-model="r.filterMatch" aria-label="筛选匹配状态" :disabled="r.busy"><option v-for="m in matchOptions" :key="m.value" :value="m.value">{{ m.label }}</option></select>
+            <button v-if="r.historyFilterCount" :disabled="r.busy" @click="r.clearHistoryFilters">清空筛选</button>
+          </header>
+          <div class="hm-line"><label><input type="checkbox" aria-label="勾选筛选结果" :checked="allVisibleSelected" :indeterminate="someVisibleSelected && !allVisibleSelected" :disabled="r.busy || !r.filteredSources.length" @change="selectVisible(($event.target as HTMLInputElement).checked)"/>勾选筛选结果</label>
+            <span>已选 {{ r.selectedCount }} 条 · 推荐候选 {{ r.recommendedMatchCount }} 条</span>
+            <template v-if="historyPages>1"><button aria-label="上一页事项" :disabled="historyPage<=1" @click="historyPage--">上一页</button><span>{{ historyPage }} / {{ historyPages }}</span><button aria-label="下一页事项" :disabled="historyPage>=historyPages" @click="historyPage++">下一页</button></template>
+          </div>
+          <div class="hm-grid"><article v-for="item in historyRows" :key="item.id" class="v2-history-row" :class="{current:r.activeSourceId===item.id}">
+            <input v-model="r.selectedMap[item.id]" type="checkbox" :aria-label="'勾选 '+item.title" :disabled="r.busy" @change="dirty=true"/>
+            <button :disabled="r.busy" @click="r.selectSource(item)"><strong>{{ item.title || item.memory_name || '未命名事项' }}</strong><small>{{ [r.workTypeLabel(item.work_type),item.building,item.specialty,r.candidateIdFor(item.id)?'有历史候选':'未匹配'].filter(Boolean).join(' · ') }}</small></button>
+          </article></div>
+          <p v-if="!r.filteredSources.length">没有符合筛选条件的事项</p>
+        </section>
+        <section v-if="r.activeSource" class="hm-panel hm-review v2-history-review" :class="{reviewing:r.reviewOpen}">
+          <header class="hm-bar"><button class="hm-listback" @click="r.closeReview"><ArrowLeft :size="14"/>事项列表</button><h2>{{ r.activeSource.title || r.activeSource.memory_name }}</h2>
+            <small>{{ r.activeFieldOriginLabel }} · {{ r.activeSource.building }}</small>
+            <label><input v-model="r.selectedMap[r.activeSourceId]" type="checkbox" :disabled="r.busy" @change="dirty=true"/>勾选保存</label></header>
+          <div class="hm-line v2-history-candidate"><strong>历史候选</strong>
+            <NSelect v-model:value="candidateChoice" class="hm-candidates" aria-label="选择历史候选" filterable :disabled="r.busy || !candidateOptions.length" :options="candidateOptions" placeholder="暂无匹配时可手工填写"/>
+            <button :disabled="r.busy || !candidateChoice" @click="applyCandidate">套用此候选</button>
+            <span>{{ r.activeCandidateHint }}</span></div>
+          <div class="hm-fields"><label v-for="f in r.primaryFieldDefs" :key="f.key">{{ f.label }}
+            <textarea v-if="f.multi" :id="'history-field-'+f.key" v-model="r.activeFields[f.key]" :disabled="r.busy" rows="2" @input="edited"/>
+            <input v-else :id="'history-field-'+f.key" v-model="r.activeFields[f.key]" :disabled="r.busy" @input="edited"/></label></div>
+          <div v-if="r.extraFieldDefs.length" class="hm-extra"><button :aria-expanded="r.showExtraFields" @click="r.showExtraFields=!r.showExtraFields">{{ r.showExtraFields?'收起':'展开' }}其他字段（{{ r.extraFieldDefs.length }}）</button>
+            <div v-if="r.showExtraFields" class="hm-fields"><label v-for="f in r.extraFieldDefs" :key="f.key">{{ f.label }}
+              <textarea v-if="f.multi" v-model="r.activeFields[f.key]" :disabled="r.busy" rows="2" @input="edited"/><input v-else v-model="r.activeFields[f.key]" :disabled="r.busy" @input="edited"/></label></div></div>
+        </section>
+        <footer class="hm-footer v2-history-footer"><strong>已选 {{ r.selectedCount }} 条</strong><span>将覆盖已有记忆 {{ r.selectedOverwriteCount }} 条</span>
+          <div class="hm-save-actions">
+            <NButton type="primary" class="hm-primary" :disabled="!!r.saveSelectedDisabledReason" :title="r.saveSelectedDisabledReason" @click="r.saveSelected">预览并保存</NButton>
+            <NButton :disabled="!!r.fillRecommendedDisabledReason" :title="r.fillRecommendedDisabledReason" @click="fillRecommended">填充推荐并预览</NButton>
+          </div></footer>
+      </template>
+      <NModal :show="r.saveConfirmOpen" :mask-closable="!r.busy" :close-on-esc="!r.busy" @update:show="(v:boolean)=>{if(!v)r.cancelSaveConfirm()}">
+        <section role="dialog" aria-modal="true" :aria-label="r.saveConfirmTitle" class="hm-confirm v2-history-confirm" data-v2-inline-feedback>
+          <h2>{{ r.saveConfirmTitle }}</h2><p>保存 {{ r.saveSummary.total }} 条 · 套用历史候选 {{ r.saveSummary.candidate }} 条 · 覆盖已有记忆 {{ r.saveSummary.overwrite }} 条</p>
+          <ul><li v-for="item in r.savePreviewItems" :key="item.key"><strong>{{ item.title }}</strong><small>{{ item.type }} · {{ item.building }} · {{ item.origin }}</small></li></ul>
+          <p v-if="r.saveSummary.total>r.savePreviewItems.length">另有 {{ r.saveSummary.total-r.savePreviewItems.length }} 条</p>
+          <p v-if="r.messageType==='failed'" role="alert">{{ r.message }}</p>
+          <div class="hm-line"><NButton :disabled="r.busy" @click="r.cancelSaveConfirm">继续核对</NButton><NButton type="primary" :loading="r.busy" :disabled="r.busy" @click="save">确认保存 {{ r.saveSummary.total }} 条</NButton></div>
+        </section>
+      </NModal>
+    </template>
+  </section>
+</template>
+
+<style scoped src="./SerenityHistoryWorkspace.css"></style>

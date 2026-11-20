@@ -220,9 +220,11 @@ function onTabKeydown(event: KeyboardEvent): void {
   const current = tabs.findIndex((tab) => tab.value === activeTab.value);
   let next = current;
   switch (event.key) {
+    case "ArrowDown":
     case "ArrowRight":
       next = (current + 1) % tabs.length;
       break;
+    case "ArrowUp":
     case "ArrowLeft":
       next = (current - 1 + tabs.length) % tabs.length;
       break;

@@ -1,0 +1,19 @@
+<section aria-label="签名信息" class="signature-strip serenity-panel">
+  <header class="serenity-heading"><div><h2><Fingerprint :size="18"/> 登记签名</h2>
+    <span v-if="person">{{ person.name }} · {{ buildingLabel(person.building) }} · {{ signatureStatusLabel(person.signature_status) }}</span></div>
+    <div class="serenity-actions"><button v-if="canViewSignature" type="button" :disabled="busy" @click="togglePreview">{{ showPreview?'收起签名':'查看签名' }}</button>
+      <button v-if="canSelfResign" type="button" class="decision-submit" :disabled="busy" @click="startSelf">{{ selfButtonLabel }}</button>
+      <button v-else-if="canRequestOther" type="button" :disabled="busy" @click="openConfirm">发起签名请求</button><button type="button" :disabled="busy" aria-label="刷新签名信息" @click="load()"><RefreshCw :size="15"/></button></div></header>
+  <p v-if="loading" role="status">正在读取签名信息…</p><p v-else-if="error || actionError" role="alert">{{ error || actionError }}</p>
+  <p v-else-if="!person" role="status">{{ reason || '该账号暂无个人签名' }}</p>
+  <template v-if="person"><p v-if="person.signature_reason">{{ person.signature_reason }}</p>
+    <p v-if="person.request">最近请求 · {{ requestStatusLabel(person.request.status) }} · {{ formatTime(person.request.created_at) }}
+      <span v-if="person.request.saved_at"> · 已保存 {{ formatTime(person.request.saved_at) }}</span><span v-else-if="person.request.expires_at"> · 到期 {{ formatTime(person.request.expires_at) }}</span></p>
+    <p v-if="person.request?.error" role="alert">{{ person.request.error }}</p></template>
+  <p v-if="notice" role="status">{{ notice }}</p>
+  <figure v-if="showPreview && canViewSignature" class="sign-sample"><img v-if="previewSrc" :src="previewSrc" alt="登记签名预览" draggable="false" @load="previewLoaded" @error="previewFailed" @dragstart.prevent>
+    <figcaption v-if="previewLoading">正在读取签名…</figcaption><figcaption v-if="previewError" role="alert">{{ previewError }} <button type="button" @click="loadPreview">重试</button></figcaption></figure>
+  <section v-if="confirming" class="serenity-panel" role="group" :aria-labelledby="confirmLabelId"><h3 :id="confirmLabelId">向 {{ person?.name }} 发送签名请求？</h3>
+    <p v-if="requestError" role="alert">{{ requestError }}</p><div class="serenity-actions"><button type="button" :disabled="requestBusy" @click="confirming=false">取消</button><button type="button" :disabled="requestBusy" class="decision-submit" @click="sendRequest">确认发送</button></div></section>
+  <a v-if="canManageRelay" href="/signature-management">管理签名及代收人员</a>
+</section>

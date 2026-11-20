@@ -123,7 +123,7 @@ class CheckSender:
 
     def photo(self, recipient, photo, identity, checkpoint):
         if self.loop is None or self.loop.is_closed():
-            raise CheckError('照片已保存，飞书智能体尚未就绪，后台稍后重试。')
+            raise CheckError('附件已保存，飞书智能体尚未就绪，后台稍后重试。')
         future = asyncio.run_coroutine_threadsafe(self.send(recipient, None, identity, photo=photo, checkpoint=checkpoint), self.loop)
         try:
             return future.result(timeout=45)
@@ -131,7 +131,7 @@ class CheckSender:
             raise
         except Exception:
             future.cancel()
-            raise CheckError('照片已保存，飞书图片发送尚未确认，后台将核验原发送。') from None
+            raise CheckError('附件已保存，飞书发送尚未确认，后台将核验原发送。') from None
 
     async def send(self, recipient, card, identity, *, photo=None, checkpoint=None):
         from .portal_service import external_real_write_guard
@@ -189,27 +189,33 @@ class CheckSender:
         content, kind = card, 'interactive'
         if photo is not None:
             if photo.get('sender_app_id') and photo['sender_app_id'] != bot.config['app_id']:
-                raise CheckError('照片原发送应用已变化，请管理员核对原消息；未改用其他应用重复发送。')
+                raise CheckError('附件原发送应用已变化，请管理员核对原消息。')
             key = photo.get('image_key') or ''
+            kind = ('file' if key.startswith('file_') else 'image') if isinstance(key, str) and key else (
+                'image' if photo.get('is_image', True) else 'file')
             if not key:
                 path = Path(photo['path'])
-                from .pre_shift_photo import prepare_delivery_image
-                try:
-                    image = await asyncio.to_thread(prepare_delivery_image, path, photo['name'])
-                except (ValueError, OSError) as exc:
-                    raise CheckError('照片已保存，发送副本生成失败：' + str(exc)) from None
-                with io.BytesIO(image['content']) if image['content'] is not None else path.open('rb') as fp:
-                    uploaded = await client.post('https://open.feishu.cn/open-apis/im/v1/images',
-                        headers=await bot.messenger.headers(), data={'image_type': 'message'},
-                        files={'image': (image['name'], fp, image['mime'])}, timeout=30)
+                image = None
+                if kind == 'image':
+                    from .pre_shift_photo import prepare_delivery_image
+                    try:
+                        image = await asyncio.to_thread(prepare_delivery_image, path, photo['name'])
+                    except (ValueError, OSError):
+                        kind = 'file'
+                upload_data = {'image_type': 'message'} if image else {'file_type': 'stream', 'file_name': photo['name']}
+                name, mime = (image['name'], image['mime']) if image else (photo['name'], 'application/octet-stream')
+                with io.BytesIO(image['content']) if image and image['content'] is not None else path.open('rb') as fp:
+                    uploaded = await client.post('https://open.feishu.cn/open-apis/im/v1/' + ('images' if image else 'files'),
+                        headers=await bot.messenger.headers(), data=upload_data, files={kind: (name, fp, mime)}, timeout=30)
                 data = uploaded.json()
-                key = (data.get('data') or {}).get('image_key')
-                if uploaded.status_code >= 400 or data.get('code') != 0 or not isinstance(key, str) or not re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', key):
-                    raise CheckError('照片已保存，飞书智能体图片上传未确认，请核对应用图片权限，后台稍后重试。')
-            if not isinstance(key, str) or not re.fullmatch(r'img_[A-Za-z0-9_-]{1,500}', key):
-                raise CheckError('照片发送进度中的图片标识无效，请管理员核对。')
+                key = (data.get('data') or {}).get(kind + '_key')
+                if uploaded.status_code >= 400 or data.get('code') != 0 or not key:
+                    label = '图片' if kind == 'image' else '文件'
+                    raise CheckError(f'附件已保存，飞书智能体{label}上传未确认，后台稍后重试。')
+            if not isinstance(key, str) or not re.fullmatch(('img_' if kind == 'image' else 'file_') + r'[A-Za-z0-9_-]{1,500}', key):
+                raise CheckError('附件发送标识无效，请管理员核对。')
             await asyncio.to_thread(checkpoint, key, bot.config['app_id'])
-            content, kind = {'image_key': key}, 'image'
+            content = {kind + '_key': key}
         try:
             headers = await bot.messenger.headers()
         except Exception:

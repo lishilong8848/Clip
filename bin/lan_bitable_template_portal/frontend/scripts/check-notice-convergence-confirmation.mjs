@@ -31,9 +31,10 @@ print(json.dumps({'html':html,'detail':extract_workbench_lite_fragments(html)['d
 }finally{assert.equal(path.dirname(scratch),os.tmpdir());assert(path.basename(scratch).startsWith('clipflow-convergence-ui-'));await rm(scratch,{recursive:true,force:true});}
 assert.equal(result.status,0,result.stderr);
 const fixture=JSON.parse(result.stdout);
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0,strictPort:true}});
+const server=await preview({root,configFile:false,build:{outDir:process.env.CLIPFLOW_NOTICE_PREVIEW_SITE||'dist'},logLevel:'error',preview:{host:'127.0.0.1',port:0,strictPort:true}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true});
+const robotId='32'.repeat(16),robotName='隔离变更群';
 try{
  for(const legacy of [true,false])for(const action of ['update','end'])for(const width of [1440,402,440]){
   const label=action==='end'?'结束':'更新',mode=legacy?'legacy':'v2';
@@ -52,6 +53,7 @@ try{
    if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend'}});
    if(url.pathname==='/api/workbench')return ok({records:[],ongoing:[fixture.row],source_snapshot_ready:true,records_pagination:{total:0},ongoing_pagination:{total:1}});
    if(url.pathname==='/api/workbench/lite-detail')return ok({fragments:{detail:fixture.detail}});
+   if(url.pathname==='/api/workbench/dingtalk-options')return ok({robots:[{id:robotId,name:robotName,types:['变更通告'],scopes:['A']}],selected_robot_ids:[]});
    if(url.pathname==='/api/workbench/draft'){
     if(request.method()==='PUT'){const body=request.postDataJSON();draft={...body,version:(draft?.version||0)+1};}
     return ok({draft});
@@ -59,6 +61,8 @@ try{
    if(url.pathname==='/api/workbench-actions'){
     const body=request.postDataJSON();requests.push(body);
     assert.equal(body.action,action);
+    assert.deepEqual(body.dingtalk_robot_ids,[robotId]);
+    assert.deepEqual(body.patch.dingtalk_robot_ids,[robotId]);
     if(body.plan_convergence_confirmation&&expire){expire=false;ticket='b'.repeat(48);}
     if(body.plan_convergence_confirmation!==ticket)return route.fulfill({status:409,json:{ok:false,error_code:'confirmation_required',error:'核对未完成，当前尚未发送。',details:{kind:'plan_convergence_unmatched',confirmation:ticket,notice_name:fixture.row.title,reason:'计划收敛核对未完成，请检查 VPN 和智航登录；不能判断为已匹配。'}}});
     accepted.push(body);return ok({job_id:'job_fixture',initial_phase:'accepted'});
@@ -71,11 +75,21 @@ try{
    await page.goto(origin+(legacy?'/__legacy':'/assets/workspace-v2/index.html?scope=A&__page=/workbench-lite&work_type=change&active_item_id=active_fixture'));
    const field=legacy?page.locator('#lite-notice-form [name=content]'):page.locator('[data-notice-field=content] textarea').first();
    await field.waitFor();await field.fill('用户手填内容，取消确认后必须保留。');
+   if(!legacy)await page.locator('.v2-notice-submit-group .n-radio-button').filter({hasText:label}).click();
+   const entry=legacy?page.locator('#lite-notice-form button[value='+action+']'):page.getByRole('button',{name:'预览并确认'+label,exact:true});
    async function submit(){
-    if(legacy){await page.locator('#lite-notice-form button[value='+action+']').click();if(action==='end')await page.locator('#lite-end-check-confirm').click();}
-    else{await page.locator('.v2-notice-submit-group .n-radio-button').filter({hasText:label}).click();await page.getByRole('button',{name:'预览并确认'+label,exact:true}).click();await page.getByRole('button',{name:'确认发送'+label,exact:true}).click();}
+    await entry.click();
+    if(!legacy)await page.getByRole('button',{name:'确认发送'+label,exact:true}).click();
+    else if(action==='end')await page.locator('#lite-end-check-confirm').click();
    }
    const modal=legacy?page.locator('#lite-convergence-confirm'):page.locator('.n-dialog').filter({hasText:'计划收敛核对待确认'}).last();
+   const group=page.getByRole('checkbox',{name:robotName,exact:true});
+   await group.waitFor();
+   assert.equal(await group.isChecked(),false);
+   assert(await entry.isDisabled(),'a group is required before submitting');
+   assert.equal(requests.length,0);assert.equal(await modal.isVisible(),false);
+   await group.check();
+   assert(await entry.isEnabled(),'selecting the allowed group unlocks submission');
    await submit();await modal.waitFor();
    assert.equal(requests.length,1,'first submission must show confirmation, without a second click');
    assert.equal(accepted.length,0);assert.match(await modal.innerText(),new RegExp(fixture.row.title.replace(/[（）]/g,'.')));

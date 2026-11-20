@@ -1,0 +1,42 @@
+<section class="lp-dashboard" aria-label="学习画像">
+  <header class="lp-heading">
+    <div><h2>{{ person ? person.name + '的学习画像' : allScopes ? '全部楼栋画像' : '楼栋学习画像' }}</h2>
+      <small v-if="personProgress">{{ [learningProgressLabel(personProgress),learningProgressDetail(personProgress)].filter(Boolean).join(' · ') }}</small></div>
+    <button v-if="showContinue" type="button" class="lp-btn primary" :disabled="disabled || loading || failed" @click="emit('continue')">继续学习</button>
+  </header>
+  <p v-if="failed" class="lp-msg error">画像数据读取失败</p>
+  <p v-else-if="loading && !ready" class="lp-msg" role="status">正在读取画像…</p>
+  <div v-else-if="ready" class="lp-metric-strip">
+    <button v-for="m in metrics" :key="m.kind + m.label" type="button" :disabled="disabled || loading || failed" :title="m.action" @click="metricAction(m.kind)">
+      <small>{{ m.label }}</small><strong>{{ m.value }}</strong>
+    </button>
+  </div>
+  <p v-else class="lp-empty">当前范围暂无画像统计</p>
+  <section class="lp-panel lp-chart">
+    <header class="lp-heading"><div><h3>{{ chartOptions.find(o => o.value === chart)?.label }}</h3><small>{{ chartNote }}</small></div>
+      <div class="lp-tools">
+        <label class="lp-field">图表<select aria-label="图表" v-model="chart" :disabled="disabled"><option v-for="o in chartOptions" :key="o.value" :value="o.value">{{ o.label }}</option></select></label>
+        <label v-if="chart === 'trend'" class="lp-field">指标<select v-model="metric"><option value="answered">{{ person ? '作答次数' : '参与人数' }}</option><option value="accuracy">正确率</option></select></label>
+        <label v-if="chart === 'wrong'" class="lp-field">分组<select v-model="classification"><option value="banks">题库</option><option value="topics">知识点</option></select></label>
+      </div>
+    </header>
+    <LearningTrend v-if="chart === 'trend'" :items="trend" :percentage="metric === 'accuracy'" :unit="metric === 'accuracy' ? '%' : person ? '次' : '人'" :loading="loading" @select="item => !disabled && emit('drill',{date:item.label})" />
+    <MotionChart v-else :key="chart + classification" :title="chartOptions.find(o => o.value === chart)?.label || '统计'" :items="chartItems" :view="chartView" :failed="failed" :loading="loading" :unit="chart === 'distribution' ? '人' : '题'" @select="chartSelect" />
+    <p v-if="chart === 'method'" class="lp-meta">独立作答正确率 {{ methodRates.independent }} · 使用提示后 {{ methodRates.assisted }}</p>
+  </section>
+  <section v-if="!person" ref="peopleHost" class="lp-panel" aria-label="人员明细">
+    <header class="lp-heading"><h3>人员明细 <small>{{ filtered.length }} 人</small></h3>
+      <div class="lp-tools"><label class="lp-field">搜索<input v-model="search" type="search" placeholder="姓名或工号" @input="page = 1"></label>
+        <label class="lp-field">排序<select v-model="sort" @change="page = 1"><option v-for="o in sortOptions" :key="o.value" :value="o.value">{{ o.label }}</option></select></label>
+        <label class="lp-check"><input v-model="includeUnanswered" type="checkbox" @change="page = 1">包含未作答</label>
+        <button v-if="bucket" class="lp-btn" @click="bucket=''; page=1">清除 {{ bucket }}</button></div>
+    </header>
+    <div v-if="visible.length" class="lp-people-grid"><button v-for="row in visible" :key="row.person_id" class="lp-person" :disabled="disabled" @click="selectPerson(row)">
+      <span><strong>{{ row.name }}</strong><small>{{ [row.employee_no, row.scope && row.scope+'楼'].filter(Boolean).join(' · ') }}</small></span>
+      <span><small>首答 / 错题</small>{{ numberText(row.summary?.answered) }} / {{ numberText(row.summary?.wrong) }}</span><span><small>正确率</small>{{ percent(row.summary?.accuracy) }}</span>
+      <span class="lp-person-progress">{{ learningProgressLabel(row.today) }} · {{ learningProgressDetail(row.today) }}</span>
+      <small>最近作答 {{ row.last_answered_at ? String(row.last_answered_at).replace('T',' ').slice(0,16) : '暂无' }}</small>
+    </button></div><p v-else class="lp-empty">当前筛选下没有人员</p>
+    <div v-if="filtered.length > 20" class="lp-tools lp-pages"><small>第 {{ page }} / {{ Math.ceil(filtered.length/20) }} 页</small><button class="lp-btn" :disabled="page===1" @click="page--">上一页</button><button class="lp-btn" :disabled="page*20>=filtered.length" @click="page++">下一页</button></div>
+  </section>
+</section>

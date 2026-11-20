@@ -1,0 +1,166 @@
+<main v-if="printMode" class="drill-print-page" :class="`sheet-${printSheet}`">
+    <section v-if="printLoading" class="print-state" role="status">
+      <Loader2 :size="24" class="spinning" /> 正在准备打印内容
+    </section>
+    <section v-else-if="printError" class="print-state error" role="alert">
+      <AlertTriangle :size="24" /> {{ printError }}
+    </section>
+    <section v-else class="print-sheet-frame" :style="printFrameStyle" :aria-label="printSheet === 'record' ? '演练记录表' : '演练评估表'">
+      <div class="print-sheet" :style="printSheetStyle">
+        <SheetTable :model="printModel" />
+      </div>
+    </section>
+  </main>
+<section v-else class="rd-desk drd-screen drill-page" aria-label="演练管理" @vue:before-mount="import('../workspace-v2/drillRiskDesk.css')">
+  <ZhihangHDrillPage v-if="showHDrill && viewMode==='admin' && isAdmin && currentUser.modules?.includes('accounts') && !currentUser.impersonation" @back="showHDrill=false" />
+  <template v-else>
+    <header class="rd-header rd-hero">
+      <div class="rd-heading"><span class="rd-title-icon"><ListChecks :size="21" /></span><div><h1 data-v2-module-title>演练管理</h1><small>{{ pageTitle }}</small></div></div>
+      <div class="rd-toolbar">
+        <label v-if="viewMode!=='landing'" class="drd-inline">月份<input v-model="selectedMonth" type="month" aria-label="演练月份" :disabled="busy" @change="viewMode==='admin'?changeAdminMonth():changeMonth()"></label>
+        <label v-if="viewMode==='building' && authorizedBuildingScopes.length>1" class="drd-inline">楼栋<select :value="activeScope" aria-label="演练楼栋" :disabled="busy" @change="changeScope"><option v-for="s in authorizedBuildingScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
+        <template v-if="viewMode==='admin' && v2DrillReturnTarget"><select v-if="v2DrillReturnOptions.length>1" :value="v2DrillReturnTarget" aria-label="返回楼栋" :disabled="busy" @change="v2DrillReturnScope=inputValue($event)"><option v-for="s in v2DrillReturnOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+          <button class="rd-btn" :disabled="busy" @click="requestDiscardChanges('返回楼栋会离开当前配置。',()=>openBuilding(v2DrillReturnTarget))">返回楼栋演练</button>
+        </template>
+        <button v-else class="rd-btn" :disabled="saving || uploading || generating" @click="leavePage">返回</button>
+        <button class="rd-btn" aria-label="刷新演练数据" :disabled="busy" @click="reloadCurrent"><RefreshCw :size="15" />刷新</button>
+        <button v-if="isAdmin && viewMode!=='admin'" class="rd-btn" :disabled="busy" @click="requestDiscardChanges('进入管理入口会离开当前填写。',openAdmin)"><Settings2 :size="15" />管理员入口</button>
+        <button v-if="viewMode==='admin' && currentUser.modules?.includes('accounts') && !currentUser.impersonation" class="rd-btn" :disabled="busy" @click="showHDrill=true">H楼值班演练</button>
+        <button v-if="viewMode==='admin' && !uploadOpen" class="rd-btn rd-primary" :disabled="busy" @click="uploadOpen=true"><UploadCloud :size="16" />上传演练文件</button>
+      </div>
+    </header>
+    <MessageBanner v-if="error" tone="failed" :text="error" />
+    <MessageBanner v-if="message" :tone="messageTone" :text="message" />
+    <p v-if="conflict" class="rd-notice rd-error" role="alert">记录版本已更新，请先核对并刷新，再继续办理。</p>
+
+    <section v-if="viewMode==='landing'" class="rd-panel">
+      <div class="rd-section-head"><h2>选择演练楼栋</h2><small>{{ selectedMonth }}</small></div>
+      <div class="rd-grid"><button v-for="s in landingScopes" :key="s.value" class="drd-choice" :disabled="!s.authorized || loading" @click="openBuilding(s.value)">
+        <Building2 :size="18" /><strong>{{ s.label }}</strong><small>{{ !s.authorized?'未授权':s.pending>0?s.pending+' 项待办理':'进入演练' }}</small><ChevronRight :size="15" /></button></div>
+    </section>
+
+    <section v-if="viewMode==='admin' && uploadOpen" class="rd-panel upload-panel">
+      <div class="rd-section-head"><div><h2>上传演练文件</h2><small>Excel 工作簿 · .xlsx · 最大 64 MiB</small></div>
+        <div class="rd-actions"><button class="rd-btn" :disabled="uploading" @click="resetUpload">取消</button><button class="rd-btn rd-primary" :disabled="busy || !uploadFile || !uploadForm.assigned_scopes.length" @click="uploadDrill">{{ uploading?'正在上传…':'上传并识别' }}</button></div></div>
+      <fieldset :disabled="uploading" class="drd-upload-fields">
+        <label class="drd-drop" :class="{active:uploadDragActive}" @dragover.prevent="uploadDragActive=true" @dragleave.prevent="uploadDragActive=false" @drop.prevent="!uploading && handleUploadDrop($event)">
+          <UploadCloud :size="22" /><strong>{{ uploadFile?.name || '选择或拖入演练工作簿' }}</strong><small v-if="uploadFile">{{ formatBytes(uploadFile.size) }}</small>
+          <input ref="uploadInput" type="file" accept=".xlsx" aria-label="选择演练工作簿" @change="handleUploadFile">
+        </label>
+        <div class="rd-form-grid"><label class="rd-field">演练名称<input v-model="uploadForm.name" placeholder="默认使用文件名"></label>
+          <label class="rd-field">演练月份<input v-model="uploadForm.month" type="month"></label></div>
+        <div class="rd-toolbar"><strong>分配楼栋</strong><label v-for="s in authorizedBuildingScopes" :key="s.value" class="drd-check"><input v-model="uploadForm.assigned_scopes" type="checkbox" :value="s.value">{{ s.label }}</label></div>
+      </fieldset>
+    </section>
+
+    <section v-if="viewMode!=='landing'" class="rd-panel drd-catalog">
+      <div class="rd-section-head">
+        <div class="rd-heading"><h2>{{ viewMode==='admin'?'本月模板':'本楼演练' }}</h2><small>{{ error?'读取待核验':loading?'读取中…':(viewMode==='admin'?drills:buildingDrills).length+' 项' }}</small></div>
+        <div v-if="(viewMode==='admin'?drills:buildingDrills).length" class="v2-drill-mobile-picker drd-picker">
+          <V2DrillSelect :value="selectedDrillId" aria-label="选择演练" :options="(viewMode==='admin'?drills:buildingDrills).map(item=>({value:String(item.drill_id),label:item.name}))"
+            :disabled="busy" @update:value="id=>viewMode==='admin'?selectAdminDrill(id):selectBuildingDrill(id)" />
+        </div>
+      </div>
+      <div class="drd-shortlist"><button v-for="item in viewMode==='admin'?drills:buildingDrills" :key="item.drill_id" class="drill-list__item drd-choice"
+        :aria-pressed="String(item.drill_id)===selectedDrillId" :disabled="busy" @click="viewMode==='admin'?selectAdminDrill(item.drill_id):selectBuildingDrill(item.drill_id)">
+        <strong>{{ item.name }}</strong><span class="rd-badge">{{ viewMode==='admin' && item.status==='draft'?'待配置':statusLabel(viewMode==='admin'?item.status:drillExecutionStatus(item)) }}</span>
+        <small>{{ viewMode==='admin'?assignedScopeLabel(item):monthLabel(item.year,item.month) }}</small>
+      </button></div>
+      <p v-if="!(viewMode==='admin'?drills:buildingDrills).length" class="rd-empty">{{ loading?'正在读取演练…':error?'演练清单暂未读取':'本月暂无演练' }}</p>
+    </section>
+
+    <section v-if="viewMode==='admin' && selectedDrill" class="rd-panel configuration-panel drd-config">
+      <div class="rd-section-head"><div><h2>{{ selectedDrill.name }}</h2><small>{{ assignedScopeLabel(selectedDrill) }} · {{ selectedDrill.source?.name || '来源待核验' }} · {{ selectedDrill.version!=null?'V'+selectedDrill.version:'版本待核验' }}</small></div>
+        <div class="rd-actions"><span v-if="adminDirty" class="rd-badge">有未保存修改</span>
+          <button class="rd-btn rd-danger" :disabled="busy" @click="requestDeleteSelected">{{ selectedDrill.status==='draft'?'删除模板':'归档演练' }}</button>
+          <button class="rd-btn" :disabled="busy || configurationLocked" @click="saveConfiguration">保存配置</button>
+          <button class="rd-btn rd-primary" :disabled="busy || configurationLocked" @click="publishSelected"><Send :size="15" />发布演练</button></div></div>
+      <p v-if="configurationLocked" class="rd-notice">已有执行记录，模板配置已锁定。</p>
+      <div v-if="selectedDrill.detection_error" class="rd-notice rd-error" role="alert"><strong>步骤识别未完成</strong><p>{{ selectedDrill.detection_error }}</p></div>
+      <div class="rd-form-grid"><label class="rd-field">记录工作表<select v-model="configDraft.record_sheet" :disabled="busy || configurationLocked"><option disabled value="">选择工作表</option><option v-for="name in sheetNames" :key="name">{{ name }}</option></select></label>
+        <label class="rd-field">评估工作表<select v-model="configDraft.assessment_sheet" :disabled="busy || configurationLocked"><option disabled value="">选择工作表</option><option v-for="name in sheetNames" :key="name">{{ name }}</option></select></label></div>
+      <div class="drd-mapping-groups">
+        <details v-for="group in [{title:'记录表字段',fields:recordMappingFields},{title:'步骤表格映射',fields:stepMappingFields},{title:'评估表字段',fields:assessmentMappingFields}]" :key="group.title" class="rd-fold">
+          <summary>{{ group.title }} <span>{{ group.fields.length }} 项</span></summary>
+          <div class="drd-map-grid"><label v-for="field in group.fields" :key="field.path" class="rd-field">{{ field.label }}
+            <input :aria-label="field.label" :value="mappingValue(field.path)" :disabled="busy || configurationLocked" spellcheck="false" @input="setMappingValue(field.path,inputValue($event))"></label></div>
+        </details>
+      </div>
+      <details class="rd-fold" open><summary>步骤与签名人数 <span>{{ configSteps.length }} 步</span></summary>
+        <div class="drd-step-cards"><div v-for="step in configSteps" :key="step.row" class="drd-config-step">
+          <div class="drd-step-head"><b>{{ step.location || '位置待核对' }}</b><small>第 {{ step.row }} 行 · {{ step.duration_minutes ?? '—' }} 分钟</small></div>
+          <p>{{ step.content }}</p><label class="drd-inline">签名人数<input v-model.number="step.signature_slots" aria-label="步骤签名人数" type="number" min="0" max="10" step="1" :disabled="busy || configurationLocked"></label>
+        </div></div>
+        <p v-if="!configSteps.length" class="rd-notice">未识别到步骤，请检查步骤区域映射。</p>
+      </details>
+      <details class="rd-fold"><summary>评分行 <span>{{ assessmentScoreRows.length }} 行</span></summary>
+        <div class="drd-score-grid"><div v-for="(row,i) in assessmentScoreRows" :key="i" class="drd-score-row">
+          <b>第 {{ row.row ?? i+1 }} 行</b>
+          <label class="rd-field">分值单元格<input v-model.trim="row.value_cell" :disabled="busy || configurationLocked"></label>
+          <label class="rd-field">得分单元格<input v-model.trim="row.score_cell" :disabled="busy || configurationLocked"></label>
+          <label class="rd-field">分值<input v-model.number="row.score" type="number" step="1" :disabled="busy || configurationLocked"></label>
+        </div></div>
+        <p v-if="!assessmentScoreRows.length" class="rd-muted">未识别到评分行。</p>
+      </details>
+    </section>
+
+    <template v-if="viewMode==='building' && selectedDrill">
+      <section v-if="execution" class="rd-panel drd-execution execution-panel">
+        <div class="execution-header rd-section-head"><div><h2>{{ selectedDrill.name }}</h2><small>{{ executionStatusText }}<template v-if="dirty"> · 有未保存修改</template><template v-else-if="lastSavedAt"> · 最近保存 {{ lastSavedAt }}</template></small></div>
+          <div class="rd-actions"><button class="rd-btn" :disabled="busy || conflict" @click="saveDraft()"><Save :size="15" />保存草稿</button>
+            <button class="rd-btn rd-primary" :disabled="busy || !canGenerate || conflict" :title="generateDisabledReason" @click="generateWorkbook"><FileCheck2 :size="15" />生成并归档</button></div></div>
+        <p v-if="execution.last_error" class="rd-notice rd-error">{{ execution.last_error }}</p>
+        <div v-if="execution.status==='sync_pending' || (execution.generated && ['error','failed'].includes(execution.status))" class="rd-section-head rd-notice"><span>{{ executionStatusText }}</span><button class="rd-btn" :disabled="busy || !canUseGeneratedFile" @click="retrySync">重试同步</button></div>
+        <div class="rd-section-head drd-sheets"><div class="drd-switch" aria-label="办理工作表">
+          <button :aria-pressed="activeSheet==='record'" @click="switchSheet('record')">演练记录表</button><button :aria-pressed="activeSheet==='assessment'" @click="switchSheet('assessment')">演练评估表</button></div>
+          <div class="rd-actions"><button class="rd-btn" :title="generatedDisabledReason" :disabled="!canUseGeneratedFile" @click="printCurrent"><Printer :size="15" />打印当前表</button>
+            <button class="rd-btn" :title="generatedDisabledReason" :disabled="!canUseGeneratedFile" @click="downloadGenerated"><Download :size="15" />下载 Excel</button></div></div>
+
+        <fieldset v-if="activeSheet==='record'" class="drd-section" :disabled="busy">
+          <div class="rd-form-grid"><label class="rd-field">演练日期<input v-model="execution.drill_date" type="date" @input="markDirty"></label>
+            <label class="rd-field">首步开始时间<input v-model="execution.first_start_time" type="time" @input="markDirty"></label>
+            <label class="rd-field">指挥人<VnetSelect input-id="drill-commander" label="指挥人" :options="commanderPersonOptionLabels" :model-value="personOptionLabel(commanderId)" :disabled="busy" @update:model-value="selectCommanderByLabel" /></label></div>
+          <label class="rd-field scenario-field">模拟场景<textarea v-model="execution.simulation_scenario" rows="2" @input="markDirty"></textarea></label>
+          <div class="rd-section-head"><div class="rd-heading"><h3>参演人员</h3><small>已选 {{ selectedParticipants.length }} / 10</small></div>
+            <div class="rd-toolbar"><input v-model="peopleSearch" type="search" aria-label="搜索参演人员" placeholder="姓名、工号或楼栋"><button class="rd-btn" @click="peopleExpanded=!peopleExpanded">{{ peopleExpanded?'仅看本楼':'查看全部人员' }}</button>
+            <button class="rd-btn" :disabled="peopleRefreshing || busy" @click="refreshSignaturePeople">{{ peopleRefreshing?'刷新中…':'刷新签名目录' }}</button></div></div>
+          <div class="drd-people-options people-options">
+            <label v-for="p in filteredPeople" :key="personId(p)" class="drd-person"><input type="checkbox" :checked="participantIds.includes(personId(p))" :disabled="busy || personId(p)===commanderId" @change="toggleParticipant(p)">
+              <span><b>{{ personName(p) }}</b><small>{{ personMeta(p) }}</small></span></label>
+            <p v-if="!filteredPeople.length" class="rd-muted">{{ peopleSearch?'没有匹配人员':'暂无可选人员' }}</p>
+          </div>
+          <div v-if="selectedParticipants.length" class="rd-toolbar drd-chosen"><span class="rd-muted">已选</span><template v-for="p in selectedParticipants" :key="personId(p)">
+            <span v-if="personId(p)===commanderId" class="rd-badge">{{ personName(p) }} · 指挥人</span>
+            <button v-else class="drd-chip" :aria-label="'移除 '+personName(p)" @click="removeParticipant(p)">{{ personName(p) }} ×</button></template></div>
+          <p v-if="missingSignaturePeople.length" class="rd-notice">{{ missingSignaturePeople.map(personName).join('、') }} 的签名待补充</p>
+          <div class="rd-section-head"><h3>步骤执行人</h3><small>{{ executionSteps.length }} 步</small></div>
+          <ol class="drd-steps"><li v-for="step in executionSteps" :key="step.row" class="execution-step">
+            <div class="drd-step-head"><b>{{ stepIndex(step) }} · {{ step.location || '位置未提供' }}</b><small>{{ step.duration_minutes ?? '—' }} 分钟</small></div>
+            <p>{{ step.content }}</p>
+            <div class="rd-form-grid signer-grid"><label v-for="slot in Number(step.signature_slots ?? 1)" :key="slot" class="rd-field">执行人 {{ slot }}
+              <VnetSelect :input-id="'drill-step-'+step.row+'-'+slot" :label="'执行人 '+slot" :model-value="stepSignerIds(step.row)[slot-1]?personOptionLabel(stepSignerIds(step.row)[slot-1]):blankStepSignerOption"
+                :options="stepSignerOptionLabels(step.row,slot-1)" :disabled="busy" @update:model-value="label=>updateStepSigner(step,slot-1,label)" /></label></div>
+            <small v-if="step.signature_slots===0">无需签名</small><p v-if="eccStepSignerError(step)" class="rd-error">{{ eccStepSignerError(step) }}</p>
+          </li></ol>
+        </fieldset>
+        <fieldset v-else class="drd-section assessment-fields" :disabled="busy">
+          <div class="rd-section-head"><h3>评估与签名</h3><button class="rd-btn" :disabled="peopleRefreshing || busy" @click="refreshSignaturePeople">刷新签名目录</button></div>
+          <div class="rd-form-grid"><label class="rd-field">评估人<VnetSelect input-id="drill-evaluator" label="评估人" :model-value="evaluatorId?personOptionLabel(evaluatorId):'不填写'"
+            :options="['不填写',...commanderPersonOptionLabels]" :disabled="busy" @update:model-value="selectEvaluatorByLabel" /></label>
+            <template v-if="hasReviewMapping"><label class="rd-field">审核人签名时间（选填）<input v-model="execution.signature_time" type="datetime-local" @input="markDirty"></label>
+              <label class="rd-field">评估时间（选填）<input v-model="execution.evaluation_time" type="datetime-local" @input="markDirty"></label></template></div>
+          <p v-if="!hasReviewMapping" class="rd-muted">本模板未配置完整的审核与评估时间映射。</p>
+        </fieldset>
+        <p v-if="generateValidationErrors.length" class="rd-notice" role="status">{{ generateValidationErrors.join('；') }}</p>
+        <details class="rd-fold v2-drill-preview drd-preview"><summary>工作表预览 <span>{{ activeSheet==='record'?'演练记录表':'演练评估表' }}</span></summary>
+          <p v-if="previewError" class="rd-notice rd-error">{{ previewError }} <button class="rd-link" :disabled="previewLoading" @click="loadPreview(activeSheet)">重新读取预览</button></p>
+          <SheetTable v-if="previewModel" :model="previewModel" /><p v-else-if="!previewError" class="rd-muted">{{ previewLoading?'正在读取工作表…':'尚无预览数据' }}</p>
+        </details>
+      </section>
+      <p v-else class="rd-empty" role="status">{{ loading?'正在读取执行记录…':'执行记录暂未取得，请刷新重试。' }}</p>
+    </template>
+    <ConfirmDialog confirm-class="drd-decision-submit" :open="!!deleteTarget" :tone="deleteTarget?.status==='draft'?'danger':'warning'" :title="deleteTarget?.status==='draft'?'删除演练模板？':'归档演练？'"
+      :message="deleteTarget?.name || ''" :confirm-label="deleteTarget?.status==='draft'?'确认删除':'确认归档'" cancel-label="取消" @resolve="resolveDelete" />
+    <ConfirmDialog confirm-class="drd-decision-submit" :open="!!discardPrompt" tone="warning" title="有未保存的修改" :message="discardPrompt?.message" :details="discardPrompt?.details" confirm-label="放弃修改" cancel-label="继续编辑" @resolve="resolveDiscardPrompt" />
+  </template>
+</section>

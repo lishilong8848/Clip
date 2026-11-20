@@ -1,0 +1,16 @@
+<form class="serenity-desk settings-form" @submit.prevent="emit('run')">
+  <header class="serenity-heading"><div><h2>模拟压力测试</h2><p>选择场景和规模，再按阈值核对执行结果。</p></div><button type="submit" class="entry-primary" :disabled="busy">运行模拟</button></header>
+  <section class="serenity-panel settings-fields">
+    <label>测试场景<select :value="pressure.scenario" :disabled="busy" @change="updateString('scenario',$event)">
+      <option value="accepted">成功受理</option><option value="failed-network">网络失败</option><option value="failed-remote-missing">远端记录缺失</option><option value="mixed">混合场景</option></select></label>
+    <label>模拟请求数<input type="number" min="1" :value="pressure.count" @input="updateNumber('count',$event)" :disabled="busy"></label>
+    <label>并发数<input type="number" min="1" :value="pressure.concurrency" @input="updateNumber('concurrency',$event)" :disabled="busy"></label>
+    <label>平均提交耗时上限（毫秒）<input type="number" min="0" :value="pressure.max_submit_average_ms" @input="updateNumber('max_submit_average_ms',$event)"></label>
+    <label>总耗时上限（秒）<input type="number" min="0" :value="pressure.max_total_seconds" @input="updateNumber('max_total_seconds',$event)"></label>
+    <label>容许失败数<input type="number" min="0" :value="pressure.max_failed" @input="updateNumber('max_failed',$event)"></label>
+    <label><span><input type="checkbox" :checked="pressure.include_site_photos" @change="updateBoolean('include_site_photos',$event)">包含模拟现场照片</span></label>
+    <template v-if="pressure.include_site_photos"><label>每次照片数<input type="number" min="1" max="3" :value="pressure.site_photo_count" @input="updateNumber('site_photo_count',$event)"></label>
+      <label>每张大小（KB）<input type="number" min="1" max="512" :value="pressure.site_photo_kb" @input="updateNumber('site_photo_kb',$event)"></label></template>
+  </section>
+  <details v-if="Object.keys(pressureResult).length" open class="serenity-panel"><summary>执行结果</summary><pre class="settings-json">{{ prettyJson(pressureResult) }}</pre></details>
+</form>

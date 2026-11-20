@@ -1,0 +1,115 @@
+<section class="serenity-desk guard-station guard-desk" aria-label="重保工作区" @vue:before-mount="import('../workspace-v2/criticalGuardDesk.css')">
+  <header class="serenity-heading gd-top">
+    <div class="gd-top__title">
+      <h1>{{ pageTitle }}</h1>
+      <div v-if="viewMode==='building'" class="gd-top__meta">
+        <span class="gd-stat">待填写 <b>{{ buildingPendingCount }}</b></span>
+        <span class="gd-stat">已完成 <b>{{ buildingCompletedCount }}</b></span>
+      </div>
+      <div v-if="viewMode==='admin'" class="gd-top__meta">
+        <span class="gd-stat">检查记录 <b>{{ adminSubmittedTotal }}</b> / <b>{{ adminResponseTotal }}</b> 份</span>
+      </div>
+    </div>
+    <div class="serenity-actions gd-actions gd-top__tools">
+      <VnetBackButton class="gd-back" within-module :disabled="saving" @click="requestPageExit"/>
+      <button type="button" :disabled="loading||saving" @click="requestReload">刷新</button>
+      <button v-if="viewMode!=='admin' && isAdmin" type="button" @click="requestSwitch(openAdmin)">管理任务</button>
+      <button v-if="viewMode==='admin'" type="button" :aria-expanded="publishOpen" class="entry-primary" @click="publishOpen=!publishOpen">{{ publishOpen?'收起发布表单':'发布任务' }}</button>
+      <select v-if="viewMode==='building' && authorizedScopes.length>1" :value="activeScope" aria-label="选择重保楼栋" @change="requestSwitch(()=>openBuilding(($event.target as HTMLSelectElement).value))"><option v-for="s in authorizedScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+    </div>
+  </header>
+  <div v-if="error||message" class="gd-alerts">
+    <p v-if="error" class="gd-message" role="alert">{{ error }}</p>
+    <p v-if="message" class="gd-message" :role="messageTone==='error'?'alert':'status'">{{ message }}</p>
+  </div>
+  <div v-if="viewMode==='landing'" class="scene-catalog gd-scopes">
+    <button v-for="scope in authorizedScopes" :key="scope.value" type="button" class="scene-tile gd-scope" @click="openBuilding(scope.value)"><strong>{{ scope.label }}</strong><span>查看检查任务</span></button>
+    <p v-if="!authorizedScopes.length" class="gd-empty" role="status">{{ loading?'正在读取…':'当前没有可办理的楼栋' }}</p>
+  </div>
+  <template v-else>
+    <div class="gd-page">
+      <section v-if="viewMode==='admin'" aria-label="天气戒备" class="serenity-panel gd-weather">
+        <header class="guard-line gd-head"><h2>天气戒备</h2><strong>{{ weatherStatus ? weatherHeadline : '正在读取戒备状态…' }}</strong>
+          <div class="serenity-actions gd-actions gd-head__tools"><button type="button" :disabled="weatherActionBusy||weatherRunning" @click="refreshWeatherNow">立即查询</button>
+          <button type="button" :disabled="weatherActionBusy||!weatherStatus" @click="toggleWeatherPause">{{ weatherPaused?'恢复自动查询':'暂停自动查询' }}</button></div></header>
+        <p class="gd-weather__body"><span>{{ weatherPhaseText }}</span><span>{{ weatherResultText }}</span></p>
+        <div v-if="weatherWarnings.length" class="guard-tags gd-tags"><span v-for="warning in weatherWarnings" :key="warning.title">{{ warning.title }} · {{ warning.guard_level }}</span></div>
+        <div v-if="weatherArchiveFailures.length" class="weather-archive-failures gd-failures"><div v-for="failure in weatherArchiveFailures" :key="failure.task_id" class="gd-failure"><span><strong>{{ failure.warning_title }}</strong> · {{ failure.archive_error }}</span>
+          <button type="button" :disabled="weatherActionBusy" @click="retryWeatherArchive(failure)">重试归档</button></div></div>
+      </section>
+      <form v-if="viewMode==='admin' && publishOpen" class="serenity-panel entry-request gd-publish" @submit.prevent="publishTask">
+        <header class="gd-head"><h2>发布重保任务</h2><div class="gd-head__tools"><button type="submit" class="entry-primary" :disabled="saving">确认发布</button><button type="button" :disabled="saving" @click="publishOpen=false">取消</button></div></header>
+        <div class="gd-publish__body">
+          <div class="gd-publish__grid"><label class="gd-field gd-field--full">任务名称<input v-model="publishForm.name" required :disabled="saving"></label></div>
+          <fieldset class="gd-form-group"><legend>检查表</legend><div class="gd-publish__grid"><label v-for="sheet in sheetTypes" :key="sheet" class="gd-field gd-field--check"><input v-model="publishForm.sheetTypes" type="checkbox" :value="sheet"><span>{{ sheet }}</span></label></div></fieldset>
+          <fieldset class="gd-form-group"><legend>填写楼栋</legend><div class="gd-publish__grid"><label v-for="s in bootstrapScopes" :key="s.value" class="gd-field gd-field--check"><input v-model="publishForm.targetScopes" type="checkbox" :value="s.value"><span>{{ s.label }}</span></label></div></fieldset>
+        </div>
+
+      </form>
+      <section aria-label="重保任务" class="gd-span-all">
+        <div class="guard-line gd-head"><h2>检查任务</h2><span class="gd-stat"><b>{{ tasks.length }}</b> 项</span></div>
+        <div class="guard-index gd-index">
+          <article v-for="task in tasks" :key="task.task_id" class="gd-task" :data-selected="task.task_id===selectedTask?.task_id"><button type="button" class="gd-task__open" :aria-pressed="task.task_id===selectedTask?.task_id" :disabled="saving" @click="viewMode==='admin'?selectTask(task.task_id,true):requestTaskSwitch(task.task_id)">
+            <strong>{{ task.name }}</strong><small>{{ (task.sheet_types||[]).join(' · ') }}</small></button><button v-if="viewMode==='admin'" type="button" class="gd-task__delete" :disabled="!!deletingTaskId" :aria-label="'删除 '+task.name" @click="requestDeleteTask(task)">删除</button></article>
+        </div>
+        <p v-if="!tasks.length" class="gd-empty" role="status">{{ loading?'正在读取任务…':'当前没有重保任务' }}</p>
+      </section>
+      <section v-if="viewMode==='admin' && selectedTask" class="serenity-panel gd-review">
+        <header class="guard-line gd-head"><div class="gd-review__title"><h2>{{ selectedTask.name }}</h2><span class="gd-badge">检查记录</span></div>
+          <div class="gd-head__tools"><button type="button" :disabled="!adminSheetHasImages" @click="downloadAdminSheet">下载本表结果</button></div></header>
+        <div class="serenity-segment gd-tabs"><button v-for="sheet in selectedTask.sheet_types" :key="sheet" type="button" :aria-pressed="adminActiveSheet===sheet" @click="adminActiveSheet=sheet">{{ sheet }}</button></div>
+        <div class="guard-index gd-records"><article v-for="rsp in adminSheetResponses(adminActiveSheet)" :key="rsp.response_id"><div class="gd-record__meta"><strong>{{ rsp.scope }}楼</strong><small>{{ statusText(rsp.status) }} · {{ formatDateTime(rsp.updated_at) }}</small></div>
+          <button v-if="rsp.image_url && !adminImageFailed(rsp)" type="button" class="gd-thumb" @click="openImage(adminImageSrc(rsp),rsp.scope+'楼 · '+rsp.sheet_type)"><img :src="adminImageSrc(rsp)" :alt="rsp.scope+'楼记录预览'" @error="markAdminImageFailed(rsp)"></button>
+          <button v-if="adminImageFailed(rsp)" type="button" class="gd-retry" @click="retryAdminImage(rsp)">重新读取图片</button></article></div>
+      </section>
+    </div>
+    <section v-if="viewMode==='building' && selectedTask" class="serenity-panel guard-sheet">
+      <header class="guard-line gd-head"><div class="gd-head__title"><h2>{{ selectedTask.name }}</h2>
+        <div v-if="activeResponse" class="gd-meta"><span class="gd-badge gd-badge--dot">{{ statusText(activeResponse.status) }}</span><span v-if="dirty" class="gd-badge gd-badge--warn">有未保存修改</span><span v-else class="gd-badge">版本 {{ activeResponse.version }}</span></div></div></header>
+      <div class="serenity-segment gd-tabs"><button v-for="rsp in orderedResponses" :key="rsp.response_id" type="button" :aria-pressed="rsp.response_id===activeResponse?.response_id" :disabled="saving" @click="requestResponseSwitch(rsp.response_id)">{{ rsp.sheet_type }}</button></div>
+      <p v-if="templateOutdated" class="gd-notice" role="alert">检查模板已更新，请管理员重新发布任务。</p>
+      <template v-if="activeDefinition && activeResponse">
+      <div class="gd-sheet-title"><h3>{{ activeDefinition.title }}</h3><span v-if="templateOutdated" class="gd-badge gd-badge--warn">模板已过期</span></div>
+      <fieldset :disabled="saving||templateOutdated" class="guard-inputs">
+        <div v-if="activeDefinition.input_mode!=='file'" class="settings-fields gd-fields"><label>机房<input :value="cells.machine_room" readonly></label><label>检查日期<input v-model="cells.check_date" type="date" @input="markDirty"></label>
+          <label v-for="field in activeDefinition.weather_fields" :key="field.key">{{ field.label }}<input v-if="cells.weather" v-model="cells.weather[field.key]" @input="markDirty"></label></div>
+        <template v-if="activeDefinition.input_mode==='file'">
+          <div class="guard-file gd-file" @dragover.prevent @drop.prevent="handleSourceFileDrop"><input ref="sourceFileInput" type="file" accept=".xlsx" hidden @change="handleSourceFileChange"><button type="button" :disabled="sourceFileUploading" @click="openSourceFilePicker">{{ sourceFileUploading?'正在上传…':'上传楼栋清单' }}</button>
+            <span v-if="effectiveSourceFile">{{ effectiveSourceFile.file_name }} · {{ formatFileSize(effectiveSourceFile.size) }}</span></div>
+          <div v-if="sourceFilePreviewUrl || sourceFilePreviewFailed" class="gd-attach"><button v-if="sourceFilePreviewUrl && !sourceFilePreviewFailed" type="button" class="gd-attach__thumb" @click="openImage(sourceFilePreviewUrl,sourceFileViewerTitle)"><img :key="sourceFilePreviewKey" :src="sourceFilePreviewUrl" :alt="sourceFileViewerTitle" @error="sourceFilePreviewFailed=true"></button>
+          <button v-if="sourceFilePreviewFailed" type="button" class="gd-retry" @click="retrySourceFilePreview">重试文件预览</button></div>
+        </template>
+        <template v-else-if="activeDefinition.kind==='check'"><div class="guard-line gd-checks-bar"><span class="gd-stat">检查项 <b>{{ activeCheckItems.length }}</b> · 异常 <b>{{ abnormalCount }}</b></span>
+          <div class="serenity-actions gd-actions"><button type="button" @click="openTemplateEditor">编辑模板</button><button type="button" @click="markAllNormal">全部正常</button></div></div>
+          <div class="guard-checks"><div v-for="item in activeCheckItems" :key="item.key"><small>{{ item.category }}</small><strong>{{ item.content }}</strong>
+            <div class="serenity-segment"><button type="button" :aria-pressed="cells.checks?.[item.key]?.status==='normal'" @click="setCheckStatus(item.key,'normal')">正常</button>
+            <button type="button" :aria-pressed="cells.checks?.[item.key]?.status==='abnormal'" @click="setCheckStatus(item.key,'abnormal')">异常</button></div>
+            <label v-if="cells.checks?.[item.key]?.status==='abnormal'">异常说明<textarea v-model="cells.checks[item.key].note" @input="markDirty"/></label></div></div>
+          <label>检查建议<textarea v-model="cells.suggestions" @input="markDirty"/></label></template>
+        <template v-else><section v-for="part in activeDefinition.kind==='materials'?activeDefinition.sections:[{key:'duty',...activeDefinition.duty},...(activeDefinition.groups||[]).map((g:any)=>({...g,columns:activeDefinition.group_columns}))]" :key="part.key">
+          <h3>{{ part.title }}</h3><div v-for="(row,i) in (cells[part.key] || cells.groups?.[part.key] || [])" :key="i" class="settings-fields gd-fields"><label v-for="col in part.columns" :key="col.key">{{ col.label }}<input v-model="row[col.key]" @input="markDirty"></label></div></section></template>
+      </fieldset>
+
+      <footer class="guard-line gd-footer"><div class="serenity-actions gd-actions"><button v-if="activeDefinition.has_signature" type="button" :disabled="saving || templateOutdated" @click="signatureDrawerOpen=true">检查人签名 · {{ signerSummaryText }}</button>
+        <a v-if="activeResponse.workbook_url" :href="activeResponse.workbook_url" download>下载检查表</a>
+        <button v-if="activeResponse.image_url" type="button" @click="openImage(activeResponse.image_url,activeResponse.sheet_type)">查看生成图片</button><button v-if="activeDefinition.input_mode!=='file'" type="button" :disabled="saving||!dirty||templateOutdated" @click="saveResponse(false)">保存</button><button type="button" class="entry-primary" :disabled="!!generateDisabledReason||sourceFileUploading" :title="generateDisabledReason" @click="saveResponse(true)">{{ generateButtonText }}</button></div>
+        <small>{{ generateDisabledReason || (dirty?'有未保存修改':statusText(activeResponse.status)) }}</small></footer></template>
+    </section>
+  </template>
+  <NModal v-if="templateEditorOpen" :show="true" :mask-closable="false" :trap-focus="!templateCloseConfirmOpen && !templateResetConfirmOpen" :close-on-esc="!templateSaving && !templateCloseConfirmOpen && !templateResetConfirmOpen" @update:show="!$event && requestCloseTemplateEditor()">
+    <section role="dialog" aria-modal="true" aria-label="编辑检查模板" class="serenity-decision gd-dialog"><header class="guard-line gd-head"><h2>编辑检查模板</h2><span class="gd-stat"><b>{{ templateRows.length }}</b> 项</span>
+      <div class="gd-head__tools"><button type="button" :disabled="templateLoading||templateSaving||templateRows.length>=200" @click="addTemplateRow">添加检查项</button><button type="button" :disabled="templateSaving" @click="requestCloseTemplateEditor">关闭</button></div></header>
+    <fieldset :disabled="templateLoading||templateSaving" class="gd-dialog__list"><div v-for="(row,i) in templateRows" :key="row.key" class="settings-fields gd-tpl-row"><span class="gd-tpl-row__index" aria-hidden="true">{{ i+1 }}</span><label>分类<input v-model="row.category"></label><label>检查内容<textarea v-model="row.content"/></label>
+      <button type="button" :disabled="templateRows.length<=1" @click="removeTemplateRow(i)">删除此项</button></div></fieldset><footer><span>{{ templateEditorDirty ? '有未保存修改' : '已载入模板' }}</span>
+      <button type="button" :disabled="!templateEditorCustomized||templateLoading||templateSaving" @click="templateResetConfirmOpen=true">恢复默认模板</button>
+      <button type="button" class="decision-submit" :disabled="templateLoading||templateSaving||!templateEditorDirty" @click="saveScopeTemplate">保存模板</button></footer></section></NModal>
+    <NModal v-if="imageViewerUrl" :show="true" :trap-focus="true" @update:show="!$event && closeImage()"><section role="dialog" aria-modal="true" :aria-label="imageViewerTitle" class="serenity-decision scene-lightbox gd-lightbox"><header class="guard-line gd-head"><h2>{{ imageViewerTitle }}</h2><div class="gd-head__tools"><button type="button" @click="closeImage">关闭</button></div></header><div class="gd-lightbox__frame"><img :src="imageViewerUrl" :alt="imageViewerTitle"></div></section></NModal>
+  <CriticalGuardSignatureDrawer :open="signatureDrawerOpen" :scope="activeScope" :context-key="signatureContextKey" :task-title="selectedTask?.name||''" :current-user-open-id="currentUserOpenId" :initial-signers="selectedSigners"
+    @change="applySignatureSelection" @refresh="refreshSignatureSelection" @status="handleSignatureStatus" @close="signatureDrawerOpen=false"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="confirmOpen" title="放弃未保存的修改？" message="此检查表还有未保存的内容。" @resolve="resolveSwitch"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="normalConfirmOpen" title="全部设为正常？" message="已有的异常说明将被清空。" @resolve="resolveMarkAllNormal"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="deleteConfirmOpen" title="删除重保任务？" :message="pendingDeleteTask?.name||''" :details="deleteTaskDetails" tone="danger" @resolve="resolveDeleteTask"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="templateResetConfirmOpen" title="恢复默认模板？" message="本楼当前检查项将恢复为默认配置。" @resolve="resolveTemplateReset"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="templateCloseConfirmOpen" title="放弃模板修改？" message="编辑的检查项尚未保存。" @resolve="resolveTemplateClose"/>
+  <ConfirmDialog confirm-class="gd-decision-submit" :open="weatherNoTaskDialogOpen" title="天气戒备查询结果" :message="weatherNoTaskDialogMessage" @resolve="weatherNoTaskDialogOpen=false"/>
+</section>

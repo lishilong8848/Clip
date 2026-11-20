@@ -1,0 +1,32 @@
+<InspectionDeskDialog :show="!!deskProfession" title="专业签字确认" :target="dialogRoot" :locked="saving" @close="deskProfession=''">
+  <div class="ins-head"><strong>{{ deskProfession }} · {{ activeSlot }} · {{ scope }}楼</strong><small>{{ day }} · {{ progressLabel(deskProfession) }}</small></div>
+  <div class="ins-head"><p>请核对本专业工作表。确认将记录在本轮当前版本。</p><button class="ins-primary" :disabled="actionLocked || props.readOnly || currentActive?.pending || !hasViewed(deskProfession)" @click="confirmProfession(deskProfession);deskProfession=''">确认本专业</button></div>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="confirmSubmit" title="本轮归档确认" :target="dialogRoot" :locked="saving" @close="confirmSubmit=false">
+  <div class="ins-head"><h3>{{ scope }}楼 · {{ day }} · {{ activeSlot }}</h3><span>{{ visitedCount }}/{{ requiredPages.length }} 张已查看</span></div>
+  <div class="ins-grid"><p v-for="p in selectedProfessions" :key="p">{{ p }} · {{ confirmationLabel(p) }}</p></div>
+  <div class="ins-head"><p>{{ currentActive?.pending?'继续核验本轮归档结果。':'按当前已确认的专业及版本归档。' }}</p>
+    <button class="ins-primary" :disabled="actionLocked || props.readOnly || !canSubmit" @click="confirmSubmit=false;submit()">确认归档本轮</button></div>
+  <p v-if="error" role="alert">{{ error }}</p>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="!!abnormal" title="异常说明" :target="dialogRoot" @close="abnormal=undefined">
+  <template v-if="abnormal"><div class="ins-head"><strong>{{ abnormal.edit.sheet }} · {{ abnormal.edit.cell }}</strong><span>{{ slotOf(abnormal.round) }}</span></div>
+    <label class="ins-field">现场情况<textarea v-model="abnormalNote" placeholder="填写异常现象和处理情况"/></label>
+    <div class="ins-head"><small>记录值 {{ abnormal.edit.value }}</small><button class="ins-primary" :disabled="!abnormalNote.trim()" @click="saveAbnormal()">保存异常说明</button></div></template>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="reviewOpen" title="本表复核" :target="dialogRoot" @close="reviewOpen=false" @after-leave="applyPendingFocus">
+  <template #actions><label>显示<select data-native-select v-model="reviewFilter"><option value="all">全部 {{ reviewRows.length }}</option><option value="changed">有变化 {{ changedRows.length }}</option><option value="pending">待填写 {{ pendingRows.length }}</option></select></label></template>
+  <strong>{{ currentPage?.name }} · {{ shownSlot || activeSlot }}</strong>
+  <p v-if="!shownReviewRows.length" class="ins-empty">本表没有符合条件的复核项。</p>
+  <div v-for="row in shownReviewRows" :key="row.address" class="ins-audit-row"><div><strong>{{ row.label }}</strong><small>{{ row.address }}</small></div><span>本轮 {{ row.current || '待填写' }}</span><span>{{ row.hasPrevious?'上轮 '+row.previous:'无上轮读数' }} {{ row.changeLabel }}</span><button @click="focusReviewCell(row)">定位单元格</button></div>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="!!lookupMode" :title="lookupMode==='abnormal'?'本轮异常':'查找单元格'" :target="dialogRoot" @close="lookupMode=''" @after-leave="applyLookupTarget">
+  <label v-if="lookupMode==='search'" class="ins-field">设备、测点或表格文字<input v-model="lookupQuery" type="search" placeholder="输入名称或关键词"/></label>
+  <p v-if="lookupPending || lookupError">{{ lookupError || '查询中…' }}</p>
+  <p v-if="!lookupRows.length && (lookupMode==='abnormal'||lookupQuery) && !lookupPending" class="ins-empty">没有匹配结果</p>
+  <div v-for="row in lookupRows" :key="row.key+row.cell" class="ins-head ins-record"><div><strong>{{ row.label }}</strong><small>{{ row.sheet }} · {{ row.cell }}</small></div><button @click="selectLookup(row)">定位</button></div>
+</InspectionDeskDialog>
+<InspectionDeskDialog :show="!!comparison" title="核对共享版本" :target="dialogRoot" @close="comparison=undefined">
+  <section v-for="job in jobs" :key="job.round.round_id" class="ins-panel"><div class="ins-head"><h3>{{ job.scope }}楼 · {{ day }} · {{ slotOf(job.round) }}</h3><div class="ins-actions"><button @click="resolveJob(job,false)">采用共享数据</button><button class="ins-primary" @click="resolveJob(job,true)">保留本机修改</button></div></div>
+    <div v-for="cell in job.cells" :key="cell.template+cell.sheet+cell.cell" class="ins-audit-row"><strong>{{ cell.sheet }} · {{ cell.cell }}</strong><span>本机 {{ cell.value }}</span><span>共享 {{ latestValue(job.round,cell) }}</span></div></section>
+</InspectionDeskDialog>

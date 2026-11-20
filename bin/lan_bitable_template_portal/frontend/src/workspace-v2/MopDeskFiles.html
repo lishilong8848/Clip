@@ -1,0 +1,42 @@
+<section class="mop-desk-files" aria-label="维护单选择与办理">
+  <header class="mop-desk-panelbar">
+    <h2>{{ selectedNotice ? '通告办理进度' : '维护单选择' }}</h2>
+    <label v-if="selectedNotice" class="mop-desk-local" :class="{dragging:localDragActive}" tabindex="0"
+      role="button" aria-label="上传本地 MOP 文件" :aria-disabled="localUploadBusy || busy"
+      @keydown.enter.prevent="triggerLocalFileInput" @keydown.space.prevent="triggerLocalFileInput"
+      @dragenter="handleLocalDragEnter" @dragleave="handleLocalDragLeave">
+      <input ref="localFileInput" type="file" accept=".xlsx,.xlsm,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.ms-excel"
+        :disabled="localUploadBusy || busy" @change="handleLocalInput" />
+      {{ localUploadBusy?'正在识别…':'上传本地表格' }}
+    </label>
+  </header>
+  <p v-if="!selectedNotice" class="mop-desk-empty">请选择一条维保通告。</p>
+  <template v-else>
+    <article class="mop-desk-target"><div class="mop-desk-line"><small>当前通告 · {{ selectedNotice.building || '未识别楼栋' }}</small><b>{{ selectedNotice.status || '进行中' }}</b></div>
+      <h3>{{ selectedNotice.title }}</h3><small v-if="selectedNotice.start_time || selectedNotice.end_time">{{ selectedNotice.start_time || '未填开始' }} 至 {{ selectedNotice.end_time || '未填结束' }}</small>
+    </article>
+    <ol class="mop-desk-milestones" aria-label="当前通告的办理进度">
+      <li :data-done="!!selectedNotice.mop_binding"><small>通告绑定</small><b>{{selectedNotice.mop_binding?(selectedNotice.mop_binding.inherited?'继承绑定':'已绑定'):'尚未绑定'}}</b></li>
+      <li :data-done="!!selectedAttachment"><small>表格附件</small><b>{{selectedAttachment?'已选附件':selectedMop?'待选附件':'待选表格'}}</b></li>
+      <li :data-done="!!(selectedNotice.mop_uploaded||Number(selectedNotice.mop_attachment_count)>0)"><small>维护单上传</small><b>{{selectedNotice.mop_uploaded||Number(selectedNotice.mop_attachment_count)>0?'已有上传记录':'待上传'}}</b></li>
+    </ol>
+    <p v-if="localUploadMessage" class="mop-desk-file-hint" :role="localUploadStatus==='failed'?'alert':'status'">{{ localUploadMessage }}</p>
+    <small class="mop-desk-file-hint">{{ localUploadHint }}</small>
+    <MopSelectedFileCard v-if="selectedMop" v-model:selected-attachment-token="selectedAttachmentModel" :selected-mop="selectedMop" :attachments="selectedMopAttachments"
+      :selected-attachment="selectedAttachment" :binding-status="bindingStatus" :binding-error="bindingError" :can-preview="canPreview" :busy="busy" :disabled-reason="disabledReason" :button-text="buttonText" @open="$emit('open')" />
+    <header class="mop-desk-panelbar"><h3>候选表格 <small>{{ mopCandidates.length }}</small></h3>
+      <small v-if="recommendedCount">推荐 {{ recommendedCount }}</small>
+      <input v-model="mopSearchModel" aria-label="搜索 MOP 表格" placeholder="搜索 MOP 名称、文件编号、专业" />
+    </header>
+    <p v-if="!mopCandidates.length" class="mop-desk-empty">暂无可选 MOP 表格</p>
+    <div v-else class="mop-desk-file-grid">
+      <button v-for="mop in mopCandidates" :key="mop.record_id" type="button" class="mop-desk-file" data-v2-navigation
+        :aria-pressed="mop.record_id===selectedMopRecordId" @click="$emit('select-mop',String(mop.record_id || ''))">
+        <span class="mop-desk-line"><small>{{ mop.file_no || '文件编号未填' }}</small><b v-if="recommended(mop)">推荐 · {{ recommendationReason(mop) }}</b></span>
+        <strong>{{ mop.title || '未命名 MOP' }}</strong>
+        <small>{{ [mop.specialty,mop.maintenance_type,mop.version,mop.file_status].filter(Boolean).join(' · ') }}</small>
+        <span class="mop-desk-line"><small>附件 {{ mop.attachment_count || 0 }} 个</small><b v-if="mop.record_id===selectedMopRecordId">已选</b></span>
+      </button>
+    </div>
+  </template>
+</section>

@@ -8,7 +8,7 @@ import { chromium } from 'playwright';
 import { adaptEmbeddedNavigation } from './workspace-embedded-adapter.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
-const output=path.resolve(root,'../../../output/playwright/workbench-redesign');
+const output=path.resolve(root,process.env.WORKBENCH_REDESIGN_OUTPUT||'../../../output/playwright/workbench-redesign');
 const fixture=`<template><NConfigProvider><NDialogProvider><NMessageProvider>
   <HomePage :user="user" :scope="scope" :scopes="scopes" :explicit-scope="explicitScope" view="home" @open="open" />
   </NMessageProvider></NDialogProvider></NConfigProvider></template>
@@ -146,6 +146,7 @@ try {
           owner_level,created_by_open_id,
         });
         return ok({ongoing:[],ongoing_pagination:{total_pages:1},records:[
+          plan('adjust','隔离设备调整','adjust','2026-11-18 15:30','L4','basic-desk'),
           plan('power','UPS 支路上电确认','power','2026-11-18 15:30','L4','basic-desk'),
           plan('change','冷冻水系统运行参数调整','change','2026-11-18 10:00','L4','basic-desk'),
           plan('maintenance','配电柜保护定值复核','maintenance','2026-11-20 09:30','L2','other-person'),
@@ -237,36 +238,59 @@ try {
     ]}));
   });
   await set(account('engineer','other'),['A']);
-  await page.getByRole('heading',{name:'需要关注',exact:true}).waitFor();
+  await page.getByRole('heading',{name:'待办办理',exact:true}).waitFor();
   await page.waitForFunction(()=>document.querySelector('.wb-shortcut')?.textContent.includes('画像学练'));
   assert.equal(await page.locator('.wb-shortcuts').getByText('账号与权限').count(),0);
   assert.equal(await page.locator('.wb-shortcuts').getByText('画像学练').count(),1);
   assert.equal(await page.locator('.wb-scope select').count(),0);
-  const todo=page.getByRole('region',{name:/待办阅览/});
-  const task=name=>todo.getByRole('button',{name:'办理 '+name,exact:true});
-  const dialog=title=>page.getByRole('dialog').filter({has:page.getByRole('heading',{name:title,exact:true})});
+  const todo=page.getByRole('region',{name:'待办办理',exact:true});
+  const tiles=todo.locator('.wb-task-tile');
+  const tile=key=>todo.locator('.wb-task-tile[data-group="'+key+'"]');
+  const pop=page.getByRole('dialog',{name:'模块待办条目',exact:true});
+  const task=name=>pop.getByRole('button',{name:'办理 '+name,exact:true});
+  async function reveal(key){
+    const control=tile(key);
+    await control.waitFor();
+    if(await control.getAttribute('aria-expanded')!=='true')await control.click();
+    await pop.waitFor();
+  }
+  async function settleQueue(){
+    await page.waitForFunction(()=>document.querySelector('.queue-panel')?.getAttribute('aria-busy')==='false');
+  }
+  async function absent(key,name){
+    await settleQueue();
+    if(!await tile(key).count())return;
+    await reveal(key);
+    assert.equal(await pop.getByText(name,{exact:true}).count(),0,name+' is not available in '+key);
+  }
+  const dialog=title=>page.getByRole('region',{name:'办理 '+title,exact:true});
   async function closeTask(title){
     await dialog(title).getByRole('button',{name:'关闭待办办理'}).click();
     await dialog(title).waitFor({state:'hidden'});
     embeddedTest=false;
   }
+  await reveal('learning');
   await task('自主练习').waitFor();
+  await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
   assert.equal(await page.getByText('每日学练',{exact:true}).count(),0);
   await page.setViewportSize({width:390,height:844});
   embeddedTest=true;
+  await reveal('learning');
   await task('自主练习').click();
   await dialog('自主练习').locator('[data-module-widget=learning]').waitFor();
   assert.equal(new URL(page.url()).pathname,'/fixture');
   await closeTask('自主练习');
+  await reveal('learning');
   assert.equal(await task('自主练习').count(),1,'opening a todo does not complete it');
   practiceFinished=true;
-  await todo.getByRole('button',{name:'刷新',exact:true}).click();
+  await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
   await task('自主练习').waitFor({state:'hidden'});
   await page.setViewportSize({width:1440,height:1000});
   exempt=false;
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
-  await page.getByText('每日学练',{exact:true}).first().waitFor();
+  await reveal('learning');
+  await pop.getByText('每日学练',{exact:true}).waitFor();
   assert.equal(await page.getByText('每日学练',{exact:true}).count(),1,'per-paper daily_exempt still excludes the task');
 
   const period=page.getByRole('region',{name:'工作状态'});
@@ -280,23 +304,25 @@ try {
   await marker('个人学练','4 / 15');
   await marker('事件','1');
   await marker('通告办理记录','2');
+  await reveal('notices:维保');
   await task('本月计划通告').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
-  assert.equal(await task('已结束的计划').count(),0);
+  await absent('notices:维保','已结束的计划');
   embeddedTest=true;
   const noticeDetail=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('record_id')==='first');
+  await reveal('notices:维保');
   await task('本月计划通告').click();
   assert.equal(new URL((await noticeDetail).url()).searchParams.get('scope'),'A');
   assert.equal(new URL(page.url()).pathname,'/fixture');
   await page.getByRole('button',{name:'关闭',exact:true}).first().click();
   embeddedTest=false;
+  await reveal('notices:维保');
   await task('本月计划通告').waitFor();
-  await todo.getByLabel('业务分类').selectOption('notices');
   await todo.getByLabel('搜索待办').fill('下一页');
-  await todo.getByRole('button',{name:'显示更多待办'}).click();
+  await todo.getByRole('button',{name:'读取更多待办'}).click();
+  await reveal('notices:维保');
   await task('下一页计划通告').waitFor();
   await todo.getByLabel('搜索待办').fill('');
-  await todo.getByLabel('业务分类').selectOption('');
   assert.equal(await card('每日任务').locator('meter[aria-label="已完成"]').getAttribute('value'),'3');
   const dailyReads=()=>requests.filter(([,url])=>url==='/api/daily-tasks').length;
   const initialDaily=dailyReads();
@@ -320,30 +346,28 @@ try {
 
   hold=true;
   await set(account('manager','manager'),['A','B']);
-  await page.waitForFunction(()=>document.querySelector('.wb-focus h2')?.textContent==='园区关注');
+  await todo.waitFor();
   const until=Date.now()+5000;
   while(!release&&Date.now()<until)await new Promise(resolve=>setTimeout(resolve,25));
   assert.ok(release,'A request was held to exercise stale responses');
   await page.locator('.wb-scope select').selectOption('B');
   hold=false;release();
-  const eventCard=page.locator('.wb-focus-card').filter({hasText:'处理中事件'});
-  await eventCard.getByText('待处理',{exact:true}).waitFor();
-  await eventCard.click();
-  await page.locator('.n-drawer').getByText('B楼隔离事件',{exact:true}).waitFor();
+  await reveal('events');
+  const eventRow=pop.getByText('B楼隔离事件',{exact:true});
+  await eventRow.waitFor();
   assert.equal(await page.getByText('A楼隔离事件',{exact:true}).count(),0);
   failure='500';await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
-  await eventCard.getByText('数据待更新',{exact:true}).waitFor();
+  await todo.locator('.queue-health summary').waitFor();
+  await eventRow.waitFor();
   failure='403';await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
-  await page.locator('.n-drawer').getByText('当前无权查看',{exact:true}).waitFor();
+  await eventRow.waitFor({state:'hidden'});
   assert.equal(await todo.getByText(/当前无权查看/).count(),0);
   assert.equal(await page.getByText('B楼隔离事件',{exact:true}).count(),0);
-  await page.keyboard.press('Escape');
-  await page.getByRole('button',{name:'打开原模块',exact:true}).waitFor({state:'hidden'});
   failure='';
 
   checkMember='operator';
   await set(account('operator','operator',['learning','water']),['A']);
-  await page.getByText('当前账号 · 值班人员 · 白班',{exact:true}).waitFor();
+  await page.getByText('值班人员 · A楼 · 白班',{exact:true}).waitFor();
   await page.getByText('无异常',{exact:true}).click();
   const previous=await page.evaluate(()=>window.opened);
   await page.locator('.wb-shortcuts').getByRole('button',{name:'水耗管理'}).click();
@@ -356,60 +380,82 @@ try {
   assert.equal(await page.locator('[data-v2-layout-protected=true]').count(),0);
   checkMember='';
 
-  const full=['event','repair_management','learning','maintenance','change','repair','power','risk_inspection','critical_guard','cabinet','drills','engineer_mop','daily','water','accounts','signatures'];
+  const full=['event','repair_management','learning','maintenance','change','repair','adjust','power','risk_inspection','critical_guard','cabinet','drills','engineer_mop','daily','water','accounts','signatures'];
   await set(account('campus-dashboard','manager',full),['A','B'],false);
+  await reveal('repair_management');
   await task('B楼隔离维修').waitFor();
+  await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
   await marker('画像学练情况汇总','7');
+  await reveal('notices:变更');
   await todo.getByText('A楼隔离变更',{exact:true}).waitFor();
+  await reveal('notices:上下电');
   await todo.getByText('B楼隔离上下电',{exact:true}).waitFor();
-  assert.equal(await todo.getByRole('button',{name:/办理.*(A楼隔离变更|B楼隔离上下电)/}).count(),0);
-  await todo.getByRole('button',{name:'查看 A楼隔离变更'}).click();
-  await page.locator('.wb-readonly-dialog').getByText('开始时间',{exact:true}).waitFor();
-  await page.keyboard.press('Escape');
-  await page.locator('.wb-readonly-dialog').waitFor({state:'hidden'});
-  assert.equal(await todo.getByText('本月计划通告',{exact:true}).count(),0,'经理不显示维保通告');
-  assert.equal(await todo.getByText('已完成重保',{exact:true}).count(),0);
+  for(const key of ['notices:变更','notices:上下电']){
+    await reveal(key);assert.equal(await pop.getByRole('button',{name:/办理 /}).count(),0);
+  }
+  await reveal('notices:变更');
+  await pop.getByRole('button',{name:'查看 A楼隔离变更'}).click();
+  const readOnlyNotice=page.getByRole('region',{name:'查看 A楼隔离变更',exact:true});
+  await readOnlyNotice.getByText('开始时间',{exact:true}).waitFor();
+  await readOnlyNotice.getByRole('button',{name:'关闭只读详情'}).click();
+  await readOnlyNotice.waitFor({state:'hidden'});
+  await absent('notices:维保','本月计划通告');
+  await absent('critical_guard','已完成重保');
+  await todo.getByLabel('搜索待办').fill('本楼重保任务');
+  await reveal('critical_guard');
   await todo.getByText('本楼重保任务',{exact:true}).waitFor();
+  await todo.getByLabel('搜索待办').fill('');
   assert.equal(await page.getByText('冷源运行状态',{exact:true}).count(),0);
   assert.equal(await page.locator('.wb-shortcuts').getByText('通告办理').count(),0);
   await page.locator('.wb-scope select').selectOption('B');
+  await reveal('notices:变更');
   await todo.getByText('B楼隔离变更',{exact:true}).waitFor();
-  assert.equal(await todo.getByText('A楼隔离变更',{exact:true}).count(),0);
-  assert.equal(await todo.getByText('本楼重保任务',{exact:true}).count(),0);
+  await absent('notices:变更','A楼隔离变更');
+  await absent('critical_guard','本楼重保任务');
 
   await set(account('building-dashboard','supervisor',full),['A','B']);
+  await reveal('cabinet');
   await task('机柜待确认').waitFor();
   await marker('画像学练情况汇总','7');
   assert.equal(await page.locator('.wb-scope select').count(),0);
-  assert.equal(await todo.getByText('机柜已确认',{exact:true}).count(),0);
-  assert.equal(await todo.getByText('B楼隔离维修',{exact:true}).count(),0);
+  await absent('cabinet','机柜已确认');
+  await absent('repair_management','B楼隔离维修');
   embeddedTest=true;
+  await reveal('cabinet');
   await task('机柜待确认').click();
   await dialog('机柜待确认').locator('[data-module-widget=cabinet]').waitFor();
   await closeTask('机柜待确认');
 
   await set(account('engineer-dashboard','engineer',full),['A']);
+  await reveal('risk_inspection');
   await task('隔离专项排查').waitFor();
+  await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
-  assert.equal(await todo.locator('.wb-task-row').count(),2);
+  assert.equal(await tiles.evaluateAll(items=>items.reduce((total,item)=>total+Number(item.dataset.count),0)),2);
 
   const dutyReadStart=requests.length;
   await set(account('shared-desk','duty',full),['A']);
-  await todo.getByRole('list',{name:'计划通告',exact:true}).getByRole('button',{name:'开始 本月计划通告',exact:true}).waitFor();
-  await todo.getByRole('list',{name:'进行中通告',exact:true}).getByText('进行中事件通告甲',{exact:true}).waitFor();
-  assert.equal(await todo.getByText('计划和进行中同一条',{exact:true}).count(),1);
+  await reveal('notices:维保');
+  await pop.getByRole('button',{name:'开始 本月计划通告',exact:true}).waitFor();
+  await reveal('events');
+  await todo.getByText('进行中事件通告甲',{exact:true}).waitFor();
+  await reveal('notices:维保');
+  assert.equal(await pop.getByText('计划和进行中同一条',{exact:true}).count(),1);
+  await reveal('drills');
   await task('待完成演练甲').waitFor();
+  await reveal('engineer_mop');
   await task('待处理维护单甲').waitFor();
-  assert.equal(await todo.locator('.wb-task-module').last().getAttribute('data-source'),'drills');
+  assert.equal(await tiles.last().getAttribute('data-source'),'drills');
   assert.ok(requests.slice(dutyReadStart).some(([,url,,params])=>url==='/api/engineer/mop/bootstrap'&&params.get('view')==='todos'));
-  assert.equal(await todo.getByText('已完成演练甲',{exact:true}).count(),0);
-  assert.equal(await todo.getByText('已上传维护单甲',{exact:true}).count(),0);
+  await absent('drills','已完成演练甲');
+  await absent('engineer_mop','已上传维护单甲');
   assert.ok(!requests.slice(dutyReadStart).some(([,url])=>url.startsWith('/api/learning/')));
 
   const drillReads=requests.length;
   embeddedTest=true;
   const drillExecution=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/drills/drill-live/execution');
+  await reveal('drills');
   await task('待完成演练甲').click();
   await dialog('待完成演练甲').locator('[data-module-widget=drills]').waitFor();
   assert.equal(new URL((await drillExecution).url()).searchParams.get('scope'),'A');
@@ -419,9 +465,11 @@ try {
   assert.ok(!requests.slice(drillReads).some(([,url])=>url.includes('/drill-done/')));
 
   await set({...account('admin-dashboard','administrator',full),tool_management_enabled:true,can_manage_accounts:true},['A']);
+  await reveal('tool_management');
   await task('工具待审核').waitFor();
+  await reveal('accounts');
   await task('权限待审核人').waitFor();
-  assert.equal(await todo.getByText('工具已归档',{exact:true}).count(),0);
+  await absent('tool_management','工具已归档');
 
   for(const [profile,category,scopes] of [
     ['manager','manager',['A','B']],['supervisor','supervisor',['A']],
@@ -432,7 +480,12 @@ try {
     for(const width of [1440,1024,800,390]){
       await page.setViewportSize({width,height:1000});
       await page.waitForFunction(()=>document.querySelector('.wb-home'));
-      assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'no page overflow at '+width);
+      const overflow=await page.evaluate(()=>{
+        if(document.documentElement.scrollWidth<=innerWidth)return [];
+        return [...document.querySelectorAll('body *')].filter(el=>el.getBoundingClientRect().right>innerWidth+1)
+          .slice(0,8).map(el=>el.tagName+'.'+el.getAttribute('class')+': '+Math.round(el.getBoundingClientRect().right));
+      });
+      assert.deepEqual(overflow,[],profile+' overflow at '+width);
       if(width===1440||width===390){
         await page.evaluate(()=>window.scrollTo(0,0));
         await page.screenshot({path:path.join(output,profile+'-'+width+'.png'),animations:'disabled'});
@@ -445,7 +498,7 @@ try {
   await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B'],false);
   const indicators=page.getByLabel('工作台指标');
   const health=todo.locator('.desk-queue-health');
-  await health.getByText(/类待重试/).waitFor();
+  await health.getByText(/读取异常/).waitFor();
   assert.equal(await health.getAttribute('open'),null);
   assert.equal(await todo.getByText(/明细尚未读全|当前无权查看|数据待更新/).count(),0);
   await health.locator('summary').click();
@@ -453,10 +506,17 @@ try {
   assert.equal(await health.getByText('专项排查待办',{exact:true}).count(),0);
   mopDelayed=false; riskDenied=false;
   await health.getByRole('button',{name:'重试待处理维护单'}).click();
+  await reveal('engineer_mop');
   await task('待处理维护单甲').first().waitFor();
   await indicators.getByRole('heading',{name:'全域待办总数'}).waitFor();
+  await settleQueue();
+  await reveal('notices:设备调整');
+  await pop.getByText('隔离设备调整',{exact:true}).first().waitFor();
+  await pop.press('Escape');await pop.waitFor({state:'hidden'});
+  assert(await tile('notices:设备调整').evaluate(el=>document.activeElement===el));
   assert.equal(await indicators.locator('article').count(),4);
   const agenda=page.getByRole('complementary',{name:'我的日程'});
+  await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
   const search=page.getByRole('searchbox',{name:'全局搜索'});
   await search.fill('维项');
@@ -486,6 +546,7 @@ try {
   assert.equal(await aRoster.getByText('验收值班员',{exact:true}).count(),1);
   await aRoster.getByRole('cell').nth(1).getByText('夜班验收人',{exact:true}).waitFor();
   assert.equal(await roster.getByText(/明日值班员|B楼当晚值班员/).count(),0);
+  await agenda.getByRole('button',{name:'展开月历',exact:true}).click();
   await agenda.getByRole('button',{name:'上个月',exact:true}).click();
   await agenda.getByRole('button',{name:/^2026-10-01/}).waitFor();
   await aRoster.getByText('验收值班员',{exact:true}).waitFor();
@@ -504,6 +565,8 @@ try {
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'workbench fits a phone viewport');
+  const badge=await page.locator('.notice-count').boundingBox(), bell=await page.locator('.notice-count').locator('..').boundingBox();
+  assert(badge&&bell&&badge.x+badge.width<=bell.x+bell.width+1&&badge.x+badge.width<=390,'unread badge stays inside the bell and the 390px viewport');
   await page.mouse.move(0,0);
   await page.screenshot({path:path.join(output,'daily-mobile.png'),animations:'disabled',fullPage:true});
   await page.setViewportSize({width:1440,height:1320});
@@ -522,49 +585,59 @@ try {
   assert.equal(await agenda.getByLabel('日程楼栋').inputValue(),'A','agenda scope is independent');
   await page.getByRole('navigation',{name:'常用业务'}).getByRole('button',{name:'维修项目',exact:true}).click();
   assert.equal(new URL(await page.evaluate(()=>window.opened),origin).searchParams.get('scope'),'B');
-  assert.equal(await task('A楼隔离维修').count(),0);
+  await absent('repair_management','A楼隔离维修');
+  await reveal('repair_management');
   await task('B楼隔离维修').waitFor();
   await page.locator('.wb-scope select').selectOption('A');
   await page.getByRole('button',{name:/消息通知/}).click();
-  await page.getByRole('button',{name:'查看全部未读'}).click();
+  await page.getByRole('button',{name:'打开未读清单'}).click();
   assert.equal(await todo.getByRole('button',{name:/^未读/}).getAttribute('aria-pressed'),'true');
   embeddedTest=true;
+  await reveal('repair_management');
   await task('A楼隔离维修').click();
   await dialog('A楼隔离维修').locator('[data-module-widget=repair_management]').waitFor();
   assert.equal(new URL(page.url()).pathname,'/fixture');
   await closeTask('A楼隔离维修');
-  await task('A楼隔离维修').waitFor({state:'hidden'});
-  await todo.getByRole('button',{name:'全部待办'}).click();
+  await absent('repair_management','A楼隔离维修');
+  await todo.getByRole('button',{name:'全部',exact:true}).click();
+  await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
 
   await set({...account('basic-desk','other',['maintenance','change','power','repair_management']),level:'L4'},['A','B']);
+  await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
-  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
+  await absent('notices:维保','配电柜保护定值复核');
   assert.equal(await page.locator('.wb-scope select').count(),0);
   assert.equal(await todo.getByRole('button',{name:'删除单据'}).count(),0);
   await set({...account('engineer-desk','engineer',full),level:'L2'},['A','B'],false);
+  await reveal('notices:维保');
   await todo.getByText('配电柜保护定值复核',{exact:true}).waitFor();
   await page.locator('.wb-scope select').selectOption('B');
+  await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
-  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
+  await absent('notices:维保','配电柜保护定值复核');
   await set({...account('supervisor-desk','supervisor',full),level:'L3'},['A','B'],false);
+  await reveal('notices:变更');
   await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
-  assert.equal(await todo.getByText('配电柜保护定值复核',{exact:true}).count(),0);
-  assert.equal(await task('B楼隔离维修').count(),0);
+  await absent('notices:维保','配电柜保护定值复核');
+  await absent('repair_management','B楼隔离维修');
   await set({...account('manager-desk','manager',full),level:'L1',can_manage_accounts:true},['A','B'],false);
-  await indicators.getByRole('heading',{name:'交接班审核待办'}).waitFor();
+  await indicators.getByRole('heading',{name:'交接待审'}).waitFor();
   assert.equal(await indicators.getByRole('heading',{name:'账号权限待审批'}).count(),0);
   await set({...account('h-duty','duty',full),home_scope:'H',level:'L4'},['H']);
-  await todo.getByRole('button',{name:'确认截图 本日变更截图待确认'}).waitFor();
-  assert.equal(await todo.getByText('已确认变更',{exact:true}).count(),0);
+  await reveal('ali_confirmation');
+  await pop.getByRole('button',{name:'确认截图 本日变更截图待确认'}).waitFor();
+  await absent('ali_confirmation','已确认变更');
   await set({...account('h-duty-admin','duty',full),home_scope:'H',role:'admin',level:'L4'},['A','H'],false);
-  await indicators.getByRole('heading',{name:'交接班审核待办'}).waitFor();
+  await indicators.getByRole('heading',{name:'交接待审'}).waitFor();
   await set({...account('d-duty','duty',full),home_scope:'D',level:'L4'},['D','E']);
+  await reveal('inspection');
   await todo.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
   waterTrial=true;
   await set(account('water-desk','other',['water']),['A']);
+  await reveal('water');
   await task('工作台验收水表').click();
   const input=dialog('工作台验收水表').getByLabel('本次水表读数',{exact:true});
   await input.fill('1250');
@@ -576,40 +649,43 @@ try {
   assert.equal(waterWrites.length,2);
   assert.equal(waterWrites[1].meter_value,1250);
   await closeTask('工作台验收水表');
-  await task('工作台验收水表').waitFor({state:'hidden'});
+  await tile('water').waitFor({state:'detached'});
   waterTrial=false;
   repairTrial=true;
   await set(account('repair-desk','engineer',['repair_management']),['A']);
+  const list=pop.getByRole('list',{name:'待办清单',exact:true});
+  await reveal('repair_management');
+  await task('跨月待跟进项目').waitFor();
+  await todo.getByRole('button',{name:'今日',exact:true}).click();
+  await reveal('repair_management');
   await task('今日测试维修6').waitFor();
-  const todayRepairs=todo.getByRole('list',{name:'今日维修',exact:true});
-  const oldRepairs=todo.getByRole('list',{name:'历史未完维修',exact:true});
-  assert.equal(await todayRepairs.getByRole('button',{name:/办理 今日测试维修/}).count(),6);
-  await oldRepairs.getByRole('button',{name:'办理 跨月待跟进项目'}).waitFor();
-  await todo.getByRole('button',{name:/^今日待办/}).click();
-  assert.equal(await task('跨月待跟进项目').count(),0);
+  assert.equal(await list.getByRole('button',{name:/办理 今日测试维修/}).count(),6,'today view includes all loaded repair tasks');
+  await absent('repair_management','跨月待跟进项目');
   await todo.getByRole('button',{name:/^历史未完维修/}).click();
-  assert.equal(await task('今日测试维修1').count(),0);
+  await absent('repair_management','今日测试维修1');
   embeddedTest=true;
   const oldProjectRequest=page.waitForRequest(request=>{
     const url=new URL(request.url());
     return url.pathname==='/api/repair-management/records'&&url.searchParams.get('focus_record_id')==='old-repair';
   });
+  await reveal('repair_management');
   await task('跨月待跟进项目').click();
   assert.equal(new URL((await oldProjectRequest).url()).searchParams.get('scope'),'A');
   historyClosed=true;
   await closeTask('跨月待跟进项目');
-  await task('跨月待跟进项目').waitFor({state:'hidden'});
+  await todo.locator('.wb-task-tile[data-group="repair_management"][data-count="1"]').waitFor();
+  await absent('repair_management','跨月待跟进项目');
   repairTrial=false;
   await set(account('visual-check','manager'),['A','B']);
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
-  assert.ok(await page.locator('.wb-primary').evaluate(element=>element.getBoundingClientRect().height>=48));
+  assert.ok(await tiles.first().evaluate(element=>element.getBoundingClientRect().height>=44));
   assert.deepEqual(requests.filter(([method])=>method!=='GET').map(([method,url])=>[method,url]),[
     ['PATCH','/api/capacity/water/records/water-home'],['PATCH','/api/capacity/water/records/water-home'],
   ]);
   assert.deepEqual(unexpected,[]);
   assert.deepEqual(errors,[]);
   const before=await readFile(path.join(root,'src/workspace-v2/HomePage.vue'),'utf8');
-  assert.match(before,/<BusinessTodos /);assert.match(before,/<TaskWorkspace /);
+  assert.match(before,/<BusinessTodos /);assert.match(before,/<WorkbenchHome /);
   console.log('Workbench roles, responsive layouts, todo filters and pagination, exact record dispatch and completion refresh passed.');
 } finally { await browser?.close(); await server.close(); }

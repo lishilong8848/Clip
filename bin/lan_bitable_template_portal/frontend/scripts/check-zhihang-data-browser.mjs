@@ -1,11 +1,18 @@
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 import { preview } from 'vite';
+import { selectWorkspaceSetting } from './workspace-account-actions.mjs';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
-const outDir = process.env.CLIPFLOW_ZHIHANG_PREVIEW_DIR || '../../../output/playwright/zhihang-data';
-const server = await preview({ root, logLevel: 'error', build: { outDir }, preview: { host: '127.0.0.1', port: 0 } });
+const suppliedDir = resolve(root, process.env.CLIPFLOW_ZHIHANG_PREVIEW_DIR || 'dist');
+const nestedDir = resolve(suppliedDir, 'assets/workspace-v2');
+const outDir = existsSync(resolve(nestedDir, 'entry.json')) ? nestedDir : suppliedDir;
+assert(existsSync(resolve(outDir, 'entry.json')), 'Expected a built V2 workspace in ' + outDir);
+const server = await preview({ configFile: false, root, base: '/assets/workspace-v2/', logLevel: 'error',
+  build: { outDir }, preview: { host: '127.0.0.1', port: 0, proxy: {} } });
 const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
 const entry = origin + '/assets/workspace-v2/index.html';
 const base = '/api/zhihang-data';
@@ -14,6 +21,9 @@ const task = { kind: 'inspection', label: '巡检', times: ['07:00', '11:00'], e
   targets: [{ label: '原巡检表', url: 'https://vnet.feishu.cn/base/sample' }], notification_targets: ['原巡检群'],
   latest: null, next_at: null };
 const auth = { has_token: false, expired: false };
+const tasks = [['risk', '风险排查'], ['change', '变更'], ['drill', '演练'], ['event', '事件']].map(([kind, label]) => ({
+  kind, label, times: [], enabled: false, confirmed: false, targets: [{ label: label + '原表' }], latest: null,
+})).concat([task]);
 const inspectionCardSetting = '参与日报并发送独立巡检异常提醒';
 const calls = [];
 const exceptions = [];
@@ -47,7 +57,7 @@ async function install(context, user) {
     if (path === '') {
       const pageSize = 10;
       const page = Math.min(Number(searchParams.get('history_page') || 1), Math.max(1, Math.ceil(history.length / pageSize)));
-      return ok({ auth, tasks: [task], history: history.slice((page - 1) * pageSize, page * pageSize),
+      return ok({ auth, tasks, history: history.slice((page - 1) * pageSize, page * pageSize),
         notification_digests: [
           { kind: 'daily', label: '智航数据同步', times: ['08:00'], prepare_at: '00:10',
             modules: ['inspection', 'change', 'event'], enabled_modules: task.notify ? ['inspection'] : [],
@@ -135,38 +145,43 @@ try {
   page.on('pageerror', error => exceptions.push(error.message));
   page.setDefaultTimeout(12000);
   await page.goto(entry);
-  const sidebar = page.locator('.v2-sidebar');
-  await sidebar.hover();
-  await sidebar.getByRole('button', { name: '系统管理', exact: true }).click();
-  await sidebar.getByRole('button', { name: '系统运维', exact: true }).click();
-  await sidebar.getByRole('button', { name: '智航数据拉取', exact: true }).click();
+  await selectWorkspaceSetting(page, '智航数据拉取');
   await page.getByRole('heading', { name: '智航数据拉取', exact: true }).waitFor();
   assert.equal(new URL(page.url()).searchParams.get('__page'), '/zhihang-data');
   assert.equal(new URL(page.url()).searchParams.has('scope'), false);
-  await page.getByRole('link', { name: '原巡检表' }).waitFor();
+  const picker = page.getByRole('group', { name: '选择任务类型' });
+  const detail = page.locator('#zh-task-detail');
+  await detail.getByRole('heading', { name: '风险排查', exact: true }).waitFor();
+  assert.equal(await picker.getByRole('button').count(), 5);
+  const inspection = picker.getByRole('button', { name: /^巡检/ });
+  await inspection.click();
+  await detail.getByRole('heading', { name: '巡检', exact: true }).waitFor();
+  assert.equal(await inspection.getAttribute('aria-pressed'), 'true');
+  await detail.getByRole('link', { name: '原巡检表' }).waitFor();
+  const ledger = page.getByRole('region', { name: '执行记录', exact: true });
   const historyPager = page.getByRole('navigation', { name: '执行记录分页' });
   await historyPager.getByText('共 12 条 · 第 1 / 2 页').waitFor();
   assert(await historyPager.getByRole('button', { name: '上一页', exact: true }).isDisabled());
-  assert.equal(await page.locator('tbody tr').count(), 10);
+  assert.equal(await ledger.getByRole('rowgroup').last().getByRole('row').count(), 10);
   await historyPager.getByRole('button', { name: '下一页', exact: true }).click();
   await historyPager.getByText('共 12 条 · 第 2 / 2 页').waitFor();
-  assert.equal(await page.locator('tbody tr').count(), 2);
+  assert.equal(await ledger.getByRole('rowgroup').last().getByRole('row').count(), 2);
   const pageTwoRefresh = page.waitForResponse(response => new URL(response.url()).searchParams.get('history_page') === '2');
   await page.getByRole('button', { name: '刷新', exact: true }).click();
   await pageTwoRefresh;
   assert(await historyPager.getByRole('button', { name: '下一页', exact: true }).isDisabled());
   await historyPager.getByRole('button', { name: '上一页', exact: true }).click();
   await historyPager.getByText('共 12 条 · 第 1 / 2 页').waitFor();
-  await page.locator('.run-failure').getByText(history[0].error, { exact: true }).waitFor();
-  await page.getByRole('button', { name: '查看巡检执行详情' }).click();
+  const failedRow = ledger.getByRole('row').filter({ hasText: history[0].error });
+  await failedRow.getByText(history[0].error, { exact: true }).waitFor();
+  await failedRow.getByRole('button', { name: '查看巡检执行详情' }).click();
   const runDialog = page.getByRole('dialog');
   await runDialog.getByText('失败阶段', { exact: true }).waitFor();
   await runDialog.getByText('每页 50 · 源端总数 120 · 已读取 50 · 当前页 2', { exact: true }).waitFor();
   assert.equal(await runDialog.getByRole('button', { name: '同步原表', exact: true }).count(), 0);
   await page.keyboard.press('Escape');
   await runDialog.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '刷新', exact: true }).hover();
-  await page.getByRole('button', { name: '拉取预览', exact: true }).click();
+  await detail.getByRole('button', { name: '拉取预览', exact: true }).click();
   await page.getByText('隔离巡检数据 1', { exact: true }).waitFor();
   await runDialog.getByText('成功', { exact: true }).waitFor();
   assert.equal(detailReads.get('fixture-preview'), 1, 'a synchronous preview renders on the first detail read');
@@ -175,7 +190,7 @@ try {
   await runDialog.getByText('隔离巡检数据 2', { exact: true }).waitFor();
   await page.keyboard.press('Escape');
   await runDialog.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '定时设置' }).click();
+  await detail.getByRole('button', { name: '定时设置' }).click();
   assert.equal(await runDialog.getByRole('checkbox', { name: inspectionCardSetting }).getAttribute('aria-checked'), 'false');
   await runDialog.getByText(/每日 00:10 准备，08:00 发送昨日汇总/).waitFor();
   await runDialog.getByLabel('运行时间（北京时间）').fill('25:01');
@@ -187,14 +202,17 @@ try {
   }
   await runDialog.getByRole('button', { name: '保存设置' }).click();
   await runDialog.waitFor({ state: 'hidden' });
-  await page.getByRole('button', { name: '查看预览', exact: true }).click();
+  await detail.getByRole('region', { name: '任务回执' }).getByRole('button', { name: '查看预览', exact: true }).click();
   await runDialog.getByRole('button', { name: '同步原表', exact: true }).click();
-  await page.getByRole('button', { name: '取消', exact: true }).click();
+  const confirm = page.getByRole('dialog', { name: '确认同步原表', exact: true });
+  await confirm.getByText('fixture-preview', { exact: true }).waitFor();
+  await confirm.getByRole('button', { name: '取消', exact: true }).click();
   assert.equal(calls.filter(([, , path]) => path === '/inspection/sync').length, 0);
   await runDialog.getByRole('button', { name: '同步原表', exact: true }).click();
-  await page.getByRole('button', { name: '确认同步', exact: true }).click();
+  await confirm.getByRole('button', { name: '确认同步', exact: true }).click();
   await runDialog.getByText('待核验', { exact: true }).waitFor();
   await runDialog.getByText('已发送', { exact: true }).waitFor();
+  assert(detailReads.get('fixture-sync') >= 2, 'sync receipt must be read back after pending verification');
   await page.keyboard.press('Escape');
   await runDialog.waitFor({ state: 'hidden' });
   await page.getByRole('button', { name: '登录智航' }).click();
@@ -208,7 +226,7 @@ try {
   await page.getByText('智航连接正常', { exact: true }).waitFor();
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole('button', { name: '功能', exact: true }).click();
-  await page.getByRole('button', { name: '智航数据拉取', exact: true }).click();
+  await page.getByRole('button', { name: /智航数据拉取/ }).click();
   await page.getByRole('heading', { name: '智航数据拉取', exact: true }).waitFor();
   assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1));
   assert.deepEqual(exceptions, []);
@@ -226,9 +244,21 @@ try {
     const denied = await deniedContext.newPage();
     denied.setDefaultTimeout(12000);
     await denied.goto(entry + '?__page=%2Fzhihang-data');
-    if (user.role === 'guest') await denied.waitForURL(url => url.searchParams.get('__page') === '/cabinet-power');
-    else await denied.getByText('没有该功能权限', { exact: true }).waitFor();
-    assert.equal(await denied.locator('.v2-sidebar').getByRole('button', { name: '智航数据拉取', exact: true }).count(), 0);
+    if (user.role === 'guest') {
+      await denied.waitForURL(url => url.searchParams.get('__page') === '/cabinet-power');
+    } else {
+      await denied.getByText('没有该功能权限', { exact: true }).waitFor();
+      const nav = denied.getByRole('navigation', { name: '功能导航', exact: true });
+      await nav.waitFor();
+      const adminGroup = nav.getByRole('button', { name: '平台运维', exact: true });
+      if (await adminGroup.count()) {
+        assert.notEqual(await adminGroup.getAttribute('aria-description'), '智航数据拉取');
+        if (await adminGroup.getAttribute('aria-expanded') === 'false') await adminGroup.click();
+      }
+      const system = nav.getByRole('button', { name: '系统运维', exact: true });
+      if (await system.count() && await system.getAttribute('aria-expanded') === 'false') await system.click();
+    }
+    assert.equal(await denied.getByRole('button', { name: '智航数据拉取', exact: true, includeHidden: true }).count(), 0);
     assert.equal(calls.filter(([id]) => id === user.open_id).length, 0);
     await deniedContext.close();
   }

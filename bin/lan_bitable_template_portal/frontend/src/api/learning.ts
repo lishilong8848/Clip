@@ -21,6 +21,7 @@ export async function requestLearning(
     method,
     signal: options.signal || undefined,
     ...(method === "GET" ? { cache: "no-store" as RequestCache } : {}),
+    ...(method === "GET" && /^\/(?:issues(?:[/?]|$)|questions\/)/.test(path) ? { fresh:true } : {}),
     ...(body !== undefined ? { body: body instanceof FormData ? body : JSON.stringify(body) } : {}),
   });
   if (method !== "GET" && result.sync_pending) options.onSyncPending?.();

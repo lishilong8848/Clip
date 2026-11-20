@@ -137,7 +137,7 @@ try{
     await page.evaluate(()=>localStorage.setItem('clipflow:frontend-version:ou_default_entry','legacy'));
     await page.goto(origin+'/');
     await page.waitForURL(url=>url.pathname===WORKSPACE_ENTRY);
-    if(page.viewportSize().width>760)await page.locator('.v2-sidebar').waitFor({state:'attached'});else await page.locator('.v2-mobile-nav').waitFor();
+    if(page.viewportSize().width>760)await page.getByRole('navigation',{name:'功能导航',exact:true}).waitFor({state:'attached'});else await page.locator('.v2-mobile-nav').waitFor();
     await selectWorkspaceAccount(page,'切换旧版');
     await page.waitForURL(url=>url.pathname==='/'&&url.searchParams.get('frontend')==='legacy');
     await page.getByRole('button',{name:'切换新版',exact:true}).waitFor();

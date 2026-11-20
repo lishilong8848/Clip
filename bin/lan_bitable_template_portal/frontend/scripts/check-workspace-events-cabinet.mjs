@@ -8,6 +8,7 @@ import { preview } from 'vite';
 import { chromium } from 'playwright';
 import { adaptEventPeriodPage } from './workspace-event-adapter.mjs';
 import { adaptCabinetBatchPage } from './workspace-cabinet-adapter.mjs';
+import { layoutApiFixture } from './layout-api-fixture.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const output = path.resolve(root, '../../../output/playwright/workspace-v2');
@@ -52,6 +53,7 @@ const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 const entry=origin+'/assets/workspace-v2/index.html';
 const browser=await chromium.launch({headless:true});
 const requests=[],writes=[],errors=[];
+const layouts=layoutApiFixture();
 let delayedMonth='',failedMonth='',partial=false,created=false;
 let page;
 try{
@@ -59,6 +61,7 @@ try{
   await context.route('**/*',async route=>{
     const req=route.request(),url=new URL(req.url());
     if(url.origin!==origin)return route.abort();
+    if(await layouts.handle(route,'isolated'))return;
     if(!url.pathname.startsWith('/api/'))return route.continue();
     requests.push({path:url.pathname,month:url.searchParams.get('month'),scope:url.searchParams.get('scope')});
     const ok=data=>route.fulfill({json:{ok:true,data}});
@@ -78,7 +81,13 @@ try{
       return ok({rows:body.sources.map(s=>({row_id:'row-'+s.id,text_id:s.id,text_row:1,scope:'A',room:'201',rack:'A01',rack_type:'服务器机柜',action:'上正式电',expected:'2026-10-01 10:00:00',actual:'2026-10-01 10:00:00',result:'成功',issues:[]}))});
     }
     if(url.pathname==='/api/cabinet-power/batches'&&req.method()==='POST'){writes.push(req.postDataJSON());created=true;return ok({batch_id:'isolated-batch'});}
-    if(url.pathname.includes('/api/cabinet-power/batches/isolated-batch'))return ok({batch_id:'isolated-batch',rows:[],scopes:['A'],status:'recognizing',progress:{pages_done:2,pages_total:4},stats:{total:1},images:[]});
+    if(url.pathname==='/api/cabinet-power/batches/isolated-batch')return ok({
+      batch_id:'isolated-batch',scopes:['A'],status:'running',source:'text',images:[],stats:{total:2},
+      rows:[
+        {row_id:'row-complete',scope:'A',room:'202',rack:'A01',status:'completed'},
+        {row_id:'row-writing',scope:'A',room:'202',rack:'A02',status:'writing'},
+      ],
+    });
     return ok({records:[],items:[],scopes:{},stats:{},rows:[],batches:[],total:0,buildings:[],settings:{},data:{}});
   });
   page=await context.newPage();
@@ -86,12 +95,19 @@ try{
   await page.clock.install({time:new Date(now)});
   await page.goto(entry+'?__page=/&mode=events&scope=ALL');
   await page.locator('[data-metric=total] .n-statistic-value__content').filter({hasText:'3'}).waitFor();
-  assert.equal(await page.locator('.event-list-panel').count(),0,'details stay closed until requested');
+  const ledger=page.getByRole('region',{name:'事件明细',exact:true});
+  const eventRows=ledger.locator('.event-row');
+  const analysisView=page.getByRole('button',{name:'运行分析',exact:true});
+  const recordsView=page.getByRole('button',{name:'事件台账',exact:true});
+  await ledger.waitFor();
+  await ledger.getByRole('button',{name:'收起明细',exact:true}).click();
+  await ledger.waitFor({state:'hidden'});
   await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
   await page.getByRole('tab',{name:'本周事件'}).click();
   await page.getByText('2026.09.28 - 2026.10.04',{exact:true}).first().waitFor();
-  await page.locator('.event-list-panel .event-row').filter({hasText:'跨月变压器告警'}).waitFor();
-  assert.equal(await page.locator('.event-list-panel .event-row').count(),3);
+  await eventRows.filter({hasText:'跨月变压器告警'}).waitFor();
+  assert.equal(await eventRows.count(),3);
+  await analysisView.click();
   assert.equal(await page.locator('.v2-event-charts [role=img]').count(),1,'one chart switches dimensions without duplicate charts');
   await page.locator('.v2-event-charts .v2-chart-canvas svg').first().waitFor();
   await page.locator('.v2-event-charts summary').focus();await page.locator('.v2-event-charts summary').press('Enter');
@@ -141,10 +157,10 @@ try{
   await page.getByRole('tab',{name:'本周事件',selected:true}).waitFor();
   await page.getByRole('tab',{name:'本月事件'}).click();
   await page.waitForTimeout(1100);
-  await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
+  await eventRows.filter({hasText:'下周设备告警'}).waitFor();
   assert.equal(await page.locator('.event-list-panel').getByText('跨月变压器告警',{exact:true}).count(),0);
-  await page.locator('.v2-event-detail-toggle button:not([data-v2-action])').waitFor();
-  await page.getByRole('button',{name:'收起事件明细',exact:true}).click();
+  await ledger.getByRole('button',{name:'收起明细',exact:true}).click();
+  await recordsView.waitFor();
   delayedMonth='';
   for(const width of [1280,1366,1440,1920,360,390,430]){
     await page.setViewportSize({width,height:width<700?900:1000});
@@ -162,14 +178,13 @@ try{
   await page.locator('.v2-event-period .n-date-picker').click();
   await page.locator('.n-date-panel').waitFor();await page.keyboard.press('Escape');
   await page.goto(entry+'?__page=/&mode=events&scope=A&period=week');
-  const dateWarning=page.getByText('1 条记录缺少有效的事件发生时间，未计入当前时间范围。',{exact:true});
+  const dateWarning=page.getByText('1 条记录缺少有效的事件发生时间，未计入所选范围。',{exact:true});
   await dateWarning.waitFor();
   assert.equal(await dateWarning.evaluate(el=>Boolean(el.closest('[data-v2-feedback]'))),false,'persistent data-quality warnings stay inline and do not cover mobile actions');
-  await page.getByRole('button',{name:'展开事件明细',exact:true}).click();
   await page.locator('.event-list-panel .event-row').filter({hasText:'跨月变压器告警'}).waitFor();
   assert.equal(await page.locator('.event-list-panel .event-row').count(),2,'building filter stays authorized');
   failedMonth='2026-09';
-  await page.reload();await page.getByText('隔离测试读取失败',{exact:true}).waitFor();
+  await page.reload();await page.getByRole('alert').getByText('隔离测试读取失败',{exact:true}).waitFor();
   assert.equal(await page.locator('[data-metric=total] strong').innerText(),'—');
   assert.equal(await page.locator('.event-list-panel .event-row').count(),0,'partial data is not shown as complete');
   failedMonth='';partial=true;
@@ -185,7 +200,7 @@ try{
   await page.getByRole('heading',{name:'识别结果分布',exact:true}).waitFor();
   assert.equal(writes.filter(w=>w.sources?.[0]?.text==='A楼\t201\tA01\t上正式电').length,1,'one paste triggers one recognition');
   await page.getByRole('textbox',{name:'文本记录包间',exact:true}).fill('202');
-  await page.getByRole('textbox',{name:'搜索粘贴记录',exact:true}).focus();
+  await page.getByRole('searchbox',{name:'搜索粘贴记录',exact:true}).focus();
   await page.getByRole('button',{name:'其他录入方式',exact:true}).click();
   await page.locator('.n-dropdown-menu').getByText('PDF识别',{exact:true}).click();
   await page.getByRole('heading',{name:'上传确认单',exact:true}).waitFor();
@@ -201,7 +216,7 @@ try{
   await page.getByRole('button',{name:/确认并创建待办/}).click();
   await page.getByRole('heading',{name:'上下电待办详情',exact:true}).waitFor();
   assert(created);assert.equal(writes.at(-1).source,'text');assert.equal(writes.at(-1).rows[0].room,'202');
-  await page.locator('.progress-copy .v2-motion-progress[aria-valuenow="50"]').waitFor();
+  await page.getByRole('progressbar',{name:'写入进度',exact:true}).and(page.locator('[aria-valuenow="50"]')).waitFor();
   assert.equal(await page.locator('.progress-copy .v2-progress-value').innerText(),'50%','production cabinet progress uses real API values');
   for(const width of [1440,390]){
     await page.setViewportSize({width,height:900});await page.waitForTimeout(300);
@@ -209,7 +224,7 @@ try{
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false,'cabinet progress stays in its container');
   }
   await context.close();assert.deepEqual(errors,[]);
-  console.log('PASS: Beijing week/month/year boundaries, period counts+list+drawer, aggregate/building scope, stale response guard, missing snapshot/error states, 6 viewports, original cross-month actions; cabinet paste default, single recognition, edits, mode switch, draft restore and original create API. Isolated data only.');
+  console.log('PASS: Beijing week/month/year boundaries, period counts+list+drawer, aggregate/building scope, stale response guard, missing snapshot/error states, 7 viewports, original cross-month actions; cabinet paste default, single recognition, edits, mode switch, draft restore and original create API. Isolated data only.');
 }catch(error){
   if(page&&!page.isClosed()){
     await page.screenshot({path:path.join(output,'events-cabinet-failure.png'),fullPage:true}).catch(()=>{});

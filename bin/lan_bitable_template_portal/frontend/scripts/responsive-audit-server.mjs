@@ -6,6 +6,7 @@ import {coreFixture} from './responsive-audit-core-fixtures.mjs';
 import {collabFixture} from './responsive-audit-collab-fixtures.mjs';
 import {accountFixture} from './responsive-audit-account-fixtures.mjs';
 import {workspaceExtensionFixture} from './workspace-extension-fixtures.mjs';
+import {toolFixture} from './responsive-audit-tool-fixture.mjs';
 
 // Development-only preview: every API is local fixture data, never a production proxy.
 const root=fileURLToPath(new URL('..',import.meta.url));
@@ -13,7 +14,7 @@ const output=path.resolve(root,'../../../output/responsive-audit');
 await mkdir(output,{recursive:true});
 const modules=['event','maintenance','change','repair','polling','adjust','power','engineer_mop','repair_management','critical_guard','risk_inspection','daily','cabinet','water','plan_convergence','drills','learning','knowledge','links','life_guide','signatures','handover','work_handover','assistant','accounts'];
 const scopes=[{value:'ALL',label:'全部授权楼栋'},...['A','B','C','D','E','H','110'].map(value=>({value,label:value==='110'?'110站':value+'楼'}))];
-const user={open_id:'ou_responsive_fixture',name:'布局验收管理员',level:'L0',category:'manager',category_label:'经理',role:'admin',can_manage_accounts:true,can_delete_business:true,modules,home_scope:'A',scopes:scopes.map(s=>s.value),login_method:'password'};
+const user={open_id:'ou_responsive_fixture',name:'演示管理员',tool_management_enabled:true,level:'L0',category:'manager',category_label:'经理',role:'admin',can_manage_accounts:true,can_delete_business:true,modules,home_scope:'A',scopes:scopes.map(s=>s.value),login_method:'password'};
 const layouts=new Map();
 let server;
 const api={name:'isolated-responsive-fixtures',configurePreviewServer(host){host.middlewares.use(async(req,res,next)=>{
@@ -37,7 +38,7 @@ const api={name:'isolated-responsive-fixtures',configurePreviewServer(host){host
       if(req.method==='GET')return ok(saved);
       const following={revision:saved.revision+1,value:body.value};layouts.set(url.pathname,following);return ok(following);
     }
-    for(const fixture of [workspaceExtensionFixture,accountFixture,coreFixture,collabFixture]){
+    for(const fixture of [toolFixture,workspaceExtensionFixture,accountFixture,coreFixture,collabFixture]){
       const result=await fixture({url,method:req.method,body});if(result)return reply(result);
     }
     await appendFile(path.join(output,'unhandled.jsonl'),JSON.stringify({path:url.pathname,query:url.search,method:req.method,page:ref.pathname+ref.search})+'\n');

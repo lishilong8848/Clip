@@ -1,24 +1,15 @@
 <template>
-  <section class="learning-home" :aria-busy="loading" :aria-label="management ? '学习管理工作台' : '个人学习首页'">
+  <LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :exemption-date="exemptionDate" @open="emit('open', $event)" @refresh="emit('refresh')" />
+  <section v-else class="learning-home" :aria-busy="loading" aria-label="学习管理工作台">
     <header v-if="workspaceV2" class="v2-home-header"><h2>{{ management ? '学习管理' : '个人学习' }}</h2><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
     <header :class="{ 'v2-home-desktop-header': workspaceV2 }"><div><span class="eyebrow">{{ management ? '学习管理' : '我的学习' }}</span><h2>{{ management ? '安排学习，跟进完成情况' : `${person?.name || '欢迎回来'}，继续今天的学习` }}</h2><p>{{ management ? '发布、题库与人员进度集中管理。' : '每日题单与当班自主练习一起计入完成情况。' }}</p></div><div class="home-meta"><span class="home-date">{{ date }}</span><button v-if="!management" :disabled="loading" aria-label="刷新学习进度" title="刷新学习进度" @click="emit('refresh')"><RefreshCw :size="17" /></button></div></header>
-    <template v-if="!management">
-      <div v-if="exemptionDate" class="learning-today">
-        <div><h3>入职首月免做</h3><p>{{ exemptionDate }} 起按排班安排每日题单。</p></div>
-        <div class="home-task-actions"><button class="primary" :disabled="loading" @click="emit('open','practice')">自主练习<ChevronRight :size="18" /></button></div>
-      </div>
-      <div v-else class="learning-today">
-        <div><span class="eyebrow">{{ data.today_summary?.task_label || '当班学练' }}</span><h3>{{ loading ? '正在读取学习进度' : failed ? '学习进度暂未更新' : completed ? '当班学习已完成' : total ? '完成今天的学习任务' : selfProgress?.activity_answered ? '今天已有学习记录' : '今天还没有必答题单' }}</h3><p v-if="failed">暂时无法读取最新进度，请重试；也可直接打开题单核对。</p><p v-else-if="total">已答 <strong>{{ answered }}</strong> / {{ total }} 题，{{ completed ? '可以继续练习或复习错题。' : `还需完成 ${Math.max(0,total-answered)} 题。` }}</p><p v-else-if="!loading"><template v-if="selfProgress?.activity_answered">今日已有效首答 {{ selfProgress.activity_answered }} 题；</template>可以继续自主练习，也可以查看已发布的资料练习。</p><progress v-if="total && !failed" :value="Math.min(answered,total)" :max="total" aria-label="今日学练完成进度" /></div>
-        <div class="home-task-actions"><button class="primary" :disabled="loading" @click="emit('open','today')">{{ completed ? '查看每日题单' : answered ? '继续每日题单' : '打开每日题单' }}<ChevronRight :size="18" /></button><button :disabled="loading" @click="emit('open','completion')">查看每日完成</button></div>
-      </div>
-      <div class="home-metrics"><div><span title="每日题单与自主练习的有效首次作答">今日首答</span><strong>{{ metric(data.today_summary?.answered) }}<small>题</small></strong></div><div><span title="今日首次客观题正确率">首答正确率</span><strong>{{ rate(data.today_summary?.accuracy) }}</strong></div><div><span>近7天学习</span><strong>{{ metric(data.summary?.learning_days) }}<small>天</small></strong></div></div>
-    </template>
     <div class="home-entries"><button v-for="entry in entries" :key="entry.id" :disabled="loading" @click="emit('open',entry.id)"><component :is="entry.icon" :size="22" /><span><strong>{{ entry.title }}</strong><small>{{ entry.description }}</small></span><ChevronRight :size="16" /></button></div>
   </section>
 </template>
 <script setup lang="ts">
 import {computed} from 'vue';
-import {BookOpen,ChevronRight,RotateCcw,History,ChartNoAxesCombined,Settings,FileText,Users,MessageSquare,CheckCircle2,RefreshCw} from 'lucide-vue-next';
+import {BookOpen,ChevronRight,History,Settings,Users,MessageSquare,CheckCircle2,RefreshCw} from 'lucide-vue-next';
+import LearningPersonalHome from './LearningPersonalHome.vue';
 import type {Dict} from '../api/client';
 const props=defineProps<{data:Dict;person?:Dict|null;date:string;loading:boolean;failed?:boolean;management?:boolean;isAdmin?:boolean;exemptionDate?:string}>();
 const workspaceV2=document.documentElement.classList.contains('workspace-v2');
@@ -27,20 +18,12 @@ const selfProgress=computed(()=>props.data.people?.find((row:Dict)=>row.person_i
 const total=computed(()=>Number(props.data.today_summary?.assigned)||0),answered=computed(()=>Number(props.data.today_summary?.task_answered)||0);
 const completed=computed(()=>total.value>0&&answered.value>=total.value&&!props.data.today_summary?.has_uncertain_tasks);
 const metric=(value:unknown)=>typeof value==='number'?String(value):'—';
-const rate=(value:unknown)=>typeof value==='number'?`${value.toFixed(1)}%`:'暂无';
-const entries=computed(()=>props.management?[
+const entries=computed(()=>[
   ...(props.isAdmin?[{id:'settings',title:'发布与提醒',description:'白夜班发布时间、发送结果与重试',icon:Settings},{id:'questions',title:'题库管理',description:'维护题目、答案与资料依据',icon:BookOpen}]:[]),
   {id:'completion',title:'完成情况',description:'按人员、日期与班次核对进度',icon:CheckCircle2},
   {id:'sharing',title:'资料练习',description:props.isAdmin?'AI出题、人工录题、导入与发布':'查看已发布的练习',icon:Users},
   {id:'issues',title:workspaceV2?'题目反馈':'题目质疑',description:'查看各楼栋的反馈和处理进度',icon:MessageSquare},
   {id:'history',title:'学习记录',description:'查阅题单与作答情况',icon:History},
-]:[
-  {id:'practice',title:'自主练习',description:'继续本次练习，或开启新一轮',icon:BookOpen},
-  {id:'review',title:'复习中心',description:'错题、收藏与笔记集中回顾',icon:RotateCcw},
-  {id:'sharing',title:'资料练习',description:'完成分配给自己的分享会练习',icon:FileText},
-  {id:'history',title:'学习记录',description:'查看题单、首答与复习记录',icon:History},
-  {id:'profile',title:'学习画像',description:'查看趋势与薄弱知识点',icon:ChartNoAxesCombined},
-  {id:'issues',title:'题目反馈',description:'查看各楼栋的反馈和处理进度',icon:MessageSquare},
 ]);
 </script>
 <style scoped>

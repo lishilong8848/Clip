@@ -1,3 +1,4 @@
+import {openWorkspaceEntry} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -208,7 +209,7 @@ try {
   assert.match(overview.page.url(),/water_view=records/);
   await overview.page.reload();
   await overview.page.getByRole('button',{name:'填写A楼生活水表'+day}).waitFor();
-  await overview.page.locator('.v2-sidebar').getByText('水耗管理',{exact:true}).click();
+  await openWorkspaceEntry(overview.page,'water');
   await overview.page.getByRole('button',{name:'查看A楼水耗记录',exact:true}).waitFor();
   assert.equal(await overview.page.locator('.water-record-table').count(),0,'returning via module entry always shows overview even after remembering a building');
   await overview.ctx.close();

@@ -345,7 +345,7 @@
 
 <script setup lang="ts">
 import { assistantProgressText } from '../assistantProgress';
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
+import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
 import type { Chat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
@@ -359,6 +359,7 @@ import AnimatedReply from '../workspace-v2/AnimatedReply.vue';
 import LighthouseArtifactPreview from './LighthouseArtifactPreview.vue';
 import LighthouseDownloads from './LighthouseDownloads.vue';
 import LighthouseQuestion from './LighthouseQuestion.vue';
+import LighthouseDeskFiles from '../workspace-v2/LighthouseDeskFiles.vue';
 import LoadingIndicator from './LoadingIndicator.vue';
 import AsyncPageState from './AsyncPageState.vue';
 import LighthouseBot from './LighthouseBot.vue';
@@ -384,6 +385,7 @@ const LighthouseStructuredField = defineAsyncComponent({
 });
 
 const props = withDefaults(defineProps<{ userName: string; userId?: string }>(), { userName: '', userId: '' });
+const pageHost = inject('lighthouse-page-host', ref<HTMLElement | null>(null));
 const appearance = ref(normalizeBot(readAppearanceCache())), appearanceOpen = ref(false), appearanceLoading = ref(false);
 const previewAppearance = ref({ ...appearance.value });
 const shownAppearance = computed(() => appearanceOpen.value ? { ...previewAppearance.value, snap_back: appearance.value.snap_back } : appearance.value);
@@ -837,6 +839,14 @@ function onNoticeEdition(id: string): void { if (noticeEdition && id !== noticeE
 const panelResizing = ref(false), dragActive = ref(false), resizeActive = ref(false);
 let panelResizeTimer = 0, panelResizeSerial = 0;
 const conversationSize = ref({ w: CONV_DEFAULT_W, h: CONV_DEFAULT_H });
+const deskRestoreSize = ref<{ w: number; h: number } | null>(null);
+function toggleDeskSize(): void {
+  const previous = deskRestoreSize.value;
+  deskRestoreSize.value = previous ? null : { ...conversationSize.value };
+  applyConversationSize(previous || { w: conversationWidthLimit.value, h: window.innerHeight });
+  saveConversationSize();
+  void nextTick(ensureInBounds);
+}
 const conversationWidth = computed(() => clampConversationSize(conversationSize.value).w);
 const conversationHeight = computed(() => clampConversationSize(conversationSize.value).h);
 const resizeFromLeft = ref(true);
@@ -873,7 +883,7 @@ function expectedPanelSize(): { w: number; h: number } {
   return { w: Math.min(w, conversationWidthLimit.value || Infinity, window.innerWidth - 50) + sideWidth.value + 2, h: Math.min(h, window.innerHeight - (window.innerWidth <= 700 ? 112 : 48)) };
 }
 watch([sideWidth], async () => {
-  if (!open.value || disposed || !root.value) return;
+  if (!open.value || disposed || !root.value || pageHost.value) return;
   const epoch = shapeEpoch, serial = ++panelResizeSerial, rect = root.value.getBoundingClientRect();
   const { w, h } = expectedPanelSize();
   const botRect = launcher.value?.getBoundingClientRect();
@@ -1977,6 +1987,38 @@ function confirmPanelExit(yes: boolean): void {
   panelExitOpen.value = false;
   if (yes) close();
 }
+const pageExitAction = shallowRef<(() => void) | null>(null);
+const hasPageDraft = computed(() => Boolean(draft.value.trim() || draftFiles.value.length || selectedCommands.value.length ||
+  [...planTurns.value.values()].some(({plan}) => plan?.status === 'needs_input' && (plan.fields || []).some((field: Dict) => {
+    const key = plan.id + ':' + field.name;
+    return key in planValues && JSON.stringify(planValues[key]) !== JSON.stringify(field.value);
+  }))));
+const pageWritePending = computed(() => settingBusy.value || uploading.value || Object.values(planBusy).some(Boolean));
+const needsPageGuard = computed(() => Boolean(pageHost.value && (pageWritePending.value || hasPageDraft.value || settingsOpen.value && isDirty())));
+function allowPageExit(proceed: () => void): boolean {
+  if (!needsPageGuard.value) return true;
+  if (pageWritePending.value) {
+    error.value = '请等待当前保存、上传或业务操作返回后再离开。';
+    return false;
+  }
+  pageExitAction.value = proceed;
+  return false;
+}
+function resolvePageExit(leave: boolean): void {
+  const proceed = pageExitAction.value;
+  pageExitAction.value = null;
+  if (leave && proceed) { saveDrafts(); proceed(); }
+}
+function guardPageUnload(event: BeforeUnloadEvent): void {
+  event.preventDefault();
+  event.returnValue = '';
+}
+watch(needsPageGuard, (needed, _, onCleanup) => {
+  if (!needed) return;
+  window.addEventListener('beforeunload', guardPageUnload);
+  onCleanup(() => window.removeEventListener('beforeunload', guardPageUnload));
+}, {flush:'sync'});
+defineExpose({ needsPageGuard, allowPageExit });
 async function saveModel(): Promise<void> {
   if (busy.value || !editProfile.value || !canSaveProfile.value) return;
   const p = editProfile.value;
@@ -2159,6 +2201,7 @@ function migrateLegacyPos(): void {
   if (loadStoredPos('panel') === null) saveStoredPos('panel', legacy.x, legacy.y);
 }
 function saveOpenState(): void {
+  if (pageHost.value) return;
   try { window.sessionStorage.setItem(storageKey() + ':open', String(open.value)); } catch { /* private mode */ }
 }
 function clampPosForSize(x: number, y: number, w: number, h: number): { x: number; y: number } {
@@ -2195,6 +2238,7 @@ function resetRootToCssDefault(): void {
   el.style.bottom = '';
 }
 function applyPanelPosition(): void {
+  if (pageHost.value) return;
   const el = root.value;
   if (!el) return;
   placeBesideLauncher();
@@ -2203,6 +2247,7 @@ function applyPanelPosition(): void {
   ensureInBounds();
 }
 function placeBesideLauncher(): void {
+  if (pageHost.value) return;
   const actual = launcher.value?.getBoundingClientRect();
   if (!actual || window.innerWidth <= 700) { panelWidthLimit.value = null; return; }
   const size = shownAppearance.value.size;
@@ -2221,6 +2266,7 @@ function placeBesideLauncher(): void {
   applyRootPos();
 }
 function ensureInBounds(): void {
+  if (pageHost.value) return;
   const el = root.value;
   if (!el || disposed || !open.value) return;
   const { w, h } = panelSize();
@@ -2487,6 +2533,19 @@ function selectSidebarTab(tab: 'notices' | 'knowledge'): void {
   sidebarUserOpened.value = true;
 }
 
+let placementReady = false;
+watch(pageHost, (host, previous) => {
+  if (!placementReady || disposed) return;
+  if (host) {
+    stopGesture();
+    resetRootToCssDefault();
+    if (!open.value) void openAssistant();
+  } else if (previous) {
+    pageExitAction.value = null;
+    workspaceOpen.value = false;
+    close();
+  }
+}, { flush: 'post' });
 onMounted(async () => {
   window.addEventListener('pagehide', saveDrafts);
   document.addEventListener('visibilitychange', resumeStreamRendering);
@@ -2504,7 +2563,9 @@ onMounted(async () => {
   }
   // Clamp only the visible shape, using its real dimensions after layout.
   await nextTick();
-  if (restoreOpen) {
+  placementReady = true;
+  if (pageHost.value) open.value = true;
+  else if (restoreOpen) {
     placeBesideLauncher(); open.value = true;
     await nextTick(); applyPanelPosition();
   }

@@ -78,7 +78,7 @@ export function adaptPageFilters(source, filename) {
       const offset=node.loc.start.offset+node.loc.source.indexOf('>',end)+1;
       edits.push([offset,offset,file==='TaskWorkspace.vue'?'<WorkspaceScopePicker v-if="!embedded" />':'<WorkspaceScopePicker />']);scopeAdded=true;
     }
-    if(node.tag==='h1'&&!overlay&&!node.props.some(p=>p.name==='data-v2-module-title')&&(['CabinetPowerPage.vue','CriticalGuardPage.vue','DrillManagementPage.vue','DailyTaskChecklistPage.vue','AdminTools.vue'].includes(file)||/^(?:画像学练|检修办理|水耗管理|机柜管理|演练管理|风险与重保|重保管理|共享知识库|多维表导航|签名管理|统一签名管理|每日任务|历史记忆|计划收敛审查|账号与权限|管理员设置|通告办理|个人工作台)$/.test(node.children?.map(n=>n.content||'').join('').trim())||node.loc.source.includes('personaTitles'))){
+    if(node.tag==='h1'&&!overlay&&!node.props.some(p=>['data-v2-module-title','data-v2-page-title'].includes(p.name))&&(['CabinetPowerPage.vue','CriticalGuardPage.vue','DrillManagementPage.vue','DailyTaskChecklistPage.vue','AdminTools.vue'].includes(file)||/^(?:画像学练|检修办理|水耗管理|机柜管理|演练管理|风险与重保|重保管理|共享知识库|多维表导航|签名管理|统一签名管理|每日任务|历史记忆|计划收敛审查|账号与权限|管理员设置|通告办理|个人工作台)$/.test(node.children?.map(n=>n.content||'').join('').trim())||node.loc.source.includes('personaTitles'))){
       edits.push([node.loc.start.offset+3,node.loc.start.offset+3,' data-v2-module-title']);
     }
     for (const child of node.children || []) visit(child, overlay);

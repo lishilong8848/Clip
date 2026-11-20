@@ -1,32 +1,71 @@
 <template>
-  <section class="v2-work-order" aria-label="工单执行">
-    <header><div><p>{{ state?.role_label }}<span v-if="state?.assigned_person?.name"> · {{ state.assigned_person.name }}</span></p><h1>{{ state?.title || '工单执行' }}</h1><p>{{ state?.sop_name }}</p></div><NButton v-if="stepsView" data-v2-navigation :disabled="busy" @click="back"><ArrowLeft :size="16" />返回工单</NButton><NButton :loading="loading" :disabled="busy" @click="load"><RefreshCw :size="16" />刷新</NButton></header>
-    <NAlert v-if="error" role="alert" type="error" :bordered="false">{{ error }}</NAlert>
-    <NSkeleton v-if="!state&&loading" :repeat="3" height="100px" />
+  <section class="serenity-desk order-desk" aria-label="工单办理">
+    <header class="order-mast">
+      <span class="order-emblem" aria-hidden="true"><ClipboardList :size="25"/></span>
+      <div><p>{{ state?.role_label || '现场工单' }}<template v-if="state?.assigned_person?.name"> · {{ state.assigned_person.name }}</template></p>
+        <h1>{{ state?.title || '工单办理' }}</h1></div>
+      <div class="order-tools">
+        <NButton v-if="stepsView" :disabled="busy" @click="back"><ArrowLeft :size="16"/>返回工单</NButton>
+        <NButton :disabled="loading||busy" @click="load"><RefreshCw :size="16"/>刷新</NButton>
+      </div>
+    </header>
+    <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
+    <NSkeleton v-if="!state && loading" text :repeat="3"/>
     <template v-if="state">
-      <NAlert v-if="['completed','upload_pending','cancelled','stopped'].includes(state.state)" :type="state.state==='completed'?'success':'info'" :bordered="false">{{ stateLabel }}<NButton v-if="state.state==='upload_pending'" :disabled="busy" :loading="busy" @click="retryUpload">重试上传工单表格</NButton></NAlert>
-      <template v-if="!stepsView">
-        <NButton v-if="state.can_release_selection" :disabled="busy" @click="act('release',{run_index:state.current_run_index})">取消当前选择</NButton>
-        <div class="v2-order-list"><NCard v-for="order in state.work_orders||[]" :key="order.run_index" :title="'工单 '+order.run_index" size="small"><p>{{ order.label }}</p><NProgress type="line" :percentage="order.step_count ? Math.round(order.completed_steps/order.step_count*100):0" /><p>已完成 {{ order.completed_steps }} / {{ order.step_count }} 步</p><NButton type="primary" :disabled="busy||!order.selectable" :loading="busy" @click="activate(order)">{{ order.state==='completed'?'已完成':order.state==='locked'?'其他工单执行中':'进入步骤' }}</NButton></NCard></div>
-      </template>
-      <div v-else class="v2-order-steps"><NCard v-for="step in state.steps||[]" :key="step.step_key" size="small" :class="{'is-current':step.position==='current'}" :title="'第 '+step.step_index+' 步'"><template #header-extra><NTag :type="step.position==='current'?'info':'default'" size="small">{{ step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步' }}</NTag></template><p class="v2-order-content">{{ step.content }}</p><div class="v2-order-checks"><NTag v-for="role in roles" :key="role.key" :type="step[role.key+'_confirmed']?'success':'default'" size="small">{{ role.label }}{{ !step[role.key+'_required']?'无需确认':step[role.key+'_confirmed']?'已确认':'待确认' }}</NTag><NTag size="small">{{ step.photos?.length ? step.photos.length+' 项操作凭据':step.photo_required===false?'无需照片':'待上传照片' }}</NTag></div><div class="v2-order-photos"><a v-for="photo in step.photos||[]" :key="photo.photo_id" :href="photoUrl(photo)" :download="isAttachment(photo) ? photo.name || '操作附件' : undefined" target="_blank" rel="noopener noreferrer"><span v-if="isAttachment(photo)" class="v2-order-file">附件 · {{ photo.name || '下载文件' }}</span><img v-else-if="photoUrl(photo)" :src="photoUrl(photo)" :alt="photo.name||'操作照片'" loading="lazy" /></a></div>
-          <template v-if="step.position==='current'&&state.state==='active'">
-            <label v-if="!step.reviewer_confirmed&&(state.role==='reviewer'||!step.operator_confirmed)" class="v2-order-upload"><ImagePlus :size="18" />添加操作照片<input type="file" accept="image/*,.heic,.heif,.avif" capture="environment" :disabled="busy" @change="upload(step,$event)" /></label>
-            <div class="v2-order-actions"><NButton type="primary" :disabled="busy||!!blockReason(step)" :loading="busy" @click="act('confirm',{step_key:step.step_key})">{{ blockReason(step)||'确认当前步骤（'+state.role_label+'）' }}</NButton><NButton v-if="state.role==='reviewer'&&state.can_rollback_previous" type="error" secondary :disabled="busy" @click="rollback(step)">回退上一步</NButton></div>
-          </template>
-        </NCard></div>
+      <NAlert v-if="state.state!=='active'" :type="state.state==='completed'?'success':'info'">{{ stateLabel }}
+        <NButton v-if="state.state==='upload_pending'" :disabled="busy" @click="retryUpload">重试上传工单表格</NButton>
+      </NAlert>
+      <section v-if="!stepsView" aria-label="工单列表">
+        <header class="order-section"><h2>选择工单 <small>{{ state.work_orders?.length || 0 }} 张</small></h2>
+          <span>{{ state.sop_name }}</span>
+          <NButton v-if="state.can_release_selection" :disabled="busy" @click="act('release',{run_index:state.current_run_index})">取消当前选择</NButton></header>
+        <div class="run-deck"><article v-for="order in state.work_orders" :key="order.run_index" class="run-card">
+          <header><strong>{{ order.label }}</strong><span>{{ runStates[order.state] || order.state }}</span></header>
+          <p v-if="order.from_unit || order.to_unit">{{ [order.from_unit,order.to_unit].filter(Boolean).join(' → ') }}</p>
+          <div class="run-actions"><div class="order-meter"><progress :max="order.step_count || 1" :value="order.completed_steps" :aria-label="order.label+' 完成进度'"></progress>
+            <span>{{ order.completed_steps }} / {{ order.step_count }} 步</span></div>
+            <NButton v-if="order.selectable" :disabled="busy" type="primary" @click="activate(order)">进入步骤</NButton></div>
+        </article></div>
+      </section>
+      <section v-else aria-label="工单步骤">
+        <header class="order-section"><h2>{{ activeProgress?.label || state.sop_name || '执行步骤' }}</h2>
+          <span v-if="activeProgress">已完成 {{ activeProgress.completed_steps }} / {{ activeProgress.step_count }} 步</span></header>
+        <div class="order-timeline">
+          <article v-for="step in state.steps" :key="step.step_key" :data-position="step.position" :aria-current="step.position==='current'?'step':undefined">
+            <header class="step-heading"><span>{{ step.step_index }}</span>
+              <div><small>{{ step.position==='current'?'当前步骤':step.position==='previous'?'上一步':'下一步' }}</small><h3>{{ step.content }}</h3></div></header>
+            <div class="step-proof"><span v-for="role in roles" :key="role.key" :data-confirmed="!!step[role.key+'_confirmed']">
+              <Check v-if="step[role.key+'_confirmed']" :size="13"/>{{ role.label }} · {{ !step[role.key+'_required']?'无需确认':step[role.key+'_confirmed']?'已确认':'待确认' }}</span></div>
+            <div v-if="step.photos?.length" class="v2-order-photos">
+              <template v-for="photo in step.photos" :key="photo.photo_id"><a v-if="photoUrl(photo)" :href="photoUrl(photo)" :download="isAttachment(photo)?photo.name||'操作附件':undefined" target="_blank" rel="noopener noreferrer">
+                <span v-if="isAttachment(photo)">附件 · {{ photo.name || '下载文件' }}</span><img v-else :src="photoUrl(photo)" :alt="photo.name||'操作照片'" loading="lazy"/></a></template></div>
+            <footer v-if="step.position==='current'&&state.state==='active'">
+              <label v-if="!step.reviewer_confirmed&&(state.role==='reviewer'||!step.operator_confirmed)" class="v2-order-upload"><ImagePlus :size="17"/>添加操作照片
+                <input type="file" accept="image/*,.heic,.heif,.avif" capture="environment" :disabled="busy" @change="upload(step,$event)"/></label>
+              <NButton type="primary" :disabled="busy||!!blockReason(step)" @click="act('confirm',{step_key:step.step_key})">{{ blockReason(step)||'确认当前步骤（'+state.role_label+'）' }}</NButton>
+              <NButton v-if="state.role==='reviewer'&&state.can_rollback_previous" secondary type="error" :disabled="busy" @click="rollbackStep=step.step_key">回退上一步</NButton>
+            </footer>
+          </article>
+        </div>
+      </section>
     </template>
+    <ConfirmDialog :open="!!rollbackStep" tone="danger" title="回退上一步"
+      message="上一步和当前步骤的确认记录、操作照片将被清空，需要重新执行并确认。"
+      confirm-label="确认回退" @resolve="resolveRollback"/>
   </section>
 </template>
 <script setup lang="ts">
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
-import {NAlert,NButton,NCard,NProgress,NSkeleton,NTag,useDialog} from 'naive-ui';
-import {ArrowLeft,ImagePlus,RefreshCw} from 'lucide-vue-next';
+import {NAlert,NButton,NSkeleton} from 'naive-ui';
+import {ArrowLeft,Check,ClipboardList,ImagePlus,RefreshCw} from 'lucide-vue-next';
+import ConfirmDialog from '../components/ConfirmDialog.vue';
 import {ApiError,requestJson,requestBinaryJson,type Dict} from './client';
 import {navigate,registerNavigationGuard} from './navigation';
-const props=defineProps<{url:string}>(),dialog=useDialog();
+const props=defineProps<{url:string}>();
 const url=new URL(props.url,location.origin),token=url.searchParams.get('token')||'',stepsView=url.pathname.endsWith('/steps');
-const state=ref<Dict|null>(null),error=ref(''),busy=ref(false),loading=ref(false),now=ref(Date.now());
+const state=ref<Dict|null>(null),error=ref(''),busy=ref(false),loading=ref(false),now=ref(Date.now()),rollbackStep=ref('');
+const runStates: Record<string,string> = {completed:'已完成',active:'办理中',available:'可办理',locked:'等待其他工单'};
+const activeProgress=computed(()=>state.value?.work_orders?.find((run:Dict)=>run.run_index===state.value?.current_run_index));
 const roles=[{key:'operator',label:'操作人'},{key:'reviewer',label:'现场审核人'}];
 let receivedAt=Date.now(),timer=0,clock=0,abort:AbortController|undefined,disposed=false,forbidden=false;
 const overview='/polling-work-order?token='+encodeURIComponent(token);
@@ -70,9 +109,15 @@ async function act(action:string,fields:Dict):Promise<boolean>{
 }
 async function activate(order:Dict){if(order.selectable&&await act('activate',{run_index:order.run_index}))navigate('/polling-work-order/steps?'+new URLSearchParams({token,run_index:String(state.value?.current_run_index||order.run_index)}));}
 async function back(){if(busy.value)return;if(state.value?.can_release_selection&&!await act('release',{run_index:state.value.current_run_index}))return;navigate(overview);}
-function rollback(step:Dict){
-  if(state.value?.role!=='reviewer'||!state.value.can_rollback_previous||busy.value)return;
-  dialog.warning({title:'回退上一步',content:'上一步和当前步骤的确认记录、操作照片将被清空，需要重新执行并确认。',positiveText:'确认回退',negativeText:'取消',onPositiveClick:async()=>{return await act('rollback',{step_key:step.step_key});}});
+function resolveRollback(confirmed:boolean){
+  const stepKey=rollbackStep.value;
+  rollbackStep.value='';
+  if(!confirmed||state.value?.role!=='reviewer'||busy.value)return;
+  if(!state.value.can_rollback_previous||!state.value.steps?.some((step:Dict)=>step.position==='current'&&step.step_key===stepKey)){
+    error.value='工单步骤已变化，请核对当前步骤后再回退。';
+    return;
+  }
+  void act('rollback',{step_key:stepKey});
 }
 async function upload(step:Dict,event:Event){
   const input=event.target as HTMLInputElement,file=input.files?.[0];input.value='';
@@ -93,6 +138,21 @@ const stopGuard=registerNavigationGuard(()=>!busy.value);
 onMounted(()=>{visibility();document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;stopGuard();abort?.abort();window.clearTimeout(timer);window.clearInterval(clock);document.removeEventListener('visibilitychange',visibility);});
 </script>
-<style>
-.v2-work-order{max-width:1080px;margin:0 auto;padding:24px 0}.v2-work-order>header{display:flex;align-items:center;gap:12px;margin-bottom:20px}.v2-work-order>header>div{flex:1;min-width:0}.v2-work-order h1{font-size:22px;line-height:1.5;margin:0;overflow-wrap:anywhere}.v2-work-order p{font-size:14px;line-height:1.8}.v2-work-order>header p{color:var(--v2-muted);margin:6px 0}.v2-order-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-top:16px}.v2-order-steps{display:grid;gap:16px;margin-top:16px}.v2-order-steps .is-current{border-color:var(--v2-blue)}.v2-order-content{white-space:pre-wrap;overflow-wrap:anywhere}.v2-order-checks,.v2-order-actions,.v2-order-photos{display:flex;gap:10px;flex-wrap:wrap;margin-top:12px}.v2-order-photos a{max-width:100%;overflow-wrap:anywhere}.v2-order-file{display:inline-block;padding:6px 10px;border:1px solid var(--v2-border);border-radius:6px}.v2-order-photos img{width:100px;height:80px;object-fit:contain;border:1px solid var(--v2-border);border-radius:6px}.v2-order-upload{position:relative;display:flex;align-items:center;gap:8px;border:1px dashed #adc5df;border-radius:6px;padding:12px;margin-top:14px;cursor:pointer}.v2-order-upload input{position:absolute;inset:0;opacity:0;width:100%;cursor:pointer}.v2-work-order .n-button__content{gap:6px}.v2-work-order .n-alert{margin-bottom:16px}@media(max-width:760px){.v2-work-order{padding:12px 0}.v2-work-order>header{flex-wrap:wrap}.v2-work-order>header>div{flex-basis:100%}.v2-work-order h1{font-size:18px}.v2-order-actions .n-button{min-height:44px;white-space:normal}}
+<style scoped>
+.order-desk{max-width:1160px;margin-inline:auto;color:var(--v2-ink);padding:clamp(10px,2vw,25px);display:grid;gap:18px}
+.order-mast,.order-section,.run-card header,.order-tools,.order-meter,.step-heading,.step-proof,.order-timeline footer,.v2-order-upload,.v2-order-photos{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+.order-mast{padding-bottom:13px;border-bottom:1px solid var(--soft-edge)}.order-mast p,.run-card p{margin:0;color:var(--v2-muted)}.order-mast h1{font:700 clamp(21px,3vw,32px)/1.35 var(--soft-title);margin:3px 0 0}.order-tools{margin-left:auto}
+.order-emblem,.step-heading>span{display:grid;place-items:center;width:43px;height:43px;border-radius:14px;background:var(--soft-mint);color:var(--v2-blue);box-shadow:var(--soft-key)}
+.order-section{margin-bottom:12px}.order-section h2{font-size:18px;margin:0}.order-section small,.order-section>span,.step-heading small,.order-meter span{color:var(--v2-muted);font-size:12px;font-weight:500}
+.run-deck,.order-timeline{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,235px),1fr));gap:12px;align-items:start}
+.run-card,.order-timeline article{border-radius:16px;background:var(--soft-face);box-shadow:var(--soft-raised);padding:16px;display:grid;gap:12px;min-width:0}
+.run-card{padding:12px;gap:8px}
+.run-card header{justify-content:space-between}.run-card header>span,.step-proof span{font-size:12px;color:var(--v2-muted)}
+.run-actions{display:flex;align-items:center;gap:8px}.order-meter{flex:1;min-width:0;gap:5px}.order-meter progress{accent-color:var(--v2-blue);height:7px;width:min(155px,55%)}.order-meter span{white-space:nowrap}.run-actions .n-button{flex:none}
+.order-timeline article[aria-current=step]{border-top:3px solid var(--v2-blue);grid-column:span 2}
+.step-heading{align-items:start;flex-wrap:nowrap}.step-heading>span{flex:none;width:31px;height:31px;border-radius:50%;font-weight:700}.step-heading h3{font-size:16px;font-weight:600;line-height:1.55;white-space:pre-wrap;overflow-wrap:anywhere;margin:3px 0}
+.step-proof span{display:inline-flex;gap:3px;align-items:center}.step-proof [data-confirmed=true]{color:var(--v2-blue)}
+.v2-order-upload{position:relative;cursor:pointer;border-radius:8px;background:var(--soft-field);padding:6px 9px;color:var(--v2-blue)}.v2-order-upload:focus-within{outline:2px solid currentColor}.v2-order-upload input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.v2-order-photos img{max-width:100px;height:70px;object-fit:contain;border-radius:9px}
+@media(max-width:690px){.order-timeline{grid-template-columns:minmax(0,1fr)}.order-timeline article[aria-current=step]{grid-column:auto}.order-tools{margin-left:0}.order-mast{align-items:flex-start}.order-mast h1{font-size:21px}.order-mast>div:not(.order-tools){flex:1;min-width:150px}}
 </style>

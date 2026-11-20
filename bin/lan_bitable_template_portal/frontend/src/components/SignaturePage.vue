@@ -346,7 +346,7 @@ function resizeCanvas(): void {
 function pointFromEvent(event: PointerEvent): { x: number; y: number } {
   const canvas = canvasRef.value;
   const rect = canvas?.getBoundingClientRect();
-  if (canvas && rect && linkMode.value && window.matchMedia("(max-width: 760px) and (orientation: portrait)").matches) {
+  if (canvas && rect && canvas.dataset.orientation !== "upright" && linkMode.value && window.matchMedia("(max-width: 760px) and (orientation: portrait)").matches) {
     const cssWidth = canvas.clientWidth || rect.height || 1;
     const cssHeight = canvas.clientHeight || rect.width || 1;
     const x = (event.clientY - rect.top) * (cssWidth / Math.max(1, rect.height));

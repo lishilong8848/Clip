@@ -1,0 +1,29 @@
+/* Modules using teleports keep their own dialog selectors. */
+.workspace-v2 .guard-station .gd-head,.workspace-v2 .gd-dialog .gd-head,
+.workspace-v2 .guard-station .gd-actions,.workspace-v2 .gd-head__tools,
+.workspace-v2 .guard-station .gd-top__meta,.workspace-v2 .gd-dialog footer {
+  display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;
+}
+.workspace-v2 .guard-station .gd-head h2,.workspace-v2 .gd-dialog h2 {margin:0;flex:1 1 12rem}
+.workspace-v2 .guard-station .gd-stat,.workspace-v2 .gd-dialog .gd-stat {font-size:12px;color:var(--v2-muted)}
+.workspace-v2 .guard-station .gd-publish {display:grid;gap:12px}
+.workspace-v2 .guard-station .gd-publish__body {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(215px,100%),1fr));gap:12px;align-items:start}
+.workspace-v2 .guard-station .gd-form-group {min-width:0;border:0;padding:0;margin:0}
+.workspace-v2 .guard-station .gd-publish__grid {display:flex;flex-wrap:wrap;gap:5px 10px}
+.workspace-v2 .guard-station .gd-field--check {display:inline-flex;align-items:center;gap:5px;min-height:32px}
+.workspace-v2 .guard-station :is(article,header,fieldset,section) {min-width:0}
+.workspace-v2 .guard-station .gd-footer {flex-wrap:wrap}
+.workspace-v2 :is(.gd-dialog,.gd-lightbox) {width:min(760px,calc(100vw - 24px));max-height:90dvh;overflow:auto;overscroll-behavior:contain;background:var(--soft-face);color:var(--v2-ink);border-radius:16px}
+.workspace-v2 .gd-dialog .gd-dialog__list {border:0;margin:0;padding:0;min-width:0}
+.workspace-v2 .gd-dialog .gd-tpl-row {display:grid;grid-template-columns:auto minmax(74px,.5fr) minmax(100px,1fr) auto;align-items:end;gap:8px;border-bottom:1px solid var(--soft-edge);padding:8px 0}
+.workspace-v2 .gd-dialog .gd-tpl-row>label {min-width:0;display:grid}
+.workspace-v2 .gd-dialog footer span {margin-right:auto;color:var(--v2-muted)}
+.workspace-v2 .gd-lightbox img {max-width:100%;max-height:74dvh;object-fit:contain}
+.workspace-v2 .guard-signature-drawer {color:var(--v2-ink);background:var(--soft-face)}
+.workspace-v2 .guard-signature-drawer .drawer-header strong {white-space:normal;overflow-wrap:anywhere}
+@media(max-width:540px){.workspace-v2 .gd-dialog .gd-tpl-row{grid-template-columns:1fr auto}.workspace-v2 .gd-dialog .gd-tpl-row>label{grid-column:1}.workspace-v2 .gd-dialog .gd-tpl-row__index{display:none}.workspace-v2 .gd-dialog .gd-tpl-row>button{grid-column:2;grid-row:span 2}.workspace-v2 .gd-head__tools{justify-content:flex-start}}
+
+.workspace-v2 .serenity-decision:has(.gd-decision-submit) {display:flex;align-items:center;flex-wrap:wrap;gap:8px 12px}
+.workspace-v2 .serenity-decision:has(.gd-decision-submit)>header,.workspace-v2 .serenity-decision:has(.gd-decision-submit)>ul {width:100%}
+.workspace-v2 .serenity-decision:has(.gd-decision-submit)>p {flex:1 1 155px;margin:0;overflow-wrap:anywhere}
+.workspace-v2 .serenity-decision:has(.gd-decision-submit)>footer {margin:0;gap:6px}
