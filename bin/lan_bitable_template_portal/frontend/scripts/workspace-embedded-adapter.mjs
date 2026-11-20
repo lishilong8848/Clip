@@ -25,7 +25,7 @@ export function adaptEmbeddedNavigation(source,filename){
   if(filename.endsWith('/CriticalGuardPage.vue')||filename.endsWith('/SignaturePage.vue')||filename.endsWith('/DrillManagementPage.vue')){
     const signature=filename.endsWith('/SignaturePage.vue');
     const drill=filename.endsWith('/DrillManagementPage.vue');
-    const busy=signature?'saving.value':drill?'busy.value':'saving.value||sourceFileUploading.value';
+    const busy=signature?'saving.value':drill?'writing.value':'saving.value||sourceFileUploading.value';
     const dirty=signature?'hasInk.value':drill?'hasUnsavedChanges.value':'dirty.value';
     const confirm=signature?"embeddedLeaveDialog.warning({title:'签名尚未保存',content:'离开将丢弃本次手写签名。',positiveText:'放弃并离开',negativeText:'继续签名',onPositiveClick:proceed});"
       :drill?'requestDiscardChanges("离开会放弃当前未保存修改。", proceed);':'requestSwitch(proceed);';

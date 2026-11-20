@@ -298,26 +298,51 @@ const noticesByDay = computed(()=>{
   return days;
 });
 
-const weather = ref<{temp:number|null;humidity:number|null;description:string;hourly:{stamp:number;temp:number}[]}>();
+const weather = ref<{temp:number|null;humidity:number|null;description:string;minimum:number|null;maximum:number|null;
+  observedAt?:number;hourly:{stamp:number;temp:number}[]}>();
 const weatherBusy = ref(false);
 const selectedWeekday = computed(()=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,weekday:'long'}).format(new Date(selected.value+'T12:00:00+08:00')));
 const condition=(description:string)=>description.includes('雪')?'snow':/雨|雷/.test(description)?'rain':
   /多云|晴间/.test(description)?'partly':/晴/.test(description)?'sun':'cloud';
 const icons={snow:CloudSnow,rain:CloudRain,partly:CloudSun,sun:Sun,cloud:Cloud};
 const currentCondition=computed(()=>condition(weather.value?.description||''));
-const forecastHours=10*3600000;
+const weatherHour=3600000;
+const firstForecastHour=computed(()=>Math.floor(props.clock/weatherHour)*weatherHour+weatherHour);
 const weatherTime=(stamp:number)=> (dayKey(stamp)===today.value?'':'次日 ')+dayTime(stamp);
+const hourForecast=computed(()=>weather.value?.hourly.find(point=>point.stamp>=firstForecastHour.value-weatherHour&&point.stamp<=firstForecastHour.value));
+const weatherTemperature=computed(()=>{
+  const current=weather.value;
+  const temp=current?.temp??hourForecast.value?.temp;
+  if(temp!=null)return temp+'°C';
+  return current?.minimum!=null&&current.maximum!=null?current.minimum+'–'+current.maximum+'°C':'';
+});
+const weatherCaption=computed(()=>{
+  const current=weather.value;
+  if(!current)return '';
+  const time=current.temp!=null&&current.observedAt?dayTime(current.observedAt)+' 实况'
+    :current.temp==null&&hourForecast.value?weatherTime(hourForecast.value.stamp)+' 预报'
+    :current.temp==null&&weatherTemperature.value?'今日预报':'';
+  return [time,current.description,current.humidity!=null?'湿度 '+current.humidity+'%':''].filter(Boolean).join(' · ');
+});
 const weatherTrend=computed(()=>{
   if(!weather.value)return;
-  const now=props.clock, until=now+forecastHours;
-  const samples=weather.value.hourly.filter(point=>point.stamp>=now&&point.stamp<=until);
+  const start=firstForecastHour.value, end=start+9*weatherHour;
+  const samples=weather.value.hourly.filter(point=>point.stamp>=start&&point.stamp<=end&&point.stamp%weatherHour===0);
   if(!samples.length)return;
   const min=Math.min(...samples.map(point=>point.temp)),max=Math.max(...samples.map(point=>point.temp));
   const readings=samples.map(({stamp,temp})=>({stamp,temp,
-    x:3+138*(stamp-now)/forecastHours,y:25-20*(temp-min+1)/(max-min+2)}));
-  const points=readings.map(({x,y})=>`${x},${y}`).join(' ');
-  const fill=`${readings[0].x},28 ${points} ${readings[readings.length-1].x},28`;
-  return {readings,points,fill,end:weatherTime(until)};
+    x:3+138*(stamp-start)/(end-start),y:25-20*(temp-min+1)/(max-min+2)}));
+  const runs:(typeof readings)[]=[];
+  for(const point of readings){
+    const run=runs[runs.length-1];
+    if(run&&point.stamp-run[run.length-1].stamp===weatherHour)run.push(point);
+    else runs.push([point]);
+  }
+  const segments=runs.filter(run=>run.length>1).map(run=>{
+    const points=run.map(({x,y})=>`${x},${y}`).join(' ');
+    return {points,fill:`${run[0].x},28 ${points} ${run[run.length-1].x},28`};
+  });
+  return {readings,segments,start:weatherTime(start),end:dayKey(start)===dayKey(end)?dayTime(end):weatherTime(end)};
 });
 const weatherStamp=ref<number>();
 const weatherReading=computed(()=>weatherTrend.value?.readings.find(point=>point.stamp===weatherStamp.value));
@@ -342,25 +367,25 @@ async function readWeather() {
   try {
     const data=await requestJson('/api/assistant/icon-weather?detail=1',{signal:controller.signal,timeoutMs:14000});
     if(controller.signal.aborted)return;
-    if(data.available!==true||data.date!==today.value||typeof data.description!=='string'){
-      weather.value=undefined;
-      return;
-    }
-    const temperature=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?Math.round(value):null;
+    if(data.available!==true||data.date!==today.value||typeof data.description!=='string')return;
+    const temperature=(value:unknown)=>typeof value==='number'&&Number.isFinite(value)?Math.round(value*10)/10:null;
     const hourly=new Map<number,number>();
     if(Array.isArray(data.hourly)) for(const point of data.hourly){
       const stamp=todoTimestamp(point?.time),temp=temperature(point?.temp);
       if(stamp!==undefined&&temp!==null)hourly.set(stamp,temp);
     }
-    weather.value={temp:temperature(data.temperature),humidity:temperature(data.humidity),description:data.current_description||data.description,
-      hourly:[...hourly].sort(([a],[b])=>a-b).map(([stamp,temp])=>({stamp,temp}))};
+    const temp=temperature(data.temperature);
+    const description=data.current_description||data.description||weather.value?.description||'';
+    const forecast=hourly.size?[...hourly].sort(([a],[b])=>a-b).map(([stamp,temp])=>({stamp,temp})):weather.value?.hourly||[];
+    weather.value={temp,humidity:temperature(data.humidity),description,
+      minimum:temperature(data.minimum),maximum:temperature(data.maximum),observedAt:todoTimestamp(data.observed_at),hourly:forecast};
   } catch {
     // Keep verified readings until the date changes.
   } finally {
     if(weatherAbort===controller){weatherAt=Date.now();weatherBusy.value=false;}
   }
 }
-watch(()=>props.clock,()=>{if(!props.guest&&!document.hidden&&Date.now()-weatherAt>(weather.value?600000:60000))void readWeather();});
+watch(()=>props.clock,()=>{if(!props.guest&&!document.hidden&&Date.now()-weatherAt>(weatherTrend.value?.readings.length===10?600000:60000))void readWeather();});
 watch(()=>props.calendarIdentity,()=>{weatherAbort?.abort();weather.value=undefined;weatherAt=0;if(!props.guest)void readWeather();});
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest){void readWeather();void loadCalendarWeather();}});
 onDeactivated(()=>{panel.value='';pendingAgendaTask.value=undefined;agendaExpanded.value=false;});
@@ -428,8 +453,8 @@ function afterAgendaClose() {
       <section v-if="!guest&&!impersonating" class="desk-weather" :data-condition="currentCondition" aria-label="今日天气">
         <component :is="icons[currentCondition]" :size="28" class="weather-mark" aria-hidden="true" />
         <div class="weather-current">
-          <strong>{{ weather?.temp!=null?weather.temp+'°C':(weatherBusy?'读取中…':'天气待更新') }}</strong>
-          <small v-if="weather">{{ [weather.description,weather.humidity!=null?'湿度 '+weather.humidity+'%':''].filter(Boolean).join(' · ') }}</small>
+          <strong>{{ weatherTemperature || (weatherBusy?'读取中…':'天气待更新') }}</strong>
+          <small v-if="weatherCaption">{{ weatherCaption }}</small>
         </div>
         <div v-if="weatherTrend" class="weather-chart">
           <div class="weather-plot" role="group" tabindex="0" aria-label="未来 10 小时气温趋势，使用左右方向键查看预报"
@@ -438,14 +463,16 @@ function afterAgendaClose() {
             @focus="weatherStamp===undefined && stepWeatherPoint(1)" @keydown.left.prevent="stepWeatherPoint(-1)"
             @keydown.right.prevent="stepWeatherPoint(1)" @keydown.esc="weatherStamp=undefined">
             <svg viewBox="0 0 144 28" preserveAspectRatio="none" aria-hidden="true">
-              <polygon :points="weatherTrend.fill" fill="currentColor" opacity=".13"/>
-              <polyline :points="weatherTrend.points" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+              <g v-for="segment in weatherTrend.segments" :key="segment.points">
+                <polygon :points="segment.fill" fill="currentColor" opacity=".13"/>
+                <polyline :points="segment.points" fill="none" stroke="currentColor" stroke-width="2" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>
+              </g>
             </svg>
             <span v-for="point in weatherTrend.readings" :key="point.stamp" class="weather-point" aria-hidden="true"
               :class="{active:point.stamp===weatherStamp}" :style="{left:point.x/144*100+'%',top:point.y/28*100+'%'}"></span>
             <output v-if="weatherReading" class="weather-reading" :style="{'--sample-x':weatherReading.x/144*100+'%'}">{{ weatherTime(weatherReading.stamp) }} · {{ weatherReading.temp }}°C</output>
           </div>
-          <div class="weather-axis"><span>现在</span><span>未来 10 小时</span><span>{{ weatherTrend.end }}</span></div>
+          <div class="weather-axis"><span>{{ weatherTrend.start }}</span><span>未来 10 小时</span><span>{{ weatherTrend.end }}</span></div>
         </div>
         <small v-else-if="weather" class="weather-axis">暂无小时预报</small>
       </section>
@@ -604,7 +631,7 @@ function afterAgendaClose() {
 .weather-mark { flex:none;color:var(--weather-hue) }
 .desk-weather[data-condition="sun"] .weather-mark { color:#974e06 }
 [data-v2-theme="dark"] .desk-weather[data-condition="sun"] .weather-mark { color:#ffc978 }
-.weather-current { display:grid;gap:1px;min-width:0;flex:none;max-width:53% }
+.weather-current { display:grid;gap:1px;min-width:0;flex:none;max-width:43% }
 .weather-current strong { font-size:21px;line-height:1.14;font-variant-numeric:tabular-nums }
 .weather-current small,.weather-axis { font-size:10px;color:var(--desk-muted);line-height:1.25 }
 .weather-chart { flex:1 1 auto;min-width:0;color:var(--weather-hue) }

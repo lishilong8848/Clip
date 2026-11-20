@@ -60,11 +60,11 @@ try {
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
   let currentAccount={}, holdAgenda=false, releaseAgenda;
   let dailyDesk=false;
-  let aggregateTrial=false, lateForecast=false;
+  let aggregateTrial=false, lateForecast=false, missingWeather=false;
   let pausedReads;
   let repairTrial=false, historyClosed=false;
   let mopDelayed=false, riskDenied=false, mopRetryFailures=0;
-  let embeddedTest=false;
+  let embeddedTest=false, inlineRead;
   let waterTrial=false,waterSaved=false;
   const waterWrites=[];
   const waterRow=()=>({record_id:'water-home',statistic_date:'2026-11-18',meter:'工作台验收水表',
@@ -85,12 +85,14 @@ try {
       return ok({record_id:'water-home',warnings:[]});
     }
     if(req.method()!=='GET') {unexpected.push(req.method()+' '+url.pathname);return route.abort();}
+    const paused=inlineRead;
+    if(paused?.matches(url)){paused.started(url);await paused.until;}
     if(url.pathname==='/api/assistant/icon-weather')return ok({
       available:true,date:'2026-11-18',temperature:16,humidity:62,description:'多云',
-      hourly:(lateForecast
-        ? [['18T21:00',14],['19T00:00',13],['19T03:00',11],['19T06:00',10],['19T09:00',15]]
-        : [['18T09:00',14],['18T12:00',16],['18T15:00',19],['18T18:00',17],['18T21:00',15],['19T00:00',13]]
-      ).map(([time,temp])=>({time:'2026-11-'+time+':00+08:00',temp})),
+      hourly:Array.from({length:12},(_,i)=>({
+        time:new Date(Date.parse('2026-11-18T'+(lateForecast?'22':'11')+':00:00+08:00')+i*3600000).toISOString(),
+        temp:lateForecast?15-i:15+i,
+      })).filter((_,i)=>!missingWeather||i!==4),
       forecast:[{date:'2026-11-18',minimum:9,maximum:19,description:'多云'},
         {date:'2026-11-19',minimum:10,maximum:18,description:'小雨'}],
     });
@@ -209,8 +211,9 @@ try {
       if(pausedReads&&scope==='A')await new Promise(resolve=>pausedReads.push(resolve));
       return riskDenied || scope==='CAMPUS'
         ? route.fulfill({status:403,json:{ok:false,error:'隔离权限校验'}})
-        : ok({total:1,items:[{id:'risk-1',name:'隔离专项排查',total:2,approved:1,submitted:1,status:'active'}]});
+        : ok({total:1,page:1,is_manager:true,items:[{id:'risk-1',name:'隔离专项排查',total:2,approved:1,submitted:1,status:'active'}]});
     }
+    if(url.pathname==='/api/risk-inspections/risk-1')return ok({id:'risk-1',name:'隔离专项排查',fields:[],people:[]});
     if(url.pathname==='/api/cabinet-power/batches')return ok({total:2,items:[{batch_id:'cab-live',title:'机柜待确认',is_todo:true},{batch_id:'cab-done',title:'机柜已确认',is_todo:false}]});
     if(url.pathname==='/api/capacity/water/records')return ok({total:waterTrial?1:0,records:waterTrial?[waterRow()]:[],snapshot:{exists:true}});
     if(url.pathname==='/api/capacity/water/bootstrap')return ok({
@@ -267,7 +270,7 @@ try {
     }
     if(url.pathname==='/api/signatures/management/account')return ok({person:{is_self:true,building:'A楼',signature_status:'signed'}});
     if(url.pathname==='/api/daily-tasks')return ok({scope,date:url.searchParams.get('date'),stats:{total:5,completed:3,ongoing:1,attention:1}});
-    if(!embeddedTest)unexpected.push(url.pathname);
+    if(!embeddedTest&&!paused?.matches(url))unexpected.push(url.pathname);
     return route.fulfill({status:404,json:{ok:false,error:'No fixture'}});
   });
   await page.goto(origin+'/fixture',{timeout:60000});
@@ -314,9 +317,31 @@ try {
   }
   const dialog=title=>page.getByRole('region',{name:'办理 '+title,exact:true});
   async function closeTask(title){
-    await dialog(title).getByRole('button',{name:'关闭待办办理'}).click();
-    await dialog(title).waitFor({state:'hidden'});
+    const close=dialog(title).getByRole('button',{name:'关闭待办办理'});
+    await close.click();
+    try{await dialog(title).waitFor({state:'hidden',timeout:4000});}
+    catch(error){console.error({title,errors,visible:await dialog(title).innerText(),panels:await page.getByRole('dialog').allTextContents()});throw error;}
     embeddedTest=false;
+  }
+  async function closeWhileReading(source,title,matches,notice=false){
+    embeddedTest=true;
+    let started,release;
+    const reading=new Promise(resolve=>started=resolve);
+    inlineRead={matches,started,until:new Promise(resolve=>release=resolve)};
+    try{
+      await reveal(source);
+      await (notice?pop.getByRole('button',{name:'更新／结束 '+title,exact:true}):task(title)).click();
+      const panel=notice?page.locator('.v2-notice-editor'):dialog(title);
+      await panel.waitFor({timeout:5000});
+      const url=await Promise.race([reading,panel.waitFor({state:'hidden',timeout:5000}).then(()=>null)]);
+      assert(url,title+' must start reading before it is closed');
+      if(notice){
+        await panel.locator('.n-base-close').click();
+        await panel.waitFor({state:'hidden',timeout:4000});
+        embeddedTest=false;
+      }else await closeTask(title);
+      return url;
+    }finally{inlineRead=undefined;release();}
   }
   await reveal('learning');
   await task('自主练习').waitFor();
@@ -493,6 +518,8 @@ try {
   await task('机柜待确认').click();
   await dialog('机柜待确认').locator('[data-module-widget=cabinet]').waitFor();
   await closeTask('机柜待确认');
+  await closeWhileReading('critical_guard','本楼重保任务',url=>url.pathname==='/api/critical-guard/bootstrap');
+  await closeWhileReading('risk_inspection','隔离专项排查',url=>url.pathname==='/api/risk-inspections/risk-1');
 
   await set(account('engineer-dashboard','engineer',full),['A']);
   await reveal('risk_inspection');
@@ -518,17 +545,28 @@ try {
   await absent('drills','已完成演练甲');
   await absent('engineer_mop','已上传维护单甲');
   assert.ok(!requests.slice(dutyReadStart).some(([,url])=>url.startsWith('/api/learning/')));
+  await closeWhileReading('notices:维保','计划和进行中同一条',url=>url.pathname==='/api/workbench/lite-detail',true);
 
   const drillReads=requests.length;
+  const drillPath='/api/drills/drill-live/execution';
+  const drillExecution=await closeWhileReading('drills','待完成演练甲',url=>url.pathname===drillPath);
+  assert.equal(drillExecution.searchParams.get('scope'),'A');
+  await closeWhileReading('engineer_mop','待处理维护单甲',url=>url.pathname==='/api/engineer/mop/bootstrap'&&url.searchParams.get('view')!=='todos');
   embeddedTest=true;
-  const drillExecution=page.waitForRequest(request=>new URL(request.url()).pathname==='/api/drills/drill-live/execution');
   await reveal('drills');
   await task('待完成演练甲').click();
-  await dialog('待完成演练甲').locator('[data-module-widget=drills]').waitFor();
-  assert.equal(new URL((await drillExecution).url()).searchParams.get('scope'),'A');
-  await dialog('待完成演练甲').locator('.execution-panel input[type=date]:enabled').waitFor();
+  const drillPanel=dialog('待完成演练甲');
+  const drillDate=drillPanel.locator('.execution-panel input[type=date]:enabled');
+  await drillDate.fill('2026-11-19');
+  const closeDrill=drillPanel.getByRole('button',{name:'关闭待办办理'});
+  await closeDrill.click();
+  await page.getByRole('button',{name:'继续编辑',exact:true}).click();
+  assert.equal(await drillDate.inputValue(),'2026-11-19','An unsaved drill remains open with its draft');
+  await closeDrill.click();
+  await page.getByRole('button',{name:'放弃修改并继续',exact:true}).click();
+  await drillPanel.waitFor({state:'hidden'});
+  embeddedTest=false;
   assert.equal(new URL(page.url()).pathname,'/fixture');
-  await closeTask('待完成演练甲');
   assert.ok(!requests.slice(drillReads).some(([,url])=>url.includes('/drill-done/')));
 
   await set({...account('admin-dashboard','administrator',full),tool_management_enabled:true,can_manage_accounts:true},['A']);
@@ -601,13 +639,13 @@ try {
   await weather.getByText('16°C',{exact:true}).waitFor();
   const trend=weather.getByRole('group',{name:/未来 10 小时气温趋势/});
   await trend.waitFor();
-  assert.equal(await trend.locator('.weather-point').count(),4,'only points in the coming ten hours are drawn');
+  assert.equal(await trend.locator('.weather-point').count(),10,'each of the coming ten hours has exactly one point');
   const firstPoint=await trend.locator('.weather-point').first().boundingBox();
   await page.mouse.move(firstPoint.x+firstPoint.width/2,firstPoint.y+firstPoint.height/2);
   await trend.getByText('12:00 · 16°C',{exact:true}).waitFor();
   await trend.focus();
   await trend.press('ArrowRight');
-  await trend.getByText('15:00 · 19°C',{exact:true}).waitFor();
+  await trend.getByText('13:00 · 17°C',{exact:true}).waitFor();
   await trend.press('Escape');
   await trend.locator('output').waitFor({state:'detached'});
   assert.equal(await page.getByRole('button',{name:'天气详情'}).count(),0);
@@ -712,12 +750,8 @@ try {
   await page.getByRole('button',{name:/消息通知/}).click();
   await page.getByRole('button',{name:'打开未读清单'}).click();
   assert.equal(await todo.getByRole('button',{name:/^未读/}).getAttribute('aria-pressed'),'true');
-  embeddedTest=true;
-  await reveal('repair_management');
-  await task('A楼隔离维修').click();
-  await dialog('A楼隔离维修').locator('[data-module-widget=repair_management]').waitFor();
+  await closeWhileReading('repair_management','A楼隔离维修',url=>url.pathname==='/api/repair-management/records'&&url.searchParams.get('focus_record_id')==='repair-A');
   assert.equal(new URL(page.url()).pathname,'/fixture');
-  await closeTask('A楼隔离维修');
   await absent('repair_management','A楼隔离维修');
   await todo.getByRole('button',{name:'全部',exact:true}).click();
   await reveal('repair_management');
@@ -766,6 +800,8 @@ try {
   const recentQuery=requests.find(([_,url,scope,q])=>url==='/api/capacity/water/records'&&scope==='A'&&q.get('latest_only')==='1')?.[3];
   assert.equal(recentQuery?.get('start_date'),'2026-10-20');
   assert.equal(recentQuery?.get('end_date'),'2026-11-18');
+  await closeWhileReading('water','工作台验收水表',url=>url.pathname==='/api/capacity/water/records/water-home');
+  await reveal('water');
   await task('工作台验收水表').click();
   const input=dialog('工作台验收水表').getByLabel('本次水表读数',{exact:true});
   await input.fill('1250');
@@ -843,10 +879,15 @@ try {
   await page.setViewportSize({width:390,height:844});
   await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
   await trend.waitFor();
-  assert.equal(await trend.locator('.weather-point').count(),3,'the ten-hour window crosses midnight');
-  const midnight=await trend.locator('.weather-point').first().boundingBox();
+  assert.equal(await trend.locator('.weather-point').count(),10,'the hourly window crosses midnight');
+  const midnight=await trend.locator('.weather-point').nth(1).boundingBox();
   await trend.dispatchEvent('pointerdown',{pointerType:'touch',clientX:midnight.x+midnight.width/2,clientY:midnight.y+midnight.height/2});
   await trend.getByText('次日 00:00 · 13°C',{exact:true}).waitFor();
+  missingWeather=true;
+  await set(account('weather-gap','manager'),['A','B']);
+  await page.waitForFunction(()=>document.querySelectorAll('.weather-plot .weather-point').length===9);
+  assert.equal(await trend.locator('.weather-point').count(),9,'missing hours are not estimated');
+  assert.equal(await trend.locator('polyline').count(),2,'a missing hour leaves a gap in the line');
   assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
   assert.ok(await tiles.first().evaluate(element=>element.getBoundingClientRect().height>=44));
   assert.deepEqual(requests.filter(([method])=>method!=='GET').map(([method,url])=>[method,url]),[

@@ -115,6 +115,7 @@ const historyLibrary=ref<InstanceType<typeof RiskInspectionTemplateLibrary>|null
 const pendingPublication=ref<Dict|null>(null),fieldOriginal=ref(''),taskSearch=ref(''),taskState=ref<string|null>(null);
 const publicationLocked=computed(()=>busy.value||loading.value||!!pendingPublication.value);
 const newReviewers=ref<string[]>([]);
+const reviewerMenuOpen=ref(false);
 const typeOptions=riskTypeOptions;
 const roleOptions=[{value:'input',label:riskRoles.input}];
 const peopleOptions=computed(()=>people.value.filter(p=>p.active!==false).map(p=>({value:p.id,label:p.name+(p.employee_no?' · '+p.employee_no:'')})));
@@ -154,9 +155,21 @@ let read:AbortController|undefined,timer=0,disposed=false;
 let listRead:AbortController|undefined,filterTimer=0;
 function cancelTaskListRead(){listRead?.abort();listRead=undefined;window.clearTimeout(filterTimer);filterTimer=0;}
 function beginWrite(){cancelTaskListRead();read?.abort();read=undefined;loading.value=false;busy.value=true;}
-function date(v:number){return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'short'}).format(new Date(v));}
+const timeFormat=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'short'});
+function date(v:number){
+ const value=new Date(v);
+ return Number.isFinite(v)&&Number.isFinite(value.getTime())?timeFormat.format(value):'待确认';
+}
 function scopeLabel(v:string){return v==='110'?'110站':v+'楼';}
-function taskStatus(task:Dict){return task.status==='publishing'?'发布处理中':task.can_claim&&activeView.value==='mine'?'待领取':!task.total?'已撤销':task.approved===task.total?'已完成':'进行中';}
+function taskStatus(task:Dict){
+  if(task.status==='publishing')return '发布处理中';
+  if(!Number.isFinite(task.total)||!Number.isFinite(task.approved))return '状态待核验';
+  if(task.status==='active'&&task.total>task.approved&&task.deadline>0&&task.deadline<Date.now())return '已逾期';
+  if(task.can_claim&&activeView.value==='mine')return '待领取';
+  if(!task.total)return '已撤销';
+  if(task.approved===task.total)return '已完成';
+  return task.submitted>task.approved?'待审核':'进行中';
+}
 function taskAction(task:Dict){return activeView.value==='mine'?(task.can_claim?'领取并填写':'进入本人任务'):activeView.value==='review'?'进入审核任务':'查看反馈';}
 function statusName(v:string){return ({pending:'未提交',submitted:'待审核',approved:'审核通过',returned:'退回修改',revoked:'已撤销'} as Dict)[v]||v;}
 function actionName(v:string){return ({save:'保存草稿',submit:'提交审核',approve:'审核通过',return:'退回修改',revoke_item:'撤销事项',revoke_person:'撤销人员',publish:'发布风险排查',delete_field:'删除模板字段',save_field:'保存模板字段',reviewer:'更换审核人',retry:'核对并重试同步',claim:'领取本人排查任务'} as Dict)[v]||v;}
@@ -218,7 +231,7 @@ function editField(field?:Dict){if(field&&riskSystemField(field))return;fieldEdi
 function changeRequired(field:Dict,required:boolean){if(busy.value||!canEditTemplate.value||riskFieldRole(field)!=='input'||field.unsupported)return;ask('save_field',{...field,required});}
 function closeFieldEditor(){if(busy.value)return;if(fieldEditor.value&&JSON.stringify(fieldEditor.value)!==fieldOriginal.value){askDiscard('放弃尚未保存的字段修改？',()=>{fieldEditor.value=null;});return;}fieldEditor.value=null;}
 function ask(action:string,item?:Dict){if(['save_field','delete_field'].includes(action)&&riskSystemField(item||fieldEditor.value||{}))return;if(action==='publish'&&(!publishValid.value||pendingPublication.value)){error.value=publishProblems.value.length?'请补充：'+publishProblems.value.join('；'):'请先核验原发布结果。';return;}error.value='';if(action==='submit'&&item&&!feedbackComplete(item))return;reason.value='';confirmation.value={action,item,version:person.value?.version};}
-async function openReviewer(){if(busy.value)return;beginWrite();error.value='';try{const data=await requestJson(root+'/people',{cache:'no-store'});people.value=data.items;newReviewers.value=riskReviewerIds(detail.value||{}).filter(id=>people.value.some(p=>p.id===id));confirmation.value={action:'reviewer',version:detail.value?.reviewer_version};}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
+async function openReviewer(){if(busy.value)return;beginWrite();error.value='';try{const data=await requestJson(root+'/people',{cache:'no-store'});people.value=data.items;newReviewers.value=riskReviewerIds(detail.value||{}).filter(id=>people.value.some(p=>p.id===id));reviewerMenuOpen.value=false;confirmation.value={action:'reviewer',version:detail.value?.reviewer_version};}catch(e:any){error.value=e.message;}finally{busy.value=false;}}
 function discardDraft(id:string){askDiscard('确认放弃此项尚未提交的本地填写？',()=>{delete drafts.value[id];});}
 function sameValues(a:Dict|undefined,b:Dict|undefined){const keys=Object.keys(a||{}),other=Object.keys(b||{});return keys.length===other.length&&keys.every(k=>other.includes(k)&&JSON.stringify(a?.[k])===JSON.stringify(b?.[k]));}
 async function readLatest(){if(busy.value||!detail.value)return;beginWrite();try{const data=await requestJson(root+'/'+detail.value.id,{cache:'no-store'});validateDetail(data);const current=data.people.find((p:Dict)=>p.id===personId.value);for(const item of current?.items||[])if(sameValues(drafts.value[item.id],item.values))delete drafts.value[item.id];applyDetail(data);confirmation.value=null;error.value='';message.value='已读取最新状态，未提交的填写仍保留，请核对后继续。';}catch(e:any){error.value=e.message;}finally{busy.value=false;}}

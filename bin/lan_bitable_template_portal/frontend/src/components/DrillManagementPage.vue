@@ -701,6 +701,7 @@ let statusPollKey = "";
 let statusPollStartVersion = -1;
 let statusPollObservedVersion = -1;
 let disposed = false;
+const readLifetime = new AbortController();
 let printStyle: HTMLStyleElement | null = null;
 let restoringHistory = false;
 let stablePageUrl = `${window.location.pathname}${window.location.search}`;
@@ -754,7 +755,8 @@ const viewMode = computed<"landing" | "admin" | "building">(() => {
 const pageTitle = computed(() => viewMode.value === "admin" ? "模板与发布" : viewMode.value === "building" ? `${activeScope.value}楼演练` : "选择入口");
 const adminDirty = computed(() => Boolean(selectedDrill.value && JSON.stringify(configDraft.value) !== configBaseline.value));
 const hasUnsavedChanges = computed(() => dirty.value || adminDirty.value);
-const busy = computed(() => loading.value || saving.value || uploading.value || generating.value || ["queued", "generating", "syncing"].includes(String(execution.value?.status || "")));
+const writing = computed(() => saving.value || uploading.value || generating.value);
+const busy = computed(() => loading.value || writing.value || ["queued", "generating", "syncing"].includes(String(execution.value?.status || "")));
 const landingScopes = computed(() => {
   const source = Array.isArray(bootstrap.value?.scopes) ? bootstrap.value?.scopes : [];
   if (source.length) {
@@ -938,7 +940,7 @@ async function loadBootstrap(): Promise<void> {
   try {
     const query = new URLSearchParams({ month: selectedMonth.value });
     if (activeScope.value) query.set("scope", activeScope.value);
-    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "reload" });
+    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "reload", signal: readLifetime.signal });
     if (disposed) return;
     loadedMonth.value = selectedMonth.value;
     stablePageUrl = `${window.location.pathname}${window.location.search}`;
@@ -968,7 +970,7 @@ async function loadBootstrap(): Promise<void> {
 async function refreshList(): Promise<void> {
   const query = new URLSearchParams({ month: selectedMonth.value });
   if (activeScope.value) query.set("scope", activeScope.value);
-  const data = await requestJson(`/api/drills?${query.toString()}`, { cache: "reload" });
+  const data = await requestJson(`/api/drills?${query.toString()}`, { cache: "reload", signal: readLifetime.signal });
   if (disposed) return;
   drills.value = arrayFrom(data.items || data.drills);
   if (viewMode.value === "admin" && selectedDrill.value && !hasUnsavedChanges.value) {
@@ -995,9 +997,9 @@ async function reloadCurrentConfirmed(): Promise<void> {
     if (viewMode.value === "admin" && selectedDrill.value) resetConfigDraft(selectedDrill.value.configuration || {});
     if (viewMode.value === "building") await loadPeople({ force: true, refresh: true });
     if (viewMode.value === "building" && selectedDrillId.value) await loadExecution();
-    setNotice("演练数据已刷新", "success");
+    if (!disposed) setNotice("演练数据已刷新", "success");
   } catch (caught) {
-    setFailure(caught, "刷新失败");
+    if (!disposed) setFailure(caught, "刷新失败");
   } finally {
     loading.value = false;
   }
@@ -1010,13 +1012,14 @@ async function loadPeople(options: { force?: boolean; refresh?: boolean } = {}):
   try {
     const query = new URLSearchParams({ scope, month: selectedMonth.value });
     if (options.refresh) query.set("refresh_people", "1");
-    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "no-store" });
+    const data = await requestJson(`/api/drills/bootstrap?${query.toString()}`, { cache: "no-store", signal: readLifetime.signal });
+    if (disposed) return false;
     if (!Array.isArray(data.people)) throw new Error("人员目录响应不完整");
     people.value = uniquePeople(data.people);
     peopleScopeLoaded.value = scope;
     return true;
   } catch {
-    if (options.force) throw new Error("人员签名状态刷新失败，请稍后重试。");
+    if (!disposed && options.force) throw new Error("人员签名状态刷新失败，请稍后重试。");
     return false;
   }
 }
@@ -1055,7 +1058,7 @@ async function loadExecution(options: { silent?: boolean } = {}): Promise<void> 
   }
   try {
     const query = new URLSearchParams({ scope: activeScope.value, create: "1" });
-    const data = await requestJson(`/api/drills/${encodeURIComponent(selectedDrillId.value)}/execution?${query.toString()}`, { cache: "no-store" });
+    const data = await requestJson(`/api/drills/${encodeURIComponent(selectedDrillId.value)}/execution?${query.toString()}`, { cache: "no-store", signal: readLifetime.signal });
     if (disposed) return;
     const remoteDrill = apiResultDrill(data);
     if (remoteDrill) mergeDrill(remoteDrill);
@@ -1463,10 +1466,10 @@ async function loadPreview(sheet: SheetKind, options: { silent?: boolean } = {})
   if (!options.silent) previewLoading.value = true;
   previewError.value = "";
   try {
-    const data = await requestJson(`/api/drills/${encodeURIComponent(selectedDrillId.value)}/preview?scope=${encodeURIComponent(activeScope.value)}&sheet=${sheet}`, { cache: "no-store" });
-    if (activeSheet.value === sheet) previewModel.value = data.model || data.preview || data;
+    const data = await requestJson(`/api/drills/${encodeURIComponent(selectedDrillId.value)}/preview?scope=${encodeURIComponent(activeScope.value)}&sheet=${sheet}`, { cache: "no-store", signal: readLifetime.signal });
+    if (!disposed && activeSheet.value === sheet) previewModel.value = data.model || data.preview || data;
   } catch (caught) {
-    if (!options.silent) previewError.value = caught instanceof Error ? caught.message : "表格预览读取失败";
+    if (!disposed && !options.silent) previewError.value = caught instanceof Error ? caught.message : "表格预览读取失败";
   } finally {
     if (!options.silent) previewLoading.value = false;
   }
@@ -2054,6 +2057,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   disposed = true;
+  readLifetime.abort();
   clearStatusPoll(true);
   window.removeEventListener("beforeunload", handleBeforeUnload);
   window.removeEventListener("popstate", handleHistoryNavigation);

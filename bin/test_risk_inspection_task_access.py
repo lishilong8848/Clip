@@ -72,12 +72,14 @@ class TaskAccessTests(unittest.TestCase):
         controller = SimpleNamespace(_current_session=lambda request: session,
             _request_target=lambda request: '/', _request_base_url=lambda request: 'http://testserver',
             _json_response=lambda request, session, payload: SimpleNamespace(headers={}, payload=payload))
-        runtime = SimpleNamespace(auth_manager=SimpleNamespace(public_status=lambda *args, **kwargs: copy.deepcopy(original)))
+        runtime = SimpleNamespace(auth_manager=SimpleNamespace(
+            public_status=lambda *args, **kwargs: copy.deepcopy(original), is_admin=lambda _: False))
         namespace = {'asyncio': asyncio, 'Request': object, 'PortalRuntime': runtime, 'self': controller}
         exec(compile(ast.Module(body=[handler], type_ignores=[]), str(source), 'exec'), namespace)
         access = Mock(return_value=granted)
-        with patch.dict(sys.modules, {'lan_bitable_template_portal.risk_inspection_routes': SimpleNamespace(risk_task_access=access)}):
-            response = asyncio.run(namespace['auth_status'](SimpleNamespace(query_params={})))
+        routes = SimpleNamespace(risk_task_access=access, tool_management_access=Mock(), tool_management_enabled=lambda: False)
+        with patch.dict(sys.modules, {'lan_bitable_template_portal.risk_inspection_routes': routes}):
+            response = asyncio.run(namespace['auth_status'](SimpleNamespace(query_params={}, scope={})))
         access.assert_called_once_with(runtime, session)
         self.assertEqual(response.headers['Cache-Control'], 'no-store')
         self.assertEqual(response.payload['data']['allowed_scopes'], ['C'])

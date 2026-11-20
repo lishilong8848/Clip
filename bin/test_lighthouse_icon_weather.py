@@ -1,6 +1,7 @@
 """Isolated icon-weather checks: no business writes, network, or Agent startup."""
 import asyncio
 import datetime as dt
+import json
 from pathlib import Path
 import sys
 import time
@@ -15,6 +16,7 @@ from lan_bitable_template_portal.lighthouse_icon_weather import (
 )
 from openclaw_service.assistant.lighthouse_ai import AssistantError
 from openclaw_service.assistant.lighthouse_appearance import read_appearance, save_appearance
+from openclaw_service.assistant.lighthouse_public import PublicSources
 
 
 def forecast(city='南通'):
@@ -82,6 +84,7 @@ class IconWeatherTests(unittest.IsolatedAsyncioTestCase):
             'temperature': 16, 'relative_humidity_pct': 62, 'weather_desc': '多云',
         }}
         weather = IconWeather(source)
+        weather._china_hourly = AsyncMock(return_value=None)
         try:
             await weather.get('南通')
             detail, _ = await asyncio.gather(weather.get('南通', detail=True), weather.get('南通', detail=True))
@@ -91,6 +94,32 @@ class IconWeatherTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('temperature', await weather.get('南通'))
             source._weather_wttr.assert_awaited_once()
             source._weather_china.assert_awaited_once()
+        finally:
+            await weather.close()
+
+    async def test_workbench_hourly_reads_real_observation_and_crosses_midnight(self):
+        now = dt.datetime.now(TZ).replace(hour=22, minute=8, second=0, microsecond=0)
+        start = now.replace(hour=23, minute=0)
+        hours = [{'jf': (start + dt.timedelta(hours=i)).strftime('%Y%m%d%H'), 'jb': str(i - 2), 'ja': '01'}
+                 for i in range(10)]
+        observation = {'od': {'od0': now.strftime('%Y%m%d2200'), 'od1': '南通',
+                              'od2': [{'od21': '22', 'od22': '9.9', 'od27': '40'}]}}
+        html = 'var hour3data=' + json.dumps([hours[:1], hours[1:], [
+            hours[1], {'jf': hours[2]['jf'], 'jb': '999'}, {'jf': '2026130100', 'jb': '1'},
+        ]]) + ';var observe24h_data=' + json.dumps(observation)
+        def respond(request):
+            self.assertEqual(str(request.url), 'https://www.weather.com.cn/weather1dn/101190501.shtml')
+            return httpx.Response(200, text=html)
+
+        weather = IconWeather(PublicSources(client_factory=lambda: httpx.AsyncClient(transport=httpx.MockTransport(respond))))
+        try:
+            with patch('lan_bitable_template_portal.lighthouse_icon_weather.time.time', return_value=now.timestamp()):
+                data = await weather.get('南通', detail=True)
+            self.assertEqual((data['temperature'], data['humidity'], data['description']), (9.9, 40, '多云'))
+            self.assertEqual(data['observed_at'], now.replace(minute=0).isoformat())
+            self.assertEqual([row['time'] for row in data['hourly']],
+                             [(start + dt.timedelta(hours=i)).isoformat() for i in range(10)])
+            self.assertEqual([row['temp'] for row in data['hourly']], list(range(-2, 8)))
         finally:
             await weather.close()
 
