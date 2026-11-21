@@ -594,6 +594,8 @@ def send_robot_title_and_content(
 
     group_name = _resolve_group_name(notice_type, level)
     if not group_name:
+        if notice_type == "事件通告":
+            return False, f"未配置飞书 {level} 事件群，请在 Qt 设置中核对群名称。"
         return False, "skip"
 
     chat_id, err = _find_chat_id_by_name(group_name)

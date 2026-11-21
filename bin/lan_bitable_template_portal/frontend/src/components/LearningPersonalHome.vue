@@ -17,7 +17,7 @@
       <span class="daily-action">{{ actionText }} <ArrowRight :size="23" aria-hidden="true" /></span>
     </button>
 
-    <nav class="personal-shortcuts" aria-label="学习入口">
+    <nav v-if="!workspaceV2" class="personal-shortcuts" aria-label="学习入口">
       <button type="button" :disabled="loading" @click="emit('open', 'practice')"><Pencil :size="19" />自主练习</button>
       <button type="button" :disabled="loading" @click="emit('open', 'sharing')"><Layers :size="19" />分享会练习</button>
       <button type="button" :disabled="loading" @click="emit('open', 'review')"><RotateCcw :size="19" />复习中心</button>
@@ -25,7 +25,7 @@
 
     <div class="personal-summary">
       <section aria-label="个人学习画像">
-        <header><button type="button" class="summary-heading" :disabled="loading" @click="emit('open', 'profile')">个人学习画像 <ChevronRight :size="16" /></button><small>近7天</small></header>
+        <header><h2 v-if="workspaceV2">个人学习画像</h2><button v-else type="button" class="summary-heading" :disabled="loading" @click="emit('open', 'profile')">个人学习画像 <ChevronRight :size="16" /></button><small>近7天</small></header>
         <dl class="personal-metrics">
           <div><dt>首次答题</dt><dd>{{ metric(data.summary?.answered) }}</dd></div>
           <div><dt>选择题正确率</dt><dd>{{ metric(data.summary?.accuracy, '%') }}</dd></div>
@@ -34,7 +34,7 @@
         <MotionChart title="答题趋势" view="bar" unit="题" :items="trend" :details="false" :loading="loading" :failed="failed" />
       </section>
       <section aria-label="学习记录">
-        <header><h2>学习记录</h2><button type="button" :disabled="loading" @click="emit('open', 'history')">查看全部</button></header>
+        <header><h2>学习记录</h2><button v-if="!workspaceV2" type="button" :disabled="loading" @click="emit('open', 'history')">查看全部</button></header>
         <p v-if="recordLoading" role="status">正在读取学习记录…</p>
         <p v-else-if="recordError">学习记录暂不可用</p>
         <p v-else-if="!records.length">暂无学习记录</p>
@@ -45,7 +45,7 @@
             <span>{{ metric(row.stats?.answered) }} / {{ metric(row.stats?.total) }}</span><time :datetime="row.date">{{ row.date }}</time>
           </li>
         </ul>
-        <footer><button type="button" :disabled="loading" @click="emit('open', 'completion')">查看每日完成</button><button type="button" :disabled="loading" @click="emit('open', 'issues')">题目反馈</button></footer>
+        <footer v-if="!workspaceV2"><button type="button" :disabled="loading" @click="emit('open', 'completion')">查看每日完成</button><button type="button" :disabled="loading" @click="emit('open', 'issues')">题目反馈</button></footer>
       </section>
     </div>
   </section>
@@ -60,6 +60,7 @@ import MotionChart from '../workspace-v2/MotionChart.vue';
 
 const props = defineProps<{ data: Dict; person?: Dict | null; loading: boolean; failed?: boolean; dailyDuty?: Dict | null }>();
 const emit = defineEmits<{ open: [value: string]; refresh: [] }>();
+const workspaceV2 = document.documentElement.classList.contains('workspace-v2');
 const progressId = useId();
 const task = computed(() => {
   const duty = props.dailyDuty;
@@ -95,7 +96,7 @@ watch([() => props.person?.id, () => props.loading], async ([personId, loading],
 <style scoped>
 .learning-personal-home{--learning-action:#2156c1;--learning-action-hover:#1949a9;--learning-progress:#90e9ec;--learning-progress-track:#ffffff45;display:grid;gap:14px;min-width:0;color:var(--v2-ink,var(--cf-text,#172638));letter-spacing:0}
 .learning-personal-home button{font:inherit;cursor:pointer;letter-spacing:0}.learning-personal-home button:disabled{cursor:default}.learning-personal-home button:focus-visible{outline:2px solid #3277e6;outline-offset:3px}
-.learning-personal-home .daily-tile{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(144px,1fr);align-items:center;gap:25px;text-align:left;min-height:186px;width:100%;padding:20px 28px;border-radius:8px;border:1px solid transparent;background:var(--learning-action);color:#fff;box-shadow:none}
+.learning-personal-home .daily-tile{display:grid;grid-template-columns:minmax(0,2.3fr) minmax(144px,1fr);align-items:center;gap:25px;text-align:left;min-height:186px;width:100%;padding:20px 28px;border-radius:8px;border:1px solid transparent;background:var(--learning-action);color:var(--learning-on-action,#fff);box-shadow:none}
 .daily-tile:hover:not(:disabled){background:var(--learning-action-hover)}.daily-tile:disabled{opacity:.72}.daily-tile-main,.daily-stats{display:grid;gap:8px;min-width:0}.daily-title,.daily-action,.daily-figures{display:flex;align-items:center;gap:10px}.daily-title{font-weight:700;font-size:19px}.daily-figures{justify-content:space-between;align-items:end;flex-wrap:wrap}.daily-figures strong{font-size:40px;line-height:1.13;font-variant-numeric:tabular-nums}.daily-figures small{display:block;font-size:13px}.daily-figures span:nth-child(2){font-size:13px}.daily-action{border-inline-start:1px solid #ffffff65;justify-content:center;min-height:90px;white-space:nowrap;font-size:20px;font-weight:700}
 .daily-tile progress{appearance:none;width:100%;height:8px;border:0;border-radius:8px;overflow:hidden;background:var(--learning-progress-track);color:var(--learning-progress)}.daily-tile progress::-webkit-progress-bar{background:transparent}.daily-tile progress::-webkit-progress-value{background:var(--learning-progress);border-radius:8px}.daily-tile progress::-moz-progress-bar{background:var(--learning-progress);border-radius:8px}
 .daily-progress :deep(.v2-progress-track){background:var(--learning-progress-track)}.daily-progress :deep(.v2-progress-track>span){background:var(--learning-progress)}.daily-progress :deep(.v2-progress-value){display:none}

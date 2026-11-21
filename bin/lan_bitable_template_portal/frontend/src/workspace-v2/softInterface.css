@@ -22,6 +22,10 @@
     background: var(--v2-bg);
     --v2-nav-color: var(--v2-palette-accent);
   }
+  html.workspace-v2:is([data-v2-palette="cyber"],[data-v2-palette="neon"]) :is(.v2-topnav,.v2-header,.v2-mobile-nav) {
+    background:linear-gradient(120deg,color-mix(in srgb,var(--v2-palette-accent) 11%,var(--soft-face)),var(--soft-face) 64%);
+    border-color:color-mix(in srgb,var(--v2-palette-accent) 34%,var(--soft-edge));
+  }
   html.workspace-v2 .v2-main { font-variant-numeric: tabular-nums; }
   html.workspace-v2[data-v2-theme] .v2-shell:not(.is-print,.is-inspection-immersive) > .v2-main {
     padding-inline: clamp(10px, 1.35vw, 22px);

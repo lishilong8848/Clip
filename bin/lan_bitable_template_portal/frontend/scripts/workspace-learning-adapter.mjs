@@ -143,12 +143,37 @@ const v2AuxOptions=computed(()=>tabs.value.filter(item=>!['home','today','review
 const v2AuxTitle=computed(()=>v2AuxOptions.value.find(item=>item.key===tab.value)?.label|| (isAdmin.value?'学练管理':'更多'));
 const v2Feedback=computed(()=>tab.value==='issues'||tab.value==='pending');
 const v2FocusedLearning=computed(()=>v2Feedback.value||tab.value==='questions');
-const v2LearningTabs=computed(()=>tabs.value.filter(item=>item.id!=='pending').map(item=>item.id==='issues'?{...item,label:'题目反馈'}:item));
-function v2OpenSection(key:string){
-  if(key==='issues'&&isAdmin.value)void switchTab('pending');
-  else if(v2LearningTabs.value.some(item=>item.id===key))void switchTab(key as Tab);
+const v2LearningTabs=computed(()=>{
+  const personal=boot.value.can_answer && boot.value.self_person;
+  return [
+    {id:'home',label:'学习首页'},
+    {id:'profile',label:viewMode.value==='overview' && !learner.value?'楼栋汇总':'个人画像'},
+    ...(personal?[{id:'today',label:'今日学练'},{id:'review',label:'错题与复习'}]:[]),
+    {id:'history',label:'学习历史'},
+    {id:'issues',label:'题目反馈'},
+    {id:'sharing',label:'分享会练习'},
+    {id:'completion',label:'每日完成'},
+    ...(isAdmin.value?[{id:'questions',label:'题库管理'},{id:'settings',label:'发布设置'}]:[]),
+  ];
+});
+async function v2ChangeMode(mode:'practice'|'overview',section:Tab='home'){
+  if(busy.value || viewMode.value===mode || (mode==='overview'?!canViewBuildings.value:!boot.value.can_answer))return;
+  if(!await allowLearningSectionChange())return;
+  saveDraft();
+  const params=new URLSearchParams({view:mode,tab:section});
+  if(mode==='overview'&&scope.value)params.set('scope',scope.value);
+  navigate('/learning?'+params);
 }
-function v2Building(value:string){const row=overviewScopes.value.find(item=>item.value===value);if(row)void changeScope(row.label);}
+function v2OpenSection(key:string){
+  if(!v2LearningTabs.value.some(item=>item.id===key))return;
+  if((key==='today'||key==='review')&&viewMode.value==='overview')void v2ChangeMode('practice',key);
+  else if(key==='issues'&&isAdmin.value){if(!v2Feedback.value)void switchTab('pending');}
+  else void switchTab(key as Tab);
+}
+function v2Building(value:string){
+  if(busy.value || value===scope.value || !overviewScopes.value.some(item=>item.value===value))return;
+  navigate('/learning?'+new URLSearchParams({view:'overview',tab:tab.value,scope:value}));
+}
 const v2Completed=computed(()=>!!paper.value && validCount.value>0 && answered.value>=validCount.value);
 const v2PaperStats=computed(()=>{const qs=(paper.value?.questions||[]).filter((q:Dict)=>!q.invalid);const choices=qs.filter((q:Dict)=>q.type!=='interview'&&q.attempt);return {choices:choices.length,correct:choices.filter((q:Dict)=>q.attempt.correct===true).length,interviews:qs.filter((q:Dict)=>q.type==='interview'&&q.attempt).length};});
 async function v2Resume(mode:'daily'|'practice'){

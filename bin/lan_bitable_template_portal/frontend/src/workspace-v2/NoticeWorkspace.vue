@@ -1,12 +1,12 @@
 <template>
   <section class="notice-desk" aria-label="通告办理" data-v2-inline-feedback>
     <template v-if="!recordOnly">
-      <header v-if="kind!=='event'" class="notice-desk-head">
+      <header class="notice-desk-head">
         <div class="notice-desk-identity">
           <span class="desk-mark" aria-hidden="true"><RadioTower :size="24" /></span>
           <div><h1>通告办理</h1><small>{{ scopeLabel }}</small></div>
         </div>
-        <div class="desk-commands">
+        <div v-if="kind!=='event'" class="desk-commands">
           <NButton data-v2-navigation aria-label="查看历史通告" @click="historyOpen=true"><History :size="16" />历史通告</NButton>
           <NDropdown :options="moreOptions" trigger="click" @select="more"><NButton data-v2-navigation aria-label="更多办理"><Ellipsis :size="16" />更多办理</NButton></NDropdown>
           <NDropdown :options="refreshOptions" trigger="click" @select="refreshSource"><NButton :loading="loading||syncing" data-v2-navigation aria-label="刷新通告"><RefreshCw :size="16" />刷新</NButton></NDropdown>

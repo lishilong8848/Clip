@@ -63,7 +63,17 @@ const v2PermissionsDirty=computed(()=>!!draft.value && !!draftOriginal && JSON.s
 const v2Dirty=computed(()=>v2AccessDirty.value || !!newPassword.value || !!confirmPassword.value);
 let v2ConfirmOpen=false;
 function v2Discard(proceed:()=>void){if(v2ConfirmOpen)return;v2ConfirmOpen=true;v2Dialog.warning({zIndex:5100,title:'放弃未保存的账号修改？',positiveText:'放弃修改',negativeText:'继续编辑',onPositiveClick:proceed,onAfterLeave:()=>{v2ConfirmOpen=false;}});}
-async function v2ReloadEditor(){const id=draft.value?.id;v2Discard(async()=>{closeEditor(true);await load();const fresh=items.value.find(item=>item.id===id);if(fresh)openAccount(fresh);});}
+function v2ReloadEditor(){
+  if(loading.value || saving.value)return;
+  const id=draft.value?.id;
+  v2Discard(async()=>{
+    closeEditor(true);
+    await load(true);
+    if(error.value || abort.signal.aborted)return;
+    const fresh=items.value.find(item=>item.id===id);
+    if(fresh)openAccount(fresh);
+  });
+}
 const v2Stop=registerNavigationGuard((_url,proceed)=>{if(saving.value){v2Message.warning('正在保存账号，请等待结果');return false;}if(v2Dirty.value){v2Discard(()=>{closeEditor(true);proceed();});return false;}return true;});
 function v2Unload(event:BeforeUnloadEvent){if(saving.value||v2Dirty.value){event.preventDefault();event.returnValue='';}}
 onMounted(()=>window.addEventListener('beforeunload',v2Unload));

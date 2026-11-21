@@ -117,7 +117,7 @@
           <button class="rd-btn rd-primary" :disabled="busy || !claimScope" @click="ask('claim')">领取本人任务</button></div>
       </section>
       <p v-if="activeView==='review' && !detail.is_reviewer" class="rd-notice" role="status">你不是本次排查的当前审核人</p>
-      <section v-else-if="feedbackDetail.people.length" class="rd-panel rk-feedback-list"><RiskInspectionTable :detail="feedbackDetail" :busy="busy" :view="activeView" @open="openFeedback" /></section>
+      <section v-else-if="feedbackDetail.people.length" class="rd-panel rk-feedback-list"><RiskInspectionTable :key="detail.id+':'+activeView" :detail="feedbackDetail" :busy="busy" :view="activeView" @open="openFeedback" /></section>
       <p v-else-if="!detail.can_claim || activeView!=='mine'" class="rd-empty">当前工作区没有可办理的反馈。</p>
       <details v-if="incompleteJobs.length" class="rd-panel rd-fold"><summary>同步进度 <span>{{ incompleteJobs.length }} 项未结束</span></summary>
         <div v-for="job in incompleteJobs" :key="job.id" class="rd-row"><strong>{{ jobLabel(job.kind) }}</strong><span>{{ job.error || job.status }}</span></div>
@@ -177,6 +177,13 @@
       <section v-if="confirmation" class="risk-confirm rd-dialog rd-desk" >
         <div class="rd-section-head"><h2>{{ confirmTitle }}</h2><button class="rd-link" autofocus :disabled="busy" @click="confirmation=null">取消</button></div><div class="rd-section-head"><p>{{ confirmation.action==='delete_release'?deleteDescription:confirmText }}</p><button class="rd-btn" :class="confirmation.action==='delete_release'?'rd-danger':'rd-primary'"
           :disabled="busy || (needsReason && !reason.trim()) || (confirmation.action==='reviewer' && !!reviewerIssue(newReviewers,people))" @click="confirm">{{ confirmation.action==='delete_release'?'确认删除':'确认' }}</button></div>
+        <dl v-if="confirmation.action==='publish'" class="rd-facts risk-confirm-summary">
+          <div><dt>排查表名</dt><dd>{{ publish.name }}</dd></div>
+          <div><dt>反馈截止</dt><dd>{{ date(publish.deadline) }}</dd></div>
+          <div><dt>审核人</dt><dd>{{ people.filter(p=>publish.reviewer_ids.includes(p.id)).map(p=>p.name).join('、') }}</dd></div>
+          <div><dt>接收经理</dt><dd>{{ people.filter(p=>publish.manager_ids.includes(p.id)).map(p=>p.name).join('、') }}</dd></div>
+          <div><dt>接收范围</dt><dd>{{ selectedPeople.length }} 人 · {{ assignmentCount }} 项个人任务 · {{ recipientSummary }}</dd></div>
+        </dl>
         <label v-if="needsReason" class="rd-field">原因<NInput v-model:value="reason" :input-props="{'aria-label':'原因'}" type="textarea" :maxlength="2000" :disabled="busy" /></label>
         <label v-if="confirmation.action==='reviewer'" class="rd-field">新审核人<NSelect v-model:value="newReviewers" v-model:show="reviewerMenuOpen" :to="false" aria-label="新审核人" :options="peopleOptions" multiple clearable filterable :disabled="busy" /></label>
         <p v-if="error" role="alert" class="rd-notice rd-error">{{ error }}</p>

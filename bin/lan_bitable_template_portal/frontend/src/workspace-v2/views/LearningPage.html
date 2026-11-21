@@ -1,61 +1,36 @@
 <section class="lp-desk learning-page" :aria-busy="loading || busy">
-  <header v-if="ready && v2FocusedLearning" class="lp-focus-head">
-    <div class="lp-title">
-      <button type="button" class="lp-btn" :disabled="busy" @click="switchTab(viewMode==='overview'?'profile':'home')"><ChevronLeft :size="16" aria-hidden="true" />学练首页</button>
-      <h1>{{ v2Feedback?'题目反馈':'题库管理' }}</h1>
-    </div>
-    <div class="lp-tools">
-      <button v-if="isAdmin" type="button" class="lp-btn" :disabled="busy" @click="v2OpenSection(v2Feedback?'questions':'issues')">{{ v2Feedback?'题库管理':'题目反馈' }}</button>
-      <button type="button" class="lp-btn" aria-label="刷新当前页面" title="刷新当前页面" :disabled="loading || busy || pendingLoading" @click="refreshView"><RefreshCw :size="16" aria-hidden="true" /></button>
-    </div>
-  </header>
-  <header v-else class="lp-head" :class="{'lp-study-heading': isLearningHub}">
+  <header class="lp-head">
     <div class="lp-title">
       <VnetBackButton v-if="viewMode==='overview' && learner" within-module :disabled="busy" @click="handleBack" />
       <span class="lp-emblem"><BookOpen :size="22" aria-hidden="true" /></span>
-      <div><h1>画像学练</h1><small>{{ learner?.name || scopeLabel || '学练工作台' }}<template v-if="date"> · <time :datetime="date">{{ date }}</time></template></small></div>
+      <div><h1>画像学练</h1><small>{{ learner?.name || scopeLabel }}<template v-if="date"> · <time :datetime="date">{{ date }}</time></template></small></div>
     </div>
     <div class="lp-tools">
-      <button v-if="ready && canViewBuildings && boot.can_answer && viewMode === 'practice' && isLearningHub" type="button" class="lp-mode-link" :disabled="busy" @click="goOverview">学习管理</button>
-      <div v-else-if="ready && canViewBuildings && boot.can_answer" class="lp-switch" role="group" aria-label="工作模式">
-        <button :aria-pressed="viewMode==='practice'" :disabled="busy" @click="goPractice">个人学习</button>
-        <button :aria-pressed="viewMode==='overview'" :disabled="busy" @click="goOverview">学习管理</button>
+      <div v-if="ready && canViewBuildings && boot.can_answer" class="lp-switch" role="group" aria-label="工作模式">
+        <button type="button" :aria-pressed="viewMode==='practice'" :disabled="busy" @click="v2ChangeMode('practice')">个人学习</button>
+        <button type="button" :aria-pressed="viewMode==='overview'" :disabled="busy" @click="v2ChangeMode('overview')">学习管理</button>
       </div>
-      <label v-if="ready && viewMode==='overview'" class="lp-field">范围<select :value="scope" :disabled="busy" @change="v2Building(($event.target as HTMLSelectElement).value)"><option v-for="s in overviewScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
-      <button v-if="ready && viewMode==='overview' && canViewBuildings" class="lp-btn" :disabled="busy" @click="openPeople">选择人员</button>
-      <button v-if="isLearningHub" type="button" class="lp-mode-link" aria-label="刷新当前页面" title="刷新当前页面" :disabled="loading || busy || pendingLoading" @click="refreshView"><RefreshCw :size="16" aria-hidden="true" /></button>
-      <button v-else class="lp-btn" :disabled="loading || busy" @click="refreshView"><RefreshCw :size="14" aria-hidden="true" />刷新</button>
+      <label v-if="ready && viewMode==='overview' && ['home','profile','history','completion'].includes(tab) && overviewScopes.length>1" class="lp-field">范围<select aria-label="学练范围" :value="scope" :disabled="busy" @change="v2Building(($event.target as HTMLSelectElement).value)"><option v-for="s in overviewScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
+      <button v-if="ready && viewMode==='overview' && canViewBuildings && tab==='profile'" type="button" class="lp-btn" :disabled="busy" @click="openPeople">{{ learner?'切换人员':'选择人员' }}</button>
+      <button type="button" class="lp-btn" aria-label="刷新当前页面" :disabled="loading || busy || pendingLoading" @click="refreshView"><RefreshCw :size="16" aria-hidden="true" />刷新</button>
     </div>
   </header>
+  <nav v-if="ready" class="lp-tabs" aria-label="学练页面" data-v2-navigation>
+    <button v-for="entry in v2LearningTabs" :key="entry.id" type="button"
+      :aria-current="(tab==='pending'?'issues':tab)===entry.id?'page':undefined" :disabled="busy" @click="v2OpenSection(entry.id)">{{ entry.label }}</button>
+  </nav>
   <p v-if="error && !modalKind" class="lp-msg error" role="alert">{{ error }}</p>
   <p v-if="notice && !modalKind" class="lp-msg" role="status">{{ notice }}</p>
   <p v-if="storageWarning || identityIssue" class="lp-msg warn">{{ [identityIssue,storageWarning].filter(Boolean).join(' · ') }}</p>
   <p v-if="!ready && loading" class="lp-empty" role="status">正在读取学习权限和题单…</p>
   <template v-if="ready">
-    <nav v-if="isAdmin && isLearningHub && viewMode==='practice'" class="lp-study-nav" aria-label="学练管理入口">
-      <button type="button" :disabled="busy" @click="switchTab('questions')">题库管理</button>
-    </nav>
-    <nav v-else-if="!isLearningHub && !v2FocusedLearning" class="lp-tabs" aria-label="学练页面">
-      <label v-if="v2Mobile" class="lp-mobile-section">当前功能<select aria-label="切换学练功能" :value="tab" :disabled="busy" @change="v2OpenSection(($event.target as HTMLSelectElement).value)"><option v-for="entry in v2LearningTabs" :key="entry.id" :value="entry.id">{{ entry.label }}</option></select></label>
-      <template v-else>
-      <button v-for="entry in v2LearningTabs" :key="entry.id" :aria-current="tab === entry.id ? 'page' : undefined" :disabled="busy" @click="v2OpenSection(entry.id)">{{ entry.label }}</button>
-      </template>
-    </nav>
-    <LearningHome v-if="isLearningHub" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || (!profile.today_summary && tab === 'home') || (!!error && viewMode === 'overview')"
-      :management="viewMode==='overview'" :is-admin="isAdmin" :daily-duty="dailyDuty" @open="$event==='issues'?v2OpenSection($event):openLearning($event)" @refresh="refreshView" />
+    <LearningHome v-if="tab==='home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !!error"
+      :management="viewMode==='overview'" :is-admin="isAdmin" :daily-duty="dailyDuty" @open="openLearning" @refresh="refreshView" />
     <div v-if="v2Feedback && isAdmin" class="lp-switch lp-feedback-switch" role="group" aria-label="反馈视图">
       <button type="button" :disabled="busy" :aria-pressed="tab==='pending'" @click="switchTab('pending')">{{ pendingQueue.total!=null && !pendingError ? '待处理 ' + pendingQueue.total : '待处理' }}</button>
       <button type="button" :disabled="busy" :aria-pressed="tab==='issues'" @click="switchTab('issues')">全部反馈</button>
     </div>
     <LearningPendingQuestions v-if="isAdmin && tab === 'pending'" :compact="v2Mobile" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
-
-    <section v-if="isLearningHub && viewMode === 'overview' && isAdmin" class="lp-panel lp-pending" aria-label="待处理">
-      <header class="lp-heading"><h2>待处理</h2><small>{{ scopeLabel || '当前范围' }}</small></header>
-      <div class="lp-queue">
-        <button v-if="isAdmin" :disabled="busy || loading" @click="filters.problems=true; pages.questions=1; switchTab('questions')"><span>题库异常</span><strong>{{ boot.question_problem_count ?? '—' }} 题</strong></button>
-        <button v-if="isAdmin" :disabled="busy || loading" @click="switchTab('settings')"><span>待同步</span><strong>{{ boot.sync?.pending ?? '—' }} 项</strong></button>
-      </div>
-    </section>
 
     <section v-if="tab==='today' || (reading && ['history','review'].includes(tab))" class="lp-reader" aria-label="题单与作答">
       <header class="lp-panel lp-heading"><div><h2>{{ tab==='today' ? studyMode==='practice' ? '自主练习' : '当班题单' : '题单回顾' }}</h2>
@@ -112,7 +87,7 @@
                 <button v-if="canAnswer && !current.invalid && !current.answer?.analysis" class="lp-btn" :disabled="busy" @click="reveal('analysis')">查看解析</button>
                 <button v-if="canAnswer" class="lp-btn" :disabled="busy" :aria-pressed="!!current.favorite" @click="saveNotes({favorite:!current.favorite})">{{ current.favorite?'取消收藏':'收藏' }}</button>
                 <button class="lp-btn" :aria-expanded="v2NotesOpen" @click="v2NotesOpen=!v2NotesOpen">学习笔记</button>
-                <button v-if="canAnswer" class="lp-btn" :disabled="busy" @click="openIssue()">题目反馈</button>
+                <button v-if="canAnswer" class="lp-btn" :disabled="busy" @click="openIssue()">反馈本题</button>
               </div>
               <div v-if="current.answer" class="lp-answer-info"><p v-if="current.answer.hint"><b>提示</b>{{ current.answer.hint }}</p><p v-if="current.answer.correct_option_ids?.length || current.answer.answer_text"><b>参考答案</b>{{ current.answer.answer_text || answerLabels(current.answer.correct_option_ids,current) }}</p><p v-if="current.answer.analysis"><b>解析</b>{{ current.answer.analysis }}</p>
                 <button v-for="a in current.answer.attachments || []" :key="a.id" class="lp-btn" @click="showAttachment(a)">{{ a.name }}</button>

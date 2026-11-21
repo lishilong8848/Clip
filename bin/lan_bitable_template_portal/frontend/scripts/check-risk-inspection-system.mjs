@@ -63,7 +63,7 @@ else app=createApp({render:()=>h(NConfigProvider,{themeOverrides:theme,locale:zh
       else if(!url.pathname.startsWith('/api/risk-inspections')){assert.equal(method,'GET','No unrelated writes');data={items:[],records:[],total:0,summary:{},scopes:{}};}
       else if(!endpoint&&method==='GET'){
         if(actor!=='admin'||url.searchParams.get('view')==='mine')assert.equal(url.searchParams.has('scope'),false,'Home building cannot filter assigned tasks');
-        data={items:[{id:'release',name:'隔离风险排查',reviewer:'受限审核人、排查人员甲',deadline:Date.now()+86400000,status:'active',people_count:2,total:3,submitted:1,approved:0}],total:1,is_manager:actor==='admin',can_edit_template:actor==='admin'};
+        data={items:[{id:'release',name:'隔离风险排查',reviewer:'受限审核人、排查人员甲',deadline:Date.now()+86400000,status:'active',people_count:2,total:3,submitted:1,approved:0}],total:1,page:1,is_manager:actor==='admin',can_edit_template:actor==='admin'};
       }else if(!endpoint&&method==='POST'){assert(Array.isArray(body.reviewer_ids));assert(body.people.every(p=>Array.isArray(p.scopes)&&!('scope' in p)));publication=body;reviewerIds=body.reviewer_ids;data=detail();}
       else if(endpoint==='/people')data={self_id:actor,items:directory,scopes:['A','B']};
       else if(endpoint==='/template')data={fields,version:'library-v1'};
@@ -92,7 +92,20 @@ else app=createApp({render:()=>h(NConfigProvider,{themeOverrides:theme,locale:zh
     }catch(error){res.statusCode=500;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:false,error:error.message}));console.error(error);}
   });}};
 }
-async function choose(page,label,text){const select=page.locator('.n-select[aria-label="'+label+'"]'),multiple=await select.locator('.n-base-selection').evaluate(el=>el.classList.contains('n-base-selection--multiple'));await select.locator('.n-base-suffix').click();const menu=page.locator('.n-base-select-menu:visible');await menu.waitFor();assert.equal(await menu.evaluate(el=>!!el.closest('.n-modal,.n-drawer')),false,label+': list must escape modal and drawer clipping');await menu.locator('.n-base-select-option').filter({hasText:text,visible:true}).click();if(multiple)await page.keyboard.press('Escape');await page.locator('.n-base-select-option:visible').first().waitFor({state:'hidden'});}
+async function choose(page,label,text){
+  const select=page.locator('.n-select[aria-label="'+label+'"]');
+  const multiple=await select.locator('.n-base-selection').evaluate(el=>el.classList.contains('n-base-selection--multiple'));
+  // A clearable select replaces its arrow with a clear button after selection.
+  const menu=page.locator('.n-base-select-menu:visible');
+  if(await select.locator('.n-base-selection-input').count() || await select.locator('input').count())
+    await select.locator('[tabindex="0"]').first().press('ArrowDown');
+  else await select.locator('.n-base-suffix').click();
+  await menu.waitFor();
+  assert.equal(await menu.evaluate(el=>!!el.closest('.n-modal,.n-drawer')),false,label+': list must escape modal and drawer clipping');
+  await menu.locator('.n-base-select-option').filter({hasText:text,visible:true}).click();
+  if(multiple)await page.keyboard.press('Escape');
+  await menu.waitFor({state:'hidden'});
+}
 async function noSystemFields(page){for(const field of fixed)assert.equal(await page.locator('[data-risk-field="'+field.key+'"],.risk-selected-fields strong,.risk-field-pick strong,.risk-sheet th,.risk-feedback-summary dt').filter({hasText:field.field_name}).count(),0,'System field not rendered: '+field.field_name);assert.equal(await page.locator('.risk-field-system').count(),0);}
 async function capture(page,tag){await page.screenshot({path:path.join(output,tag+'.png'),fullPage:true,animations:'disabled'});await page.screenshot({path:path.join(output,tag+'-viewport.png'),animations:'disabled'});assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),'No page overflow: '+tag);}
 async function checkInputs(page,tag,root='.risk-publish',minimum=5){
@@ -114,7 +127,7 @@ async function testFeedback(page,url,tag){
   assert.deepEqual(people[0].items[0].values,{},'Saving B must not change A');assert.deepEqual(people[0].items[1].values,{answer:'第二楼独立反馈'});
   await drawer.getByRole('button',{name:'提交审核',exact:true}).click();await confirm(page);await noSystemFields(page);assert.equal(people[0].items[1].system_values.fixed_8,1792152000000);
   assert.equal(await drawer.getByRole('button',{name:'审核通过',exact:true}).count(),0,'Filling never mixes review actions');
-  await page.keyboard.press('Escape');await drawer.waitFor({state:'hidden'});await page.getByRole('button',{name:'进入审核任务',exact:true}).click();await choose(page,'反馈楼栋','B楼');await page.getByRole('button',{name:'处理 排查人员甲 · 设备检查',exact:true}).click();
+  await page.keyboard.press('Escape');await drawer.waitFor({state:'hidden'});await page.getByRole('button',{name:'进入审核任务',exact:true}).click();await page.getByText('全部楼栋',{exact:true}).waitFor();await choose(page,'反馈楼栋','B楼');await page.getByRole('button',{name:'处理 排查人员甲 · 设备检查',exact:true}).click();
   assert.equal(await drawer.getByRole('button',{name:'保存草稿',exact:true}).count(),0,'Review is a separate read-only page');
   await drawer.getByRole('button',{name:'审核通过',exact:true}).click();await confirm(page);assert.equal(people[0].items[1].status,'approved','Designated reviewers can self-review');await capture(page,tag+'-self-review');await page.keyboard.press('Escape');await drawer.waitFor({state:'hidden'});
   actor='reviewer';await page.goto(url+'?view=review');await page.locator('.risk-task-name:visible').click();await page.getByRole('button',{name:'处理 排查人员乙 · 设备检查',exact:true}).click();await drawer.getByRole('button',{name:'审核通过',exact:true}).click();await confirm(page);assert.equal(people[1].items[0].status,'approved','Reviewer with no building permissions can review assigned tasks');await noSystemFields(page);await capture(page,tag+'-assigned-reviewer');
@@ -126,7 +139,7 @@ async function testPublish(page,url,tag){
   assert.match(await page.locator('.n-select[aria-label="审核人"]').innerText(),/发起人/);await choose(page,'审核人','受限审核人');await choose(page,'接收人员','排查人员甲');await choose(page,'接收人员','发起人');
   await page.locator('.risk-recipients summary').click();await choose(page,'排查人员甲的接收楼栋','B楼');const scope=page.locator('.n-select[aria-label="排查人员甲的接收楼栋"]');assert.match(await scope.innerText(),/A楼/);assert.match(await scope.innerText(),/B楼/);assert(!await scope.locator('.n-base-selection').evaluate(el=>el.classList.contains('n-base-selection--disabled')));
   await choose(page,'接收经理','甲楼经理');await page.getByText(/接收经理需覆盖全部接收楼栋/).waitFor();await page.locator('.n-select[aria-label="接收经理"] .n-base-selection').click();assert.equal(await page.locator('.n-base-select-option').filter({hasText:'无楼栋经理',visible:true}).count(),0,'Use final_scopes');await page.keyboard.press('Escape');await choose(page,'接收经理','乙楼经理');
-  await page.locator('.risk-publish .n-date-picker input').fill('2099-01-01 12:00:00');await page.keyboard.press('Enter');await page.keyboard.press('Tab');await noSystemFields(page);await capture(page,tag+'-publish');await checkInputs(page,tag+'-publish');await page.getByRole('button',{name:'确认发布',exact:true}).click();await confirm(page);
+  await page.locator('.risk-publish .n-date-picker input').fill('2099-01-01 12:00:00');await page.keyboard.press('Enter');await page.keyboard.press('Tab');await noSystemFields(page);await capture(page,tag+'-publish');await checkInputs(page,tag+'-publish');await page.getByRole('button',{name:'确认发布',exact:true}).click();assert.match(await page.locator('.risk-confirm').innerText(),/受限审核人/);assert.match(await page.locator('.risk-confirm').innerText(),/乙楼经理/);await confirm(page);
   assert.deepEqual(publication.reviewer_ids,['admin','reviewer']);assert.deepEqual(publication.people,[{id:'alice',scopes:['A','B']},{id:'admin',scopes:['A']}]);assert.deepEqual(publication.items,template.items);
   await page.getByRole('button',{name:'更换审核人',exact:true}).click();await choose(page,'新审核人','排查人员甲');await confirm(page);assert(reviewerIds.includes('alice'));
 }
@@ -157,7 +170,7 @@ async function testShell(page,origin,version){
 }
 const browser=await chromium.launch({headless:true}),reports=[];
 try{
-  for(const version of process.argv.includes('--preview-only')?['v2']:['legacy','v2']){
+  for(const version of process.argv.some(arg=>arg==='--v2-only'||arg==='--preview-only')?['v2']:['legacy','v2']){
     reset();const server=await createServer({root,configFile:version==='v2'?path.join(root,'vite.workspace-v2.config.ts'):false,cacheDir:path.join(output,'vite-cache-'+version),publicDir:false,plugins:[harness(version),...version==='legacy'?[vue()]:[]],server:{host:'127.0.0.1',port:0,hmr:false,proxy:{}},optimizeDeps:{noDiscovery:true,include:['vue','naive-ui','lucide-vue-next']},logLevel:'error'});
     try{
       await server.listen();const origin='http://127.0.0.1:'+server.httpServer.address().port,url=origin+(version==='v2'?'/assets/workspace-v2':'')+'/__risk-system.html';

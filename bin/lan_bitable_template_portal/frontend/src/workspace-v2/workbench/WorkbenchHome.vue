@@ -613,7 +613,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .queue-title .wb-task-count { margin:0; padding:1px 6px; border-radius:999px; color:var(--desk-blue); background:var(--desk-blue-wash); font-variant-numeric:tabular-nums }
 .queue-switches { flex-wrap:wrap; gap:4px }
 .task-desk .queue-switches button { min-height:32px;padding:3px 9px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--desk-muted);font-size:12px;white-space:nowrap }
-.task-desk .queue-switches button[aria-pressed="true"] { background:var(--desk-blue-wash); color:var(--desk-blue); font-weight:650 }
+.task-desk .queue-switches button[aria-pressed="true"] { background:var(--v2-palette-selection); color:var(--v2-palette-accent-text); font-weight:650 }
 .queue-filters { flex:1 1 145px;max-width:232px;margin-inline-start:auto }
 .queue-filters label { min-width:0; min-height:35px; padding:0 9px; background:var(--desk-well); border:1px solid var(--desk-line); border-radius:8px; color:var(--desk-muted) }
 .queue-filters svg { flex:none }
@@ -660,7 +660,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .task-meta { flex-wrap:wrap;gap:2px 7px;color:var(--desk-muted);font-size:11px;line-height:1.35 }
 .late .due,.delete-key { color:#99441d }
 .delete-key { min-height:34px;border:0;background:transparent;font-size:12px }
-[data-v2-theme="dark"] :is(.wb-task-tile,.tile-popover) { --tile-accent:hsl(var(--tile-hue) 65% 73%) }
+:global([data-v2-theme="dark"] :is(.wb-task-tile,.tile-popover)) { --tile-accent:hsl(var(--tile-hue) 65% 73%) }
 @media(max-width:600px){
   .task-tiles { grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }
   .task-desk .wb-task-tile { min-height:66px;padding:8px 10px }
@@ -673,7 +673,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .queue-health>div { display:flex; align-items:center; justify-content:space-between; margin-top:6px }
 .task-dialog { width:min(1240px,calc(100vw - 36px)); border:1px solid var(--soft-edge,#aebdc1); border-radius:16px; background:var(--soft-face,#f4f7f7); box-shadow:0 18px 65px #10252c3d; color:var(--v2-ink,#20373b); box-sizing:border-box; overflow-wrap:anywhere }
 .close-key { display:grid; place-items:center; min-width:38px; min-height:36px; padding:5px 9px; color:inherit; background:var(--soft-field,#edf2f3); border:1px solid #879b9c66; border-radius:8px }
-[data-v2-theme="dark"] .late .due,[data-v2-theme="dark"] .delete-key { color:#ffbf91 }
+:global([data-v2-theme="dark"] :is(.task-desk,.tile-popover) .late .due),:global([data-v2-theme="dark"] .task-desk .delete-key) { color:#ffbf91 }
 @media(max-width:760px) {
   .scope-choice select { min-height:44px }
   .task-desk :is(.business-key,.more-key,.expand-key,.record-key,.delete-key,.queue-switches button),.queue-filters label,.close-key { min-height:44px }
@@ -707,7 +707,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .priority-capsule small { font-size:11px;color:var(--desk-muted) }
 .priority-status { justify-self:start;padding:1px 6px;border-radius:999px;background:color-mix(in srgb,var(--attention) 14%,var(--desk-paper));color:var(--attention);font-size:11px;font-weight:700 }
 .priority-capsule>svg { color:var(--attention);grid-area:1/2/span 3 }
-[data-v2-theme="dark"] .priority-board { --priority-red:#ffaeb2;--priority-amber:#fed491 }
+:global([data-v2-theme="dark"] .task-desk .priority-board) { --priority-red:#ffaeb2;--priority-amber:#fed491 }
 @media(max-width:700px){
   .priority-board .priority-grid { grid-template-columns:minmax(0,1fr) }
   .priority-grid[data-collapsed=true] > :nth-child(n+3) { display:none }

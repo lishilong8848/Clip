@@ -73,7 +73,11 @@ class MainWindowRecordsMixin:
             )
             if rollback is None and candidate_rollback:
                 rollback = candidate_rollback
-            self.pending_update_after_upload.pop(candidate_id, None)
+            request = self.pending_update_after_upload.get(candidate_id) or {}
+            if (request.get("data") or {}).get("notice_type") == "事件通告":
+                request["waiting_for_retry"] = True
+            else:
+                self.pending_update_after_upload.pop(candidate_id, None)
             self.pending_new_by_record_id.pop(candidate_id, None)
         old_data = rollback.get("old_data") if isinstance(rollback, dict) else None
         if isinstance(old_data, dict):
@@ -177,9 +181,9 @@ class MainWindowRecordsMixin:
     def _upload_operation_for_record(data: dict) -> str:
         original = data.get("_event_inflight_retry_snapshot")
         original = original if isinstance(original, dict) else {}
-        if data.get("_event_delivery_pending") and data.get("_event_wait_job_id"):
-            return str(data["_event_wait_job_id"])
-        return str(data.get("_upload_operation_id") or original.get("_upload_operation_id") or "").strip()
+        operation_id = str(data.get("_upload_operation_id") or data.get("_event_wait_job_id")
+                           or original.get("_upload_operation_id") or "").strip()
+        return "" if operation_id == data.get("_event_delivery_receipt_id") else operation_id
 
     def _upload_state_is_busy(self, data: dict) -> bool:
         if not isinstance(data, dict):
@@ -4544,6 +4548,9 @@ class MainWindowRecordsMixin:
             if success:
                 for candidate_id in candidate_ids:
                     self.pending_upload_rollback_by_record_id.pop(candidate_id, None)
+                    request = getattr(self, "pending_update_after_upload", {}).get(candidate_id)
+                    if request:
+                        request.pop("waiting_for_retry", None)
             else:
                 pending_updates = getattr(
                     self,
@@ -4552,7 +4559,11 @@ class MainWindowRecordsMixin:
                 )
                 pending_new = getattr(self, "pending_new_by_record_id", {})
                 for candidate_id in candidate_ids:
-                    pending_updates.pop(candidate_id, None)
+                    request = pending_updates.get(candidate_id) or {}
+                    if (request.get("data") or {}).get("notice_type") == "事件通告":
+                        request["waiting_for_retry"] = True
+                    else:
+                        pending_updates.pop(candidate_id, None)
                     pending_new.pop(candidate_id, None)
             list_widget, item = self._find_active_item_by_upload_operation(
                 operation_id
@@ -4595,6 +4606,8 @@ class MainWindowRecordsMixin:
                         "remote_written": False,
                     }
                 if not success:
+                    receipt_id = data.get("_event_delivery_receipt_id")
+                    inflight = data.get("_event_inflight_retry_snapshot")
                     rollback = None
                     for candidate_id in candidate_ids:
                         rollback = self.pending_upload_rollback_by_record_id.pop(
@@ -4602,8 +4615,14 @@ class MainWindowRecordsMixin:
                         )
                         if rollback:
                             break
-                    if rollback and rollback.get("old_data"):
-                        data = rollback.get("old_data") or data
+                    previous = inflight or (rollback or {}).get("old_data")
+                    if previous:
+                        data = dict(previous)
+                        if receipt_id:
+                            data["_event_delivery_receipt_id"] = receipt_id
+                            for field in ("_event_wait_job_id", "_event_wait_attempt", "_event_wait_released",
+                                          "_event_delivery_pending", "_event_wait_resume_job_id"):
+                                data.pop(field, None)
                         data["_pending_upload_hash"] = None
                         data["_has_unuploaded_changes"] = True
                         data["_upload_in_progress"] = False
@@ -4706,8 +4725,7 @@ class MainWindowRecordsMixin:
                 data.pop("_upload_pending_dialog", None)
                 data.pop("_upload_started_monotonic", None)
                 data.pop("_upload_verification_pending", None)
-                if success:
-                    data.pop("_event_inflight_retry_snapshot", None)
+                data.pop("_event_inflight_retry_snapshot", None)
                 if preserve_operation:
                     data["_upload_operation_id"] = str(
                         retry_meta.get("operation_id") or operation_id

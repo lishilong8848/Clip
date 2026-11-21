@@ -126,20 +126,46 @@ try{
         await page.clock.setFixedTime(new Date(day+'T14:00:00+08:00'));
         await page.goto(homeUrl);
         const tile=page.getByRole('button',{name:'继续答题',exact:true});
-        await tile.waitFor();assert.equal(await tile.getByRole('progressbar').getAttribute('aria-valuenow'),'50');
+        await tile.waitFor();
+        assert(await tile.evaluate(el=>getComputedStyle(el).color===getComputedStyle(el.closest('.learning-personal-home')).color),'duty card uses a readable foreground on the themed surface');
+        assert.equal(await tile.getByRole('progressbar').getAttribute('aria-valuenow'),'50');
         await page.getByRole('button',{name:'题库管理',exact:true}).waitFor();
         await page.getByRole('button',{name:'题目反馈',exact:true}).waitFor();
         await page.screenshot({path:path.join(output,'redesign-desktop-home.png'),fullPage:true});
         for(const [width,height] of [[402,874],[820,1180]]){
           await page.setViewportSize({width,height});
           assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+          const cta=tile.locator('.daily-action'), box=await cta.boundingBox();
+          assert(box.width<=100&&box.height<=36&&box.x>=0&&box.x+box.width<=width,'continue action stays compact and within the viewport');
+          assert((await tile.boundingBox()).height>=44,'the full card remains a comfortably sized target');
           await page.screenshot({path:path.join(output,`redesign-${width}-home.png`),fullPage:true});
+          if(width===402){
+            await cta.click();
+            await page.locator('.lp-question .stem').getByText('隔离每日题单第2题',{exact:true}).waitFor();
+            await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'学习首页',exact:true}).click();
+            await tile.waitFor();
+          }
         }
         await page.setViewportSize({width:1440,height:1000});
         await page.getByRole('button',{name:'题库管理',exact:true}).click();
         const bank=page.getByRole('region',{name:'题库列表'});
         await bank.getByText(revision.stem,{exact:true}).waitFor();
-        assert.equal(await page.getByRole('navigation',{name:'学练页面'}).count(),0);
+        const nav=page.getByRole('navigation',{name:'学练页面'});
+        const expectedTabs=['学习首页','个人画像','今日学练','错题与复习','学习历史','题目反馈','分享会练习','每日完成','题库管理','发布设置'];
+        const tabNames=()=>nav.getByRole('button').allTextContents().then(items=>items.map(item=>item.trim()));
+        assert.deepEqual(await tabNames(),expectedTabs);
+        await nav.getByRole('button',{name:'学习首页',exact:true}).click();
+        await tile.waitFor();
+        assert.deepEqual(await tabNames(),expectedTabs,'the home must retain all authorized section buttons');
+        assert.equal(await page.getByRole('navigation',{name:'学习入口'}).count(),0,'the new homepage does not repeat the section buttons');
+        await page.getByRole('button',{name:'学习管理',exact:true}).click();
+        await page.getByRole('region',{name:'学习管理工作台'}).waitFor();
+        assert.deepEqual(await tabNames(),expectedTabs.map(label=>label==='个人画像'?'楼栋汇总':label));
+        await nav.getByRole('button',{name:'今日学练',exact:true}).click();
+        await page.getByRole('region',{name:'题单与作答'}).waitFor();
+        assert.deepEqual(await tabNames(),expectedTabs);
+        await nav.getByRole('button',{name:'题库管理',exact:true}).click();
+        await bank.getByText(revision.stem,{exact:true}).waitFor();
         assert.equal(await bank.getByRole('button',{name:'批量启用'}).count(),0);
         await page.screenshot({path:path.join(output,'redesign-desktop-bank.png'),fullPage:true});
         await page.setViewportSize({width:390,height:844});
@@ -188,15 +214,15 @@ try{
         assert(editRequests.some(row=>row.method==='PUT'&&!row.grouped));
         admin=false;await page.goto(homeUrl);await tile.waitFor();
         assert.equal(await page.getByRole('button',{name:/待处理题目/}).count(),0);
-        await tile.click();await page.locator(v2?'.lp-question':'.question-body').getByRole('button',{name:v2?'题目反馈':'题目有疑问',exact:true}).waitFor();
+        await tile.click();await page.locator(v2?'.lp-question':'.question-body').getByRole('button',{name:v2?'反馈本题':'题目有疑问',exact:true}).waitFor();
         assert.equal(await page.getByRole('button',{name:'编辑本题',exact:true}).count(),0);
         onDuty=false;await page.setViewportSize({width:390,height:844});await page.goto(homeUrl);
         const home=page.getByRole('region',{name:'个人学习首页'});
-        await home.getByRole('button',{name:'分享会练习',exact:true}).waitFor();
+        await nav.getByRole('button',{name:'分享会练习',exact:true}).waitFor();
         assert.equal(await home.getByText('当班题单',{exact:true}).count(),0);
         await home.getByText('历史题单',{exact:true}).waitFor();
         await page.screenshot({path:path.join(output,'redesign-mobile-off-duty.png'),fullPage:true});
-        await home.getByRole('button',{name:'分享会练习',exact:true}).click();
+        await nav.getByRole('button',{name:'分享会练习',exact:true}).click();
         await page.locator('.sharing-exercises').waitFor();
         assert.equal(claims.length,0);
         assert.deepEqual(errors,[]);
@@ -216,17 +242,16 @@ try{
         const switchMode=mode=>page.getByRole('group',{name:v2?'题单类型':'学练方式'}).getByRole('button',{name:mode==='每日题单'?'当班题单':mode,exact:true}).click();
         const openSection=async(label)=>{
           const nav=page.getByRole('navigation',{name:'学练页面'});
-          if(v2 && width<=760) await nav.getByRole('combobox',{name:'切换学练功能'}).selectOption({label});
-          else await nav.getByRole('button',{name:label,exact:true}).click();
+          await nav.getByRole('button',{name:label,exact:true}).click();
         };
         const firstAnswer=v2?page.getByRole('group',{name:'作答选项'}).getByRole('button',{name:/核对安全条件/}):page.locator('.options input[value="A"]');
         const chooseFirst=()=>v2?firstAnswer.click():firstAnswer.check();
         const firstIsSelected=async()=>v2?(await firstAnswer.getAttribute('aria-pressed'))==='true':await firstAnswer.isChecked();
         await page.goto(origin+entry.replace('&view=practice',''));await page.getByRole('region',{name:'个人学习首页'}).waitFor();await ready();assert.equal(claims.length,0,'learning home is read-only');
-        assert.equal(await page.getByRole('navigation',{name:'学练页面'}).count(),0,'home cards are not duplicated by a second navigation row');
+        assert.equal(await page.getByRole('navigation',{name:'学练页面'}).count(),v2?1:0);
         const home=page.getByRole('region',{name:'个人学习首页'});
         const homeEntries=await home.getByRole('navigation',{name:'学习入口'}).getByRole('button').allTextContents();
-        assert.deepEqual(homeEntries,['自主练习','分享会练习','复习中心']);
+        assert.deepEqual(homeEntries,v2?[]:['自主练习','分享会练习','复习中心']);
         profileFailure=true;await page.getByRole('button',{name:'刷新当前页面',exact:true}).click();await ready();
         await home.getByText(/进度暂未读取/).waitFor();assert.equal(await home.getByText(/暂无已领取题目/).count(),0,'read failures must not claim no assignments');
         if(!v2){await page.getByRole('button',{name:'关闭错误提示',exact:true}).click();assert(await home.getByText(/进度暂未读取/).isVisible(),'dismissing an error is not a successful refresh');}
@@ -234,11 +259,12 @@ try{
         profileDay='2026-10-29';const beforeRollover=profileReads;await page.clock.setFixedTime(new Date(profileDay+'T09:00:00+08:00'));await page.evaluate(()=>document.dispatchEvent(new Event('visibilitychange')));
         await page.locator('.learning-page > header time').filter({hasText:/^2026-10-29$/}).waitFor();assert(profileReads>beforeRollover,'home refreshes its statistics after a Beijing date rollover');
         profileDay=day;await page.clock.setFixedTime(new Date(day+'T14:00:00+08:00'));await page.getByRole('button',{name:'刷新当前页面',exact:true}).click();await ready();
-        for(const label of ['复习中心','分享会练习','查看全部','个人学习画像','题目反馈']){
-          await home.getByRole('button',{name:new RegExp(label)}).click();await ready();
+        for(const label of (v2?['错题与复习','分享会练习','学习历史','个人画像','题目反馈']:['复习中心','分享会练习','查看全部','个人学习画像','题目反馈'])){
+          if(v2)await openSection(label);
+          else await home.getByRole('button',{name:new RegExp(label)}).click();
+          await ready();
           if(label==='分享会练习')await page.locator('.sharing-exercises').waitFor();
-          if(v2 && label==='题目反馈')await page.getByRole('button',{name:'学练首页',exact:true}).click();
-          else await openSection('学习首页');
+          await openSection('学习首页');
           await home.waitFor();await ready();
         }
         await page.screenshot({path:path.join(output,`${v2?'v2':'legacy'}-${width}-home.png`),fullPage:true,animations:'disabled'});
@@ -293,10 +319,12 @@ try{
             assert.equal(await page.locator('[aria-label="答题操作"]').count(),0,'leaving the paper removes its teleported controls');
           }finally{releasePapers();}
         }
-        admin=true;await page.goto(origin+entry.replace('view=practice','view=overview'));const management=page.getByRole('region',{name:'学习管理工作台'});await management.waitFor();await ready();
-        assert.equal(await (v2?management.getByRole('group',{name:'学练入口'}):management).getByRole('button').count(),6);
-        if(v2)await management.getByRole('button',{name:/题目反馈/}).waitFor();
-        else await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'待处理题目 0',exact:true}).waitFor();
+        admin=true;await page.goto(origin+entry.replace('view=practice','view=overview')+(v2?'&tab=home':''));const management=page.getByRole('region',{name:'学习管理工作台'});await management.waitFor();await ready();
+        if(v2)await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'题目反馈',exact:true}).waitFor();
+        else {
+          assert.equal(await management.getByRole('button').count(),6);
+          await page.getByRole('navigation',{name:'学练页面'}).getByRole('button',{name:'待处理题目 0',exact:true}).waitFor();
+        }
         await page.screenshot({path:path.join(output,`${v2?'v2':'legacy'}-${width}-admin.png`),fullPage:true,animations:'disabled'});
         await context.close();
       }

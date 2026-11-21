@@ -51,7 +51,7 @@ export function operationsFixture(){
     if(result?.json?.data){const data=result.json.data;
       if(p==='/api/daily-tasks')data.scope=url.searchParams.get('scope');
       if(p.endsWith('/morning-meeting/preview')&&!url.searchParams.has('temperature_only'))morning=data;
-      if(p.endsWith('/learning/bootstrap')){data.silent_manual_publish=true;data.settings.enabled=false;}
+      if(p.endsWith('/learning/bootstrap')){data.daily_duty={date:data.today,scope:'A',shift:'白',end_at:new Date(Date.now()+3600000).toISOString()};data.silent_manual_publish=true;data.settings.enabled=false;}
       if(p.endsWith('/learning/settings'))Object.assign(data,{enabled:false,publish_time:'13:00',night_publish_time:'20:00',reminder_time:'17:00'});
       if(/^\/api\/learning\/papers(?:\/|$)/.test(p))for(const paper of (data.items||[data]))if(paper.questions?.length)paper.questions[0].attachments=[sample];
       if(p.endsWith('/learning/issues'))for(const issue of (data.items||[data]))Object.assign(issue,{can_update:true,question_id:'collab-question-1',category:'题干',status:'pending',description:'设备型号需要核对',suggestion:'补充水泵铭牌信息',attachments:[sample]});

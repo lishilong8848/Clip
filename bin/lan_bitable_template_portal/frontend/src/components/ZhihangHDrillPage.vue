@@ -1,7 +1,7 @@
 <template>
   <section class="h-drill" aria-labelledby="h-drill-title">
     <header class="h-header">
-      <VnetBackButton @click="emit('back')" />
+      <VnetBackButton v-if="!embedded" @click="emit('back')" />
       <h1 id="h-drill-title">H 楼值班演练</h1>
       <NButton :loading="busy === 'refresh'" @click="refresh">刷新</NButton>
       <a v-if="status?.table_url" :href="status.table_url" target="_blank" rel="noopener noreferrer">打开飞书原表</a>
@@ -58,11 +58,13 @@
 </template>
 
 <script setup lang="ts">
+
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { NAlert, NButton, NInput, NModal } from 'naive-ui';
 import { requestJson } from '../api/client';
 import VnetBackButton from './VnetBackButton.vue';
 
+defineProps<{ embedded?: boolean }>();
 const emit = defineEmits<{ back: [] }>();
 const base = '/api/drills/zhihang-h';
 type Row = Record<string, string>;

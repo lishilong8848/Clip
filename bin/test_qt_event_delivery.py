@@ -84,6 +84,37 @@ class QtEventDeliveryTests(unittest.TestCase):
                     if task["payload"]["operation_id"] == operation_id)
         self.store.mark_outbox_event(task["id"], "pending", retry_at=0, count_attempt=False)
 
+    def test_start_uses_explicit_i3_from_text_and_waits_for_confirmed_group_delivery(self):
+        from upload_event_module.services import feishu_service, robot_webhook
+
+        request = self.request("upload", target="localid-explicit-level")
+        request["data_dict"].pop("level")
+        request["data_dict"]["text"] += "\n【事件等级】I3级"
+        self.send.side_effect = feishu_service.send_robot_message_by_payload
+        self.delivery.submit(request)
+        with (
+            patch.object(robot_webhook.config, "group_name_event_i3", ""),
+            patch.object(robot_webhook, "send_text_to_chat_id") as post,
+        ):
+            self.delivery.process_messages()
+            post.assert_not_called()
+        operation_id = request["operation_id"]
+        self.assertIn("未配置飞书 I3 事件群", self.delivery.status(operation_id)["error"])
+        self.assertEqual(self.store.list_outbox_events(ARCHIVES), [])
+
+        self.make_due(operation_id, "next_message_at")
+        with (
+            patch.object(robot_webhook.config, "group_name_event_i3", "隔离内部群"),
+            patch.object(robot_webhook, "_find_chat_id_by_name", return_value=("isolated-chat", "")) as find,
+            patch.object(robot_webhook, "send_text_to_chat_id", return_value=(True, "ok")) as post,
+        ):
+            self.delivery.process_messages()
+            find.assert_called_once_with("隔离内部群")
+            post.assert_called_once()
+            self.assertEqual(post.call_args.args[1], "isolated-chat")
+        self.assertTrue(self.delivery.status(operation_id)["result"]["robot_sent"])
+        self.create.assert_not_called()
+
     def test_end_releases_waiters_before_bitable_and_retries_the_original_archive_after_restart(self):
         self.seed_existing()
         request = self.request("end")
@@ -133,6 +164,56 @@ class QtEventDeliveryTests(unittest.TestCase):
         self.assertEqual(event_priority.blockers(self.store), [])
         self.assertEqual(self.send.call_args_list[0].kwargs, self.send.call_args_list[1].kwargs)
         self.update.assert_not_called()
+
+    def test_end_delivers_failure_receipt_when_retries_are_exhausted(self):
+        self.seed_existing()
+        request = self.request("end")
+        operation_id = request["operation_id"]
+        self.send.return_value = {"robot_sent": False, "last_robot_error": "隔离群发送失败"}
+        self.delivery.submit(request)
+        for _ in range(5):
+            self.make_due(operation_id, "next_message_at")
+            self.delivery.process_messages()
+        receipt, = self.store.list_outbox_events("qt_action")
+        result = receipt["payload"]["payload"]["result"]
+        self.assertFalse(result["ok"])
+        self.assertIn("隔离群发送失败", result["message"])
+        self.assertEqual(self.delivery.status(operation_id)["status"], "failed")
+        self.assertEqual(len(event_priority.blockers(self.store)), 1)
+        self.update.assert_not_called()
+
+    def test_manual_end_retry_after_lost_receipts_and_restart_reuses_group_message_id(self):
+        self.seed_existing()
+        request = self.request("end")
+        original_id = request["operation_id"]
+        accepted = set()
+        lose_reply = True
+
+        def send(_kind, _payload, *, message_uuid):
+            accepted.add(message_uuid)
+            return ({"robot_sent": False, "last_robot_error": "隔离回执丢失"}
+                    if lose_reply else {"robot_sent": True})
+
+        self.send.side_effect = send
+        self.delivery.submit(request)
+        for _ in range(5):
+            self.make_due(original_id, "next_message_at")
+            self.delivery.process_messages()
+        self.assertEqual(self.delivery.status(original_id)["status"], "failed")
+        old_operation = self.delivery.operation(original_id)
+        old_operation.pop("message_uuid", None)
+        self.store.put_document(OPERATIONS, original_id, old_operation)
+        self.restart()
+        retry = self.request("end")
+        retry["operation_id"] = "qt_notice:manual-end-retry"
+        retry["response_time"] = "2026-08-31 10:06"
+        self.delivery.submit(retry)
+        lose_reply = False
+        self.delivery.process_messages()
+        self.assertEqual(len(accepted), 1)
+        self.assertEqual(event_priority.blockers(self.store), [])
+        self.delivery.process_archives()
+        self.update.assert_called_once()
 
     def test_independent_send_and_archive_pass_retrying_batches(self):
         requests = []

@@ -49,6 +49,7 @@ try{
   if(u.pathname==='/api/workbench')return ok(route,{records:[{record_id:'plan-E',work_type:'maintenance',title:u.searchParams.get('month')+'计划',source_progress:bindingOnly?'进行中':'未开始',building:'E楼'}],ongoing:[{active_item_id:'active-E',work_type:'maintenance',title:'E楼进行中',status:'开始',building:'E楼'}],records_pagination:{total:1},ongoing_pagination:{total:1}});
   if(u.pathname==='/api/workbench/lite-detail')return ok(route,{fragments:{detail:form(u.searchParams.has('active_item_id'))}});
   if(u.pathname==='/api/workbench/draft')return ok(route,{draft:null});
+  if(u.pathname==='/api/workbench/dingtalk-options')return ok(route,{robots:[{id:'fixture-ding',name:'隔离钉钉群',enabled:true,scopes:[],types:[]}],selected_robot_ids:['fixture-ding']});
   if(bindingOnly&&u.pathname==='/api/notice-target-candidates'){
     assert.equal(req.postDataJSON().lookup_context,'planned_target_table');
     return ok(route,{candidates:[{target_record_id:'target-E',active_item_id:'active-E',title:'已发原通告',building:'E楼',status:bindingStatus==='active'?'开始':'结束'}]});
@@ -86,7 +87,8 @@ try{
  });
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));await page.addInitScript(()=>sessionStorage.clear());
  const goto=async(kind='maintenance')=>{await page.goto(origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=E&month=10月&work_type='+kind);await page.locator('[data-list=planned] .desk-record').first().waitFor();};
- const scrollSection=label=>page.locator({'通告内容':'.v2-notice-page-fields','推荐填写':'[data-notice-section=memory]','照片':'[data-notice-section=photos]'}[label]).scrollIntoViewIfNeeded();
+ const scrollSection=label=>page.locator({'通告内容':'.v2-notice-pane-form','推荐填写':'[data-notice-section=memory]','照片':'[data-notice-section=photos]'}[label]).scrollIntoViewIfNeeded();
+ const pickRobot=()=>page.getByRole('checkbox',{name:'隔离钉钉群',exact:true}).check();
  const open=async()=>{await page.locator('[data-list=planned]').getByRole('button',{name:'开始',exact:true}).click();await page.getByRole('textbox',{name:'名称',exact:true}).waitFor();assert.equal(await page.locator('.v2-notice-pane-tabs').count(),0);assert(await page.getByRole('textbox',{name:'原因',exact:true}).isVisible());assert(await page.locator('[data-notice-section=memory]').isVisible());if(photoRequired)assert(await page.locator('[data-notice-section=photos]').isVisible());assert(await page.getByRole('button',{name:'查找目标通告',exact:true}).isVisible());await scrollSection('推荐填写');};
  if(bindingOnly){
   await page.clock.install();
@@ -136,7 +138,7 @@ try{
  assert.equal(await page.locator('.v2-notice-field-grid [data-notice-field]').first().getAttribute('data-notice-field'),'content','filling a missing field does not move it away from the cursor');
  assert.equal(await page.getByRole('button',{name:'展开其它字段',exact:true}).count(),0);assert.equal(await page.getByRole('textbox',{name:'原因',exact:true}).inputValue(),'本楼现场原因');
  assert.equal(await page.getByRole('textbox',{name:'进度',exact:true}).inputValue(),'现场检查已完成');
- await scrollSection('照片');await page.getByLabel('添加现场照片',{exact:true}).setInputFiles([{name:'成功.png',mimeType:'image/png',buffer:Buffer.from('fixture1')},{name:'失败.png',mimeType:'image/png',buffer:Buffer.from('fixture2')}]);
+ await pickRobot();await scrollSection('照片');await page.getByLabel('添加现场照片',{exact:true}).setInputFiles([{name:'成功.png',mimeType:'image/png',buffer:Buffer.from('fixture1')},{name:'失败.png',mimeType:'image/png',buffer:Buffer.from('fixture2')}]);
  await page.getByRole('button',{name:'重试此张',exact:true}).waitFor();await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('alert').filter({hasText:'还有图片未上传成功'}).waitFor();
  await page.getByRole('button',{name:'重试此张',exact:true}).click();await page.locator('.v2-photo-queue').waitFor({state:'detached'});
  assert.deepEqual(uploads,['成功.png','失败.png','失败.png']);assert.equal(await page.locator('[data-notice-upload-kind=site] figure').count(),2);
@@ -146,7 +148,7 @@ try{
  assert.equal(await page.getByRole('textbox',{name:'内容',exact:true}).count(),0,'accepted jobs show results, not a locked form');
  jobPhase='success';await page.getByRole('button',{name:'查询进度',exact:true}).click();await page.getByRole('status',{name:'通告办理完成',exact:true}).waitFor();
  await page.getByRole('button',{name:'返回列表',exact:true}).click();
- await goto('change');await page.getByRole('button',{name:'更多办理',exact:true}).click();await page.getByText('变更确认',{exact:true}).click();await page.getByText('E楼待确认',{exact:true}).waitFor();assert.equal(await page.getByText('A楼不可混入',{exact:true}).count(),0);
+ await goto('change');await page.getByRole('button',{name:'更多办理',exact:true}).click();await page.getByText('变更确认',{exact:true}).click();await page.getByRole('heading',{name:'E楼待确认',exact:true}).waitFor();assert.equal(await page.getByText('A楼不可混入',{exact:true}).count(),0);
  await page.getByRole('button',{name:'关闭',exact:true}).click();
  await page.evaluate(()=>sessionStorage.clear());prefillDelay=900;await goto();await open();await scrollSection('通告内容');await page.getByRole('textbox',{name:'内容',exact:true}).fill('用户先填的内容');
  await scrollSection('推荐填写');await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();assert.equal(await page.getByRole('textbox',{name:'内容',exact:true}).inputValue(),'用户先填的内容');
@@ -155,7 +157,7 @@ try{
  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();await page.getByRole('button',{name:'保留副本并离开',exact:true}).click();
  await page.evaluate(()=>sessionStorage.clear());useSop=true;prefillDelay=0;await goto();await open();await page.locator('[data-notice-section=sop] .lhs-sop .n-select').waitFor();
  await page.locator('.v2-notice-editor-footer').getByRole('button',{name:'关闭',exact:true}).click();await page.locator('.v2-notice-editor').waitFor({state:'detached'});assert.equal(await page.getByRole('button',{name:'保留副本并离开',exact:true}).count(),0,'displaying SOP defaults is not an unsaved user edit');
- await open();await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();
+ await open();await pickRobot();await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();
  await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('alert').filter({hasText:'请完成本次工单'}).waitFor();
  await page.getByRole('button',{name:'选择工单及人员',exact:true}).click();
  await page.locator('.lhs-sop .n-select').click();await page.locator('.n-base-select-option').getByText('E楼标准工单',{exact:true}).click();
@@ -175,7 +177,7 @@ try{
   await page.evaluate(()=>sessionStorage.clear());await page.setViewportSize({width,height:width===390?844:1000});
   await page.emulateMedia({reducedMotion:'no-preference'});waitingScenario=true;photoRequired=false;jobPhase='event_waiting';jobId='job-wait-'+width;
   const before=writes.filter(v=>v==='/api/workbench-actions').length;
-  await goto();await open();await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();
+  await goto();await open();await pickRobot();await page.getByRole('button',{name:'采用这组空白项',exact:true}).click();
   await page.getByRole('button',{name:'预览并确认开始',exact:true}).click();await page.getByRole('button',{name:'确认发送开始',exact:true}).click();
   await page.getByRole('status',{name:'已排队，等待事件结束',exact:true}).waitFor();
   const popup=page.locator('.n-dialog').filter({hasText:'事件优先：通告已排队'});await popup.waitFor();assert((await popup.innerText()).includes('隔离测试事件'));

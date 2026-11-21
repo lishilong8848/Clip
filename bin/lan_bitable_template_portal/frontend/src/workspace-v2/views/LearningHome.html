@@ -1,10 +1,7 @@
 <LearningPersonalHome v-if="!management" :data="data" :person="person" :loading="loading" :failed="failed" :daily-duty="dailyDuty" @open="emit('open', $event)" @refresh="emit('refresh')" />
 <section v-else class="lp-hub" aria-label="学习管理工作台">
   <section class="lp-panel lp-agenda">
-    <header class="lp-heading"><div><h2>{{ management ? '当班学习进度' : '我的题单' }}</h2><small><time :datetime="date">{{ date }}</time> · {{ management ? '当前管理范围' : person?.name || '个人学习' }}</small></div>
-      <div class="lp-tools"><button class="lp-btn" :disabled="loading" @click="emit('refresh')">刷新学习进度</button>
-      <button v-if="management" class="lp-btn" :disabled="loading" @click="emit('open','completion')">查看每日完成</button></div>
-    </header>
+    <header class="lp-heading"><h2>当班学习进度</h2><small>{{ date }}</small></header>
     <p v-if="failed" class="lp-msg error">进度暂未读取 <button class="lp-btn" @click="emit('refresh')">重试</button></p>
     <p v-else-if="loading" class="lp-msg" role="status">正在读取当日进度…</p>
     <template v-else>
@@ -15,7 +12,4 @@
       <ul v-if="selfProgress?.tasks?.length" class="lp-shifts"><li v-for="(task,i) in selfProgress.tasks" :key="i">{{ task.shift || '当班' }}班 · {{ task.label || task.status || task.state }}</li></ul>
     </template>
   </section>
-  <div class="lp-entry-list" role="group" aria-label="学练入口"><button v-for="item in entries" :key="item.id" class="lp-entry" :disabled="loading" @click="emit('open',item.id)">
-    <component :is="item.icon" :size="17" aria-hidden="true" /><span><strong>{{ item.title }}</strong><small>{{ item.description }}</small></span><ChevronRight :size="14" aria-hidden="true" />
-  </button></div>
 </section>

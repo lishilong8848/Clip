@@ -32,6 +32,42 @@ export const palettes={
       accent:'#c6a8f5',accentText:'#d5bbff',hover:'#d7bdfc',pressed:'#b698e7',onAccent:'#2c1a47',onAccentText:'#2c1a47',
       selection:'#48345f',navSelected:'#48345f',navHover:'#36294b'},
   },
+  cyber:{
+    light:{...mineral.light,bg:'#eaf4f7',surface:'#f6fcfd',soft:'#deeef2',text:'#172f38',muted:'#3e5966',
+      border:'#adc9d1',header:'#123e4b',sidebar:'#eaf4f7',sidebarEnd:'#eaf4f7',navText:'#172f38',navMuted:'#3e5966',
+      accent:'#006477',accentText:'#005363',hover:'#00566a',pressed:'#044656',selection:'#d4edf4',navSelected:'#d4edf4',navHover:'#deeef2'},
+    dark:{...mineral.dark,bg:'#0c1821',surface:'#142635',soft:'#10212e',text:'#e9f8ff',muted:'#abceda',
+      border:'#35576a',header:'#142635',sidebar:'#0c1821',sidebarEnd:'#0a141c',navText:'#e9f8ff',navMuted:'#abceda',
+      accent:'#59e1ee',accentText:'#76eefa',hover:'#89eff7',pressed:'#40cbda',onAccent:'#062731',onAccentText:'#062731',
+      selection:'#1e4050',navSelected:'#1e4050',navHover:'#183444'},
+  },
+  neon:{
+    light:{...mineral.light,bg:'#f7eff6',surface:'#fff8fd',soft:'#f2e6f1',text:'#391f38',muted:'#65435f',
+      border:'#d7bacf',header:'#54213f',sidebar:'#f7eff6',sidebarEnd:'#f7eff6',navText:'#391f38',navMuted:'#65435f',
+      accent:'#a02675',accentText:'#80235f',hover:'#8a2065',pressed:'#731a55',selection:'#f4deee',navSelected:'#f4deee',navHover:'#f2e6f1'},
+    dark:{...mineral.dark,bg:'#1d1123',surface:'#301b35',soft:'#28162e',text:'#fff1fb',muted:'#dfbbd7',
+      border:'#624263',header:'#301b35',sidebar:'#1d1123',sidebarEnd:'#190e1e',navText:'#fff1fb',navMuted:'#dfbbd7',
+      accent:'#ff91d4',accentText:'#ffb2e1',hover:'#ffb2e1',pressed:'#ee78bf',onAccent:'#3f1533',onAccentText:'#3f1533',
+      selection:'#512747',navSelected:'#512747',navHover:'#422039'},
+  },
+  lava:{
+    light:{...mineral.light,bg:'#f9f2e9',surface:'#fffcf6',soft:'#f4ebdf',text:'#392a20',muted:'#634d3d',
+      border:'#d8c3ab',header:'#55341e',sidebar:'#f9f2e9',sidebarEnd:'#f9f2e9',navText:'#392a20',navMuted:'#634d3d',
+      accent:'#9b431b',accentText:'#813810',hover:'#873916',pressed:'#6f2c0d',selection:'#f5e1ca',navSelected:'#f5e1ca',navHover:'#f4ebdf'},
+    dark:{...mineral.dark,bg:'#201711',surface:'#30241d',soft:'#281d17',text:'#fff3e8',muted:'#e2c7ad',
+      border:'#665043',header:'#30241d',sidebar:'#201711',sidebarEnd:'#190f0b',navText:'#fff3e8',navMuted:'#e2c7ad',
+      accent:'#ffb568',accentText:'#ffc68f',hover:'#ffcc9a',pressed:'#eda553',onAccent:'#392012',onAccentText:'#392012',
+      selection:'#503222',navSelected:'#503222',navHover:'#432b1e'},
+  },
+  graphite:{
+    light:{...mineral.light,bg:'#edf0f4',surface:'#f9fafc',soft:'#e6eaf0',text:'#222e40',muted:'#4a566a',
+      border:'#c0c9d5',header:'#323c4b',sidebar:'#edf0f4',sidebarEnd:'#edf0f4',navText:'#222e40',navMuted:'#4a566a',
+      accent:'#45536a',accentText:'#3c485b',hover:'#39465b',pressed:'#303a4e',selection:'#dee5ee',navSelected:'#dee5ee',navHover:'#e6eaf0'},
+    dark:{...mineral.dark,bg:'#181c24',surface:'#242b36',soft:'#1f252f',text:'#eff4ff',muted:'#c0cbd9',
+      border:'#4b596d',header:'#242b36',sidebar:'#181c24',sidebarEnd:'#12161e',navText:'#eff4ff',navMuted:'#c0cbd9',
+      accent:'#c2d0eb',accentText:'#d3dff7',hover:'#d6e1f4',pressed:'#aabbdc',onAccent:'#263048',onAccentText:'#263048',
+      selection:'#374359',navSelected:'#374359',navHover:'#303a4b'},
+  },
 };
 export type PaletteId=keyof typeof palettes;
 export const paletteId=ref<PaletteId>('mineral');

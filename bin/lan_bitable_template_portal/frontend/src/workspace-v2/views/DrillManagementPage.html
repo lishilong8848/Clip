@@ -12,23 +12,27 @@
     </section>
   </main>
 <section v-else class="rd-desk drd-screen drill-page" aria-label="演练管理" @vue:before-mount="import('../workspace-v2/drillRiskDesk.css')">
-  <ZhihangHDrillPage v-if="showHDrill && viewMode==='admin' && isAdmin && currentUser.modules?.includes('accounts') && !currentUser.impersonation" @back="showHDrill=false" />
-  <template v-else>
+
     <header class="rd-header rd-hero">
       <div class="rd-heading"><span class="rd-title-icon"><ListChecks :size="21" /></span><div><h1 data-v2-module-title>演练管理</h1><small>{{ pageTitle }}</small></div></div>
       <div class="rd-toolbar">
-        <label v-if="viewMode!=='landing'" class="drd-inline">月份<input v-model="selectedMonth" type="month" aria-label="演练月份" :disabled="busy" @change="viewMode==='admin'?changeAdminMonth():changeMonth()"></label>
+        <label v-if="viewMode!=='landing' && !showHDrill" class="drd-inline">月份<input v-model="selectedMonth" type="month" aria-label="演练月份" :disabled="busy" @change="viewMode==='admin'?changeAdminMonth():changeMonth()"></label>
         <label v-if="viewMode==='building' && authorizedBuildingScopes.length>1" class="drd-inline">楼栋<select :value="activeScope" aria-label="演练楼栋" :disabled="busy" @change="changeScope"><option v-for="s in authorizedBuildingScopes" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
-        <template v-if="viewMode==='admin' && v2DrillReturnTarget"><select v-if="v2DrillReturnOptions.length>1" :value="v2DrillReturnTarget" aria-label="返回楼栋" :disabled="busy" @change="v2DrillReturnScope=inputValue($event)"><option v-for="s in v2DrillReturnOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+        <template v-if="viewMode==='admin' && v2DrillReturnTarget && !showHDrill"><select v-if="v2DrillReturnOptions.length>1" :value="v2DrillReturnTarget" aria-label="返回楼栋" :disabled="busy" @change="v2DrillReturnScope=inputValue($event)"><option v-for="s in v2DrillReturnOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
           <button class="rd-btn" :disabled="busy" @click="requestDiscardChanges('返回楼栋会离开当前配置。',()=>openBuilding(v2DrillReturnTarget))">返回楼栋演练</button>
         </template>
-        <button v-else class="rd-btn" :disabled="saving || uploading || generating" @click="leavePage">返回</button>
-        <button class="rd-btn" aria-label="刷新演练数据" :disabled="busy" @click="reloadCurrent"><RefreshCw :size="15" />刷新</button>
+        <button v-else-if="!showHDrill" class="rd-btn" :disabled="saving || uploading || generating" @click="leavePage">返回</button>
+        <button v-if="!showHDrill" class="rd-btn" aria-label="刷新演练数据" :disabled="busy" @click="reloadCurrent"><RefreshCw :size="15" />刷新</button>
         <button v-if="isAdmin && viewMode!=='admin'" class="rd-btn" :disabled="busy" @click="requestDiscardChanges('进入管理入口会离开当前填写。',openAdmin)"><Settings2 :size="15" />管理员入口</button>
-        <button v-if="viewMode==='admin' && currentUser.modules?.includes('accounts') && !currentUser.impersonation" class="rd-btn" :disabled="busy" @click="showHDrill=true">H楼值班演练</button>
-        <button v-if="viewMode==='admin' && !uploadOpen" class="rd-btn rd-primary" :disabled="busy" @click="uploadOpen=true"><UploadCloud :size="16" />上传演练文件</button>
+        <div v-if="viewMode==='admin' && isAdmin && currentUser.modules?.includes('accounts') && !currentUser.impersonation" class="rd-toolbar" role="group" aria-label="演练管理分区">
+          <button type="button" class="rd-btn" :aria-pressed="!showHDrill" :disabled="busy" @click="showHDrill=false">演练模板</button>
+          <button type="button" class="rd-btn" :aria-pressed="showHDrill" :disabled="busy" @click="!showHDrill && requestDiscardChanges('切换页面会离开当前配置。',()=>showHDrill=true)">H楼值班演练</button>
+        </div>
+        <button v-if="viewMode==='admin' && !uploadOpen && !showHDrill" class="rd-btn rd-primary" :disabled="busy" @click="uploadOpen=true"><UploadCloud :size="16" />上传演练文件</button>
       </div>
     </header>
+    <ZhihangHDrillPage v-if="showHDrill && viewMode==='admin' && isAdmin && currentUser.modules?.includes('accounts') && !currentUser.impersonation" embedded />
+    <template v-else>
     <MessageBanner v-if="error" tone="failed" :text="error" />
     <MessageBanner v-if="message" :tone="messageTone" :text="message" />
     <p v-if="conflict" class="rd-notice rd-error" role="alert">记录版本已更新，请先核对并刷新，再继续办理。</p>

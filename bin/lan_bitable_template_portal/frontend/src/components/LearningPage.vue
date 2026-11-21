@@ -867,11 +867,15 @@ async function loadView(): Promise<void> {
   } catch (e) { if (token === epoch && !disposed) { error.value = String((e as Error).message); if (tab.value === 'home') homeProgressError.value = true; } }
   finally { if (token === epoch) loading.value = false; }
 }
+async function allowLearningSectionChange(): Promise<boolean> {
+  if (tab.value === 'sharing' && sharingDirty.value && !await ask('离开分享会练习', '题目修改尚未保存，确认放弃？')) return false;
+  sharingDirty.value = false;
+  if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("离开发布设置", "尚有未保存的设置，确认放弃？")) return false;
+  return true;
+}
 async function switchTab(value: Tab): Promise<void> {
   if (busy.value || value === tab.value || (value === 'pending' && !isAdmin.value)) return;
-  if (tab.value === 'sharing' && sharingDirty.value && !await ask('离开分享会练习', '题目修改尚未保存，确认放弃？')) return;
-  sharingDirty.value = false;
-  if (tab.value === "settings" && JSON.stringify(settingsForm) !== settingsSnapshot && !await ask("离开发布设置", "尚有未保存的设置，确认放弃？")) return;
+  if (!await allowLearningSectionChange()) return;
   saveDraft(); rows.value = []; total.value = 0; tab.value = value; reading.value = false; notice.value = "";
   if (value === "today" && !scope.value) scope.value = boot.value.scopes?.find((s: Dict) => s.value)?.value || "";
   if (value === 'today' && viewMode.value === 'practice') {
@@ -1060,7 +1064,13 @@ async function bootstrap(): Promise<void> {
         tab.value = new URLSearchParams(window.location.search).get('tab') as Tab; loading.value = false;
       } else if (viewMode.value === "practice" && boot.value.can_answer === true && learner.value?.id && boot.value.self_scope) {
         const entry = new URLSearchParams(window.location.search);
-        if (entry.get('tab') === 'review') { tab.value = 'review'; await loadView(); }
+        if (entry.get('tab') === 'today' && !entry.has('paper_id') && !entry.has('date') && !entry.has('shift')) {
+          if (entry.get('study_mode') === 'practice' || !dailyDuty.value) studyMode.value = 'practice';
+          await loadTodayPaper();
+        }
+        else if (['review', 'history', 'profile'].includes(entry.get('tab') || '') && !entry.has('paper_id') && !entry.has('date') && !entry.has('shift')) {
+          tab.value = entry.get('tab') as Tab; await loadView();
+        }
         else if (entry.get('paper_id')) { tab.value = 'history'; await loadPaper(entry.get('paper_id')!); }
         else if (entry.has('date') || entry.has('shift')) {
           const claimed = await requestLearning(learningOptions, '/papers/claim', 'POST', {
@@ -1072,6 +1082,8 @@ async function bootstrap(): Promise<void> {
         else await enterPracticeToday();
       } else if (viewMode.value === 'overview') {
         const entry = new URLSearchParams(window.location.search);
+        const section = entry.get('tab');
+        if (section === 'history' || (section === 'home' && document.documentElement.classList.contains('workspace-v2'))) tab.value = section;
         const from = entry.get('from'), to = entry.get('to');
         if (from && to && /^\d{4}-\d{2}-\d{2}$/.test(from) && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
           Object.assign(filters, { from, to, period: '' });

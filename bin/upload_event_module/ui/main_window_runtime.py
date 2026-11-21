@@ -787,18 +787,21 @@ class MainWindowRuntimeMixin:
                 pending_action_ids = set(
                     getattr(self, "pending_action_record_ids", set()) or set()
                 )
-                current_upload_busy = bool(
+                confirmed = getattr(self, "pending_update_after_upload", {})
+                current_upload_busy = (
                     existing_data.get("_upload_in_progress")
-                ) or any(
-                    candidate_id in pending_action_ids
-                    for candidate_id in candidate_ids
+                    or existing_data.get("_event_delivery_pending")
+                    or any(candidate_id in pending_action_ids for candidate_id in candidate_ids)
+                    or any(candidate_id in confirmed for candidate_id in candidate_ids)
                 )
+                inflight = existing_data.get("_event_inflight_retry_snapshot") or {}
                 if (
                     is_event
                     and bool(existing_data.get("_queued_after_upload"))
                     and incoming_text
                     and incoming_text != existing_text
-                    and not bool(data.get("_has_unuploaded_changes"))
+                    and (not data.get("_has_unuploaded_changes")
+                         or incoming_text == str(inflight.get("text") or "").strip())
                 ):
                     return {"ok": True, "stale": True, "queued": True}
                 if (

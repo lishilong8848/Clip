@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {createServer} from 'node:http';
+import {once} from 'node:events';
 import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -30,7 +31,13 @@ async function serverFor(fixture){
       const file=await readFile(path.join(assets,name));res.writeHead(200,{'Content-Type':({'.js':'application/javascript','.html':'text/html','.css':'text/css','.json':'application/json','.png':'image/png','.svg':'image/svg+xml'})[path.extname(name)]||'application/octet-stream'});res.end(file);
     }catch(e){res.writeHead(e.code==='ENOENT'?404:500).end();}
   });
-  await new Promise(resolve=>srv.listen(0,'127.0.0.1',resolve));return srv;
+  // This host also allocates low ephemeral ports, some of which browsers refuse.
+  for(let port=18080; ;port++){
+    try{
+      await once(srv.listen(port,'127.0.0.1'),'listening');
+      return srv;
+    }catch(error){if(error.code!=='EADDRINUSE'||port>=18110)throw error;}
+  }
 }
 const button=(root,name)=>root.getByRole('button',{name,exact:true});
 async function zhihang({page,go,capture}){

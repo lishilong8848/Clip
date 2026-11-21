@@ -11,7 +11,7 @@ import './check-workspace-palettes.mjs';
 import {openWorkspaceRail,selectWorkspaceSetting} from './workspace-account-actions.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url)),out=path.resolve(root,'../../../output/playwright/account-rail');
 await mkdir(out,{recursive:true});
-const server=await preview({root,configFile:false,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
+const server=await preview({root,configFile:process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?path.join(root,'vite.workspace-v2.config.ts'):false,logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:900}}),page=await context.newPage();
 page.setDefaultTimeout(15000);
 let logged=true,user={open_id:'rail-fixture',name:'布局验收管理员',role:'admin',level:'L0',category:'manager',login_method:'password',modules:['accounts','learning','maintenance','critical_guard','signatures']};
@@ -53,9 +53,15 @@ try{
  await page.screenshot({path:path.join(out,'desktop-settings.png')});
  await account('个人信息');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
  const mode=page.getByRole('button',{name:'夜间模式',exact:true});
+ const palette=page.getByRole('button',{name:'主题配色',exact:true});
+ for(const [id,label] of [['ocean','海蓝'],['violet','暮紫'],['neon','霓虹玫红'],['lava','熔岩橙'],['graphite','石墨银'],['cyber','赛博青']]){
+  await palette.click();await page.locator('.n-dropdown-menu:visible').getByText(label,{exact:true}).click();
+  await page.waitForFunction(id=>document.documentElement.dataset.v2Palette===id,id);
+ }
  await mode.click();await page.waitForFunction(()=>document.documentElement.dataset.v2Theme==='dark');
  await page.reload();await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
  assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
+ assert.equal(await page.locator('html').getAttribute('data-v2-palette'),'cyber');
  for(const viewport of [{width:402,height:874},{width:440,height:956},{width:360,height:640},{width:1440,height:900}]){
   await page.setViewportSize(viewport);await page.mouse.move(viewport.width-10,300);await page.waitForTimeout(300);
   if(viewport.width<=760){
@@ -68,7 +74,8 @@ try{
   assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
  }
  await page.setViewportSize({width:1440,height:900});user={...user,open_id:'member-rail',name:'普通人员',role:'building',level:'L4',modules:['learning']};await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
- assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'light');await openRail();await page.getByRole('button',{name:'账户菜单：'+user.name}).click();assert.equal(await page.locator('.n-dropdown-menu').getByText('系统设置',{exact:true}).count(),0);
+ assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'light');
+ assert.equal(await page.locator('html').getAttribute('data-v2-palette'),'mineral');await openRail();await page.getByRole('button',{name:'账户菜单：'+user.name}).click();assert.equal(await page.locator('.n-dropdown-menu').getByText('系统设置',{exact:true}).count(),0);
  await page.locator('.n-dropdown-menu').getByText('切换账号',{exact:true}).click();await page.getByRole('button',{name:'取消',exact:true}).click();assert(!writes.includes('/api/auth/logout'));
  await account('切换账号');await page.getByRole('button',{name:'继续',exact:true}).click();await page.locator('#personnel-name-select').waitFor();assert.equal(writes.filter(v=>v==='/api/auth/logout').length,1);
  await page.clock.install();logged=true;user={...user,open_id:'admin-again',name:'管理员',role:'admin',level:'L0',modules:['accounts','critical_guard']};await page.goto(entry+'?__page=/critical-guard&mode=admin');

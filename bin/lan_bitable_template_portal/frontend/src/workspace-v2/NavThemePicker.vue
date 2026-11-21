@@ -15,7 +15,7 @@ import {Moon,Palette,Sun} from 'lucide-vue-next';
 import {nightMode,paletteId,palettes,saveNightMode,savePalette,type PaletteId} from './theme';
 const props=defineProps<{userId:string;label?:boolean;paletteOnly?:boolean}>();
 const message=useMessage();
-const labels={mineral:'松绿',ocean:'海蓝',violet:'暮紫'};
+const labels={mineral:'松绿',ocean:'海蓝',violet:'暮紫',cyber:'赛博青',neon:'霓虹玫红',lava:'熔岩橙',graphite:'石墨银'} satisfies Record<PaletteId,string>;
 const options=computed(()=>Object.entries(labels).map(([key,label])=>({
   key,label:paletteId.value===key?label+' · 已选':label,
   icon:()=>h('span',{style:{width:'13px',height:'13px',borderRadius:'50%',background:palettes[key as PaletteId][nightMode.value?'dark':'light'].accent}}),

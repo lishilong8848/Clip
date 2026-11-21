@@ -117,12 +117,21 @@ class QtEventDeliveryTests(unittest.TestCase):
     def test_queued_end_dispatches_after_start_without_remote_id(self):
         self.submit(self.pending())
         end = {**self.read(), "text":"【事件通告】状态：结束\n【标题】隔离事件",
-               "_queued_after_upload":True,"_queued_upload_requested":True,"_queued_action":"end"}
+               "_queued_after_upload":True,"_queued_upload_requested":False,"_queued_action":"end"}
         self.write(end)
-        self.window.pending_update_after_upload[self.local] = {"data":end, "action_type":"end"}
         self.window._resolve_upload_fields_from_cache = Mock(return_value={"buildings":["A楼"]})
-        self.window.do_feishu_upload = Mock()
         self.deliver(self.final())
+        self.window._dialog_block_reason = Mock(return_value="")
+        self.window._show_screenshot_dialog = Mock()
+        self.window.handle_action(self.read(), "end")
+        self.window._show_screenshot_dialog.assert_called_once()
+        self.assertFalse(self.window.pending_action_record_ids)
+        self.assertTrue(self.window._queue_confirmed_upload_if_busy(
+            end, screenshot_bytes=b"end", action_type="end", response_time="",
+            buildings=["A楼"], extra_images=[], specialty="电气", change_level="",
+            event_level="I3", event_source="BMS", recover_selected=False, robot_group_choice="auto",
+        ))
+        self.window.do_feishu_upload = Mock()
         self.window._dispatch_pending_update(self.local, "")
         self.window.do_feishu_upload.assert_called_once()
         payload, _, action = self.window.do_feishu_upload.call_args.args
@@ -130,6 +139,72 @@ class QtEventDeliveryTests(unittest.TestCase):
         self.assertEqual(payload["record_id"], self.local)
         self.assertFalse(payload.get("target_record_id"))
         self.assertNotEqual(payload["_upload_operation_id"], self.op)
+        self.assertNotIn("_event_wait_job_id", payload)
+        self.assertNotIn("_event_delivery_pending", payload)
+
+    def test_failed_predecessor_holds_confirmed_end_for_retry(self):
+        self.submit(self.pending())
+        end = {**self.read(), "text": self.data["text"].replace("开始", "结束")}
+        self.window.pending_update_after_upload[self.local] = {"data": end, "action_type": "end"}
+        self.deliver(self.final(ok=False, robot_sent=False))
+        self.window.do_feishu_upload = Mock()
+        self.window._dispatch_pending_update(self.local, "")
+        self.window.do_feishu_upload.assert_not_called()
+        self.assertTrue(self.window.pending_update_after_upload[self.local]["waiting_for_retry"])
+        self.assertEqual(ActiveNoticeModel.action_for_record(self.read()), "upload")
+        self.op = "qt_notice:fixture-start-retry"
+        self.write({**self.read(), "_upload_operation_id": self.op})
+        self.deliver(self.final())
+        self.window._dispatch_pending_update(self.local, "")
+        self.assertEqual(self.window.do_feishu_upload.call_args.args[2], "end")
+
+    def test_two_confirmed_updates_and_end_keep_their_own_text_screenshot_and_receipt(self):
+        w = self.window
+        w._pending_cache_refresh = False
+        w._try_process_pending_force_uploads = Mock()
+        w._resolve_upload_fields_from_cache = Mock(return_value={"buildings": ["A楼"], "level": "I3"})
+        w._set_delete_interaction_enabled = w._resume_clipboard_timer = Mock()
+        w._apply_cache_to_item = w._schedule_record_binding_validation = w._schedule_active_route_reconcile = Mock()
+        w._dispatch_backend_notice_upload = lambda _, task, **kwargs: task()
+        w._upload_qt_notice_attachment = Mock(side_effect=lambda _, raw, __: {"upload_id": raw.decode()})
+
+        def backend(command):
+            return {**self.pending(), "job_id": command["operation_id"]}
+
+        self.submit(self.pending())
+        self.client.execute_qt_notice_upload.side_effect = backend
+        queued = [
+            ("update", "更新", "第二条更新", b"update-2"),
+            ("update", "更新", "第三条更新", b"update-3"),
+            ("end", "结束", "确认结束", b"end"),
+        ]
+        w._dialog_block_reason = Mock(return_value="")
+        w._show_screenshot_dialog = Mock()
+        for action, status, content, screenshot in queued:
+            text = self.data["text"].replace("状态：开始", "状态：" + status) + "\n【进展】" + content
+            self.assertTrue(w._queue_pending_content(self.local, text, status, active_item_id=self.data["active_item_id"]))
+            w.handle_action(self.read(), action)
+            w._show_screenshot_dialog.assert_called_with(self.read(), action)
+            w.do_feishu_upload(self.read(), screenshot, action)
+            self.assertEqual(self.client.execute_qt_notice_upload.call_count, 1)
+
+        self.deliver(self.final())
+        for index, (action, _, content, screenshot) in enumerate(queued, 2):
+            w._dispatch_pending_update(self.local, "")
+            command = self.client.execute_qt_notice_upload.call_args.args[0]
+            op = command["operation_id"]
+            self.assertEqual(self.client.execute_qt_notice_upload.call_count, index)
+            self.assertEqual(command["action_type"], action)
+            self.assertTrue(command["data_dict"]["text"].endswith(content))
+            self.assertEqual(command["screenshot_upload_id"], screenshot.decode())
+            self.assertEqual(self.read()["_event_wait_job_id"], op)
+            self.assertIn("确认结束", self.read()["text"])
+            self.assertEqual(w._apply_event_wait_result({
+                "job_id": op, "attempt": 0, "command": command, "result": self.final(
+                    name="结束" if action == "end" else "更新"),
+            }), {"ok": True})
+        w._do_move_to_history.assert_called_once()
+        self.assertEqual(w.pending_update_after_upload, {})
 
     def test_recovered_response_uses_authoritative_receipt(self):
         command = {"data_dict":self.data}

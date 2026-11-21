@@ -1,4 +1,4 @@
-import {openWorkspaceRail,selectWorkspaceAccount,selectWorkspaceSetting} from './workspace-account-actions.mjs';
+import {selectWorkspaceAccount} from './workspace-account-actions.mjs';
 import assert from 'node:assert/strict';
 import {mkdir} from 'node:fs/promises';
 import path from 'node:path';
@@ -19,7 +19,7 @@ const items=[fixture('H楼','L1','duty'),fixture('值班员甲','L1','operator')
   ...['A','B','C','E','D'].map(home=>fixture(home+'楼主管','L3','supervisor',home)),fixture('工程师丁','L2','engineer'),fixture('工程师戊','L2','engineer'),
   ...Array.from({length:30},(_,i)=>fixture('普通人员'+String(i+1).padStart(2,'0'),'L4','operator','A'))];
 const categories=['manager','supervisor','engineer','operator','duty'].map(value=>({value,label:{manager:'经理',supervisor:'主管',engineer:'工程师',operator:'值班员',duty:'固定值班账号'}[value]}));
-let listedItems=items,accountReads=0;
+let listedItems=items,accountReads=0,requestReads=0;
 let actor={open_id:'account-list-test',name:'隔离验收管理员',level:'L0',role:'admin',category:'manager',modules:['accounts'],can_manage_accounts:true};
 const layouts=layoutApiFixture();
 await context.route('**/*',async route=>{
@@ -33,41 +33,44 @@ await context.route('**/*',async route=>{
   if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:actor,scope_options:allowedScopes});
   if(url.pathname==='/api/auth/health'||url.pathname==='/api/health')return ok({service:'clipflow_backend',instance_id:'isolated-account-list'});
   if(url.pathname==='/api/auth/accounts'){accountReads++;return ok({items:listedItems,category_options:categories,scope_options:allowedScopes,level_options:[],module_options:[],policy:{level:actor.level,scope_rules:allowedScopes.map(s=>s.value),modules:['accounts']}});}
+  if(url.pathname==='/api/auth/permission-requests/admin'){
+    requestReads++;
+    return ok({items:[{request_id:'request-test',name:'待审申请人',status:'pending',requested_scopes:['A'],reason:'申请A楼访问'}]});
+  }
   return ok({items:[],records:[],users:[],settings:{}});
 });
 const page=await context.newPage();page.setDefaultTimeout(12000);page.on('pageerror',error=>errors.push(error.message));
 try{
   await page.goto(entry);await page.getByRole('searchbox',{name:'搜索账号'}).waitFor();
+  const rows=page.locator('.account-directory article');
+  const manage=name=>rows.filter({has:page.getByText(name,{exact:true})}).getByRole('button',{name:'查看账号',exact:true});
   const levels=page.getByRole('combobox',{name:'筛选权限级别'}),jobs=page.getByRole('combobox',{name:'筛选岗位'});
   async function check(level,expected){
     await levels.selectOption(level);await page.waitForTimeout(200);
-    assert.equal(await page.locator('.accounts tbody tr:visible').count(),expected,'every matching '+level+' account is displayed');
+    assert.equal(await rows.count(),expected,'every matching '+level+' account is displayed');
     assert.equal(await page.locator('.accounts [data-v2-capacity-hidden],.accounts [data-v2-capacity-column]').count(),0,'no hidden account rows or columns');
     assert.equal(await page.locator('.v2-visible-count').count(),0,'no second pagination in account management');
   }
-  await check('L3',5);assert(await page.getByRole('button',{name:'管理D楼主管',exact:true}).isVisible());
+  await check('L3',5);assert(await manage('D楼主管').isVisible());
   await page.screenshot({path:path.join(output,'all-five-supervisors.png')});
-  await check('L1',7);assert(await page.getByRole('button',{name:'管理经理甲',exact:true}).isVisible());assert(await page.getByRole('button',{name:'管理经理乙',exact:true}).isVisible());
-  await jobs.selectOption('manager');await page.waitForTimeout(150);assert.equal(await page.locator('.accounts tbody tr:visible').count(),2);
+  await check('L1',7);assert(await manage('经理甲').isVisible());assert(await manage('经理乙').isVisible());
+  await jobs.selectOption('manager');await page.waitForTimeout(150);assert.equal(await rows.count(),2);
   await jobs.selectOption('');await check('L2',2);
-  assert(!await page.getByRole('button',{name:'管理工程师甲',exact:true}).count(),'existing L1 overrides are not reclassified as L2');
+  assert(!await manage('工程师甲').count(),'existing L1 overrides are not reclassified as L2');
   await levels.selectOption('');await page.getByRole('searchbox',{name:'搜索账号'}).fill('D楼主管');
-  assert.equal(await page.locator('.accounts tbody tr:visible').count(),1);
+  assert.equal(await rows.count(),1);
   await page.getByRole('searchbox',{name:'搜索账号'}).fill('');await page.waitForTimeout(150);
-  assert.equal(await page.locator('.accounts tbody tr:visible').count(),20);
-  await page.getByRole('button',{name:'下一页',exact:true}).click();assert.equal(await page.locator('.accounts tbody tr:visible').count(),20);
+  assert.equal(await rows.count(),30);
+  await page.getByRole('button',{name:'下一页',exact:true}).click();assert.equal(await rows.count(),14);
   await check('L3',5);assert.equal(await page.getByRole('button',{name:'上一页',exact:true}).isEnabled(),false,'filtering resets native pagination');
-  const viewport=page.locator('.accounts').locator('xpath=ancestor::*[contains(@class,"v2-responsive-body")][1]');
-  await viewport.evaluate(el=>{el.style.height='260px';el.style.maxHeight='260px';});await page.waitForTimeout(200);
-  await check('L1',7);assert(await viewport.evaluate(el=>el.scrollHeight>el.clientHeight),'compact panels scroll instead of clipping accounts');
-  await page.getByRole('button',{name:'管理经理乙',exact:true}).scrollIntoViewIfNeeded();
-  assert(await page.getByRole('button',{name:'管理经理乙',exact:true}).isVisible());
+  await check('L1',7);
+  await manage('经理乙').scrollIntoViewIfNeeded();
+  assert(await manage('经理乙').isVisible());
   for(const width of [1366,390,360]){
     await page.setViewportSize({width,height:844});await check('L3',5);await check('L1',7);
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),'responsive table stays within its scroll region');
   }
   await page.setViewportSize({width:1440,height:900});await levels.selectOption('');
-  await viewport.evaluate(el=>{el.style.removeProperty('height');el.style.removeProperty('max-height');});
   await page.getByRole('tab',{name:'树形分组',exact:true}).click();
   const tree=page.getByRole('tree',{name:'账号多层分组树'});await tree.waitFor();
   const group=(type,depth)=>tree.locator(`[data-account-group="${type}"][data-group-depth="${depth}"]:visible`);
@@ -114,9 +117,9 @@ try{
   await page.getByRole('button',{name:'展开全部',exact:true}).click();
   await waitPeople(44);
   await tree.locator('[data-account-person="fixture-工程师甲"]').click();
-  const editor=page.getByRole('dialog',{name:'工程师甲',exact:true});await editor.waitFor();
-  assert.equal(await editor.getByRole('button',{name:'保存启用状态',exact:true}).isEnabled(),false,'tree selection retains backend read-only restrictions');
-  assert.equal(await editor.getByRole('button',{name:'保存权限',exact:true}).count(),0,'tree does not grant access editing');
+  const editor=page.getByRole('dialog',{name:'工程师甲 账号详情',exact:true});await editor.waitFor();
+  assert.equal(await editor.getByRole('button',{name:'保存账号状态',exact:true}).count(),0,'tree selection retains backend read-only restrictions');
+  assert.equal(await editor.getByRole('button',{name:'保存授权',exact:true}).count(),0,'tree does not grant access editing');
   await editor.getByRole('button',{name:'关闭账号详情',exact:true}).click();
   for(const width of [390,360]){
     await page.setViewportSize({width,height:844});
@@ -140,8 +143,11 @@ try{
   assert(await page.getByRole('radio',{name:'按级别',exact:true}).isChecked());
   await page.mouse.move(10,10);await page.waitForTimeout(350);
   await page.screenshot({path:path.join(output,'tree-level-pc.png')});
-  const picker=page.locator('.v2-settings-picker');assert(await picker.locator('[data-v2-layout-tools="accounts"] button').isVisible());
-  await selectWorkspaceSetting(page,'高级诊断');await page.waitForFunction(()=>new URL(location.href).searchParams.get('tab')==='pressure');
+  const beforeRequests=requestReads;
+  await page.getByRole('group',{name:'账号视图'}).getByRole('button',{name:/^权限申请/}).click();
+  const pending=page.getByRole('row').filter({hasText:'待审申请人'});
+  await pending.getByRole('button',{name:'核对并审批',exact:true}).waitFor();
+  assert(requestReads>beforeRequests,'opening approval reads pending requests');
   await selectWorkspaceAccount(page,'个人信息');await page.waitForFunction(()=>new URL(location.href).searchParams.get('view')==='my');
 
   const relation=(name,level,category,home='H',extra={})=>({...fixture(name,level,category,home),modules:level==='L4'?['learning']:['accounts'],...extra});
@@ -183,14 +189,14 @@ try{
   assert.equal(accountReads,readsBeforeExpand,'expanding a person never requests a wider directory or impersonates them');
   assert.equal(await person('当前管理员',1).count(),0,'management paths never contain their own manager');
   await person('A工程师',3).getByRole('button',{name:'查看A工程师的详细信息',exact:true}).click();
-  let details=page.getByRole('dialog',{name:'A工程师',exact:true});await details.waitFor();
-  assert(await details.getByRole('button',{name:'保存启用状态',exact:true}).isDisabled(),'descendant details keep current-login edit restrictions');
-  assert.equal(await details.getByRole('button',{name:'保存权限',exact:true}).count(),0);
+  let details=page.getByRole('dialog',{name:'A工程师 账号详情',exact:true});await details.waitFor();
+  assert.equal(await details.getByRole('button',{name:'保存账号状态',exact:true}).count(),0,'descendant details keep current-login edit restrictions');
+  assert.equal(await details.getByRole('button',{name:'保存授权',exact:true}).count(),0);
   await details.getByRole('button',{name:'关闭账号详情',exact:true}).click();
   await page.emulateMedia({reducedMotion:'no-preference'});
   const managerDetails=person('跨楼经理',1).getByRole('button',{name:'查看跨楼经理的详细信息',exact:true});
   await managerDetails.focus();await page.keyboard.press('Enter');
-  details=page.getByRole('dialog',{name:'跨楼经理',exact:true});await details.waitFor();
+  details=page.getByRole('dialog',{name:'跨楼经理 账号详情',exact:true});await details.waitFor();
   await details.getByRole('button',{name:'关闭账号详情',exact:true}).click();
   assert.equal(await person('跨楼经理',1).getAttribute('aria-expanded'),'true','viewing details never collapses the management range');
   assert.equal(await managerDetails.getAttribute('data-v2-action'),null,'opening details is navigation, not a submission animation');
@@ -204,7 +210,7 @@ try{
     const bounds=await person('A工程师',3).getByRole('button',{name:'查看A工程师的详细信息',exact:true}).boundingBox();
     assert(bounds.width>=44&&bounds.height>=44,'mobile details button retains a 44px touch target');
     await page.screenshot({path:path.join(output,`management-tree-mobile-${width}.png`)});
-    await person('A工程师',3).click();details=page.getByRole('dialog',{name:'A工程师',exact:true});await details.waitFor();
+    await person('A工程师',3).click();details=page.getByRole('dialog',{name:'A工程师 账号详情',exact:true});await details.waitFor();
     await details.getByRole('button',{name:'关闭账号详情',exact:true}).click();
   }
   await page.getByRole('searchbox',{name:'搜索账号'}).fill('A主管');
@@ -218,8 +224,8 @@ try{
   await page.setViewportSize({width:1440,height:900});await showTree();await openRange('A主管',0);
   assert.equal(await tree.locator('[data-account-person="fixture-B工程师"],[data-account-person="fixture-跨楼经理"]').count(),0,'single-building viewer cannot traverse to hidden managers or personnel');
   await person('A主管',0).getByRole('button',{name:'查看A主管的详细信息',exact:true}).click();
-  details=page.getByRole('dialog',{name:'A主管',exact:true});await details.waitFor();
-  assert.equal(await details.getByRole('button',{name:'保存权限',exact:true}).count(),0,'self details never grant self-authorization');
+  details=page.getByRole('dialog',{name:'A主管 账号详情',exact:true});await details.waitFor();
+  assert.equal(await details.getByRole('button',{name:'保存授权',exact:true}).count(),0,'self details never grant self-authorization');
   await details.getByRole('button',{name:'关闭账号详情',exact:true}).click();
 
   actor={...actor,open_id:'ou_fixture_H工程师',name:'H工程师',level:'L2',category:'engineer'};

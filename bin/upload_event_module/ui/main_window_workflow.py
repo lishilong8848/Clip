@@ -947,7 +947,9 @@ class MainWindowWorkflowMixin:
     def _mark_event_delivery_pending(self, operation_id, record_id, message):
         if (operation_id, 0) in getattr(self, "_completed_event_wait_jobs", {}):
             return
-        owner, card, _ = self._find_active_item_by_upload_completion_id(record_id)
+        owner, card = self._find_active_item_by_upload_operation(operation_id)
+        if not card:
+            owner, card, _ = self._find_active_item_by_upload_completion_id(record_id)
         if not card or not self._is_valid_list_item(card):
             return
         current = dict(card.data(Qt.ItemDataRole.UserRole) or {})
@@ -981,8 +983,9 @@ class MainWindowWorkflowMixin:
         data["_event_wait_screenshot_name"] = command.get("screenshot_file_name") or ""
         data["_event_wait_resume_job_id"] = payload.get("job_id") or ""
         record_id = str(data.get("record_id") or "")
-        list_widget, item = (self._find_active_item_by_active_item_id(data["active_item_id"])
-                             if data.get("active_item_id") else (None, None))
+        list_widget, item = self._find_active_item_by_upload_operation(key[0]) if delivery else (None, None)
+        if not item and data.get("active_item_id"):
+            list_widget, item = self._find_active_item_by_active_item_id(data["active_item_id"])
         if not item:
             if delivery:
                 list_widget, item, _ = self._find_active_item_by_upload_completion_id(record_id)
@@ -996,7 +999,7 @@ class MainWindowWorkflowMixin:
                 return {"ok": True, "ignored": True}
             current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
             operation_id = key[0]
-            pending = current.get("_event_wait_job_id") or self._upload_operation_for_record(current)
+            pending = self._upload_operation_for_record(current)
             if (pending and pending != operation_id) or current.get("_event_delivery_receipt_id") == operation_id:
                 return {"ok": True, "ignored": True}
             if not pending and (current.get("_event_delivery_receipt_id")
@@ -1427,10 +1430,12 @@ class MainWindowWorkflowMixin:
             return False
         record_id = str(data_dict.get("record_id") or "").strip()
         candidate_ids = self._upload_completion_record_id_candidates(record_id)
-        if not data_dict.get("_event_delivery_pending") and not any(
+        pending_key = next((key for key in candidate_ids if key in self.pending_update_after_upload), "")
+        is_event = data_dict.get("notice_type") == "事件通告"
+        if not is_event and not any(
             candidate_id in self.pending_action_record_ids
             for candidate_id in candidate_ids
-        ):
+        ) and not pending_key:
             return False
         queued_data = copy.deepcopy(data_dict)
         for key in (
@@ -1448,7 +1453,7 @@ class MainWindowWorkflowMixin:
             queued_data.pop(key, None)
         queued_data["_has_unuploaded_changes"] = True
         self._queue_update_after_upload(
-            record_id,
+            pending_key or record_id,
             {
                 "data": queued_data,
                 "screenshot_bytes": screenshot_bytes,
@@ -1465,7 +1470,7 @@ class MainWindowWorkflowMixin:
             },
         )
         self._restore_queued_upload_ui(record_id, requested=True)
-        if str(data_dict.get("notice_type") or "") == "事件通告":
+        if is_event:
             self._probe_event_upload(data_dict)
         if self.current_screenshot_record_id == record_id:
             self.current_screenshot_record_id = None
@@ -1484,6 +1489,10 @@ class MainWindowWorkflowMixin:
             payload["action_type"] = "update"
         existing = self.pending_update_after_upload.get(record_id) or {}
         if existing:
+            if (payload.get("data") or {}).get("notice_type") == "事件通告":
+                existing.setdefault("following", []).append(payload)
+                self._schedule_pending_update_after_upload()
+                return
             merged = dict(existing)
             merged.update(payload)
             # 保留最近一次有效截图/响应时间，避免被空值覆盖。
@@ -1511,6 +1520,18 @@ class MainWindowWorkflowMixin:
             f"robot_group_choice={payload.get('robot_group_choice') or 'auto'}"
         )
         self._schedule_pending_update_after_upload()
+
+    def _advance_pending_update(self, record_id, request):
+        if self.pending_update_after_upload.get(record_id) is not request:
+            return
+        following = request.pop("following", [])
+        if following:
+            next_request = following.pop(0)
+            if following:
+                next_request["following"] = following
+            self.pending_update_after_upload[record_id] = next_request
+        else:
+            self.pending_update_after_upload.pop(record_id, None)
 
     def _schedule_pending_update_after_upload(self, delay: int = 300):
         if getattr(self, "_pending_update_after_upload_scheduled", False):
@@ -1563,6 +1584,9 @@ class MainWindowWorkflowMixin:
         if not item or not self._is_valid_list_item(item):
             return
         data = item.data(Qt.ItemDataRole.UserRole) or {}
+        request = self.pending_update_after_upload.get(pending_key)
+        if not request or request.get("waiting_for_retry"):
+            return
         candidate_ids = set(
             self._upload_completion_record_id_candidates(pending_key)
         )
@@ -1585,9 +1609,6 @@ class MainWindowWorkflowMixin:
             if str(data.get("notice_type") or "") == "事件通告":
                 self._probe_event_upload(data)
             return
-        request = self.pending_update_after_upload.get(pending_key)
-        if not request:
-            return
         payload_data = request.get("data") or data
         if isinstance(payload_data, dict):
             payload_data = dict(payload_data)
@@ -1598,6 +1619,13 @@ class MainWindowWorkflowMixin:
                 "_queued_upload_requested",
                 "_event_inflight_retry_snapshot",
                 "_upload_verification_pending",
+                "_event_delivery_pending",
+                "_event_wait_job_id",
+                "_event_wait_attempt",
+                "_event_wait_released",
+                "_event_wait_resume_job_id",
+                "_event_wait_screenshot_id",
+                "_event_wait_screenshot_name",
             ):
                 payload_data.pop(key, None)
             if self._is_placeholder_record(data):
@@ -1675,6 +1703,10 @@ class MainWindowWorkflowMixin:
             f"response_time={'Y' if request.get('response_time') else 'N'}"
         )
         current_data = item.data(Qt.ItemDataRole.UserRole) or {}
+        newer_event_draft = None
+        if (notice_type == "事件通告" and current_data.get("_queued_after_upload")
+                and current_data.get("text") != payload_data.get("text")):
+            newer_event_draft = dict(current_data)
         if isinstance(current_data, dict):
             current_data = dict(current_data)
             for key in (
@@ -1704,6 +1736,7 @@ class MainWindowWorkflowMixin:
                 event_source=resolved.get("event_source"),
                 recover_selected=bool(request.get("recover_selected", False)),
                 robot_group_choice=str(request.get("robot_group_choice") or "auto").strip() or "auto",
+                newer_event_draft=newer_event_draft,
             )
         except Exception:
             current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
@@ -1713,8 +1746,7 @@ class MainWindowWorkflowMixin:
                 item.setData(Qt.ItemDataRole.UserRole, current)
                 self._rebuild_active_item_widget(list_widget, item, current)
             raise
-        if self.pending_update_after_upload.get(pending_key) is request:
-            self.pending_update_after_upload.pop(pending_key, None)
+        self._advance_pending_update(pending_key, request)
 
     def _manual_update_has_target(self, content: str) -> bool:
         info = extract_event_info(content)
@@ -2754,10 +2786,13 @@ class MainWindowWorkflowMixin:
             action_type,
         )
         record_id = data_dict["record_id"]
-        if any(
-            key in self.pending_update_after_upload
-            for key in self._upload_completion_record_id_candidates(record_id)
-        ):
+        waiting = next((self.pending_update_after_upload[key]
+                        for key in self._upload_completion_record_id_candidates(record_id)
+                        if key in self.pending_update_after_upload), {})
+        fresh_queued_event = (data_dict.get("notice_type") == "事件通告"
+                              and data_dict.get("_queued_after_upload")
+                              and not data_dict.get("_queued_upload_requested"))
+        if waiting and not waiting.get("waiting_for_retry") and not fresh_queued_event:
             self._schedule_pending_update_after_upload()
             self.show_message("该操作已确认，将在上一条结果核对完成后自动继续。")
             return
@@ -2767,7 +2802,7 @@ class MainWindowWorkflowMixin:
             or bool(data_dict.get("_event_delivery_pending"))
             or self._has_pending_upload(record_id)
         )
-        if upload_busy and bool(data_dict.get("_queued_after_upload")):
+        if fresh_queued_event or upload_busy and data_dict.get("_queued_after_upload"):
             if bool(data_dict.get("_queued_upload_requested")):
                 self.show_message("下一条通告已排队，将在当前上传成功后自动发送。")
                 return
@@ -2844,6 +2879,20 @@ class MainWindowWorkflowMixin:
                 r"\s+", "", str(cleaned_content or "")
             ):
                 return False
+            is_event = (info.get("notice_type") or old_data.get("notice_type")) == "事件通告"
+            for key in self._upload_completion_record_id_candidates(record_id):
+                request = self.pending_update_after_upload.get(key)
+                if not is_event:
+                    self.pending_update_after_upload.pop(key, None)
+                    continue
+                if request and request.get("waiting_for_retry"):
+                    self.show_message("上一条事件通告发送失败，请先重试原通告。")
+                    return True
+                if self.pending_action_types.get(key) == "end" or (
+                    request and any(r.get("action_type") == "end" for r in [request, *request.get("following", [])])
+                ):
+                    self.show_message("结束通告已确认，正在等待发送结果。")
+                    return True
             if record_id not in self.pending_upload_rollback_by_record_id:
                 try:
                     rollback_snapshot = copy.deepcopy(old_data)
@@ -2880,25 +2929,6 @@ class MainWindowWorkflowMixin:
             queued_action = "end" if parsed_status == "结束" else "update"
             new_data["status"] = "结束" if queued_action == "end" else "更新"
             new_data["action"] = queued_action
-            pending_keys = self._upload_completion_record_id_candidates(record_id)
-            pending_key = next(
-                (
-                    key
-                    for key in pending_keys
-                    if isinstance(self.pending_update_after_upload.get(key), dict)
-                    and bool(self.pending_update_after_upload.get(key))
-                ),
-                "",
-            )
-            pending_request = (
-                self.pending_update_after_upload.get(pending_key) if pending_key else None
-            )
-            requested = isinstance(pending_request, dict) and bool(pending_request)
-            if requested:
-                for key in pending_keys:
-                    self.pending_update_after_upload.pop(key, None)
-                pending_request = None
-                requested = False
             current_operation_id = str(
                 new_data.get("_upload_operation_id") or ""
             ).strip()
@@ -2909,7 +2939,7 @@ class MainWindowWorkflowMixin:
                 new_data["_upload_operation_id"] = current_operation_id
             new_data["_queued_after_upload"] = True
             new_data["_queued_action"] = queued_action
-            new_data["_queued_upload_requested"] = requested
+            new_data["_queued_upload_requested"] = False
             new_data["_upload_in_progress"] = False
             new_data["_pending_upload_hash"] = None
             new_data.pop("_upload_started_monotonic", None)
@@ -2946,6 +2976,7 @@ class MainWindowWorkflowMixin:
         event_source=None,
         recover_selected=False,
         robot_group_choice="auto",
+        newer_event_draft=None,
     ):
         if not data_dict:
             return
@@ -3053,6 +3084,9 @@ class MainWindowWorkflowMixin:
             operation_id = f"qt_notice:{uuid.uuid4().hex}"
             data_dict["_upload_operation_id"] = operation_id
         if record_id:
+            if notice_type == "事件通告":
+                self.pending_action_record_ids.add(record_id)
+                self.pending_action_types[record_id] = action_type
             data_dict["_upload_in_progress"] = True
             data_dict.pop("_upload_pending_dialog", None)
             data_dict["_upload_started_monotonic"] = time.monotonic()
@@ -3107,17 +3141,21 @@ class MainWindowWorkflowMixin:
             data_dict.pop("maintenance_cycle", None)
         if response_time:
             data_dict["last_response_time"] = response_time
-        self._update_active_item_data(
-            data_dict.get("record_id"),
-            data_dict,
-            persist_cache=False,
-        )
+        visible_data = data_dict
+        if newer_event_draft:
+            visible_data = {
+                **newer_event_draft,
+                "_upload_operation_id": operation_id,
+                "_upload_in_progress": False,
+                "_event_inflight_retry_snapshot": dict(data_dict),
+            }
+        self._update_active_item_data(record_id, visible_data, persist_cache=False)
 
         if record_id and self._is_event_notice(notice_type):
             list_widget, item = self._find_active_item_by_record_id(record_id)
             if item:
                 w = self._safe_item_widget(list_widget, item)
-                if w and getattr(w, "timer_widget", None):
+                if not newer_event_draft and w and getattr(w, "timer_widget", None):
                     w.timer_widget.update_context(
                         text=data_dict.get("text"),
                         buildings=_buildings,
@@ -3192,6 +3230,8 @@ class MainWindowWorkflowMixin:
                 data_dict["record_id"]
             )
         self._clear_upload_queue(data_dict.get("record_id"))
+        for record_id in self._upload_completion_record_id_candidates(data_dict.get("record_id")):
+            self.pending_update_after_upload.pop(record_id, None)
         self._today_in_progress_pending_record_ids.discard(
             str(data_dict.get("record_id") or "").strip()
         )
@@ -3613,7 +3653,9 @@ class MainWindowWorkflowMixin:
                     return
                 if event_delivery is not None:
                     getattr(self, "_remote_written_retry_operations", {}).pop(operation_id, None)
-                    _, item, _ = self._find_active_item_by_upload_completion_id(record_id)
+                    _, item = self._find_active_item_by_upload_operation(operation_id)
+                    if not item:
+                        _, item, _ = self._find_active_item_by_upload_completion_id(record_id)
                     if item and self._is_valid_list_item(item):
                         current = dict(item.data(Qt.ItemDataRole.UserRole) or {})
                         for field in ("_event_wait_job_id", "_event_wait_attempt", "_event_wait_released",
@@ -3632,7 +3674,7 @@ class MainWindowWorkflowMixin:
                 if operation_id:
                     for pending_key, request in list(self.pending_update_after_upload.items()):
                         if request.get("dispatch_operation_id") == operation_id:
-                            self.pending_update_after_upload.pop(pending_key, None)
+                            self._advance_pending_update(pending_key, request)
                 if name == "结束" and not success and record_id:
                     self._rollback_end(record_id)
                     self.restore_button_state(
@@ -3776,10 +3818,6 @@ class MainWindowWorkflowMixin:
                 else:
                     if name in ["上传", "更新"] and record_id:
                         self.pending_new_by_record_id.pop(record_id, None)
-                        self.pending_update_after_upload.pop(record_id, None)
-                        alias = self._payload_alias.get(record_id)
-                        if alias:
-                            self.pending_update_after_upload.pop(alias, None)
                     if name == "归档" and record_id:
                         self._rollback_apply_replace(record_id)
                     self._emit_system_alert(

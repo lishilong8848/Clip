@@ -1229,7 +1229,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertNotIn("_queued_after_upload", data)
         self.assertFalse(harness.pending_upload_rollback_by_record_id)
 
-    def test_recreated_event_start_upload_queues_latest_end_generation(self):
+    def test_recreated_event_keeps_confirmed_update_when_end_is_copied(self):
         harness = _ReplaceRecordIdHarness()
         record_id = "local_recreated_event"
         harness.pending_action_record_ids = {record_id}
@@ -1301,7 +1301,7 @@ class ActiveNoticeModelTests(unittest.TestCase):
         self.assertEqual(data["_queued_action"], "end")
         self.assertTrue(data["_queued_after_upload"])
         self.assertFalse(data["_queued_upload_requested"])
-        self.assertNotIn(record_id, harness.pending_update_after_upload)
+        self.assertEqual(harness.pending_update_after_upload[record_id]["data"]["text"], update_text)
         self.assertEqual(
             harness.pending_upload_rollback_by_record_id[record_id]["old_data"][
                 "text"

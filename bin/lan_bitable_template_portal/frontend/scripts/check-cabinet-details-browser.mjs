@@ -75,14 +75,14 @@ try{
     }
     await page.setViewportSize({width:1440,height:900});await go();
     await page.getByRole('button',{name:'原始平面图',exact:true}).click();await page.locator('.map-cell[aria-label="A01 正式电"]').waitFor();
-    delayMap=true;await page.locator('.room-sidebar button').filter({hasText:'202 包间'}).click();
+    delayMap=true;await page.locator('.room-sidebar button').filter({hasText:'202机房'}).click();
     await page.waitForFunction(()=>document.body.textContent.includes('正在读取平面图'));
-    await page.locator('.room-sidebar button').filter({hasText:'201 包间'}).click();
+    await page.locator('.room-sidebar button').filter({hasText:'201机房'}).click();
     await page.locator('.map-cell[aria-label="A01 正式电"]').waitFor();
     assert(releaseMap);await releaseMap();delayMap=false;await page.waitForTimeout(200);
     assert.equal(await page.locator('.map-cell[aria-label="B01 未上电/已下电"]').count(),0,'late map response cannot replace the cached selected room');
     failHistory=true;await page.locator('.map-cell[aria-label="A01 正式电"]').click();
-    await drawer.getByText('隔离测试：机柜历史暂时不可用',{exact:true}).waitFor();
+    await drawer.getByRole('alert').filter({hasText:'隔离测试：机柜历史暂时不可用'}).waitFor();
     failHistory=false;await drawer.getByRole('button',{name:'重试读取',exact:true}).click();await drawer.getByText('上正式电 · 成功',{exact:true}).waitFor();
     await drawer.getByRole('button',{name:'关闭历史',exact:true}).click();await page.locator('.map-cell[aria-label="A02 未上电/已下电"]').click();
     await drawer.getByText('该机柜暂无已登记的操作历史。',{exact:true}).waitFor();
@@ -96,7 +96,7 @@ try{
     assert.equal(await drawer.locator('.history-record').count(),0,'late pagination cannot append another cabinet history');
     await drawer.getByRole('button',{name:'关闭历史',exact:true}).click();await page.locator('.map-cell[aria-label="A01 正式电"]').click();
     failHistory=true;await drawer.getByRole('button',{name:'加载更多',exact:true}).click();
-    await drawer.getByText('隔离测试：机柜历史暂时不可用',{exact:true}).waitFor();
+    await drawer.getByRole('alert').filter({hasText:'隔离测试：机柜历史暂时不可用'}).waitFor();
     assert.equal(await drawer.locator('.history-record').count(),1,'pagination failure retains loaded history');
     failHistory=false;await drawer.getByRole('button',{name:'重试读取',exact:true}).click();
     await drawer.getByText('较早的操作记录 第 8 行',{exact:true}).waitFor();

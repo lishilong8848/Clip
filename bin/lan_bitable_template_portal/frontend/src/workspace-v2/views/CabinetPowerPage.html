@@ -173,7 +173,7 @@
           <button v-for="target in ['formal','test','off']" :key="target" :disabled="saving || selectedRack.state===target || !['formal','test','off'].includes(selectedRack.state)" @click="openStateSwitch(target)">{{ stateAction(target) }}</button>
         </div>
       </template>
-      <p v-if="historyError" role="alert" class="cab-alert">{{ historyError }} <button @click="history.items?.length ? moreHistory() : openHistory(historyRoom,historyRack)">重试读取</button></p>
+      <p v-if="historyError" role="alert" class="cab-alert" data-v2-inline-feedback>{{ historyError }} <button @click="history.items?.length ? moreHistory() : openHistory(historyRoom,historyRack)">重试读取</button></p>
       <div v-if="history.items?.length" class="cab-history-grid"><article v-for="op in history.items" :key="op.record_id" class="cab-item history-record">
         <div class="cab-section-head"><strong>{{ op.source || op.display_sheet }}{{ op.source_row ? ' 第 '+op.source_row+' 行' : '' }}</strong>
           <div v-if="!props.readOnly" class="cab-actions"><button @click="openEditor(op)" :disabled="saving">编辑</button><button v-if="canDelete && isResidualEmptyRecord(op)" :disabled="saving" @click="requestDeleteEmptyRecord(op)">删除空记录</button></div>

@@ -2,32 +2,40 @@
   <header class="serenity-heading console-heading"><div class="serenity-segment" role="group" aria-label="账号视图">
     <button v-for="item in tabs" :key="item.value" type="button" :aria-pressed="tab===item.value" @click="switchTab(item.value)">{{ item.label }}<template v-if="item.value==='requests' && pendingCount"> · {{ pendingCount }}</template></button>
   </div><div v-if="tab!=='requests'" class="serenity-actions"><button type="button" :disabled="saving||loading" @click="tab==='audit'?loadAudit():load(true)">刷新</button>
-    <button v-if="tab==='accounts' && selectedIds.size" type="button" class="entry-primary" :disabled="saving" @click="openBulkModules">批量调整 · {{ selectedIds.size }} 人</button></div></header>
+    <button v-if="tab==='accounts' && myLevel && !policy.is_fixed_superuser" type="button" :disabled="saving" @click="v2RequestAccess">申请修改本人权限</button>
+    <button v-if="tab==='accounts' && v2AccountMode==='list' && selectedIds.size" type="button" class="entry-primary" :disabled="saving" @click="openBulkModules">批量调整 · {{ selectedIds.size }} 人</button></div></header>
   <p v-if="error" role="alert">{{ error }}</p><p v-if="warning" role="status">{{ warning }}</p><p v-if="notice" role="status">{{ notice }}</p>
   <template v-if="tab==='accounts'"><div class="account-queries">
     <label class="serenity-search"><Search :size="15"/><input v-model="search" type="search" aria-label="搜索账号" placeholder="姓名、工号或岗位"></label>
     <select v-model="kind" aria-label="账号类型"><option value="">全部类型</option><option v-for="(label,key) in kinds" :value="key" :key="key">{{ label }}</option></select>
     <select v-model="building" aria-label="楼栋"><option value="">全部授权楼栋</option><option v-for="scope in ownScopeOptions" :key="scope.value" :value="scope.value">{{ scope.label }}</option></select>
-    <select v-model="category" aria-label="岗位"><option v-for="row in categoryTabs" :key="row.value" :value="row.value">{{ row.label }} · {{ row.count }}</option></select>
+    <select v-model="v2Level" aria-label="筛选权限级别"><option value="">全部级别</option><option v-for="level in [...new Set(items.map(item=>item.level))].filter(Boolean).sort()" :key="level" :value="level">{{ levelLabel(level) }}</option></select>
+    <select v-model="category" aria-label="筛选岗位"><option v-for="row in categoryTabs" :key="row.value" :value="row.value">{{ row.label }} · {{ row.count }}</option></select>
     <select v-model="state" aria-label="授权状态"><option value="">全部状态</option><option value="active">已授权</option><option value="pending">未授权</option><option value="disabled">已停用</option><option value="blocked">待核对</option><option value="admin">管理员</option></select>
-    <label v-if="pageSelectable.length"><input type="checkbox" :checked="pageSelectable.every(item=>selectedIds.has(item.id))" @change="selectModulePage(($event.target as HTMLInputElement).checked)">选择本页</label></div>
+    <label v-if="v2AccountMode==='list' && pageSelectable.length"><input type="checkbox" :checked="pageSelectable.every(item=>selectedIds.has(item.id))" @change="selectModulePage(($event.target as HTMLInputElement).checked)">选择本页</label></div>
     <p v-if="selectionNotice">{{ selectionNotice }}</p>
-    <nav class="serenity-pager" aria-label="账号分页"><span>{{ filtered.length }} 人 · 第 {{ page }} / {{ pageCount }} 页</span>
+    <div class="serenity-segment" role="tablist" aria-label="账号显示方式">
+      <button type="button" role="tab" :aria-selected="v2AccountMode==='list'" @click="v2AccountMode='list'">列表</button>
+      <button type="button" role="tab" :aria-selected="v2AccountMode==='tree'" @click="v2AccountMode='tree'">树形分组</button>
+    </div>
+    <AccountHierarchy v-if="v2AccountMode==='tree'" :accounts="filtered" :directory="items" mode="tree" :show-toggle="false" :level-label="levelLabel" :building-label="value=>scopesLabel([value])" :category-label="categoryLabel" @select="openAccount"/>
+    <template v-else><nav class="serenity-pager" aria-label="账号分页"><span>{{ filtered.length }} 人 · 第 {{ page }} / {{ pageCount }} 页</span>
       <button type="button" :disabled="page<=1" @click="page--">上一页</button><button type="button" :disabled="page>=pageCount" @click="page++">下一页</button></nav>
     <div class="account-directory"><article v-for="item in pageItems" :key="item.id">
       <label><input v-if="canSelectModules(item)" type="checkbox" :checked="selectedIds.has(item.id)" :aria-label="'选择 '+item.name" @change="selectModuleAccount(item,($event.target as HTMLInputElement).checked)"><strong>{{ item.name }}</strong></label>
       <span>{{ categoryLabel(item.category) }} · {{ scopesLabel(item.own_scopes) }}</span><small>{{ levelLabel(item.level) }} · {{ stateLabel(item) }}</small>
       <div class="serenity-actions"><button type="button" @click="openAccount(item)">查看账号</button><button v-if="item.can_impersonate" type="button" :disabled="saving" @click="requestImpersonation(item)">代登录</button></div>
     </article></div><p v-if="!pageItems.length" role="status">{{ loading?'读取中…':'没有符合条件的账号' }}</p>
-  </template><slot v-else-if="tab==='requests'"/>
+    </template>
+  </template><PermissionReview v-else-if="tab==='requests'" :scopes="scopeOptions" :modules="moduleOptions" :categories="categoryOptions" @changed="load();emit('changed')"/>
   <section v-else class="serenity-panel"><h2>账号变更记录</h2><div v-for="(row,i) in audits" :key="i" class="transfer-item">
     <strong>{{ actionLabel(row.action) }}</strong><span>{{ row.actor_name || row.actor }} · {{ row.target_name }} · {{ statusLabel(row.status) }}</span><time>{{ formatTime(row.created_at) }}</time></div>
     <p v-if="!audits.length">{{ auditLoading?'读取中…':'暂无变更记录' }}</p></section>
-  <Teleport to="body"><div v-if="draft" class="serenity-scrim" @click.self="closeEditor">
+  <Teleport to="body"><div v-if="draft" class="serenity-scrim account-scrim" @click.self="closeEditor">
     <section ref="editor" tabindex="-1" class="serenity-decision account-dialog" role="dialog" aria-modal="true" :aria-label="draft.name+' 账号详情'">
       <header><h2>{{ draft.name }}</h2><button type="button" :disabled="saving" aria-label="关闭账号详情" @click="closeEditor">×</button></header>
-      <p>{{ draft.employee_no }} · {{ draft.position || categoryLabel(draft.category) }} · {{ stateLabel(draft) }}</p>
-      <p v-if="editorError" role="alert">{{ editorError }}</p><p v-if="draft.blocked_reason" role="status">{{ draft.blocked_reason }}</p>
+      <p><template v-if="myLevel!=='L2' && draft.employee_no">{{ draft.employee_no }} · </template>{{ draft.position || categoryLabel(draft.category) }} · {{ stateLabel(draft) }} · {{ draft.kind==='external'?'姓名密码登录':'飞书登录' }}</p>
+      <p v-if="editorError" role="alert">{{ editorError }} <button v-if="v2Stale" type="button" :disabled="saving" @click="v2ReloadEditor">重新读取账号</button></p><p v-if="draft.blocked_reason" role="status">{{ draft.blocked_reason }}</p>
       <div class="settings-fields"><label>权限等级<select v-model="draft.level" :disabled="saving||!canChooseAccess(draft)" @change="changeLevel">
         <option v-for="option in accessLevelOptions" :key="option.value" :value="option.value" :disabled="option.disabled">{{ option.label }}</option></select></label>
         <label>岗位<select v-model="draft.category" :disabled="saving||!canEditAccess(draft)"><option v-for="option in accessCategoryOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label></div>
@@ -35,14 +43,14 @@
       <fieldset><legend>功能授权 · {{ draft.modules?.length || 0 }} 项</legend><fieldset v-for="group in moduleGroups" :key="group.label"><legend>{{ group.label }}</legend>
         <label v-for="opt in group.options" :key="opt.value"><input v-model="draft.modules" :value="opt.value" type="checkbox" :disabled="saving||!canEditAccess(draft)||(opt.value==='accounts'&&draft.level==='L4')">{{ opt.label }}</label></fieldset></fieldset>
       <div v-if="canEdit(draft) || canSaveAccess(draft) || draft.can_delete" class="serenity-heading account-decisions">
-        <div v-if="canEdit(draft)" class="serenity-actions"><label><input v-model="draft.enabled" type="checkbox" :disabled="saving">启用账号</label><button type="button" :disabled="saving" @click="saveEnabled">保存账号状态</button></div>
-        <div class="serenity-actions"><button v-if="draft.can_delete" type="button" :disabled="saving" @click="deleteAccount(draft)">撤销登录权限</button>
-          <button v-if="canSaveAccess(draft)" type="button" class="decision-submit" :disabled="saving" @click="saveAccess">保存授权</button></div></div>
+        <div v-if="canEdit(draft)" class="serenity-actions"><label><input v-model="draft.enabled" type="checkbox" :disabled="saving">启用账号</label><button type="button" :disabled="saving||v2Stale||v2PermissionsDirty||!v2AccessDirty" @click="saveEnabled">保存账号状态</button></div>
+        <div class="serenity-actions"><button v-if="draft.can_delete" type="button" :disabled="saving||v2Stale" @click="deleteAccount(draft)">撤销登录权限</button>
+          <button v-if="canSaveAccess(draft)" type="button" class="decision-submit" :disabled="saving||v2Stale||!v2AccessDirty" @click="saveAccess">保存授权</button></div></div>
       <details v-if="draft.can_set_password" class="account-password"><summary>设置密码</summary><div class="settings-fields"><label>新密码<input v-model="newPassword" type="password" autocomplete="new-password"></label>
-        <label>确认密码<input v-model="confirmPassword" type="password" autocomplete="new-password"></label><button type="button" :disabled="saving" @click="savePassword">保存密码</button></div></details>
+        <label>确认密码<input v-model="confirmPassword" type="password" autocomplete="new-password"></label><button type="button" :disabled="saving||v2Stale" @click="savePassword">保存密码</button></div></details>
       <AccountSignature v-if="draft.can_access_signature && draft.open_id && actorModules.includes('signatures') && draft.kind!=='duty'" :key="draft.open_id" :open-id="draft.open_id"/>
     </section></div>
-    <div v-if="bulkOpen" class="serenity-scrim"><section ref="bulkEditor" tabindex="-1" class="serenity-decision account-dialog" role="dialog" aria-modal="true" aria-label="批量功能授权">
+    <div v-if="bulkOpen" class="serenity-scrim account-scrim"><section ref="bulkEditor" tabindex="-1" class="serenity-decision account-dialog" role="dialog" aria-modal="true" aria-label="批量功能授权">
       <header><h2>批量功能授权 · {{ selectedAccounts.length }} 人</h2><button type="button" aria-label="关闭批量授权" :disabled="saving" @click="closeBulkModules">×</button></header>
       <label>调整方式<select v-model="bulkMode" :disabled="saving"><option value="add">增加功能</option><option value="remove">移除功能</option></select></label>
       <fieldset v-for="group in bulkModuleGroups" :key="group.label"><legend>{{ group.label }}</legend>

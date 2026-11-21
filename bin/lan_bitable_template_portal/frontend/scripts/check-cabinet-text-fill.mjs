@@ -39,7 +39,7 @@ try{
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
   await page.goto(`${base}/assets/workspace-v2/index.html?__page=/cabinet-power/batches&scope=E&status=todo`);
   await page.getByRole('button',{name:'进入',exact:true}).first().click();
-  await page.getByRole('button',{name:'粘贴文本识别',exact:true}).click();
+  await page.getByRole('button',{name:'文本回填',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'粘贴文本识别',exact:true});
   const paste=async(text)=>{
     const response=page.waitForResponse(response=>response.url().endsWith('/text-preview'));
@@ -76,7 +76,7 @@ try{
   assert.equal(saved.rows[1].actual,'');assert.equal(saved.rows[2].action,'上正式电');
   assert.equal(saved.rows[0].edits.filter(edit=>edit.source==='text_fill').length,3);
 
-  await page.getByRole('button',{name:'粘贴文本识别',exact:true}).click();
+  await page.getByRole('button',{name:'文本回填',exact:true}).click();
   await paste('EA118-E2-2 A11');
   assert(await dialog.getByRole('alert').isVisible());assert.equal(await dialog.locator('tbody tr').count(),0);
   await paste(line('A11','正式电转测试电'));
@@ -101,7 +101,7 @@ try{
   const afterRetry=await api('batches/'+batch.batch_id,undefined,'GET');
   assert.deepEqual(afterRetry.rows[0].edits,afterLoss.rows[0].edits);
 
-  await page.getByRole('button',{name:'粘贴文本识别',exact:true}).click();
+  await page.getByRole('button',{name:'文本回填',exact:true}).click();
   await paste(Array.from({length:100},()=>line('A11')).join('\n'));
   assert.equal(await dialog.locator('tbody tr').count(),25);
   assert(await dialog.getByRole('button',{name:'填入本批次（1）',exact:true}).isEnabled());

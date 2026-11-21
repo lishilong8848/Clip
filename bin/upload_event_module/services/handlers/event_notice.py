@@ -211,7 +211,7 @@ class EventNoticeHandler(BaseNoticeHandler):
         return ""
 
     def _normalize_event_level(self, level: str, text: str) -> str:
-        raw_level = (level or "").strip().upper()
+        raw_level = str(level or (extract_event_info(text) or {}).get("level") or "").strip().upper()
         if raw_level:
             if re.search(rf"{LEVEL_I3}\s*[→>\\-]\s*{LEVEL_I2}", raw_level):
                 return EVENT_LEVEL_UPGRADE_I3_TO_I2

@@ -1,0 +1,24 @@
+import path from 'node:path';import {readFileSync} from 'node:fs';import {preview} from 'vite';import {chromium} from 'playwright';
+import {selectWorkspaceSetting} from './scripts/workspace-account-actions.mjs';
+import {layoutApiFixture} from './scripts/layout-api-fixture.mjs';
+const root=process.cwd();
+const s=await preview({root,configFile:path.join(root,'vite.workspace-v2.config.ts'),logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
+const origin='http://127.0.0.1:'+s.httpServer.address().port;
+const b=await chromium.launch({headless:true});const c=await b.newContext({viewport:{width:1440,height:950}});
+const layouts=layoutApiFixture();
+const user={open_id:'self',name:'隔离验收主管',role:'building',level:'L1',category:'manager',modules:['accounts','signatures','maintenance'],can_manage_accounts:true,scopes:[{value:'A',label:'A楼'}]};
+await c.route('**/*',async r=>{const q=r.request(),u=new URL(q.url());if(u.origin!==origin)return r.abort();if(u.pathname==='/assets/vnet-logo.png')return r.abort();if(!u.pathname.startsWith('/api/'))return r.continue();if(await layouts.handle(r,'p'))return;
+ const f=o=>r.fulfill({status:200,contentType:'application/json',body:JSON.stringify(o)});
+ if(u.pathname==='/api/auth/status')return f({ok:true,authenticated:true,user});
+ return f({ok:true,items:[],records:[],users:[],settings:{}});});
+const p=await c.newPage();p.on('pageerror',e=>console.log('PAGEERR',e.message));
+await p.goto(origin+'/assets/workspace-v2/index.html?__page=/admin/settings');
+await p.waitForTimeout(2500);
+console.log('after goto URL',p.url());
+try{await p.getByRole('button',{name:'账号与权限'}).first().click({timeout:5000});}catch(e){console.log('btn click fail',e.message.split('\n')[0]);}
+await p.waitForTimeout(2500);
+console.log('after click URL',p.url());
+console.log('regions',await p.getByRole('region').evaluateAll(n=>n.map(x=>x.getAttribute('aria-label'))));
+console.log('groups',await p.getByRole('group').evaluateAll(n=>n.map(x=>x.getAttribute('aria-label'))));
+console.log('buttons sample',(await p.getByRole('button').evaluateAll(n=>n.map(x=>x.textContent.trim()).filter(Boolean))).slice(0,40));
+await b.close();await s.close();

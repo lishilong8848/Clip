@@ -578,7 +578,7 @@ function afterAgendaClose() {
   --desk-blue:#266288; --desk-blue-wash:#dcedf8; --desk-shadow:var(--soft-key);
   display:grid; gap:14px; width:100%; min-width:0; container:daily-desk / inline-size; color:var(--desk-ink); font:inherit;
 }
-[data-v2-theme="dark"] .daily-desk {
+:global([data-v2-theme="dark"] .daily-desk) {
   --desk-blue:#aad5ee; --desk-blue-wash:#243e4f;
 }
 .daily-desk *, .daily-desk *::after { box-sizing:border-box }
@@ -586,7 +586,8 @@ function afterAgendaClose() {
 .daily-desk h1 { font-size:clamp(20px,2vw,27px); line-height:1.2; letter-spacing:-.035em }
 .daily-desk h2 { font-size:18px }
 .daily-desk h3 { font-size:14px }
-.daily-desk :is(button,select,input) { font:inherit; color:inherit }
+.daily-desk :is(button,select,input) { font:inherit }
+.daily-desk :where(button:not(.n-button),select,input) { color:inherit }
 .daily-desk button { cursor:pointer }
 .daily-desk button:disabled { cursor:wait; opacity:.65 }
 .daily-desk :is(button,select,input):focus-visible,.day-planner:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
@@ -623,14 +624,14 @@ function afterAgendaClose() {
   display:flex;align-items:center;gap:8px;min-width:0;width:min(100%,360px);margin-inline:auto;padding:8px 12px;
   background:radial-gradient(ellipse closest-side, color-mix(in srgb,var(--weather-tint) var(--weather-strength),transparent) 16%, transparent 100%);
 }
-[data-v2-theme="dark"] .desk-weather { --weather-strength:21% }
+:global([data-v2-theme="dark"] .desk-weather) { --weather-strength:21% }
 .desk-weather[data-condition="sun"] { --weather-tint:#f3bd67 }
 .desk-weather[data-condition="partly"] { --weather-tint:#c9cedf }
 .desk-weather[data-condition="rain"] { --weather-tint:#73a7c6 }
 .desk-weather[data-condition="snow"] { --weather-tint:#b8cbe6 }
 .weather-mark { flex:none;color:var(--weather-hue) }
 .desk-weather[data-condition="sun"] .weather-mark { color:#974e06 }
-[data-v2-theme="dark"] .desk-weather[data-condition="sun"] .weather-mark { color:#ffc978 }
+:global([data-v2-theme="dark"] .desk-weather[data-condition="sun"] .weather-mark) { color:#ffc978 }
 .weather-current { display:grid;gap:1px;min-width:0;flex:none;max-width:43% }
 .weather-current strong { font-size:21px;line-height:1.14;font-variant-numeric:tabular-nums }
 .weather-current small,.weather-axis { font-size:10px;color:var(--desk-muted);line-height:1.25 }

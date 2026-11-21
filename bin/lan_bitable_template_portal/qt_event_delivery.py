@@ -166,10 +166,16 @@ class QtEventDelivery:
             command.update(operation_id=operation_id, data_dict=data)
             previous = event.get("last_archive_operation", "")
             now = time.time()
+            robot_payload = self.runtime._event_robot_retry_payload(payload)
+            message_uuid = self.runtime._event_robot_message_uuid(operation_id)
+            if (latest and latest["delivery_state"] == "failed"
+                    and latest["action"] == action and latest["robot_payload"] == robot_payload):
+                # A lost receipt can exhaust retries even though Feishu accepted the message.
+                message_uuid = latest.get("message_uuid") or self.runtime._event_robot_message_uuid(latest["operation_id"])
             operation = {"operation_id": operation_id, "event_id": event_id, "intent": identity,
                          "action": action, "target_record_id": target, "record_id": record,
                          "previous_archive_operation": previous, "command": command, "audit_id": audit_id,
-                         "robot_payload": self.runtime._event_robot_retry_payload(payload),
+                         "robot_payload": robot_payload, "message_uuid": message_uuid,
                          "delivery_state": "pending", "updated_at": now}
             event.update(latest=operation_id, target_record_id=target,
                          active_item_id=active or event.get("active_item_id") or record)
@@ -244,7 +250,7 @@ class QtEventDelivery:
                             raise DeliveryBusy()
                         sent = server.send_robot_message_by_payload(
                             NOTICE_TYPE, NoticePayload(**operation["robot_payload"]),
-                            message_uuid=self.runtime._event_robot_message_uuid(operation_id),
+                            message_uuid=operation.get("message_uuid") or self.runtime._event_robot_message_uuid(operation_id),
                         )
                         if not (sent.get("robot_sent") or sent.get("robot_skipped")):
                             raise PortalError(sent.get("last_robot_error") or "事件群消息未确认送达。")
@@ -266,16 +272,16 @@ class QtEventDelivery:
                         if sent_to_group:
                             self.runtime.action_queue_event.set()
                             self.runtime.clear_payload_cache()
-                    self.notify_qt(operation)
-                    if operation.get("robot_sent") and operation["action"] == "end":
-                        self.runtime._enqueue_active_delete_for_ended_notice(
-                            operation["command"]["data_dict"], remote_record_id=operation["target_record_id"],
-                            job_id=operation_id, enqueue_if_missing=False,
-                        )
-                    if operation["delivery_state"] == "failed" and operation.get("audit_id"):
-                        finish_business_audit(self.store, operation["audit_id"], success=False,
-                                              error=operation.get("error", ""), error_stage="group_delivery")
-                    self.store.mark_outbox_event(task["id"], "done")
+                self.notify_qt(operation)
+                if operation.get("robot_sent") and operation["action"] == "end":
+                    self.runtime._enqueue_active_delete_for_ended_notice(
+                        operation["command"]["data_dict"], remote_record_id=operation["target_record_id"],
+                        job_id=operation_id, enqueue_if_missing=False,
+                    )
+                if operation["delivery_state"] == "failed" and operation.get("audit_id"):
+                    finish_business_audit(self.store, operation["audit_id"], success=False,
+                                          error=operation.get("error", ""), error_stage="group_delivery")
+                self.store.mark_outbox_event(task["id"], "done")
             except DeliveryBusy:
                 self.store.mark_outbox_event(task["id"], "pending", count_attempt=False,
                                              retry_at=max(time.time() + 2, (operation or {}).get("next_message_at", 0)))
@@ -294,6 +300,8 @@ class QtEventDelivery:
                         retry_at = operation["next_message_at"]
                     self.store.put_document(OPERATIONS, operation_id, operation)
                 self.store.mark_outbox_event(task["id"], "pending", error=str(exc), count_attempt=False, retry_at=retry_at)
+                if operation and operation["delivery_state"] == "failed":
+                    self.notify_qt(operation)
 
     def process_archives(self):
         for task in self.store.lease_outbox_events(ARCHIVES, limit=5, lease_seconds=300, respect_retry_at=True):

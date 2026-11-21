@@ -2,6 +2,7 @@
    and attachment viewers as documents: their paper, cell geometry and ink are data. */
 @media screen {
   .signature-strip {min-width:0;margin-top:10px}
+  @media(max-width:760px){.signature-strip .serenity-actions button{min-height:44px}}
   .signature-strip h2 {display:flex;align-items:center;gap:5px;font:700 18px/1.4 var(--soft-title);margin:0}
   .signature-strip p,.signature-strip header span {color:var(--v2-muted);font-size:13px}
   .sign-sample {margin:8px 0;padding:8px;display:inline-grid;background:white;border:1px solid var(--soft-edge);border-radius:8px}
@@ -33,7 +34,7 @@
   .serenity-search input {min-width:0;background:transparent;border:0;color:var(--v2-ink);font:inherit}
   .serenity-segment {display:flex;align-items:center;flex-wrap:wrap;gap:4px;max-width:100%;justify-self:start;padding:4px;background:var(--soft-field);border-radius:11px;box-shadow:var(--soft-inset)}
   .serenity-segment button {min-height:32px;flex:none;padding:4px 10px;font:inherit;font-size:13px;color:var(--v2-muted);border:0;border-radius:8px;background:transparent;cursor:pointer}
-  .serenity-segment button[aria-pressed=true] {background:var(--soft-face);color:var(--v2-blue);box-shadow:var(--soft-key);font-weight:650}
+  .serenity-segment button:is([aria-pressed=true],[aria-selected=true]) {background:var(--soft-face);color:var(--v2-blue);box-shadow:var(--soft-key);font-weight:650}
   .serenity-panel {min-width:0;padding:13px 15px;background:var(--soft-face);border-radius:15px;box-shadow:var(--soft-raised)}
   .serenity-pager {display:flex;align-items:center;justify-content:flex-end;gap:8px;padding-top:8px}
   .serenity-pager>span {margin-right:auto;color:var(--v2-muted);font-size:12px}
@@ -103,6 +104,8 @@
   .scene-lightbox img {display:block;max-width:100%;max-height:65dvh;object-fit:contain;margin:0 auto 10px}
   .board-view-selector {margin-bottom:10px}
   .serenity-scrim {position:fixed;inset:0;z-index:6000;display:grid;place-items:center;padding:12px;background:rgb(36 46 59 / .44)}
+  /* The discard confirmation opens above the account editor. */
+  .serenity-scrim.account-scrim {z-index:5000}
   .serenity-decision {width:min(430px,100%);max-height:calc(100dvh - 24px);overflow:auto;padding:18px;border-radius:18px;color:var(--v2-ink);background:var(--soft-face);box-shadow:0 12px 48px rgb(30 40 55 / .28)}
   .serenity-decision header {display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:4px}
   .serenity-decision header>span {grid-column:1/-1;color:var(--v2-muted);font-size:12px}
@@ -113,7 +116,7 @@
   .serenity-decision footer {justify-content:flex-end;flex-wrap:wrap;margin-top:15px}
   .serenity-decision button,.sign-desk button {min-height:36px;padding:6px 12px;border:1px solid var(--soft-edge);border-radius:10px;background:var(--soft-face);box-shadow:var(--soft-key);color:var(--v2-ink);font:inherit;cursor:pointer}
   .serenity-decision header button {width:36px;padding:0;font-size:20px}
-  .serenity-decision .decision-submit,.sign-paper footer button {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:transparent}
+  .serenity-decision .decision-submit,.signature-strip .decision-submit,.sign-paper footer button {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:transparent}
   .serenity-decision[data-tone=danger] .decision-submit {background:#ac3448;color:white}
   .sign-desk {max-width:790px;margin-inline:auto}
   .sign-paper header,.sign-paper footer {justify-content:space-between;flex-wrap:wrap}
