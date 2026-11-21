@@ -1,6 +1,7 @@
 <template>
   <RepairController v-bind="props" v-slot="{controller:r}">
     <section class="v2-repair-workspace repair-desk" data-v2-inline-feedback :class="{'repair-status-page':statusEntry}">
+      <template v-if="!recordOnly">
       <header class="repair-desk-bar">
         <h1><Wrench :size="21" />检修办理</h1>
         <WorkspaceScopePicker />
@@ -48,15 +49,20 @@
               </article>
             </div>
           </div>
-          <footer class="v2-repair-pager"><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>changePage(r,value)" /></footer>
+          <footer v-if="r.recordPageCount>1 || r.recordPage>1" class="v2-repair-pager"><NPagination :page="r.recordPage" :page-count="r.recordPageCount" :disabled="r.loading||r.v2Writing" :page-slot="5" @update:page="value=>changePage(r,value)" /></footer>
           </section>
         </template>
       </PageCanvas>
-      <Teleport to="body">
+      </template>
+      <template v-else-if="!r.projectDrawerOpen">
+        <NSkeleton v-if="r.loading || (!r.v2RecordsReady && !r.v2RecordError)" text :repeat="4" />
+        <NAlert v-else type="warning" :bordered="false" role="status">{{ r.v2RecordError || r.messageText || '当前范围内找不到这条维修单。' }} <NButton text @click="r.v2RefreshView">重试</NButton></NAlert>
+      </template>
+      <Teleport to="body" :disabled="recordOnly">
         <Transition name="v2-repair-detail">
-          <div v-if="r.projectDrawerOpen" class="v2-repair-workspace v2-repair-dialog-shell repair-desk-modal" data-v2-inline-feedback @click.self="r.requestCloseProjectDrawer">
-          <section :ref="r.v2SetDetail" class="repair-project-drawer v2-repair-detail" :class="{'repair-desk-has-queue':r.editingRecordId && r.records.length}" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="repair-detail-title" @keydown="r.handleProjectDrawerKeydown">
-            <aside v-if="r.editingRecordId && r.records.length" class="repair-desk-queue" aria-label="本页维修项目">
+          <div v-if="r.projectDrawerOpen" class="v2-repair-workspace repair-desk-modal" :class="recordOnly?'repair-desk-inline':'v2-repair-dialog-shell'" data-v2-inline-feedback @click.self="!recordOnly && r.requestCloseProjectDrawer()">
+          <section :ref="r.v2SetDetail" class="repair-project-drawer v2-repair-detail" :class="{'repair-desk-has-queue':!recordOnly && r.editingRecordId && r.records.length}" tabindex="-1" :role="recordOnly?undefined:'dialog'" :aria-modal="recordOnly?undefined:true" :aria-labelledby="recordOnly?undefined:'repair-detail-title'" @keydown="r.handleProjectDrawerKeydown">
+            <aside v-if="!recordOnly && r.editingRecordId && r.records.length" class="repair-desk-queue" aria-label="本页维修项目">
               <header><strong>本页维修项目</strong><small>{{r.v2AppliedState}} · {{r.records.length}} 项</small></header>
               <div class="repair-desk-queue-items">
                 <button v-for="item in r.records" :key="item.record_id" type="button" data-v2-navigation
@@ -68,7 +74,7 @@
                 </button>
               </div>
             </aside>
-            <header class="v2-repair-detail-head"><div><small>{{r.editingRecordId?'维修项目':'新建维修单'}}</small><h2 id="repair-detail-title">{{r.editingRecordId?(r.selectedRecord?.title||r.selectedRecordTitle):'填写维修项目'}}</h2></div><NButton data-v2-navigation quaternary circle aria-label="关闭维修项目" :disabled="r.v2Writing" @click="r.requestCloseProjectDrawer"><X :size="21" /></NButton></header>
+            <header v-if="!recordOnly" class="v2-repair-detail-head"><div><small>{{r.editingRecordId?'维修项目':'新建维修单'}}</small><h2 id="repair-detail-title">{{r.editingRecordId?(r.selectedRecord?.title||r.selectedRecordTitle):'填写维修项目'}}</h2></div><NButton data-v2-navigation quaternary circle aria-label="关闭维修项目" :disabled="r.v2Writing" @click="r.requestCloseProjectDrawer"><X :size="21" /></NButton></header>
             <div class="repair-desk-tabbar">
             <nav v-if="!r.recordDetailLoading" class="v2-repair-detail-tabs" aria-label="维修办理内容">
               <NRadioGroup :value="r.activeWorkspaceTab" :disabled="r.v2Writing" @update:value="r.openWorkspaceTab">
@@ -109,7 +115,7 @@
             <footer v-if="!r.recordDetailLoading" class="v2-repair-detail-footer">
               <div class="v2-repair-save-state" :class="r.activeWorkspaceTab==='project'?r.projectSaveStateTone:(r.followupHasUnsavedChanges?'dirty':'')"><span v-if="r.activeWorkspaceTab==='project'">{{projectSaveHint(r)}}</span><span v-else>{{r.v2FollowupApi?.action.reason || (r.followupHasUnsavedChanges?'跟进有未保存修改':'')}}</span></div>
               <div class="v2-repair-inline-actions">
-                <NButton data-v2-navigation :disabled="r.v2Writing" @click="r.requestCloseProjectDrawer">返回列表</NButton>
+                <NButton v-if="!recordOnly" data-v2-navigation :disabled="r.v2Writing" @click="r.requestCloseProjectDrawer">返回列表</NButton>
                 <NButton v-if="r.editingRecordId&&noticeAllowed&&!r.selectedRecordReadOnly" data-v2-navigation :disabled="r.v2Writing" @click="r.requestOpenRepairNoticeWorkbench"><FileText :size="15" />办理检修通告</NButton>
                 <NDropdown v-if="r.activeWorkspaceTab==='project'&&!r.selectedRecordReadOnly" trigger="click" :options="recordOptions(r)" @select="value=>recordMore(value,r)"><NButton data-v2-navigation :disabled="r.v2Writing" aria-label="维修单更多操作"><Ellipsis :size="17" /></NButton></NDropdown>
                 <NButton v-if="r.activeWorkspaceTab==='project'&&!r.selectedRecordReadOnly" type="primary" :loading="r.saving" :disabled="!r.canSaveRecord" @click="r.saveRecord"><Save :size="16" />{{r.editingRecordId?'保存修改':'保存维修单'}}</NButton>
@@ -149,7 +155,7 @@ import type { ScopeOption } from '../types';
 import './repair.css';
 import './RepairDesk.css';
 import {repairDisplayTime} from '../repairManagementUtils';
-const props=defineProps<{scope:string;scopeOptions:ScopeOption[];focusRecordId?:string;focusFollowups?:boolean;initialInProgress?:boolean;canDelete?:boolean;userId?:string}>();
+const props=defineProps<{scope:string;scopeOptions:ScopeOption[];focusRecordId?:string;focusFollowups?:boolean;initialInProgress?:boolean;canDelete?:boolean;userId?:string;recordOnly?:boolean}>();
 defineOptions({inheritAttrs:false});
 const noticeAllowed=computed(()=>canUseModule('repair'));
 const statusEntry=computed(()=>logicalUrl().pathname==='/repair-status');

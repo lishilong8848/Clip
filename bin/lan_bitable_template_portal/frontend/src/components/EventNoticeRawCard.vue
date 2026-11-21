@@ -61,7 +61,12 @@ const datetime=(value:unknown)=>String(value||'').replace(' ','T').slice(0,16);
 let saveTimer=0,parseTimer=0,parseVersion=0,disposed=false;
 const manualFields=ref<string[]>([]),autoFields=ref<Dict>({});
 const cacheKey=()=> 'event-draft:'+props.options.user_id+':'+eventId.value;
-function persist(){try{sessionStorage.setItem(cacheKey(),JSON.stringify({metadata:metadata.value,base:base.value,text:text.value,editingAction:editingAction.value,frozen:frozen.value,manualFields:manualFields.value,autoFields:autoFields.value}));if(props.creation)sessionStorage.setItem(pointer,eventId.value);}catch{saveError.value='浏览器无法保存草稿，请保持本页打开。';}}
+function persist(){try{sessionStorage.setItem(cacheKey(),JSON.stringify({metadata:metadata.value,base:base.value,text:text.value,editingAction:editingAction.value,frozen:frozen.value,manualFields:manualFields.value,autoFields:autoFields.value}));if(props.creation)sessionStorage.setItem(pointer,eventId.value);return true;}catch{saveError.value='浏览器无法保存草稿，请保持本页打开。';return false;}}
+function guardNavigation(){
+  if(busy.value||saving.value){saveError.value='正在提交，请等待结果。';return false;}
+  return !text.value&&!frozen.value&&!Object.keys(patch()).length || persist();
+}
+defineExpose({guardNavigation});
 try{const saved=JSON.parse(sessionStorage.getItem(cacheKey())||'null');if(saved){metadata.value={...empty(),...saved.metadata};base.value={...empty(),...saved.base};text.value=props.initialText||saved.text||'';editingAction.value=saved.editingAction||'';frozen.value=saved.frozen||null;manualFields.value=Array.isArray(saved.manualFields)?saved.manualFields:[];autoFields.value=saved.autoFields||{};}}catch{}
 function merge(value:Dict){const previous=base.value,next={...empty(),...(value.metadata||{})};for(const key of Object.keys(next))if(metadata.value[key]===previous[key])metadata.value[key]=next[key];base.value=next;const issues=Object.fromEntries(Object.entries(value.metadata_issues||{}).filter(([key])=>metadata.value[key]!==next[key]));current.value={...value,metadata_issues:issues};if(!Object.keys(patch()).length&&!Object.keys(issues).length)saveError.value='';persist();}
 watch(()=>props.row,value=>{if(value&&!props.creation)merge(value);},{deep:true});

@@ -114,7 +114,7 @@ footer {margin-top:auto;gap:6px;justify-content:space-between}
 .record-note {margin:0;color:var(--v2-ink)}
 .record-note svg {color:#b07a25;flex:none}
 .record-actions button {min-height:32px;padding:4px 10px;border-radius:8px;border:1px solid var(--soft-edge);color:var(--v2-ink);background:var(--soft-face);font:inherit;font-size:12px;font-weight:550;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:4px}
-.record-actions .primary-action {background:var(--desk-green);color:white;border-color:transparent}
+.record-actions .primary-action {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:transparent}
 .record-actions .bind-action {background:transparent;border-color:transparent;color:var(--v2-blue)}
 .record-actions button:hover:enabled {box-shadow:var(--soft-key)}
 .record-actions button:disabled {cursor:default;opacity:.65}

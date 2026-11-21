@@ -9,6 +9,9 @@ export function adaptEventPeriodPage(source) {
     code = code.replace(before, after);
   }
   replace('import EventStatsCards from "./EventStatsCards.vue";', 'import EventStatsCards from "../workspace-v2/EventMetrics.vue";\nimport EventPeriodFilter from "../workspace-v2/EventPeriodFilter.vue";\nimport { NButton, NSkeleton } from "naive-ui";\nimport { beijingDate, occurrenceTimestamp, eventPeriodRange, mergeEventMonths, eventPeriodStats, type EventPeriod } from "../workspace-v2/eventPeriod";');
+  replace('const eventTransferBusy = ref(false);', `const eventTransferBusy = ref(false);
+if (props.recordOnly) onBeforeUnmount(registerNavigationGuard(() => !eventTransferBusy.value));`);
+  replace('import { navigate } from "../navigation";', 'import { navigate } from "../navigation";\nimport { registerNavigationGuard } from "../workspace-v2/navigation";');
   replace('const selectedMonth = ref(currentLocalMonth());', `const eventQuery = new URLSearchParams(window.location.search);
 const eventPeriod = ref<EventPeriod>(['week','history','custom'].includes(eventQuery.get('period') || '') ? eventQuery.get('period') as EventPeriod : 'month');
 const selectedMonth = ref(/^\\d{4}-(0[1-9]|1[0-2])$/.test(eventQuery.get('event_month') || '') ? eventQuery.get('event_month')! : beijingDate().slice(0,7));

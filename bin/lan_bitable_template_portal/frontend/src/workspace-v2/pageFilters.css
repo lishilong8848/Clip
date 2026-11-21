@@ -48,7 +48,7 @@ html.workspace-v2{--filter-height:36px;--filter-radius:6px;--filter-font:14px;--
   border:1px solid var(--filter-border);border-radius:var(--filter-radius);background:var(--filter-bg);color:var(--v2-ink);box-shadow:none;
   font-family:inherit;font-size:var(--filter-font);font-weight:500;line-height:1.4;cursor:pointer;
 }
-.workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) button:is(.primary,.primary-button):not([data-v2-action]){background:var(--v2-blue);border-color:var(--v2-blue);color:#fff}
+.workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) button:is(.primary,.primary-button):not([data-v2-action]){background:var(--v2-palette-accent);border-color:var(--v2-palette-accent);color:var(--v2-palette-on-accent)}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) button:is(.active,[aria-pressed=true]):not([data-v2-action]){background:var(--filter-selected);border-color:var(--filter-hover);color:var(--v2-blue)}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) :is(.search-input,.search,.kb-search,.search-field,.vnet-combobox-control)>button{width:28px;min-width:28px;min-height:28px;padding:0;border:0;background:transparent;flex:none}
 .workspace-v2 :is(#workspace-page-filters,[data-v2-filter]) button:is(.icon-only,.icon-button,.ledger-reset){width:var(--filter-height);height:var(--filter-height);padding:0;flex:none}

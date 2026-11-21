@@ -70,11 +70,12 @@ const NoticeWorkspace=lazy(()=>import('../NoticeWorkspace.vue'));
 const EventNoticeBoard=lazy(()=>import('../../components/EventNoticeBoard.vue'));
 const NoticeChangeConfirmations=lazy(()=>import('../NoticeChangeConfirmations.vue'));
 const ModuleWidget=lazy(()=>import('../ModuleWidget.vue'));
-const inlineNotice=ref<{url:string;scope:string;work:string;eventId:string}>();
-const inlineTask=ref<{item:WorkItem;widget:Widget;url:string;scope:string}>();
+type OpenCase={item:WorkItem;mode:'read'|'module'|'notice'|'event'|'change';scope:string;url:string;focusId?:string;widget?:Widget};
+const activeCase=ref<OpenCase>();
 const casePanel=ref<HTMLElement>();
-const readOnlyTask=ref<WorkItem>();
-const aliFocus=ref(''), aliScope=ref('');
+const caseBody=ref<HTMLElement>();
+const caseEditor=ref<{guardNavigation:(proceed:()=>void)=>boolean}>();
+const caseListOpen=ref(false),caseSearch=ref('');
 
 const {layout}=useReadOnlyLayout(()=>props.user,accessKey);
 const widgets=computed<Dict[]>(()=>{
@@ -221,6 +222,11 @@ function compareRows(a:WorkItem,b:WorkItem){
   return rowPriority(a)-rowPriority(b)||Array.from(a.title).length-Array.from(b.title).length
     ||(a.dueAt??Infinity)-(b.dueAt??Infinity)||a.title.localeCompare(b.title,'zh-CN')||a.key.localeCompare(b.key);
 }
+const switchableCases=computed(()=>{
+  const query=caseSearch.value.trim().toLowerCase();
+  return queueTasks.value.filter(item=>item.key!==activeCase.value?.item.key
+    && [item.title,taskScopeLabel(item.scope),taskModuleLabel(item.kind),item.detail].join(' ').toLowerCase().includes(query)).sort(compareRows);
+});
 const taskGroups=computed(()=>{
   const groups=new Map<string,{key:string;label:string;source:SourceId;icon:typeof Layers3;hue:number;rows:WorkItem[]}>();
   function groupFor(key:string,label:string,source:SourceId) {
@@ -261,14 +267,9 @@ function setGroup(key:string,show:boolean){
 }
 function anchorGroup(event:MouseEvent){
   tileTrigger=event.currentTarget as HTMLButtonElement;
-  groupPlacement.value='bottom-start';
-  groupMaxHeight.value=undefined;
   const nav=tileTrigger.closest('.v2-shell')?.querySelector('.v2-mobile-nav');
-  if(!nav?.getClientRects().length)return;
   const tile=tileTrigger.getBoundingClientRect();
-  const assistant=document.querySelector('.lighthouse-launcher:not([popover])');
-  const bottom=Math.min(nav.getBoundingClientRect().top,
-    assistant?.getClientRects().length?assistant.getBoundingClientRect().top:window.innerHeight);
+  const bottom=nav?.getClientRects().length?nav.getBoundingClientRect().top:window.innerHeight;
   const below=bottom-tile.bottom-12;
   const above=tile.top-12;
   const flip=below<window.innerHeight*.48&&above>below;
@@ -331,20 +332,9 @@ function canOpenNoticeDeletion(item:WorkItem){
     && item.kind==='notices'&&item.ongoing===true&&!readOnly(item);
 }
 function openItem(item:WorkItem){
-  if(inlineTask.value){
-    const current=inlineTask.value, identity=context.value;
-    if(current.item.key===item.key && current.item.scope===item.scope){focusCasePanel();return;}
-    requestEmbeddedChange(current.widget.id,()=>{
-      if(inlineTask.value!==current || identity!==context.value)return;
-      releaseInlineTask(current);
-      void nextTick(()=>{if(identity===context.value)openItem(item);});
-    });
-    return;
-  }
+  if(activeCase.value?.item.key===item.key){caseListOpen.value=false;focusCasePanel();return;}
   if (readOnly(item)) {
-    markRead(item);
-    trigger=document.activeElement as HTMLElement;
-    readOnlyTask.value=item;
+    changeCase({item,mode:'read',url:item.url,scope:item.scope});
     return;
   }
   const url=new URL(item.url,location.origin);
@@ -353,55 +343,64 @@ function openItem(item:WorkItem){
   const module=moduleForRoute(url), work=url.searchParams.get('work_type')||'';
   if(!module)return;
   const scope=explicitScope||authorizedScopes.value.find(option=>option.value===selectedScope.value)?.value||authorizedScopes.value[0]?.value||'';
-  runNavigationAction(url.href,()=>{
-    markRead(item);
-    trigger=document.activeElement as HTMLElement;
-    readOnlyTask.value=undefined;
-    if(item.kind==='ali_confirmation'){
-      aliScope.value=scope;
-      aliFocus.value=url.searchParams.get('change_confirmation')||'';
-    } else if (item.kind==='notices'||item.kind==='event_notices') {
-      inlineNotice.value={url:url.pathname+url.search,scope,work,eventId:url.searchParams.get('event_id')||''};
-    } else {
-      url.searchParams.set('workbench_return',selectedScope.value);
-      inlineTask.value={item,scope,url:url.pathname+url.search,
-        widget:widget('module',props.user,{id:'workbench-inline-task',module,title:item.title})};
-
-    }
-  });
+  const path=url.pathname+url.search;
+  if(item.kind==='ali_confirmation')changeCase({item,scope,url:path,mode:'change',focusId:url.searchParams.get('change_confirmation')||''});
+  else if(work==='event'&&(item.kind==='event_notices'||item.kind==='notices'))changeCase({item,scope,url:path,mode:'event',focusId:url.searchParams.get('event_id')||''});
+  else if(item.kind==='notices')changeCase({item,scope,url:path,mode:'notice'});
+  else {
+    url.searchParams.set('workbench_return',selectedScope.value);
+    changeCase({item,scope,url:url.pathname+url.search,mode:'module',
+      widget:widget('module',props.user,{id:'workbench-inline-task',module,title:item.title})});
+  }
 }
-function closeReadOnlyTask(){readOnlyTask.value=undefined;restoreFocus();}
-function closeInlineNotice(){
-  const events=inlineNotice.value?.work==='event';
-  inlineNotice.value=undefined;
-  refresh(events?['event_notices','events']:['notices','engineer_mop','repair_management']);
-  restoreFocus();
+function refreshClosedCase(current:OpenCase){
+  if(current.mode==='read')return;
+  if(current.mode==='event')refresh(['event_notices','events']);
+  else if(current.mode==='notice')refresh(['notices','engineer_mop','repair_management']);
+  else if(current.mode==='change')refresh(['ali_confirmation','notices']);
+  else refresh(current.item.kind==='repair_management'?['repair_management','notices']:[current.item.kind]);
 }
-function releaseInlineTask(current:NonNullable<typeof inlineTask.value>){
-  inlineTask.value=undefined;
-  refresh(current.item.kind==='repair_management'?['repair_management','notices']:[current.item.kind]);
-}
-function closeInlineTask(){
-  const current=inlineTask.value;
-  if(current)requestEmbeddedChange(current.widget.id,()=>{
-    if(inlineTask.value!==current)return;
-    releaseInlineTask(current);
-    restoreFocus();
-  });
+function changeCase(next?:OpenCase){
+  const current=activeCase.value,identity=context.value;
+  const proceed=()=>{
+    if(activeCase.value!==current||context.value!==identity)return;
+    if(!current&&next)trigger=document.activeElement as HTMLElement;
+    if(current)refreshClosedCase(current);
+    caseListOpen.value=false;
+    caseSearch.value='';
+    activeCase.value=next;
+    if(next){markRead(next.item);focusCasePanel();}
+    else restoreFocus();
+  };
+  if(current?.widget){requestEmbeddedChange(current.widget.id,proceed);return;}
+  if(current&&caseEditor.value?.guardNavigation(proceed)===false)return;
+  if(!current&&next&&next.mode!=='read')runNavigationAction(next.url,proceed);
+  else proceed();
 }
 function focusCasePanel(){
   void nextTick(()=>{
     casePanel.value?.focus({preventScroll:true});
-    casePanel.value?.scrollIntoView({block:'start'});
+    if(caseBody.value)caseBody.value.scrollTop=0;
   });
 }
-watch([inlineTask,readOnlyTask],([task,detail])=>{if(task||detail)focusCasePanel();});
+function closeCase(){changeCase();}
+function openCaseList(){
+  caseListOpen.value=!caseListOpen.value;
+  if(caseListOpen.value)void nextTick(()=>casePanel.value?.querySelector<HTMLInputElement>('.case-search input')?.focus({preventScroll:true}));
+}
+function escapeCaseList(event:KeyboardEvent){
+  if(!caseListOpen.value)return;
+  event.stopPropagation();
+  event.preventDefault();
+  caseListOpen.value=false;
+  casePanel.value?.querySelector<HTMLElement>('.case-switch')?.focus({preventScroll:true});
+}
 function restoreFocus(){
   const last=trigger;trigger=null;
   void nextTick(()=>{(last?.isConnected?last:content.value)?.focus({preventScroll:true});});
 }
 watch([context,selectedScope],()=>{
-  inlineNotice.value=undefined;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';trigger=null;
+  activeCase.value=undefined;caseListOpen.value=false;caseSearch.value='';trigger=null;
   taskSearch.value=''; taskView.value='all'; activeGroup.value='';tileTrigger=null; allShortcuts.value=false;
 },{flush:'sync'});
 
@@ -426,7 +425,7 @@ function pause(){
 }
 onDeactivated(()=>{
   pause();
-  inlineNotice.value=undefined;inlineTask.value=undefined;readOnlyTask.value=undefined;aliFocus.value='';
+  activeCase.value=undefined;caseListOpen.value=false;caseSearch.value='';
   activeGroup.value='';trigger=null;tileTrigger=null;
 });
 onBeforeUnmount(pause);
@@ -464,7 +463,6 @@ const viewButtons=computed<{view:TaskView;label:string;count?:number}[]>(()=>[
   ...(hasPreviousRepairs.value||taskView.value==='previous-repairs'?[{view:'previous-repairs' as const,label:'历史未完维修',count:queueTasks.value.filter(isPreviousRepair).length}]:[]),
 ]);
 function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof moduleIcons]||Layers3;}
-function closeAli(){aliFocus.value='';restoreFocus();}
 </script>
 
 <template>
@@ -497,17 +495,6 @@ function closeAli(){aliFocus.value='';restoreFocus();}
           </button>
         </div>
       </section>
-      <section v-if="inlineTask || readOnlyTask" ref="casePanel" class="case-panel" tabindex="-1" :aria-label="(inlineTask?'办理 ':'查看 ')+(inlineTask?.item.title||readOnlyTask?.title)">
-        <template v-if="inlineTask">
-        <header><h2>{{ inlineTask.item.title }}</h2><div id="workbench-task-header-tools" /><button class="close-key" aria-label="关闭待办办理" @click="closeInlineTask"><X :size="18" /></button></header>
-        <div class="dialog-scroll"><ModuleWidget :key="inlineTask.url" :item="inlineTask.widget" :user="user" :scope="inlineTask.scope" :scopes="authorizedScopes"
-          fixed-scope :initial-url="inlineTask.url" header-tools-id="workbench-task-header-tools" @close="closeInlineTask" /></div>
-        </template>
-        <template v-else-if="readOnlyTask">
-        <header><h2>{{ readOnlyTask.title }}</h2><button class="close-key" aria-label="关闭只读详情" @click="closeReadOnlyTask"><X :size="18" /></button></header>
-        <dl><div v-for="[label,value] in [['业务',sourceLabels.get(readOnlyTask.kind)],['楼栋',taskScopeLabel(readOnlyTask.scope)],['类型',readOnlyTask.detail],['状态',readOnlyTask.status],['开始时间',readOnlyTask.noticeWindow?.start || readOnlyTask.time],['结束时间',readOnlyTask.noticeWindow?.end || (readOnlyTask.dueAt && deadline(readOnlyTask.dueAt))]]" :key="label"><dt>{{ label }}</dt><dd>{{ value || '暂未提供' }}</dd></div></dl>
-        </template>
-      </section>
       <section v-if="queueSources.length" ref="content" class="wb-todo-panel queue-panel" tabindex="-1" aria-labelledby="workbench-queue-title" :aria-busy="allLoading">
         <header class="queue-toolbar">
           <div class="queue-title"><h2 id="workbench-queue-title">待办办理</h2>
@@ -528,7 +515,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
         <p v-if="queueStatus" class="quiet-message" role="status">{{ queueStatus }}</p>
         <ul v-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
           <li v-for="group in taskGroups" :key="group.key" :style="{'--tile-hue':group.hue}">
-            <NPopover trigger="click" :placement="groupPlacement" :to="false" raw :show-arrow="false"
+            <NPopover trigger="click" :placement="groupPlacement" raw :show-arrow="false"
               :animated="false" :show="activeGroup===group.key" @update:show="show=>setGroup(group.key,show)">
               <template #trigger>
                 <button type="button" class="wb-task-tile" :data-source="group.source" :data-group="group.key" :data-count="group.rows.length"
@@ -540,7 +527,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
                 </button>
               </template>
               <section class="tile-popover" role="dialog" aria-label="模块待办条目" tabindex="-1"
-                :style="groupMaxHeight === undefined ? undefined : {'--tile-available':groupMaxHeight+'px'}"
+                :style="{'--tile-hue':group.hue,'--tile-available':groupMaxHeight===undefined?undefined:groupMaxHeight+'px'}"
                 @vue:mounted="(node:VNode)=>node.el?.focus({preventScroll:true})" @keydown.esc.stop.prevent="closeGroup">
                 <header><component :is="group.icon" :size="17" aria-hidden="true" /><h3>{{ group.label }}</h3>
                   <span>{{ group.rows.length ? (group.source==='notices'?'进行中 ':'')+group.rows.length+' 项' : '暂无已读明细' }}</span>
@@ -570,16 +557,34 @@ function closeAli(){aliFocus.value='';restoreFocus();}
       <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="composite(selectedScope)?dataScope:selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
     </WorkbenchDailyLayout>
 
-    <NoticeWorkspace v-if="inlineNotice && inlineNotice.work!=='event'" :key="inlineNotice.url" :url="inlineNotice.url" :scope="inlineNotice.scope"
-      :scopes="authorizedScopes" :user="user" :active="true" record-only @record-close="closeInlineNotice" />
-    <NModal :show="inlineNotice?.work==='event'" :mask-closable="false" :close-on-esc="false">
-      <section v-if="inlineNotice?.work==='event'" role="dialog" aria-modal="true" aria-label="事件通告" class="task-dialog">
-        <header><h2>事件通告</h2><button class="close-key" aria-label="关闭事件通告" @click="closeInlineNotice"><X :size="18" /></button></header>
-        <div class="dialog-scroll"><EventNoticeBoard :scope="inlineNotice.scope" :focus-event-id="inlineNotice.eventId" :active="true" /></div>
-      </section>
+    <NModal :show="!!activeCase" :mask-closable="false" :close-on-esc="!caseListOpen" :auto-focus="false" @update:show="visible=>!visible&&closeCase()">
+      <div v-if="activeCase" class="task-dialog" role="dialog" aria-modal="true" aria-label="待办办理窗口">
+        <section ref="casePanel" class="case-panel" tabindex="-1" :aria-label="(activeCase.mode==='read'?'查看 ':'办理 ')+activeCase.item.title" @keydown.esc="escapeCaseList">
+          <header class="case-header">
+            <div class="case-title"><small>{{ [taskModuleLabel(activeCase.item.kind),taskScopeLabel(activeCase.item.scope||activeCase.scope)].filter(Boolean).join(' · ') }}</small><h2 :title="activeCase.item.title">{{ activeCase.item.title }}</h2></div>
+            <div id="workbench-task-header-tools" class="case-tools" />
+            <button type="button" class="close-key case-switch" :aria-expanded="caseListOpen" aria-controls="workbench-case-list" @click="openCaseList"><ListChecks :size="17" aria-hidden="true" />切换待办</button>
+            <button type="button" class="close-key" :aria-label="activeCase.mode==='read'?'关闭只读详情':'关闭待办办理'" @click="closeCase"><X :size="18" /></button>
+          </header>
+          <section v-if="caseListOpen" id="workbench-case-list" class="case-list" aria-label="选择另一条待办">
+            <label class="case-search"><Search :size="16" aria-hidden="true" /><input v-model="caseSearch" type="search" aria-label="搜索可切换待办" placeholder="搜索名称、楼栋或模块"></label>
+            <ul><li v-for="item in switchableCases" :key="item.key"><button type="button" @click="caseListOpen=false;openItem(item)">
+              <small>{{ [taskModuleLabel(item.kind),taskScopeLabel(item.scope),item.status].filter(Boolean).join(' · ') }}</small><strong>{{ item.title }}</strong><ChevronRight :size="15" aria-hidden="true" />
+            </button></li></ul>
+            <p v-if="!switchableCases.length" role="status">{{ caseSearch?'没有匹配的待办':'当前楼栋暂无其他待办' }}</p>
+          </section>
+          <div v-show="!caseListOpen" ref="caseBody" class="case-body" :key="activeCase.item.key">
+            <ModuleWidget v-if="activeCase.widget" :key="activeCase.url" :item="activeCase.widget" :user="user" :scope="activeCase.scope" :scopes="authorizedScopes"
+              fixed-scope record-only :initial-url="activeCase.url" header-tools-id="workbench-task-header-tools" @close="closeCase" />
+            <NoticeWorkspace v-else-if="activeCase.mode==='notice'" ref="caseEditor" :url="activeCase.url" :scope="activeCase.scope" :scopes="authorizedScopes"
+              :user="user" :active="true" record-only @record-close="closeCase" />
+            <EventNoticeBoard v-else-if="activeCase.mode==='event'" ref="caseEditor" :scope="activeCase.scope" :focus-event-id="activeCase.focusId" :active="true" />
+            <NoticeChangeConfirmations v-else-if="activeCase.mode==='change'" ref="caseEditor" :scope="activeCase.scope" :focus-id="activeCase.focusId" embedded @close="closeCase" @changed="refresh(['ali_confirmation','notices'])" />
+            <dl v-else><div v-for="[label,value] in [['业务',sourceLabels.get(activeCase.item.kind)],['楼栋',taskScopeLabel(activeCase.scope)],['类型',activeCase.item.detail],['状态',activeCase.item.status],['开始时间',activeCase.item.noticeWindow?.start || activeCase.item.time],['结束时间',activeCase.item.noticeWindow?.end || (activeCase.item.dueAt && deadline(activeCase.item.dueAt))]]" :key="label"><dt>{{ label }}</dt><dd>{{ value || '暂未提供' }}</dd></div></dl>
+          </div>
+        </section>
+      </div>
     </NModal>
-
-    <NoticeChangeConfirmations v-if="aliFocus" :scope="aliScope" :focus-id="aliFocus" @close="closeAli" @changed="refresh(['ali_confirmation','notices'])" />
   </div>
 </template>
 
@@ -628,6 +633,8 @@ function closeAli(){aliFocus.value='';restoreFocus();}
 .tile-count { font-size:18px;line-height:1;font-variant-numeric:tabular-nums }
 .tile-label { grid-column:1/-1;font-size:13px;line-height:1.25;overflow-wrap:anywhere }
 .tile-popover {
+  --desk-paper:var(--soft-face,#f4f7f7);--desk-well:var(--soft-field,#edf2f3);--desk-line:var(--soft-edge,#c5d2d0);
+  --desk-ink:var(--v2-ink,#20373b);--desk-muted:var(--v2-muted,#496064);--desk-blue:var(--v2-blue,#24799f);--desk-green:var(--v2-palette-accent-text,#175e52);
   display:flex;flex-direction:column;box-sizing:border-box;width:min(420px,calc(100vw - 32px));
   /* The shared mobile dialog limit also matches this anchored popover. */
   max-height:min(420px,48dvh,var(--tile-available,100dvh))!important;
@@ -648,7 +655,7 @@ function closeAli(){aliFocus.value='';restoreFocus();}
 .task-title strong { font-size:13px;line-height:1.35;overflow-wrap:anywhere }
 .item-action { display:flex;gap:1px;align-items:center;font-size:12px;color:var(--desk-green);white-space:nowrap }
 .wb-read-only .item-action { color:var(--desk-blue) }
-.read-pin { width:6px;height:6px;background:var(--tile-accent);border:1px solid var(--tile-accent);border-radius:50%;box-sizing:border-box }
+.read-pin { position:relative;width:6px;height:6px;background:var(--tile-accent);border:1px solid var(--tile-accent);border-radius:50%;box-sizing:border-box }
 .seen .read-pin { background:transparent;border-color:var(--desk-muted) }
 .task-meta { flex-wrap:wrap;gap:2px 7px;color:var(--desk-muted);font-size:11px;line-height:1.35 }
 .late .due,.delete-key { color:#99441d }
@@ -664,17 +671,14 @@ function closeAli(){aliFocus.value='';restoreFocus();}
 .queue-health { border-radius:9px; padding:7px 9px; color:var(--desk-muted); background:var(--desk-well); font-size:12px }
 .queue-health summary { cursor:pointer }
 .queue-health>div { display:flex; align-items:center; justify-content:space-between; margin-top:6px }
-.task-dialog { display:flex; flex-direction:column; width:min(1120px,calc(100vw - 26px)); max-height:92dvh; overflow:hidden; border:1px solid #879b9c66; border-radius:16px; background:var(--soft-face,#f4f7f7); box-shadow:0 18px 65px #10252c3d; color:var(--v2-ink,#20373b); box-sizing:border-box; overflow-wrap:anywhere }
-.task-dialog>header { flex:none; display:flex; align-items:center; justify-content:space-between; gap:10px; padding:9px 14px; border-bottom:1px solid #879b9c55 }
-.task-dialog h2 { margin:0; flex:1; font-size:17px }
+.task-dialog { width:min(1240px,calc(100vw - 36px)); border:1px solid var(--soft-edge,#aebdc1); border-radius:16px; background:var(--soft-face,#f4f7f7); box-shadow:0 18px 65px #10252c3d; color:var(--v2-ink,#20373b); box-sizing:border-box; overflow-wrap:anywhere }
 .close-key { display:grid; place-items:center; min-width:38px; min-height:36px; padding:5px 9px; color:inherit; background:var(--soft-field,#edf2f3); border:1px solid #879b9c66; border-radius:8px }
-.dialog-scroll { min-height:0; overflow:auto; padding:10px; overscroll-behavior:contain }
 [data-v2-theme="dark"] .late .due,[data-v2-theme="dark"] .delete-key { color:#ffbf91 }
 @media(max-width:760px) {
   .scope-choice select { min-height:44px }
   .task-desk :is(.business-key,.more-key,.expand-key,.record-key,.delete-key,.queue-switches button),.queue-filters label,.close-key { min-height:44px }
   .queue-switches { gap:2px }
-  .task-dialog { width:calc(100vw - 12px); max-height:96dvh }
+  .task-dialog { width:calc(100vw - 12px) }
 }
 @media(max-width:440px) {
   .task-desk .business-strip { gap:4px }
@@ -710,14 +714,40 @@ function closeAli(){aliFocus.value='';restoreFocus();}
   .priority-capsule strong { display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;white-space:normal;overflow-wrap:anywhere }
 }
 @media(min-width:701px){.task-desk .mobile-priority-toggle {display:none}}
-.case-panel { min-width:0;margin-bottom:12px;border:1px solid var(--desk-green);border-radius:12px;background:var(--desk-paper);scroll-margin-top:70px }
-.case-panel>header { display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--desk-green-wash);border-radius:12px 12px 0 0 }
-.case-panel h2 { margin:0;flex:1;min-width:0;overflow-wrap:anywhere;font-size:17px }
-.case-panel .close-key { flex:none }
-.case-panel .dialog-scroll { overflow:auto;min-width:0 }
+.case-panel { display:flex;flex-direction:column;min-width:0;max-height:min(860px,calc(100dvh - 48px));border-radius:inherit;overflow:hidden }
+.case-header { display:flex;align-items:center;gap:8px;padding:10px 14px;flex:none;background:var(--soft-field,#e4eeeb);border-bottom:1px solid var(--soft-edge,#bacac8) }
+.case-title { flex:1;min-width:0 }
+.case-title small { color:var(--v2-muted,#496064);font-size:12px }
+.case-title h2 { margin:0;font-size:17px;font-weight:700;color:var(--v2-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
+.case-tools,.case-panel .close-key { flex:none }
+.case-tools:empty { display:none }
+.case-panel .case-switch { display:flex;align-items:center;gap:6px;color:var(--v2-blue,#175e52);font-weight:650 }
+.case-switch[aria-expanded=true] { background:var(--soft-sky,#dcecf2);border-color:currentColor }
+.case-list { flex:none;display:grid;grid-template-rows:auto minmax(0,1fr);max-height:min(40dvh,360px);padding:9px 14px;gap:6px;border-bottom:1px solid var(--soft-edge,#bacac8) }
+.case-search { display:flex;align-items:center;gap:8px;border:1px solid var(--soft-edge,#aebdc1);border-radius:8px;padding-inline:9px;background:var(--soft-field,#edf2f3) }
+.case-search input { width:100%;min-width:0;min-height:37px;font:inherit;color:inherit;background:transparent;border:0 }
+.case-list ul { list-style:none;margin:0;padding:0;overflow:auto;overscroll-behavior:contain }
+.case-list li + li { border-top:1px solid var(--soft-edge,#bacac8) }
+.case-list li button { display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:2px 8px;width:100%;padding:6px 8px;text-align:start;border:0;border-radius:6px;background:transparent;color:inherit;font:inherit }
+.case-list li button:hover,.case-list li button:focus-visible { background:var(--soft-field,#edf2f3) }
+.case-list li small { color:var(--v2-muted,#496064);font-size:11px }
+.case-list li strong { grid-column:1;min-width:0;overflow-wrap:anywhere;font-size:13px;font-weight:650 }
+.case-list li svg { grid-column:2;grid-row:1/span 2 }
+.case-list p { margin:0;padding:8px;font-size:13px;color:var(--v2-muted,#496064) }
+.case-body { flex:0 1 auto;min-height:0;min-width:0;overflow:auto;overscroll-behavior:contain;scroll-padding-block:12px;padding:12px }
 .case-panel dl { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(170px,100%),1fr));gap:7px 14px;margin:10px 12px }
-.case-panel dt { color:var(--desk-muted);font-size:12px }
+.case-panel dt { color:var(--v2-muted,#496064);font-size:12px }
 .case-panel dd { margin:0 }
+@media(max-width:640px){
+  .case-panel { max-height:calc(100dvh - 20px - env(safe-area-inset-bottom)) }
+  .case-header { display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:4px 7px;padding:8px 10px }
+  .case-title { grid-column:1/-1 }
+  .case-panel .close-key { min-height:44px }
+  .case-tools:empty { display:block }
+  .case-search input { min-height:44px;font-size:16px }
+  .case-list li button { min-height:44px }
+  .case-body { padding:8px }
+}
 .task-desk .shift-check { margin:12px 0 0 }
 .shift-check :deep(.v2-check-task:only-child:has(> .n-empty)) { grid-column:1 / -1;display:block }
 @media(max-width:640px) {

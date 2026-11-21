@@ -23,6 +23,7 @@
 }
 @keyframes ld-wait { from { opacity:.35; } to { opacity:1; } }
 .ld-layer .ld-launcher { position: fixed; right: 16px; bottom: 20px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 50%; background: transparent; pointer-events: auto; cursor: pointer; }
+html.workspace-v2:has(.v2-shell.has-topnav .ins-page) .ld-layer .ld-launcher { bottom: 72px; }
 .ld-layer .ld-launcher[hidden] { display: none; }
 .ld-launcher:focus-visible { outline: 2px solid var(--bot-color); outline-offset: 4px; }
 .ld-title>svg { color: var(--bot-color); }
@@ -54,7 +55,7 @@
   padding: 4px 8px; border: 1px solid var(--ld-line); border-radius: 8px; color: inherit; background: var(--ld-face); font: inherit; font-size: .83rem; cursor: pointer;
 }
 .ld-shell button:disabled { opacity: .53; cursor: not-allowed; }
-.ld-shell :is(.ld-actions,.ld-composer-bar,.ld-tools)>.ld-primary,.ld-shell .ld-primary { background: #11694b; color: #fff; border-color: #105f46; }
+.ld-shell :is(.ld-actions,.ld-composer-bar,.ld-tools)>.ld-primary,.ld-shell .ld-primary { background: var(--v2-palette-accent); color: var(--v2-palette-on-accent); border-color: var(--v2-palette-accent); }
 .ld-shell :is(button,select,textarea,input,a,summary,[tabindex]):focus-visible,.ld-launcher:focus-visible { outline: 2px solid var(--v2-blue,#3a7d9e); outline-offset: 2px; }
 .ld-shell .ld-input,.ld-plan select,.ld-plan .ld-field>textarea,.ld-plan .ld-field>input:not([type=checkbox],[type=radio]),.ld-settings label>input:not([type=checkbox]),.ld-settings label>select { max-width: 100%; min-width: 0; min-height: 32px; padding: 5px 8px; border: 1px solid var(--ld-line); border-radius: 7px; background: var(--ld-field); color: inherit; font: inherit; box-sizing: border-box; }
 .ld-shell .ld-scroll { min-height: 0; overflow: auto; overscroll-behavior: contain; }

@@ -1,5 +1,5 @@
 <template>
-  <section class="serenity-desk cold-desk" aria-label="冷源运行状态">
+  <section class="serenity-desk cold-desk" aria-label="冷源运行状态" data-v2-inline-feedback>
     <header class="serenity-heading">
       <div><h1>冷源运行状态</h1><p>当前授权范围内的湿球温度与运行模式</p></div>
       <div class="cold-tools"><div class="serenity-segment" role="group" aria-label="冷源视图">

@@ -12,7 +12,7 @@
       <span class="sop-desk__layout-tools" data-v2-layout-tools="sops"></span>
     </div>
     <NAlert v-if="error" class="sop-desk__error" role="alert" type="error" :bordered="false">{{ error }} <NButton text :disabled="busy" @click="leave(()=>{draft=null;cache.clear();load()})">重新读取列表</NButton></NAlert>
-    <PageCanvas page="sops" label="SOP模板" :blocks="[{id:'templates',title:'SOP列表',w:4,h:9,minW:4,minH:4},{id:'editor',title:'SOP步骤与附件',w:8,h:12,minW:4,minH:4}]">
+    <PageCanvas page="sops" label="SOP模板" :class="{'sop-catalog':!draft}" :blocks="[{id:'templates',title:'SOP列表',w:4,h:9,minW:4,minH:4},{id:'editor',title:'SOP步骤与附件',w:8,h:12,minW:4,minH:4}]">
       <template #templates>
         <section class="sop-desk__block" aria-label="SOP列表">
           <header class="sop-desk__block-head">
@@ -234,7 +234,10 @@ onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onB
 .sop-desk__head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:none;flex-wrap:wrap}
 .sop-desk__list{flex:1 1 auto;min-width:0;min-height:0;overflow:auto}
 .sop-desk :deep([data-page-layout=sops]:not(.is-customizing) .grid-stack-item:is([data-widget-id=block_templates],[data-widget-id=block_editor])>.v2-widget>.v2-widget-head){display:none}
+.sop-catalog :deep(.v2-flow-grid>[data-widget-id=block_templates]){grid-column:1/-1}
+.sop-catalog :deep(.v2-flow-grid>[data-widget-id=block_editor]){display:none}
 .sop-desk__cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,210px),1fr));gap:8px;align-items:start}
+.sop-catalog :deep(.v2-flow-grid) .sop-desk__cards{grid-template-columns:repeat(auto-fill,minmax(min(100%,245px),1fr))}
 .sop-desk__card{display:grid;gap:3px;min-width:0;padding:9px 11px;border:1px solid var(--sop-line);border-radius:10px;background:var(--sop-face);color:var(--sop-ink);text-align:left;cursor:pointer;transition:border-color .15s ease,box-shadow .15s ease,background-color .15s ease}
 .sop-desk__card:hover:not(:disabled){border-color:#9fc9e4;background:var(--sop-sky)}
 .sop-desk__card:focus-visible{outline:2px solid var(--sop-blue);outline-offset:2px}

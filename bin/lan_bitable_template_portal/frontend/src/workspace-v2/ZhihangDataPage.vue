@@ -423,7 +423,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <section class="zh-console" aria-labelledby="zh-title">
+  <section class="zh-console" aria-labelledby="zh-title" data-v2-inline-feedback>
     <header class="zh-mast">
       <div class="zh-topline">
         <div class="zh-brand">
@@ -754,7 +754,7 @@ onBeforeUnmount(() => {
   padding: 6px 12px; border: 1px solid #cbd8da; border-radius: 9px; background: linear-gradient(#fff,#edf2f3);
   box-shadow: 1px 2px 3px #6d89961a; color: #2c4857;
 }
-.zh-btn.primary { background: linear-gradient(125deg,#208166,#15694f); border-color: #1b7057; color: white; }
+.zh-btn.primary { background: var(--v2-palette-accent); border-color: var(--v2-palette-accent); color: var(--v2-palette-on-accent); }
 .zh-btn:hover:not(:disabled) { border-color: #8cabae; filter: brightness(.98); }
 .zh-btn:disabled { opacity: .56; cursor: default; }
 .zh-text-btn { padding: 4px 6px; background: transparent; border: 0; border-radius: 6px; color: #21668a; }

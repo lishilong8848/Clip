@@ -1,6 +1,6 @@
 .workspace-v2 .learning-page {padding:0;min-width:0;color:var(--v2-text,#233c33)}
-.workspace-v2 :is(.learning-page .primary,.v2-learning-studybar .n-button--primary-type,.v2-learning-completion .n-button--primary-type,.v2-learning-answerbar .n-button--primary-type,.v2-learning-today .n-button--primary-type) {background:var(--v2-blue,#0071e3);color:#fff;border-color:var(--v2-blue,#0071e3)}
-.workspace-v2 :is(.learning-page .primary,.v2-learning-studybar .n-button--primary-type,.v2-learning-completion .n-button--primary-type,.v2-learning-answerbar .n-button--primary-type,.v2-learning-today .n-button--primary-type):hover:not(:disabled) {background:#0063c7}
+.workspace-v2 :is(.learning-page .primary,.v2-learning-studybar .n-button--primary-type,.v2-learning-completion .n-button--primary-type,.v2-learning-answerbar .n-button--primary-type,.v2-learning-today .n-button--primary-type) {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent)}
+.workspace-v2 :is(.learning-page .primary,.v2-learning-studybar .n-button--primary-type,.v2-learning-completion .n-button--primary-type,.v2-learning-answerbar .n-button--primary-type,.v2-learning-today .n-button--primary-type):hover:not(:disabled) {background:var(--v2-palette-hover)}
 .workspace-v2 .v2-learning-head {flex-wrap:wrap;gap:10px;margin-bottom:8px}
 .workspace-v2 .v2-learning-head h1 {font-size:21px;margin:0}
 .workspace-v2 .v2-learning-head>.actions {gap:7px;width:auto;margin-left:auto}
@@ -11,7 +11,7 @@
 .workspace-v2 .v2-learning-building {padding:8px 0}
 .workspace-v2 .v2-learning-tabs {gap:4px;padding:7px 0;border-bottom:1px solid var(--v2-border,#dce5df);margin-bottom:12px}
 .workspace-v2 .v2-learning-tabs .n-button {border:0;border-radius:6px;min-height:38px;padding:7px 14px}
-.workspace-v2 .learning-page .v2-learning-tabs .n-button--primary-type,.workspace-v2 .learning-page .v2-learning-tabs .n-button--primary-type:hover:not(:disabled) {background:#e9f2ff;color:#1458a8}
+.workspace-v2 .learning-page .v2-learning-tabs .n-button--primary-type,.workspace-v2 .learning-page .v2-learning-tabs .n-button--primary-type:hover:not(:disabled) {background:var(--v2-palette-selection);color:var(--v2-palette-accent-text)}
 .workspace-v2 .v2-learning-studybar {gap:10px;flex-wrap:wrap;margin-bottom:10px}
 .workspace-v2 .v2-learning-studybar>.actions {margin-left:auto}
 .workspace-v2 .v2-learning-progress-label {font-size:12px;color:#61736b}

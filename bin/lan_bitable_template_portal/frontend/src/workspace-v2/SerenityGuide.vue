@@ -8,7 +8,7 @@ export interface LibraryController {
 <script setup lang="ts">
 import {inject,onBeforeUnmount,onMounted,toRef,watch} from 'vue';
 import {pageContext} from './pageLayout';
-import {mineral,nightMode,saveNightMode} from './theme';
+import {nightMode,paletteId,palettes,saveNightMode} from './theme';
 const props = defineProps<{model: LibraryController}>();
 const model = props.model;
 const guideFrame = toRef(model, 'guideFrame');
@@ -17,7 +17,7 @@ const initialStorage = JSON.stringify({...JSON.parse(model.storageSeed),theme:ni
 
 function syncTheme() {
   const dark = nightMode.value;
-  const colors = dark ? mineral.dark : mineral.light;
+  const colors = palettes[paletteId.value][dark ? 'dark' : 'light'];
   const palette = {page:colors.bg,panel:colors.surface,field:colors.soft,ink:colors.text,
     sub:colors.muted,line:colors.border,green:colors.accent,'on-accent':colors.onAccent};
   guideFrame.value?.contentWindow?.postMessage({kind:'clipflow-life-guide-theme',dark,palette}, '*');
@@ -27,7 +27,7 @@ function onThemeChange(event: MessageEvent) {
       || event.data.key !== 'theme' || !['light','dark'].includes(event.data.value)) return;
   saveNightMode(String(account?.user.value.open_id || ''), event.data.value==='dark');
 }
-watch(nightMode,syncTheme);
+watch([nightMode,paletteId],syncTheme);
 onMounted(()=>window.addEventListener('message',onThemeChange));
 onBeforeUnmount(()=>window.removeEventListener('message',onThemeChange));
 </script>

@@ -1,5 +1,5 @@
 <template>
-  <section class="serenity-desk order-desk" aria-label="工单办理">
+  <section class="serenity-desk order-desk" aria-label="工单办理" data-v2-inline-feedback>
     <header class="order-mast">
       <span class="order-emblem" aria-hidden="true"><ClipboardList :size="25"/></span>
       <div><p>{{ state?.role_label || '现场工单' }}<template v-if="state?.assigned_person?.name"> · {{ state.assigned_person.name }}</template></p>

@@ -36,8 +36,8 @@ async function run(canDelete,width){
       await page.locator('.wb-task-tile[data-group="events"]').click();
       const queue=page.getByRole('dialog',{name:'模块待办条目'});
       await queue.getByRole('button',{name:'办理 冷冻水回水温度偏高',exact:true}).click();
-      const focused=page.getByRole('dialog',{name:'事件通告',exact:true});
-      await focused.getByRole('heading',{name:'冷冻水回水温度偏高',exact:true}).waitFor();
+      const focused=page.getByRole('dialog',{name:'待办办理窗口',exact:true});
+      await focused.locator('.evt-record').getByRole('heading',{name:'冷冻水回水温度偏高',exact:true}).waitFor();
       assert.equal(await focused.locator('.evt-record').count(),1);
       assert.equal(await focused.locator('.evt-compose,.evt-index').count(),0);
       await focused.getByRole('button',{name:'更新',exact:true}).click();
@@ -46,9 +46,9 @@ async function run(canDelete,width){
       const nested=page.getByRole('alertdialog',{name:'核对未送达的群'});
       await nested.getByRole('button',{name:'暂不重发'}).click();
       assert.equal(posts('retry').length,0);
-      await snap('07-工作台-指定事件办理',[focused.getByRole('heading',{name:'冷冻水回水温度偏高'}),focused.getByLabel('本次通告原文')]);
+      await snap('07-工作台-指定事件办理',[focused.locator('.evt-record').getByRole('heading',{name:'冷冻水回水温度偏高',exact:true}),focused.getByLabel('本次通告原文')]);
       await focused.getByRole('button',{name:'收起，保留填写'}).click();
-      await focused.getByRole('button',{name:'关闭事件通告'}).click();
+      await focused.getByRole('button',{name:'关闭待办办理'}).click();
       await focused.waitFor({state:'hidden'});
     }
     await page.goto(mock.origin+'/assets/workspace-v2/index.html?__page=/workbench-lite&scope=A&work_type=event');

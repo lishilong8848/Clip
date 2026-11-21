@@ -51,6 +51,6 @@ function replaceFile() {
 header,footer,.reader-tools {display:flex;align-items:center;gap:8px;flex-wrap:wrap;} header {align-items:flex-start;flex-wrap:nowrap;} header div,footer span:first-child {flex:1;min-width:0;}
 h2 {font-size:clamp(17px,3vw,22px);line-height:1.35;margin:2px 0;overflow-wrap:anywhere;} small,footer span {font-size:12px;}
 button {display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:6px 10px;font:inherit;font-size:13px;color:inherit;background:var(--soft-field,#e8eeee);border:1px solid #91a6aa70;border-radius:8px;cursor:pointer;}
-button.primary {background:#187653;color:white;} button:disabled {opacity:.5;cursor:default;} button:focus-visible {outline:3px solid var(--v2-blue,#4399c1);}
+button.primary {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);} button:disabled {opacity:.5;cursor:default;} button:focus-visible {outline:3px solid var(--v2-blue,#4399c1);}
 .reader-body {overflow:auto;overscroll-behavior:contain;min-height:0;padding:0 5px;scrollbar-gutter:stable;} article {padding:12px;border-top:1px solid #91a6aa50;} article[aria-current=true] {background:var(--v2-palette-selection,#deefe6);border-inline-start:3px solid #228768;} article p {white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.75;margin:4px 0;font-size:15px;}
 </style>

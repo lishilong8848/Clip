@@ -21,7 +21,7 @@
 }
 .tool-desk button:hover:enabled,.tool-desk a:hover{border-color:var(--td-blue)}
 .tool-desk button:disabled,.tool-desk fieldset:disabled button{opacity:.54;cursor:default}
-.tool-desk .td-primary,.tool-desk button.td-primary{background:var(--td-green);color:white;border-color:var(--td-green)}
+.tool-desk .td-primary,.tool-desk button.td-primary{background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent)}
 .tool-desk .td-link{border-color:transparent;background:transparent;color:var(--td-blue);padding-inline:.4rem}
 .tool-desk .td-icon{aspect-ratio:1;padding:.45rem}.tool-desk .td-danger{color:#a33e31}
 .tool-desk :is(input:not([type=checkbox]):not([type=radio]),select,textarea){

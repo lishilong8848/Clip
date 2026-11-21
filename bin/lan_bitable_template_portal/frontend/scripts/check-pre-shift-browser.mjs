@@ -47,7 +47,7 @@ try{
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(u.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'ou_'+mode,name:'隔离验收人员',role:mode==='manager'?'admin':'building',level:mode==='manager'?'L1':'L4',category:mode==='manager'?'shift_leader':mode,home_scope:'A',modules:mode==='restricted'?['change']:['maintenance','polling','adjust'],can_delete_business:mode==='manager'},scope_options:[{value:'A',label:'A楼'},{value:'B',label:'B楼'}]});
   if(u.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'pre-shift-fixture'}});
-  if(u.pathname==='/api/pre-shift-checks')return ok({server_time:new Date().toISOString(),scope:'A',scopes:mode==='manager'?['A','B']:['A'],can_manage:mode==='manager',can_configure_location:mode==='manager',definition,roster_ready:true,roster_error:'',tasks:!submitted&&!definition.items.length?[]:[{id:'fixture-'+day+shift,day,scope:'A',shift,due:Date.now()/1000-60,files,handover_photo:handover,can_upload_handover:!handover,definition_version:submitted?1:definition.version,items:submitted?items:definition.items,people:[{name:'值班员一'},{name:'值班长二'}],submitted:submitted?'2026-10-14T09:05:00+08:00':'',actor_name:'隔离验收人员',can_submit:!submitted,deadline:Date.now()/1000+10000,answers:submitted?[{...items[0],status:'normal',note:''},{...items[1],status:'abnormal',note:'测试异常说明'}]:[],sync_status:submitted?'synced':'pending'}]});
+  if(u.pathname==='/api/pre-shift-checks')return ok({server_time:new Date().toISOString(),scope:'A',scopes:mode==='manager'?['A','B']:['A'],can_manage:mode==='manager',can_configure_location:mode==='manager',definition,roster_ready:true,roster_error:'',viewer_on_roster:mode!=='restricted',viewer_active_shift:mode==='restricted'?'':shift,tasks:!submitted&&!definition.items.length?[]:[{id:'fixture-'+day+shift,day,scope:'A',shift,due:Date.now()/1000-60,files,handover_photo:handover,can_upload_handover:!handover,definition_version:submitted?1:definition.version,items:submitted?items:definition.items,people:[{name:'值班员一'},{name:'值班长二'}],submitted:submitted?'2026-10-14T09:05:00+08:00':'',actor_name:'隔离验收人员',can_submit:!submitted,deadline:Date.now()/1000+10000,answers:submitted?[{...items[0],status:'normal',note:''},{...items[1],status:'abnormal',note:'测试异常说明'}]:[],sync_status:submitted?'synced':'pending'}]});
   if(u.pathname==='/api/pre-shift-checks/location-settings'){
    assert.equal(mode,'manager','only privileged accounts access global map settings');
    if(req.method()==='PUT'){assert.deepEqual(req.postDataJSON(),{key:'0'.repeat(32),revision:locationSettings.revision});locationWrites++;await locationRelease;locationSettings={configured:true,revision:'fixture-location-'+locationWrites};}
@@ -81,7 +81,7 @@ try{
  page=await context.newPage();page.on('pageerror',e=>errors.push(e.message));
  async function confirmPhoto(){const editor=page.locator('.v2-photo-editor');await editor.waitFor();await editor.getByRole('button',{name:/确认水印并上传|保留原图并上传/}).click();await editor.waitFor({state:'hidden'});const viewer=page.locator('.v2-check-photo-preview');await viewer.waitFor();await viewer.getByRole('button',{name:'完成',exact:true}).click();}
  await page.goto(origin+'/assets/workspace-v2/index.html');
- const check=page.locator('.wb-check-panel .v2-shift-check');
+ const check=page.locator('.wb-check-panel.v2-shift-check');
  await page.getByText('本次待检查',{exact:true}).waitFor();
  assert(await check.evaluate(el=>el.classList.contains('has-pending-checks')));
  assert.equal(await check.evaluate(el=>getComputedStyle(el,'::before').animationName),'none','reduced motion uses a static red outline');
@@ -234,7 +234,7 @@ for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:
   assert.equal(await check.locator('.v2-check-form>footer').evaluate(el=>el.previousElementSibling.classList.contains('v2-check-items')),true,'submit remains outside the scroll list');
   await itemList.evaluate(el=>el.scrollTop=0);await check.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,'long-check-'+viewport.width+'.png'),fullPage:true});
  }
- await page.setViewportSize({width:1440,height:960});
+ await page.setViewportSize({width:1440,height:640});
  await itemList.evaluate(el=>{el.scrollTop=0;el.scrollIntoView({block:'center',behavior:'instant'});});
  const outerScroll=await itemList.evaluateHandle(el=>{
    for(let host=el.parentElement;host;host=host.parentElement){

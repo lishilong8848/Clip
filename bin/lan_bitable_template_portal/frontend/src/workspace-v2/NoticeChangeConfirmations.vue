@@ -1,5 +1,6 @@
 <template>
-  <NModal :show="true" preset="card" class="change-inbox" title="变更确认" aria-label="变更确认" data-v2-inline-feedback :mask-closable="false" :closable="!busy" :close-on-esc="!busy && !imageOpen" @update:show="close">
+  <component :is="embedded?NCard:NModal" v-bind="embedded?{bordered:false}:{show:true,preset:'card',title:'变更确认',maskClosable:false,closable:!busy,closeOnEsc:!busy&&!imageOpen}"
+    class="change-inbox" :class="{'is-inline-record':embedded}" aria-label="变更确认" data-v2-inline-feedback @update:show="close">
     <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert><NAlert v-if="warning" type="warning">{{ warning }}</NAlert>
     <div class="change-controls"><div class="serenity-segment" role="group" aria-label="变更确认状态">
       <button v-for="mode in filters" :key="mode.value" type="button" :aria-pressed="mode.value===filter" @click="filter=mode.value">{{ mode.label }}</button></div>
@@ -23,17 +24,17 @@
           <NButton v-if="canConfirm" type="primary" :disabled="busy||selected.state!=='awaiting_confirmation'" @click="confirm(selected)">确认变更</NButton></footer>
       </article></div><NEmpty v-else-if="!loading && !error" description="当前没有符合条件的变更"/></NSpin>
     <template #footer><div class="change-tools"><span>{{ visible.length }} 项</span><NPagination v-if="visible.length>10" v-model:page="page" :item-count="visible.length" :page-size="10" simple/>
-      <NButton :disabled="busy" data-v2-navigation @click="close">关闭</NButton></div></template>
-  </NModal>
+      <NButton v-if="!embedded" :disabled="busy" data-v2-navigation @click="close">关闭</NButton></div></template>
+  </component>
 </template>
 <script setup lang="ts">
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
-import {NAlert,NButton,NEmpty,NImage,NImageGroup,NInput,NModal,NPagination,NSpin,NTag,useDialog,useMessage} from 'naive-ui';
+import {NAlert,NButton,NCard,NEmpty,NImage,NImageGroup,NInput,NModal,NPagination,NSpin,NTag,useDialog,useMessage} from 'naive-ui';
 import {ImagePlus,Trash2} from 'lucide-vue-next';
 import {requestJson,requestBinaryJson,type Dict} from './client';
 import {registerNavigationGuard} from './navigation';
 import {noticeInScope,noticeBuildings} from './noticeExperience';
-const props=defineProps<{scope:string;focusId?:string}>(),emit=defineEmits<{close:[];changed:[]}>(),dialog=useDialog(),message=useMessage();
+const props=defineProps<{scope:string;focusId?:string;embedded?:boolean}>(),emit=defineEmits<{close:[];changed:[]}>(),dialog=useDialog(),message=useMessage();
 const items=ref<Dict[]>([]),pending=ref<Record<string,Dict>>({}),busy=ref(false),loading=ref(false),error=ref(''),warning=ref(''),canConfirm=ref(false),page=ref(1),filter=ref(props.focusId?'all':'pending'),search=ref('');
 const filters=[{value:'pending',label:'待处理'},{value:'missing_screenshot',label:'待上传截图'},{value:'awaiting_confirmation',label:'待确认'},{value:'all',label:'全部未结束'}];
 const visible=computed(()=>items.value.filter(i=>noticeInScope(i,props.scope)&&(filter.value==='all'||filter.value==='pending'&&i.state!=='confirmed'||filter.value===i.state)&&(!search.value||String(i.title+' '+i.building).includes(search.value))));
@@ -66,7 +67,9 @@ async function upload(item:Dict){if(busy.value)return;const file=pending.value[i
 function confirm(item:Dict){dialog.warning({title:'确认此变更？',content:item.title,positiveText:'确认变更',negativeText:'返回核对',onPositiveClick:async()=>{busy.value=true;try{await requestJson(base(item)+'/confirm',{method:'POST',body:'{}'});emit('changed');await load();}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;}}});}
 function remove(item:Dict,photo:Dict){dialog.warning({title:'删除此确认截图？',positiveText:'确认删除',negativeText:'取消',onPositiveClick:async()=>{busy.value=true;try{await requestJson(base(item)+'/screenshot?'+new URLSearchParams({local_image_id:photo.local_image_id||'',file_token:photo.file_token||''}),{method:'DELETE'});emit('changed');await load();}catch(e){error.value=(e as Error).message;return false;}finally{busy.value=false;}}});}
 function close(){if(busy.value)return;if(Object.keys(pending.value).length)dialog.warning({title:'截图尚未提交',content:'关闭后，本次选择不会上传到变更记录。',positiveText:'关闭',negativeText:'继续处理',onPositiveClick:()=>emit('close')});else emit('close');}
-const stop=registerNavigationGuard((_target,proceed)=>{if(busy.value){message.warning('正在处理变更确认，请等待结果');return false;}if(Object.keys(pending.value).length){dialog.warning({title:'截图尚未提交',positiveText:'离开',negativeText:'继续处理',onPositiveClick:proceed});return false;}return true;});
+function guardNavigation(proceed:()=>void){if(busy.value){message.warning('正在处理变更确认，请等待结果');return false;}if(Object.keys(pending.value).length){dialog.warning({title:'截图尚未提交',positiveText:'离开',negativeText:'继续处理',onPositiveClick:proceed});return false;}return true;}
+defineExpose({guardNavigation});
+const stop=registerNavigationGuard((_target,proceed)=>guardNavigation(proceed));
 function unload(event:BeforeUnloadEvent){if(busy.value||Object.keys(pending.value).length){event.preventDefault();event.returnValue='';}}
 watch([filter,search],()=>page.value=1);onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onBeforeUnmount(()=>{controller?.abort();stop();window.removeEventListener('beforeunload',unload);});
 </script>
@@ -77,4 +80,6 @@ watch([filter,search],()=>page.value=1);onMounted(()=>{void load();window.addEve
 .change-queue button[aria-pressed=true]{background:var(--soft-face);border-color:var(--v2-blue);box-shadow:var(--soft-key);border-radius:6px}.change-queue small,.change-queue time,.change-proof p,.change-proof header>span,.change-photos figcaption{font-size:12px;color:var(--v2-muted)}
 .change-proof{padding:12px 15px;border-radius:14px;box-shadow:var(--soft-raised);overflow-wrap:anywhere}.change-proof header{justify-content:space-between}.change-proof h2{margin:9px 0;font-size:20px}.change-photos figure{position:relative;margin:4px 0}.change-photos figure>.n-button{position:absolute;top:2px;right:2px;background:var(--soft-face)}.change-proof footer{margin-top:10px}.change-file{position:relative;padding:6px 9px;border-radius:8px;background:var(--soft-field);color:var(--v2-blue)}.change-file:focus-within{outline:2px solid currentColor}.change-file input{position:absolute;inset:0;width:100%;opacity:0;cursor:pointer}
 @media(max-width:650px){.change-spread{grid-template-columns:minmax(0,1fr)}.change-queue{max-height:18dvh}.change-controls .serenity-segment{flex-wrap:wrap}.change-proof{min-width:0}.change-inbox.n-card{width:96vw}}
+.change-inbox.n-card.is-inline-record{width:100%;max-height:none;overflow:visible;background:transparent}
+.change-inbox.is-inline-record>.n-card__content{padding:0}
 </style>

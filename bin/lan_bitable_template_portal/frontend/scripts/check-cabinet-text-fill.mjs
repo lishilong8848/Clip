@@ -37,8 +37,8 @@ try{
   const batch=await api('batches',{rows:[row('A11'),row('A12'),row('A12')]});
   browser=await chromium.launch();page=await browser.newPage({viewport:{width:1366,height:900}});
   const errors=[];page.on('pageerror',error=>errors.push(error.message));
-  await page.goto(`${base}/cabinet-power/batches?scope=E&status=todo`);
-  await page.getByRole('button',{name:'处理待办',exact:true}).first().click();
+  await page.goto(`${base}/assets/workspace-v2/index.html?__page=/cabinet-power/batches&scope=E&status=todo`);
+  await page.getByRole('button',{name:'进入',exact:true}).first().click();
   await page.getByRole('button',{name:'粘贴文本识别',exact:true}).click();
   const dialog=page.getByRole('dialog',{name:'粘贴文本识别',exact:true});
   const paste=async(text)=>{

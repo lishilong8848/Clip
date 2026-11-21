@@ -62,15 +62,16 @@
                 </li>
               </ul>
               <div v-else class="desk-empty" role="status"><Inbox :size="24" /><p>{{ error?'通告读取失败，不能判断为零条':lane.id==='ongoing'?'当前没有进行中通告':'当前筛选下没有计划通告' }}</p></div>
-              <footer v-if="lane.rows.length || lane.total" class="lane-pagination"><small>本页 {{ lane.rows.length }} 条</small><NPagination :page="pages[lane.id]" :page-size="20"
+              <footer v-if="lane.total>20 || pages[lane.id]>1" class="lane-pagination"><small>本页 {{ lane.rows.length }} 条</small><NPagination :page="pages[lane.id]" :page-size="20"
                 :item-count="lane.total" :page-slot="3" :disabled="loading || !!data.partial_buildings" @update:page="value=>changePage(lane.id,value)" /></footer>
             </section>
           </template>
         </PageCanvas>
       </template>
     </template>
-    <NModal :show="editing" preset="card" class="v2-notice-editor desk-editor" data-v2-inline-feedback :aria-label="form?.values.title || '填写通告'" :bordered="false" :mask-closable="false" :close-on-esc="!busy&&!uploading&&!saving" :closable="!busy&&!uploading&&!saving" @update:show="value=>{if(!value)closeEditor()}">
-      <template #header>
+    <component v-if="!recordOnly||editing" :is="recordOnly?NCard:NModal" v-bind="recordOnly?{}:{show:editing,preset:'card',maskClosable:false,closeOnEsc:!busy&&!uploading&&!saving,closable:!busy&&!uploading&&!saving}"
+      class="v2-notice-editor desk-editor" :class="{'is-inline-record':recordOnly}" data-v2-inline-feedback :aria-label="form?.values.title || '填写通告'" :bordered="false" @update:show="value=>{if(!value)closeEditor()}">
+      <template v-if="!recordOnly" #header>
         <div class="notice-editor-title">
           <small>{{ form ? typeLabel(form.values.work_type)+' · '+selectedBuildingLabel : '通告办理' }}</small>
           <strong>{{ form?.values.title || '填写通告' }}</strong>
@@ -140,7 +141,7 @@
           <NButton v-if="form?.canDelete&&!confirming" type="error" text :loading="busy" :disabled="locked" @click="deleteNotice"><Trash2 :size="16" />删除通告</NButton>
           <span></span>
           <NButton v-if="confirming" data-v2-navigation :disabled="busy" @click="confirming=false">返回修改</NButton>
-          <NButton v-else class="v2-notice-close" secondary data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor"><X :size="18" />关闭</NButton>
+          <NButton v-else-if="!recordOnly" class="v2-notice-close" secondary data-v2-navigation :disabled="busy||uploading||saving" @click="closeEditor"><X :size="18" />关闭</NButton>
 
           <div v-if="form&&!job&&!ambiguous&&!bindingFinished" class="v2-notice-submit-group" data-notice-section="action">
             <NRadioGroup v-if="!confirming&&!verifyBeforeStart" v-model:value="action" :disabled="locked" size="small" role="radiogroup" aria-label="本次操作" @update:value="changeAction"><NRadioButton v-for="value in form.actions" :key="value" :value="value">{{ actionLabel(value) }}</NRadioButton></NRadioGroup>
@@ -150,7 +151,7 @@
           </div>
         </div>
       </template>
-    </NModal>
+    </component>
     <NModal :show="pasteOpen" preset="card" class="v2-notice-confirm desk-dialog" title="粘贴通告原文" :mask-closable="false" :closable="!parsing" :close-on-esc="!parsing" @update:show="value=>pasteOpen=value"><NAlert v-if="pasteError" role="alert" type="error" :bordered="false">{{ pasteError }}</NAlert><NInput v-model:value="pasteText" type="textarea" :autosize="{minRows:8,maxRows:16}" maxlength="30000" :input-props="{'aria-label':'通告原文'}" :disabled="parsing" placeholder="粘贴完整通告，解析后核对字段再发送" @paste="pasteNoticeText" /><template #footer><div class="v2-dialog-actions"><NButton :disabled="parsing" @click="pasteOpen=false">取消</NButton><NButton type="primary" :loading="parsing" :disabled="!pasteText.trim()" @click="parsePasted">解析并填写</NButton></div></template></NModal>
     <NoticeChangeConfirmations v-if="changeOpen" :scope="scope" :focus-id="params.get('change_confirmation')||''" @close="changeOpen=false" @changed="load(true)" />
     <NoticeHistory workspace ref="historyDialog" :scope="scope" :work-type="kind" :show="historyOpen" @close="historyOpen=false" @changed="load(true)" />
@@ -164,7 +165,7 @@ import NoticeDeskRecord from './NoticeDeskRecord.vue';
 import NoticeDeskReceipt from './NoticeDeskReceipt.vue';
 import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
-import { NAlert,NButton,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,useDialog,useMessage } from 'naive-ui';
+import { NAlert,NButton,NCard,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,useDialog,useMessage } from 'naive-ui';
 import { CalendarDays,ClipboardList,Inbox,Link2,Radio,RadioTower,Ellipsis,History,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
 import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
@@ -696,7 +697,7 @@ function undo(item:Dict){
   }});
 }
 function guardNoticeNavigation(proceed:()=>void){if(busy.value||uploading.value||saving.value||parsing.value){message.warning('正在提交或上传，请等待结果。');return false;}if(editing.value&&dirty.value&&!job.value){askLeave(proceed);return false;}return !editing.value||persist();}
-const stopGuard=registerNavigationGuard((_target,proceed)=>{
+function guardNavigation(proceed:()=>void){
   if(!props.active)return true;
   if(historyOpen.value&&historyDialog.value){
     const resume=()=>{historyOpen.value=false;if(guardNoticeNavigation(proceed))proceed();};
@@ -704,7 +705,9 @@ const stopGuard=registerNavigationGuard((_target,proceed)=>{
     historyOpen.value=false;
   }
   return guardNoticeNavigation(proceed);
-});
+}
+defineExpose({guardNavigation});
+const stopGuard=registerNavigationGuard((_target,proceed)=>guardNavigation(proceed));
 function visibility(){if(document.hidden){listAbort?.abort();window.clearTimeout(timer);window.clearTimeout(undoTimer);}else if(props.active){void load();void pollJob();void pollUndo();}}
 function beforeUnload(event:BeforeUnloadEvent){persist();if(busy.value||uploading.value||dirty.value){event.preventDefault();event.returnValue='';}}
 const contextKey=()=>JSON.stringify([props.scope,selectedBuildings.value,kind.value,applied.value]);
@@ -748,7 +751,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .notice-desk small,.desk-editor .notice-editor-title small {color:var(--v2-muted);font-size:12px}
 .desk-commands {gap:6px;flex-wrap:wrap}
 .desk-commands .n-button__content,.v2-notice-editor-footer .n-button__content,.v2-notice-tools .n-button__content {gap:5px}
-.notice-desk .desk-primary:not(:disabled),.desk-editor .n-button--primary-type:not(:disabled),.desk-dialog .n-button--primary-type:not(:disabled) {color:white;background:var(--desk-green)}
+.notice-desk .desk-primary:not(:disabled),.desk-editor .n-button--primary-type:not(:disabled),.desk-dialog .n-button--primary-type:not(:disabled) {color:var(--v2-palette-on-accent);background:var(--v2-palette-accent)}
 .notice-desk .desk-band {justify-content:space-between;flex-wrap:wrap;gap:6px 14px}
 .notice-desk .notice-progress{margin:4px 0;color:var(--v2-muted);font-size:12px}
 .desk-types {display:flex;gap:3px;max-width:100%;min-width:0;overflow:auto;padding:4px;box-sizing:border-box;border-radius:12px;background:var(--soft-field);box-shadow:var(--soft-inset);scrollbar-width:thin}
@@ -772,19 +775,25 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .desk-records,.desk-loading {list-style:none;padding:0;margin:0;display:grid;gap:8px;grid-template-columns:minmax(0,1fr)}
 .desk-records>li {min-width:0}
 [data-list=planned]>.desk-records {row-gap:0;column-gap:14px}
-.desk-empty {padding:32px 12px;text-align:center;color:var(--v2-muted);background:var(--soft-field);border-radius:10px}
-.desk-empty p {margin:4px 0}
+.desk-empty {display:flex;align-items:center;gap:8px;padding:12px;text-align:start;color:var(--v2-muted);background:var(--soft-field);border-radius:10px}
+.desk-empty svg {flex:none;width:18px}
+.desk-empty p {margin:0}
 .lane-pagination {justify-content:space-between;flex-wrap:wrap;margin-top:12px;padding:4px 0}
 @container desk-lane (min-width:550px){.desk-filters{grid-template-columns:minmax(140px,1fr) 90px 110px auto}.desk-filters>.n-input{grid-column:auto}}
 @container desk-lane (min-width:700px){.desk-records{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @container desk-lane (min-width:1060px){.desk-records{grid-template-columns:repeat(3,minmax(0,1fr))}}
 @container notice-desk (max-width:760px){
-  .notice-desk .notice-desk-head {padding:10px 12px;gap:8px}
+  .notice-desk {gap:8px}
+  .notice-desk .notice-desk-head {padding:8px 10px;gap:6px}
+  .notice-desk .notice-desk-identity h1 {font-size:18px}
+  .desk-mark {width:34px;height:34px;border-radius:9px}
+  .desk-mark svg {width:19px}
   .desk-commands .n-button {min-height:40px;padding-inline:9px}
   .desk-types button,.desk-switch button {min-height:44px}
   .desk-band>.desk-types {flex:1 1 100%}
   .desk-switch {display:grid;grid-template-columns:1fr 1fr;padding:3px;border-radius:11px;background:var(--soft-field);box-shadow:var(--soft-inset)}
   .desk-switch button {min-width:0}.desk-switch b {font-variant-numeric:tabular-nums}
+  .notice-desk .v2-page-canvas:not(.is-customizing) .lane-head {display:none}
   .desk-lane.desk-hidden,.notice-desk .v2-embedded-block:has(>.desk-hidden),.notice-desk .grid-stack-item:has(.desk-hidden) {display:none}
   .notice-desk .grid-stack-item:has(.desk-lane),.notice-desk .v2-embedded-block:has(>.desk-lane) {grid-column:1/-1}
   .desk-filters .n-button {min-height:40px}
@@ -819,6 +828,9 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .desk-editor>.n-card__footer {padding:12px 16px;border-top:1px solid var(--soft-edge)}
 .desk-editor .n-alert,.desk-dialog .n-alert {margin-bottom:8px}
 .desk-editor .v2-notice-loading {display:grid;place-content:center;min-height:200px}
+.desk-editor.v2-notice-editor.is-inline-record {width:100%;height:auto;max-height:none;border-radius:0;overflow:visible;background:transparent}
+.is-inline-record>.n-card__content {padding:0;overflow:visible}
+.is-inline-record .v2-notice-loading {min-height:108px}
 .editor-sheet {display:grid;grid-template-columns:minmax(0,1fr) minmax(260px,30%);grid-template-areas:"fields routing";gap:16px;align-items:start}
 .editor-routing {grid-area:routing;min-width:0;padding:12px;background:var(--soft-field);border-radius:14px;box-shadow:var(--soft-inset);overflow-wrap:anywhere}
 .editor-routing>div,.editor-routing>.v2-plan-binding,.editor-routing>.notice-dingtalk {margin-top:10px}

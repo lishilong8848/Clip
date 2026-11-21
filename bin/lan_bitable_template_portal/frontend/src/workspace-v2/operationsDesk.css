@@ -48,7 +48,7 @@
 }
 .ops-desk .ops-pill-button { border-radius: 18px; }
 .ops-desk .ops-text-button { background: transparent; border-color: transparent; color: #226783; }
-.ops-desk .ops-button.is-primary { background: linear-gradient(120deg,#238266,#176d52); border-color: #186d54; color: white; }
+.ops-desk .ops-button.is-primary { background: var(--v2-palette-accent); border-color: var(--v2-palette-accent); color: var(--v2-palette-on-accent); }
 .ops-desk :is(.ops-button,.ops-pill-button,.ops-text-button,.ops-tabs button):not(:disabled):hover { filter: brightness(.97); border-color: #82a8ad; }
 .ops-desk :is(.ops-button,.ops-pill-button,.ops-text-button,.ops-tabs button,.ops-building):disabled { opacity: .53; cursor: default; }
 .ops-desk :is(button,a,input,select,summary,[tabindex]):focus-visible { outline: 2px solid #25749d; outline-offset: 2px; }
@@ -143,6 +143,8 @@
 }
 .ops-desk .ops-drawer-overlay[open] { padding: 8px; place-items: stretch end; }
 .ops-desk .ops-drawer { width: min(100%,660px); max-height: calc(100dvh - 16px); }
+.ops-desk.ops-case .ops-event-case .ops-dialog { width:100%;max-height:none;border:0;border-radius:0;box-shadow:none;background:transparent;overflow:visible }
+.ops-desk.ops-case .ops-dialog-body { overflow:visible;padding-inline:0 }
 .ops-desk .event-metric-dialog { width: min(100%,880px); }
 .ops-desk .ops-morning-dialog { width: min(100%,1000px); }
 .ops-desk .ops-dialog-body fieldset { min-width: 0; margin: 0; padding: 10px; border: 1px solid var(--ops-line); border-radius: 9px; }

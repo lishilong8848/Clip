@@ -1,5 +1,5 @@
 <template>
-  <nav class="v2-mobile-nav" aria-label="手机导航" data-v2-navigation>
+  <nav class="v2-mobile-nav" aria-label="手机导航" data-v2-navigation :style="{gridTemplateColumns:`repeat(${tabs.length},minmax(0,1fr))`}">
     <button v-for="tab in tabs" :key="tab.value" type="button" :aria-current="active===tab.value?'page':undefined" @click="select(tab.value)">
       <span class="mobile-nav-icon"><component :is="tab.icon" :size="19" aria-hidden="true" /></span>
       <span>{{ tab.label }}</span>

@@ -772,6 +772,7 @@ const props = defineProps<{
   scope: string;
   scopeOptions: ScopeOption[];
   focusRecordId?: string;
+  recordOnly?: boolean;
   focusFollowups?: boolean;
   initialInProgress?: boolean;
   canDelete?: boolean;
@@ -1646,7 +1647,7 @@ function runWithUnsavedGuard(action: () => void | Promise<void>): void {
 }
 
 function focusProjectDrawer(): void {
-  void nextTick(() => projectDrawerRef.value?.focus());
+  if (!props.recordOnly) void nextTick(() => projectDrawerRef.value?.focus());
 }
 
 function handleProjectDrawerKeydown(event: KeyboardEvent): void {
@@ -3597,6 +3598,7 @@ watch(hasAnyUnsavedChanges, (dirty) => {
 
 watch(projectDrawerOpen, (open) => {
   if (open) {
+    if (props.recordOnly) return;
     projectDrawerReturnFocus = document.activeElement instanceof HTMLElement
       ? document.activeElement
       : null;

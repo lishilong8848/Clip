@@ -9,7 +9,7 @@
   <p v-if="error" class="evt-error" role="alert">{{error}} <button type="button" @click="initialize">重试读取</button></p>
   <p v-if="warning" class="evt-warning" role="status">{{warning}}</p>
   <template v-if="focusEventId">
-    <EventNoticeRawCard v-if="focused && options.user_id" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
+    <EventNoticeRawCard v-if="focused && options.user_id" ref="focusedCard" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
     <p v-else-if="!error" role="status">{{loading || !options.user_id?'正在读取这条事件通告…':'当前范围内找不到这条事件通告。'}}</p>
   </template>
   <template v-else>

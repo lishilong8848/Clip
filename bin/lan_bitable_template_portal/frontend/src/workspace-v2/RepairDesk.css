@@ -24,10 +24,13 @@
 .repair-desk-record small,.repair-desk-times span {font-size:12px;color:var(--v2-muted)}
 .repair-desk-progress {display:grid;gap:4px;min-width:90px}
 .repair-desk :is(.repair-desk-record,.repair-desk-filters) button:focus-visible {outline:2px solid var(--v2-blue);outline-offset:2px}
-.repair-desk .repair-desk-bar .n-button--primary-type:not(:disabled),.repair-desk-modal .v2-repair-detail-footer .n-button--primary-type:not(:disabled) {background:var(--repair-desk-green);color:white}
+.repair-desk .repair-desk-bar .n-button--primary-type:not(:disabled),.repair-desk-modal .v2-repair-detail-footer .n-button--primary-type:not(:disabled) {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent)}
 .repair-desk-modal .v2-repair-detail-head {background:linear-gradient(110deg,var(--repair-desk-sky),var(--repair-desk-mint))}
 .repair-desk-modal .repair-desk-tabbar {justify-content:space-between;padding:6px 12px;border-bottom:1px solid var(--soft-edge)}
 .repair-desk-modal .repair-desk-tabbar :is(.v2-repair-detail-tabs,.v2-repair-detail-summary){padding:0;margin:0;border:0;background:none}
+.repair-desk-inline .v2-repair-detail {background:transparent;box-shadow:none;border:0;max-height:none;overflow:visible}
+.repair-desk-inline .v2-repair-detail-body {overflow:visible;padding:10px 0}
+.repair-desk-inline .v2-repair-detail-footer {position:static;background:transparent;box-shadow:none;min-height:0}
 .repair-desk-modal .repair-desk-project {display:grid;grid-template-columns:minmax(190px,.32fr) minmax(0,1fr);gap:14px;align-items:start}
 .repair-desk-modal .v2-repair-source-flow {padding:10px;border-radius:12px;background:var(--soft-field);box-shadow:var(--soft-inset)}
 .repair-desk-modal .v2-repair-source-flow :is(summary,ol,li) {display:flex;flex-direction:column;align-items:stretch;gap:7px}

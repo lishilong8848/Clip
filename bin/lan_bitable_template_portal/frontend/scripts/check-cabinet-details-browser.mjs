@@ -60,7 +60,7 @@ try{
       const cell=page.locator('.map-cell[aria-label="A01 正式电"]');await cell.click();
       await drawer.getByText('上正式电 · 成功',{exact:true}).waitFor();
       assert.match(await drawer.innerText(),/4200 W/);assert.match(await drawer.innerText(),/2026-10-15 08:20/);
-      const box=await drawer.boundingBox();assert(box.height>400&&box.y>=0&&box.y+box.height<=(width===390?844:900)+1,'details are inside the viewport');
+      const box=await drawer.boundingBox();assert(box&&box.y>=-1&&box.x>=-1&&box.x+box.width<=width+1&&box.y+box.height<=(width===390?844:900)+1,'details are inside the viewport');
       assert(await drawer.locator('.history-record').evaluate(el=>el.getBoundingClientRect().height>30),'history content is not collapsed');
       await shot('history-'+width);await drawer.getByRole('button',{name:'关闭历史',exact:true}).click();
       await page.getByRole('button',{name:'机柜状态',exact:true}).click();

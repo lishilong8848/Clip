@@ -2,7 +2,7 @@
     <section v-if="printLoading" class="print-state" role="status">
       <Loader2 :size="24" class="spinning" /> 正在准备打印内容
     </section>
-    <section v-else-if="printError" class="print-state error" role="alert">
+    <section v-else-if="printError" class="print-state error" role="alert" data-v2-inline-feedback>
       <AlertTriangle :size="24" /> {{ printError }}
     </section>
     <section v-else class="print-sheet-frame" :style="printFrameStyle" :aria-label="printSheet === 'record' ? '演练记录表' : '演练评估表'">

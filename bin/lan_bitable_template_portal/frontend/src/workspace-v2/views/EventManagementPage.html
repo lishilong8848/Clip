@@ -1,4 +1,5 @@
-<section class="ops-desk ops-events" aria-label="事件管理">
+<section class="ops-desk ops-events" :class="{'ops-case':props.recordOnly}" :data-v2-inline-feedback="props.recordOnly||undefined" aria-label="事件管理">
+  <template v-if="!props.recordOnly">
   <header class="ops-head">
     <div class="ops-heading">
       <VnetBackButton v-if="showingDetails && !['ALL','CAMPUS'].includes(detailScope)" within-module title="返回楼栋概览"
@@ -126,15 +127,17 @@
     </article>
   </dialog>
 
-  <dialog v-if="selectedEvent" class="ops-overlay ops-events-overlay ops-drawer-overlay" aria-labelledby="ops-event-title"
-    @vue:mounted="node => node.el?.showModal()" @cancel.prevent="!eventTransferBusy && (selectedEvent = null)" @click.self="!eventTransferBusy && (selectedEvent = null)">
+  </template>
+  <p v-else-if="!selectedEvent" class="ops-alert" role="status">{{ loading ? '正在读取事件…' : (errorText || '当前范围内找不到这条事件。') }}</p>
+  <component v-if="selectedEvent" :is="props.recordOnly?'section':'dialog'" :class="props.recordOnly?'ops-event-case':'ops-overlay ops-events-overlay ops-drawer-overlay'" :aria-labelledby="props.recordOnly?undefined:'ops-event-title'"
+    @vue:mounted="node => { if (!props.recordOnly) node.el?.showModal() }" @cancel.prevent="!eventTransferBusy && (selectedEvent = null)" @click.self="!props.recordOnly && !eventTransferBusy && (selectedEvent = null)">
     <article class="ops-dialog ops-drawer event-drawer">
-      <header class="ops-dialog-head ops-event-head"><div><small>{{ selectedEvent.building || scopeLabel }} · {{ selectedEvent.level || '未定级' }} · {{ selectedEvent.status || '未标注状态' }}</small><h2 id="ops-event-title">{{ selectedEvent.title || selectedEvent.alarm_desc || '未命名事件' }}</h2></div>
+      <header class="ops-dialog-head ops-event-head"><div><small>{{ selectedEvent.building || scopeLabel }} · {{ selectedEvent.level || '未定级' }} · {{ selectedEvent.status || '未标注状态' }}</small><h2 v-if="!props.recordOnly" id="ops-event-title">{{ selectedEvent.title || selectedEvent.alarm_desc || '未命名事件' }}</h2></div>
       <div class="ops-tabs" role="group" aria-label="详情视图">
         <button type="button" :aria-pressed="selectedEventDetailTab === 'summary'" @click="selectedEventDetailTab = 'summary'">事件概况</button>
         <button type="button" :aria-pressed="selectedEventDetailTab === 'timeline'" @click="selectedEventDetailTab = 'timeline'">时间线</button>
         <button v-if="isAdmin" type="button" :aria-pressed="selectedEventDetailTab === 'fields'" @click="selectedEventDetailTab = 'fields'">原表字段</button>
-      </div><button type="button" class="ops-button" :disabled="eventTransferBusy" @click="selectedEvent = null">关闭</button></header>
+      </div><button v-if="!props.recordOnly" type="button" class="ops-button" :disabled="eventTransferBusy" @click="selectedEvent = null">关闭</button></header>
       <div class="ops-dialog-body">
         <template v-if="selectedEventDetailTab === 'summary'">
           <p v-if="selectedEvent.alarm_desc && selectedEvent.alarm_desc !== selectedEvent.title" class="ops-description">{{ selectedEvent.alarm_desc }}</p>
@@ -165,5 +168,5 @@
         <p v-if="errorText" class="ops-alert is-error" role="alert">{{ errorText }}</p>
       </div>
     </article>
-  </dialog>
+  </component>
 </section>

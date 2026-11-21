@@ -62,6 +62,7 @@ function v2ScheduleStats(): void {
 async function v2RefreshView(): Promise<void> {
   if (v2Writing.value || loading.value) return;
   clearRecordResponseCache(); clearRecordDetailCache();
+  if (props.recordOnly) { appliedFocusRecordId.value=''; await loadRecords(true); return; }
   await Promise.all([loadRecords(true), v2LoadStats()]);
 }
 function v2SetDetail(element: unknown): void { projectDrawerRef.value = element as HTMLElement | null; }
@@ -76,8 +77,8 @@ function v2BeforeUnload(event: BeforeUnloadEvent): void {
   if (hasAnyUnsavedChanges.value || v2Writing.value) {event.preventDefault();event.returnValue='';}
 }
 watch(v2FollowupBusy, value => { if(!value && serverUpdatePending.value && !hasAnyUnsavedChanges.value)scheduleRepairStreamRefresh(); });
-onMounted(()=>{void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);});
-watch(()=>props.scope,()=>{v2Stats.value=null;v2StatsAt.value='';void v2LoadStats();});
+onMounted(()=>{if(!props.recordOnly)void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);});
+watch(()=>props.scope,()=>{v2Stats.value=null;v2StatsAt.value='';if(!props.recordOnly)void v2LoadStats();});
 onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();if(v2StatsTimer)clearTimeout(v2StatsTimer);window.removeEventListener('beforeunload',v2BeforeUnload);});
 `;
 

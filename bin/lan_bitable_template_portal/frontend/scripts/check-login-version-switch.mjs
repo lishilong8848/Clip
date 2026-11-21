@@ -60,7 +60,7 @@ for(const target of ['/api/auth/logout','/assets/workspace-v2/index.html','https
 assert.equal(new URL(toAbsoluteUrl('/?frontend=workspace')).searchParams.get('frontend'),'workspace');
 delete globalThis.window;delete globalThis.document;delete globalThis.localStorage;
 
-const server = await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server = await preview({root,logLevel:'error',build:{outDir:process.env.WORKSPACE_LOGIN_DIST||'dist'},preview:{host:'127.0.0.1',port:0}});
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const output = path.resolve(root,'../../../output/playwright/login-version-switch');
 await mkdir(output,{recursive:true});

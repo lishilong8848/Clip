@@ -10,7 +10,7 @@
     <p v-if="error" role="alert">{{ error }} <button @click="initialize">重试读取</button></p>
     <div v-if="!focusEventId && !options.user_id" class="event-defaults"><h2>新建事件通告</h2><label>本次通告原文<textarea v-model="pendingText" rows="9" maxlength="15000" placeholder="粘贴完整的事件通告"></textarea></label><p>{{error?'暂未取得操作权限，请重试读取。':'正在读取权限和默认机器人，完成后即可发送。'}}</p></div>
     <template v-if="focusEventId">
-      <EventNoticeRawCard v-if="focused && options.user_id" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
+      <EventNoticeRawCard v-if="focused && options.user_id" ref="focusedCard" :key="context+':'+focused.event_id" :row="focused" :scope="scope" :options="options" @changed="changed" />
       <p v-else-if="!error" role="status">{{ loading || !options.user_id ? '正在读取这条事件通告…' : '当前范围内找不到这条事件通告。' }}</p>
     </template>
     <template v-else-if="options.user_id">
@@ -31,6 +31,8 @@ const props=defineProps<{scope:string;active?:boolean;focusEventId?:string}>();
 const options=ref<Dict>({}),rows=ref<Dict[]>([]),error=ref(''),warning=ref(''),loading=ref(false),month=ref(new Date(Date.now()+8*3600000).toISOString().slice(0,7));
 const pendingText=ref('');
 const defaultsOpen=ref(false),defaultsBusy=ref(false),defaultsError=ref(''),selected=ref<string[]>([]);
+const focusedCard=ref<InstanceType<typeof EventNoticeRawCard>>();
+defineExpose({guardNavigation:()=>focusedCard.value?.guardNavigation()!==false});
 let generation=0,timer=0,disposed=false;
 const context=computed(()=>props.scope+':'+options.value.user_id);
 const ongoing=computed(()=>rows.value.filter(row=>row.state!=='ended'));

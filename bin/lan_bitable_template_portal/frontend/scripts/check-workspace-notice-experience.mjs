@@ -127,7 +127,7 @@ try{
  await goto();
  await page.getByLabel('计划月份',{exact:true}).click();await page.locator('.n-base-select-option').getByText('11月',{exact:true}).click();
  assert.equal(await page.locator('.v2-notice-heading h1').isVisible(),false,'navigation already names this module');assert.match(await page.locator('[data-list=planned]').innerText(),/10月计划/);
- await page.getByRole('button',{name:'筛选',exact:true}).click();await page.locator('[data-list=planned]').getByText('11月计划',{exact:true}).waitFor();
+ await page.getByRole('button',{name:'筛选计划通告',exact:true}).click();await page.locator('[data-list=planned]').getByText('11月计划',{exact:true}).waitFor();
  await goto();await open();await page.getByRole('button',{name:'采用这组空白项',exact:true}).waitFor();
  await page.screenshot({path:path.join(output,'cross-building-recommendations.png'),fullPage:true});
  assert.equal(await page.locator('.v2-notice-field-grid [data-notice-field]').first().getAttribute('data-notice-field'),'content','missing fields appear before prefilled title');

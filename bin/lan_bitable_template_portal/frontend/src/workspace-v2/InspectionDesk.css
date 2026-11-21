@@ -20,7 +20,7 @@
 .ins-foot{border-top:1px solid var(--ins-edge)}.ins-status{background:var(--v2-palette-selection,#e0eef9)}.ins-record,.ins-audit-row{border-top:1px solid var(--ins-edge);padding:.55rem 0}
 .ins-desk :is(.ins-head,.ins-line,.ins-actions,.ins-panel,.ins-options,.ins-record,.ins-audit-row) button,.ins-workbook :is(.ins-bar,.ins-controls,.ins-status,.ins-editbar,.ins-foot) button,.ins-desk.ins-modal>header button{
   display:inline-flex;align-items:center;justify-content:center;gap:.28rem;min-height:34px;padding:.34rem .65rem;border-radius:9px;border:1px solid var(--ins-edge);background:var(--ins-face);color:var(--ins-ink);font:inherit;font-size:.88rem;cursor:pointer}
-:is(.ins-desk,.ins-workbook) :is(.ins-head,.ins-line,.ins-actions,.ins-options) button.ins-primary{background:var(--ins-green);color:white;border-color:var(--ins-green)}
+:is(.ins-desk,.ins-workbook) :is(.ins-head,.ins-line,.ins-actions,.ins-options) button.ins-primary{background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent)}
 .ins-workbook .ins-rounds button[aria-pressed=true]{background:var(--ins-mint);border-color:var(--ins-green)}
 .ins-desk button:disabled,.ins-workbook :is(.ins-bar,.ins-controls,.ins-foot) button:disabled{opacity:.55;cursor:default}
 .ins-desk :is(.ins-head,.ins-field,.ins-line,.ins-panel,.ins-grid) :is(select,input:not([type=checkbox]),textarea),.ins-workbook .ins-controls :is(select,input){

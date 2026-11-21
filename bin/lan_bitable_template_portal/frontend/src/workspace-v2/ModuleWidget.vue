@@ -26,7 +26,7 @@ import { canViewInspectionHistory } from '../inspectionAccess';
 import { navigate,requestEmbeddedChange } from './navigation';
 import { embeddedContextKey } from './embeddedContext';
 import { pageContext } from './pageLayout';
-const props=defineProps<{item:Widget;user:Dict;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];fixedScope?:boolean;headerToolsId?:string;initialUrl?:string}>();
+const props=defineProps<{item:Widget;user:Dict;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];fixedScope?:boolean;headerToolsId?:string;initialUrl?:string;recordOnly?:boolean}>();
 const emit=defineEmits<{close:[]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
@@ -78,14 +78,14 @@ const pageProps=computed(()=>{
   switch(pageName.value){
     case 'water':return {...common,initialView:p.get('water_view')==='overview'?'overview':'records'};
     case 'risk_inspection':return {...common,releaseId:p.get('id')||'',view:p.get('view')||''};
-    case 'repair_management':return {...common,userId:props.user.open_id,canDelete:props.user.can_delete_business===true,focusRecordId:p.get('record_id')||'',focusFollowups:p.get('workspace_tab')==='followups',initialInProgress:p.get('state')==='in_progress'};
+    case 'repair_management':return {...common,userId:props.user.open_id,canDelete:props.user.can_delete_business===true,focusRecordId:p.get('record_id')||'',focusFollowups:p.get('workspace_tab')==='followups',initialInProgress:p.get('state')==='in_progress',recordOnly:props.recordOnly&&p.has('record_id')};
     case 'learning':return {...common,scope:p.get('scope')||'',personId:p.get('person_id')||'',userId:props.user.open_id};
     case 'critical_guard':return {...common,scope:adminMode.value?'':localScope.value,user:props.user,adminMode:adminMode.value,focusTaskId:p.get('task_id')||''};
     case 'drills':return {...common,scope:adminMode.value?'':localScope.value,currentUser:props.user,adminMode:adminMode.value,printMode:false};
     case 'cabinet':return {...common,scope:['ALL','CAMPUS'].includes(localScope.value)?'':localScope.value,userId:props.user.open_id,readOnly:false,canDelete:props.user.can_delete_business===true};
     case 'cabinet_batch':return {...common,userId:props.user.open_id};
     case 'accounts':return {open:true,systemAdmin:admin,initialTab:p.get('tab')||'permissions',scopeOptions:props.scopes,focusPermissionRequestId:p.get('request_id')||''};
-    case 'event':return {...common,refreshNonce:0,focusRecordId:p.get('event_id')||''};
+    case 'event':return {...common,refreshNonce:0,focusRecordId:p.get('event_id')||'',recordOnly:props.recordOnly&&p.has('event_id')};
     case 'daily':return {...common,printMode:false};
     case 'daily_inspection':return {initialScope:localScope.value};
     case 'tool_management':return {...common,toolView:p.get('tool_view')||'',toolSession:p.get('tool_session')||'',toolAsset:p.get('tool_asset')||'',toolOrder:p.get('tool_order')||''};

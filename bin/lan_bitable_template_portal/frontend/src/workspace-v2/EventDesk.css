@@ -15,8 +15,8 @@
 .evt-desk button {min-height:34px;padding:5px 10px;background:var(--evt-face);cursor:pointer}
 .evt-desk button:disabled {opacity:.55;cursor:default}
 .evt-desk button:focus-visible,.evt-desk summary:focus-visible,.evt-desk :is(input,textarea,select):focus-visible {outline:2px solid var(--v2-blue);outline-offset:1px}
-.evt-desk button.evt-primary,.evt-desk button.evt-destructive {color:#fff;background:var(--evt-green);border-color:transparent}
-.evt-desk button.evt-destructive {background:#9d383b}
+.evt-desk button.evt-primary {color:var(--v2-palette-on-accent);background:var(--v2-palette-accent);border-color:transparent}
+.evt-desk button.evt-destructive {color:#fff;background:#9d383b;border-color:transparent}
 .evt-desk button.evt-delete {color:#a54042}
 .evt-desk :is(input:not([type=checkbox]),textarea,select){width:100%;min-width:0;min-height:34px;padding:5px 8px;background:var(--evt-field)}
 .evt-desk textarea {line-height:1.6;resize:vertical}

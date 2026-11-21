@@ -38,6 +38,7 @@ try {
       if(p==='/api/auth/permission-requests/current')return ok({});
       if(p==='/api/scope-overview')return ok({scopes:{}});
       if(p==='/api/learning/bootstrap')return ok({is_admin:actor==='admin',can_answer:true,can_view_buildings:actor==='admin',self_person:{id:'p1',name:'测试人员甲',scopes:['A']},self_scope:'A',scopes:[{value:'A',label:'A楼'}],settings:{enabled:true},sync:{status:'ready',pending:0},today:'2026-10-14'});
+      if(p==='/api/learning/issues/pending-questions'&&method==='GET')return ok({items:[],total:0});
       if(p==='/api/learning/sharing') {
         if(method==='POST'){ assert.deepEqual(request.postDataJSON().question_types,['single','multiple']);created++;return ok({id:batch.id}); }
         return ok({items:[batch],page:1,total:1});

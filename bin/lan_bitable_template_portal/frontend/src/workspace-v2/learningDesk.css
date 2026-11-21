@@ -57,7 +57,7 @@ html.workspace-v2[data-v2-theme] .learning-personal-home .daily-tile {
 .lp-heading small,.lp-title small,.lp-meta,.lp-row small,.lp-dashboard small,.lp-index small,.lp-line small,.lp-result small,.lp-queue span,.lp-agenda small,.lp-answer-actions>span,.lp-modal small {font-size:12px;color:var(--lp-muted);font-variant-numeric:tabular-nums;}
 .lp-title>div,.lp-row>div:first-child,.lp-entry span,.lp-person>span:first-child,.lp-result>div {display:grid;gap:2px;}
 .lp-btn,.lp-tabs button,.lp-switch button,.lp-numbers button,.lp-tools > button:not([class]),.lp-modal button:not([class]) {display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:32px;padding:5px 10px;border:1px solid #c8d8da;border-radius:8px;background:linear-gradient(#fcfefd,#ecf2f3);color:#2a4a56;font:inherit;font-size:13px;font-weight:600;line-height:1.4;cursor:pointer;text-decoration:none;}
-.lp-btn.primary,.lp-desk .lp-btn.primary,.lp-modal .lp-btn.primary {background:linear-gradient(130deg,#227d62,#17684e);color:white;border-color:#196e54;}
+.lp-btn.primary,.lp-desk .lp-btn.primary,.lp-modal .lp-btn.primary {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent);}
 .lp-btn.danger {color:#893c35;}
 .lp-btn:hover:not(:disabled),.lp-entry:hover:not(:disabled),.lp-person:hover:not(:disabled),.lp-queue button:hover:not(:disabled) {border-color:#8caeac;filter:brightness(.985);}
 .lp-desk :is(button,input,select,textarea):disabled,.lp-modal :is(button,input,select):disabled {opacity:.58;cursor:default;}

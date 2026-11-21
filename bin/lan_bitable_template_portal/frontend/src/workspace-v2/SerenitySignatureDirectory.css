@@ -7,7 +7,7 @@
 .ssig input:not([type=checkbox]):not([type=radio]),.ssig select {box-sizing:border-box;max-width:100%;font:inherit;color:inherit;padding:7px 8px;border:1px solid var(--ss-line);border-radius:8px;background:var(--ss-field);}
 .ssig button,.ssig summary {box-sizing:border-box;font:inherit;font-size:13px;font-weight:550;color:inherit;background:var(--ss-face);border:1px solid var(--ss-line);border-radius:8px;cursor:pointer;min-height:33px;padding:6px 10px;}
 .ssig button {display:inline-flex;align-items:center;justify-content:center;gap:5px;}.ssig button:hover:not(:disabled) {border-color:#51957a;}
-.ssig button.primary {background:#176f50;color:white;border-color:#176f50;}.ssig button.primary:hover:not(:disabled) {background:#125b41;color:white;}.ssig button:disabled {opacity:.52;cursor:default;}
+.ssig button.primary {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent);}.ssig button.primary:hover:not(:disabled) {background:var(--v2-palette-hover);}.ssig button:disabled {opacity:.52;cursor:default;}
 .ssig :focus-visible {outline:3px solid var(--v2-blue,#3389b6);outline-offset:2px;}.ssig input[type=checkbox],.ssig input[type=radio] {accent-color:#187451;}
 .ssig-line,.ssig-actions,.ssig-person,.ssig-pager,.recipient-pinned {display:flex;align-items:center;flex-wrap:wrap;gap:5px 9px;min-width:0;}
 .ssig .directory-panel>.ssig-line {padding:8px 14px;color:var(--ss-sub);font-size:12px;}.ssig-line>strong,.ssig-line>h2 {color:var(--ss-ink);}

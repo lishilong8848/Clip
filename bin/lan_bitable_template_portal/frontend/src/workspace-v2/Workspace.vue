@@ -4,7 +4,7 @@
       <div :key="impersonationSession" class="v2-shell" :class="{ 'has-topnav':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink)" class="v2-header">
-          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="'/assets/vnet-logo.png'" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
+          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="vnetLogo" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
           <div class="v2-header-actions">
             <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" />
             <NButton v-if="loggedIn || !checking && !publicLink" data-v2-navigation size="small" secondary :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" :style="!loggedIn ? {minHeight:'44px'} : undefined" @click="requestVersion(switchLegacy)">切换旧版</NButton>
@@ -87,7 +87,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
 import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
-import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
+import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, MessageCircle, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
 import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, canReviewHandover, zhihangDataModule } from './modules';
@@ -97,6 +97,7 @@ import { sidebarGroups, sidebarRole } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack, registerNavigationGuard, runNavigationAction } from './navigation';
 import { theme,nightTheme,nightMode,loadNightMode,loadPalette } from './theme';
+import vnetLogo from '../../public/assets/vnet-logo.png?inline';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import TopNavigation from './TopNavigation.vue';
@@ -189,7 +190,7 @@ const activeModule = computed(() => moduleForRoute(route.value));
 const view = computed(() => route.value.searchParams.get('view') || 'home');
 const workbenchActive = computed(() => route.value.pathname === '/' && view.value === 'home' && !route.value.searchParams.get('mode'));
 const homeViews = ['home', 'tasks', 'functions'];
-const mobileActive = computed(() => route.value.pathname === '/' && (route.value.searchParams.get('account') === 'password' || ['my', 'permission'].includes(view.value)) ? 'my' : route.value.pathname === '/' && !route.value.searchParams.get('mode') && homeViews.includes(view.value) ? view.value : 'functions');
+const mobileActive = computed(() => route.value.pathname === '/' && (route.value.searchParams.get('account') === 'password' || ['my', 'permission'].includes(view.value)) ? 'my' : route.value.pathname === '/' && !route.value.searchParams.get('mode') && (homeViews.includes(view.value)||view.value==='assistant') ? view.value : 'functions');
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
 const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
@@ -297,7 +298,10 @@ function confirmAccountAction(){
  const target=accountAction.value==='switch'?'/?login=password':'/';
  runNavigationAction(target,()=>void logout(target));
 }
-const mobileTabs = [{value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},{value:'my',label:'我的',icon:UserRound}];
+const mobileTabs = computed(() => [
+  {value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},
+  ...(!user.value.impersonation?[{value:'assistant',label:'助手',icon:MessageCircle}]:[]),{value:'my',label:'我的',icon:UserRound},
+]);
 function selectMobileTab(value:string){
  const current=route.value;
  if(current.pathname==='/' && view.value===value && !current.searchParams.has('mode') && !current.searchParams.has('account'))return;

@@ -504,8 +504,8 @@ onBeforeUnmount(()=>{disposed=true;bootstrapRead?.abort();listRead?.abort();deta
 .tool-button:not(:disabled):hover,.icon-button:not(:disabled):hover,.range-picker button:not([aria-pressed="true"]):hover,.queue-options button:not([aria-pressed="true"]):hover { background: var(--water-field,#eaf0f2); }
 .icon-button { padding: 6px; min-width: 34px; }
 .text-button { color: var(--v2-blue,#28688f); text-decoration: underline; text-underline-offset: 3px; }
-.primary-button { color: #fff; background: #137351; border-color: #126346; font-weight: 650; }
-.primary-button:hover { background: #105f43; }
+.primary-button { color: var(--v2-palette-on-accent); background: var(--v2-palette-accent); border-color: var(--v2-palette-accent); font-weight: 650; }
+.primary-button:hover:not(:disabled) { background: var(--v2-palette-hover); }
 .desk-notice,.book-message,.context-error { overflow-wrap: anywhere; }
 .desk-notice { border-inline-start: 3px solid #358b69; background: var(--water-field); border-radius: 8px; padding: 7px 10px; }
 .desk-notice.caution { border-color: #bb793a; }

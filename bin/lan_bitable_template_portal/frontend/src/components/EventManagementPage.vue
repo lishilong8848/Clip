@@ -284,6 +284,7 @@ const props = defineProps<{
   refreshNonce?: number;
   isAdmin?: boolean;
   focusRecordId?: string;
+  recordOnly?: boolean;
 }>();
 
 const emit = defineEmits<{

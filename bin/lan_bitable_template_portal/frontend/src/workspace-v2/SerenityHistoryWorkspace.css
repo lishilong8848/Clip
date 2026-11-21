@@ -8,7 +8,7 @@
 .hm-work small,.hm-confirm small,.hm-work .hm-line span,.hm-footer>span {color:var(--hm-sub);font-size:12px;}
 .hm-work button:not(.n-button),.hm-work input:not([type=checkbox]),.hm-work textarea,.hm-work select {box-sizing:border-box;font:inherit;color:inherit;background:var(--hm-field);border:1px solid var(--hm-line);border-radius:8px;padding:6px 8px;max-width:100%;}
 .hm-work button:not(.n-button) {display:inline-flex;align-items:center;justify-content:center;gap:5px;min-height:33px;background:var(--hm-face);font-size:13px;cursor:pointer;}
-.hm-work button.hm-primary,.hm-work .hm-primary,.hm-confirm .n-button--primary-type {background:#176f50;color:white;border-color:#176f50;}.hm-work .hm-primary :deep(.n-button__content) {color:white;}
+.hm-work button.hm-primary,.hm-work .hm-primary,.hm-confirm .n-button--primary-type {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent);border-color:var(--v2-palette-accent);}
 .hm-work button:disabled {cursor:default;opacity:.55;}.hm-work :focus-visible,.hm-confirm :focus-visible {outline:3px solid var(--v2-blue,#3788ae);outline-offset:2px;}.hm-work input[type=checkbox] {accent-color:#187a58;}
 .hm-grid {display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,245px),1fr));gap:6px;padding:0 12px 10px;}
 .hm-grid .v2-history-row {min-width:0;display:flex;align-items:center;gap:6px;padding:5px 8px;border:1px solid var(--hm-line);border-radius:9px;}

@@ -27,7 +27,8 @@
 .cab-desk button:not(.map-cell):not(:disabled):hover,.cab-desk summary:hover { background-color: var(--cab-field); }
 .cab-desk :is(button,input,textarea,select,a,summary,[tabindex]):focus-visible { outline: 2px solid var(--cab-accent); outline-offset: 2px; }
 .cab-desk button:disabled { opacity: .52; cursor: not-allowed; }
-.cab-desk button.cab-primary,.cab-desk button.cab-primary:not(:disabled):hover { background: #126b4d; color: #fff; border-color: #0e6245; font-weight: 620; }
+.cab-desk button.cab-primary { background: var(--v2-palette-accent); color: var(--v2-palette-on-accent); border-color: var(--v2-palette-accent); font-weight: 620; }
+.cab-desk button.cab-primary:not(:disabled):hover { background: var(--v2-palette-hover); }
 .cab-desk :is(button,a,h1,h2,h3)>svg { flex: none; width: 16px; height: 16px; }
 .cab-desk a { color: var(--cab-accent); text-underline-offset: 3px; }
 .cab-desk :is(.cab-head,.cab-head-main,.cab-panel-head,.cab-section-head,.cab-taskbar,.cab-actions,.cab-fields,.cab-tabs,.cab-pager,.cab-line,.cab-row-actions,.cab-title) { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px; min-width: 0; }

@@ -40,7 +40,7 @@
   background:var(--rd-face);color:var(--rd-ink);font-size:13px;font-weight:580;line-height:1.4;text-decoration:none;
 }
 .rd-desk .rd-icon { width:35px;padding:5px }
-.rd-desk .rd-btn.rd-primary,.rd-desk button.rd-primary { color:#fff;background:var(--rd-green);border-color:var(--rd-green) }
+.rd-desk .rd-btn.rd-primary,.rd-desk button.rd-primary { color:var(--v2-palette-on-accent);background:var(--v2-palette-accent);border-color:var(--v2-palette-accent) }
 .rd-desk .rd-btn.rd-go { background:var(--rd-mint);color:var(--rd-positive);border-color:transparent }
 .rd-desk .rd-danger { color:var(--rd-danger) }
 .rd-desk :is(.rd-name,.rd-link) { background:transparent;border:0;color:var(--rd-blue);text-align:left;padding:3px 0;font-weight:600 }
@@ -131,20 +131,20 @@
 
 
 .workspace-v2 .drill-print-page .print-state {
-  width: min(720px, calc(100% - 32px));
-  min-height: 150px;
+  width: min(720px, 100%);
+  min-height: 0;
+  padding: 14px;
   display: flex;
   align-items: center;
   justify-content: center;
   gap: 12px;
-  margin: 48px auto;
-  border: 1px solid #d8e5f7;
-  border-radius: 22px;
-  background: rgba(255,255,255,.94);
-  color: #31516f;
-  box-shadow: 0 14px 34px rgba(0,47,135,.1);
+  margin: 12px auto;
+  border: 1px solid var(--soft-edge);
+  border-radius: 10px;
+  background: var(--soft-face);
+  color: var(--v2-ink);
 }
-.workspace-v2 .drill-print-page .print-state.error { border-color: #fecaca; color: #b91c1c; }
+.workspace-v2 .drill-print-page .print-state.error { border-inline-start: 3px solid var(--v2-danger,#b91c1c); }
 .workspace-v2 :is(.drd-screen,.drill-print-page) .sheet-table-wrap { min-width: 0; overflow: auto; border: 1px solid #dbe7f5; border-radius: 14px; background: #fff; }
 .workspace-v2 :is(.drd-screen,.drill-print-page) .sheet-preview-table { border-collapse: collapse; }
 .workspace-v2 :is(.drd-screen,.drill-print-page) .sheet-preview-table td { box-sizing: border-box; padding: 1px 3px; color: #000; font-size: 11pt; line-height: 1.2; white-space: pre-wrap; text-align: center; vertical-align: middle; }

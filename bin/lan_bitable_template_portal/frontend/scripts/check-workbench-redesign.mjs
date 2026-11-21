@@ -198,7 +198,7 @@ try {
       if(repairTrial&&scope==='A'){
         assert.equal(url.searchParams.get('period'),'all');
         assert.equal(url.searchParams.get('state'),'all');
-        for(let i=1;i<=6;i++)records.push({record_id:'new-'+i,title:'今日测试维修'+i,building:'A',state:'in_progress',
+        for(let i=1;i<=21;i++)records.push({record_id:'new-'+i,title:'今日测试维修'+i,building:'A',state:'in_progress',
           repair_start_time:String(Date.parse('2026-11-18T09:30:00+08:00')),workflow:'维修中',specialty:'电气'});
         records.push({record_id:'old-repair',title:'跨月待跟进项目',building:'A',state:historyClosed?'completed':'in_progress',
           repair_start_time:'2026-10-26 09:29',latest_followup_time:'2026-11-18 12:20',workflow:'维修完成待回访',specialty:'电气'});
@@ -335,11 +335,7 @@ try {
       await panel.waitFor({timeout:5000});
       const url=await Promise.race([reading,panel.waitFor({state:'hidden',timeout:5000}).then(()=>null)]);
       assert(url,title+' must start reading before it is closed');
-      if(notice){
-        await panel.locator('.n-base-close').click();
-        await panel.waitFor({state:'hidden',timeout:4000});
-        embeddedTest=false;
-      }else await closeTask(title);
+      await closeTask(title);
       return url;
     }finally{inlineRead=undefined;release();}
   }
@@ -389,8 +385,7 @@ try {
   await task('计划和进行中同一条').click();
   assert.equal(new URL((await noticeDetail).url()).searchParams.get('scope'),'A');
   assert.equal(new URL(page.url()).pathname,'/fixture');
-  await page.getByRole('button',{name:'关闭',exact:true}).first().click();
-  embeddedTest=false;
+  await closeTask('计划和进行中同一条');
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
   assert.equal(await todo.getByRole('button',{name:'读取更多待办'}).count(),0);
@@ -480,9 +475,9 @@ try {
   await task('A楼隔离维修').waitFor();
   await marker('画像学练情况汇总','7');
   await reveal('notices:变更');
-  await todo.getByText('A楼隔离变更',{exact:true}).waitFor();
+  await pop.getByText('A楼隔离变更',{exact:true}).waitFor();
   await reveal('notices:上下电');
-  await todo.getByText('B楼隔离上下电',{exact:true}).waitFor();
+  await pop.getByText('B楼隔离上下电',{exact:true}).waitFor();
   for(const key of ['notices:变更','notices:上下电']){
     await reveal(key);assert.equal(await pop.getByRole('button',{name:/办理 /}).count(),0);
   }
@@ -496,13 +491,13 @@ try {
   await absent('critical_guard','已完成重保');
   await todo.getByLabel('搜索待办').fill('本楼重保任务');
   await reveal('critical_guard');
-  await todo.getByText('本楼重保任务',{exact:true}).waitFor();
+  await pop.getByText('本楼重保任务',{exact:true}).waitFor();
   await todo.getByLabel('搜索待办').fill('');
   assert.equal(await page.getByText('冷源运行状态',{exact:true}).count(),0);
   assert.equal(await page.locator('.wb-shortcuts').getByText('通告办理').count(),0);
   await page.locator('.wb-scope select').selectOption('B');
   await reveal('notices:变更');
-  await todo.getByText('B楼隔离变更',{exact:true}).waitFor();
+  await pop.getByText('B楼隔离变更',{exact:true}).waitFor();
   await absent('notices:变更','A楼隔离变更');
   await absent('critical_guard','本楼重保任务');
 
@@ -533,7 +528,7 @@ try {
   await reveal('notices:维保');
   await pop.getByRole('button',{name:'更新／结束 计划和进行中同一条',exact:true}).waitFor();
   await reveal('events');
-  await todo.getByText('进行中事件通告甲',{exact:true}).waitFor();
+  await pop.getByText('进行中事件通告甲',{exact:true}).waitFor();
   await reveal('notices:维保');
   assert.equal(await pop.getByText('计划和进行中同一条',{exact:true}).count(),1);
   await reveal('drills');
@@ -558,14 +553,20 @@ try {
   const drillPanel=dialog('待完成演练甲');
   const drillDate=drillPanel.locator('.execution-panel input[type=date]:enabled');
   await drillDate.fill('2026-11-19');
-  const closeDrill=drillPanel.getByRole('button',{name:'关闭待办办理'});
-  await closeDrill.click();
+  const switchDrill=drillPanel.getByRole('button',{name:'切换待办'});
+  const choices=drillPanel.getByRole('region',{name:'选择另一条待办'});
+  await switchDrill.click();
+  await choices.getByRole('searchbox').fill('待处理维护单甲');
+  await choices.getByRole('button',{name:/待处理维护单甲/}).click();
   await page.getByRole('button',{name:'继续编辑',exact:true}).click();
   assert.equal(await drillDate.inputValue(),'2026-11-19','An unsaved drill remains open with its draft');
-  await closeDrill.click();
+  await switchDrill.click();
+  await choices.getByRole('button',{name:/待处理维护单甲/}).click();
   await page.getByRole('button',{name:'放弃修改并继续',exact:true}).click();
   await drillPanel.waitFor({state:'hidden'});
-  embeddedTest=false;
+  assert.equal(await page.getByRole('dialog',{name:'待办办理窗口',exact:true}).count(),1);
+  await dialog('待处理维护单甲').locator('[data-module-widget=engineer_mop]').waitFor();
+  await closeTask('待处理维护单甲');
   assert.equal(new URL(page.url()).pathname,'/fixture');
   assert.ok(!requests.slice(drillReads).some(([,url])=>url.includes('/drill-done/')));
 
@@ -629,7 +630,7 @@ try {
   assert.equal(await page.locator('.wb-check-panel').count(),0);
   const agenda=page.getByRole('complementary',{name:'我的日程'});
   await reveal('notices:变更');
-  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
+  await pop.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
   const search=page.getByRole('searchbox',{name:'全局搜索'});
   await search.fill('维项');
   await page.getByRole('region',{name:'搜索结果'}).getByRole('button',{name:'维修项目'}).waitFor();
@@ -712,8 +713,7 @@ try {
   const detailQuery=new URL((await scheduledDetail).url()).searchParams;
   assert.equal(detailQuery.get('active_item_id'),'A-active-change');
   assert.equal(detailQuery.get('scope'),'A');
-  await page.locator('.v2-notice-editor').getByRole('button',{name:'关闭',exact:true}).click();
-  embeddedTest=false;
+  await closeTask('冷冻水系统运行参数调整');
   await agenda.getByText('验收值班员',{exact:true}).waitFor();
   assert.equal(await agenda.getByText(/未来 12 小时气温/).count(),0);
   assert.equal(await agenda.getByText('16°C',{exact:true}).count(),0,'temperature is only shown in the masthead');
@@ -759,25 +759,25 @@ try {
 
   await set({...account('basic-desk','other',['maintenance','change','power','repair_management']),level:'L4'},['A','B']);
   await reveal('notices:变更');
-  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  await pop.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   await absent('notices:维保','配电柜保护定值复核');
   assert.equal(await page.locator('.wb-scope select').count(),0);
   assert.equal(await todo.getByRole('button',{name:'删除单据'}).count(),0);
   await set({...account('engineer-desk','engineer',full),level:'L2'},['A','B'],false);
   await reveal('notices:维保');
-  await todo.getByText('配电柜保护定值复核',{exact:true}).waitFor();
+  await pop.getByText('配电柜保护定值复核',{exact:true}).waitFor();
   await absent('notices:变更','冷冻水系统运行参数调整');
   await reveal('events');await task('A楼隔离事件').waitFor();
   await absent('events','A楼暖通事件');
   await set({...account('hvac-engineer','engineer',full),level:'L2',specialties:['暖通']},['A','B'],false);
   await reveal('notices:变更');
-  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  await pop.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   await absent('notices:维保','配电柜保护定值复核');
   await reveal('events');await task('A楼暖通事件').waitFor();
   await absent('events','A楼隔离事件');
   await set({...account('supervisor-desk','supervisor',full),level:'L3'},['A','B'],false);
   await reveal('notices:变更');
-  await todo.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
+  await pop.getByText('冷冻水系统运行参数调整',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
   await reveal('notices:维保');await task('配电柜保护定值复核').waitFor();
   await absent('repair_management','B楼隔离维修');
@@ -792,7 +792,7 @@ try {
   await overview.getByRole('heading',{name:'画像学练情况汇总'}).waitFor();
   await set({...account('d-duty','duty',full),home_scope:'D',level:'L4'},['D','E']);
   await reveal('inspection');
-  await todo.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
+  await pop.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
   waterTrial=true;
   await set({...account('water-desk','other',['water']),level:'L4'},['A']);
@@ -816,14 +816,21 @@ try {
   await tile('water').waitFor({state:'detached'});
   waterTrial=false;
   repairTrial=true;
+  await page.setViewportSize({width:1440,height:900});
   await set(account('repair-desk','engineer',['repair_management']),['A']);
   const list=pop.getByRole('list',{name:'待办清单',exact:true});
+  await tile('repair_management').waitFor();
+  await settleQueue();
+  const documentHeight=()=>page.evaluate(()=>document.documentElement.scrollHeight);
+  const heightBeforeList=await documentHeight();
   await reveal('repair_management');
   await task('跨月待跟进项目').waitFor();
+  assert(await list.evaluate(el=>el.scrollHeight>el.clientHeight),'a long group scrolls inside the popover');
+  assert.equal(await documentHeight(),heightBeforeList,'a long group must not extend the document');
   await todo.getByRole('button',{name:'今日',exact:true}).click();
   await reveal('repair_management');
-  await task('今日测试维修6').waitFor();
-  assert.equal(await list.getByRole('button',{name:/办理 今日测试维修/}).count(),6,'today view includes all loaded repair tasks');
+  await task('今日测试维修21').waitFor();
+  assert.equal(await list.getByRole('button',{name:/办理 今日测试维修/}).count(),21,'today view includes all loaded repair tasks');
   await absent('repair_management','跨月待跟进项目');
   await todo.getByRole('button',{name:/^历史未完维修/}).click();
   await absent('repair_management','今日测试维修1');

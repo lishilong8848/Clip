@@ -1,17 +1,26 @@
 <section class="serenity-desk entry-desk" :class="{'session-entry':!checking&&!loggedIn}" aria-label="账号办理">
   <p v-if="checking" role="status">正在检查登录状态…</p>
   <template v-else-if="!loggedIn">
-    <header class="serenity-heading"><h1>登录灯塔</h1></header>
-    <div class="entry-methods" role="tablist" aria-label="登录方式" @keydown="onTabKeydown">
-      <button v-for="tab in tabs" :id="'login-tab-'+tab.value" :key="tab.value" role="tab" type="button"
-        :aria-controls="'login-panel-'+tab.value" :tabindex="activeTab===tab.value?0:-1" :aria-selected="activeTab===tab.value" @click="selectTab(tab.value)">
-        <component :is="tab.icon" :size="19" aria-hidden="true"/>{{ tab.label }}</button>
-    </div>
-    <div :id="'login-panel-'+activeTab" role="tabpanel" :aria-labelledby="'login-tab-'+activeTab" class="entry-body">
-      <template v-if="activeTab==='feishu'"><span class="serenity-symbol"><QrCode :size="20"/></span><h2>使用飞书身份</h2>
-        <p v-if="authCancelled" role="status">上次授权已取消，可重新登录。</p><a class="entry-primary feishu-btn" :href="feishuLoginUrl" @click="handleFeishuLogin">前往飞书授权</a></template>
-      <PersonnelPasswordLogin v-else-if="activeTab==='password'"/>
-      <form v-else action="/api/auth/guest" method="post"><h2>访客查询</h2><p>访客可查看机柜信息。</p><button class="entry-primary" type="submit">查看机柜</button></form>
+    <div class="entry-scene" aria-hidden="true"><span class="entry-beam"/><span class="entry-tower"/></div>
+    <div class="entry-signin" data-v2-inline-feedback>
+      <header><h1>登录灯塔</h1></header>
+      <div class="entry-methods" role="tablist" aria-label="登录方式" @keydown="onTabKeydown">
+        <button v-for="tab in tabs" :id="'login-tab-'+tab.value" :key="tab.value" role="tab" type="button"
+          :aria-controls="'login-panel-'+tab.value" :tabindex="activeTab===tab.value?0:-1" :aria-selected="activeTab===tab.value" @click="selectTab(tab.value)">
+          <component :is="tab.icon" :size="17" aria-hidden="true"/>{{ tab.label }}</button>
+      </div>
+      <div :id="'login-panel-'+activeTab" role="tabpanel" :aria-labelledby="'login-tab-'+activeTab" class="entry-body">
+        <div v-if="activeTab==='feishu'" class="entry-choice">
+          <p>授权后进入南通运维工作空间。</p>
+          <p v-if="authCancelled" class="entry-cancelled" role="status">上次授权已取消，可重新登录。</p>
+          <a class="entry-primary feishu-btn" :href="feishuLoginUrl" @click="handleFeishuLogin"><QrCode :size="18" aria-hidden="true"/>前往飞书授权</a>
+          <a class="entry-link" href="https://applink.feishu.cn/T9aX3K4ZHOXl" target="_blank" rel="noopener noreferrer">申请飞书应用权限</a>
+        </div>
+        <PersonnelPasswordLogin v-else-if="activeTab==='password'"/>
+        <form v-else class="entry-choice" action="/api/auth/guest" method="post">
+          <p>访客权限仅用于查询机柜信息。</p><button class="entry-primary" type="submit">查看机柜</button>
+        </form>
+      </div>
     </div>
   </template>
   <template v-else-if="passwordSettings"><header class="serenity-heading"><h1>修改密码</h1><button type="button" @click="emit('back')">返回个人信息</button></header>

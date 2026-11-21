@@ -15,7 +15,7 @@
 .sdoc-scope {width:clamp(8em,11vw,12em);}
 .sdoc button,.sdoc-detail button,.sdoc-dialog button,.sdoc-dialog-head button,.sdoc-more summary {background:var(--sd-face);color:inherit;border:1px solid var(--sd-line);font:inherit;font-size:13px;line-height:1.3;cursor:pointer;padding:7px 10px;border-radius:8px;min-height:33px;}
 .sdoc button,.sdoc-detail button,.sdoc-dialog button,.sdoc-dialog-head button,.sdoc-file a {display:inline-flex;align-items:center;justify-content:center;gap:5px;}
-.sdoc .sdoc-primary,.sdoc-detail .sdoc-primary,.sdoc-dialog .sdoc-primary {color:white;background:#176f50;border-color:#176f50;}
+.sdoc .sdoc-primary,.sdoc-detail .sdoc-primary,.sdoc-dialog .sdoc-primary {color:var(--v2-palette-on-accent);background:var(--v2-palette-accent);border-color:var(--v2-palette-accent);}
 .sdoc button:disabled,.sdoc-detail button:disabled,.sdoc-dialog button:disabled {opacity:.51;cursor:default;}
 .sdoc :focus-visible,.sdoc-detail :focus-visible,.sdoc-dialog :focus-visible,.sdoc-dialog-head :focus-visible {outline:3px solid var(--v2-blue,#3389b6);outline-offset:2px;}
 .sdoc-inner,.sdoc-detail,.sdoc-form,.sdoc-stack {display:grid;align-content:start;gap:10px;}.sdoc-inner {padding:10px 14px 14px;}

@@ -71,6 +71,7 @@
   html.workspace-v2 .v2-shell.is-mobile-workspace.has-impersonation > .v2-main {flex:1;min-height:0;overflow:auto}
   html.workspace-v2 .v2-shell.is-mobile-workspace.is-inspection-immersive > .v2-main {padding:0 0 max(10px,env(safe-area-inset-bottom))}
   html.inspection-mobile-active :is(.lighthouse-launcher,.lighthouse-layer){visibility:hidden!important;pointer-events:none!important}
+  html.workspace-v2:has(.v2-mobile-nav) .lighthouse-launcher {display:none!important}
   .v2-mobile-profile-tools {display:flex;align-items:center;gap:4px;flex:none;margin-left:auto}
   .v2-mobile-profile-tools .n-button {width:44px;height:44px}
 }

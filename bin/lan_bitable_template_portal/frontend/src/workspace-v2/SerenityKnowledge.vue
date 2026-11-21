@@ -168,7 +168,7 @@ function deleteFolder(ok: boolean) {
 .sk-library button,.sk-library :deep(.sk-upload button) {font:inherit; font-size:13px; font-weight:600; cursor:pointer; border:1px solid var(--sk-edge); background:var(--sk-face); color:var(--sk-ink); padding:7px 11px; border-radius:9px; display:inline-flex; justify-content:center; align-items:center; gap:6px; min-height:34px; overflow-wrap:anywhere;}
 .sk-library button:hover:not(:disabled) {border-color:#549381;}
 .sk-library button:disabled,.sk-library :deep(.sk-upload button:disabled) {cursor:default; opacity:.55;}
-.sk-library button.sk-primary,.sk-library :deep(.sk-upload .sk-primary) {background:#187653; color:white; border-color:#187653;}
+.sk-library button.sk-primary,.sk-library :deep(.sk-upload .sk-primary) {background:var(--v2-palette-accent); color:var(--v2-palette-on-accent); border-color:var(--v2-palette-accent);}
 .sk-library :focus-visible {outline:3px solid var(--v2-blue,#3287b0); outline-offset:2px;}
 .sk-shelf {padding:clamp(10px,1.6vw,18px);}
 .sk-findbar {display:flex; flex-wrap:wrap; justify-content:space-between; gap:12px;}
