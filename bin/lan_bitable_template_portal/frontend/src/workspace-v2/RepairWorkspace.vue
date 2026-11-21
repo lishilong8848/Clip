@@ -5,7 +5,7 @@
       <header class="repair-desk-bar">
         <h1><Wrench :size="21" />检修办理</h1>
         <WorkspaceScopePicker />
-        <NInput :value="r.searchText" placeholder="搜索维修名称、设备、位置或专业" clearable :input-props="{'aria-label':'搜索维修项目'}" @update:value="r.searchText=$event"><template #prefix><Search :size="16" /></template></NInput>
+        <NInput :value="r.searchText" placeholder="搜索维修项目" clearable :input-props="{'aria-label':'搜索维修项目'}" @update:value="r.searchText=$event"><template #prefix><Search :size="16" /></template></NInput>
         <span class="repair-desk-layout" data-v2-layout-tools="repair"></span>
         <NButton data-v2-navigation type="primary" :disabled="r.v2Writing" @click="r.requestStartCreate"><Plus :size="17" />新建维修单</NButton>
         <NDropdown trigger="click" :options="moreOptions" @select="value=>more(value,r)"><NButton data-v2-navigation aria-label="更多检修操作" title="更多检修操作" :disabled="r.v2Writing"><Ellipsis :size="18" /></NButton></NDropdown>

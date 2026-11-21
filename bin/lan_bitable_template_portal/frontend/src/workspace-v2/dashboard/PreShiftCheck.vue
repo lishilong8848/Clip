@@ -266,5 +266,17 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 .ps-desk .v2-check-form{min-width:0}.ps-desk .ps-evidence{background:var(--soft-field,#eef4f1);padding:.55rem .7rem;border-radius:8px}
 @container shift-check (max-width:649px){.ps-shifts-label{grid-column:1 / -1}.ps-heading,.ps-controls{gap:.35rem}.ps-controls .n-select{width:5rem}}
 @container shift-check (min-width:980px){.ps-desk .v2-check-task{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(180px,.85fr);align-items:start}.ps-receipt,.ps-desk .v2-check-sync,.ps-desk .v2-check-task>.n-alert{grid-column:1/-1}.ps-evidence{grid-column:2}.ps-desk .v2-check-form{grid-column:1}}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-workspace) {grid-template-columns:minmax(0,1fr);gap:10px}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-shifts) {grid-template-columns:repeat(2,minmax(0,1fr))}
+@media(max-width:340px){
+  :global(.is-mobile-workspace .v2-shift-check .v2-check-shifts) {grid-template-columns:minmax(0,1fr)}
+}
+:global(.is-mobile-workspace .v2-shift-check .ps-shifts-label) {grid-column:1/-1}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-task) {display:flex;align-items:stretch}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-items) {
+  max-height:none;overflow:visible;scrollbar-gutter:auto;padding:0;
+}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-form>footer) {position:static;box-shadow:none}
+:global(.is-mobile-workspace .v2-shift-check .v2-check-form>footer .n-button) {min-height:44px}
 .ps-definitions .v2-check-definition{border-inline-start:3px solid var(--v2-blue,#577f95);border-radius:6px;background:var(--soft-face,#fff)}
 </style>

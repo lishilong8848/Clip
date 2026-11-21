@@ -22,16 +22,13 @@
           <component :is="group.icon" class="topnav-tab-icon" :size="16" aria-hidden="true" />{{ group.label }}<ChevronDown v-if="group.branches" class="topnav-chevron" :size="12" aria-hidden="true" />
         </button>
         <section v-if="group.branches" v-show="opened===group.key" :id="'nav-panel-'+group.key" class="topnav-directory"
-          :aria-label="group.label" :style="{'--menu-anchor':anchor+'px'}">
+          :aria-label="group.label" :style="{'--menu-anchor':anchor+'px','--menu-columns':group.branches.length}">
           <div v-for="branch in group.branches" :key="branch.key" class="topnav-branch">
-            <button v-if="branch.label" type="button" class="topnav-subtitle" :aria-expanded="branches.has(group.key+':'+branch.key)"
-              :aria-controls="'nav-branch-'+group.key+'-'+branch.key" @click="toggleBranch(group.key+':'+branch.key)">
-              {{ branch.label }}<ChevronDown :size="13" aria-hidden="true" />
-            </button>
-            <div v-show="!branch.label || branches.has(group.key+':'+branch.key)" class="topnav-links" :id="'nav-branch-'+group.key+'-'+branch.key">
+            <p v-if="branch.label && group.branches.length>1" class="topnav-subtitle">{{ branch.label }}</p>
+            <div class="topnav-links">
               <button v-for="entry in branch.entries" :key="entry.key" type="button" :data-nav-entry="entry.key"
                 :aria-current="entry.key===selected?'page':undefined" @click="choose(entry.key)">
-                <component :is="entry.icon" v-if="entry.icon" :size="15" aria-hidden="true" />{{ entry.label }}
+                <component :is="entry.icon" v-if="entry.icon" :size="15" aria-hidden="true" /><span>{{ entry.label }}</span>
               </button>
             </div>
           </div>
@@ -42,13 +39,12 @@
   </nav>
 </template>
 <script setup lang="ts">
-import {computed,nextTick,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
+import {computed,nextTick,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {ChevronDown, LayoutDashboard} from 'lucide-vue-next';
 import type {SidebarGroup} from './sidebarSections';
 const props=defineProps<{groups:SidebarGroup[];selected:string}>();
 const emit=defineEmits<{select:[key:string]}>();
-const nav=ref<HTMLElement>(), opened=ref(''), anchor=ref(0), branches=reactive(new Set<string>());
-const visited=new Set<string>();
+const nav=ref<HTMLElement>(), opened=ref(''), anchor=ref(0);
 const sections=computed(()=>props.groups.filter(group=>group.key!=='home'));
 const hasHome=computed(()=>props.groups.some(group=>group.key==='home'));
 const currentGroup=computed(()=>sections.value.find(group=>group.direct?.key===props.selected ||
@@ -66,11 +62,6 @@ function alignPanel(){
 function openPanel(group:SidebarGroup){
   opened.value=group.key;
   alignPanel();
-  if(!visited.has(group.key)){
-    visited.add(group.key);
-    const initial=group.branches?.find(branch=>branch.entries.some(entry=>entry.key===props.selected))?.key || group.defaultBranch;
-    if(initial)branches.add(group.key+':'+initial);
-  }
 }
 function toggle(group:SidebarGroup,keyboard=false){
   if(group.direct){choose(group.direct.key);return;}
@@ -85,10 +76,8 @@ async function focusPanel(group:SidebarGroup,event?:KeyboardEvent){
   if(opened.value!==group.key)return;
   const panel=currentPanel();
   const first=panel?.querySelector<HTMLButtonElement>('button[aria-current=page]') || panel?.querySelector<HTMLButtonElement>('button');
-  if(first?.getClientRects().length)first.focus();
-  else panel?.querySelector<HTMLButtonElement>('button')?.focus();
+  first?.focus();
 }
-function toggleBranch(key:string){if(!branches.delete(key))branches.add(key);}
 function closePanel(){opened.value='';}
 function choose(key:string){
   if(currentPanel()?.contains(document.activeElement))groupButton(opened.value)?.focus();
@@ -107,12 +96,7 @@ function onFocusOut(event:FocusEvent){
   const next=event.relatedTarget;
   if(opened.value && next instanceof Node && next!==groupButton(opened.value) && !currentPanel()?.contains(next))closePanel();
 }
-watch(()=>props.selected,selected=>{
-  closePanel();
-  const group=sections.value.find(item=>item.key===currentGroup.value);
-  const active=group?.branches?.find(branch=>branch.entries.some(entry=>entry.key===selected));
-  if(group&&active)branches.add(group.key+':'+active.key);
-});
+watch(()=>props.selected,closePanel);
 watch(sections,groups=>{if(!groups.some(group=>group.key===opened.value&&group.branches))closePanel();});
 onMounted(()=>{
   document.addEventListener('pointerdown',outside);

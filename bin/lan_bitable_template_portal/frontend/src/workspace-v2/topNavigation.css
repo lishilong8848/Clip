@@ -41,19 +41,22 @@
   .topnav-account-tools .topnav-account {max-width:165px}
   .topnav-username {overflow:hidden;text-overflow:ellipsis;max-width:8em}
   .topnav-directory {
-    --menu-width:min(204px,100%);
-    position:absolute;top:calc(100% + 5px);left:clamp(0px,var(--menu-anchor),100% - var(--menu-width));
+    --menu-width:min(calc(169px * var(--menu-columns) + 10px),100%);
+    position:absolute;top:calc(100% + 5px);left:clamp(0px,var(--menu-anchor),calc(100% - var(--menu-width)));
+    display:grid;grid-template-columns:repeat(var(--menu-columns),minmax(0,1fr));
     box-sizing:border-box;width:var(--menu-width);max-height:min(50dvh,370px);overflow:auto;overscroll-behavior:contain;
-    padding:5px;border:1px solid var(--soft-edge);border-radius:11px;
+    padding:5px 4px;border:1px solid var(--soft-edge);border-radius:11px;
     background:var(--soft-face);box-shadow:0 10px 26px rgb(30 40 55 / .18);
   }
-  .topnav-branch + .topnav-branch {border-top:1px solid var(--soft-edge)}
-  .v2-topnav .topnav-subtitle,.v2-topnav .topnav-links button {display:flex;align-items:center;gap:7px;width:100%;min-height:33px;padding:4px 8px;border-radius:6px;text-align:left;font-size:13px}
-  .v2-topnav .topnav-subtitle {justify-content:space-between;font-weight:650}
-  .topnav-subtitle[aria-expanded=true] svg {rotate:180deg}
-  .topnav-subtitle + .topnav-links {padding-inline-start:6px}
-  .v2-topnav :is(.topnav-tab,.topnav-subtitle,.topnav-links button):hover:not([data-current=true],[aria-current=page],[aria-expanded=true]) {background:var(--soft-field)}
+  .topnav-branch {min-width:0;padding:0 4px}
+  .topnav-branch + .topnav-branch {border-inline-start:1px solid var(--soft-edge)}
+  .topnav-subtitle {margin:0;padding:5px 8px 3px;color:var(--v2-muted);font-size:12px;font-weight:650}
+  .v2-topnav .topnav-links button {display:flex;align-items:center;gap:7px;width:100%;min-height:33px;padding:4px 8px;border-radius:6px;text-align:left;font-size:13px}
+  .topnav-links button>svg {flex:none}
+  .topnav-links button>span {min-width:0;overflow-wrap:anywhere}
+  .v2-topnav :is(.topnav-tab,.topnav-links button):hover:not([data-current=true],[aria-current=page],[aria-expanded=true]) {background:var(--soft-field)}
   .v2-topnav button:focus-visible {outline:2px solid var(--v2-blue);outline-offset:-2px}
+  @media(pointer:coarse){.v2-topnav :is(.topnav-tab,.topnav-links button){min-height:44px}}
   @media(max-width:1100px){
     .v2-topnav {grid-template-columns:auto 1fr;gap:3px 8px}
     .topnav-account-tools {grid-row:1;grid-column:2;justify-content:end}
@@ -66,7 +69,11 @@
     .topnav-chevron {width:10px}
   }
   html.workspace-v2 .v2-shell.is-mobile-workspace {--head-height:0px;--nav-width:0px;--v2-content-sticky-top:0px;padding-top:0;display:block;height:auto;overflow-x:clip}
-  html.workspace-v2 .v2-shell.is-mobile-workspace > .v2-main {margin-left:0}
+  html.workspace-v2:has(.v2-mobile-nav),
+  html.workspace-v2 .v2-shell.is-mobile-workspace:has(>.v2-mobile-nav) > .v2-main {
+    scroll-padding-bottom:calc(72px + env(safe-area-inset-bottom));
+  }
+  html.workspace-v2 .v2-shell.is-mobile-workspace > .v2-main {box-sizing:border-box;width:100%;margin-left:0}
   html.workspace-v2 .v2-shell.is-mobile-workspace.has-impersonation {display:flex;flex-direction:column;height:100dvh;overflow:hidden}
   html.workspace-v2 .v2-shell.is-mobile-workspace.has-impersonation > .v2-main {flex:1;min-height:0;overflow:auto}
   html.workspace-v2 .v2-shell.is-mobile-workspace.is-inspection-immersive > .v2-main {padding:0 0 max(10px,env(safe-area-inset-bottom))}

@@ -24,11 +24,7 @@ export async function selectWorkspaceSetting(page,label){
     return;
   }
   if(await group.getAttribute('aria-expanded')==='false')await group.click();
-  const button=page.getByRole('button',{name:label,exact:true,includeHidden:true});
-  const item=section.getByRole('button',{name:label,exact:true});
-  const branch=section.locator('.topnav-branch').filter({has:button}).locator('.topnav-subtitle');
-  if(await branch.count()&&await branch.getAttribute('aria-expanded')==='false')await branch.click();
-  await item.click();
+  await section.getByRole('button',{name:label,exact:true}).click();
 }
 export async function openWorkspaceEntry(page,key){
   const mobile=page.locator('.v2-mobile-nav');
@@ -45,10 +41,6 @@ export async function openWorkspaceEntry(page,key){
     const panel=await item.evaluate(el=>el.closest('section').id);
     const group=nav.locator('[aria-controls="'+panel+'"]');
     if(await group.getAttribute('aria-expanded')==='false')await group.click();
-    if(!await item.isVisible()){
-      const branch=await item.evaluate(el=>el.parentElement.id);
-      await nav.locator('[aria-controls="'+branch+'"]').click();
-    }
   }
   await item.click();
 }

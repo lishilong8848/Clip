@@ -10,7 +10,6 @@ type Section = { label: string; icon: Component; branches: Branch[] };
 type SidebarRole = Persona | 'manager' | 'administrator';
 export type SidebarGroup = Entry & {
   direct?: Entry;
-  defaultBranch?: string;
   branches?: { key: string; label: string; entries: Entry[] }[];
 };
 
@@ -83,10 +82,7 @@ export function sidebarGroups(entries: Entry[], role: SidebarRole): SidebarGroup
       const entry = visible[0].entries[0];
       groups.push({ key, label, icon, direct: key === 'repairs' ? { ...entry, label } : entry });
     } else {
-      const defaultBranch = role === 'duty' && key === 'operations' ? 'shift'
-        : role === 'administrator' && key === 'administration' ? 'permissions' : undefined;
-      groups.push({ key, label, icon, branches: visible,
-        defaultBranch: visible.some(branch => branch.key === defaultBranch) ? defaultBranch : undefined });
+      groups.push({ key, label, icon, branches: visible });
     }
   }
   return groups;

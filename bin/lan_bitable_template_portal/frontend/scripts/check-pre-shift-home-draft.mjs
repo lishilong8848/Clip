@@ -57,6 +57,22 @@ try{
   await check.getByRole('button',{name:'历史检查记录',exact:true}).click();
   await check.getByRole('button',{name:'返回检查清单',exact:true}).click();
   assert.equal(await note.inputValue(),text);
+  for(const [width,height] of [[320,620],[390,844],[430,932]]){
+    await page.setViewportSize({width,height});
+    await page.locator('.v2-mobile-nav').waitFor();
+    assert(await check.evaluate(el=>{
+      const body=el.querySelector('.v2-check-task'),workspace=el.querySelector('.v2-check-workspace');
+      return body.getBoundingClientRect().width>=workspace.getBoundingClientRect().width-1 &&
+        document.documentElement.scrollWidth<=innerWidth+1;
+    }),'checklist fills the mobile card');
+    assert.equal(await check.locator('.v2-check-items').evaluate(el=>getComputedStyle(el).maxHeight),'none');
+    const submit=check.getByRole('button',{name:'提交检查',exact:true});
+    await submit.scrollIntoViewIfNeeded();
+    assert(await submit.evaluate(el=>{
+      const rect=el.getBoundingClientRect(),nav=document.querySelector('.v2-mobile-nav').getBoundingClientRect();
+      return rect.bottom<=nav.top+1 && el.contains(document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2));
+    }),'submit can be reached above the mobile navigation');
+  }
   assert(calls.some(([p,m])=>p===layoutPath && m==='GET'));
   assert.equal(layouts.writes,0);
   assert.deepEqual(layouts.records.get(owner+':'+layoutPath),saved);

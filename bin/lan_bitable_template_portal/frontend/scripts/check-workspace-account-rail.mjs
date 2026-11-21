@@ -43,7 +43,9 @@ try{
  await group.focus();await page.keyboard.press('ArrowDown');
  await rail.locator('#nav-panel-administration button').first().waitFor();assert.equal(await group.getAttribute('aria-expanded'),'true');
  const settingsPanel=rail.locator('#nav-panel-administration'), popup=await settingsPanel.boundingBox(), trigger=await group.boundingBox();
- assert(popup.width<=225 && popup.x<=trigger.x+trigger.width && popup.x+popup.width>=trigger.x,'compact menu stays anchored to its trigger');
+ assert(popup.width<=700 && popup.x>=header.x && popup.x+popup.width<=header.x+header.width+1,'grouped settings fit inside the header width');
+ assert(popup.y>=header.y+header.height && popup.x<=trigger.x+trigger.width && popup.x+popup.width>=trigger.x,'menu stays below and anchored to its trigger');
+ assert.equal(await settingsPanel.getByRole('button').count(),10,'all available settings are listed on first open');
  assert.deepEqual(await main.boundingBox(),initial,'opening the menu does not displace content');
  await page.keyboard.press('Escape');assert(await group.evaluate(el=>el===document.activeElement));
  await selectWorkspaceSetting(page,'后台状态');await page.getByRole('heading',{name:'运行监测',exact:true}).waitFor();

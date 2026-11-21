@@ -215,12 +215,15 @@ for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:
  const itemList=check.getByRole('group',{name:'本次检查项目',exact:true});
  for(const viewport of [{width:1440,height:900},{width:402,height:874},{width:440,height:956},{width:360,height:640}]){
   await page.setViewportSize(viewport);await itemList.scrollIntoViewIfNeeded();
-  assert(await itemList.evaluate(el=>el.scrollHeight>el.clientHeight&&el.clientHeight<=481),'long checklists have a bounded scroll area');
+  const mobile=viewport.width<760;
+  assert(await itemList.evaluate((el,mobile)=>mobile
+    ? getComputedStyle(el).maxHeight==='none' && el.scrollHeight<=el.clientHeight+1
+    : el.scrollHeight>el.clientHeight && el.clientHeight<=481,mobile),'phone uses page scrolling while desktop bounds the checklist');
   assert(await check.locator('legend').first().evaluate(el=>parseFloat(getComputedStyle(el).fontSize)>=16),'check descriptions stay readable');
   await check.locator('fieldset').first().locator('.v2-check-normal').click();
   await check.locator('fieldset').last().locator('.v2-check-abnormal').click();
   await check.locator('fieldset').last().getByRole('textbox').fill('末项异常备注');
-  assert(await itemList.evaluate(el=>el.scrollTop>0),'the last check and its note are reachable within the list');
+  if(!mobile)assert(await itemList.evaluate(el=>el.scrollTop>0),'desktop can scroll to the last check');
   assert(await check.locator('fieldset').first().getByRole('radio',{name:'无异常',exact:true}).isChecked(),'scrolling retains earlier answers');
   const fits=await check.evaluate(el=>{
     const panel=el.closest('.wb-check-panel'),box=panel.getBoundingClientRect();
@@ -230,7 +233,14 @@ for(const width of [1440,390,360,375]){await page.setViewportSize({width,height:
       });
   });
   assert(fits,'check text and controls fit the home panel at '+viewport.width+'px');
-  await check.getByRole('button',{name:'提交检查',exact:true}).scrollIntoViewIfNeeded();
+  assert(await itemList.locator('fieldset').evaluateAll(rows=>rows.every(row=>{
+    const text=row.querySelector('legend').getBoundingClientRect();
+    const controls=row.querySelector('.v2-check-result').getBoundingClientRect();
+    return text.right<=controls.left+1 || text.bottom<=controls.top+1;
+  })),'check text and actions do not overlap');
+  const submit=check.getByRole('button',{name:'提交检查',exact:true});
+  await submit.scrollIntoViewIfNeeded();
+  if(mobile)assert(await submit.evaluate(el=>el.getBoundingClientRect().bottom<=document.querySelector('.v2-mobile-nav').getBoundingClientRect().top+1),'phone submit stays above bottom navigation');
   assert.equal(await check.locator('.v2-check-form>footer').evaluate(el=>el.previousElementSibling.classList.contains('v2-check-items')),true,'submit remains outside the scroll list');
   await itemList.evaluate(el=>el.scrollTop=0);await check.scrollIntoViewIfNeeded();await page.screenshot({path:path.join(output,'long-check-'+viewport.width+'.png'),fullPage:true});
  }

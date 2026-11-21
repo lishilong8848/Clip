@@ -34,6 +34,12 @@ try {
  assert(noticeMenu.width<=225 && Math.abs(noticeMenu.x-noticeTab.x)<=3,'menu is compact and anchored');
  await library.click();assert.equal(await notices.getAttribute('aria-expanded'),'false');
  assert.equal(await library.getAttribute('aria-expanded'),'true','switching categories replaces the prior menu');
+ const entries=nav.locator('#nav-panel-learning');
+ for(const key of ['learning','knowledge','documents']){
+   assert(await entries.locator('[data-nav-entry="'+key+'"]').isVisible(),key+' is available after one click');
+ }
+ assert.equal(await entries.locator('[data-nav-entry]').count(),3,'only authorized knowledge entries are listed');
+ assert.equal(await entries.locator('button[aria-expanded]').count(),0,'category labels do not require another click');
  await page.keyboard.press('Escape');
  assert(await library.evaluate(el=>el===document.activeElement),'Escape restores the trigger');
  // Existing dialogs use z-index 140. Their controls must stay above the header.
