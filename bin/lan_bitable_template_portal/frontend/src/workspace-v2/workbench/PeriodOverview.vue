@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
-import { ArrowUpRight, BookOpenCheck, Building2, ChevronRight, MapPinned, ShieldCheck } from 'lucide-vue-next';
+import { ArrowUpRight, BookOpenCheck, Building2, ChevronRight, ClipboardCheck, ListChecks, MapPinned, ShieldCheck } from 'lucide-vue-next';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 import type { Dict } from '../client';
 import { todoTimestamp } from '../businessTodos';
@@ -12,21 +12,21 @@ import type { CalendarItem, SealStatus } from './WorkbenchDailyLayout.vue';
 
 const props=defineProps<{user:Dict;scope:string;scopeLabel:string;scopes:ScopeOption[];role:Role;clock:number;tasks:WorkItem[];
   planState?:'loading'|'ok'|'stale'|'down'|'deny';sealStatus?:SealStatus;seals:CalendarItem[];partial:boolean;
-  action:(item:WorkItem)=>string}>();
-defineEmits<{open:[url:string];task:[item:WorkItem];retry:[]}>();
+  checkStatus:string;inspectionState?:'loading'|'ok'|'stale'|'down'|'deny';action:(item:WorkItem)=>string}>();
+defineEmits<{open:[url:string];task:[item:WorkItem];retry:[];check:[];retryInspection:[]}>();
 const period=ref<'day'|'week'|'month'>('week');
 const view=ref<'cards'|'table'>('cards');
 const periods=[{id:'day',label:'今日'},{id:'week',label:'本周'},{id:'month',label:'本月'}] as const;
 const filters=[
   {id:'all',label:'全部'},{id:'late',label:'逾期'},{id:'soon',label:'今明截止'},
-  {id:'running',label:'进行中'},{id:'planned',label:'待开始'},{id:'seal',label:'封网'},
+  {id:'running',label:'进行中'},{id:'planned',label:'未开始'},{id:'seal',label:'封网'},
 ] as const;
 type Filter = typeof filters[number]['id'];
 const filter=ref<Filter>('all');
 const today=computed(()=>beijingDate(props.clock));
 const canSeeCampus=computed(()=>props.role==='manager'||props.user.category==='manager');
 const canSeeBuilding=computed(()=>!['guest','temporary'].includes(props.user.role)&&!!props.scope);
-const canSeePersonal=computed(()=>!props.user.impersonation&&!['guest','temporary'].includes(props.user.role)&&props.user.category!=='duty');
+const canSeePersonal=computed(()=>!props.user.impersonation&&!['guest','temporary'].includes(props.user.role));
 const canReadLearning=computed(()=>!props.user.impersonation&&props.user.modules?.includes('learning'));
 const canReadTeam=computed(()=>canReadLearning.value&&(canSeeCampus.value||props.role==='supervisor')
   &&/^(?:ALL|CAMPUS|[A-EH])$/.test(props.scope));
@@ -47,7 +47,7 @@ const timeText=(value:number)=>timeFormat.format(value);
 const dateOnly=(value?:string|number)=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value);
 const startAt=(item:WorkItem)=>todoTimestamp(item.noticeWindow?.start||item.scheduledAt||item.time);
 const deadline=(item:WorkItem)=>item.dueAt??todoTimestamp(item.noticeWindow?.end);
-const running=(item:WorkItem)=>item.ongoing||item.kind==='events'||/进行中|处理中|维修中/.test(item.status);
+const running=(item:WorkItem)=>item.kind==='notices'?item.ongoing===true:item.kind==='events'||item.ongoing||/进行中|处理中|维修中/.test(item.status);
 const planned=(item:WorkItem)=>item.kind==='notices'&&!running(item);
 const tomorrow=computed(()=>beijingDate(props.clock+86400000));
 function urgency(item:WorkItem){
@@ -57,9 +57,14 @@ function urgency(item:WorkItem){
 }
 function matchesPeriod(item:WorkItem){
   const from=startAt(item), end=deadline(item);
+  if(planned(item)){
+    if(item.detail==='检修')return true;
+    if(from===undefined&&end===undefined)return period.value==='month'&&item.planMonth===Number(today.value.slice(5,7))+'月';
+    return (from??end!)<range.value.end&&(end??from!)>=range.value.start;
+  }
   if (end!==undefined&&end<=props.clock) return true;
   if (running(item)||item.kind==='repair_management') return from===undefined||from<range.value.end;
-  if (from===undefined&&end===undefined)return item.kind!=='notices'||period.value==='month';
+  if (from===undefined&&end===undefined)return true;
   return (from??end!)<range.value.end&&(end??from!)>=range.value.start;
 }
 function sortRows(a:WorkItem,b:WorkItem){
@@ -76,16 +81,17 @@ function timing(item:WorkItem){
   return start===undefined?'':dateOnly(raw)?dateFormat.format(start):timeText(start);
 }
 const highLevel=new Set(['events','event_notices','critical_guard','risk_inspection']);
-const personalKinds=new Set(['learning','signatures']);
+const personalKinds=new Set(['learning','signatures','inspection']);
+const inspectionTask=computed(()=>props.tasks.find(row=>row.kind==='inspection'));
 const active=computed(()=>props.tasks.filter(matchesPeriod).sort(sortRows));
-const campusFocus=(row:WorkItem)=>highLevel.has(row.kind)||row.kind==='notices'&&row.detail==='变更';
+const campusFocus=(row:WorkItem)=>highLevel.has(row.kind);
 const campusRows=computed(()=>active.value.filter(campusFocus));
 const buildingRows=computed(()=>active.value.filter(row=>!personalKinds.has(row.kind)&&(!canSeeCampus.value||!campusFocus(row))));
 const cards=computed(()=>[
   ...(canSeeCampus.value?[{id:'campus',title:'园区',icon:MapPinned,rows:campusRows.value}]:[]),
   ...(canSeeBuilding.value?[{id:'building',title:'楼栋',icon:Building2,rows:buildingRows.value}]:[]),
   ...(canSeePersonal.value?[{id:'personal',title:'个人',icon:BookOpenCheck,
-    rows:active.value.filter(row=>personalKinds.has(row.kind)&&!(row.kind==='learning'&&canReadLearning.value))}]:[]),
+    rows:active.value.filter(row=>personalKinds.has(row.kind)&&row.kind!=='inspection'&&!(row.kind==='learning'&&canReadLearning.value))}]:[]),
 ]);
 const sealRows=computed(()=>props.seals.filter(item=>{
   const start=todoTimestamp(item.start),end=todoTimestamp(item.end);
@@ -113,6 +119,14 @@ const visibleCards=computed(()=>cards.value.map(card=>({...card,
   rows:filter.value==='all'?card.rows:card.rows.filter(item=>matchesFilter(item,filter.value)),
   seals:card.id===sealCard.value&&(filter.value==='all'||filter.value==='seal')?sealRows.value:[],
 })).filter(card=>filter.value==='all'||card.rows.length||card.seals.length));
+function cardGroups(card:typeof visibleCards.value[number]){
+  if(card.id!=='building')return [{id:card.id,label:'',rows:card.rows}];
+  return [
+    {id:'building-running',label:'进行中通告',rows:card.rows.filter(row=>row.kind==='notices'&&running(row))},
+    {id:'building-planned',label:'未开始通告',rows:card.rows.filter(planned)},
+    {id:'building-other',label:'其他待办',rows:card.rows.filter(row=>row.kind!=='notices')},
+  ].filter(group=>group.rows.length);
+}
 const incomplete=computed(()=>props.partial||['loading','stale','down'].includes(props.planState||''));
 const rowMeta=(item:WorkItem)=>[
   (item.referencedScopes?.length?[...new Set(item.referencedScopes)].sort().map(scopeName).join('、'):scopeName(item.scope)),
@@ -189,19 +203,23 @@ watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,r
           <span v-if="card.rows.length||card.seals.length" class="row-count"><b>{{ card.rows.length+card.seals.length }}</b> 项</span>
         </header>
 
-        <ul v-if="card.rows.length" class="period-entries" :class="{expanded:expanded[card.id]}">
-          <li v-for="item in (expanded[card.id]?card.rows:card.rows.slice(0,4))" :key="item.key">
-            <button type="button" class="period-entry" :data-tone="urgency(item)===0?'late':urgency(item)<3?'soon':undefined" @click="$emit('task',item)">
-              <span class="period-kind">{{ label(item) }}</span><strong class="period-title">{{ item.title }}</strong>
-              <span class="period-action">{{ action(item) }} <ChevronRight :size="13" aria-hidden="true"/></span>
-              <small class="period-meta">{{ rowMeta(item) }}</small>
-              <small v-if="timing(item)" class="period-time">{{ timing(item) }}</small>
-            </button>
-          </li>
-        </ul>
-        <button v-if="card.rows.length>4" type="button" class="period-expand" :aria-expanded="!!expanded[card.id]" @click="expanded[card.id]=!expanded[card.id]">
-          {{ expanded[card.id]?'收起':`展开其余 ${card.rows.length-4} 项` }}
-        </button>
+        <section v-for="group in cardGroups(card)" v-show="group.rows.length" :key="group.id" class="period-group"
+          :data-group="group.id" :aria-label="group.label||undefined">
+          <h4 v-if="group.label" class="period-group-title">{{ group.label }} <small>{{ group.rows.length }}</small></h4>
+          <ul class="period-entries" :class="{expanded:expanded[group.id]}">
+            <li v-for="item in (expanded[group.id]?group.rows:group.rows.slice(0,4))" :key="item.key">
+              <button type="button" class="period-entry" :data-tone="urgency(item)===0?'late':urgency(item)<3?'soon':undefined" @click="$emit('task',item)">
+                <span class="period-kind">{{ label(item) }}</span><strong class="period-title">{{ item.title }}</strong>
+                <span class="period-action">{{ action(item) }} <ChevronRight :size="13" aria-hidden="true"/></span>
+                <small class="period-meta">{{ rowMeta(item) }}</small>
+                <small v-if="timing(item)" class="period-time">{{ timing(item) }}</small>
+              </button>
+            </li>
+          </ul>
+          <button v-if="group.rows.length>4" type="button" class="period-expand" :aria-expanded="!!expanded[group.id]" @click="expanded[group.id]=!expanded[group.id]">
+            {{ expanded[group.id]?'收起':`展开其余 ${group.rows.length-4} 项` }}
+          </button>
+        </section>
 
         <div v-if="card.seals.length" class="seal-list" aria-label="周期内封网">
           <div v-for="item in card.seals" :key="item.title+'-'+item.start" class="seal-row">
@@ -239,9 +257,23 @@ watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,r
           </small>
         </div>
 
+        <div v-if="filter==='all'&&card.id==='personal'&&(checkStatus||inspectionState&&inspectionState!=='deny')" class="personal-duty">
+          <button v-if="checkStatus" type="button" class="personal-duty-row" @click="$emit('check')">
+            <ClipboardCheck :size="16" aria-hidden="true"/><strong>班前检查</strong><small>{{ checkStatus }}</small><ChevronRight :size="13" aria-hidden="true"/>
+          </button>
+          <button v-if="inspectionTask" type="button" class="personal-duty-row" @click="$emit('task',inspectionTask)">
+            <ListChecks :size="16" aria-hidden="true"/><strong>{{ inspectionTask.title }}</strong><small>{{ inspectionTask.status }}</small><ChevronRight :size="13" aria-hidden="true"/>
+          </button>
+          <div v-else-if="inspectionState&&inspectionState!=='deny'" class="personal-duty-row" role="status">
+            <ListChecks :size="16" aria-hidden="true"/><strong>日常巡检</strong>
+            <small>{{ inspectionState==='loading'?'读取中…':inspectionState==='ok'?'暂无待巡检':'待核对' }}</small>
+            <button v-if="inspectionState==='stale'||inspectionState==='down'" type="button" @click="$emit('retryInspection')">重试</button>
+          </div>
+        </div>
+
         <p v-if="!card.rows.length&&!card.seals.length&&!incomplete
           &&!(canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building'))
-          &&!(card.id==='personal'&&canReadLearning)" class="period-muted">本周期暂无待处理事项</p>
+          &&!(card.id==='personal'&&(canReadLearning||checkStatus||inspectionState&&inspectionState!=='deny'))" class="period-muted">本周期暂无待处理事项</p>
       </article>
     </div>
   </section>
@@ -262,7 +294,7 @@ watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,r
 .status-filters button[data-filter=late][data-has-items=true]{color:var(--cf-danger,#a43c31)}
 .status-filters button[data-filter=soon][data-has-items=true]{color:var(--cf-warning,#8a4d11)}
 .period-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,255px),1fr));gap:8px;align-items:start}
-.period-grid[data-view=table]{grid-template-columns:minmax(0,1fr)}
+.period-grid[data-view=table]{grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))}
 .period-card{min-width:0;display:grid;gap:7px;padding:9px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-paper);overflow-wrap:anywhere;container:period-card / inline-size}
 .card-head{min-height:24px}
 .card-head svg{color:var(--desk-green)}
@@ -277,7 +309,18 @@ watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,r
 .learning-kpis{color:var(--desk-muted);font-size:.76rem}
 .learning-kpis b{font-variant-numeric:tabular-nums;color:var(--desk-green)}
 .learning-kpis [data-warn=true],.learning-kpis [data-warn=true] b{color:var(--cf-warning,#8a4d11)}
+.personal-duty{display:grid;gap:4px}
+.personal-duty-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:5px;text-align:start;
+  min-width:0;min-height:34px;padding:5px 7px;border:1px solid var(--desk-line);border-radius:7px;background:var(--desk-well);color:var(--desk-ink);font:inherit;font-size:.79rem}
+button.personal-duty-row{cursor:pointer}
+.personal-duty-row :is(svg,small){color:var(--desk-green)}
+.personal-duty-row button{color:var(--desk-green)}
 .period-entries{display:grid;gap:4px;list-style:none;margin:0;padding:0}
+.period-group{display:grid;gap:4px;min-width:0}
+.period-group-title{display:flex;align-items:center;gap:6px;margin:2px 0 0;color:var(--desk-muted);font-size:.78rem}
+.period-group-title small{padding:0 .4em;border-radius:999px;background:var(--desk-well);font-variant-numeric:tabular-nums}
+.period-group[data-group=building-running] .period-group-title{color:var(--desk-green)}
+.period-group[data-group=building-planned] .period-group-title{color:var(--v2-amber,#99441d)}
 .period-entries.expanded,.seal-list{max-height:21rem;overflow:auto;overscroll-behavior:contain;padding:2px}
 .period-entry,.seal-row{width:100%;min-width:0;display:grid;gap:3px 7px;align-items:center;text-align:left;
   border:1px solid var(--desk-line);border-radius:8px;background:var(--desk-well);padding:6px 7px;color:var(--desk-ink);font:inherit;font-size:.8rem}
@@ -308,5 +351,6 @@ watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,r
     grid-template-areas:"kind title meta time action";min-height:38px
   }
 }
-@media(pointer:coarse){.period-tools button,.status-filters button,.period-entry,.period-expand,.learning-title button{min-height:44px}}
+.period-grid[data-view=table] .period-group{max-inline-size:56rem}
+@media(pointer:coarse){.period-tools button,.status-filters button,.period-entry,.period-expand,.learning-title button,.personal-duty-row{min-height:44px}}
 </style>

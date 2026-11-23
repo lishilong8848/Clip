@@ -160,12 +160,19 @@ function noticeIsEnded(notice: Dict): boolean {
 }
 
 .list {
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   display: grid;
   gap: 6px;
   align-content: start;
   padding-right: 4px;
+}
+
+.notice-list:not(.notice-card-view) {
+  grid-template-columns: minmax(0, 1fr);
+  max-inline-size: 68rem;
+  gap: 4px;
 }
 
 .empty-box {
@@ -238,6 +245,7 @@ function noticeIsEnded(notice: Dict): boolean {
   margin-top: 3px;
   line-height: 1.35;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 
 .notice-row small,

@@ -72,6 +72,14 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(result['incoming']['verified'])
                 self.assertFalse(result['incoming']['staff'])
 
+    def test_handover_marks_long_day_staff_only_on_the_day_shift(self):
+        person = {'name':'实习验收', 'position':'运维实习生', 'group':'A班'}
+        staff = [*self.staff, {'building':'A','scheduleDate':'2026-11-18','shiftText':'长白','people':[person]}]
+        result = handover_roster({'A'}, staff, ['2026-11-18'], dt.datetime(2026, 11, 18, 11, tzinfo=TZ))
+        self.assertEqual(result['current']['staff'][1]['people'], [{**person, 'duty_kind':'长白'}])
+        self.assertEqual(result['incoming']['staff'], [])
+        self.assertNotIn('duty_kind', person)
+
     async def test_seal_scope_and_missing_source_state(self):
         auth = SimpleNamespace(session_scopes=lambda _: ['A','B'], account_profile=lambda _: {'level':'L1'})
         controller = SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'isolated'}})
@@ -81,12 +89,13 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         scoped = [dict(self.seals[0], buildings=['B'])]
         with patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value=set()), \
              patch('lan_bitable_template_portal.workbench_calendar.read_roster', return_value=([],[])), \
-             patch('lan_bitable_template_portal.workbench_calendar.read_seals', side_effect=[None, OSError(), scoped]), \
+             patch('lan_bitable_template_portal.workbench_calendar.read_seals', side_effect=[OSError(), scoped]) as read_seals, \
              patch.dict(os.environ, keys):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
                 endpoint='/api/personal-calendar?month=2026-11'
                 unconfigured=(await client.get(endpoint+'&scope=A')).json()['data']
                 self.assertEqual(unconfigured['seal_status'],'unconfigured')
+                read_seals.assert_not_called()
                 keys['CLIPFLOW_CALENDAR_SEALING_APP_TOKEN']='synthetic'
                 os.environ.update(keys, CLIPFLOW_CALENDAR_SEALING_TABLE_ID='tblUnavailable')
                 failure=(await client.get(endpoint+'&scope=A')).json()['data']
@@ -110,7 +119,8 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
              patch('lan_bitable_template_portal.workbench_calendar.read_seals', return_value=self.seals), \
              patch('lan_bitable_template_portal.workbench_calendar.read_changes', return_value=self.changes), \
              patch('lan_bitable_template_portal.workbench_calendar.read_zhihang_schedule', return_value={}), \
-             patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value={'change'}):
+             patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value={'change'}), \
+             patch.dict(os.environ, {'CLIPFLOW_CALENDAR_SEALING_APP_TOKEN':'fixture', 'CLIPFLOW_CALENDAR_SEALING_TABLE_ID':'tblSource'}):
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
                 aggregate = await client.get('/api/personal-calendar?month=2026-11')
                 wrong = await client.get('/api/personal-calendar?month=2026-11&scope=B')

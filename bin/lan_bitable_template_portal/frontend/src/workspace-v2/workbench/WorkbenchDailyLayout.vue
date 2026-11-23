@@ -427,7 +427,7 @@ function afterAgendaClose() {
             <div class="agenda-scroll"><WorkbenchAgendaList :entries="itinerary" :view="agendaView" @task="openAgendaTask" /></div>
           </NModal>
           <div v-if="calendarNotice" class="retry-note" role="status">{{ calendarNotice }} <button class="text-key" @click="calendarRevision++">重试日程</button></div>
-          <div v-if="sealStatus==='unconfigured'" class="retry-note muted" role="status">封网数据源未配置</div>
+          <div v-if="sealStatus==='unconfigured'" class="retry-note muted" role="status">封网表未接入</div>
           <div v-else-if="sealStatus==='failed'" class="retry-note" role="status">封网读取失败 <button class="text-key" @click="calendarRevision++">重试封网</button></div>
           <p v-else-if="sealStatus==='ready'&&!calendarDay?.items.some(item=>item.kind==='封网')" class="retry-note muted">当日无封网</p>
         </section>

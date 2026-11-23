@@ -21,7 +21,7 @@ defineEmits<{ task:[item:WorkItem] }>();
 </template>
 
 <style scoped>
-.timeline { list-style:none; padding:0; margin:8px 0 0 }
+.timeline { list-style:none; min-width:0; max-inline-size:100%; padding:0; margin:8px 0 0 }
 .timeline li { display:grid; grid-template-columns:42px minmax(0,1fr); gap:8px; font-size:13px }
 .timeline time { padding-top:8px; color:var(--desk-blue); font-size:12px; font-variant-numeric:tabular-nums }
 .timeline li>div { position:relative; display:grid; gap:2px; border-left:1px solid var(--desk-line); padding:5px 0 8px 11px; overflow-wrap:anywhere }
@@ -33,4 +33,8 @@ defineEmits<{ task:[item:WorkItem] }>();
 .timeline[data-view=cards] li{padding:4px 7px;border:1px solid var(--desk-line);border-radius:8px;background:var(--soft-face)}
 .timeline[data-view=cards] li>div{border:0;padding-inline-start:0}
 .timeline[data-view=cards] li>div::before{display:none}
+.timeline[data-view=table] li{grid-template-columns:36px minmax(0,1fr);gap:6px;border-bottom:1px solid var(--desk-line)}
+.timeline[data-view=table] li>div{border:0;padding:5px 0}
+.timeline[data-view=table] li>div::before{display:none}
+.agenda-task{min-width:0;overflow-wrap:anywhere}
 </style>

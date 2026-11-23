@@ -113,7 +113,7 @@ onBeforeUnmount(()=>downloadRequest?.abort());
 </template>
 
 <style scoped>
-.mop-history{display:grid;gap:12px;min-width:0;color:var(--v2-ink,#243149)}
+.mop-history{display:grid;gap:12px;min-width:0;color:var(--v2-ink,#243149);container:mop-history / inline-size}
 .history-toolbar,.history-filters,.history-pagination{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .history-toolbar h2{margin:0 auto 0 0;font-size:1.1rem}
 .history-filters{max-width:100%}
@@ -122,18 +122,19 @@ onBeforeUnmount(()=>downloadRequest?.abort());
 .mop-history button{cursor:pointer}
 .mop-history button:disabled{opacity:.64;cursor:default}
 .history-records[data-view=cards]{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(285px,100%),1fr));gap:8px}
+.history-records[data-view=table]{min-width:0;max-inline-size:68rem}
 .history-row,.history-columns{min-width:0;display:grid;align-items:start;gap:6px;padding:10px 12px;overflow-wrap:anywhere}
 .history-row{border:1px solid var(--v2-border,#d4dbe4);border-radius:9px;background:var(--soft-face,#fff)}
 .history-row>span,.history-pagination,.history-feedback{color:var(--v2-muted,#516177);font-size:.88rem}
 .history-records[data-view=table] :is(.history-row,.history-columns){grid-template-columns:minmax(0,1.3fr) minmax(0,.8fr) minmax(0,.85fr) minmax(0,1fr);gap:8px;border-radius:0}
 .history-columns{background:var(--soft-field,#f2f4f7);font-size:.85rem}
 .history-files{display:flex;gap:4px;flex-wrap:wrap;min-width:0}
-.history-files button{display:inline-flex;align-items:center;gap:5px;text-align:left;min-width:0;overflow-wrap:anywhere}
+.history-files button{display:inline-flex;align-items:center;gap:5px;text-align:left;min-width:0;overflow-wrap:anywhere;white-space:normal}
 .history-files svg{flex:none;color:var(--v2-palette-accent-text,#19704c)}
 .history-pagination{justify-content:flex-end}
 .history-pagination span:first-child{margin-inline-end:auto}
 .history-feedback{margin:4px 0}
-@media(max-width:660px){
+@container mop-history (max-width:640px){
   .history-filters{order:1;width:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) auto}
   .history-filters input{grid-column:1/3;width:100%}
   .history-records[data-view=table] .history-columns{display:none}

@@ -254,6 +254,8 @@ def handover_roster(scopes, roster, covered, current):
             if scope not in scopes or row.get('scheduleDate') != date or label not in labels:
                 continue
             people = row.get('people') or [{'name': name} for name in strings(row.get('dutyStaffActual'))]
+            if label == '长白':
+                people = [{**person, 'duty_kind': '长白'} for person in people]
             staff.append({'scope':scope, 'people':people})
         return {'date':date, 'shift':shift, 'end':finish.isoformat(), 'verified':date in covered, 'staff':staff}
 
@@ -428,7 +430,8 @@ def install_workbench_calendar(app, controller, runtime):
                 headers={'Cache-Control':'private, no-store'})
         staff_data, seals, changes = await asyncio.gather(
             asyncio.to_thread(read_roster, service, month, today, cached_only=True),
-            reads.read(('seals', sealing_app, sealing_table), lambda: read_seals(service, sealing_app, sealing_table)),
+            reads.read(('seals', sealing_app, sealing_table), lambda: read_seals(service, sealing_app, sealing_table))
+            if seal_configured else asyncio.sleep(0, result=None),
             asyncio.to_thread(read_changes, service) if include_changes else asyncio.sleep(0, result=[]),
             return_exceptions=True)
         if isinstance(changes, Exception):

@@ -102,7 +102,8 @@ try {
       if(holdAgenda&&url.searchParams.get('view')!=='roster')await new Promise(resolve=>releaseAgenda=resolve);
       const allowed=building=>scope==='ALL'||scope===building;
       const staff=(building,name,detail={})=>({scope:building,people:[{name,...detail}]});
-      const current=[staff('A','验收值班员',{open_id:'ou_fixtureA1',group:'A班',position:'值班员'}),staff('A','白班第二人'),staff('B','B楼当班人员')].filter(row=>allowed(row.scope));
+      const current=[staff('A','验收值班员',{open_id:'ou_fixtureA1',group:'A班',position:'值班员'}),staff('A','白班第二人'),
+        staff('A','隔离长白实习生',{open_id:'ou_fixtureIntern',group:'A班',position:'运维实习生',duty_kind:'长白'}),staff('B','B楼当班人员')].filter(row=>allowed(row.scope));
       const incoming=[staff('A','夜班验收人'),staff('B','B楼当晚值班员')].filter(row=>allowed(row.scope));
       const sealing={kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00',end:'2026-11-19T13:00:00+08:00',scopes:['A']};
       return ok({
@@ -168,7 +169,10 @@ try {
         const records=url.searchParams.get('month')==='11月'?
           [row('A','隔离明日截止维保','未开始'),row('B','B楼待开始维保','未开始'),row('A','隔离已完成计划','已完成')]:[];
         if(currentAccount.open_id==='period-review'&&url.searchParams.get('month')==='11月')
-          records.push({...row('A','隔离逾期维保','未开始'),record_id:'plan-overdue',planned_start_time:'2026-11-12 09:00',planned_end_time:'2026-11-13 18:00'});
+          records.push(
+            {...row('A','隔离逾期维保','未开始'),record_id:'plan-overdue',planned_start_time:'2026-11-12 09:00',planned_end_time:'2026-11-13 18:00'},
+            {...row('A','跨月未发检修','进行中'),record_id:'repair-unsent',work_type:'repair',planned_start_time:'2026-10-12 09:00',planned_end_time:'2026-10-13 18:00'},
+            {...row('A','已发检修通告','未开始'),record_id:'repair-sent',work_type:'repair',planned_end_time:'',repair_notice_linked:true});
         return ok({scope,source_snapshot_ready:true,records:records.filter(row=>scope==='ALL'||row.building_codes.includes(scope))});
       }
       if(aggregateTrial && url.searchParams.get('sections')==='ongoing'){
@@ -383,25 +387,27 @@ try {
   assert.equal(await page.getByText('每日学练',{exact:true}).count(),1,'per-paper daily_exempt still excludes the task');
 
   const period=page.getByRole('region',{name:'工作状态'});
-  await set(account('period-review','other',['daily','event','maintenance','learning']),['A','B']);
+  await set(account('period-review','other',['daily','event','maintenance','repair','learning']),['A','B']);
   const personalCard=period.getByRole('article',{name:'个人卡片'});
   await period.getByRole('button',{name:'今日',exact:true}).click();
   await personalCard.getByText(/已答.*4 \/ 15/).waitFor();
   const buildingCard=period.getByRole('article',{name:'楼栋卡片'});
   await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
+  await buildingCard.getByRole('region',{name:'进行中通告'}).getByText('已发检修通告',{exact:true}).waitFor();
   assert.equal(await period.getByText('隔离已完成计划',{exact:true}).count(),0);
   await period.getByRole('button',{name:'表单显示'}).click();
   assert.equal(await period.locator('.period-grid').getAttribute('data-view'),'table');
   await period.getByRole('button',{name:'卡片显示'}).click();
   const status=period.getByRole('group',{name:'工作状态筛选'});
   await status.getByRole('button',{name:'逾期 1',exact:true}).click();
-  await buildingCard.getByRole('button',{name:/隔离逾期维保.*已逾期/}).waitFor();
-  assert.equal(await period.getByText('隔离明日截止维保',{exact:true}).count(),0);
+  await buildingCard.getByRole('button',{name:/跨月未发检修.*已逾期/}).waitFor();
+  assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'今明截止 1',exact:true}).click();
   await buildingCard.getByRole('button',{name:/隔离明日截止维保.*明日截止/}).waitFor();
   assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
-  await status.getByRole('button',{name:'待开始 2',exact:true}).click();
-  assert.equal(await buildingCard.locator('.period-entry').count(),2,'both unstarted plans can be found without also showing active notices');
+  await status.getByRole('button',{name:'未开始 2',exact:true}).click();
+  await buildingCard.getByRole('region',{name:'未开始通告'}).getByText('跨月未发检修',{exact:true}).waitFor();
+  assert.equal(await buildingCard.getByText('已发检修通告',{exact:true}).count(),0);
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
@@ -431,6 +437,7 @@ try {
   await personalCard.getByText(/已答.*9 \/ 30/).waitFor();
   await period.getByRole('button',{name:'本月',exact:true}).click();
   await personalCard.getByText(/已答.*23 \/ 60/).waitFor();
+  await buildingCard.getByRole('region',{name:'未开始通告'}).getByText('隔离逾期维保',{exact:true}).waitFor();
   await page.locator('.wb-scope select').selectOption('B');
   await personalCard.getByText('本楼暂无个人题单').waitFor();
   await buildingCard.getByRole('button',{name:/B楼待开始维保/}).waitFor();
@@ -465,11 +472,15 @@ try {
   await set({...account('h-off','operator',['maintenance']),home_scope:'H',level:'L4'},['H']);
   await hRosterRead;
   assert.equal(await page.locator('.wb-check-panel').count(),0,'an off-duty H operator has no pre-shift card');
+  assert.equal(await personalCard.getByRole('button',{name:/班前检查/}).count(),0);
   await set(account('operator','operator',['learning','water']),['A']);
   await page.getByText('值班人员 · A楼 · 白班',{exact:true}).waitFor();
   await page.setViewportSize({width:393,height:852});
   const shiftArea=page.locator('.wb-check-panel');
   await shiftArea.getByRole('button',{name:'提交检查'}).waitFor();
+  await personalCard.getByRole('button',{name:/班前检查.*待检查/}).click();
+  assert(await shiftArea.evaluate(el=>document.activeElement===el));
+  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
   assert.equal(await shiftArea.getByLabel('当班人员').innerText(),'隔离值班人员');
   assert(await shiftArea.evaluate(area=>area.getBoundingClientRect().width>=innerWidth-40 &&
     area.querySelector('.v2-check-task').getBoundingClientRect().width>=innerWidth-70),
@@ -568,7 +579,8 @@ try {
   assert.ok(requests.slice(dutyReadStart).some(([,url,,params])=>url==='/api/engineer/mop/bootstrap'&&params.get('view')==='todos'));
   await absent('drills','已完成演练甲');
   await absent('engineer_mop','已上传维护单甲');
-  assert.ok(!requests.slice(dutyReadStart).some(([,url])=>url.startsWith('/api/learning/')));
+  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
+  assert.ok(!requests.slice(dutyReadStart).some(([,url])=>url==='/api/learning/papers'));
   await closeWhileReading('notices:维保','计划和进行中同一条',url=>url.pathname==='/api/workbench/lite-detail',true);
 
   const drillReads=requests.length;
@@ -684,6 +696,17 @@ try {
   const roster=agenda.getByRole('region',{name:'交接班人员'});
   await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
+  const intern=roster.getByRole('button',{name:'查看隔离长白实习生的基本信息（长白实习生）'});
+  assert(await intern.evaluate(el=>el.classList.contains('is-intern')));
+  await roster.getByRole('button',{name:'卡片显示',exact:true}).click();
+  await roster.locator('[data-view=cards]').getByText('接班人员',{exact:true}).first().waitFor();
+  await intern.click();
+  const internDialog=page.getByRole('dialog',{name:'隔离长白实习生的基本信息'});
+  await internDialog.getByText('长白',{exact:true}).waitFor();
+  assert.equal(await internDialog.getByRole('link',{name:'飞书对话'}).getAttribute('href'),'https://applink.feishu.cn/client/chat/open?openId=ou_fixtureIntern');
+  await page.locator('.title-line h1').click();
+  await roster.getByRole('button',{name:'表单显示',exact:true}).click();
+  assert.equal(await roster.getByRole('table').getByRole('columnheader').count(),3);
   await roster.getByRole('button',{name:'查看验收值班员的基本信息'}).click();
   const person=page.getByRole('dialog',{name:'验收值班员的基本信息'});
   await person.getByText('A班',{exact:true}).waitFor();
@@ -790,7 +813,7 @@ try {
   await page.getByLabel('工作台楼栋').selectOption('A');
   await page.locator('.wb-scope select').selectOption('B');
   await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
-  await agenda.getByText('封网数据源未配置',{exact:true}).waitFor();
+  await agenda.getByText('封网表未接入',{exact:true}).waitFor();
   assert.equal(await agenda.getByText('隔离封网安排',{exact:true}).count(),0,'switching the workbench building changes the calendar');
   await page.getByRole('navigation',{name:'常用业务'}).getByRole('button',{name:'维修项目',exact:true}).click();
   assert.equal(new URL(await page.evaluate(()=>window.opened),origin).searchParams.get('scope'),'B');
@@ -844,7 +867,18 @@ try {
   await set({...account('d-duty','duty',full),home_scope:'D',level:'L4'},['D','E']);
   await reveal('inspection');
   await pop.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
+  await personalCard.getByRole('button',{name:/D楼白班第 2 轮巡检/}).waitFor();
+  await personalCard.getByRole('button',{name:/班前检查/}).waitFor();
+  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
+  checkMember='d-operator';
+  await set({...account(checkMember,'operator',full),home_scope:'D',level:'L4'},['D']);
+  await personalCard.getByRole('button',{name:/D楼白班第 2 轮巡检/}).waitFor();
+  const offDutyRead=page.waitForResponse(response=>response.url().includes('/api/pre-shift-checks?')&&new URL(response.url()).searchParams.get('scope')==='D');
+  await set({...account('d-off','operator',full),home_scope:'D',level:'L4'},['D']);
+  await offDutyRead;
+  assert.equal(await personalCard.getByRole('button',{name:/班前检查|轮巡检/}).count(),0);
+  checkMember='';
   waterTrial=true;
   await set({...account('water-desk','other',['water']),level:'L4'},['A']);
   await reveal('water');

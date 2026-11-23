@@ -30,6 +30,9 @@ defineEmits<{open:[item:WorkItem]}>();
 </template>
 
 <style scoped>
+.queue-list{min-width:0;max-inline-size:100%}
+.queue-list[data-view=table]{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr));gap:0 10px}
+.queue-building{min-width:0;max-inline-size:56rem}
 .queue-building h4{display:flex;gap:6px;align-items:center;margin:0;padding:6px 8px;font-size:13px;color:var(--v2-palette-accent-text)}
 .queue-building h4 small{color:var(--v2-muted);font-weight:normal}
 .queue-building ul{list-style:none;padding:0;margin:0;min-width:0}

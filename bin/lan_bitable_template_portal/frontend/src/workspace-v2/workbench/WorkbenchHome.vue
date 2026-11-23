@@ -5,7 +5,7 @@ import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, Cl
 import type { Dict } from '../client';
 import { canReviewHandover, moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
 import { widget, type Widget } from '../dashboard/layout';
-import { preShiftHomeAccount } from '../../preShiftUtils';
+import { preShiftHomeAccount, preShiftHomeVisible, preShiftSummary } from '../../preShiftUtils';
 import { requestEmbeddedChange, runNavigationAction } from '../navigation';
 import PreShiftCheck from '../dashboard/PreShiftCheck.vue';
 import PeriodOverview from './PeriodOverview.vue';
@@ -35,6 +35,8 @@ const ownScope=computed(()=>concreteScopes.value.find(option=>option.value===pro
 const checkScope=computed(()=>preShiftHomeAccount(props.user)?ownScope.value:'');
 const checkUser=computed(()=>props.user.home_scope===checkScope.value?props.user:{...props.user,home_scope:checkScope.value});
 const shift=ref('');
+const checkSnapshot=ref<Dict>();
+const checkPanel=ref<InstanceType<typeof PreShiftCheck>>();
 const accountLevel=computed(()=>deskRole(props.user));
 const globalDesk=computed(()=>accountLevel.value==='L0'||accountLevel.value==='L1');
 const role=computed(()=>globalDesk.value?'manager':accountLevel.value==='L2'?'engineer':accountLevel.value==='L3'?'supervisor':
@@ -59,6 +61,23 @@ const selectedScope=computed(()=>{
   return (scopeOptions.value.find(option=>option.value===props.scope)||scopeOptions.value[0])?.value||'';
 });
 const dataScope=selectedScope;
+const dutyOverview=computed(()=>!props.user.impersonation&&!!checkScope.value
+  &&(dataScope.value===checkScope.value||composite(dataScope.value))&&preShiftHomeVisible(checkUser.value,checkSnapshot.value));
+const checkStatus=computed(()=>{
+  if(!dutyOverview.value)return '';
+  if(!checkSnapshot.value)return '待核对';
+  try{
+    const {pending,completed}=preShiftSummary(checkSnapshot.value);
+    return pending?pending+' 项待检查':completed?'已提交':'暂无待检查';
+  }catch{return '待核对';}
+});
+function focusPreShift(){
+  const section=checkPanel.value?.$el;
+  if(section instanceof HTMLElement){
+    section.scrollIntoView({block:'start'});
+    section.focus({preventScroll:true});
+  }
+}
 const readScopes=computed(()=>composite(dataScope.value)&&concreteScopes.value.length>0
   &&(dataScope.value==='CAMPUS'||!authorizedScopes.value.some(option=>option.value==='ALL'))
   ?concreteScopes.value.map(option=>option.value):undefined);
@@ -113,7 +132,8 @@ function switchScope(event:Event){
 const pendingSources=computed(()=>accountLevel.value
   ?deskSources[accountLevel.value==='L4'&&role.value==='duty'?'duty':accountLevel.value]:recipe.value.pending);
 const sourceContext=computed(()=>({user:props.user,scope:dataScope.value,scopes:authorizedScopes.value,
-  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value}));
+  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value,
+  inspectionOnDuty:dutyOverview.value&&!!shift.value}));
 const planMonths=computed(()=>[...new Set([beijingDate(clock.value).slice(0,7),
   ...eventPeriodRange('week','',clock.value).months,beijingDate(clock.value+86400000).slice(0,7)])]
   .map(month=>Number(month.slice(5))+'月'));
@@ -435,11 +455,12 @@ watch([context,selectedScope],()=>{
 },{flush:'sync'});
 
 function readDuty(data:Dict){
+  checkSnapshot.value=data.scope===checkScope.value?data:undefined;
   const assigned=data.viewer_active_shift;
   shift.value=data.scope===checkScope.value&&data.viewer_on_roster===true&&['白','夜'].includes(assigned)?assigned:'';
 }
 let dutyTimer:ReturnType<typeof setInterval>|undefined;
-watch(accessKey,()=>{shift.value='';},{flush:'sync'});
+watch([accessKey,checkScope],()=>{shift.value='';checkSnapshot.value=undefined;},{flush:'sync'});
 function updateClock(){
   if(!document.hidden){clock.value=Date.now();refreshExpired();}
 }
@@ -577,12 +598,14 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
           </li>
         </ul>
       </section>
-      <PreShiftCheck v-if="checkScope" :key="accessKey+checkScope" class="wb-check-panel shift-check"
+      <PreShiftCheck v-if="checkScope" ref="checkPanel" :key="accessKey+checkScope" class="wb-check-panel shift-check" tabindex="-1"
         :user="checkUser" :fixed-scope="checkScope" workbench @snapshot="readDuty" />
       <template #overview="{seals,sealStatus}"><PeriodOverview :key="accessKey" :user="user" :scope="dataScope" :scope-label="currentScopeLabel"
         :scopes="concreteScopes" :role="role" :clock="clock" :tasks="periodTasks" :plan-state="states.notice_plans?.status"
         :seal-status="sealStatus" :seals="seals" :partial="!!queueNote && queueNote!=='暂无待办'" :action="actionLabel"
-        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)" /></template>
+        :check-status="checkStatus" :inspection-state="orderedSources.some(source=>source.id==='inspection')?states.inspection?.status||'loading':undefined"
+        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)" @check="focusPreShift"
+        @retry-inspection="load('inspection',true)" /></template>
     </WorkbenchDailyLayout>
 
     <NModal :show="!!activeCase" :mask-closable="false" :close-on-esc="!caseListOpen" :auto-focus="false" @update:show="visible=>!visible&&closeCase()">
@@ -708,7 +731,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .priority-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }
 .priority-grid:has(> :only-child) { grid-template-columns:minmax(0,min(100%,460px)) }
 .priority-grid:has(> :nth-child(2):last-child) { grid-template-columns:repeat(2,minmax(0,1fr)) }
-.priority-board .priority-grid[data-view=table]{grid-template-columns:minmax(0,1fr)}
+.priority-board .priority-grid[data-view=table]{grid-template-columns:repeat(auto-fit,minmax(min(100%,19rem),1fr));max-inline-size:58rem}
 .task-desk .priority-capsule {
   --attention:var(--priority-red,#a82c3e);
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 5px;min-width:0;
@@ -721,10 +744,8 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .priority-capsule small { font-size:11px;color:var(--desk-muted) }
 .priority-status { justify-self:start;padding:1px 6px;border-radius:999px;background:color-mix(in srgb,var(--attention) 14%,var(--desk-paper));color:var(--attention);font-size:11px;font-weight:700 }
 .priority-capsule>svg { color:var(--attention);grid-area:1/2/span 3 }
-@media(min-width:701px){
-  .priority-grid[data-view=table] .priority-capsule{grid-template-columns:100px minmax(0,1.2fr) minmax(0,.8fr) auto;border-radius:6px}
-  .priority-grid[data-view=table] .priority-capsule>svg{grid-area:auto}
-}
+.priority-grid[data-view=table] .priority-capsule{border-radius:7px}
+.priority-grid[data-view=table] .priority-capsule strong{white-space:normal;overflow-wrap:anywhere}
 :global([data-v2-theme="dark"] .task-desk .priority-board) { --priority-red:#ffaeb2;--priority-amber:#fed491 }
 @media(max-width:700px){
   .priority-board .priority-grid { grid-template-columns:minmax(0,1fr) }

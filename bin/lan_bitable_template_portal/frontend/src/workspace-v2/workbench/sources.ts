@@ -33,7 +33,7 @@ const sections: Record<SourceId,Source['section']> = {
   event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',
 };
 const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
-type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string};
+type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string; inspectionOnDuty?:boolean};
 const array = (value: unknown): Dict[] => {
   if (!Array.isArray(value)) throw new Error('待办数据未完整返回。');
   return value;
@@ -171,10 +171,12 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
           {time:String(item.started_at||item.start_time||'')})]:[]),delayed:!!data.warning};
     });
   }
-  if(ctx.accessLevel==='duty'&&['D','E'].includes(ctx.scope)&&enabled('inspection','daily')){
+  if(!ctx.user.impersonation&&(ctx.accessLevel==='duty'||ctx.inspectionOnDuty)&&['D','E'].includes(ctx.scope)
+    &&ctx.user.modules?.includes('daily')){
     const url=link('/daily-inspection');
     add('inspection',url,[ctx.scope],async(scope,signal)=>{
       const data=await get(scopedUrl('/api/daily-inspection/status',{view_scope:scope}),signal);
+      if(ctx.accessLevel!=='duty'&&(!data.duty||data.can_edit===false))return {rows:[]};
       if(data.view_scope!==scope||data.duty?.scope!==scope||!Number.isSafeInteger(data.next_round)||!Number.isSafeInteger(data.round_limit))
         return {rows:[],delayed:true};
       const sameShift=data.active?.duty?.date===data.duty.date&&data.active?.duty?.shift===data.duty.shift;

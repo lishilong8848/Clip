@@ -520,6 +520,7 @@ onBeforeUnmount(() => {
 }
 
 .mop-candidate-list {
+  min-width: 0;
   max-height: clamp(260px, 46vh, 520px);
   min-height: 180px;
   overflow: auto;
@@ -527,6 +528,12 @@ onBeforeUnmount(() => {
   gap: 7px;
   align-content: start;
   padding-right: 4px;
+}
+
+.mop-candidate-list:not(.mop-candidate-grid) {
+  grid-template-columns: minmax(0, 1fr);
+  max-inline-size: 68rem;
+  gap: 4px;
 }
 
 .local-mop-upload {

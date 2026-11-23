@@ -10,7 +10,7 @@ export const todoCatalog = [
   { value:'signatures', label:'我的签名' },
 ] as const;
 export type TodoKind = typeof todoCatalog[number]['value'];
-export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number; specialty?:string; referencedScopes?:string[] };
+export type TodoRow = { key:string; kind:TodoKind; module:string; title:string; scope:string; status:string; time:string; url:string; detail?:string; dueAt?:number; sourceKey?:string; ongoing?:boolean; planMonth?:string; noticeWindow?:{start:string;end:string}; actorIds?:string[]; ownerLevel?:string; scheduledAt?:string|number; specialty?:string; referencedScopes?:string[] };
 export type TodoPage = { rows:TodoRow[]; more:boolean; note?:string; partial?:boolean };
 export type TodoSource = { id:string; page:number; more:boolean; load:(page:number, signal:AbortSignal)=>Promise<TodoPage> };
 export type TodoContext = { user:Dict; scope:string; scopes:{value:string;label:string}[]; selectedScopes?:string[]; home?:boolean; noticeTypes?:string[] };
@@ -56,11 +56,17 @@ export function plannedNoticeTodo(row:Dict, scope:string, month:string):TodoRow|
   const noticeWindow=noticePlanWindow(row);
   const linked=row.linked_ongoing;
   const activeId=linked?.active_item_id;
-  const ongoing=!!activeId||/进行中|未结束|未完成|^开始$|^更新$/.test(plan);
+  const inProgress=(status:string)=>/进行中|未结束|未完成|^(开始|更新)$/.test(status);
+  const fields=row.display_fields||{};
+  // A repair project's start time does not establish that its notice was sent.
+  const repairLinked=row.repair_notice_linked ?? Boolean(text(fields['设备检修关联-L']||fields['设备检修关联']).trim());
+  const ongoing=Boolean(activeId||linked?.target_record_id||row.work_summary?.started_at||inProgress(summary)
+    ||(type==='repair'?repairLinked:inProgress(plan)));
   const dueAt=todoTimestamp(noticeWindow.end);
   const referencedScopes=Array.isArray(row.building_codes)?row.building_codes.filter(code=>/^(?:[A-EH]|110)$/.test(code)):[];
   return {...ownership(row),key:`notice:${type}:plan:${id}`,kind:'notices',module:'notices',title:title(row),
-    scope:text(row.display_fields?.['楼栋']||row.building_codes)||scope,detail:noticeTypeLabels[type],status:plan,
+    scope:text(fields['楼栋']||row.building_codes)||scope,detail:noticeTypeLabels[type],
+    status:type==='repair'?(ongoing?'进行中':'待发检修'):plan,planMonth:type==='maintenance'?month:undefined,
     time:noticeWindow.start,dueAt:dueAt!==undefined&&/^\d{4}-\d{2}-\d{2}$/.test(noticeWindow.end)?dueAt+86399999:dueAt,
     noticeWindow,ongoing,referencedScopes,sourceKey:type+':'+id,specialty:noticeListSpecialty(row),
     url:link('/workbench-lite',{scope,month,work_type:type,[activeId?'active_item_id':'record_id']:activeId||id})};

@@ -4,7 +4,7 @@ import { NPopover } from 'naive-ui';
 import { MessageCircle, UsersRound } from 'lucide-vue-next';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 
-export type RosterPerson = {name:string;open_id?:string;group?:string;position?:string};
+export type RosterPerson = {name:string;open_id?:string;group?:string;position?:string;duty_kind?:string};
 type BuildingStaff = {scope:string;people:RosterPerson[]};
 export type ShiftRoster = {date:string;shift:'白'|'夜';verified:boolean;end?:string;staff:BuildingStaff[]};
 export type Handover = {current:ShiftRoster;incoming:ShiftRoster};
@@ -19,7 +19,8 @@ const rows=computed(()=>order.flatMap(scope=>{
 }));
 const label=(scope:string)=>scope==='110'?'110站':scope+'楼';
 const shiftText=(shift?:ShiftRoster)=>shift?shift.date.slice(5).replace('-','/')+' '+shift.shift+'班':'';
-const columns=['current','incoming'] as const;
+const columns=[{id:'current',label:'当班人员'},{id:'incoming',label:'接班人员'}] as const;
+const isLongDayIntern=(person:RosterPerson)=>person.position==='运维实习生'&&(person.duty_kind==='长白'||person.group==='长白');
 function chatLink(person:RosterPerson) {
   return !props.impersonating&&/^ou_[A-Za-z0-9]+$/.test(person.open_id||'')
     ?'https://applink.feishu.cn/client/chat/open?'+new URLSearchParams({openId:person.open_id!}):'';
@@ -33,31 +34,42 @@ function chatLink(person:RosterPerson) {
       <RecordViewSwitch v-if="rows.length" v-model="view"/>
     </header>
     <div v-if="handover" class="roster-grid" :data-view="view" :role="view==='table'?'table':undefined">
-      <div class="roster-row roster-columns" :role="view==='table'?'row':undefined">
-        <span :role="view==='table'?'columnheader':undefined">楼栋</span>
-        <span class="current-shift" :role="view==='table'?'columnheader':undefined"><b>当班人员</b><small>{{ shiftText(handover.current) }}</small></span>
-        <span :role="view==='table'?'columnheader':undefined"><b>接班人员</b><small>{{ shiftText(handover.incoming) }}</small></span>
+      <div v-if="view==='cards'&&rows.length" class="roster-dates">
+        <small>当班 {{ shiftText(handover.current) }}</small><small>接班 {{ shiftText(handover.incoming) }}</small>
+      </div>
+      <div v-if="view==='table'&&rows.length" class="roster-row roster-columns" role="row">
+        <span role="columnheader">楼栋</span>
+        <span v-for="column in columns" :key="column.id" :class="{'current-shift':column.id==='current'}" role="columnheader">
+          <b>{{ column.label }}</b><small>{{ shiftText(handover[column.id]) }}</small>
+        </span>
       </div>
       <div v-for="row in rows" :key="row.scope" class="roster-row" :role="view==='table'?'row':undefined">
         <b class="building-label" :role="view==='table'?'rowheader':undefined">{{ label(row.scope) }}</b>
-        <div v-for="column in columns" :key="column" class="roster-names" :class="{'current-shift':column==='current'}" :role="view==='table'?'cell':undefined">
-          <NPopover v-for="(person,index) in row[column]" :key="person.open_id||person.name+'-'+index"
-            trigger="click" placement="top" :show-arrow="false" raw>
-            <template #trigger>
-              <button type="button" class="person-key" :aria-label="'查看'+person.name+'的基本信息'" aria-haspopup="dialog">{{ person.name }}</button>
-            </template>
-            <section class="roster-person" role="dialog" :aria-label="person.name+'的基本信息'">
-              <strong>{{ person.name }}</strong>
-              <dl><dt>楼栋</dt><dd>{{ label(row.scope) }}</dd><dt>班次</dt><dd>{{ shiftText(handover[column]) }}</dd>
-                <template v-if="person.group"><dt>班组</dt><dd>{{ person.group }}</dd></template>
-                <template v-if="person.position"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
-              </dl>
-              <a v-if="chatLink(person)" :href="chatLink(person)" target="_blank" rel="noopener noreferrer">
-                <MessageCircle :size="16" aria-hidden="true"/>飞书对话</a>
-              <small v-else-if="!impersonating">飞书身份待核对</small>
-            </section>
-          </NPopover>
-          <small v-if="!row[column].length">{{ handover[column].verified?'暂无排班':'名单待同步' }}</small>
+        <div v-for="column in columns" :key="column.id" class="roster-shift" :class="{'current-shift':column.id==='current'}"
+          :role="view==='table'?'cell':undefined">
+          <div v-if="view==='cards'" class="shift-heading"><b>{{ column.label }}</b></div>
+          <div class="roster-names">
+            <NPopover v-for="(person,index) in row[column.id]" :key="(person.open_id||person.name)+'-'+index"
+              trigger="click" placement="top" :show-arrow="false" raw>
+              <template #trigger>
+                <button type="button" class="person-key" :class="{'is-intern':isLongDayIntern(person)}"
+                  :aria-label="'查看'+person.name+'的基本信息'+(isLongDayIntern(person)?'（长白实习生）':'')" aria-haspopup="dialog">
+                  <span>{{ person.name }}</span><small v-if="isLongDayIntern(person)" aria-hidden="true">长白实习</small>
+                </button>
+              </template>
+              <section class="roster-person" role="dialog" :aria-label="person.name+'的基本信息'">
+                <strong>{{ person.name }}</strong>
+                <dl><dt>楼栋</dt><dd>{{ label(row.scope) }}</dd><dt>班次</dt><dd>{{ isLongDayIntern(person)?'长白':shiftText(handover[column.id]) }}</dd>
+                  <template v-if="person.group"><dt>班组</dt><dd>{{ person.group }}</dd></template>
+                  <template v-if="person.position"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
+                </dl>
+                <a v-if="chatLink(person)" :href="chatLink(person)" target="_blank" rel="noopener noreferrer">
+                  <MessageCircle :size="16" aria-hidden="true"/>飞书对话</a>
+                <small v-else-if="!impersonating">飞书身份待核对</small>
+              </section>
+            </NPopover>
+            <small v-if="!row[column.id].length">{{ handover[column.id].verified?'暂无排班':'名单待同步' }}</small>
+          </div>
         </div>
       </div>
       <p v-if="!rows.length" class="roster-feedback" role="status">{{ message || '暂无已核验人员' }}</p>
@@ -71,19 +83,27 @@ function chatLink(person:RosterPerson) {
 
 <style scoped>
 .workbench-roster{min-width:0;color:var(--desk-ink)}
-.roster-head{display:flex;align-items:center;gap:7px;padding:7px 10px}
+.roster-head{display:flex;align-items:center;flex-wrap:wrap;gap:7px;padding:7px 10px}
 .roster-head h3{margin:0 auto 0 0}.roster-head svg{color:var(--desk-green)}
-.roster-grid{display:grid;gap:3px;padding:0 8px 8px}
-.roster-row{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(0,1fr);align-items:stretch;gap:4px;min-width:0}
-.roster-row>span,.roster-row>b,.roster-names{min-width:0;padding:4px 5px;border-radius:5px;overflow-wrap:anywhere}
-.roster-columns>span{background:var(--desk-well);font-size:12px;display:grid;align-content:start;gap:1px}
+.roster-grid{display:grid;gap:3px;padding:0 8px 8px;max-inline-size:100%}
+.roster-row{display:grid;grid-template-columns:38px repeat(2,minmax(0,1fr));align-items:stretch;gap:4px;min-width:0}
+.roster-columns>span,.roster-shift,.building-label{min-width:0;padding:4px 5px;border-radius:6px;background:var(--desk-well)}
+.roster-columns>span,.shift-heading{font-size:.76rem;display:grid;align-content:start;gap:1px}
 .roster-row .current-shift{background:var(--desk-green-wash);color:var(--desk-green);border-inline-start:2px solid var(--desk-green)}
-.roster-names{display:flex;align-items:center;align-content:center;flex-wrap:wrap;gap:1px 4px;background:var(--desk-well)}
-.building-label{display:grid;place-items:center;background:var(--desk-well);font-size:.77rem}
-.person-key{border:0;border-radius:4px;padding:3px;background:transparent;color:inherit;font-size:.84rem!important;font-weight:650!important;cursor:pointer;overflow-wrap:anywhere}
+.roster-shift{display:grid;align-content:center;gap:4px}
+.roster-names{display:flex;align-items:center;flex-wrap:wrap;gap:2px 4px;min-width:0}
+.building-label{display:grid;place-items:center;font-size:.77rem}
+.person-key{display:inline-flex;align-items:center;flex-wrap:wrap;gap:2px 4px;max-width:100%;min-width:0;min-height:27px;
+  border:0;border-radius:5px;padding:2px 4px;background:transparent;color:inherit;font:inherit;font-size:.82rem;font-weight:650;cursor:pointer;overflow-wrap:anywhere}
 .person-key:is(:hover,:focus-visible){text-decoration:underline;background:var(--desk-paper)}
-.roster-names>small,.roster-feedback,.roster-columns small{color:var(--desk-muted);font-size:.72rem}
-.roster-grid[data-view=cards] .roster-row:not(.roster-columns){box-shadow:var(--desk-shadow);border:1px solid var(--desk-line);padding:4px;border-radius:7px}
+.person-key.is-intern{color:var(--v2-amber,#99441d);background:color-mix(in srgb,currentColor 10%,var(--desk-paper))}
+.person-key small{font-size:.68rem;white-space:nowrap}
+.roster-names>small,.roster-feedback,.roster-columns small,.roster-dates small{color:var(--desk-muted);font-size:.72rem}
+.roster-grid[data-view=cards]{gap:6px}
+.roster-dates{display:flex;flex-wrap:wrap;gap:2px 10px;padding:0 4px}
+.roster-grid[data-view=cards] .roster-row{grid-template-columns:repeat(2,minmax(0,1fr));padding:6px;border:1px solid var(--desk-line);border-radius:8px}
+.roster-grid[data-view=cards] .building-label{grid-column:1/-1;justify-self:start;padding:2px 7px}
+.roster-grid[data-view=cards] .roster-shift{align-content:start}
 .roster-feedback{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:5px 9px}
 .roster-feedback button{border:1px solid var(--desk-line);background:var(--desk-well);border-radius:5px;color:var(--desk-green);min-height:34px}
 .roster-person{width:min(224px,calc(100vw - 24px));padding:10px 12px;border-radius:10px;border:1px solid var(--v2-border);

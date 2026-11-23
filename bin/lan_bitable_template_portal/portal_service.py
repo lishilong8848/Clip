@@ -30805,6 +30805,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "repair_management_record_id": (
                 record_id if work_type == WORK_TYPE_REPAIR else ""
             ),
+            **({"repair_notice_linked": bool(self._repair_target_record_id(record))}
+               if work_type == WORK_TYPE_REPAIR else {}),
             "source_event_id": source_event_id,
             "related_event_record_id": source_event_id,
             "event_title": event_title,

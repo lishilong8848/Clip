@@ -14,7 +14,7 @@ export const deskSources:Record<DeskRole,SourceId[]> = {
   L0:[...common,'ali_confirmation'], L1:[...common,'ali_confirmation'],
   L2:['notices','repair_management','events','engineer_mop','water'],
   L3:['events','critical_guard','risk_inspection','notices','engineer_mop','repair_management','water'],
-  L4:['notices','events','repair_management','water'],
+  L4:['notices','events','repair_management','water','inspection'],
   duty:['ali_confirmation','inspection','notices','event_notices','events','repair_management','critical_guard','drills','engineer_mop','water'],
 };
 const owned = (user:Dict,item:WorkItem) =>
@@ -33,7 +33,7 @@ export function deskTaskVisible(role:DeskRole|undefined,user:Dict,item:WorkItem,
     }
     if (item.kind==='repair_management') return true;
   }
-  if (item.kind==='water') return true;
+  if (item.kind==='water'||item.kind==='inspection') return true;
   if (role==='L4') return !!ownScope&&inDeskScope(item,ownScope)&&owned(user,item);
   if (role==='L3') return !!ownScope&&inDeskScope(item,ownScope)
     && (['events','critical_guard','risk_inspection'].includes(item.kind)||item.ownerLevel==='L4');
