@@ -471,7 +471,7 @@ async function saveDraft(){
     const revision=Number(base?.client_revision||0)+1;
     const result=await requestJson('/api/workbench/draft',{method:'PUT',body:JSON.stringify({scope:v.scope,work_type:v.work_type,target_record_id:v.target_record_id,action:action.value,fields,client_revision:revision})});
     if(Number(result.draft?.client_revision)!==revision||Object.entries(fields).some(([key,value])=>String(result.draft?.fields?.[key]??'')!==value))throw new Error(conflict);
-    draftVersion=Number(result.draft.version);draftWarning.value='';saved.value=snapshot();persist();message.success('草稿已保存');return true;
+    draftVersion=Number(result.draft.version);draftWarning.value='';saved.value=snapshot();persist();return true;
   }catch(e){detailError.value=e instanceof Error?e.message:'草稿保存失败';return false;}
   finally{saving.value=false;}
 }
@@ -875,8 +875,10 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
   .desk-editor.v2-notice-editor {width:calc(100vw - 10px);height:calc(100dvh - 10px);max-height:calc(100dvh - 10px);border-radius:12px}
   .desk-editor>.n-card-header,.desk-editor>.n-card-content,.desk-editor>.n-card__footer {padding:10px 12px}
   .notice-editor-title strong {font-size:16px}.desk-editor>.n-card-content {scrollbar-gutter:auto}
-  .v2-notice-editor-footer .n-button,.v2-notice-submit-group .n-radio-button {min-height:44px}
+  .v2-notice-editor-footer .n-button {min-height:44px}
+  .v2-notice-submit-group .n-radio-group {--n-height:44px !important}
   .v2-notice-editor-footer:not(.is-review) .v2-notice-submit-group {justify-content:space-between;flex:1 1 100%}
+  .v2-notice-submit-group > .n-button {margin-inline-start:auto}
   .review-columns {grid-template-columns:minmax(0,1fr)}.review-paper,.review-summary {padding:12px}
 }
 </style>

@@ -85,6 +85,7 @@ function checked(cell:Cell,value:string){
 .paper-scroll{width:100%;max-width:100%;min-width:0;max-height:72dvh;overflow:auto;overscroll-behavior:contain;background:var(--td-field);border:1px solid var(--td-line)}
 .paper{position:relative;display:grid;background:white;color:#151515;font:13px/1.15 "Microsoft YaHei",sans-serif}
 .paper-row{display:contents}.paper-cell{min-height:0;min-width:0;overflow:hidden;display:flex;flex-direction:column;padding:1px 3px;box-sizing:border-box}
+.paper-cell:has(> .paper-edit){padding:0}.tool-desk .paper-cell>button.paper-edit{padding:1px 3px;box-sizing:border-box;cursor:text}
 .paper-cell>span{overflow-wrap:anywhere;flex-shrink:1;min-height:0}.paper-cell .paper-signature{align-self:center;min-height:0;max-height:68%;max-width:95%;object-fit:contain}
 .paper-cell.paper-signed.paper-short{flex-direction:row;align-items:center;justify-content:flex-start!important;gap:3px}.paper-signed.paper-short .paper-signature{max-width:60%;max-height:100%;min-width:0}.paper-image,.paper-title{position:absolute;pointer-events:none;max-width:none}.paper-title{box-sizing:border-box;display:grid;align-content:center;text-align:center;white-space:pre-wrap;overflow:hidden;font-weight:700}
 .paper-choices,.paper-choices label{display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:.24em}.paper-choices{gap:.8em}.tool-desk .paper-choices input[type=radio]{accent-color:#136648;margin:0;width:1em;height:1em;min-height:0;box-shadow:none}

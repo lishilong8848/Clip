@@ -26,9 +26,12 @@
   <template v-if="ready">
     <LearningHome v-if="tab==='home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !!error"
       :management="viewMode==='overview'" :is-admin="isAdmin" :daily-duty="dailyDuty" @open="openLearning" @refresh="refreshView" />
-    <div v-if="v2Feedback && isAdmin" class="lp-switch lp-feedback-switch" role="group" aria-label="反馈视图">
-      <button type="button" :disabled="busy" :aria-pressed="tab==='pending'" @click="switchTab('pending')">{{ pendingQueue.total!=null && !pendingError ? '待处理 ' + pendingQueue.total : '待处理' }}</button>
-      <button type="button" :disabled="busy" :aria-pressed="tab==='issues'" @click="switchTab('issues')">全部反馈</button>
+    <div v-if="v2Feedback && isAdmin" class="lp-tools">
+      <div class="lp-switch lp-feedback-switch" role="group" aria-label="反馈视图">
+        <button type="button" :disabled="busy" :aria-pressed="tab==='pending'" @click="switchTab('pending')">{{ pendingQueue.total!=null && !pendingError ? '待处理 ' + pendingQueue.total : '待处理' }}</button>
+        <button type="button" :disabled="busy" :aria-pressed="tab==='issues'" @click="switchTab('issues')">全部反馈</button>
+      </div>
+      <button v-if="boot.question_problem_count > 0" type="button" class="lp-btn" :disabled="busy" @click="openQuestionProblems">题库待核对 {{ boot.question_problem_count }} 题</button>
     </div>
     <LearningPendingQuestions v-if="isAdmin && tab === 'pending'" :compact="v2Mobile" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
 

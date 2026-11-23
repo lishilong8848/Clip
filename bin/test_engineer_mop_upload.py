@@ -141,6 +141,60 @@ class EngineerMopUploadTests(unittest.TestCase):
         self._old_mock = os.environ.get("CLIPFLOW_BACKEND_MOCK_EXTERNAL")
         os.environ["CLIPFLOW_BACKEND_MOCK_EXTERNAL"] = "1"
 
+    def test_filled_records_find_older_files_and_recheck_scope_and_attachment_on_download(self):
+        signed = {"file_token":"fixtureOldMop", "name":"既有维保单.xlsx"}
+        rows = {
+            "recAHistory":{"楼栋":"A楼","维护总项":"历史巡视","专业":"电气","计划开始维护时间":"2025-04-01",
+                           MOP_SIGNED_ATTACHMENT_FIELD:[signed]},
+            "recOther":{"楼栋":"B楼","维护总项":"别楼","专业":"暖通",MOP_SIGNED_ATTACHMENT_FIELD:[signed]},
+            "recUnscoped":{"维护总项":"未选楼栋",MOP_SIGNED_ATTACHMENT_FIELD:[signed]},
+            "recPhotoOnly":{"楼栋":"A楼","照片":[{"file_token":"fixturePhoto","name":"照片.png"}]},
+        }
+
+        def read(path, *, app_token, table_id, params=None):
+            self.assertEqual((app_token, table_id),(DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID))
+            if path.startswith("records/"):
+                return {"data":{"record":{"fields":rows[path.split("/")[-1]]}}}
+            self.assertIn(MOP_SIGNED_ATTACHMENT_FIELD, json.loads(params['field_names']))
+            self.assertNotIn('照片', json.loads(params['field_names']))
+            if not params.get("page_token"):
+                return {"data":{"items":[{"record_id":"recPhotoOnly","fields":rows["recPhotoOnly"]}],
+                                "has_more":True,"page_token":"second"}}
+            return {"data":{"items":[{"record_id":key,"fields":rows[key]} for key in ("recAHistory","recOther","recUnscoped")],"has_more":False}}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            service=FakeMopUploadService(tmp)
+            field_catalog = dict.fromkeys(['楼栋', '维护总项', '专业', '计划开始维护时间', MOP_SIGNED_ATTACHMENT_FIELD])
+            with patch.object(service,"_request_json",side_effect=read), \
+                 patch.object(service,"_load_table_fields",return_value=([],field_catalog)), \
+                 patch.object(service,"_download_mop_attachment",return_value=(b"file","application/octet-stream")) as download:
+                records=service.engineer_mop_history(scope="A")["records"]
+                self.assertEqual([(row["record_id"],row["specialty"],row["planned"]) for row in records],
+                                 [("recAHistory","电气","2025-04-01")])
+                attachment_id=records[0]["attachments"][0]["id"]
+                with self.assertRaises(PortalError):
+                    service.download_engineer_mop_history(scope="A",record_id="recOther",attachment_id=attachment_id)
+                with self.assertRaises(PortalError):
+                    service.download_engineer_mop_history(scope="A",record_id="recUnscoped",attachment_id=attachment_id)
+                download.assert_not_called()
+                self.assertEqual(service.download_engineer_mop_history(scope="A",record_id="recAHistory",attachment_id=attachment_id),
+                                 (b"file","application/octet-stream","既有维保单.xlsx"))
+                rows["recAHistory"][MOP_SIGNED_ATTACHMENT_FIELD]=[]
+                with self.assertRaises(PortalError):
+                    service.download_engineer_mop_history(scope="A",record_id="recAHistory",attachment_id=attachment_id)
+
+    def test_filled_records_explicit_refresh_replaces_the_cached_list(self):
+        from clipflow_backend.main import FastAPIPortalController
+        from lan_bitable_template_portal.server import PortalRuntime
+
+        key = ('mop_history', 'isolated-refresh', 'A')
+        with patch.object(PortalRuntime, 'payload_cache', {}):
+            cache = FastAPIPortalController._cached_service_payload
+            self.assertEqual(cache(key, lambda: {'records': ['old']}), {'records': ['old']})
+            self.assertEqual(cache(key, lambda: {'records': ['new']}), {'records': ['old']})
+            self.assertEqual(cache(key, lambda: {'records': ['new']}, fresh=True), {'records': ['new']})
+            self.assertEqual(cache(key, lambda: {'records': []}), {'records': ['new']})
+
     def tearDown(self):
         if self._old_mock is None:
             os.environ.pop("CLIPFLOW_BACKEND_MOCK_EXTERNAL", None)

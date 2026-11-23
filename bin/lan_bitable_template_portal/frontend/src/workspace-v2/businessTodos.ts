@@ -46,6 +46,26 @@ export function sortTodos(input:TodoRow[], now=Date.now()):TodoRow[] {
   return [...unique.values()].sort((a,b)=>priority(a)-priority(b)||(a.dueAt??todoTimestamp(a.time)??Infinity)-(b.dueAt??todoTimestamp(b.time)??Infinity)||a.key.localeCompare(b.key));
 }
 
+export function plannedNoticeTodo(row:Dict, scope:string, month:string):TodoRow|undefined {
+  const type=String(row.work_type||'');
+  const id=String(row.record_id||'');
+  const plan=noticeListStatus(row,'planned').label;
+  const summary=text(row.work_summary?.status);
+  if(!id||!noticeTypeLabels[type]||ended(plan)||ended(summary)||row.work_summary?.ended_at
+    ||/取消|撤销|已关闭/.test(plan)||row.deleted||row.deleted_at)return;
+  const noticeWindow=noticePlanWindow(row);
+  const linked=row.linked_ongoing;
+  const activeId=linked?.active_item_id;
+  const ongoing=!!activeId||/进行中|未结束|未完成|^开始$|^更新$/.test(plan);
+  const dueAt=todoTimestamp(noticeWindow.end);
+  const referencedScopes=Array.isArray(row.building_codes)?row.building_codes.filter(code=>/^(?:[A-EH]|110)$/.test(code)):[];
+  return {...ownership(row),key:`notice:${type}:plan:${id}`,kind:'notices',module:'notices',title:title(row),
+    scope:text(row.display_fields?.['楼栋']||row.building_codes)||scope,detail:noticeTypeLabels[type],status:plan,
+    time:noticeWindow.start,dueAt:dueAt!==undefined&&/^\d{4}-\d{2}-\d{2}$/.test(noticeWindow.end)?dueAt+86399999:dueAt,
+    noticeWindow,ongoing,referencedScopes,sourceKey:type+':'+id,specialty:noticeListSpecialty(row),
+    url:link('/workbench-lite',{scope,month,work_type:type,[activeId?'active_item_id':'record_id']:activeId||id})};
+}
+
 export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSource[] {
   if(!todoOptions(ctx.user).some(item=>item.value===kind))return [];
   if(ctx.selectedScopes&&!['learning','signatures'].includes(kind))return [...new Set(ctx.selectedScopes)].filter(scope=>ctx.scopes.some(option=>option.value===scope)).flatMap(scope=>

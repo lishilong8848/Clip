@@ -17,6 +17,7 @@
         <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
         <TopNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" :groups="menuGroups" :selected="selectedMenu" @select="selectMenu">
           <template #account>
+            <WorkbenchWeather v-if="workbenchActive&&!user.impersonation" :identity="identityKey" />
             <NDropdown trigger="click" placement="bottom-end" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
               <NButton data-v2-navigation quaternary class="topnav-account" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="topnav-username">{{ user.name }}</span><ChevronDown aria-hidden="true" :size="14" /></NButton>
             </NDropdown>
@@ -118,6 +119,7 @@ const AccountHome=lazy(()=>import('./AccountHome.vue'));
 const HomePage = lazy(() => import('./HomePage.vue'));
 const WorkbenchHome = lazy(() => import('./workbench/WorkbenchHome.vue'));
 const GuestWorkbenchHeader = lazy(() => import('./workbench/WorkbenchDailyLayout.vue'));
+const WorkbenchWeather = lazy(() => import('./workbench/WorkbenchWeather.vue'));
 const HandoverReviewDialog = lazy(() => import('./workbench/HandoverReviewDialog.vue'));
 const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
 const NoticeWorkspace = lazy(() => import('./NoticeWorkspace.vue'));

@@ -7,7 +7,7 @@ type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult
 const statusOf = (error: unknown) => (error as {status?:number})?.status;
 
 export async function readWorkbenchRequest(path: string, signal: AbortSignal) {
-  const background=!path.startsWith('/api/workbench?');
+  const background=!path.startsWith('/api/workbench?')||path.includes('sections=records');
   const read=()=>requestJson(path,{signal,cache:'no-store',timeoutMs:18000,queueTimeoutMs:JSON_REQUEST_TIMEOUT_MS,background});
   try {
     return await read();

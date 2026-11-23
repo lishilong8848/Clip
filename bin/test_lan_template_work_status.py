@@ -41573,6 +41573,15 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ]
             remote_sources = {row["record_id"]: dict(row["display_fields"])
                               for row in service._records + service._change_records}
+            end_meta = FieldMeta("fld-end", "实际结束时间", "DateTime", 5, False, {}, [], False)
+            service._field_meta_by_name = {
+                "维护实施状态": FieldMeta("fld-state", "维护实施状态", "Formula", 20, False, {}, [], True),
+                "实际结束时间": end_meta,
+            }
+            service._change_field_meta_by_name = {
+                "变更进度": FieldMeta("fld-progress", "变更进度", "SingleSelect", 3, False, {}, ["进行中", "已结束"], False),
+                "实际结束时间": end_meta,
+            }
 
             def write_source_fields(*, record_id, fields, **kwargs):
                 remote_sources[record_id].update(fields)
@@ -41591,7 +41600,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ), patch.object(service, "_request_json", side_effect=lambda path, **kwargs: {
                     "data": {"record": {"record_id": path.split("/")[-1],
                                         "fields": dict(remote_sources[path.split("/")[-1]])}}
-                }), patch.object(service, "_patch_record_fields", side_effect=write_source_fields) as patch_fields:
+                }), patch.object(service, "_load_table_fields",
+                    return_value=([], service._change_field_meta_by_name),
+                ), patch.object(service, "_patch_record_fields", side_effect=write_source_fields) as patch_fields:
                     change_undo_id = service.create_notice_undo_checkpoint(
                         "end",
                         {

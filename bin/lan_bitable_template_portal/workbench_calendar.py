@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 import datetime as dt
+import logging
 import os
 import re
 import time
@@ -15,9 +16,11 @@ from upload_event_module.building_normalizer import extract_building_codes
 from .cabinet_guest import is_cabinet_guest
 from .module_access import allowed_modules
 from .personnel_source import ROSTER_NAMESPACE, TABLE_ID as PERSONNEL_TABLE, daily_roster, observed_on_day
+from .pre_shift_checks import windows
 
 TZ = dt.timezone(dt.timedelta(hours=8))
 BUILDINGS = frozenset((*'ABCDEH', '110'))
+LOG = logging.getLogger(__name__)
 
 
 def building(value):
@@ -76,6 +79,18 @@ def change_window(item, day, today, *, conflict=False):
     return clipped if clipped[0] < clipped[1] else None
 
 
+def sealing_windows(scopes, records):
+    windows = []
+    for item in records or ():
+        start, end = timestamp(item.get('startDate')), timestamp(item.get('endDate'))
+        title = str(item.get('sealingName') or '').strip()
+        buildings = item.get('buildings') or []
+        visible = sorted(scopes.intersection(buildings))
+        if start and end and end > start and title and (not buildings or visible):
+            windows.append({'kind':'封网', 'title':title[:240], 'start':start.isoformat(), 'end':end.isoformat(), 'scopes':visible})
+    return sorted(windows, key=lambda entry: entry['start'])
+
+
 def public_schedule(month, scopes, month_data, seals_data, changes_data, today):
     days = defaultdict(lambda: {'items': [], 'staff': []})
     assignments = defaultdict(set)
@@ -96,13 +111,7 @@ def public_schedule(month, scopes, month_data, seals_data, changes_data, today):
             if shift_code:
                 assignments[(day, shift_code, name)].add(scope)
 
-    seals = []
-    for item in seals_data or ():
-        start, end = timestamp(item.get('startDate')), timestamp(item.get('endDate'))
-        title = str(item.get('sealingName') or '').strip()
-        if start and end and end > start and title:
-            seals.append((title[:240], (start, end)))
-    seals.sort(key=lambda entry: entry[1][0])
+    seals = [(item, (timestamp(item['start']), timestamp(item['end']))) for item in sealing_windows(scopes, seals_data)]
     changes = []
     for item in changes_data or ():
         authorized = sorted(scopes.intersection(building(value) for value in strings(item.get('buildings'))))
@@ -117,9 +126,8 @@ def public_schedule(month, scopes, month_data, seals_data, changes_data, today):
         key = day.isoformat()
         midnight = dt.datetime.combine(day, dt.time(), TZ)
         day_window = (midnight, midnight + dt.timedelta(days=1))
-        sealing = [(title, window) for title, window in seals if overlap(window, day_window)]
-        for title, window in sealing:
-            days[key]['items'].append({'kind': '封网', 'title': title, 'start': window[0].isoformat(), 'end': window[1].isoformat()})
+        sealing = [(item, window) for item, window in seals if overlap(window, day_window)]
+        days[key]['items'].extend(item for item, _ in sealing)
         windows = []
         for item, title, authorized, elevated in changes:
             window = change_window(item, day, today)
@@ -127,11 +135,13 @@ def public_schedule(month, scopes, month_data, seals_data, changes_data, today):
                 windows.append((item, title, authorized, elevated, window))
         for index, (item, title, authorized, elevated, window) in enumerate(windows):
             compare = change_window(item, day, today, conflict=True)
-            conflicts = [name for name, seal_window in sealing[:1] if compare and overlap(compare, seal_window)]
+            relevant_seals = [(seal['title'], seal_window) for seal, seal_window in sealing
+                              if not seal['scopes'] or set(seal['scopes']).intersection(authorized)]
+            conflicts = [name for name, seal_window in relevant_seals if compare and overlap(compare, seal_window)]
             related = [name for other, (_, name, _, other_risk, other_window) in enumerate(windows)
                        if other != index and elevated and other_risk and overlap(window, other_window)]
             notes = [f'与封网 {name} 冲突' for name in conflicts]
-            notes += [f'当日有封网 {name}' for name, _ in sealing if name not in conflicts]
+            notes += [f'当日有封网 {name}' for name, _ in relevant_seals if name not in conflicts]
             notes += [f'与变更 {name} 时段重叠' for name in related]
             days[key]['items'].append({'kind': '冲突' if conflicts else '提醒' if notes else '变更',
                                       'title': title, 'scopes': authorized, 'notes': notes,
@@ -171,7 +181,7 @@ class CalendarReads:
         try:
             result = await asyncio.to_thread(loader)
         except Exception:
-            pass
+            LOG.warning('工作台%s数据读取失败', key[0], exc_info=False)
         finally:
             self.pending.pop(key, None)
         if len(self.cache) >= 36:
@@ -191,7 +201,8 @@ def read_roster(service, month, today, *, cached_only=False, today_only=False):
 
     first = dt.date.fromisoformat(month+'-01')
     rows, covered = [], []
-    dates = [day for day in (first-dt.timedelta(days=1), *month_dates(month)) if day <= today and (not today_only or day == today)]
+    dates = [day for day in (first-dt.timedelta(days=1), *month_dates(month))
+             if day <= today and (not today_only or day >= today-dt.timedelta(days=1))]
     for day in reversed(dates):
         date = day.isoformat()
         snapshot = None
@@ -211,10 +222,42 @@ def read_roster(service, month, today, *, cached_only=False, today_only=False):
         for person in snapshot.get('people') or []:
             if person.get('name') and person.get('scope') in BUILDINGS:
                 shift = person.get('shift') if person.get('duty_kind') != '长白' else '长白'
-                groups[(person['scope'], shift)].append(person['name'])
-        for (scope, shift), names in groups.items():
-            rows.append({'building':scope,'scheduleDate':date,'shiftText':shift,'dutyStaffActual':names})
+                groups[(person['scope'], shift)].append({
+                    key: str(person.get(key) or '') for key in ('name', 'open_id', 'group', 'position')
+                })
+        for (scope, shift), people in groups.items():
+            rows.append({'building':scope,'scheduleDate':date,'shiftText':shift,
+                         'dutyStaffActual':[person['name'] for person in people], 'people':people})
     return rows, covered
+
+
+def handover_roster(scopes, roster, covered, current):
+    today = current.date()
+    start, end = windows(today.isoformat(), '白')
+    if current < start:
+        pairs = ((today-dt.timedelta(days=1), '夜'), (today, '白'))
+    elif current < end:
+        pairs = ((today, '白'), (today, '夜'))
+    else:
+        pairs = ((today, '夜'), (today+dt.timedelta(days=1), '白'))
+
+    def shift_rows(day, shift):
+        date = day.isoformat()
+        _, finish = windows(date, shift)
+        staff = []
+        labels = {shift, shift+'班'}
+        if shift == '白':
+            labels.add('长白')
+        for row in roster:
+            scope = building(row.get('building') or row.get('buildingText'))
+            label = str(row.get('shiftText') or row.get('shift') or '')
+            if scope not in scopes or row.get('scheduleDate') != date or label not in labels:
+                continue
+            people = row.get('people') or [{'name': name} for name in strings(row.get('dutyStaffActual'))]
+            staff.append({'scope':scope, 'people':people})
+        return {'date':date, 'shift':shift, 'end':finish.isoformat(), 'verified':date in covered, 'staff':staff}
+
+    return {name: shift_rows(day, shift) for name, (day, shift) in zip(('current', 'incoming'), pairs)}
 
 
 def read_seals(service, app_token, table_id):
@@ -225,14 +268,16 @@ def read_seals(service, app_token, table_id):
         response = service._request_json('records', params=params, app_token=app_token, table_id=table_id)
         data = response.get('data') or {}
         records = data.get('items')
-        if not isinstance(records, list):
+        if response.get('code') != 0 or not isinstance(records, list) or type(data.get('has_more')) is not bool:
             raise ValueError('封网记录读取不完整')
         for record in records:
             fields = record.get('fields') or {}
             title = fields.get('封网名称') or fields.get('封网信息') or fields.get('名称')
             start = fields.get('开始日期') or fields.get('开始时间') or fields.get('开始')
             end = fields.get('结束日期') or fields.get('结束时间') or fields.get('结束')
-            result.append({'sealingName':service._repair_management_plain_text(title),'startDate':start,'endDate':end})
+            area = fields.get('适用楼栋') or fields.get('楼栋') or fields.get('实施区域')
+            result.append({'sealingName':service._repair_management_plain_text(title),'startDate':start,'endDate':end,
+                           'buildings':extract_building_codes(service._repair_management_plain_text(area))})
         if not data.get('has_more'):
             return result
         token = data.get('page_token')
@@ -350,7 +395,7 @@ def install_workbench_calendar(app, controller, runtime):
         scopes = set(BUILDINGS if 'ALL' in granted_scopes else BUILDINGS.intersection(granted_scopes))
         level = profile.get('level')
         is_h_admin = profile.get('category') == 'duty' and profile.get('home_scope') == 'H' and await asyncio.to_thread(auth.is_admin, session)
-        if not is_h_admin and (level in {'L2','L3','L4'} or profile.get('category') == 'duty'):
+        if not is_h_admin and (level in {'L3','L4'} or profile.get('category') == 'duty'):
             home = profile.get('home_scope')
             scopes &= {home} if home else scopes if len(scopes) == 1 else set()
         if scope in BUILDINGS:
@@ -359,10 +404,14 @@ def install_workbench_calendar(app, controller, runtime):
             return JSONResponse({'ok': False, 'error': '当前楼栋没有日历权限。'}, status_code=403)
         service = runtime.service
         include_shared = level != 'L4' or profile.get('category') == 'duty'
+        if level == 'L2' and scopes != {profile.get('home_scope')}:
+            include_shared = False
         include_changes = 'change' in modules and include_shared
         sealing_app = os.getenv('CLIPFLOW_CALENDAR_SEALING_APP_TOKEN', '').strip()
         sealing_table = os.getenv('CLIPFLOW_CALENDAR_SEALING_TABLE_ID', '').strip()
-        today = dt.datetime.now(TZ).date()
+        seal_configured = bool(re.fullmatch(r'[A-Za-z0-9]+', sealing_app) and re.fullmatch(r'tbl[A-Za-z0-9]+', sealing_table))
+        current = dt.datetime.now(TZ)
+        today = current.date()
         if request.query_params.get('view') == 'roster':
             from upload_event_module.config import config
             roster, covered = await asyncio.to_thread(read_roster, service, month, today, cached_only=True, today_only=True)
@@ -374,6 +423,7 @@ def install_workbench_calendar(app, controller, runtime):
                 else:
                     roster, covered = await reads.read(key, loader) or ([], [])
             return JSONResponse({'ok':True,'data':{'month':month,'days':public_schedule(month, scopes, roster, [], [], today),
+                'handover':handover_roster(scopes, roster, covered, current),
                 'unavailable':[] if today.isoformat() in covered else ['排班'],'roster_dates':covered}},
                 headers={'Cache-Control':'private, no-store'})
         staff_data, seals, changes = await asyncio.gather(
@@ -386,6 +436,7 @@ def install_workbench_calendar(app, controller, runtime):
         roster, covered = staff_data if isinstance(staff_data, tuple) else ([], [])
         if isinstance(seals, Exception):
             seals = None
+        seal_status = 'ready' if seals is not None else 'failed' if seal_configured else 'unconfigured'
         missing = [label for label, value in [('封网', seals), ('计划变更', changes)] if value is None]
         days = public_schedule(month, scopes, roster, seals, changes, today)
         if include_shared:
@@ -399,7 +450,8 @@ def install_workbench_calendar(app, controller, runtime):
             except Exception:
                 missing.append('智航日程')
         return JSONResponse({'ok': True, 'data': {'month': month, 'days': days,
-                                                'unavailable': missing, 'roster_dates':covered}},
+                                                'unavailable': missing, 'seal_status':seal_status,
+                                                'seal_windows':sealing_windows(scopes, seals), 'roster_dates':covered}},
                             headers={'Cache-Control': 'private, no-store'})
 
     @app.get('/api/personal-calendar/weather')

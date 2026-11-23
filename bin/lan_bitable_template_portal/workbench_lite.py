@@ -7688,7 +7688,9 @@ def render_workbench_lite(
           if(!robots.length)panel.textContent='当前没有适用的已启用机器人';
           if(selected.some(id=>!robots.some(r=>r.id===id))){{const clear=document.createElement('button');clear.type='button';clear.textContent='移除已失效的机器人选择';clear.onclick=()=>{{field.value=JSON.stringify(selected.filter(id=>robots.some(r=>r.id===id)));field.dispatchEvent(new Event('input',{{bubbles:true}}));render();}};panel.append(clear);}}
         }};
-        render();form.addEventListener('change',event=>{{if(['building_codes','notice_type'].includes(event.target.name))render();}});
+        render();
+        updateActionAvailability(form);
+        form.addEventListener('change',event=>{{if(['building_codes','notice_type'].includes(event.target.name))render();}});
       }}catch(error){{if(form.isConnected){{panel.textContent='机器人读取失败，可重试；原通告内容保留。';const retry=document.createElement('button');retry.type='button';retry.textContent='重新读取';retry.onclick=()=>hydrateDingTalkPicker(form);panel.append(retry);}}}}
     }}
     let noticeTagsTimer = 0, noticeTagsRequest = null, noticeTagsSequence = 0;

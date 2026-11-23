@@ -51,13 +51,14 @@
       </label>
       <div class="candidate-summary">
         <span>{{ mopCandidates.length }} 个可选 MOP</span>
+        <RecordViewSwitch v-model="recordView"/>
         <strong v-if="recommendedCount">推荐 {{ recommendedCount }}</strong>
         <strong v-else>候选 MOP</strong>
       </div>
       <div v-if="!mopCandidates.length" class="empty-box">
         暂无可选 MOP 表格
       </div>
-      <div v-else class="mop-candidate-list">
+      <div v-else class="mop-candidate-list" :class="{'mop-candidate-grid':recordView==='cards'}">
         <button type="button"
           v-for="mop in mopCandidates"
           :key="mop.record_id"
@@ -134,6 +135,9 @@
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { Dict } from "../api/client";
 import MopSelectedFileCard from "./MopSelectedFileCard.vue";
+import RecordViewSwitch from './RecordViewSwitch.vue';
+
+const recordView=ref<'cards'|'table'>('cards');
 
 const props = defineProps<{
   selectedNotice: Dict | null;
@@ -302,6 +306,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.mop-candidate-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(200px,100%),1fr));align-items:start}
 .panel {
   padding: 14px;
   display: grid;

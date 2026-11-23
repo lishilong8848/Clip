@@ -20,7 +20,7 @@ import threading
 import time
 import uuid
 import weakref
-from contextlib import nullcontext, suppress
+from contextlib import ExitStack, nullcontext, suppress
 from concurrent.futures import ThreadPoolExecutor
 from http import HTTPStatus
 from pathlib import Path
@@ -3270,15 +3270,21 @@ class PortalRuntime:
         return query_record_by_id(record_id, notice_type)
 
     @classmethod
-    def _stage_source_end_sync(cls, payload, record_id, notice_type, *, awaiting_target=False):
+    def _stage_source_end_sync(cls, payload, record_id, notice_type, *, awaiting_target=False, start_only=False):
         source_id = canonical_source_record_id(payload)
         work_type = str(payload.get("source_work_type") or payload.get("converted_from_work_type") or payload.get("work_type") or "")
         if work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE} or not source_id or source_id == record_id or is_local_record_id(source_id):
             return '', {}
+        if start_only and (not record_id or is_local_record_id(record_id)
+                           or not MaintenancePortalService.notice_source_uses_actual_start(cls.service, payload)):
+            return '', {}
         from .notice_actions import CURRENT_NOTICE_JOB
         job_id = str(CURRENT_NOTICE_JOB.get() or payload.get('job_id') or '')
         operation_id = str(payload.get('_remote_operation_id') or payload.get('operation_id') or job_id)
-        recovery_id = hashlib.sha256(json.dumps([source_id, record_id, work_type, operation_id]).encode()).hexdigest()
+        identity = [source_id, record_id, work_type, operation_id]
+        if start_only:
+            identity.append('actual_start')
+        recovery_id = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
         document = cls.state_store.get_document('notice_source_recovery', recovery_id)
         if document:
             return recovery_id, document
@@ -3296,8 +3302,13 @@ class PortalRuntime:
                      _source_recovery_id=recovery_id, _source_job_id=job_id, idempotency_key=recovery_id)
         if CURRENT_NOTICE_JOB.get():
             saved['_admin_notice_job_id'] = CURRENT_NOTICE_JOB.get()
+        if start_only:
+            saved['_source_actual_start_only'] = True
+            if payload.get('_source_binding_actor'):
+                saved['_source_binding_actor'] = payload['_source_binding_actor']
         document = {'created_at': time.time(), 'state': 'awaiting_target' if awaiting_target else 'staging_pending',
-                    'reason': '关联源表结束状态待核验。', 'source_record_id': source_id, 'target_record_id': record_id,
+                    'reason': '关联源表实际开始时间待核验。' if start_only else '关联源表结束状态待核验。',
+                    'source_record_id': source_id, 'target_record_id': record_id,
                     'job_id': job_id, 'operation_id': operation_id, 'next_check_at': 0, 'payload': saved}
         # Save the immutable intent before the cloud end write / outbox insert.
         cls.state_store.put_document('notice_source_recovery', recovery_id, document)
@@ -3307,16 +3318,17 @@ class PortalRuntime:
 
     @classmethod
     def _enqueue_source_end_intent(cls, recovery_id, document):
-        pending = {**document, 'state': 'pending', 'reason': '关联源表结束状态待核验。', 'next_check_at': 0}
+        reason = '关联源表实际开始时间待核验。' if document['payload'].get('_source_actual_start_only') else '关联源表结束状态待核验。'
+        pending = {**document, 'state': 'pending', 'reason': reason, 'next_check_at': 0}
         pending['outbox_id'] = cls.state_store.enqueue_outbox_event('notice_source_finalize', document['payload'],
             documents={('notice_source_recovery', recovery_id): pending})
         cls.state_store.put_document('notice_source_recovery', recovery_id, pending)
         return pending
 
     @classmethod
-    def _queue_source_end_sync(cls, payload, record_id, notice_type):
+    def _queue_source_end_sync(cls, payload, record_id, notice_type, *, start_only=False):
         try:
-            recovery_id, document = cls._stage_source_end_sync(payload, record_id, notice_type)
+            recovery_id, document = cls._stage_source_end_sync(payload, record_id, notice_type, start_only=start_only)
             if not recovery_id or document.get('state') in {'done', 'superseded'}:
                 return ''
             try:
@@ -3325,12 +3337,12 @@ class PortalRuntime:
                 document.update(state='staging_pending', next_check_at=time.time() + 60)
                 cls._source_sync_result(document['payload'], document, 'staging_pending',
                     '原源表同步快照已保存，入队暂未完成，后台将仅恢复入队：' + str(exc))
-                return '通告已结束，原源表同步快照已保存，后台等待恢复入队。'
+                return '关联源表的实际时间待同步，后台将恢复原任务。' if start_only else '通告已结束，原源表同步快照已保存，后台等待恢复入队。'
             cls._source_sync_result(document['payload'], document, 'pending', document['reason'])
-            return "通告已结束，关联事项正在后台同步。"
+            return '关联源表的实际开始时间正在后台同步。' if start_only else '通告已结束，关联事项正在后台同步。'
         except Exception as exc:
-            log_warning(f"结束通告源表任务暂未保存: {record_id}: {exc}")
-            return "通告已结束，关联事项同步暂未提交，请刷新核验。"
+            log_warning(f"通告源表同步任务暂未保存: {record_id}: {exc}")
+            return '关联源表的实际时间同步暂未提交，请刷新核验。' if start_only else '通告已结束，关联事项同步暂未提交，请刷新核验。'
 
     @classmethod
     def _resume_source_end_staging(cls):
@@ -3374,7 +3386,9 @@ class PortalRuntime:
             raise RuntimeError("目标记录缺少实际结束时间，未使用当前时间代替。")
         # Preserve the precise source timestamp: dropping milliseconds makes
         # the later exact readback check reject an otherwise matching record.
-        return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).isoformat(sep=" ", timespec="milliseconds")}
+        return {**payload, "ended_at": dt.datetime.fromtimestamp(ended_ms / 1000).isoformat(sep=" ", timespec="milliseconds"),
+                '_target_actual_start_ms': cls.service._target_record_actual_started_ms(
+                    notice_type=notice_type, target_record={'raw_fields': fields})}
 
     @classmethod
     def queue_manual_finished_binding(cls, payload, actor):
@@ -3491,6 +3505,8 @@ class PortalRuntime:
                         cls.service._enqueue_target_snapshot_active_delete(
                             payload=item_payload, reason='manual_finished_target_binding')
                 cls.service._mark_local_notice_finished_from_target(payload, ended_at=str(payload.get('ended_at') or ''))
+                cls._queue_source_end_sync({**payload, 'operation_id': op, '_source_binding_actor': actor},
+                                           canonical_target_record_id(payload), str(payload.get('notice_type') or ''), start_only=True)
                 cls.clear_payload_cache()
                 cls.state_store.update_manual_notice_binding(key, op, {'state': 'done', 'reason': '', 'next_check_at': 0})
             except (NoticeSourceSuperseded, ValueError) as exc:
@@ -3517,6 +3533,15 @@ class PortalRuntime:
     def _sync_confirmed_source_end_impl(cls, payload):
         target_id = canonical_target_record_id(payload)
         notice_type = str(payload.get("notice_type") or "")
+        start_only = bool(payload.get('_source_actual_start_only'))
+        actor = payload.get('_source_binding_actor')
+        if actor:
+            from .module_access import allowed_modules
+            from .notice_actions import NoticeJobPermissionDenied
+            session = {'user': {'open_id': actor}}
+            if (not cls.auth_manager.scope_allowed(session, payload.get('scope') or 'ALL')
+                    or payload.get('work_type') not in allowed_modules(cls.auth_manager, session)):
+                raise NoticeJobPermissionDenied('绑定发起人的楼栋或通告权限已变化，实际时间暂未同步。')
         key, owner, error = cls._acquire_event_operation_lock(
             payload, action_type="source_finalize", target_record_id=target_id,
         )
@@ -3543,6 +3568,13 @@ class PortalRuntime:
                 work_type=str(payload.get("work_type") or ""), notice_type=notice_type,
                 target_record={"record_id": target_id, "display_fields": fields},
             )
+            if start_only:
+                if not (lifecycle.get('active') or lifecycle.get('finished')):
+                    raise NoticeSourcePending('目标通告的发送状态尚未读回，等待核验。')
+                return cls.service.sync_notice_source_ended_fields({**payload,
+                    '_target_actual_start_ms': cls.service._target_record_actual_started_ms(
+                        notice_type=notice_type, target_record={'raw_fields': fields})},
+                    start_only=True, before_write=check_lock)
             if not lifecycle.get("finished"):
                 return False
             return cls.service.sync_notice_source_ended_fields(
@@ -3615,7 +3647,7 @@ class PortalRuntime:
                 document['next_check_at'] = time.time() + (300 if delayed else 60)
                 cls._source_sync_result(payload, document, 'attention_required' if delayed else 'pending', reason)
                 cls.state_store.mark_outbox_event(task['id'], 'deferred', error=reason, count_attempt=False)
-                log_warning(f"结束通告关联事项同步待重试: {exc}")
+                log_warning(f"通告关联事项同步待重试: {exc}")
 
     @classmethod
     def _source_sync_result(cls, payload, document, state, reason):
@@ -3739,7 +3771,7 @@ class PortalRuntime:
             )
         return tuple(sorted(marker))
 
-    def _cached_service_payload(self, key_parts: tuple, builder) -> dict:
+    def _cached_service_payload(self, key_parts: tuple, builder, *, fresh: bool = False) -> dict:
         service_version = 0
         try:
             service_version = self.service.state_cache_version()
@@ -3754,6 +3786,8 @@ class PortalRuntime:
         now = time.monotonic()
         with PortalRuntime.payload_cache_lock:
             PortalRuntime._prune_payload_cache_locked(now)
+            if fresh:
+                PortalRuntime.payload_cache.pop(key, None)
             cached = PortalRuntime.payload_cache.get(key)
             if cached and cached[0] > now:
                 return copy.deepcopy(cached[1])
@@ -4596,6 +4630,34 @@ class PortalRuntime:
                         "data": self._with_auth_context(data, session),
                     },
                 )
+            except (PortalError, ValueError) as exc:
+                return self._send_json(403, {"ok": False, "error": str(exc)})
+        if parsed.path == "/api/engineer/mop/history" or parsed.path.startswith("/api/engineer/mop/history/"):
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                from .module_access import require_module
+                require_module(PortalRuntime.auth_manager, session, "engineer_mop")
+                query = parse_qs(parsed.query)
+                scope = self._authorized_scope_or_error(session, (query.get("scope") or ["ALL"])[0])
+                if parsed.path != "/api/engineer/mop/history":
+                    record_id, attachment_id = parsed.path.removeprefix("/api/engineer/mop/history/").split("/")
+                    content, content_type, name = self.service.download_engineer_mop_history(
+                        scope=scope, record_id=record_id, attachment_id=attachment_id,
+                    )
+                    return self._write_response(200, {
+                        "Content-Type": content_type or "application/octet-stream",
+                        "Content-Disposition": "attachment; filename*=UTF-8''" + quote(name, safe=""),
+                        "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+                    }, content)
+                app_id = PortalRuntime.auth_manager.current_feishu_app_id()
+                data = self._cached_service_payload(("mop_history", app_id, scope),
+                    lambda: self.service.engineer_mop_history(scope=scope), fresh=query.get('refresh') == ['1'])
+                page = self.service.engineer_mop_history_page(data["records"], scope=scope,
+                    search=(query.get("search") or [""])[0], specialty=(query.get("specialty") or [""])[0],
+                    page=(query.get("page") or ["1"])[0])
+                return self._send_json(200, {"ok": True, "data": self._with_auth_context(page, session)})
             except (PortalError, ValueError) as exc:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/engineer/mop/preview":
@@ -6806,6 +6868,11 @@ class PortalRuntime:
 
     @classmethod
     def _enqueue_qt_notice_followups(cls, data, request, operation_id, target_record_id, action):
+        if action in {'start', 'update'}:
+            notice_type = str(data.get('notice_type') or '')
+            cls._queue_source_end_sync({**data, 'operation_id': operation_id,
+                'work_type': data.get('work_type') or cls._notice_work_type_from_notice_type(notice_type)},
+                target_record_id, notice_type, start_only=True)
         cls.enqueue_notice_alert_tags({**data, 'action': action}, operation_id=operation_id,
                                       target_record_id=target_record_id, request=request)
         cls._enqueue_qt_power_notice(data, request, operation_id, target_record_id, action)
@@ -11166,6 +11233,38 @@ class PortalRuntime:
         return restored
 
     @classmethod
+    def _notice_undo_target_fields(cls, undo: dict, target_id: str, notice_type: str, before: dict,
+                                   *, current_fields: dict | None = None) -> dict:
+        written = undo.get("target_written_fields")
+        if not isinstance(written, dict) or not written:
+            return before
+        if current_fields is None:
+            ok, row = query_record_by_id(target_id, notice_type)
+            if not ok or not isinstance(row, dict) or row.get("record_id", target_id) != target_id or not isinstance(row.get("fields"), dict):
+                raise PortalError("目标通告字段尚未读回，请重试原回退。")
+            current_fields = row["fields"]
+        current = cls._undo_restore_fields(notice_type, current_fields)
+        restore = {}
+        for name, after in cls._undo_restore_fields(notice_type, written).items():
+            old, actual = before.get(name), current.get(name)
+            if cls._notice_undo_field_equal(actual, old):
+                continue
+            if not cls._notice_undo_field_equal(actual, after):
+                raise PortalError(f"目标通告的「{name}」已另行修改，请核对后再回退。")
+            restore[name] = old
+        return restore
+
+    @classmethod
+    def _notice_undo_field_equal(cls, left, right) -> bool:
+        empty = (None, "", [], {})
+        if left in empty or right in empty:
+            return left in empty and right in empty
+        left_tokens, right_tokens = cls._event_attachment_tokens(left), cls._event_attachment_tokens(right)
+        if left_tokens or right_tokens:
+            return left_tokens == right_tokens
+        return cls._remote_values_equal(cls._remote_compare_value(left), cls._remote_compare_value(right))
+
+    @classmethod
     def _create_backend_undo_checkpoint(
         cls,
         action_type: str,
@@ -11196,6 +11295,16 @@ class PortalRuntime:
     @classmethod
     def execute_notice_undo(cls, undo_id: str, *, job_id: str = "", requested_by: str = "") -> dict:
         undo = cls.state_store.get_notice_undo_action(undo_id) or {}
+        if undo and not (undo.get("action_type") == "end" and undo.get("work_type") == WORK_TYPE_REPAIR):
+            with ExitStack() as locks:
+                for item in cls.service.paired_notice_undo(undo):
+                    if item is None:
+                        continue
+                    key, owner, error = cls._acquire_event_operation_lock(item, action_type="notice_undo")
+                    if error:
+                        raise PortalError(error)
+                    locks.callback(cls._release_event_operation_lock, key, owner)
+                return cls._execute_notice_undo(undo_id, job_id=job_id, requested_by=requested_by)
         if undo.get("action_type") != "end" or undo.get("work_type") != WORK_TYPE_REPAIR:
             return cls._execute_notice_undo(undo_id, job_id=job_id, requested_by=requested_by)
         target_id = str(undo.get("target_record_id") or "")
@@ -11287,6 +11396,9 @@ class PortalRuntime:
         if record.get("record_id", target_id) != target_id:
             raise PortalError("回读返回了其他检修记录。")
         current = record["fields"]
+        restore_fields = cls._notice_undo_target_fields(
+            undo, target_id, notice_type, fields, current_fields=current,
+        ) if undo.get("target_written_fields") else {**fields, end_field: fields.get(end_field)}
         buildings = cls.service._target_record_building_codes(current, field_config)
         original_buildings = cls.service._target_record_building_codes(fields, field_config)
         if scope != "ALL" and (
@@ -11323,7 +11435,7 @@ class PortalRuntime:
             if already_restored:
                 return
             ok, result = update_bitable_record_fields(
-                target_id, notice_type, {**fields, end_field: fields.get(end_field)},
+                target_id, notice_type, restore_fields,
             )
             if not ok and cls._remote_record_data_not_ready(result):
                 # This response confirms the write was rejected before execution.
@@ -11340,7 +11452,9 @@ class PortalRuntime:
                 or cls.service._repair_management_datetime_ms(current.get(end_field))
                 != cls.service._repair_management_datetime_ms(fields.get(end_field))
                 or bool(cls.service._clean_source_text(current.get(end_field)))
-                != bool(cls.service._clean_source_text(fields.get(end_field)))):
+                != bool(cls.service._clean_source_text(fields.get(end_field)))
+                or (undo.get("target_written_fields") and cls._notice_undo_target_fields(
+                    undo, target_id, notice_type, fields, current_fields=current))):
             raise NoticeSourcePending("关联状态待核验，目标检修尚未读回，后台将继续确认。")
 
     @classmethod
@@ -11381,9 +11495,15 @@ class PortalRuntime:
         paired_target_id = str((paired_undo or {}).get("target_record_id") or "")
         paired_remote = (paired_undo or {}).get("remote") or {}
         paired_fields = cls._undo_restore_fields(NOTICE_TYPE_MAINTENANCE, paired_remote.get("fields") or {})
+        paired_before = paired_fields
         if paired_undo and (not target_record_id or not paired_target_id or (action_type != "start" and
                 (not paired_fields or paired_remote.get("missing") or not remote_fields or remote.get("missing")))):
             raise PortalError("双表回退缺少完整目标快照，未执行回退。")
+        if action_type == "end" and remote_fields:
+            config = get_field_config(notice_type)
+            end_field = config.get("actual_end") or config.get("end_time")
+            if end_field and cls.service._target_status_is_active(remote_fields.get(config.get("status"))):
+                remote_fields.setdefault(end_field, None)
         restored_record_id = target_record_id
         remote_message = ""
         related_remote_result: dict[str, Any] = {
@@ -11399,8 +11519,7 @@ class PortalRuntime:
         has_source_end_snapshot = bool(
             action_type == "end"
             and isinstance(undo.get("source_remote"), dict)
-            and isinstance(undo.get("source_remote", {}).get("fields"), dict)
-            and undo.get("source_remote", {}).get("fields")
+            and (undo["source_remote"].get("track_end_write") or undo["source_remote"].get("fields"))
         )
         work_type = str(undo.get("work_type") or cls._notice_work_type_from_notice_type(notice_type)).strip()
         work_order_end = bool(action_type == "end" and target_record_id and not paired_undo
@@ -11427,9 +11546,9 @@ class PortalRuntime:
             if receipt is not None:
                 if not isinstance(receipt, dict) or any(receipt.get(key) != value for key, value in receipt_binding.items()):
                     raise PortalError("工单结束回退的远端回执与当前任务不一致，请核验原回退。")
-                if receipt.get("state") != "restored":
+                if receipt.get("state") != "restored" and not undo.get("target_written_fields"):
                     raise PortalError("远端回退结果尚未确认，请核验原回退；未重复修改远端。")
-                remote_done = True
+                remote_done = receipt.get("state") == "restored"
             else:
                 if remote_fields and not remote.get("missing") and not guard["mock_external"] and not guard["real_write_allowed"]:
                     raise PortalError(str(guard["reason"] or "真实外部写入未确认。"))
@@ -11442,6 +11561,14 @@ class PortalRuntime:
             and (not remote_fields or bool(remote.get("missing")))
         ):
             raise PortalError("检修结束回退缺少目标多维快照，未执行回退。")
+        target_restore = remote_fields
+        if not remote_done and action_type in {"update", "end"} and not guard["mock_external"] and guard["real_write_allowed"]:
+            if not is_repair_end:
+                target_restore = cls._notice_undo_target_fields(undo, target_record_id, notice_type, remote_fields)
+            if paired_undo:
+                paired_fields = cls._notice_undo_target_fields(
+                    paired_undo, paired_target_id, NOTICE_TYPE_MAINTENANCE, paired_fields,
+                )
         if remote_done:
             remote_message = receipt["remote_message"]
             related_remote_result = receipt["related_remote"]
@@ -11476,27 +11603,35 @@ class PortalRuntime:
                         undo, target_record_id, remote_fields,
                         scope=repair_scope, job_id=job_id, actor=requested_by,
                     )
-                else:
-                    ok, result = update_bitable_record_fields(target_record_id, notice_type, remote_fields)
+                elif target_restore:
+                    ok, result = update_bitable_record_fields(target_record_id, notice_type, target_restore)
                     if not ok:
                         raise PortalError(str(result or "回退多维失败。"))
-                    restored_record_id = str(result or target_record_id)
+                    if result and result != target_record_id:
+                        raise PortalError("回退返回了其他目标通告。")
+                    if undo.get("target_written_fields") and cls._notice_undo_target_fields(
+                            undo, target_record_id, notice_type, remote_fields):
+                        raise NoticeSourcePending("目标通告回退尚未完整读回，请重试原回退。")
                 remote_message = "多维已恢复"
             elif action_type == "delete":
                 ok, query_result = query_record_by_id(target_record_id, notice_type)
                 if ok:
-                    ok_update, result = update_bitable_record_fields(
-                        target_record_id,
-                        notice_type,
-                        remote_fields,
-                    )
-                    if not ok_update:
-                        raise PortalError(str(result or "回退多维失败。"))
+                    if undo.get("restored_target_record_id"):
+                        current = query_result.get("fields") if isinstance(query_result, dict) else None
+                        if not isinstance(current, dict) or any(not cls._notice_undo_field_equal(current.get(name), value)
+                                for name, value in remote_fields.items()):
+                            raise NoticeSourcePending("已重建的通告字段尚未核对一致，请核验原恢复记录。")
+                    else:
+                        ok_update, result = update_bitable_record_fields(target_record_id, notice_type, remote_fields)
+                        if not ok_update:
+                            raise PortalError(str(result or "回退多维失败。"))
                     restored_record_id = target_record_id
                     remote_message = "多维已恢复"
                 else:
                     if not cls._remote_record_not_found(query_result):
                         raise PortalError(str(query_result or "读取待恢复多维记录失败。"))
+                    if undo.get("restored_target_record_id"):
+                        raise NoticeSourcePending("已重建的目标通告尚未读回，请重试原回退。")
                     ok_create, result = create_bitable_record_fields(
                         notice_type,
                         remote_fields,
@@ -11507,13 +11642,14 @@ class PortalRuntime:
                     restored_record_id = str(result or "").strip()
                     if not restored_record_id:
                         raise PortalError("重建多维记录成功但未返回记录 ID。")
-                    cls.state_store.mark_notice_undo_action(
+                    if not cls.state_store.mark_notice_undo_action(
                         undo_id,
                         "available",
                         payload_patch={
                             "restored_target_record_id": restored_record_id,
                         },
-                    )
+                    ):
+                        raise PortalError("重建记录已返回，保存回执未完成，请重试原回退。")
                     restored_visible = False
                     restored_query_result: Any = ""
                     for delay in (0.0, 0.25, 0.75):
@@ -11530,9 +11666,12 @@ class PortalRuntime:
                             or cls._remote_record_data_not_ready(restored_query_result)
                         ):
                             break
-                    if not restored_visible:
+                    current = restored_query_result.get("fields") if restored_visible and isinstance(restored_query_result, dict) else None
+                    if not isinstance(current, dict) or restored_query_result.get("record_id", restored_record_id) != restored_record_id or any(
+                        not cls._notice_undo_field_equal(current.get(name), value) for name, value in remote_fields.items()
+                    ):
                         raise PortalError(
-                            "多维记录已重建但暂未完成回读，系统已保留新记录 ID；"
+                            "多维记录已重建但字段尚未完整读回，系统已保留新记录 ID；"
                             "请稍后重试本次回退。"
                         )
                     remote_message = "多维已重建"
@@ -11549,11 +11688,24 @@ class PortalRuntime:
                         ok, result = delete_bitable_record(paired_target_id, NOTICE_TYPE_MAINTENANCE)
                     elif cls._remote_record_not_found(result):
                         ok = True
-                else:
+                elif paired_fields:
                     ok, result = update_bitable_record_fields(paired_target_id, NOTICE_TYPE_MAINTENANCE, paired_fields)
+                else:
+                    ok, result = True, ""
                 if not ok:
                     raise PortalError(f"维保目标表回退失败：{result}；双表回退未完成，可重试原回退。")
+                if action_type != "start" and paired_undo.get("target_written_fields") and cls._notice_undo_target_fields(
+                        paired_undo, paired_target_id, NOTICE_TYPE_MAINTENANCE, paired_before):
+                    raise NoticeSourcePending("维保目标表尚未完整读回，请重试原回退。")
             remote_message = "变更与维保目标表已恢复" if action_type != "start" else "变更与维保开始记录已删除"
+
+        if action_type == 'start' and not guard['mock_external']:
+            for start_undo in (undo, paired_undo):
+                if start_undo and start_undo.get('work_type') in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
+                    warning = cls.service.undo_notice_source_start(start_undo)
+                    if warning:
+                        related_remote_result['warnings'].append(warning)
+                        remote_message += '；' + warning
 
         if (is_repair_end or has_source_end_snapshot) and not remote_done:
             if guard["mock_external"]:
@@ -11574,7 +11726,8 @@ class PortalRuntime:
                     is_repair_end and related_remote_result.get("reason") == "no_source_at_end"
                     and not cls.service._repair_undo_source_id(undo)
                 )
-                if not (related_remote_result.get("restored") or no_repair_source):
+                source_skipped = not is_repair_end and related_remote_result.get("reason") in {"source_changed", "no_source_write"}
+                if not (related_remote_result.get("restored") or no_repair_source or source_skipped):
                     raise PortalError("结束回退未恢复关联源表，未完成本次回退。")
                 remote_message = "；".join(
                     item
@@ -11582,6 +11735,8 @@ class PortalRuntime:
                         remote_message,
                         "结束时未关联维修项目，已跳过源表恢复"
                         if no_repair_source
+                        else "；".join(related_remote_result.get("warnings") or ["未找到本次结束的源表写入凭据，已保留源表现值"])
+                        if source_skipped
                         else "维修单及跟进记录已恢复" if is_repair_end
                         else "关联源表已恢复",
                     )
@@ -12861,6 +13016,10 @@ class PortalRuntime:
             if written:
                 prepared["_accepted_target_fields"] = {**fields, **written}
                 prepared["_accepted_target_at"] = time.time()
+                if checkpoint_id:
+                    cls.state_store.mark_notice_undo_action(
+                        checkpoint_id, "available", payload_patch={"target_written_fields": written},
+                    )
             if remote_operation_id:
                 cls._mark_notice_remote_operation(remote_operation_id, status="remote_written",
                     target_record_id=record_id, result={"record_id": record_id, "written_fields": written})
@@ -14553,16 +14712,6 @@ class PortalRuntime:
             if action_type in {"update", "end"}:
                 if notice_type == NOTICE_TYPE_REPAIR and not external_real_write_guard()["mock_external"]:
                     cls.service.verify_repair_notice_before_write(data, query_record_id, action=action_type)
-                checkpoint_id = cls._create_backend_undo_checkpoint(
-                    "end" if action_type == "end" else "update",
-                    {
-                        **data,
-                        "target_record_id": query_record_id,
-                    },
-                    remote_fields=fields,
-                    remote_missing=False,
-                    job_id=str(payload.get("job_id") or ""),
-                )
             (
                 existing_tokens,
                 existing_extra_tokens,
@@ -14842,6 +14991,20 @@ class PortalRuntime:
                 "real_record_id": "",
             }
         operation_status = str(operation.get("status") or "")
+        if has_remote_record_for_update and action_type in {"update", "end"} and notice_type != "事件通告":
+            checkpoint_id = str((operation.get("result") or {}).get("undo_id") or "")
+            checkpoint = cls.state_store.get_notice_undo_action(checkpoint_id) if checkpoint_id else None
+            if (not checkpoint or checkpoint.get("status") == "failed") and operation_status not in {"remote_written", "completed"}:
+                try:
+                    checkpoint_id = cls._create_backend_undo_checkpoint(
+                        action_type, {**data, "target_record_id": target_record_id},
+                        remote_fields=remote_fields_for_action, job_id=str(payload.get("job_id") or operation_id),
+                    )
+                    if checkpoint_id:
+                        cls._mark_notice_remote_operation(operation_id, status=operation_status, result={"undo_id": checkpoint_id})
+                except Exception:
+                    cls._release_event_operation_lock(event_lock_key, event_lock_owner)
+                    raise
         robot_result: dict = {}
         remote_write_unverified = False
         verified_event_query: dict = {}
@@ -15080,6 +15243,12 @@ class PortalRuntime:
                 "failed",
                 error=str(result or "多维更新失败。"),
             )
+        elif success and checkpoint_id:
+            written = getattr(notice_payload, "_clipflow_written_fields", None)
+            if written:
+                cls.state_store.mark_notice_undo_action(
+                    checkpoint_id, "available", payload_patch={"target_written_fields": written},
+                )
         repair_project_queue_id = 0
         repair_project_queued = False
         repair_project_warning = ""
@@ -17405,6 +17574,12 @@ class PortalRuntime:
                         prepared.pop(
                             "preserve_ongoing_source_after_target_end", None
                         )
+                if action in {'start', 'update'}:
+                    source_time_warning = cls._queue_source_end_sync(
+                        prepared, resolved_remote_record_id, str(prepared.get('notice_type') or ''), start_only=True,
+                    )
+                    if source_time_warning:
+                        result_warnings.append(source_time_warning)
                 cls.enqueue_notice_alert_tags(prepared, operation_id=job_id,
                     target_record_id=resolved_remote_record_id, request=current_job.get('request') or {})
                 cls.service.mark_action_upload_result(

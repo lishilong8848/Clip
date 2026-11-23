@@ -27,9 +27,10 @@
     <header class="mop-desk-panelbar"><h3>候选表格 <small>{{ mopCandidates.length }}</small></h3>
       <small v-if="recommendedCount">推荐 {{ recommendedCount }}</small>
       <input v-model="mopSearchModel" aria-label="搜索 MOP 表格" placeholder="搜索 MOP 名称、文件编号、专业" />
+      <RecordViewSwitch v-model="recordView"/>
     </header>
     <p v-if="!mopCandidates.length" class="mop-desk-empty">暂无可选 MOP 表格</p>
-    <div v-else class="mop-desk-file-grid">
+    <div v-else class="mop-desk-file-grid" :data-view="recordView">
       <button v-for="mop in mopCandidates" :key="mop.record_id" type="button" class="mop-desk-file" data-v2-navigation
         :aria-pressed="mop.record_id===selectedMopRecordId" @click="$emit('select-mop',String(mop.record_id || ''))">
         <span class="mop-desk-line"><small>{{ mop.file_no || '文件编号未填' }}</small><b v-if="recommended(mop)">推荐 · {{ recommendationReason(mop) }}</b></span>

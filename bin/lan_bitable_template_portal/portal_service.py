@@ -1135,6 +1135,8 @@ STATE_NS_DAILY_SUMMARY = "notice_daily_summary"
 STATE_NS_WORK_STATUS = "notice_work_status"
 STATE_NS_HIDDEN_ONGOING = "notice_hidden_ongoing"
 STATE_NS_ACTION_JOB = "notice_action_job"
+STATE_NS_NOTICE_SOURCE_START = "notice_source_start_write"
+STATE_NS_NOTICE_SOURCE_END = "notice_source_end_write"
 ACTION_JOB_MAX_RETAINED = 120
 ACTION_JOB_SUCCESS_RETENTION_SECONDS = 30 * 60
 ACTION_JOB_FAILED_RETENTION_SECONDS = 14 * 24 * 60 * 60
@@ -22592,11 +22594,18 @@ class MaintenancePortalService(RepairOperationsMixin):
                 'plan_month': re.sub(r'\s+', '', self._repair_management_plain_text(payload.get('plan_month') or fields.get('计划维护月份'))),
                 'maintenance_cycle': self._normalize_memory_cycle(payload.get('maintenance_cycle') or fields.get('维护周期'))}
 
+    def notice_source_uses_actual_start(self, payload: dict[str, Any]) -> bool:
+        kind = payload.get('source_work_type') or payload.get('converted_from_work_type') or payload.get('work_type')
+        return kind == WORK_TYPE_MAINTENANCE and (
+            payload.get('source_app_token') or getattr(self, 'app_token', ''),
+            payload.get('source_table_id') or getattr(self, 'table_id', ''),
+        ) == (DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID)
+
     def sync_notice_source_ended_fields(
         self, payload: dict[str, Any], *, before_write: Callable[[], None] | None = None,
-        read_only: bool = False,
+        read_only: bool = False, start_only: bool = False,
     ) -> bool:
-        """Write an ended notice back to its linked maintenance/change source row."""
+        """Synchronize verified target times to the linked plan for the same cycle."""
         payload = normalize_notice_identity_payload(payload or {})
         source_record_id = str(payload.get("source_record_id") or "").strip()
         target_record_id = canonical_target_record_id(payload)
@@ -22615,13 +22624,19 @@ class MaintenancePortalService(RepairOperationsMixin):
         if source_work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
             # 检修源表结束仍由维修单原有流程控制，通告结束不改其源字段。
             return False
+        uses_actual_start = self.notice_source_uses_actual_start(payload)
+        if start_only and not uses_actual_start:
+            return False
+        started_at_ms = self._repair_management_datetime_ms(payload.get('_target_actual_start_ms')) if uses_actual_start else None
+        if start_only and started_at_ms is None:
+            raise NoticeSourcePending('目标通告的实际开始时间尚未读回，等待核验。')
         ended_at_ms = self._repair_management_datetime_ms(payload.get("ended_at"))
-        if ended_at_ms is None:
+        if not start_only and ended_at_ms is None:
             raise PortalError("目标记录缺少实际结束时间，未使用当前时间代替。")
         if not target_record_id or is_local_record_id(target_record_id):
             raise PortalError("目标通告记录未确认，未回写源记录。")
-        ended_at = dt.datetime.fromtimestamp(ended_at_ms / 1000)
-        ended_at_text = ended_at.strftime("%Y-%m-%d %H:%M")
+        ended_at = dt.datetime.fromtimestamp(ended_at_ms / 1000) if ended_at_ms is not None else None
+        ended_at_text = ended_at.strftime("%Y-%m-%d %H:%M") if ended_at else ''
         if source_work_type == WORK_TYPE_MAINTENANCE:
             app_token = str(payload.get("source_app_token") or self.app_token).strip()
             table_id = str(payload.get("source_table_id") or self.table_id).strip()
@@ -22648,6 +22663,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             }
             source_records = self._change_records
 
+        if start_only:
+            remote_fields, local_fields = {}, {}
+
         source_record = next(
             (
                 record
@@ -22670,7 +22688,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 or not current_fields
             ):
                 raise PortalError("源记录未完整读取，保留同步任务等待重试。")
-            if not self._repair_management_plain_text(current_fields.get(status_field)).strip():
+            if not start_only and not self._repair_management_plain_text(current_fields.get(status_field)).strip():
                 raise PortalError("源记录状态未取得，保留同步任务等待重试。")
             return current_fields
 
@@ -22682,28 +22700,40 @@ class MaintenancePortalService(RepairOperationsMixin):
         else:
             current_fields = read_source_fields()
 
-        # Source IDs can be reused next month; a late end must not close that new cycle.
-        plan_start = (
-            self._change_time_range({"display_fields": current_fields})[0]
-            if source_work_type == WORK_TYPE_CHANGE else
-            current_fields.get("计划开始维护时间") or current_fields.get("计划开始时间")
-        )
-        for value in (current_fields.get("实际开始时间"), plan_start):
-            value = self._repair_management_plain_text(value)
-            started_ms = self._repair_management_datetime_ms(value)
-            started_at = (dt.datetime.fromtimestamp(started_ms / 1000) if started_ms is not None
-                          else self._history_datetime_from_values(value))
-            if value and started_at is None:
-                raise PortalError("源记录开始时间无法解析，保留同步任务等待核验。")
-            if started_at and started_at > ended_at:
-                return False
-        identity = self._state_store.resolve_notice_identity(
-            work_type=str(payload.get("work_type") or source_work_type),
-            source_record_id=source_record_id,
-        ) or {}
-        current_target = canonical_target_record_id(identity)
+        # A late end must not close an upcoming cycle of the same source row.
+        if not start_only:
+            plan_start = (
+                self._change_time_range({"display_fields": current_fields})[0]
+                if source_work_type == WORK_TYPE_CHANGE else
+                current_fields.get("计划开始维护时间") or current_fields.get("计划开始时间")
+            )
+            for value in (current_fields.get("实际开始时间"), plan_start):
+                value = self._repair_management_plain_text(value)
+                started_ms = self._repair_management_datetime_ms(value)
+                started_at = (dt.datetime.fromtimestamp(started_ms / 1000) if started_ms is not None
+                              else self._history_datetime_from_values(value))
+                if value and started_at is None:
+                    raise PortalError("源记录开始时间无法解析，保留同步任务等待核验。")
+                if started_at and started_at > ended_at:
+                    return False
+
+        def linked_target():
+            return canonical_target_record_id(self._state_store.resolve_notice_identity(
+                work_type=str(payload.get('work_type') or source_work_type),
+                source_record_id=source_record_id,
+            ) or {})
+
+        current_target = linked_target()
         if current_target and current_target != target_record_id:
+            if start_only:
+                raise NoticeSourceSuperseded('源记录已关联其他目标通告，原任务不再回写实际开始时间。')
             raise PortalError("源记录关联的目标通告已变化，未使用旧任务回写，请核验关联。")
+        if start_only and not current_target:
+            raise NoticeSourcePending('目标通告与源表的关联尚未确认，等待核验。')
+        if start_only and current_fields.get('楼栋') and payload.get('scope') and not self._scope_matches_building(
+            payload['scope'], self._repair_management_plain_text(current_fields['楼栋'])
+        ):
+            raise NoticeSourceSuperseded('源记录楼栋已变化，原任务没有覆盖实际开始时间。')
         expected_period = payload.get('_source_period')
         if not isinstance(expected_period, dict):
             expected_period = self.notice_source_period_snapshot(payload)
@@ -22718,13 +22748,26 @@ class MaintenancePortalService(RepairOperationsMixin):
                 raise NoticeSourceSuperseded(f'源表{label}已变化，旧任务未回写新周期，请核验原任务。')
             if bool(expected) != bool(current):
                 raise NoticeSourcePending(f'缺少可核验的原{label}快照或当前字段，未根据日期推算，源表暂未回写。')
+        start_value = current_fields.get('实际开始时间')
+        current_start = self._repair_management_datetime_ms(start_value)
+        has_current_start = bool(self._repair_management_plain_text(start_value).strip())
+        if start_only and has_current_start and current_start != started_at_ms:
+            raise NoticeSourceSuperseded('源表已有不同的实际开始时间，请核对原通告。')
+        if start_only:
+            current_end = self._repair_management_datetime_ms(current_fields.get('实际结束时间'))
+            if current_end is not None and current_end < started_at_ms:
+                raise NoticeSourceSuperseded('目标实际开始时间晚于源表已有实际结束时间，请核对原通告。')
+        elif started_at_ms is not None and ended_at_ms < started_at_ms:
+            raise NoticeSourcePending('目标通告实际开始时间晚于结束时间，请核对后再同步。')
+        verify_start = start_only or (started_at_ms is not None and not read_only and not has_current_start)
         # Formula/lookup statuses must never be written. Unknown metadata is
         # read-only as well; an actual writable status uses its existing option.
         meta_by_name = getattr(self, '_field_meta_by_name' if source_work_type == WORK_TYPE_MAINTENANCE else '_change_field_meta_by_name', {})
         default_app = self.app_token if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_APP_TOKEN
         default_table = self.table_id if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_SOURCE_TABLE_ID
         if (app_token, table_id) != (default_app, default_table) or (
-            not guard.get('mock_external') and status_field not in meta_by_name
+            not guard.get('mock_external') and (status_field not in meta_by_name
+            or verify_start and '实际开始时间' not in meta_by_name)
         ):
             metas, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
             if (app_token, table_id) == (default_app, default_table):
@@ -22733,7 +22776,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     setattr(self, prefix + '_list', metas)
                     setattr(self, prefix + '_by_name', meta_by_name)
         status_meta = meta_by_name.get(status_field)
-        if not status_meta and not guard.get('mock_external'):
+        if not start_only and not status_meta and not guard.get('mock_external'):
             raise NoticeSourcePending('源表状态字段元信息缺失，后台将重新读取字段定义后重试，未猜测写入。')
         writable_status = bool(status_meta and not self._field_meta_is_readonly(status_meta))
         expected_status = '已结束' if source_work_type == WORK_TYPE_MAINTENANCE else CHANGE_PROGRESS_ENDED
@@ -22757,17 +22800,46 @@ class MaintenancePortalService(RepairOperationsMixin):
         end_meta = meta_by_name.get('实际结束时间')
         if same_end or (end_meta and self._field_meta_is_readonly(end_meta)):
             remote_fields.pop('实际结束时间', None)
-        if writable_status and not status_ended(current_fields):
+        if not start_only and writable_status and not status_ended(current_fields):
             if status_meta.option_names and expected_status not in status_meta.option_names:
                 raise PortalError('源表状态缺少对应结束选项，未猜测写入，请核对字段配置。')
             remote_fields[status_field] = expected_status
         else:
             remote_fields.pop(status_field, None)
+        if verify_start and current_start != started_at_ms:
+            start_meta = meta_by_name.get('实际开始时间')
+            if not guard.get('mock_external') and (not start_meta or start_meta.field_type != 5 or self._field_meta_is_readonly(start_meta)):
+                raise NoticeSourcePending('源表实际开始时间字段尚未确认为可写的日期时间，请核对字段设置。')
+            remote_fields['实际开始时间'] = started_at_ms
+        if verify_start:
+            local_fields['实际开始时间'] = self._format_source_datetime(started_at_ms)
         if read_only and remote_fields:
             raise NoticeSourcePending("源表结束信息仍未同步，后台继续核验。")
         if before_write is not None:
             before_write()
+        if '实际开始时间' in remote_fields and linked_target() != current_target:
+            raise NoticeSourceSuperseded('源记录关联在同步期间变化，原任务未回写实际时间。')
         if not guard.get("mock_external") and remote_fields:
+            if not start_only:
+                kind = str(payload.get('work_type') or source_work_type)
+                key = f'{kind}:{target_record_id}:{source_record_id}'
+                previous = self._state_store.get_document(STATE_NS_NOTICE_SOURCE_END, key) or {}
+                if previous.get('ended_at_ms') != ended_at_ms or previous.get('period') != current_period:
+                    previous = {}
+                self._state_store.put_document(STATE_NS_NOTICE_SOURCE_END, key, {
+                    'ended_at_ms': ended_at_ms, 'period': current_period,
+                    'written_at': previous.get('written_at') or time.time(),
+                    'app_token': app_token, 'table_id': table_id,
+                    'building': self._repair_management_plain_text(current_fields.get('变更楼栋') or current_fields.get('楼栋')),
+                    'before': {**{name: current_fields.get(name) for name in remote_fields}, **(previous.get('before') or {})},
+                    'after': {**(previous.get('after') or {}), **remote_fields},
+                })
+            if '实际开始时间' in remote_fields:
+                kind = str(payload.get('work_type') or source_work_type)
+                self._state_store.put_document(STATE_NS_NOTICE_SOURCE_START, f'{kind}:{target_record_id}:{source_record_id}', {
+                    'started_at_ms': started_at_ms, 'period': current_period,
+                    'building': self._repair_management_plain_text(current_fields.get('楼栋')),
+                })
             self._patch_record_fields(
                 app_token=app_token,
                 table_id=table_id,
@@ -22776,14 +22848,19 @@ class MaintenancePortalService(RepairOperationsMixin):
             )
         if not guard.get("mock_external"):
             confirmed_fields = read_source_fields() if remote_fields else current_fields
+            if verify_start and self._repair_management_datetime_ms(confirmed_fields.get('实际开始时间')) != started_at_ms:
+                raise NoticeSourcePending('源表实际开始时间尚未准确读回，等待核验。')
+            if start_only and (observed_status := state_text(confirmed_fields, status_field)):
+                local_fields[status_field] = observed_status
+        if not guard.get('mock_external') and not start_only:
             actual_end = self._repair_management_plain_text(confirmed_fields.get("实际结束时间"))
             confirmed_end = self._repair_management_datetime_ms(actual_end)
             if confirmed_end != ended_at_ms:
                 raise NoticeSourcePending("源记录本次实际结束时间尚未准确读回，保留同步任务等待核验。")
-            local_fields = {
+            local_fields.update({
                 "实际结束时间": self._format_source_datetime(actual_end),
                 status_field: state_text(confirmed_fields, status_field),
-            }
+            })
             if source_work_type == WORK_TYPE_CHANGE:
                 local_fields['开始/结束状态打标'] = state_text(confirmed_fields, '开始/结束状态打标')
                 # Persist the verified dates at full precision; snapshot patches update display fields only.
@@ -22808,12 +22885,64 @@ class MaintenancePortalService(RepairOperationsMixin):
                 fields=local_fields,
             )
         self._touch_state_cache_version()
-        if not guard.get('mock_external') and not status_ended(confirmed_fields):
+        if not start_only and not guard.get('mock_external') and not status_ended(confirmed_fields):
             reason = ('源表状态字段元信息缺失，未猜测写入状态，请核对字段配置。' if not status_meta else
                       '源表公式/只读状态尚未结束，后台仅回读，不重复写入结束时间。' if not writable_status else
                       '源表可写状态尚未确认结束，保留同步核验。')
             raise NoticeSourcePending(reason)
         return True
+
+    def undo_notice_source_start(self, undo: dict[str, Any]) -> str:
+        kind = str(undo.get('work_type') or '')
+        target_id = canonical_target_record_id(undo)
+        identity = self._state_store.resolve_notice_identity(work_type=kind, target_record_id=target_id) or {}
+        source_id = canonical_source_record_id(identity)
+        if not source_id or canonical_target_record_id(identity) != target_id:
+            return ''
+        other = self._state_store.resolve_notice_identity(work_type=kind, source_record_id=source_id) or {}
+        if canonical_target_record_id(other) not in ('', target_id):
+            return '原维保计划已关联其他通告，请核对源表。'
+        key = f'{kind}:{target_id}:{source_id}'
+        receipt = self._state_store.get_document(STATE_NS_NOTICE_SOURCE_START, key) or {}
+        if not receipt:
+            return ''
+
+        def read_fields():
+            result = self._request_json(f'records/{source_id}', app_token=DEFAULT_APP_TOKEN, table_id=DEFAULT_TABLE_ID)
+            row = (result.get('data') or {}).get('record') or {}
+            if row.get('record_id') != source_id or not isinstance(row.get('fields'), dict):
+                raise NoticeSourcePending('撤回开始后尚未读回原维保计划，请重试原撤回。')
+            return row['fields']
+
+        current = read_fields()
+        building = self._repair_management_plain_text(current.get('楼栋'))
+        period = self.notice_source_period_snapshot({'source_record_id': source_id, 'work_type': WORK_TYPE_MAINTENANCE,
+            'plan_month': current.get('计划维护月份'), 'maintenance_cycle': current.get('维护周期')})
+        start = current.get('实际开始时间')
+        if (period != receipt['period'] or receipt.get('building') != building
+                or building and not self._scope_matches_building(undo.get('scope') or 'ALL', building)
+                or self._repair_management_plain_text(current.get('实际结束时间')).strip()
+                or self._repair_management_plain_text(start).strip()
+                and self._repair_management_datetime_ms(start) != receipt['started_at_ms']):
+            return '原维保计划的周期或实际时间已变化，请核对源表。'
+        if self._repair_management_plain_text(start).strip():
+            self._patch_record_fields(app_token=DEFAULT_APP_TOKEN, table_id=DEFAULT_TABLE_ID, record_id=source_id,
+                                      fields={'实际开始时间': None})
+            current = read_fields()
+            if self._repair_management_plain_text(current.get('实际开始时间')).strip():
+                raise NoticeSourcePending('原维保计划的实际开始时间尚未清空，请重试原撤回。')
+        fields = {'实际开始时间': ''}
+        if '维护实施状态' in current:
+            fields['维护实施状态'] = self._repair_management_plain_text(current['维护实施状态'])
+        with self._refresh_lock:
+            for row in self._records:
+                if row.get('record_id') == source_id:
+                    row.setdefault('display_fields', {}).update(fields)
+                    break
+            self._state_store.patch_active_source_record_fields(source_record_id=source_id,
+                work_type=WORK_TYPE_MAINTENANCE, fields=fields)
+        self._touch_state_cache_version()
+        return ''
 
     def _change_record_building_codes(self, record: dict[str, Any]) -> list[str]:
         fields = record.get("display_fields") or {}
@@ -31155,7 +31284,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if (
                         isinstance(status_item, dict)
                         and self._scope_matches_item(scope, status_item)
-                        and (self._work_status_identity_keys(status_item) & deleted_keys)
+                        and self._items_identity_intersects(deleted_keys, self._work_status_identity_keys(status_item))
                     ):
                         if matched_work_status_item is None:
                             matched_work_status_item = copy.deepcopy(status_item)
@@ -31185,7 +31314,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     if (
                         isinstance(summary_item, dict)
                         and self._scope_matches_item(scope, summary_item)
-                        and (self._work_status_identity_keys(summary_item) & deleted_keys)
+                        and self._items_identity_intersects(deleted_keys, self._work_status_identity_keys(summary_item))
                     ):
                         daily_summary_removed += 1
                         changed = True
@@ -31200,11 +31329,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                     )
             source_record_id = canonical_source_record_id(item)
             target_record_id = canonical_target_record_id(item)
+            binding = self._state_store.resolve_notice_identity(
+                work_type=item["work_type"], source_record_id=source_record_id,
+            ) if reset_source_plan and source_record_id else None
             if (
                 reset_source_plan
                 and source_record_id
                 and not is_local_record_id(source_record_id)
                 and source_record_id != target_record_id
+                and canonical_target_record_id(binding or {}) in ("", target_record_id)
             ):
                 reset_item = copy.deepcopy(matched_work_status_item or {})
                 for field_name, value in item.items():
@@ -31695,6 +31828,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "record_id": source_record_id,
                     "fields": source_fields,
                 }
+            if source_record_id and source_work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_CHANGE}:
+                source_remote.update(work_type=source_work_type, record_id=source_record_id, track_end_write=True)
         payload = {
             "undo_id": uuid.uuid4().hex,
             "identity_key": str(identity.get("identity_key") or ""),
@@ -32044,20 +32179,90 @@ class MaintenancePortalService(RepairOperationsMixin):
             if isinstance(source_remote.get("fields"), dict)
             else {}
         )
-        if source_fields and str(source_remote.get("record_id") or "").strip():
+        tracked = source_remote.get("track_end_write")
+        current_fields = {}
+        meta_by_name = {}
+        if tracked:
+            source_id = str(source_remote.get("record_id") or "")
+            target_id = target_record_id or canonical_target_record_id(undo)
+            receipt = self._state_store.get_document(STATE_NS_NOTICE_SOURCE_END, f'{work_type}:{target_id}:{source_id}') or {}
+            skip = {"restored": False, "skipped": True, "reason": "no_source_write", "warnings": []}
+            config = get_field_config(str(undo.get("notice_type") or ""))
+            end_field = config.get("actual_end") or config.get("end_time")
+            target_end_ms = self._repair_management_datetime_ms((undo.get("target_written_fields") or {}).get(end_field))
+            if (float(receipt.get("written_at") or 0) < float(undo.get("created_at") or 0) or not receipt.get('after')
+                    or target_end_ms is not None and receipt.get("ended_at_ms") != target_end_ms):
+                return skip
+            kind, app_token, table_id = source_remote["work_type"], receipt["app_token"], receipt["table_id"]
+            _metas, meta_by_name = self._load_table_fields(app_token=app_token, table_id=table_id)
+
+            def read_fields():
+                result = self._request_json(f'records/{source_id}', app_token=app_token, table_id=table_id)
+                row = (result.get('data') or {}).get('record') or {}
+                if row.get('record_id') != source_id or not isinstance(row.get('fields'), dict) or not row['fields']:
+                    raise NoticeSourcePending('原计划记录尚未读回，请重试原回退。')
+                return row['fields']
+
+            def equal(name, left, right):
+                if name in ('实际开始时间', '实际结束时间'):
+                    left_text, right_text = [self._repair_management_plain_text(value).strip() for value in (left, right)]
+                    if not left_text or not right_text:
+                        return left_text == right_text
+                    left_ms, right_ms = [self._repair_management_datetime_ms(value) for value in (left_text, right_text)]
+                    return left_ms == right_ms if left_ms is not None and right_ms is not None else left_text == right_text
+                return self._normalize_field_value(name, self._repair_management_plain_text(left), meta_by_name=meta_by_name) == (
+                    self._normalize_field_value(name, self._repair_management_plain_text(right), meta_by_name=meta_by_name))
+
+            current_fields = read_fields()
+            binding = self._state_store.resolve_notice_identity(work_type=work_type, source_record_id=source_id) or {}
+            building = self._repair_management_plain_text(current_fields.get('变更楼栋') or current_fields.get('楼栋'))
+            period = self.notice_source_period_snapshot({'source_record_id': source_id, 'work_type': kind,
+                'plan_month': current_fields.get('计划维护月份'), 'maintenance_cycle': current_fields.get('维护周期')})
+            if (canonical_target_record_id(binding) not in ('', target_id) or building != receipt['building']
+                    or period != receipt['period'] or (building and not self._scope_matches_building(undo.get('scope') or 'ALL', building))):
+                return {**skip, "reason": "source_changed", "warnings": ["原计划的楼栋、周期或关联已变化，已保留源表。"]}
+            source_fields = {}
+            for name, after in receipt['after'].items():
+                before = receipt['before'].get(name)
+                if equal(name, current_fields.get(name), before):
+                    continue
+                if not equal(name, current_fields.get(name), after):
+                    return {**skip, "reason": "source_changed", "warnings": [f"源表「{name}」已另行修改，已保留源表。"]}
+                meta = meta_by_name.get(name)
+                if not meta or self._field_meta_is_readonly(meta):
+                    raise NoticeSourcePending(f'源表「{name}」当前不可写，请核对字段后重试原回退。')
+                source_fields[name] = self._normalize_field_value(name, self._repair_management_plain_text(before),
+                    meta_by_name=meta_by_name) if name in ("维护实施状态", "变更进度") and before is not None else before
+            if source_fields:
+                self._patch_record_fields(app_token=app_token, table_id=table_id, record_id=source_id, fields=source_fields)
+                current_fields = read_fields()
+                if any(not equal(name, current_fields.get(name), value) for name, value in source_fields.items()):
+                    raise NoticeSourcePending('源表回退尚未完整读回，请重试原回退。')
+            source_fields = {name: current_fields.get(name) for name in
+                             ('实际开始时间', '实际结束时间', '维护实施状态', '变更进度', '开始/结束状态打标') if name in current_fields}
+            for name in ('实际开始时间', '实际结束时间'):
+                source_fields[name] = self._format_source_datetime(current_fields.get(name))
+        if (source_fields or tracked) and str(source_remote.get("record_id") or "").strip():
             source_work_type = str(source_remote.get("work_type") or "").strip()
             source_record_id = str(source_remote.get("record_id") or "").strip()
-            self._patch_record_fields(
-                app_token=str(source_remote.get("app_token") or "").strip(),
-                table_id=str(source_remote.get("table_id") or "").strip(),
-                record_id=source_record_id,
-                fields=source_fields,
-            )
+            if not tracked:
+                self._patch_record_fields(
+                    app_token=str(source_remote.get("app_token") or "").strip(),
+                    table_id=str(source_remote.get("table_id") or "").strip(),
+                    record_id=source_record_id,
+                    fields=source_fields,
+                )
             local_fields = dict(source_fields)
+            if tracked:
+                for name in ('维护实施状态', '变更进度', '开始/结束状态打标'):
+                    if name in local_fields:
+                        local_fields[name] = self._normalize_field_value(name,
+                            self._repair_management_plain_text(local_fields[name]), meta_by_name=meta_by_name)
             if source_work_type == WORK_TYPE_MAINTENANCE:
-                local_fields["维护实施状态"] = str(
-                    (undo.get("context") or {}).get("source_progress") or "进行中"
-                ).strip()
+                if not tracked:
+                    local_fields["维护实施状态"] = str(
+                        (undo.get("context") or {}).get("source_progress") or "进行中"
+                    ).strip()
                 source_records = self._records
             else:
                 source_records = self._change_records
@@ -32401,6 +32606,15 @@ class MaintenancePortalService(RepairOperationsMixin):
         if qt_snapshot and isinstance(qt_snapshot.get("payload"), dict):
             qt_payload.update(copy.deepcopy(qt_snapshot.get("payload") or {}))
         if qt_payload:
+            remote_fields = (undo.get("remote") or {}).get("fields") or {}
+            if action_type in {"update", "end"} and remote_fields:
+                config = get_field_config(str(undo.get("notice_type") or ""))
+                written = undo.get("target_written_fields") or {}
+                projection = {name: config.get(name) for name in ("content", "reason", "impact", "progress")}
+                projection["title"] = config.get("title") or config.get("name")
+                for logical, physical in projection.items():
+                    if physical and (physical in remote_fields or physical in written):
+                        qt_payload[logical] = self._clean_source_text(remote_fields.get(physical))
             resolved_target_record_id = str(
                 target_record_id
                 or undo.get("target_record_id")
@@ -32457,6 +32671,9 @@ class MaintenancePortalService(RepairOperationsMixin):
             if action_type in {"update", "end"}:
                 qt_payload["action"] = "update"
                 qt_payload["status"] = "更新"
+                if action_type == "end":
+                    for field in ("ended_at", "completed_date"):
+                        qt_payload.pop(field, None)
                 if action_type == "end" and work_type == WORK_TYPE_REPAIR:
                     source_id = self._repair_undo_source_id(undo)
                     if source_id:
@@ -32466,8 +32683,6 @@ class MaintenancePortalService(RepairOperationsMixin):
                         for field in ("source_record_id", "repair_management_record_id",
                                       "related_repair_management_record_id", "source_app_token", "source_table_id"):
                             qt_payload.pop(field, None)
-                    for field in ("ended_at", "completed_date"):
-                        qt_payload.pop(field, None)
                     if resolved_target_record_id:
                         self._state_store.upsert_notice_identity(
                             {**qt_payload, "status": "进行中"}, origin="repair_end_undo",
@@ -33141,6 +33356,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         if ended_ms is None:
             return ""
         return dt.datetime.fromtimestamp(ended_ms / 1000).isoformat(sep=" ", timespec="milliseconds")
+
+    def _target_record_actual_started_ms(self, *, notice_type: str, target_record: dict[str, Any]) -> int | None:
+        fields = target_record.get('raw_fields')
+        if not isinstance(fields, dict):
+            fields = target_record.get('display_fields') or {}
+        name = get_field_config(notice_type).get('actual_start') or '实际开始时间'
+        return self._repair_management_datetime_ms(fields.get(name))
 
     def _source_snapshot_active_payload(
         self,
@@ -34620,6 +34842,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "target_building_codes": target_building_codes,
             "target_active": bool(target_lifecycle.get("active")),
             "target_finished": bool(target_lifecycle.get("finished")),
+            "target_actual_start_ms": self._target_record_actual_started_ms(notice_type=notice_type, target_record=target_record) if target_record else None,
             "target_ended_at": (
                 self._target_record_actual_ended_at(
                     notice_type=notice_type,
@@ -37605,6 +37828,95 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "settings": dict(settings),
             }
         return candidates, warnings, settings
+
+    def _signed_mop_attachments(self, fields: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        return {
+            hashlib.sha256(item["file_token"].encode()).hexdigest()[:24]: item
+            for item in self._extract_mop_attachments(
+                {MOP_SIGNED_ATTACHMENT_FIELD: fields.get(MOP_SIGNED_ATTACHMENT_FIELD)}, MOP_SIGNED_ATTACHMENT_FIELD
+            )
+            if re.fullmatch(r"[A-Za-z0-9_-]{4,200}", item["file_token"])
+        }
+
+    def engineer_mop_history(self, *, scope: str) -> dict[str, Any]:
+        """Read uploaded MOPs from the same source table used by the signed upload."""
+        from .workbench_calendar import timestamp
+
+        field_names = [MOP_SIGNED_ATTACHMENT_FIELD, "楼栋", "维护总项", "维护周期", "专业类别", "专业",
+                       "维护实施状态", "计划维护月份", "计划开始维护时间", "计划结束维护时间"]
+        required_fields = {"楼栋", MOP_SIGNED_ATTACHMENT_FIELD}
+        metadata = self._field_meta_by_name
+        if (self.app_token, self.table_id) != (DEFAULT_APP_TOKEN, DEFAULT_TABLE_ID) or not required_fields.issubset(metadata):
+            _, metadata = self._load_table_fields(app_token=DEFAULT_APP_TOKEN, table_id=DEFAULT_TABLE_ID)
+        if not required_fields.issubset(metadata):
+            raise PortalError('维保计划表缺少楼栋或维保单附件字段，请核对源表。')
+        selected_fields = json.dumps([name for name in field_names if name in metadata], ensure_ascii=False)
+        cursor, seen, items = "", set(), {}
+        while True:
+            params = {"page_size": 500, "field_names": selected_fields}
+            if cursor:
+                params["page_token"] = cursor
+            data = self._request_json(
+                "records", app_token=DEFAULT_APP_TOKEN, table_id=DEFAULT_TABLE_ID, params=params
+            ).get("data") or {}
+            if not isinstance(data.get("items"), list) or type(data.get("has_more")) is not bool:
+                raise PortalError("维保单填写记录分页未读全，请重试。")
+            for row in data["items"]:
+                record_id = str(row.get("record_id") or "")
+                fields = row.get("fields") or {}
+                text = self._repair_management_plain_text
+                building = text(fields.get("楼栋"))
+                if not re.fullmatch(r"rec[A-Za-z0-9]+", record_id) or not self._scope_matches_building(scope, building):
+                    continue
+                attachments = self._signed_mop_attachments(fields)
+                if not attachments:
+                    continue
+                plan = timestamp(fields.get("计划开始维护时间")) or timestamp(fields.get("计划结束维护时间"))
+                items[record_id] = {
+                    "record_id": record_id, "title": text(fields.get("维护总项")) or record_id,
+                    "building": building, "cycle": text(fields.get("维护周期")),
+                    "specialty": text(fields.get("专业类别") or fields.get("专业")),
+                    "status": text(fields.get("维护实施状态")),
+                    "planned": plan.date().isoformat() if plan else text(fields.get("计划维护月份")),
+                    "attachments": [{"id": aid, "name": attachment["name"]} for aid, attachment in attachments.items()],
+                }
+            cursor = self._next_record_page_token(data, current_token=cursor, seen_tokens=seen, context="维保单填写记录")
+            if not cursor:
+                break
+        return {"records": sorted(items.values(), key=lambda item: (item["planned"], item["record_id"]), reverse=True)}
+
+    @staticmethod
+    def engineer_mop_history_page(records, *, scope: str, search: str = "", specialty: str = "", page: str = "1") -> dict:
+        query = search[:200].strip().casefold()
+        major = specialty[:80].strip()
+        specialties = sorted({row["specialty"] for row in records if row["specialty"]})
+        matches = [row for row in records
+                   if (not major or row["specialty"] == major)
+                   and (not query or query in " ".join([row["title"], row["building"], row["planned"],
+                        *(file["name"] for file in row["attachments"])]).casefold())]
+        page_size = 20
+        number = int(page) if re.fullmatch(r"[1-9][0-9]{0,5}", page) else 1
+        number = min(number, max(1, (len(matches) + page_size - 1) // page_size))
+        start = (number - 1) * page_size
+        return {"scope": scope, "records": matches[start:start + page_size], "specialties": specialties,
+                "page": number, "page_size": page_size, "total": len(matches)}
+
+    def download_engineer_mop_history(self, *, scope: str, record_id: str, attachment_id: str) -> tuple[bytes, str, str]:
+        if not re.fullmatch(r"rec[A-Za-z0-9]+", record_id) or not re.fullmatch(r"[a-f0-9]{24}", attachment_id):
+            raise PortalError("填写记录或附件无效。")
+        fields = self._request_json(
+            "records/" + record_id, app_token=DEFAULT_APP_TOKEN, table_id=DEFAULT_TABLE_ID,
+        ).get("data", {}).get("record", {}).get("fields") or {}
+        if not self._scope_matches_building(scope, self._repair_management_plain_text(fields.get("楼栋"))):
+            raise PortalError("当前楼栋无权下载该文件。")
+        attachment = self._signed_mop_attachments(fields).get(attachment_id)
+        if not attachment:
+            raise PortalError("这份维保单附件已移除，请刷新填写记录。")
+        content, content_type = self._download_mop_attachment(
+            {"file_token": attachment["file_token"]}, app_token=DEFAULT_APP_TOKEN,
+            table_id=DEFAULT_TABLE_ID, record_id=record_id, cache_category="mop_signed",
+        )
+        return content, content_type, Path(attachment["name"]).name or "维保单"
 
     def engineer_mop_bootstrap(
         self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None, month: str = "",

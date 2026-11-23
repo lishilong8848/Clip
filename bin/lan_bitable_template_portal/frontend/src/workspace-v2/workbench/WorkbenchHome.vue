@@ -10,13 +10,16 @@ import { requestEmbeddedChange, runNavigationAction } from '../navigation';
 import PreShiftCheck from '../dashboard/PreShiftCheck.vue';
 import PeriodOverview from './PeriodOverview.vue';
 import WorkbenchDailyLayout from './WorkbenchDailyLayout.vue';
+import WorkbenchTaskRows from './WorkbenchTaskRows.vue';
+import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 import AsyncPageState from '../../components/AsyncPageState.vue';
 import { recipes, workbenchModules, workbenchRole, workbenchScopes, type ScopeOption } from './recipes';
-import { scopedUrl, workbenchSources, type SourceId, type WorkItem } from './sources';
+import { scopedUrl, workbenchPlanSource, workbenchSources, type SourceId, type WorkItem } from './sources';
 import { readWorkbenchRequest, useReadOnlyLayout, useWorkbenchReads } from './useWorkbenchReads';
 import { deskActionOrder, deskRole, deskSources, deskTaskVisible, inDeskScope } from './deskPolicy';
 import { todoTimestamp } from '../businessTodos';
 import { eventLevelTone } from '../../eventManagementUtils';
+import { beijingDate, eventPeriodRange } from '../eventPeriod';
 
 const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[]}>(),{explicitScope:true});
 const emit=defineEmits<{open:[url:string]}>();
@@ -55,15 +58,10 @@ const selectedScope=computed(()=>{
   if (!props.explicitScope&&accountLevel.value==='L2'&&ownScope.value) return ownScope.value;
   return (scopeOptions.value.find(option=>option.value===props.scope)||scopeOptions.value[0])?.value||'';
 });
-const dataScope=computed(()=>{
-  if(!globalDesk.value&&!composite(selectedScope.value))return selectedScope.value;
-  return scopeOptions.value.find(option=>option.value==='ALL')?.value
-    ||(globalDesk.value?scopeOptions.value.find(option=>composite(option.value))?.value:'')||selectedScope.value;
-});
+const dataScope=selectedScope;
 const readScopes=computed(()=>composite(dataScope.value)&&concreteScopes.value.length>0
   &&(dataScope.value==='CAMPUS'||!authorizedScopes.value.some(option=>option.value==='ALL'))
   ?concreteScopes.value.map(option=>option.value):undefined);
-const agendaScopes=computed(()=>globalDesk.value&&composite(dataScope.value)?concreteScopes.value:[]);
 const context=computed(()=>JSON.stringify([accessKey.value,role.value,dataScope.value]));
 const lazy=(loader:()=>Promise<any>)=>defineAsyncComponent({loader,loadingComponent:AsyncPageState,errorComponent:AsyncPageState,delay:80,timeout:30000});
 const NoticeWorkspace=lazy(()=>import('../NoticeWorkspace.vue'));
@@ -114,9 +112,17 @@ function switchScope(event:Event){
 
 const pendingSources=computed(()=>accountLevel.value
   ?deskSources[accountLevel.value==='L4'&&role.value==='duty'?'duty':accountLevel.value]:recipe.value.pending);
-const sources=computed(()=>workbenchSources({user:props.user,scope:dataScope.value,scopes:authorizedScopes.value,
-  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value},readWorkbenchRequest));
+const sourceContext=computed(()=>({user:props.user,scope:dataScope.value,scopes:authorizedScopes.value,
+  selectedScopes:readScopes.value,role:role.value,pending:pendingSources.value,accessLevel:accountLevel.value}));
+const planMonths=computed(()=>[...new Set([beijingDate(clock.value).slice(0,7),
+  ...eventPeriodRange('week','',clock.value).months,beijingDate(clock.value+86400000).slice(0,7)])]
+  .map(month=>Number(month.slice(5))+'月'));
+const sources=computed(()=>[
+  ...workbenchSources(sourceContext.value,readWorkbenchRequest),
+  ...workbenchPlanSource(sourceContext.value,planMonths.value,readWorkbenchRequest),
+]);
 const {states,load,refresh,refreshExpired}=useWorkbenchReads(context,sources);
+watch(()=>planMonths.value.join(','),()=>refresh(['notice_plans']));
 const allShortcuts=ref(false);
 const sourceOrder=computed(()=>[...new Set<SourceId>([
   ...(pendingSources.value||[]),...(Array.isArray(preferredTasks.value)?preferredTasks.value:[]),...sources.value.map(source=>source.id),
@@ -127,6 +133,7 @@ watch([context,orderedSources],()=>{for(const source of orderedSources.value) vo
 type TaskView='all'|'today'|'previous-repairs'|'unread';
 const taskSearch=ref(''),taskView=ref<TaskView>('all');
 const allTasks=computed(()=>orderedSources.value
+  .filter(source=>source.id!=='notice_plans')
   .flatMap(source=>(states.value[source.id]?.result?.rows||[]).map(item=>source.readOnly?{...item,readOnly:true}:item))
   .filter(item=>(accountLevel.value!=='L2'||inDeskScope(item,dataScope.value))
     &&deskTaskVisible(accountLevel.value,props.user,item,ownScope.value)));
@@ -140,8 +147,13 @@ const readStorageKey=computed(()=>{
 const readKeys=ref(new Set<string>());
 const readIdentity=(item:WorkItem)=>JSON.stringify([item.kind,item.scope,item.key,item.status,item.time,item.dueAt,item.noticeWindow?.start,item.noticeWindow?.end]);
 const isRead=(item:WorkItem)=>readKeys.value.has(readIdentity(item));
-const inQueueScope=(row:WorkItem)=>composite(selectedScope.value)||dataScope.value===selectedScope.value||inDeskScope(row,selectedScope.value);
+const inQueueScope=(row:WorkItem)=>composite(selectedScope.value)||inDeskScope(row,selectedScope.value);
 const queueTasks=computed(()=>allTasks.value.filter(inQueueScope));
+const periodTasks=computed(()=>{
+  const current=new Set(queueTasks.value.filter(item=>item.ongoing&&item.sourceKey).map(item=>item.sourceKey));
+  return [...queueTasks.value,...(states.value.notice_plans?.result?.rows||[]).filter(item=>
+    !current.has(item.sourceKey)&&inQueueScope(item)&&deskTaskVisible(accountLevel.value,props.user,item,ownScope.value))];
+});
 const unreadTasks=computed(()=>queueTasks.value.filter(item=>!isRead(item)));
 watch(context,()=>{
   let keys:unknown;
@@ -155,10 +167,13 @@ function markRead(item:WorkItem) {
   try { if(readStorageKey.value) localStorage.setItem(readStorageKey.value,JSON.stringify(keys)); } catch { /* Keep session state. */ }
 }
 const activeGroup=ref('');
+const queueView=ref<'cards'|'table'>('cards');
+const popoverView=ref<'cards'|'table'>('table');
+const priorityView=ref<'cards'|'table'>('cards');
 const groupPlacement=ref<'top-start'|'bottom-start'>('bottom-start');
 const groupMaxHeight=ref<number>();
 let tileTrigger: HTMLButtonElement | null=null;
-const queueSources=computed(()=>orderedSources.value.filter(source=>states.value[source.id]?.status!=='deny'));
+const queueSources=computed(()=>orderedSources.value.filter(source=>source.id!=='notice_plans'&&states.value[source.id]?.status!=='deny'));
 const sourcesForQueue=computed(()=>queueSources.value.filter(source=>
   taskView.value!=='previous-repairs'||source.id==='repair_management'));
 const isOverdue=(row:WorkItem)=>!!row.dueAt&&row.dueAt<=clock.value;
@@ -192,16 +207,19 @@ const hasPreviousRepairs=computed(()=>queueTasks.value.some(isPreviousRepair)||s
 const taskScopeLabel=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope==='110'?'110站':scope==='ALL'||scope==='CAMPUS'?'园区':scope;
 const taskModuleLabels:Partial<Record<SourceId,string>>={
   notices:'通告',events:'事件',event_notices:'事件',repair_management:'维修',critical_guard:'重保',risk_inspection:'专项排查',
-  water:'水耗',engineer_mop:'维护单',cabinet:'机柜',drills:'演练',accounts:'权限',ali_confirmation:'阿里确认',
+  water:'水耗',engineer_mop:'维保单',cabinet:'机柜',drills:'演练',accounts:'权限',ali_confirmation:'阿里确认',
   tool_management:'工具',inspection:'巡检',learning:'学练',signatures:'签名',
 };
 const taskModuleLabel=(kind:SourceId)=>taskModuleLabels[kind]||sourceLabels.value.get(kind);
+const taskLabel=(item:WorkItem)=>item.kind==='notices'
+  ? item.detail==='维保'?'维保通告':item.detail||'通告'
+  :taskModuleLabel(item.kind)||'待办';
 const matchedTasks=computed(()=>{
   const terms=taskSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
   return queueTasks.value
     .filter(row=>(taskView.value!=='today'||isTodayTask(row))&&(taskView.value!=='previous-repairs'||isPreviousRepair(row))
       &&(taskView.value!=='unread'||!isRead(row))&&terms.every(term=>
-      [row.title,taskScopeLabel(row.scope),row.status,row.detail,taskModuleLabel(row.kind),sourceLabels.value.get(row.kind)].join(' ').toLowerCase().includes(term)));
+      [row.title,taskScopeLabel(row.scope),row.status,taskLabel(row),sourceLabels.value.get(row.kind)].join(' ').toLowerCase().includes(term)));
 });
 const groupPriority:Record<string,number>={events:0,critical_guard:1,'notices:变更':2,risk_inspection:3};
 const tileStyles:Record<string,[typeof Layers3,number]>={
@@ -222,6 +240,18 @@ function compareRows(a:WorkItem,b:WorkItem){
   return rowPriority(a)-rowPriority(b)||Array.from(a.title).length-Array.from(b.title).length
     ||(a.dueAt??Infinity)-(b.dueAt??Infinity)||a.title.localeCompare(b.title,'zh-CN')||a.key.localeCompare(b.key);
 }
+function byBuilding(items:WorkItem[]){
+  const groups=new Map<string,WorkItem[]>();
+  for(const item of items){
+    const codes=item.referencedScopes?.length?[...new Set(item.referencedScopes)].sort():[];
+    const label=!composite(selectedScope.value)&&inDeskScope(item,selectedScope.value)
+      ?taskScopeLabel(selectedScope.value):codes.length?codes.map(taskScopeLabel).join('、'):taskScopeLabel(item.scope)||'楼栋待核对';
+    const rows=groups.get(label)||[];
+    rows.push(item);
+    groups.set(label,rows);
+  }
+  return [...groups].sort(([a],[b])=>a.localeCompare(b,'zh-CN',{numeric:true})).map(([building,rows])=>({building,rows}));
+}
 const switchableCases=computed(()=>{
   const query=caseSearch.value.trim().toLowerCase();
   return queueTasks.value.filter(item=>item.key!==activeCase.value?.item.key
@@ -239,8 +269,8 @@ const taskGroups=computed(()=>{
   }
   for(const item of matchedTasks.value){
     const source=item.kind==='event_notices'?'events':item.kind;
-    const label=(source==='notices' && item.detail)||taskModuleLabel(source)||source;
-    const key=source==='notices'?'notices:'+label:source;
+    const label=taskLabel(item);
+    const key=source==='notices'?'notices:'+(item.detail||label):source;
     groupFor(key,label,source).rows.push(item);
   }
   const represented=new Set([...groups.values()].map(group=>group.source));
@@ -316,15 +346,15 @@ function taskWhen(item:WorkItem){
   if(item.dueAt)return '截止 '+deadline(item.dueAt);
   const raw=item.time||item.noticeWindow?.start;
   const stamp=todoTimestamp(raw);
-  return stamp&&raw&&!/^\d{4}-\d{2}-\d{2}$/.test(raw)?deadline(stamp):raw;
+  return stamp&&raw&&!/^\d{4}-\d{2}-\d{2}$/.test(raw)?deadline(stamp):raw||'';
 }
 let trigger:HTMLElement|null=null;
-const readOnly=(item:WorkItem)=>sources.value.some(source=>source.id===item.kind&&source.readOnly);
+const readOnly=(item:WorkItem)=>!!item.readOnly||sources.value.some(source=>source.id===item.kind&&source.readOnly);
 function actionLabel(item:WorkItem) {
   if (readOnly(item)) return '查看';
   if (item.kind==='accounts'&&globalDesk.value) return '授权审核';
   if (item.kind==='ali_confirmation') return '确认截图';
-  if (role.value!=='duty'||item.kind!=='notices') return '办理';
+  if (role.value!=='duty'||item.kind!=='notices'||!item.ongoing) return '办理';
   return '更新／结束';
 }
 function canOpenNoticeDeletion(item:WorkItem){
@@ -356,8 +386,8 @@ function openItem(item:WorkItem){
 function refreshClosedCase(current:OpenCase){
   if(current.mode==='read')return;
   if(current.mode==='event')refresh(['event_notices','events']);
-  else if(current.mode==='notice')refresh(['notices','engineer_mop','repair_management']);
-  else if(current.mode==='change')refresh(['ali_confirmation','notices']);
+  else if(current.mode==='notice')refresh(['notices','notice_plans','engineer_mop','repair_management']);
+  else if(current.mode==='change')refresh(['ali_confirmation','notices','notice_plans']);
   else refresh(current.item.kind==='repair_management'?['repair_management','notices']:[current.item.kind]);
 }
 function changeCase(next?:OpenCase){
@@ -468,7 +498,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 <template>
   <div class="wb-home task-desk">
     <WorkbenchDailyLayout :name="accountName" :avatar="user.avatar_url || user.avatar" :clock="clock" :links="deskLinks"
-      :tasks="allTasks" :unread="unreadTasks" :agenda-scopes="agendaScopes" :calendar-scope="dataScope" :impersonating="!!user.impersonation"
+      :tasks="periodTasks" :unread="unreadTasks" :calendar-scope="dataScope" :impersonating="!!user.impersonation"
       :calendar-identity="accessKey" :user-id="String(user.open_id||'')" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
       <template #context><span class="wb-identity role-context">{{ [roleLabel,scopeOptions.length<=1?currentScopeLabel:'',shift?shift+'班':''].filter(Boolean).join(' · ') }}</span></template>
       <template v-if="scopeOptions.length>1" #focus>
@@ -484,8 +514,9 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 
       <section v-if="priorities.length" class="priority-board" aria-label="紧急事项">
         <header><h2><CircleAlert :size="17" aria-hidden="true" />紧急事项 <span>{{ priorities.length }}</span></h2>
+          <RecordViewSwitch v-model="priorityView"/>
           <button v-if="priorities.length>2" class="more-key" :class="{'mobile-priority-toggle':priorities.length===3}" :aria-expanded="priorityExpanded" @click="priorityExpanded=!priorityExpanded">{{ priorityExpanded?'收起':'查看全部' }}</button></header>
-        <div class="priority-grid" :data-collapsed="!priorityExpanded">
+        <div class="priority-grid" :data-collapsed="!priorityExpanded" :data-view="priorityView">
           <button v-for="{item,rank,label} in (priorityExpanded?priorities:priorities.slice(0,3))" :key="item.key" class="priority-capsule"
             :class="{'due-soon':rank===2}" :aria-label="label+'，'+actionLabel(item)+' '+item.title" :title="item.title" @click="openItem(item)">
             <span class="priority-status">{{ label }}</span>
@@ -507,13 +538,17 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
           </div>
           <div class="queue-filters">
             <label><Search :size="15" aria-hidden="true" /><input v-model="taskSearch" type="search" aria-label="搜索待办" placeholder="搜索待办"></label>
+            <RecordViewSwitch v-model="queueView" @update:model-value="activeGroup=''"/>
           </div>
         </header>
         <details v-if="queueIssues.length" class="desk-queue-health queue-health"><summary>{{ queueIssues.length }} 类待办待更新</summary>
           <div v-for="source in queueIssues" :key="source.id"><span>{{ source.label }} · {{ sourceStatus(source.id) }}</span><button :aria-label="'重试'+source.label" @click="load(source.id,true)">重试</button></div>
         </details>
         <p v-if="queueStatus" class="quiet-message" role="status">{{ queueStatus }}</p>
-        <ul v-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
+        <WorkbenchTaskRows v-if="queueView==='table'&&matchedTasks.length" :groups="byBuilding([...matchedTasks].sort(compareRows))"
+          view="table" :label="taskLabel" :action="actionLabel" :when="taskWhen" :seen="isRead" :late="isOverdue" :read-only="readOnly"
+          :can-delete="canOpenNoticeDeletion" @open="openItem"/>
+        <ul v-else-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
           <li v-for="group in taskGroups" :key="group.key" :style="{'--tile-hue':group.hue}">
             <NPopover trigger="click" :placement="groupPlacement" raw :show-arrow="false"
               :animated="false" :show="activeGroup===group.key" @update:show="show=>setGroup(group.key,show)">
@@ -531,22 +566,12 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
                 @vue:mounted="(node:VNode)=>node.el?.focus({preventScroll:true})" @keydown.esc.stop.prevent="closeGroup">
                 <header><component :is="group.icon" :size="17" aria-hidden="true" /><h3>{{ group.label }}</h3>
                   <span>{{ group.rows.length ? (group.source==='notices'?'进行中 ':'')+group.rows.length+' 项' : '暂无已读明细' }}</span>
+                  <RecordViewSwitch v-if="group.rows.length" v-model="popoverView"/>
                   <button v-if="states[group.source]?.result?.more" type="button" class="tile-more" :disabled="states[group.source]?.status==='loading'" @click="load(group.source,true,true)">继续读取</button>
                   <button type="button" class="tile-close" aria-label="关闭待办条目" @click="closeGroup"><X :size="16" /></button>
                 </header>
-                <ul class="queue-list" aria-label="待办清单">
-                  <li v-for="item in group.rows" :key="item.key" class="wb-task-row task-line" :data-source="item.kind" :class="{seen:isRead(item),late:isOverdue(item)}">
-                    <button type="button" class="record-key" :class="{'wb-read-only':readOnly(item)}" :aria-label="actionLabel(item)+' '+item.title" @click="openGroupItem(item)">
-                      <span class="read-pin"><span class="wb-sr-only">{{ isRead(item)?'已读':'未读' }}</span></span>
-                      <span class="task-copy"><span class="task-title"><strong>{{ item.title }}</strong></span>
-                        <span class="task-meta"><span v-if="item.scope">{{ taskScopeLabel(item.scope) }}</span><span v-if="item.status">{{ item.status }}</span>
-                          <span v-if="taskWhen(item)" class="due">{{ taskWhen(item) }}{{ isOverdue(item)?' · 逾期':'' }}</span></span>
-                      </span>
-                      <span class="item-action">{{ actionLabel(item) }}<ChevronRight :size="13" aria-hidden="true" /></span>
-                    </button>
-                    <button v-if="canOpenNoticeDeletion(item)" type="button" class="delete-key" aria-label="删除单据" @click="openGroupItem(item)">删除</button>
-                  </li>
-                </ul>
+                <WorkbenchTaskRows :groups="byBuilding(group.rows)" :view="popoverView" :action="actionLabel" :when="taskWhen"
+                  :seen="isRead" :late="isOverdue" :read-only="readOnly" :can-delete="canOpenNoticeDeletion" @open="openGroupItem"/>
               </section>
             </NPopover>
           </li>
@@ -554,7 +579,10 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
       </section>
       <PreShiftCheck v-if="checkScope" :key="accessKey+checkScope" class="wb-check-panel shift-check"
         :user="checkUser" :fixed-scope="checkScope" workbench @snapshot="readDuty" />
-      <template #overview><PeriodOverview :key="accessKey" :user="user" :scope="composite(selectedScope)?dataScope:selectedScope" :scopes="scopeOptions" :read-scopes="composite(selectedScope)?readScopes:undefined" :role="role" @open="emit('open',$event)" /></template>
+      <template #overview="{seals,sealStatus}"><PeriodOverview :key="accessKey" :user="user" :scope="dataScope" :scope-label="currentScopeLabel"
+        :scopes="concreteScopes" :role="role" :clock="clock" :tasks="periodTasks" :plan-state="states.notice_plans?.status"
+        :seal-status="sealStatus" :seals="seals" :partial="!!queueNote && queueNote!=='暂无待办'" :action="actionLabel"
+        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)" /></template>
     </WorkbenchDailyLayout>
 
     <NModal :show="!!activeCase" :mask-closable="false" :close-on-esc="!caseListOpen" :auto-focus="false" @update:show="visible=>!visible&&closeCase()">
@@ -593,7 +621,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .task-desk :is(button,select,input) { font:inherit }
 .task-desk button,.task-dialog button { cursor:pointer }
 .task-desk button:disabled { cursor:default }
-.business-strip,.business-key,.queue-title,.queue-switches,.queue-filters label,.task-meta,.record-key,.expand-key { display:flex; align-items:center; gap:7px }
+.business-strip,.business-key,.queue-title,.queue-switches,.queue-filters label,.expand-key { display:flex; align-items:center; gap:7px }
 .scope-choice { min-width:0 }
 .scope-choice select { max-width:100%;min-height:34px;padding:4px 8px;border:1px solid var(--desk-line);border-radius:999px;background:var(--desk-paper);color:var(--desk-ink);font-size:12px }
 .quiet-message { color:var(--desk-muted); font-size:12px }
@@ -614,8 +642,8 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .queue-switches { flex-wrap:wrap; gap:4px }
 .task-desk .queue-switches button { min-height:32px;padding:3px 9px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--desk-muted);font-size:12px;white-space:nowrap }
 .task-desk .queue-switches button[aria-pressed="true"] { background:var(--v2-palette-selection); color:var(--v2-palette-accent-text); font-weight:650 }
-.queue-filters { flex:1 1 145px;max-width:232px;margin-inline-start:auto }
-.queue-filters label { min-width:0; min-height:35px; padding:0 9px; background:var(--desk-well); border:1px solid var(--desk-line); border-radius:8px; color:var(--desk-muted) }
+.queue-filters { display:flex;align-items:center;gap:5px;flex:1 1 170px;max-width:272px;margin-inline-start:auto }
+.queue-filters label { flex:1;min-width:0; min-height:35px; padding:0 7px; background:var(--desk-well); border:1px solid var(--desk-line); border-radius:8px; color:var(--desk-muted) }
 .queue-filters svg { flex:none }
 .task-desk .queue-filters input { min-width:0; width:100%; min-height:32px; border:0; color:var(--desk-ink); background:transparent; box-shadow:none; padding:0; font-size:13px }
 .task-tiles {
@@ -641,30 +669,18 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
   background:var(--desk-paper);color:var(--desk-ink);border:1px solid var(--desk-line);
   border-radius:14px;box-shadow:0 10px 32px #112c3a32;overflow:hidden;font-size:13px
 }
-.tile-popover>header { display:flex;flex:none;align-items:center;gap:6px;padding:5px 8px 5px 12px;background:var(--tile-tint);color:var(--tile-accent);border-bottom:1px solid var(--desk-line) }
+.tile-popover>header { display:flex;flex:none;flex-wrap:wrap;align-items:center;gap:6px;padding:5px 8px 5px 12px;background:var(--tile-tint);color:var(--tile-accent);border-bottom:1px solid var(--desk-line) }
 .tile-popover h3 { margin:0;font-size:14px }.tile-popover>header>span { flex:1;font-size:12px }
 .tile-popover button { color:inherit;cursor:pointer }
 .tile-more,.tile-close { border:0;background:transparent;min-height:32px;border-radius:8px }
 .tile-close { width:34px;display:grid;place-items:center }
 .tile-popover .queue-list { min-height:0;list-style:none;padding:0 8px;margin:0;overflow:auto;overscroll-behavior:contain }
-.tile-popover .task-line { display:flex;align-items:center;min-width:0;border-bottom:1px solid var(--desk-line) }
-.tile-popover .task-line:last-child { border:0 }
-.tile-popover .record-key { flex:1;min-width:0;display:grid;grid-template-columns:6px minmax(0,1fr) auto;align-items:center;gap:7px;background:transparent;color:inherit;text-align:left;border:0;border-radius:7px;padding:7px 2px;min-height:40px }
-.tile-popover .record-key:hover,.tile-popover .record-key:focus-visible { background:var(--desk-well) }
-.task-copy { display:grid;gap:2px;min-width:0 }
-.task-title strong { font-size:13px;line-height:1.35;overflow-wrap:anywhere }
-.item-action { display:flex;gap:1px;align-items:center;font-size:12px;color:var(--desk-green);white-space:nowrap }
-.wb-read-only .item-action { color:var(--desk-blue) }
-.read-pin { position:relative;width:6px;height:6px;background:var(--tile-accent);border:1px solid var(--tile-accent);border-radius:50%;box-sizing:border-box }
-.seen .read-pin { background:transparent;border-color:var(--desk-muted) }
-.task-meta { flex-wrap:wrap;gap:2px 7px;color:var(--desk-muted);font-size:11px;line-height:1.35 }
-.late .due,.delete-key { color:#99441d }
-.delete-key { min-height:34px;border:0;background:transparent;font-size:12px }
+:global(.v-binder-follower-container:has(.tile-popover)) { position:fixed }
 :global([data-v2-theme="dark"] :is(.wb-task-tile,.tile-popover)) { --tile-accent:hsl(var(--tile-hue) 65% 73%) }
 @media(max-width:600px){
   .task-tiles { grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }
   .task-desk .wb-task-tile { min-height:66px;padding:8px 10px }
-  .tile-popover :is(.record-key,.tile-close,.tile-more) { min-height:44px }
+  .tile-popover :is(.tile-close,.tile-more) { min-height:44px }
 }
 .quiet-message,.queue-health { margin:7px 0 0; line-height:1.6 }
 .quiet-message { padding-block:5px }
@@ -673,28 +689,26 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .queue-health>div { display:flex; align-items:center; justify-content:space-between; margin-top:6px }
 .task-dialog { width:min(1240px,calc(100vw - 36px)); border:1px solid var(--soft-edge,#aebdc1); border-radius:16px; background:var(--soft-face,#f4f7f7); box-shadow:0 18px 65px #10252c3d; color:var(--v2-ink,#20373b); box-sizing:border-box; overflow-wrap:anywhere }
 .close-key { display:grid; place-items:center; min-width:38px; min-height:36px; padding:5px 9px; color:inherit; background:var(--soft-field,#edf2f3); border:1px solid #879b9c66; border-radius:8px }
-:global([data-v2-theme="dark"] :is(.task-desk,.tile-popover) .late .due),:global([data-v2-theme="dark"] .task-desk .delete-key) { color:#ffbf91 }
 @media(max-width:760px) {
   .scope-choice select { min-height:44px }
-  .task-desk :is(.business-key,.more-key,.expand-key,.record-key,.delete-key,.queue-switches button),.queue-filters label,.close-key { min-height:44px }
+  .task-desk :is(.business-key,.more-key,.expand-key,.queue-switches button),.queue-filters label,.close-key { min-height:44px }
   .queue-switches { gap:2px }
   .task-dialog { width:calc(100vw - 12px) }
 }
 @media(max-width:440px) {
   .task-desk .business-strip { gap:4px }
   .queue-panel { padding:8px }
-  .task-desk .task-line { gap:5px }
-  .record-key { gap:2px; padding-inline:6px }
 }
 .priority-board { margin:0 0 12px }
 .queue-filter-count { margin-inline-start:4px;font-size:11px;font-variant-numeric:tabular-nums }
 .priority-board>header,.priority-board h2 { display:flex;align-items:center;gap:6px }
 .priority-board>header { justify-content:space-between;margin-bottom:6px }
-.priority-board h2 { font-size:17px;color:var(--priority-red,#a82c3e) }
+.priority-board h2 { font-size:17px;color:var(--priority-red,#a82c3e);margin-inline-end:auto }
 .priority-board h2 span { font-size:12px;font-variant-numeric:tabular-nums }
 .priority-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }
 .priority-grid:has(> :only-child) { grid-template-columns:minmax(0,min(100%,460px)) }
 .priority-grid:has(> :nth-child(2):last-child) { grid-template-columns:repeat(2,minmax(0,1fr)) }
+.priority-board .priority-grid[data-view=table]{grid-template-columns:minmax(0,1fr)}
 .task-desk .priority-capsule {
   --attention:var(--priority-red,#a82c3e);
   display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:3px 5px;min-width:0;
@@ -707,6 +721,10 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .priority-capsule small { font-size:11px;color:var(--desk-muted) }
 .priority-status { justify-self:start;padding:1px 6px;border-radius:999px;background:color-mix(in srgb,var(--attention) 14%,var(--desk-paper));color:var(--attention);font-size:11px;font-weight:700 }
 .priority-capsule>svg { color:var(--attention);grid-area:1/2/span 3 }
+@media(min-width:701px){
+  .priority-grid[data-view=table] .priority-capsule{grid-template-columns:100px minmax(0,1.2fr) minmax(0,.8fr) auto;border-radius:6px}
+  .priority-grid[data-view=table] .priority-capsule>svg{grid-area:auto}
+}
 :global([data-v2-theme="dark"] .task-desk .priority-board) { --priority-red:#ffaeb2;--priority-amber:#fed491 }
 @media(max-width:700px){
   .priority-board .priority-grid { grid-template-columns:minmax(0,1fr) }

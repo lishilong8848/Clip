@@ -2,19 +2,20 @@
   <header class="mop-desk-panelbar"><h2>维保通告 <small>{{ items.length }}</small></h2>
     <select v-model="statusModel" aria-label="维保通告状态">
       <option value="">全部状态</option><option value="ongoing">进行中/未闭环</option><option value="closed">已完成/已闭环</option>
-      <option value="pending">待绑定或待上传</option><option value="bound">已绑定表格</option><option value="unbound">未绑定</option><option value="uploaded">已上传维护单</option>
+      <option value="pending">待绑定或待上传</option><option value="bound">已绑定表格</option><option value="unbound">未绑定</option><option value="uploaded">已上传维保单</option>
     </select>
     <input v-model="searchModel" aria-label="搜索维保通告" placeholder="搜索通告、楼栋、专业" />
+    <RecordViewSwitch v-model="recordView"/>
   </header>
   <p v-if="!items.length" class="mop-desk-empty">暂无维保通告</p>
-  <div v-else class="mop-desk-ledger">
+  <div v-else :class="recordView==='cards'?'mop-desk-notice-grid':'mop-desk-ledger'">
     <button v-for="notice in items" :key="notice.notice_key" type="button" data-v2-navigation class="mop-desk-notice"
       :aria-pressed="notice.notice_key===selectedNoticeKey" @click="$emit('select',String(notice.notice_key || ''))">
       <span class="mop-desk-line mop-desk-ledger-status"><span>{{ notice.building || '未识别楼栋' }}</span><b :class="{'mop-desk-ended':noticeIsEnded(notice)}">{{ notice.status || '进行中' }}</b></span>
       <strong class="mop-desk-ledger-title">{{ notice.title || '未命名维保通告' }}</strong>
       <small class="mop-desk-ledger-kind" v-if="notice.specialty || notice.maintenance_cycle">{{ [notice.specialty,notice.maintenance_cycle].filter(Boolean).join(' · ') }}</small>
       <small class="mop-desk-ledger-binding">{{ notice.mop_binding ? (notice.mop_binding.inherited?'已继承绑定':'已绑定')+' · '+(notice.mop_binding.mop_title || '已选 MOP 表格') : '未绑定 MOP 表格' }}</small>
-      <small class="mop-desk-ledger-upload" :class="{'mop-desk-attention':mopNoticeNeedsAction(notice)}">{{ noticeMopUploaded(notice) ? '已上传维护单'+(Number(notice.mop_attachment_count||0)?' '+notice.mop_attachment_count+' 份':'') : '未上传维护单' }}</small>
+      <small class="mop-desk-ledger-upload" :class="{'mop-desk-attention':mopNoticeNeedsAction(notice)}">{{ noticeMopUploaded(notice) ? '已上传维保单'+(Number(notice.mop_attachment_count||0)?' '+notice.mop_attachment_count+' 份':'') : '未上传维保单' }}</small>
     </button>
   </div>
 </section>

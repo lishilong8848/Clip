@@ -1,5 +1,6 @@
 """Workbench calendar projection tests using isolated Lighthouse data."""
 import datetime as dt
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from fastapi import FastAPI
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.workbench_calendar import (
-    install_workbench_calendar, public_schedule, read_roster, read_zhihang_schedule, TZ,
+    handover_roster, install_workbench_calendar, public_schedule, read_roster, read_zhihang_schedule, TZ,
 )
 
 
@@ -52,6 +53,51 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows[0]['dutyStaffActual'], ['甲'])
             snapshot['observed_at'] -= 86400
             self.assertEqual(read_roster(service, day[:7], now.date()), ([], []))
+
+    def test_handover_uses_previous_night_and_never_reuses_day_staff_for_tomorrow(self):
+        staff = [
+            {'building':'A','scheduleDate':'2026-11-17','shiftText':'夜','dutyStaffActual':['昨夜班']},
+            {'building':'A','scheduleDate':'2026-11-18','shiftText':'白','dutyStaffActual':['本日白班']},
+            {'building':'A','scheduleDate':'2026-11-18','shiftText':'夜','dutyStaffActual':['本日夜班']},
+            {'building':'B','scheduleDate':'2026-11-18','shiftText':'白','dutyStaffActual':['其他楼栋']},
+        ]
+        covered = ['2026-11-17','2026-11-18']
+        for hour, names in [(7, ('昨夜班','本日白班')), (17, ('本日白班','本日夜班')), (18, ('本日夜班',None))]:
+            result = handover_roster({'A'}, staff, covered, dt.datetime(2026, 11, 18, hour, 55, tzinfo=TZ))
+            self.assertEqual(result['current']['staff'][0]['people'][0]['name'], names[0])
+            if names[1]:
+                self.assertEqual(result['incoming']['staff'], [{'scope':'A','people':[{'name':names[1]}]}])
+            else:
+                self.assertEqual(result['incoming']['date'], '2026-11-19')
+                self.assertFalse(result['incoming']['verified'])
+                self.assertFalse(result['incoming']['staff'])
+
+    async def test_seal_scope_and_missing_source_state(self):
+        auth = SimpleNamespace(session_scopes=lambda _: ['A','B'], account_profile=lambda _: {'level':'L1'})
+        controller = SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'isolated'}})
+        app = FastAPI()
+        install_workbench_calendar(app, controller, SimpleNamespace(auth_manager=auth, service=object()))
+        keys = {'CLIPFLOW_CALENDAR_SEALING_APP_TOKEN':'', 'CLIPFLOW_CALENDAR_SEALING_TABLE_ID':''}
+        scoped = [dict(self.seals[0], buildings=['B'])]
+        with patch('lan_bitable_template_portal.workbench_calendar.allowed_modules', return_value=set()), \
+             patch('lan_bitable_template_portal.workbench_calendar.read_roster', return_value=([],[])), \
+             patch('lan_bitable_template_portal.workbench_calendar.read_seals', side_effect=[None, OSError(), scoped]), \
+             patch.dict(os.environ, keys):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url='http://test') as client:
+                endpoint='/api/personal-calendar?month=2026-11'
+                unconfigured=(await client.get(endpoint+'&scope=A')).json()['data']
+                self.assertEqual(unconfigured['seal_status'],'unconfigured')
+                keys['CLIPFLOW_CALENDAR_SEALING_APP_TOKEN']='synthetic'
+                os.environ.update(keys, CLIPFLOW_CALENDAR_SEALING_TABLE_ID='tblUnavailable')
+                failure=(await client.get(endpoint+'&scope=A')).json()['data']
+                self.assertEqual(failure['seal_status'],'failed')
+                os.environ['CLIPFLOW_CALENDAR_SEALING_TABLE_ID']='tblReady'
+                a=(await client.get(endpoint+'&scope=A')).json()['data']
+                b=(await client.get(endpoint+'&scope=B')).json()['data']
+                self.assertEqual(a['seal_status'],'ready')
+                self.assertEqual(a['seal_windows'],[])
+                self.assertEqual(b['seal_windows'][0]['scopes'],['B'])
+        await app.router.shutdown()
 
     async def test_calendar_projects_only_current_user_scopes(self):
         auth = SimpleNamespace(session_scopes=lambda session: ['A', 'B'],

@@ -1,265 +1,312 @@
+<script setup lang="ts">
+import { computed, ref, watch } from 'vue';
+import { ArrowUpRight, BookOpenCheck, Building2, ChevronRight, MapPinned, ShieldCheck } from 'lucide-vue-next';
+import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
+import type { Dict } from '../client';
+import { todoTimestamp } from '../businessTodos';
+import { beijingDate, eventPeriodRange } from '../eventPeriod';
+import { readWorkbenchRequest } from './useWorkbenchReads';
+import type { Role, ScopeOption } from './recipes';
+import type { WorkItem } from './sources';
+import type { CalendarItem, SealStatus } from './WorkbenchDailyLayout.vue';
+
+const props=defineProps<{user:Dict;scope:string;scopeLabel:string;scopes:ScopeOption[];role:Role;clock:number;tasks:WorkItem[];
+  planState?:'loading'|'ok'|'stale'|'down'|'deny';sealStatus?:SealStatus;seals:CalendarItem[];partial:boolean;
+  action:(item:WorkItem)=>string}>();
+defineEmits<{open:[url:string];task:[item:WorkItem];retry:[]}>();
+const period=ref<'day'|'week'|'month'>('week');
+const view=ref<'cards'|'table'>('cards');
+const periods=[{id:'day',label:'今日'},{id:'week',label:'本周'},{id:'month',label:'本月'}] as const;
+const filters=[
+  {id:'all',label:'全部'},{id:'late',label:'逾期'},{id:'soon',label:'今明截止'},
+  {id:'running',label:'进行中'},{id:'planned',label:'待开始'},{id:'seal',label:'封网'},
+] as const;
+type Filter = typeof filters[number]['id'];
+const filter=ref<Filter>('all');
+const today=computed(()=>beijingDate(props.clock));
+const canSeeCampus=computed(()=>props.role==='manager'||props.user.category==='manager');
+const canSeeBuilding=computed(()=>!['guest','temporary'].includes(props.user.role)&&!!props.scope);
+const canSeePersonal=computed(()=>!props.user.impersonation&&!['guest','temporary'].includes(props.user.role)&&props.user.category!=='duty');
+const canReadLearning=computed(()=>!props.user.impersonation&&props.user.modules?.includes('learning'));
+const canReadTeam=computed(()=>canReadLearning.value&&(canSeeCampus.value||props.role==='supervisor')
+  &&/^(?:ALL|CAMPUS|[A-EH])$/.test(props.scope));
+const range=computed(()=>{
+  const at=Date.parse(today.value+'T12:00:00+08:00');
+  return period.value==='day'?eventPeriodRange('custom','',at,[today.value,today.value]):eventPeriodRange(period.value,'',at);
+});
+const labels:Partial<Record<WorkItem['kind'],string>>={
+  notices:'通告',events:'事件',event_notices:'事件',repair_management:'维修跟进',engineer_mop:'维保单',critical_guard:'重保',
+  risk_inspection:'专项排查',water:'水耗',drills:'演练',inspection:'巡检',cabinet:'上下电',learning:'画像学练',accounts:'权限审批',tool_management:'工具',
+};
+const noticeLabel=(item:WorkItem)=>item.detail==='维保'?'维保通告':item.detail==='变更'?'变更通告':item.detail||'通告';
+const label=(item:WorkItem)=>item.kind==='notices'?noticeLabel(item):labels[item.kind]||'待办';
+const scopeName=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope==='110'?'110站':['ALL','CAMPUS'].includes(scope)?'园区':scope;
+const dateFormat=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric'});
+const timeFormat=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
+const timeText=(value:number)=>timeFormat.format(value);
+const dateOnly=(value?:string|number)=>typeof value==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(value);
+const startAt=(item:WorkItem)=>todoTimestamp(item.noticeWindow?.start||item.scheduledAt||item.time);
+const deadline=(item:WorkItem)=>item.dueAt??todoTimestamp(item.noticeWindow?.end);
+const running=(item:WorkItem)=>item.ongoing||item.kind==='events'||/进行中|处理中|维修中/.test(item.status);
+const planned=(item:WorkItem)=>item.kind==='notices'&&!running(item);
+const tomorrow=computed(()=>beijingDate(props.clock+86400000));
+function urgency(item:WorkItem){
+  const due=deadline(item);
+  if(due===undefined)return 4;
+  return due<=props.clock?0:beijingDate(due)===today.value?1:beijingDate(due)===tomorrow.value?2:3;
+}
+function matchesPeriod(item:WorkItem){
+  const from=startAt(item), end=deadline(item);
+  if (end!==undefined&&end<=props.clock) return true;
+  if (running(item)||item.kind==='repair_management') return from===undefined||from<range.value.end;
+  if (from===undefined&&end===undefined)return item.kind!=='notices'||period.value==='month';
+  return (from??end!)<range.value.end&&(end??from!)>=range.value.start;
+}
+function sortRows(a:WorkItem,b:WorkItem){
+  return urgency(a)-urgency(b)||(deadline(a)??Infinity)-(deadline(b)??Infinity)
+    ||Number(!!b.urgentEvent)-Number(!!a.urgentEvent)||a.title.localeCompare(b.title,'zh-CN');
+}
+function timing(item:WorkItem){
+  const due=deadline(item);
+  if(due!==undefined){
+    const when=dateOnly(item.noticeWindow?.end)?dateFormat.format(due):timeText(due);
+    return ['已逾期','今日截止','明日截止','截止'][urgency(item)]+' '+when;
+  }
+  const raw=item.noticeWindow?.start||item.scheduledAt||item.time, start=startAt(item);
+  return start===undefined?'':dateOnly(raw)?dateFormat.format(start):timeText(start);
+}
+const highLevel=new Set(['events','event_notices','critical_guard','risk_inspection']);
+const personalKinds=new Set(['learning','signatures']);
+const active=computed(()=>props.tasks.filter(matchesPeriod).sort(sortRows));
+const campusFocus=(row:WorkItem)=>highLevel.has(row.kind)||row.kind==='notices'&&row.detail==='变更';
+const campusRows=computed(()=>active.value.filter(campusFocus));
+const buildingRows=computed(()=>active.value.filter(row=>!personalKinds.has(row.kind)&&(!canSeeCampus.value||!campusFocus(row))));
+const cards=computed(()=>[
+  ...(canSeeCampus.value?[{id:'campus',title:'园区',icon:MapPinned,rows:campusRows.value}]:[]),
+  ...(canSeeBuilding.value?[{id:'building',title:'楼栋',icon:Building2,rows:buildingRows.value}]:[]),
+  ...(canSeePersonal.value?[{id:'personal',title:'个人',icon:BookOpenCheck,
+    rows:active.value.filter(row=>personalKinds.has(row.kind)&&!(row.kind==='learning'&&canReadLearning.value))}]:[]),
+]);
+const sealRows=computed(()=>props.seals.filter(item=>{
+  const start=todoTimestamp(item.start),end=todoTimestamp(item.end);
+  return start!==undefined&&end!==undefined&&start<range.value.end&&end>=range.value.start&&end>=props.clock;
+}).sort((a,b)=>(todoTimestamp(a.start)??0)-(todoTimestamp(b.start)??0)));
+const matchesFilter=(item:WorkItem,value:Filter)=>{
+  switch(value){
+    case 'late':return urgency(item)===0;
+    case 'soon':return urgency(item)===1||urgency(item)===2;
+    case 'running':return running(item);
+    case 'planned':return planned(item);
+    case 'seal':return false;
+    default:return true;
+  }
+};
+const statusFilters=computed(()=>{
+  const rows=cards.value.flatMap(card=>card.rows);
+  const seals=sealRows.value.length;
+  return filters.map(option=>({...option,count:option.id==='seal'?seals:
+    option.id==='all'?rows.length+seals:rows.filter(item=>matchesFilter(item,option.id)).length}))
+    .filter(option=>option.id!=='seal'||option.count>0||filter.value==='seal');
+});
+const sealCard=computed(()=>canSeeCampus.value?'campus':'building');
+const visibleCards=computed(()=>cards.value.map(card=>({...card,
+  rows:filter.value==='all'?card.rows:card.rows.filter(item=>matchesFilter(item,filter.value)),
+  seals:card.id===sealCard.value&&(filter.value==='all'||filter.value==='seal')?sealRows.value:[],
+})).filter(card=>filter.value==='all'||card.rows.length||card.seals.length));
+const incomplete=computed(()=>props.partial||['loading','stale','down'].includes(props.planState||''));
+const rowMeta=(item:WorkItem)=>[
+  (item.referencedScopes?.length?[...new Set(item.referencedScopes)].sort().map(scopeName).join('、'):scopeName(item.scope)),
+  item.urgentEvent,
+  item.status,
+].filter(Boolean).join(' · ');
+const expanded=ref<Partial<Record<string,boolean>>>({});
+watch([period,filter],()=>{expanded.value={};});
+watch(()=>props.scope,()=>{filter.value='all';expanded.value={};});
+const issuerScopes=computed(()=>new Set(props.scopes.map(item=>item.value)));
+type Count = {done:number;total:number;pending:number;late:number;checking:number;upcoming:number};
+const team=ref<Count>(), personal=ref<{done?:number;total?:number;message?:string}>();
+const teamError=ref(''), personalError=ref(''), revision=ref(0);
+function count(value:unknown){
+  if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error('完成数据待核验');
+  return value;
+}
+watch([()=>props.scope,period,today,canReadTeam,canReadLearning,canSeePersonal,revision],async(_current,_previous,onCleanup)=>{
+  const request=new AbortController();
+  onCleanup(()=>request.abort());
+  team.value=undefined;personal.value=undefined;teamError.value=personalError.value='';
+  const from=beijingDate(range.value.start),to=today.value,scope=props.scope,signal=request.signal;
+  const read=(path:string,params:Record<string,string>)=>readWorkbenchRequest(path+'?'+new URLSearchParams(params),signal);
+  const requests:Promise<unknown>[]=[];
+  if(canReadTeam.value)requests.push(read('/api/learning/workbench-summary',{scope,from,to}).then(data=>{
+    if(signal.aborted)return;
+    if(!Array.isArray(data.scopes)||!data.scopes.length||data.scopes.some((building:string)=>
+      ['ALL','CAMPUS'].includes(scope)?issuerScopes.value.size>0&&!issuerScopes.value.has(building):scope!==building))
+      throw new Error('学练汇总楼栋未核验');
+    const done=count(data.summary?.['已完成']),late=count(data.summary?.['逾期']);
+    const pending=count(data.summary?.['待答'])+count(data.summary?.['答题中'])+late;
+    team.value={done,total:done+pending,pending,late,checking:count(data.summary?.['待核对']),upcoming:count(data.summary?.['未到时'])};
+  }).catch(cause=>{if(!signal.aborted)teamError.value=[401,403].includes(cause?.status)?'当前账号无权查看学练汇总':'学练汇总读取失败';}));
+  if(canReadLearning.value&&canSeePersonal.value)requests.push(read('/api/learning/bootstrap',{}).then(async boot=>{
+    if(signal.aborted)return;
+    if(!boot.self_person?.id){personal.value={message:'账号未关联学练人员'};return;}
+    if(!['ALL','CAMPUS'].includes(scope)&&boot.self_scope&&boot.self_scope!==scope){
+      personal.value={message:'本楼暂无个人题单'};return;
+    }
+    if(period.value==='day'&&boot.daily_exemption?.status==='exempt'){personal.value={message:'入职首月免答'};return;}
+    const data=await read('/api/learning/profile',{scope:boot.self_scope||'',person_id:boot.self_person.id,from,to});
+    if(signal.aborted)return;
+    const summary=period.value==='day'?data.today_summary:data.summary;
+    const done=count(summary?.task_answered),total=count(summary?.assigned);
+    personal.value={done,total,message:total?undefined:'本周期暂无当班题单'};
+  }).catch(cause=>{if(!signal.aborted)personalError.value=[401,403].includes(cause?.status)?'账号未关联学练人员':'学练进度读取失败';}));
+  await Promise.all(requests);
+},{immediate:true});
+</script>
+
 <template>
-  <section v-if="shownSources.length" class="wb-period" aria-label="工作状态">
-    <header class="wb-period-header">
-      <h2 :title="dateLabel+' · '+scopeLabel">工作状态</h2>
-      <div class="wb-period-select" role="group" aria-label="统计周期">
-        <button v-for="option in periods" :key="option.id" type="button" :aria-pressed="period === option.id"
-          @click="period = option.id">{{ option.label }}</button>
+  <section v-if="cards.length" class="wb-period" aria-label="工作状态">
+    <header class="period-tools">
+      <h2>工作状态</h2>
+      <div class="period-switch" role="group" aria-label="统计周期">
+        <button v-for="option in periods" :key="option.id" type="button" :aria-pressed="period===option.id" @click="period=option.id">{{ option.label }}</button>
       </div>
+      <RecordViewSwitch v-model="view"/>
     </header>
-    <div class="wb-period-grid" aria-live="polite">
-      <article v-for="source in shownSources" :key="source.id" class="wb-period-card">
-        <header>
-          <div class="wb-period-topic"><component :is="icons[source.id]" :size="16" aria-hidden="true" /><h3>{{ source.label }}</h3></div>
-          <div v-if="results[source.id]?.metric" class="wb-period-value"><strong>{{ results[source.id]?.metric?.value }}</strong><span>{{ results[source.id]?.metric?.unit }}</span></div>
-          <button v-if="source.url" type="button" :aria-label="`打开${source.label}`"
-            @click="$emit('open', source.url)"><ArrowUpRight :size="17" /></button>
+    <div class="status-filters" role="group" aria-label="工作状态筛选">
+      <button v-for="option in statusFilters" :key="option.id" type="button" :data-filter="option.id" :data-has-items="option.count>0"
+        :aria-pressed="filter===option.id" @click="filter=option.id">{{ option.label }} <b>{{ option.count }}</b></button>
+    </div>
+    <p v-if="planState==='down'||planState==='stale'" class="period-muted" role="status">计划通告待更新 <button type="button" @click="$emit('retry')">重试</button></p>
+    <p v-else-if="incomplete" class="period-muted" role="status">{{ planState==='loading'?'正在读取计划通告…':'部分数据待更新' }}</p>
+    <p v-if="!visibleCards.length&&!incomplete" class="period-empty" role="status">
+      {{ filter==='seal'&&sealStatus!=='ready'?'封网信息待更新':'本周期暂无此类事项' }}
+    </p>
+    <div class="period-grid" :data-view="view">
+      <article v-for="card in visibleCards" :key="card.id" class="period-card" :data-card="card.id" :aria-label="card.title+'卡片'">
+        <header class="card-head">
+          <component :is="card.icon" :size="17" aria-hidden="true"/><h3>{{ card.title }}</h3>
+          <small v-if="card.id!=='personal'">{{ scopeLabel }}</small>
+          <span v-if="card.rows.length||card.seals.length" class="row-count"><b>{{ card.rows.length+card.seals.length }}</b> 项</span>
         </header>
-        <template v-if="results[source.id]?.metric">
-          <div v-if="results[source.id]?.metric?.bars.length" class="wb-period-stats">
-            <div v-for="bar in results[source.id]?.metric?.bars" :key="bar.label" class="wb-period-bar" :class="bar.tone">
-              <span>{{ bar.label }}</span><b>{{ bar.value }}</b>
-              <meter :value="bar.value" :max="bar.max || 1" :aria-label="bar.label" />
-            </div>
+
+        <ul v-if="card.rows.length" class="period-entries" :class="{expanded:expanded[card.id]}">
+          <li v-for="item in (expanded[card.id]?card.rows:card.rows.slice(0,4))" :key="item.key">
+            <button type="button" class="period-entry" :data-tone="urgency(item)===0?'late':urgency(item)<3?'soon':undefined" @click="$emit('task',item)">
+              <span class="period-kind">{{ label(item) }}</span><strong class="period-title">{{ item.title }}</strong>
+              <span class="period-action">{{ action(item) }} <ChevronRight :size="13" aria-hidden="true"/></span>
+              <small class="period-meta">{{ rowMeta(item) }}</small>
+              <small v-if="timing(item)" class="period-time">{{ timing(item) }}</small>
+            </button>
+          </li>
+        </ul>
+        <button v-if="card.rows.length>4" type="button" class="period-expand" :aria-expanded="!!expanded[card.id]" @click="expanded[card.id]=!expanded[card.id]">
+          {{ expanded[card.id]?'收起':`展开其余 ${card.rows.length-4} 项` }}
+        </button>
+
+        <div v-if="card.seals.length" class="seal-list" aria-label="周期内封网">
+          <div v-for="item in card.seals" :key="item.title+'-'+item.start" class="seal-row">
+            <ShieldCheck :size="15" aria-hidden="true"/>
+            <div><strong>{{ item.title }}</strong><small>{{ timeText(todoTimestamp(item.start)!) }} 至 {{ timeText(todoTimestamp(item.end)!) }}</small></div>
+            <small class="seal-state">{{ todoTimestamp(item.start)!<=clock?'封网中':'待生效' }}</small>
           </div>
-          <p v-if="results[source.id]?.metric?.note">{{ results[source.id]?.metric?.note }}</p>
-        </template>
-        <p v-if="results[source.id]?.error" class="wb-period-message">{{ results[source.id]?.error }}
-          <button type="button" @click="load(source)">重试</button>
-        </p>
-        <p v-else-if="!results[source.id]" class="wb-period-message" role="status">正在读取…</p>
+        </div>
+
+        <div v-if="filter==='all'&&canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building')" class="learning-summary">
+          <h4>画像学练情况汇总</h4>
+          <template v-if="team">
+            <div class="learning-kpis"><span>已完成 <b>{{ team.done }} / {{ team.total }}</b> 人天</span>
+              <span :data-warn="team.pending>0">未完成 <b>{{ team.pending }}</b></span><span v-if="team.late" data-warn="true">其中逾期 <b>{{ team.late }}</b></span></div>
+            <meter :value="team.done" :max="team.total||1" aria-label="学练人天完成进度"/>
+            <small v-if="team.checking||team.upcoming">{{ [team.checking?'待核对 '+team.checking:'',team.upcoming?'未到时 '+team.upcoming:''].filter(Boolean).join(' · ') }}</small>
+            <small v-else-if="!team.total">暂无已到作答时段的人员</small>
+          </template>
+          <small v-else role="status">{{ teamError || '正在读取学练汇总…' }}
+            <button v-if="teamError==='学练汇总读取失败'" type="button" @click="revision++">重试</button>
+          </small>
+        </div>
+
+        <div v-if="filter==='all'&&card.id==='personal'&&canReadLearning" class="learning-summary">
+          <div class="learning-title"><strong>我的画像学练</strong>
+            <button type="button" aria-label="打开画像学练" @click="$emit('open','/learning?view=practice')">去学练 <ArrowUpRight :size="14" aria-hidden="true"/></button></div>
+          <template v-if="personal">
+            <div v-if="personal.total" class="learning-kpis"><span>已答 <b>{{ personal.done }} / {{ personal.total }}</b> 题</span>
+              <span>{{ personal.total>Number(personal.done)?'待完成':'已完成' }}</span></div>
+            <meter v-if="personal.total" :value="Math.min(personal.done||0,personal.total)" :max="personal.total" aria-label="当班题单进度"/>
+            <small v-if="personal.message">{{ personal.message }}</small>
+          </template>
+          <small v-else role="status">{{ personalError || '正在读取个人进度…' }}
+            <button v-if="personalError==='学练进度读取失败'" type="button" @click="revision++">重试</button>
+          </small>
+        </div>
+
+        <p v-if="!card.rows.length&&!card.seals.length&&!incomplete
+          &&!(canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building'))
+          &&!(card.id==='personal'&&canReadLearning)" class="period-muted">本周期暂无待处理事项</p>
       </article>
     </div>
   </section>
 </template>
 
-<script setup lang="ts">
-import { computed, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
-import { ArrowUpRight, BookOpenCheck, ClipboardList, Radio, Siren } from 'lucide-vue-next';
-import { requestJson, type Dict } from '../client';
-import { beijingDate, eventCalendarRange, eventPeriodRange, mergeEventMonths } from '../eventPeriod';
-import { eventStatusTone } from '../../eventManagementUtils';
-import type { Role, ScopeOption } from './recipes';
-import { readWorkbenchRequest } from './useWorkbenchReads';
-
-const props = defineProps<{ user: Dict; scope: string; scopes: ScopeOption[]; role: Role; readScopes?:string[] }>();
-defineEmits<{ open: [url: string] }>();
-const periods = [{ id: 'day', label: '今日' }, { id: 'week', label: '本周' }, { id: 'month', label: '本月' }] as const;
-const icons={daily:ClipboardList, events:Siren, notices:Radio, learning:BookOpenCheck};
-type Period = typeof periods[number]['id'];
-type Bar = { label: string; value: number; max: number; tone?: 'ok' | 'warn' };
-type Metric = { value: number | string; unit?: string; bars: Bar[]; note?: string };
-type Source = { id: keyof typeof icons; label: string; url?: string; read: (signal: AbortSignal) => Promise<Metric> };
-const period = ref<Period>('day');
-const today = ref(beijingDate());
-const range = computed(() => {
-  const at = Date.parse(today.value + 'T12:00:00+08:00');
-  return period.value === 'day' ? eventPeriodRange('custom', '', at, [today.value, today.value]) : eventCalendarRange(period.value, at);
-});
-const dateLabel = computed(() => period.value === 'day' ? today.value : range.value.caption);
-const scopeLabel = computed(() => props.scopes.find(option => option.value === props.scope)?.label || '本人');
-const results = ref<Record<string, { metric?: Metric; error?: string; denied?: boolean }>>({});
-const requests = new Map<string, AbortController>();
-const count = (value: unknown): number => {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) throw new Error('数据待核验');
-  return value;
-};
-const read = (path: string, query: Record<string, string>, signal: AbortSignal) =>
-  readWorkbenchRequest(path + '?' + new URLSearchParams(query), signal);
-
-const sources = computed<Source[]>(() => {
-  const grants: string[] = Array.isArray(props.user.modules) ? props.user.modules : [];
-  if (['temporary', 'guest'].includes(props.user.role)) return [];
-  const scope = props.scope, date = today.value, activeRange = range.value, selectedPeriod = period.value;
-  const scoped = props.scopes.some(option => option.value === scope);
-  const personal = props.role==='personal';
-  const team = ['manager','supervisor'].includes(props.role);
-  const eventScopes=props.readScopes||[scope];
-  const rows: Source[] = [];
-  if (personal && scoped && grants.includes('daily') && selectedPeriod === 'day') rows.push({
-    id: 'daily', label: '每日任务', url: '/daily-tasks?' + new URLSearchParams({ scope, date }),
-    async read(signal) {
-      const data = await read('/api/daily-tasks', { scope, date }, signal);
-      if (data.date !== date || data.scope !== scope || data.warnings?.length) throw new Error('任务数据待同步');
-      const total = count(data.stats?.total);
-      return { value: total, unit: '项任务', bars: [
-        { label: '已完成', value: count(data.stats.completed), max: total, tone: 'ok' },
-        { label: '进行中', value: count(data.stats.ongoing), max: total },
-        { label: '需关注', value: count(data.stats.attention), max: total, tone: 'warn' },
-      ] };
-    },
-  });
-  if ((personal||team||props.role==='specialist') && scoped && grants.includes('event')) rows.push({
-    id: 'events', label: '事件', url: props.readScopes?undefined:'/?' + new URLSearchParams({ scope, mode: 'events', detail: '1' }),
-    async read(signal) {
-      const batches = await Promise.all(eventScopes.flatMap(building=>activeRange.months.map(async month => {
-        const batch=await read('/api/events/monthly', {scope:building,month,date_field:'occurrence_time'},signal);
-        if (batch.scope!==building) throw new Error('事件数据待同步');
-        return batch;
-      })));
-      if (batches.some(batch => batch.snapshot_exists !== true || batch.config_missing || Object.keys(batch.last_failed || {}).length)) {
-        throw new Error('事件数据待同步');
-      }
-      const events = mergeEventMonths(batches, activeRange);
-      const total = events.records.length;
-      return { value: total, unit: '起事件', bars: [
-        { label: '处理中', value: events.records.filter((row: Dict) => eventStatusTone(row.status) === 'processing').length, max: total, tone: 'warn' },
-        { label: '已恢复', value: events.records.filter((row: Dict) => eventStatusTone(row.status) === 'recovered').length, max: total, tone: 'ok' },
-        { label: 'I2 及以上', value: events.stats.i2_or_higher, max: total },
-      ], note: events.unknown_time_count ? '部分时间待核对' : undefined };
-    },
-  });
-  const noticeKinds = ['maintenance', 'change', 'repair'].filter(kind => grants.includes(kind));
-  if (personal && scoped && noticeKinds.length) rows.push({
-    id: 'notices', label: '通告办理记录', url: '/workbench-lite?' + new URLSearchParams({ scope, work_type: noticeKinds.length === 1 ? noticeKinds[0]! : 'all' }),
-    async read(signal) {
-      const workTypes = noticeKinds.length === 3 ? ['all'] : noticeKinds;
-      const requests = activeRange.months.flatMap(month => workTypes.map(async work_type => ({
-        month, data: await read('/api/history-summary', { scope, month, work_type }, signal),
-      })));
-      const values = { started: 0, updated: 0, ended: 0 };
-      for (const { month, data } of await Promise.all(requests)) {
-        if (data.scope !== scope || data.month !== month || !Array.isArray(data.days)) throw new Error('通告记录待核验');
-        for (const day of data.days) {
-          if (day.date < beijingDate(activeRange.start) || day.date > date) continue;
-          for (const key of ['started', 'updated', 'ended'] as const) values[key] += count(day.stats?.[key]);
-        }
-      }
-      const total = values.started + values.updated + values.ended;
-      return { value: total, unit: '项状态记录', note: '同一通告的开始、更新、结束分别统计', bars: [
-        { label: '开始', value: values.started, max: total }, { label: '更新', value: values.updated, max: total },
-        { label: '结束', value: values.ended, max: total, tone: 'ok' },
-      ] };
-    },
-  });
-  if (team && scoped && /^(?:[A-EH]|ALL|CAMPUS)$/.test(scope) && grants.includes('learning') && !props.user.impersonation) rows.push({
-    id:'learning',label:'画像学练情况汇总',
-    async read(signal) {
-      const data=await read('/api/learning/workbench-summary',{scope,from:beijingDate(activeRange.start),to:date},signal);
-      const authorized=new Set(props.scopes.filter(option=>/^[A-EH]$/.test(option.value)).map(option=>option.value));
-      if (!Array.isArray(data.scopes)||!data.scopes.length||data.scopes.some((building:string)=>
-        ['ALL','CAMPUS'].includes(scope)
-          ? (!authorized.has(building)&&!props.scopes.some(option=>option.value==='ALL'&&!props.readScopes))
-          : building!==scope)) throw new Error('数据待核验');
-      const values=['已完成','待答','答题中','逾期','待核对','未到时'].map(label=>({label,value:count(data.summary?.[label])}));
-      const total=values.reduce((sum,item)=>sum+item.value,0);
-      return {value:total,unit:'人天',bars:values.map(item=>({...item,max:total,tone:item.label==='已完成'?'ok':item.label==='逾期'||item.label==='待核对'?'warn':undefined})),
-        note:selectedPeriod==='day'?undefined:'同一人不同排班日分别统计'};
-    },
-  });
-  if ((personal||props.role==='duty'&&props.user.category!=='duty') && grants.includes('learning')) rows.push({
-    id: 'learning', label: '个人学练', url: '/learning?view=practice',
-    async read(signal) {
-      const boot = await requestJson('/api/learning/bootstrap', { signal, timeoutMs: 12_000 });
-      if (!boot.self_person?.id) return { value: '未关联', bars: [], note: '当前账号暂无个人学练身份' };
-      if (selectedPeriod === 'day' && boot.daily_exemption?.status === 'exempt') return {
-        value: '首月免做', bars: [], note: `${boot.daily_exemption.resume_date} 起按排班安排`,
-      };
-      const data = await read('/api/learning/profile', { scope: boot.self_scope || '', person_id: boot.self_person.id,
-        from: beijingDate(activeRange.start), to: date }, signal);
-      const summary = selectedPeriod === 'day' ? data.today_summary : data.summary;
-      const done = count(summary?.task_answered), total = count(summary?.assigned);
-      return { value: `${done} / ${total}`, unit: '题已答', bars: [{ label: '答题进度', value: done, max: Math.max(total, done), tone: 'ok' }],
-        note: summary.task_label || (total ? undefined : '暂无已安排题目') };
-    },
-  });
-  const order = team ? ['events', 'learning']
-    : ['engineer', 'specialist'].includes(props.role) ? ['notices', 'events', 'daily', 'learning']
-    : props.role === 'duty' ? ['daily', 'notices', 'events', 'learning'] : ['learning', 'daily', 'notices', 'events'];
-  return rows.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
-});
-const shownSources=computed(()=>sources.value.filter(source=>!results.value[source.id]?.denied));
-let activeView=true, refreshPending=false, refreshedAt=0;
-
-async function load(source: Source) {
-  if(!activeView||requests.has(source.id))return;
-  const controller = new AbortController();
-  requests.set(source.id, controller);
-  const previous=results.value[source.id]?.metric;
-  try {
-    const metric = await source.read(controller.signal);
-    if (!controller.signal.aborted) results.value[source.id] = { metric };
-  } catch (error) {
-    if (!controller.signal.aborted) {
-      const denied = [401,403].includes((error as { status?: number })?.status || 0);
-      const label = error instanceof Error && /待(同步|核验)/.test(error.message) ? error.message : '读取失败';
-      results.value[source.id] = {denied, metric:denied?undefined:previous, error:previous?'汇总待更新':label};
-    }
-  } finally {
-    if (requests.get(source.id) === controller) {
-      requests.delete(source.id);
-      if(!requests.size&&refreshPending)refresh();
-    }
+<style scoped>
+.wb-period{display:grid;gap:8px;min-width:0;container:wb-period / inline-size}
+.period-tools,.period-switch,.card-head,.learning-title,.learning-kpis{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.period-tools h2{margin-inline-end:auto}
+.period-switch button,.status-filters button,.period-expand,.learning-title button,.period-muted button,.learning-summary small button{
+  border:1px solid var(--desk-line);background:var(--desk-paper);color:var(--desk-green);
+  border-radius:7px;min-height:32px;padding:4px 8px;cursor:pointer;font-size:.78rem}
+.period-switch button[aria-pressed=true],.status-filters button[aria-pressed=true]{
+  background:var(--desk-green-wash);border-color:var(--desk-green);font-weight:700}
+.status-filters{display:flex;gap:5px;flex-wrap:wrap}
+.status-filters button,.row-count{font-variant-numeric:tabular-nums;white-space:nowrap}
+.status-filters button b{margin-inline-start:3px;font-size:.82rem}
+.status-filters button[data-filter=late][data-has-items=true]{color:var(--cf-danger,#a43c31)}
+.status-filters button[data-filter=soon][data-has-items=true]{color:var(--cf-warning,#8a4d11)}
+.period-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,255px),1fr));gap:8px;align-items:start}
+.period-grid[data-view=table]{grid-template-columns:minmax(0,1fr)}
+.period-card{min-width:0;display:grid;gap:7px;padding:9px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-paper);overflow-wrap:anywhere;container:period-card / inline-size}
+.card-head{min-height:24px}
+.card-head svg{color:var(--desk-green)}
+.card-head h3{margin:0}.card-head small,.period-muted,.learning-summary small{color:var(--desk-muted);font-size:.76rem}
+.row-count{margin-inline-start:auto;color:var(--desk-muted);font-size:.77rem}
+.row-count b{color:var(--desk-ink)}
+.learning-summary{min-width:0;display:grid;gap:4px;padding:6px;border-radius:7px;background:var(--desk-well);font-size:.83rem}
+.learning-title{justify-content:space-between}
+.learning-title button{display:inline-flex;align-items:center;gap:3px}
+.learning-summary meter{width:100%;height:9px;accent-color:var(--desk-green)}
+.learning-summary meter::-webkit-meter-optimum-value{background:var(--desk-green)}
+.learning-kpis{color:var(--desk-muted);font-size:.76rem}
+.learning-kpis b{font-variant-numeric:tabular-nums;color:var(--desk-green)}
+.learning-kpis [data-warn=true],.learning-kpis [data-warn=true] b{color:var(--cf-warning,#8a4d11)}
+.period-entries{display:grid;gap:4px;list-style:none;margin:0;padding:0}
+.period-entries.expanded,.seal-list{max-height:21rem;overflow:auto;overscroll-behavior:contain;padding:2px}
+.period-entry,.seal-row{width:100%;min-width:0;display:grid;gap:3px 7px;align-items:center;text-align:left;
+  border:1px solid var(--desk-line);border-radius:8px;background:var(--desk-well);padding:6px 7px;color:var(--desk-ink);font:inherit;font-size:.8rem}
+.period-entry{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"kind action" "title title" "meta time"}
+.period-entry:hover,.period-entry:focus-visible{border-color:var(--desk-green)}
+.period-kind{grid-area:kind;justify-self:start;color:var(--desk-green);font-size:.74rem;font-weight:650}
+.period-title{grid-area:title;overflow-wrap:anywhere;line-height:1.32}
+.period-action{grid-area:action;justify-self:end;display:flex;align-items:center;gap:1px;color:var(--desk-green);font-size:.75rem;white-space:nowrap}
+.period-meta,.period-time,.seal-row small{font-size:.74rem;color:var(--desk-muted);line-height:1.35}
+.period-meta{grid-area:meta}.period-time{grid-area:time;justify-self:end;text-align:end}
+.period-entry[data-tone=late]{border-inline-start:3px solid var(--cf-danger,#a43c31)}
+.period-entry[data-tone=soon]{border-inline-start:3px solid var(--cf-warning,#8a4d11)}
+.period-entry[data-tone=late] .period-time{color:var(--cf-danger,#a43c31);font-weight:700}
+.period-entry[data-tone=soon] .period-time{color:var(--cf-warning,#8a4d11);font-weight:700}
+.period-expand{justify-self:end}
+.seal-list{display:grid;gap:4px}
+.seal-row{grid-template-columns:auto minmax(0,1fr) auto}
+.seal-row>div{display:grid;gap:2px}
+.seal-row :is(svg,.seal-state){color:var(--desk-green)}
+.period-empty{padding:10px 12px;border:1px solid var(--desk-line);border-radius:8px;color:var(--desk-muted);font-size:.8rem}
+@container wb-period (min-width:815px){
+  .period-grid[data-view=cards]:has(article:nth-child(3)){grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(190px,.64fr)}
+}
+@container period-card (min-width:525px){
+  .period-grid[data-view=cards] .period-entries{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .period-grid[data-view=table] .period-entry{
+    grid-template-columns:75px minmax(0,1fr) minmax(0,.55fr) minmax(0,.68fr) auto;
+    grid-template-areas:"kind title meta time action";min-height:38px
   }
 }
-function refresh(){
-  if(!activeView||document.hidden||requests.size){refreshPending=true;return;}
-  refreshPending=false;
-  refreshedAt=Date.now();
-  shownSources.value.forEach(source=>void load(source));
-}
-watch(()=>JSON.stringify([range.value.start,range.value.end,props.scope,props.readScopes,props.role,
-  props.scopes,props.user.open_id,props.user.modules,props.user.level,props.user.category,props.user.impersonation]),()=>{
-  requests.forEach(request=>request.abort());
-  requests.clear();
-  results.value={};
-  refresh();
-},{immediate:true});
-function resume(){
-  if(!activeView||document.hidden)return;
-  const next=beijingDate();
-  if(next!==today.value){today.value=next;return;}
-  if(refreshPending||Date.now()-refreshedAt>=120000)refresh();
-}
-const dateTimer = window.setInterval(resume,60000);
-onActivated(()=>{activeView=true;resume();});
-onDeactivated(()=>{activeView=false;});
-onMounted(()=>{
-  window.addEventListener('clipflow-business-changed',refresh);
-  document.addEventListener('visibilitychange',resume);
-});
-onBeforeUnmount(() => {
-  requests.forEach(request => request.abort());
-  window.clearInterval(dateTimer);
-  window.removeEventListener('clipflow-business-changed', refresh);
-  document.removeEventListener('visibilitychange',resume);
-});
-</script>
-
-<style scoped>
-.wb-period { display:grid;gap:9px;min-width:0;padding:11px;border:1px solid var(--soft-edge);border-radius:14px;background:var(--soft-face) }
-.wb-period-header { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:4px 9px }
-.wb-period h2, .wb-period h3, .wb-period p { margin: 0; }
-.wb-period h2 { font-size: 16px; }
-.wb-period p { color: var(--v2-muted); font-size: 13px; line-height: 1.55; }
-.wb-period-select { display:grid;grid-template-columns:repeat(3,auto);border:1px solid var(--v2-border);background:var(--soft-face);border-radius:999px }
-.wb-period button { border: 0; color: inherit; background: none; cursor: pointer; }
-.wb-period button:focus-visible { outline: 2px solid var(--wb-primary,var(--v2-blue)); outline-offset: -2px; }
-.wb-period-select button { min-height:30px;padding:0 9px;border-radius:999px;font-size:12px;font-weight:600 }
-.wb-period-select button[aria-pressed='true'] { color: var(--wb-primary,var(--v2-blue)); background: color-mix(in srgb,var(--wb-primary,var(--v2-blue)) 12%,transparent); }
-.wb-period-grid { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,235px),1fr));gap:8px;align-items:start }
-.wb-period-card { display:grid;align-content:start;gap:8px;min-width:0;padding:9px 11px;background:var(--soft-field);border:1px solid var(--soft-edge);border-radius:10px }
-.wb-period-card header { display:flex;align-items:center;gap:7px;min-height:28px }
-.wb-period-topic { display:flex;align-items:center;gap:6px;min-width:0;margin-inline-end:auto }
-.wb-period-topic svg { color:var(--v2-palette-accent-text);flex:none }
-.wb-period-card h3 { font-size: 13px; }
-.wb-period-card header button { display:grid;place-items:center;min-width:28px;min-height:28px;color:var(--wb-primary,var(--v2-blue)) }
-.wb-period-value { display:flex;align-items:baseline;gap:4px;white-space:nowrap;line-height:1.12 }
-.wb-period-value strong { font-size:clamp(16px,1.6vw,21px);font-variant-numeric:tabular-nums }
-.wb-period-value span { color: var(--v2-muted); font-size: 12px; }
-.wb-period-stats { display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,68px),1fr));gap:6px 9px }
-.wb-period-bar { --bar-color:var(--wb-primary,var(--v2-blue));display:grid;grid-template-columns:minmax(0,1fr) auto;
-  align-items:center;gap:2px 4px;font-size:12px }
-.wb-period-bar.ok { --bar-color: var(--v2-green,#18835a); }
-.wb-period-bar.warn { --bar-color: var(--v2-amber,#b66b24); }
-.wb-period-bar b { min-width: 2ch; text-align: right; font-variant-numeric: tabular-nums; }
-.wb-period-bar meter { grid-column:1/-1;width:100%;height:5px;appearance:none }
-.wb-period-bar meter::-webkit-meter-bar { border: 0; background: var(--v2-border); }
-.wb-period-bar meter::-webkit-meter-optimum-value { background: var(--bar-color); }
-.wb-period-bar meter::-moz-meter-bar { background: var(--bar-color); }
-.wb-period-message button { color: var(--wb-primary,var(--v2-blue)); min-height: 34px; text-decoration: underline; }
-@media(max-width:560px) {
-  .wb-period-select button,.wb-period-card header button,.wb-period-message button { min-height: 44px; }
-  .wb-period-card { padding-inline: 10px; }
-}
+@media(pointer:coarse){.period-tools button,.status-filters button,.period-entry,.period-expand,.learning-title button{min-height:44px}}
 </style>

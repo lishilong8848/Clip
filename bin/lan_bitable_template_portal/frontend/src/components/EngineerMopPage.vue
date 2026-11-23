@@ -4,7 +4,7 @@
       <VnetBackButton to="/" />
     </div>
     <MopPageHeader
-      v-if="!previewMode"
+      v-if="!previewMode && deskView==='fill'"
       v-model:scope="scope"
       v-model:month="month"
       :month-options="monthOptions"
@@ -22,20 +22,25 @@
 
     <template v-else>
       <MessageBanner
-        v-if="message"
+        v-if="deskView==='fill'&&message"
         :tone="messageType === 'failed' ? 'failed' : messageType === 'success' ? 'success' : 'info'"
         :text="message"
       />
       <MessageBanner
-        v-if="warnings.length"
+        v-if="deskView==='fill'&&warnings.length"
         tone="warning"
         title="需要注意"
         :items="warnings"
       />
 
-      <MopFlowSteps v-if="!previewMode" :steps="mopFlowSteps" />
+      <nav v-if="!previewMode" class="mop-history-tabs" aria-label="维保单办理分区">
+        <button type="button" :aria-pressed="deskView==='fill'" @click="deskView='fill'">办理</button>
+        <button type="button" :aria-pressed="deskView==='history'" @click="deskView='history'">填写记录</button>
+      </nav>
+      <MopFlowSteps v-if="!previewMode && deskView==='fill'" :steps="mopFlowSteps" />
 
-      <section v-if="previewMode && preview" class="mop-preview-page" :class="`mobile-page-${mopMobileStep}`">
+      <MopHistory v-if="deskView==='history'" v-model:scope="scope" :scope-options="scopeOptions" />
+      <section v-else-if="previewMode && preview" class="mop-preview-page" :class="`mobile-page-${mopMobileStep}`">
         <MopPreviewHeader
           :title="previewTitle"
           :notice-title="selectedNotice?.title || ''"
@@ -416,6 +421,7 @@ import type { MopCellPopoverMode } from "./MopCellPopover.vue";
 import MopCompanySignaturePicker from "./MopCompanySignaturePicker.vue";
 import MopFileActions from "./MopFileActions.vue";
 import MopFlowSteps from "./MopFlowSteps.vue";
+import MopHistory from "./MopHistory.vue";
 import MessageBanner from "./MessageBanner.vue";
 import MopOtherSignatureManager from "./MopOtherSignatureManager.vue";
 import MopPageHeader from "./MopPageHeader.vue";
@@ -445,6 +451,7 @@ const monthOptions = ref(mopMonthOptions());
 const initialSourceRecordId = String(routeParams.get("source_record_id") || "").trim();
 const initialNoticeKey = String(routeParams.get("notice_key") || "").trim();
 const scope = ref(normalizeMopScope(routeParams.get("scope") || props.scopeOptions[0]?.value || "ALL"));
+const deskView=ref<'fill'|'history'>(routeParams.get('mop_view')==='history'?'history':'fill');
 const loading = ref(false);
 const saving = ref(false);
 const previewLoading = ref(false);
@@ -2533,7 +2540,7 @@ function preferredNoticeKeyFromRoute(): string {
 }
 
 async function loadPage(force = false): Promise<void> {
-  if (!props.loggedIn) return;
+  if (!props.loggedIn || deskView.value==='history') return;
   const loadVersion = ++mopPageLoadVersion;
   mopPageLoadAbortController?.abort();
   const abortController = new AbortController();
@@ -2776,6 +2783,15 @@ watch(
 // File/sheet selection made by an accepted response finishes before this watch runs.
 watch(mopFileTargetContext, invalidateMopFileRequests);
 
+watch(deskView,view=>{
+  const url=new URL(window.location.href);
+  if(view==='history')url.searchParams.set('mop_view','history');
+  else url.searchParams.delete('mop_view');
+  window.history.replaceState(window.history.state,'',url);
+  if(view==='history')mopPageLoadAbortController?.abort();
+  else if(!notices.value.length)void loadPage();
+});
+
 watch([scope, month], () => {
   closeMopTransientUi();
   releaseMopEditSession();
@@ -2893,6 +2909,11 @@ watch(() => props.scopeOptions, (items) => {
 </script>
 
 <style scoped>
+.mop-history-tabs{display:flex;gap:6px;margin:0 0 10px;flex-wrap:wrap}
+.mop-history-tabs button{min-height:36px;padding:4px 11px;border:1px solid var(--v2-border,#d4dbe4);border-radius:7px;
+  background:var(--soft-face,#fff);color:var(--v2-ink,#243149);font:inherit;cursor:pointer}
+.mop-history-tabs button[aria-pressed=true]{background:var(--v2-palette-selection,#def2e5);color:var(--v2-palette-accent-text,#19704c);font-weight:660}
+@media(pointer:coarse){.mop-history-tabs button{min-height:44px}}
 .engineer-mop {
   width: min(1800px, 100%);
   margin: 0 auto;

@@ -29,6 +29,9 @@
     <div v-else-if="tab !== 'sharing' && viewMode === 'practice' && !learner && identityIssue" class="empty"><AlertCircle :size="30" /><strong>尚未关联个人身份</strong><span>{{ identityIssue || '无法进行个人答题，请与管理员核对人员目录。' }}</span></div>
 
     <template v-else>
+      <div v-if="isAdmin && ['issues', 'pending'].includes(tab) && boot.question_problem_count > 0" class="actions">
+        <button type="button" :disabled="busy" @click="openQuestionProblems">题库待核对 {{ boot.question_problem_count }} 题</button>
+      </div>
       <LearningHome v-if="tab === 'home'" :data="profile" :person="learner" :date="date" :loading="loading || busy" :failed="homeProgressError || !profile.today_summary" :daily-duty="dailyDuty" @open="openLearning" @refresh="refreshView" />
       <LearningPendingQuestions v-else-if="isAdmin && tab === 'pending'" :queue="pendingQueue" :loading="pendingLoading" :error="pendingError" :busy="busy" :labels="typeLabels" @page="loadPendingQuestions" @edit="openReview($event, '', true)" />
       <LearningSharing v-else-if="tab === 'sharing'" :is-admin="isAdmin" :user-id="userId" @dirty="sharingDirty = $event" @busy="busy = $event" />
@@ -102,7 +105,7 @@
             <label v-if="tab !== 'history'" class="search-field"><Search :size="16" /><input v-model="listSearch" aria-label="搜索题目或质疑" placeholder="搜索题目或质疑" type="search" /></label>
             <button type="button" :disabled="loading || busy" @click="clearFilters"><X :size="16" />清空筛选</button><button type="submit" :disabled="loading || busy"><Search :size="16" />查询</button>
           </div>
-          <button v-if="isAdmin && tab === 'issues'" type="button" :disabled="busy" @click="filters.problems = true; switchTab('questions')"><AlertCircle :size="16" />题库待核对 {{ boot.question_problem_count ?? '—' }} 题</button><div v-if="tab === 'questions'" class="actions"><button type="button" :disabled="busy" @click="modalKind = 'import'; importRows = []; importName = ''; error = ''"><Upload :size="16" />导入</button><button type="button" :disabled="busy" @click="exportData('questions')"><Download :size="16" />导出</button><button type="button" class="primary" :disabled="busy" @click="editQuestion()"><Plus :size="16" />新增题目</button></div>
+          <div v-if="tab === 'questions'" class="actions"><button type="button" :disabled="busy" @click="modalKind = 'import'; importRows = []; importName = ''; error = ''"><Upload :size="16" />导入</button><button type="button" :disabled="busy" @click="exportData('questions')"><Download :size="16" />导出</button><button type="button" class="primary" :disabled="busy" @click="editQuestion()"><Plus :size="16" />新增题目</button></div>
           <button v-if="isAdmin && tab === 'history'" type="button" :disabled="busy" @click="exportData('results')"><Download :size="16" />导出学习记录</button>
         </form>
         <div v-if="tab === 'questions' && selected.length" class="batch-bar"><span>已选 {{ selected.length }} 题</span><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter((q:Dict) => selected.includes(q.id)), 'published')"><CheckCircle2 :size="16" />批量启用</button><button :disabled="busy || loading" @click="setQuestionStatus(rows.filter((q:Dict) => selected.includes(q.id)), 'disabled')"><X :size="16" />批量停用</button><button :disabled="busy || loading" @click="selected = []">取消选择</button></div>
@@ -859,6 +862,9 @@ async function loadView(): Promise<void> {
       if (token !== epoch) return;
       if (tab.value === "profile" || tab.value === 'home') { profile.value = data; if (learner.value && data.person) learner.value = data.person; }
       else { rows.value = data.items || []; total.value = Number(data.total ?? rows.value.length); if (data.page) pages[tab.value] = data.page; }
+      if (tab.value === 'questions' && filters.problems && !filters.bank && !filters.status && !filters.bankSearch) {
+        boot.value.question_problem_count = total.value;
+      }
       if (tab.value === 'home') {
         homeProgressError.value = false;
         if (/^\d{4}-\d{2}-\d{2}$/.test(String(data.to || ''))) date.value = data.to;
@@ -984,6 +990,12 @@ async function loadTodayPaper(): Promise<void> {
   finally { if (token === epoch) loading.value = false; }
 }
 function filterChanged(): void { pages[tab.value] = 1; void loadView(); }
+function openQuestionProblems(): void {
+  if (!isAdmin.value || busy.value) return;
+  Object.assign(filters, { bankSearch: '', status: '', bank: '', problems: true });
+  pages.questions = 1;
+  void switchTab('questions');
+}
 function clearFilters(): void {
   if (tab.value === "review") { filters.review = "mistakes"; filters.reviewBank = ""; filters.search = ""; }
   else if (tab.value === "history") { filters.from = ""; filters.to = ""; }
@@ -1053,6 +1065,7 @@ async function bootstrap(): Promise<void> {
           else await perform(async()=>openIssue({},await requestLearning(learningOptions,'/issues/'+encodeURIComponent(link.get('issue_id')!))));
         }
       } else if(isAdmin.value && (link.get('edit_question') || link.get('question_id') || link.get('tab')==='questions')) {
+        filters.problems=link.get('problems')==='1';
         tab.value='questions'; await loadView();
         const target=link.get('edit_question')||link.get('question_id');
         if(target)await editQuestion(target);

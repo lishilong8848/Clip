@@ -272,6 +272,65 @@ class ZhihangSyncTests(unittest.TestCase):
         self.assertEqual([len(ids) for ids in self.cloud.update_batches], [100, 100, 5])
         self.assertEqual(self.cloud.created, 205)
 
+    def test_scheduled_risk_and_drill_ignore_feishu_read_format_differences(self):
+        for kind, key_field, status_field in (("risk", "风险ID", "排查状态"), ("drill", "计划ID", "执行状态")):
+            with self.subTest(kind=kind):
+                cloud = Cloud()
+                before = {key_field: "fixture", status_field: "待处理"}
+                target = before | {status_field: "已完成"}
+                cloud.rows = {"recKnown": before | {"公式编码": ["编码"], "备注": "人工数据"}}
+                worker = ZhihangSync(Store(), cloud=lambda _: cloud,
+                                     pull=lambda *_: {kind: {identity(kind, target): target}})
+                self.addCleanup(worker.close)
+                worker.configure(kind, {"confirmed": True})
+                list_all = cloud.list_all
+
+                def list_rows(path="records"):
+                    return ([{"field_name": name, "type": 1} for name in before]
+                            if path == "fields" else list_all(path))
+
+                def read_batch(keys):
+                    return [{"record_id": key, "fields": cloud.rows[key] | {
+                        status_field: [{"text": cloud.rows[key][status_field], "type": "text"}],
+                        "公式编码": {"value": ["编码"]},
+                    }} for key in keys]
+
+                with (
+                    patch.object(cloud, "list_all", side_effect=list_rows),
+                    patch.object(cloud, "batch_get", side_effect=read_batch),
+                    patch.object(cloud, "batch_update", wraps=cloud.batch_update) as write,
+                ):
+                    run, future = worker.start_now(kind, "scheduled")
+                    self.assertEqual(future.result(5)["status"], "success", worker.detail(run["id"]))
+                    write.assert_called_once_with([{"record_id": "recKnown", "fields": {status_field: "已完成"}}])
+                self.assertEqual(cloud.rows["recKnown"]["备注"], "人工数据")
+
+    def test_concurrent_edit_waits_without_writing_and_retries_original_batch(self):
+        record_id = "recExisting"
+        before = self.records["event:1"] | {"事件标题": "原记录"}
+        self.cloud.rows[record_id] = before.copy()
+
+        def edit_before_read(ids):
+            self.cloud.rows[record_id]["事件标题"] = "人工修改"
+            return [self.cloud.get(key) for key in ids]
+
+        with patch.object(self.cloud, "batch_get", side_effect=edit_before_read):
+            receipt, future = self.worker.start_now("event", "scheduled")
+            self.assertEqual(future.result(5)["status"], "pending_verify")
+        run_id = receipt["id"]
+        self.assertEqual(self.cloud.rows[record_id]["事件标题"], "人工修改")
+        self.assertEqual(self.cloud.update_batches, [])
+        self.assertEqual(self.worker.detail(run_id)["checks"]["同步飞书原表"]["冲突字段"], "事件标题")
+
+        self.cloud.rows[record_id] = before.copy()
+        run = self.store.get_document(NS, "run:" + run_id)
+        self.store.put_document(NS, "run:" + run_id, dict(run, next_attempt=""))
+        self.assertEqual([f.result(5)["status"] for f in self.worker.kick()], ["success"])
+        self.assertEqual([row["id"] for row in self.worker.history()], [run_id])
+        self.assertEqual(self.cloud.rows[record_id], self.records["event:1"])
+        self.assertEqual(self.cloud.update_batches, [[record_id]])
+        self.assertEqual(self.cloud.created, 0)
+
     def test_partial_create_visibility_waits_for_original_receipt(self):
         self.records["event:2"] = self.records["event:1"] | {"事件ID": "2"}
         preview = self.enqueue("preview")
@@ -297,6 +356,27 @@ class ZhihangSyncTests(unittest.TestCase):
         self.assertEqual(self.enqueue("sync", preview["id"])["status"], "success")
         self.assertEqual(self.cloud.deleted, ["recNew1"])
         self.assertIn("recManual", self.cloud.rows)
+
+    def test_preserves_a_manual_column_changed_during_update_on_later_cleanup(self):
+        first = self.enqueue("preview")
+        self.assertEqual(self.enqueue("sync", first["id"])["status"], "success")
+        self.records["event:1"]["事件标题"] = "更新后的事件标题"
+
+        def read_batch(ids):
+            self.cloud.rows["recNew1"]["备注"] = "现场手填"
+            return [self.cloud.get(key) for key in ids]
+
+        with patch.object(self.cloud, "batch_get", side_effect=read_batch):
+            _, future = self.worker.start_now("event", "scheduled")
+            self.assertEqual(future.result(5)["status"], "success")
+        self.assertEqual(self.cloud.rows["recNew1"]["事件标题"], "更新后的事件标题")
+        self.assertEqual(self.cloud.rows["recNew1"]["备注"], "现场手填")
+
+        self.records = {"event:2": {"事件ID": "2", "事件标题": "事件二", "发生时间": TODAY + " 08:30"}}
+        preview = self.enqueue("preview")
+        self.assertEqual(preview["counts"]["delete"], 0)
+        self.assertEqual(self.enqueue("sync", preview["id"])["status"], "success")
+        self.assertIn("recNew1", self.cloud.rows)
 
     def test_empty_data_and_disabled_settings_leave_cloud_unchanged(self):
         self.records.clear()

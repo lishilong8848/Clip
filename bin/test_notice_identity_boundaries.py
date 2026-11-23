@@ -2,6 +2,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from types import SimpleNamespace
 from unittest import mock
 from pathlib import Path
 
@@ -1683,7 +1684,7 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         finally:
             PortalRuntime.state_store = old_state_store
 
-    def test_event_upload_with_stale_target_recreates_record(self) -> None:
+    def test_event_upload_with_stale_target_requires_selecting_an_existing_record(self) -> None:
         class FakeStateStore:
             def __init__(self) -> None:
                 self.identities = []
@@ -1741,42 +1742,23 @@ class NoticeIdentityBoundaryTests(unittest.TestCase):
         old_service = PortalRuntime.service
         old_created_targets = dict(getattr(PortalRuntime, "local_upload_created_targets", {}) or {})
         fake_state = FakeStateStore()
-        remote_fields = {}
         PortalRuntime.state_store = fake_state
-        PortalRuntime.service = object()
+        lookup = mock.Mock(return_value={'candidates': [{'record_id': 'recExistingEvent', 'title': '隔离候选通告'}]})
+        PortalRuntime.service = SimpleNamespace(lookup_notice_target_candidates=lookup)
         PortalRuntime.local_upload_created_targets = {}
         try:
-            def query_record(record_id: str, _notice_type: str):
-                if record_id == "recMissingEvent":
-                    return False, "查询记录失败:1254043-RecordIdNotFound"
-                return True, {
-                    "record_id": record_id,
-                    "fields": dict(remote_fields),
-                    "record_version": "v1",
-                }
-
-            def create_event(notice_type: str, notice_payload: NoticePayload):
-                fields = EventNoticeHandler(notice_type).build_create_fields(
-                    notice_payload
-                )
-                setattr(notice_payload, "_clipflow_written_fields", dict(fields))
-                remote_fields.update(fields)
-                return True, "recNewEvent"
-
             with mock.patch(
                 "lan_bitable_template_portal.server.query_record_by_id",
-                side_effect=query_record,
-            ), mock.patch(
-                "lan_bitable_template_portal.server.create_bitable_record_by_payload",
-                side_effect=create_event,
-            ) as create_record:
+                return_value=(False, '查询记录失败:1254043-RecordIdNotFound'),
+            ), mock.patch("lan_bitable_template_portal.server.create_bitable_record_by_payload") as create_record:
                 result = PortalRuntime.execute_local_notice_upload(request_payload)
 
-            self.assertTrue(result.get("ok"), result)
-            self.assertEqual(result.get("name"), "上传")
-            self.assertEqual(result.get("real_record_id"), "recNewEvent")
-            self.assertEqual(fake_state.active_items[0][0]["target_record_id"], "recNewEvent")
-            create_record.assert_called_once()
+            self.assertFalse(result.get('ok'), result)
+            self.assertTrue(result.get('target_record_missing'))
+            self.assertTrue(result.get('needs_target_selection'))
+            self.assertEqual([row['target_record_id'] for row in result['target_candidates']], ['recExistingEvent'])
+            self.assertFalse(fake_state.active_items)
+            create_record.assert_not_called()
         finally:
             PortalRuntime.state_store = old_state_store
             PortalRuntime.service = old_service

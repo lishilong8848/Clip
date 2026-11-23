@@ -5,6 +5,7 @@
         <h2>{{ noticeMonth ? noticeMonth + ' 维保通告' : '本月维保通告' }}</h2>
       </div>
       <span>{{ items.length }}</span>
+      <RecordViewSwitch v-model="recordView"/>
     </div>
     <div class="filters">
       <input v-model="searchModel" placeholder="搜索通告、楼栋、专业" />
@@ -21,7 +22,7 @@
     <div v-if="!items.length" class="empty-box">
       暂无维保通告
     </div>
-    <div v-else class="list notice-list">
+    <div v-else class="list notice-list" :class="{'notice-card-view':recordView==='cards'}">
       <button type="button"
         v-for="notice in items"
         :key="notice.notice_key"
@@ -53,8 +54,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import type { Dict } from "../api/client";
+import RecordViewSwitch from './RecordViewSwitch.vue';
+
+const recordView=ref<'cards'|'table'>('table');
 
 const props = defineProps<{
   noticeMonth?: string;
@@ -96,6 +100,7 @@ function noticeIsEnded(notice: Dict): boolean {
 </script>
 
 <style scoped>
+.notice-card-view{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(190px,100%),1fr));align-items:start}
 .panel {
   height: min(720px, calc(100vh - 300px));
   min-height: min(500px, calc(100vh - 220px));

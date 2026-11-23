@@ -111,6 +111,198 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
         return {'open_id': recipient, 'ok': ok, 'message_id': 'message-' + recipient if ok else '',
                 'message': 'ok' if ok else 'rejected', 'failure_kind': '' if ok else 'not_sent', **extra}
 
+    def maintenance_actual_times_source(self):
+        self.service.app_token, self.service.table_id = portal.DEFAULT_APP_TOKEN, portal.DEFAULT_TABLE_ID
+        payload, remote, row = self.source(formula=True)
+        remote.pop('实际开始时间')
+        row['display_fields'].pop('实际开始时间')
+        for name in ('实际开始时间', '实际结束时间'):
+            self.service._field_meta_by_name[name] = portal.FieldMeta('date-field', name, 'DateTime', 5, False, {}, [], False)
+        started = self.service._repair_management_datetime_ms('2026-10-19 09:32:47.123')
+        return {**payload, 'notice_type': '维保通告', 'scope': 'A', 'operation_id': 'original-operation'}, remote, started
+
+    def test_end_undo_restores_only_its_own_source_fields_and_waits_for_readback(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        status = '维护实施状态'
+        self.service._field_meta_by_name[status] = field(status, options=['进行中', '已结束'])
+        self.service._load_table_fields.side_effect = None
+        self.service._load_table_fields.return_value = ([], self.service._field_meta_by_name)
+        remote['楼栋'] = 'A楼'
+        remote['计划维护月份'] = '10月'
+        remote['维护周期'] = '月度'
+        payload['plan_month'], payload['maintenance_cycle'] = '10月', '月度'
+        self.store.upsert_notice_identity({**payload, 'status': '开始'}, origin='test')
+        undo = {**payload, 'action_type': 'end', 'created_at': time.time() - 1,
+                'source_remote': {'work_type': 'maintenance', 'record_id': 'rec-source', 'track_end_write': True}}
+        self.assertTrue(self.service.restore_notice_undo_related_remote(undo)['skipped'])
+        self.service._patch_record_fields.assert_not_called()
+        self.assertTrue(self.service.sync_notice_source_ended_fields({**payload, '_target_actual_start_ms': started}))
+        self.assertEqual(remote[status], '已结束')
+        self.assertEqual(remote['实际开始时间'], started)
+        later_end = remote['实际结束时间'] + 60000
+        original_end = remote['实际结束时间']
+        remote['实际结束时间'] = later_end
+        outcome = self.service.restore_notice_undo_related_remote(undo)
+        self.assertEqual(outcome['reason'], 'source_changed')
+        self.assertEqual(remote['实际结束时间'], later_end)
+        remote['实际结束时间'] = original_end
+        remote['无关字段'] = '保留'
+        self.service._patch_record_fields.side_effect = lambda **_kwargs: None
+        with self.assertRaisesRegex(portal.NoticeSourcePending, '读回'):
+            self.service.restore_notice_undo_related_remote(undo)
+        self.service._patch_record_fields.side_effect = lambda **kwargs: remote.update(kwargs['fields'])
+        self.assertTrue(self.service.restore_notice_undo_related_remote(undo)['restored'])
+        self.assertEqual(self.service._patch_record_fields.call_args.kwargs['fields'],
+                         {'实际开始时间': None, '实际结束时间': None, status: '进行中'})
+        self.assertEqual(remote['无关字段'], '保留')
+        count = self.service._patch_record_fields.call_count
+        self.assertTrue(self.service.restore_notice_undo_related_remote(undo)['restored'])
+        self.assertEqual(self.service._patch_record_fields.call_count, count)
+
+    def test_start_write_uses_exact_actual_date_and_keeps_pending_task_until_readback(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        self.store.upsert_notice_identity({**payload, 'status': '开始'}, origin='test')
+        names = server.get_field_config('维保通告')
+        target = {names['status']: '开始', names['plan_start']: started - 60000, names['actual_end']: started + 3600000}
+        with (patch.object(server, 'query_record_by_id', return_value=(True, {'fields': target})),
+              patch.object(self.runtime, 'enqueue_notice_alert_tags'), patch.object(self.runtime, '_enqueue_qt_power_notice')):
+            for _ in range(2):
+                self.runtime._enqueue_qt_notice_followups(payload, {}, 'original-operation', 'rec-target', 'start')
+            self.assertEqual(len(self.store.list_outbox_events('notice_source_finalize')), 1)
+            self.runtime.process_source_end_sync()
+            self.service._patch_record_fields.assert_not_called()
+            self.assertNotIn('实际开始时间', remote)
+            task, = self.store.list_documents('notice_source_recovery')
+            self.assertEqual(task['payload']['state'], 'pending')
+            target[names['actual_start']] = {'type': 5, 'value': [started]}
+            self.store.put_document('notice_source_recovery', task['key'], {**task['payload'], 'next_check_at': 0})
+            self.runtime.process_source_end_sync()
+            self.runtime.process_source_end_sync()
+        self.assertEqual(remote['实际开始时间'], started)
+        self.assertNotIn('实际结束时间', remote)
+        self.service._patch_record_fields.assert_called_once_with(
+            app_token=portal.DEFAULT_APP_TOKEN, table_id=portal.DEFAULT_TABLE_ID,
+            record_id='rec-source', fields={'实际开始时间': started},
+        )
+
+    def test_end_fills_both_dates_from_the_confirmed_notice_in_one_patch(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        names = server.get_field_config('维保通告')
+        ended = self.service._repair_management_datetime_ms(payload['ended_at']) + 123
+        remote['维护实施状态'] = '已结束'
+        projected = self.runtime._source_end_payload(
+            payload, {names['actual_start']: started, names['actual_end']: ended}, '维保通告')
+        self.assertTrue(self.service.sync_notice_source_ended_fields(projected))
+        self.assertTrue(self.service.sync_notice_source_ended_fields(projected))
+        self.service._patch_record_fields.assert_called_once_with(
+            app_token=portal.DEFAULT_APP_TOKEN, table_id=portal.DEFAULT_TABLE_ID,
+            record_id='rec-source', fields={'实际开始时间': started, '实际结束时间': ended},
+        )
+
+    def test_start_never_overwrites_a_different_existing_date_or_another_source_table(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        self.store.upsert_notice_identity({**payload, 'status': '开始'}, origin='test')
+        remote['实际开始时间'] = started - 60000
+        with self.assertRaises(portal.NoticeSourceSuperseded):
+            self.service.sync_notice_source_ended_fields({**payload, '_target_actual_start_ms': started}, start_only=True)
+        self.assertFalse(self.service.sync_notice_source_ended_fields(
+            {**payload, 'source_table_id': 'tblOther', '_target_actual_start_ms': started}, start_only=True))
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_start_recovery_after_lost_write_response_does_not_patch_twice(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        self.store.upsert_notice_identity({**payload, 'status': '开始'}, origin='test')
+        names = server.get_field_config('维保通告')
+        writer = self.service._patch_record_fields
+
+        def accepted(**request):
+            remote.update(request['fields'])
+            raise TimeoutError('write accepted, response lost')
+
+        writer.side_effect = accepted
+        with patch.object(server, 'query_record_by_id', return_value=(True, {'fields': {
+            names['status']: '开始', names['actual_start']: started,
+        }})):
+            self.runtime._queue_source_end_sync(payload, 'rec-target', '维保通告', start_only=True)
+            self.runtime.process_source_end_sync()
+            task, = self.store.list_documents('notice_source_recovery')
+            self.assertEqual(task['payload']['state'], 'pending')
+            self.store.put_document('notice_source_recovery', task['key'], {**task['payload'], 'next_check_at': 0})
+            restarted = type('RestartedRecoveryRuntime', (self.runtime,), {})
+            restarted.process_source_end_sync()
+        self.assertEqual(remote['实际开始时间'], started)
+        writer.assert_called_once()
+        self.assertEqual(self.store.get_document('notice_source_recovery', task['key'])['state'], 'done')
+
+    def test_start_rechecks_binding_before_writing_source(self):
+        payload, _, started = self.maintenance_actual_times_source()
+        with patch.object(self.store, 'resolve_notice_identity', side_effect=[
+            {'target_record_id': 'rec-target'}, {'target_record_id': 'rec-other'},
+        ]):
+            with self.assertRaisesRegex(portal.NoticeSourceSuperseded, '关联在同步期间变化'):
+                self.service.sync_notice_source_ended_fields({**payload, '_target_actual_start_ms': started}, start_only=True)
+        self.service._patch_record_fields.assert_not_called()
+
+    def test_start_undo_clears_the_owned_time_once_and_keeps_later_changes(self):
+        payload, remote, started = self.maintenance_actual_times_source()
+        self.store.upsert_notice_identity({**payload, 'status': '开始'}, origin='test')
+        self.assertTrue(self.service.sync_notice_source_ended_fields(
+            {**payload, '_target_actual_start_ms': started}, start_only=True))
+        writer = self.service._patch_record_fields
+        for field_name, value in (('实际开始时间', started+1000), ('计划维护月份', '12月'), ('楼栋', 'B楼')):
+            with self.subTest(field_name=field_name):
+                before = remote.copy()
+                remote[field_name] = value
+                self.assertIn('核对源表', self.service.undo_notice_source_start(payload))
+                writer.assert_called_once()
+                self.assertEqual(remote[field_name], value)
+                remote.clear()
+                remote.update(before)
+        self.assertEqual(self.service.undo_notice_source_start(payload), '')
+        self.assertEqual(self.service.undo_notice_source_start(payload), '')
+        self.assertIsNone(remote['实际开始时间'])
+        self.assertEqual([call.kwargs['fields'] for call in writer.call_args_list],
+                         [{'实际开始时间': started}, {'实际开始时间': None}])
+
+    def test_binding_active_notice_enqueues_only_the_verified_original_start(self):
+        from clipflow_backend.main import FastAPIPortalController
+        from fastapi.testclient import TestClient
+
+        payload, remote, started = self.maintenance_actual_times_source()
+        period = self.service.notice_source_period_snapshot(payload)
+        validation = {'scope': 'A', 'notice_type': '维保通告', 'work_type': 'maintenance',
+            'source_record_id': 'rec-source', 'source_found': True, 'source_work_type': 'maintenance',
+            'target_record_id': 'rec-target', 'target_found': True, 'target_active': True,
+            '_source_period': period, 'target_actual_start_ms': started,
+            '_target_active_payload': {'title': '隔离维保', 'active_item_id': 'isolated-active', 'status': '开始'}}
+        names = server.get_field_config('维保通告')
+        session = {'user': {'open_id': 'fixture-owner'}, 'role': 'building', 'allowed_scopes': ['A']}
+        with (patch.object(server.PortalRuntime, 'state_store', self.store),
+              patch.object(server.PortalRuntime, 'service', self.service),
+              patch('clipflow_backend.main.LanPortalStateStore', return_value=self.store),
+              patch.object(server.PortalRuntime.auth_manager, 'account_profile', return_value={'modules': ['maintenance']}),
+              patch.object(server.PortalRuntime.auth_manager, 'scope_allowed', return_value=True),
+              patch.object(server.PortalRuntime.auth_manager, 'is_admin', return_value=False),
+              patch.object(self.service, 'validate_notice_identity_binding', return_value=validation),
+              patch.object(server.PortalRuntime, '_reconcile_source_ongoing_after_target_terminal'),
+              patch.object(server, 'query_record_by_id', return_value=(True, {'fields': {
+                  names['status']: '更新', names['actual_start']: started,
+              }}))):
+            controller = FastAPIPortalController(host='127.0.0.1', port=18766)
+            with patch.object(controller, '_current_session', return_value=session):
+                response = TestClient(controller._build_app()).post('/api/notice-identity/bind', json={
+                    'scope': 'A', 'work_type': 'maintenance', 'notice_type': '维保通告',
+                    'source_record_id': 'rec-source', 'target_record_id': 'rec-target', 'binding_context': 'planned',
+                })
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertTrue(response.json()['data']['active_updated'])
+            self.service._patch_record_fields.assert_not_called()
+            self.assertEqual(self.store.resolve_notice_identity(work_type='maintenance',
+                source_record_id='rec-source')['target_record_id'], 'rec-target')
+            server.PortalRuntime.process_source_end_sync()
+        self.assertEqual(remote['实际开始时间'], started)
+        self.assertNotIn('实际结束时间', remote)
+
     def deliver(self, side_effect):
         with patch.object(portal, 'send_text_to_open_ids', side_effect=side_effect) as sender:
             result = self.service.send_action_personal_message(self.prepared)
@@ -1056,11 +1248,14 @@ class NoticeDeliverySourceRecoveryTests(unittest.TestCase):
         self.runtime.action_executor = executor
         self.runtime.action_worker_stop = False
         self.runtime.notice_personal_future = None
-        with patch.object(self.runtime, 'process_notice_personal_messages') as process, \
-                patch.object(self.store, 'lease_outbox_events', return_value=[]) as lease:
+        with (patch.object(self.runtime, 'process_notice_personal_messages') as process,
+              patch.object(self.store, 'lease_outbox_events', return_value=[]) as lease,
+              patch('lan_bitable_template_portal.event_notice_delivery.dispatch') as event_dispatch,
+              patch('lan_bitable_template_portal.dingtalk_notices.dispatch') as dingtalk_dispatch):
             self.runtime.process_notice_robot_messages()
-            lease.assert_called_once()
-            self.assertEqual(lease.call_args.args[0], 'notice_robot')
+            lease.assert_called_once_with('notice_robot', limit=3, lease_seconds=900)
+            event_dispatch.assert_called_once_with(self.runtime)
+            dingtalk_dispatch.assert_called_once_with(self.runtime)
             process.assert_not_called()
             for _ in range(10):
                 self.assertFalse(self.runtime.dispatch_notice_personal_messages())

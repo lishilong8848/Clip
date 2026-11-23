@@ -10109,7 +10109,7 @@ class LanPortalStateStore:
                     source_record_id=source_record_id,
                     target_record_id=target_record_id,
                 )
-                if not row:
+                if not row or (target_record_id and self._text(row["target_record_id"]) not in ("", target_record_id)):
                     return False
                 now = time.time()
                 conn.execute(

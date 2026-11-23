@@ -4,7 +4,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'vite';
-import vue from '@vitejs/plugin-vue';
 import { chromium } from 'playwright';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -32,13 +31,13 @@ const fixture = `<template><NConfigProvider><NDialogProvider><NMessageProvider>
   const opened=url=>{window.opened=url;};
   </script>`;
 const entry = `import {createApp} from 'vue';import Fixture from '/@role-layout.vue';createApp(Fixture).mount('#app');`;
-const server = await createServer({root, configFile:false, logLevel:'error',
-  cacheDir:path.join(output, 'vite'), optimizeDeps:{include:['vue','naive-ui','lucide-vue-next']},
+const server = await createServer({root, base:'/', configFile:path.join(root,'vite.workspace-v2.config.ts'), logLevel:'error',
+  cacheDir:path.join(output, 'vite'), optimizeDeps:{entries:[], include:['vue','naive-ui','lucide-vue-next']},
   server:{host:'127.0.0.1',port:0}, plugins:[{
     name:'isolated-role-layout', enforce:'pre',
     resolveId(id) { if (id.startsWith('/@role-layout.')) return id; },
     load(id) { if (id==='/@role-layout.vue') return fixture; if (id==='/@role-layout.js') return entry; },
-  }, vue()],
+  }],
 });
 await server.listen();
 const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
@@ -154,17 +153,19 @@ try {
   async function checkInlineRepair(scope){
     await open('repair_management');
     const before=page.url();
-    const focused=page.waitForRequest(request=>{
+    const focused=request=>{
       const url=new URL(request.url());
       return url.pathname==='/api/repair-management/records' && url.searchParams.get('scope')===scope
         && url.searchParams.get('focus_record_id')==='repair-'+scope;
-    });
-    await todo.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click();
-    await focused;
+    };
+    await Promise.all([
+      page.waitForRequest(focused),
+      dialog.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click(),
+    ]);
     const panel=page.getByRole('region',{name:'办理 隔离维修待办',exact:true});
     await panel.locator('[data-module-widget="repair_management"]').waitFor();
     assert.equal(page.url(),before,'opening an exact record keeps the current workbench');
-    await page.getByRole('button',{name:'关闭维修项目',exact:true}).click();
+    await panel.getByRole('navigation',{name:'维修办理内容'}).getByText(/跟进记录/).waitFor();
     await panel.getByRole('button',{name:'独立页面',exact:true}).click();
     await page.waitForURL(url=>url.searchParams.get('__page')==='/repair-management');
     const params=new URL(page.url()).searchParams;
@@ -187,7 +188,7 @@ try {
   await viewNotice.click();
   const readOnlyDetail=page.getByRole('region',{name:'查看 隔离变更只读项',exact:true});
   await readOnlyDetail.getByText('开始时间',{exact:true}).waitFor();
-  assert.deepEqual(await readOnlyDetail.getByRole('button').evaluateAll(buttons=>buttons.map(button=>button.getAttribute('aria-label'))),['关闭只读详情']);
+  assert.deepEqual(await readOnlyDetail.getByRole('button').evaluateAll(buttons=>buttons.map(button=>button.getAttribute('aria-label')||button.textContent.trim())),['切换待办','关闭只读详情']);
   assert.equal(await page.locator('[data-module-widget]').count(),0,'viewing a notice must not mount a business editor');
   await readOnlyDetail.getByRole('button',{name:'关闭只读详情'}).click();
   checks.push('single-building manager classification, maintenance exclusion and read-only notice details');
@@ -216,7 +217,7 @@ try {
     ['supervisor',['A'],['事件管理','维修项目','机柜管理','画像学练','重保管理','专项排查']],
     ['engineer',['A'],['维修项目','专项排查','通告办理','事件管理']],
     ['engineer',['A','B'],['维修项目','专项排查','事件管理','通告办理']],
-    ['duty',['A'],['通告办理','演练管理','维护单管理','水耗管理']],
+    ['duty',['A'],['通告办理','演练管理','维保单办理','水耗管理']],
     ['administrator',['A'],['账号与权限','签名管理']],
   ]) {
     await set(actor('layout-'+category+'-'+scopes.length,category,full,{testScopes:scopes,can_manage_accounts:category==='administrator'}));
@@ -268,7 +269,7 @@ try {
   await dialog.getByRole('button',{name:'办理 '+lastTitle,exact:true}).click();await selectedRequest;
   const lastCase=page.getByRole('region',{name:'办理 '+lastTitle,exact:true});
   await lastCase.locator('[data-module-widget=repair_management]').waitFor();
-  await page.getByRole('button',{name:'关闭维修项目',exact:true}).click();
+  await lastCase.getByRole('navigation',{name:'维修办理内容'}).getByText(/跟进记录/).waitFor();
   await lastCase.getByRole('button',{name:'关闭待办办理',exact:true}).click();await settle();
   await todo.getByLabel('搜索待办').fill('维修 7');await counts(1,true);
   await open('repair_management');assert.equal(await rowsOf('repair_management').count(),1);await close();

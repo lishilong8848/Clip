@@ -15,7 +15,7 @@ export const modules: ModuleEntry[] = [
   { id: 'event', label: '事件管理', group: '运行管理', path: '/?mode=events&detail=1', icon: 'event' },
   { id: 'cold_source', label: '冷源运行状态', group: '运行管理', path: '/cold-source-monitor', icon: 'activity', permission: 'daily' },
   ...['维保通告', '变更通告', '检修通告', '设备轮巡', '设备调整', '上下电通告'].map((label, i) => ({ id: NOTICE_IDS[i], label, group: '通告办理', path: '/workbench-lite?work_type=' + NOTICE_IDS[i], icon: 'notice' })),
-  { id: 'engineer_mop', label: '维护单管理', group: '运行管理', path: '/engineer/mop', icon: 'wrench' },
+  { id: 'engineer_mop', label: '维保单办理', group: '运行管理', path: '/engineer/mop', icon: 'wrench' },
   { id: 'repair_management', label: '维修项目', group: '运行管理', path: '/repair-management', icon: 'wrench' },
   { id: 'critical_guard', label: '重保管理', group: '运行管理', path: '/critical-guard', icon: 'shield' },
   { id: 'risk_inspection', label: '专项排查', group: '专项功能', path: '/risk-inspections', icon: 'shield' },

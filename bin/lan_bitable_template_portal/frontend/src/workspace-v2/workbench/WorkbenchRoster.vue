@@ -1,81 +1,95 @@
 <script setup lang="ts">
-import { Moon, Sun, UsersRound } from 'lucide-vue-next';
+import { computed, ref } from 'vue';
+import { NPopover } from 'naive-ui';
+import { MessageCircle, UsersRound } from 'lucide-vue-next';
+import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 
-defineProps<{
-  rows: {scope:string;day:Set<string>;night:Set<string>;other:Map<string,Set<string>>}[];
-  message: string;
-  canRetry: boolean;
-}>();
-defineEmits<{ retry: [] }>();
+export type RosterPerson = {name:string;open_id?:string;group?:string;position?:string};
+type BuildingStaff = {scope:string;people:RosterPerson[]};
+export type ShiftRoster = {date:string;shift:'白'|'夜';verified:boolean;end?:string;staff:BuildingStaff[]};
+export type Handover = {current:ShiftRoster;incoming:ShiftRoster};
+const props = defineProps<{handover?:Handover; message:string; canRetry:boolean; impersonating?:boolean}>();
+defineEmits<{retry:[]}>();
+const view=ref<'cards'|'table'>('table');
+const order=['H','A','B','C','D','E','110'];
+const rows=computed(()=>order.flatMap(scope=>{
+  const current=props.handover?.current.staff.filter(row=>row.scope===scope).flatMap(row=>row.people)||[];
+  const incoming=props.handover?.incoming.staff.filter(row=>row.scope===scope).flatMap(row=>row.people)||[];
+  return current.length||incoming.length?[{scope,current,incoming}]:[];
+}));
+const label=(scope:string)=>scope==='110'?'110站':scope+'楼';
+const shiftText=(shift?:ShiftRoster)=>shift?shift.date.slice(5).replace('-','/')+' '+shift.shift+'班':'';
+const columns=['current','incoming'] as const;
+function chatLink(person:RosterPerson) {
+  return !props.impersonating&&/^ou_[A-Za-z0-9]+$/.test(person.open_id||'')
+    ?'https://applink.feishu.cn/client/chat/open?'+new URLSearchParams({openId:person.open_id!}):'';
+}
 </script>
 
 <template>
   <section class="workbench-roster" aria-labelledby="roster-heading">
     <header class="roster-head">
-      <span class="roster-icon"><UsersRound :size="17" aria-hidden="true" /></span>
-      <h3 id="roster-heading">今日上班人员</h3>
+      <UsersRound :size="17" aria-hidden="true"/><h3 id="roster-heading">交接班人员</h3>
+      <RecordViewSwitch v-if="rows.length" v-model="view"/>
     </header>
-    <table v-if="rows.length" class="roster-table">
-      <thead>
-        <tr><th scope="col">楼栋</th>
-          <th scope="col" class="day-header"><span class="shift-label"><Sun :size="14" aria-hidden="true" />白班</span></th>
-          <th scope="col" class="night-header"><span class="shift-label"><Moon :size="13" aria-hidden="true" />夜班</span></th>
-        </tr>
-      </thead>
-      <tbody>
-        <template v-for="row in rows" :key="row.scope">
-          <tr class="building-row">
-            <th scope="row"><span class="building-key">{{ row.scope==='110'?'110站':row.scope+'楼' }}</span></th>
-            <td class="day-staff"><ul v-if="row.day.size" class="names"><li v-for="name in row.day" :key="name">{{ name }}</li></ul>
-              <span v-else class="no-staff">暂无</span></td>
-            <td class="night-staff"><ul v-if="row.night.size" class="names"><li v-for="name in row.night" :key="name">{{ name }}</li></ul>
-              <span v-else class="no-staff">暂无</span></td>
-          </tr>
-          <tr v-if="row.other.size" class="extra-shifts">
-            <td></td><td colspan="2">
-              <dl><div v-for="[shift, people] in row.other" :key="shift">
-                <dt>{{ shift }}</dt><dd>{{ [...people].join('、') }}</dd>
-              </div></dl>
-            </td>
-          </tr>
-        </template>
-      </tbody>
-    </table>
-    <div v-else class="empty-state" role="status">
-      <p>{{ message || '暂无排班' }}</p>
+    <div v-if="handover" class="roster-grid" :data-view="view" :role="view==='table'?'table':undefined">
+      <div class="roster-row roster-columns" :role="view==='table'?'row':undefined">
+        <span :role="view==='table'?'columnheader':undefined">楼栋</span>
+        <span class="current-shift" :role="view==='table'?'columnheader':undefined"><b>当班人员</b><small>{{ shiftText(handover.current) }}</small></span>
+        <span :role="view==='table'?'columnheader':undefined"><b>接班人员</b><small>{{ shiftText(handover.incoming) }}</small></span>
+      </div>
+      <div v-for="row in rows" :key="row.scope" class="roster-row" :role="view==='table'?'row':undefined">
+        <b class="building-label" :role="view==='table'?'rowheader':undefined">{{ label(row.scope) }}</b>
+        <div v-for="column in columns" :key="column" class="roster-names" :class="{'current-shift':column==='current'}" :role="view==='table'?'cell':undefined">
+          <NPopover v-for="(person,index) in row[column]" :key="person.open_id||person.name+'-'+index"
+            trigger="click" placement="top" :show-arrow="false" raw>
+            <template #trigger>
+              <button type="button" class="person-key" :aria-label="'查看'+person.name+'的基本信息'" aria-haspopup="dialog">{{ person.name }}</button>
+            </template>
+            <section class="roster-person" role="dialog" :aria-label="person.name+'的基本信息'">
+              <strong>{{ person.name }}</strong>
+              <dl><dt>楼栋</dt><dd>{{ label(row.scope) }}</dd><dt>班次</dt><dd>{{ shiftText(handover[column]) }}</dd>
+                <template v-if="person.group"><dt>班组</dt><dd>{{ person.group }}</dd></template>
+                <template v-if="person.position"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
+              </dl>
+              <a v-if="chatLink(person)" :href="chatLink(person)" target="_blank" rel="noopener noreferrer">
+                <MessageCircle :size="16" aria-hidden="true"/>飞书对话</a>
+              <small v-else-if="!impersonating">飞书身份待核对</small>
+            </section>
+          </NPopover>
+          <small v-if="!row[column].length">{{ handover[column].verified?'暂无排班':'名单待同步' }}</small>
+        </div>
+      </div>
+      <p v-if="!rows.length" class="roster-feedback" role="status">{{ message || '暂无已核验人员' }}</p>
+    </div>
+    <div v-if="!handover || canRetry" class="roster-feedback" role="status">
+      <span v-if="!handover">{{ message }}</span>
       <button v-if="canRetry" type="button" @click="$emit('retry')">重试排班</button>
     </div>
   </section>
 </template>
 
 <style scoped>
-.workbench-roster { min-width:0;overflow:hidden;color:var(--desk-ink) }
-.roster-head { display:flex;align-items:center;gap:8px;padding:9px 12px 6px }
-.roster-head h3 { font-size:14px;font-weight:730 }
-.roster-icon { display:grid;place-items:center;width:29px;height:29px;border-radius:8px;background:var(--desk-green-wash);color:var(--desk-green) }
-.roster-table { width:calc(100% - 18px);margin:0 9px 8px;border-collapse:separate;border-spacing:3px 3px;
-  table-layout:fixed;font-size:13px;line-height:1.4 }
-.roster-table thead th:first-child { width:48px;color:var(--desk-muted);text-align:center;font-size:12px }
-.roster-table :is(th,td) { padding:4px 6px;border-radius:5px;text-align:left;vertical-align:middle;overflow-wrap:anywhere }
-.building-row th { background:var(--desk-well);text-align:center }
-.day-staff { background:color-mix(in srgb,var(--v2-amber,#a76712) 9%,var(--desk-paper)) }
-.night-staff { background:color-mix(in srgb,var(--desk-blue) 11%,var(--desk-paper)) }
-.day-header { background:color-mix(in srgb,var(--v2-amber,#a76712) 16%,var(--desk-paper)) }
-.night-header { background:color-mix(in srgb,var(--desk-blue) 19%,var(--desk-paper)) }
-.shift-label,.names,.extra-shifts dl>div { display:flex;align-items:center;flex-wrap:wrap;gap:3px 8px }
-.shift-label { font-weight:700 }
-.day-header svg { color:var(--v2-amber,#a76712) }
-.night-header svg { color:var(--desk-blue) }
-.building-key { display:inline-block;white-space:nowrap;min-width:34px;text-align:center;
-  border-radius:6px;padding:1px 3px;background:var(--desk-green-wash);color:var(--desk-green);font-weight:680 }
-.names { list-style:none;padding:0;margin:0;font-weight:600 }
-.names li { min-width:0;max-width:100% }
-.extra-shifts td { padding-top:0 }
-.extra-shifts :is(dl,dd) { margin:0 }
-.extra-shifts dt,.no-staff { color:var(--desk-muted);font-size:12px }
-.empty-state { display:flex;justify-content:space-between;align-items:center;gap:8px;padding:9px 12px;
-  color:var(--desk-muted);font-size:12px }
-.empty-state button { min-height:36px;border:1px solid var(--desk-line);border-radius:7px;
-  padding:3px 8px;background:var(--desk-well);color:var(--desk-green);white-space:nowrap }
-@media (pointer:coarse) { .empty-state button { min-height:44px } }
+.workbench-roster{min-width:0;color:var(--desk-ink)}
+.roster-head{display:flex;align-items:center;gap:7px;padding:7px 10px}
+.roster-head h3{margin:0 auto 0 0}.roster-head svg{color:var(--desk-green)}
+.roster-grid{display:grid;gap:3px;padding:0 8px 8px}
+.roster-row{display:grid;grid-template-columns:42px minmax(0,1fr) minmax(0,1fr);align-items:stretch;gap:4px;min-width:0}
+.roster-row>span,.roster-row>b,.roster-names{min-width:0;padding:4px 5px;border-radius:5px;overflow-wrap:anywhere}
+.roster-columns>span{background:var(--desk-well);font-size:12px;display:grid;align-content:start;gap:1px}
+.roster-row .current-shift{background:var(--desk-green-wash);color:var(--desk-green);border-inline-start:2px solid var(--desk-green)}
+.roster-names{display:flex;align-items:center;align-content:center;flex-wrap:wrap;gap:1px 4px;background:var(--desk-well)}
+.building-label{display:grid;place-items:center;background:var(--desk-well);font-size:.77rem}
+.person-key{border:0;border-radius:4px;padding:3px;background:transparent;color:inherit;font-size:.84rem!important;font-weight:650!important;cursor:pointer;overflow-wrap:anywhere}
+.person-key:is(:hover,:focus-visible){text-decoration:underline;background:var(--desk-paper)}
+.roster-names>small,.roster-feedback,.roster-columns small{color:var(--desk-muted);font-size:.72rem}
+.roster-grid[data-view=cards] .roster-row:not(.roster-columns){box-shadow:var(--desk-shadow);border:1px solid var(--desk-line);padding:4px;border-radius:7px}
+.roster-feedback{display:flex;align-items:center;justify-content:space-between;gap:5px;padding:5px 9px}
+.roster-feedback button{border:1px solid var(--desk-line);background:var(--desk-well);border-radius:5px;color:var(--desk-green);min-height:34px}
+.roster-person{width:min(224px,calc(100vw - 24px));padding:10px 12px;border-radius:10px;border:1px solid var(--v2-border);
+  background:var(--soft-face,#fff);color:var(--v2-ink);box-shadow:var(--soft-key);font-size:.86rem;overflow-wrap:anywhere}
+.roster-person dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 9px;margin:8px 0}
+.roster-person dt,.roster-person small{color:var(--v2-muted)}
+.roster-person dd{margin:0}.roster-person a{display:inline-flex;align-items:center;gap:5px;min-height:36px;color:var(--v2-palette-accent-text)}
+@media(pointer:coarse){.person-key,.roster-person a,.roster-feedback button{min-height:44px}}
 </style>

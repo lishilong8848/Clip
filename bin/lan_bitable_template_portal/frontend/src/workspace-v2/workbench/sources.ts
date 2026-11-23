@@ -1,12 +1,13 @@
 import { eventI2OrHigher, eventStatusTone, isHighLevelEvent } from '../../eventManagementUtils';
 import { beijingDate } from '../modules';
 import { noticeListSpecialty } from '../noticeListMeta';
-import { todoOptions, todoSources, sortTodos, todoTimestamp, type TodoContext, type TodoRead, type TodoRow } from '../businessTodos';
+import { plannedNoticeTodo, todoOptions, todoSources, sortTodos, todoTimestamp, type TodoContext, type TodoRead, type TodoRow } from '../businessTodos';
+import { NOTICE_IDS } from '../modules';
 import type { Dict } from '../client';
 import type { Role, Section } from './recipes';
 import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
-export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection';
+export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection' | 'notice_plans';
 export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; readOnly?:boolean; urgentEvent?:string };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
 type Publish = (partial:SourceResult)=>void;
@@ -23,13 +24,13 @@ const labels = {
   events: '处理中事件', notices:'通告待办', repair_management:'待跟进维修',
   critical_guard:'待填写重保', risk_inspection:'专项排查待办',
   water:'水耗待补', learning:'个人学练', signatures:'个人签名',
-  event_notices:'事件通告', drills:'待完成演练', engineer_mop:'待处理维护单', cabinet:'待确认机柜批次',
+  event_notices:'事件', drills:'待完成演练', engineer_mop:'待处理维保单', cabinet:'待确认机柜批次',notice_plans:'计划通告',
   tool_management:'待办工具记录', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',
 };
 const sections: Record<SourceId,Source['section']> = {
   events:'operations', notices:'business', repair_management:'business',
   critical_guard:'operations', risk_inspection:'business', water:'operations', learning:'people', signatures:'people',
-  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',
+  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',
 };
 const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
 type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string};
@@ -37,6 +38,27 @@ const array = (value: unknown): Dict[] => {
   if (!Array.isArray(value)) throw new Error('待办数据未完整返回。');
   return value;
 };
+
+export function workbenchPlanSource(ctx:HomeContext, months:string[], get:TodoRead):Source[] {
+  if(!ctx.scope||!NOTICE_IDS.some(kind=>ctx.user.modules?.includes(kind)))return [];
+  const scopes=ctx.selectedScopes?.length
+    ?[...ctx.selectedScopes,...(ctx.scope==='CAMPUS'?['CAMPUS']:[])]:[ctx.scope];
+  const readOnly=ctx.role==='manager'&&!ctx.accessLevel;
+  return [{id:'notice_plans',label:labels.notice_plans,section:'business',
+    url:scopedUrl('/workbench-lite',{scope:scopes[0]!,work_type:'all'}),readOnly,
+    load(signal,_pages,publish) {
+      return readParts(scopes.flatMap(scope=>months.map(month=>async()=>{
+        const data=await get(scopedUrl('/api/workbench',{scope,month,work_type:'all',sections:'records',records_page_size:'0'}),signal);
+        if(data.scope!==scope)throw new Error('计划通告范围未核验');
+        return {delayed:data.source_snapshot_ready===false,rows:array(data.records).flatMap(row=>{
+          if(!ctx.user.modules?.includes(row.work_type))return [];
+          const task=plannedNoticeTodo(row,scope,month);
+          return task?[{...task,readOnly}]:[];
+        })};
+      })),signal,publish);
+    },
+  }];
+}
 
 export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
   if (!ctx.scope) return [];
@@ -179,7 +201,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     const data=await get(link('/api/engineer/mop/bootstrap',{scope,month,view:'todos'}),signal);
     return {delayed:data.snapshot_pending===true,rows:array(data.notices).flatMap(item=>{
       if (!item.notice_key||noticeIsEnded(item)||!mopNoticeNeedsAction(item)) return [];
-      return [row('engineer_mop',item.notice_key,scope,item.title||item.name||'通告维护单',item.mop_binding?'待上传':'待绑定',
+      return [row('engineer_mop',item.notice_key,scope,item.title||item.name||'通告维保单',item.mop_binding?'待上传':'待绑定',
         link('/engineer/mop',{scope,month,notice_key:item.notice_key}))];
     })};
   });

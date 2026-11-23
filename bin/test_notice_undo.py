@@ -34,6 +34,72 @@ class NoticeUndoTests(unittest.TestCase):
         service._hidden_ongoing_path = Path(tmpdir) / "hidden.json"
         return service
 
+    def test_unbound_end_reverts_empty_fields_and_preserves_independent_changes(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(tmpdir)
+            store = service._state_store
+            context = {"scope": "A", "work_type": WORK_TYPE_MAINTENANCE, "notice_type": NOTICE_TYPE_MAINTENANCE,
+                       "active_item_id": "active-alone", "target_record_id": "rec-alone",
+                       "building_codes": ["A"], "progress": "本次完工", "ended_at": "2026-11-23 09:30"}
+            before = {"名称": "独立维保", "维保状态": "开始", "原因": "原原因"}
+            after = {"维保状态": "结束", "实际结束时间": 1795397400000, "进度": "本次完工", "过程现场图片": [{"file_token": "added"}]}
+            remote = {**before, **after, "原因": "后来补充的原因"}
+            try:
+                undo_id = service.create_notice_undo_checkpoint("end", context, remote_fields=before, scope="A")
+                store.mark_notice_undo_action(undo_id, "available", payload_patch={"target_written_fields": after})
+                def read_target(*_args):
+                    return True, {"record_id": "rec-alone", "fields": dict(remote)}
+                def write_target(record_id, _notice_type, fields):
+                    remote.update(fields)
+                    return True, record_id
+                with patch.object(PortalRuntime, "service", service), patch.object(PortalRuntime, "state_store", store), patch(
+                    "lan_bitable_template_portal.server.external_real_write_guard",
+                    return_value={"mock_external": False, "real_write_allowed": True},
+                ), patch("lan_bitable_template_portal.server.query_record_by_id", side_effect=read_target), patch(
+                    "lan_bitable_template_portal.server.update_bitable_record_fields", side_effect=write_target,
+                ) as update, patch.object(service, "restore_notice_undo_related_remote") as source, patch.object(
+                    PortalRuntime, "polling_work_orders",
+                ) as polling:
+                    polling.return_value.get_group.return_value = None
+                    remote["进度"] = "另一人的修改"
+                    with self.assertRaisesRegex(PortalError, "进度.*另行修改"):
+                        PortalRuntime.execute_notice_undo(undo_id)
+                    update.assert_not_called()
+                    remote["进度"] = after["进度"]
+                    self.assertTrue(PortalRuntime.execute_notice_undo(undo_id)["ok"])
+                    source.assert_not_called()
+                self.assertEqual(update.call_args.args[2], {"维保状态": "开始", "实际结束时间": None,
+                    "进度": None, "过程现场图片": None})
+                self.assertEqual(remote["原因"], "后来补充的原因")
+                local = store.list_qt_active_items()[0]["payload"]
+                self.assertNotIn("ended_at", local)
+                self.assertFalse(local.get("source_record_id"))
+                self.assertEqual(local["progress"], "")
+            finally:
+                store.shutdown_write_worker(timeout=1.0)
+
+    def test_delete_does_not_remove_another_execution_of_the_same_plan(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(tmpdir)
+            store = service._state_store
+            common = {"scope": "A", "work_type": WORK_TYPE_MAINTENANCE, "title": "同名通告",
+                      "building": "A楼", "source_record_id": "rec-shared-plan"}
+            old = {**common, "target_record_id": "rec-older", "active_item_id": "older"}
+            live = {**common, "target_record_id": "rec-current", "active_item_id": "current"}
+            try:
+                store.put_document(STATE_NS_WORK_STATUS, "A", {"items": [old, live]})
+                store.upsert_notice_identity(live, origin="test")
+                deleted = service.discard_deleted_ongoing_state(old, scope="A", reset_source_plan=True)
+                self.assertEqual(deleted["work_status_removed"], 1)
+                self.assertFalse(deleted["source_plan_reset"])
+                self.assertEqual(store.get_document(STATE_NS_WORK_STATUS, "A")["items"], [live])
+                self.assertFalse(store.mark_notice_identity_deleted(work_type=WORK_TYPE_MAINTENANCE,
+                    source_record_id=common["source_record_id"], target_record_id=old["target_record_id"]))
+                self.assertEqual(store.resolve_notice_identity(work_type=WORK_TYPE_MAINTENANCE,
+                    source_record_id=common["source_record_id"])["target_record_id"], live["target_record_id"])
+            finally:
+                store.shutdown_write_worker(timeout=1.0)
+
     def test_checkpoint_snapshot_prefers_strong_identity_over_same_title(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = self._service(tmpdir)
@@ -471,7 +537,7 @@ class NoticeUndoTests(unittest.TestCase):
                 self.assertTrue(result["ok"])
                 create_record.assert_called_once()
                 self.assertEqual(create_record.call_args.kwargs["client_token"], undo_id)
-                update_record.assert_called_once()
+                update_record.assert_not_called()
             finally:
                 PortalRuntime.service, PortalRuntime.state_store = previous
                 service._state_store.shutdown_write_worker(timeout=1.0)

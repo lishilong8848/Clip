@@ -44,7 +44,7 @@ export function noticePlanWindow(row: Dict): { start: string; end: string } {
     fields['计划开始维护时间'], fields['计划开始'], fields['计划开始时间'], fields['计划延迟开始日期'],
     row.plan_start_time, row.planned_start_time, row.plan_start);
   const end = first(change && fields['变更结束日期（阿里）'] || '', change && fields['计划结束日期（阿里）'] || '',
-    fields['计划结束维护时间'], fields['计划结束'], fields['计划结束时间'], fields['计划延迟结束日期'],
+    fields['计划结束维护时间'], fields['计划结束'], fields['计划结束时间'], fields['计划延迟结束日期'], fields['期望完成时间'],
     row.plan_end_time, row.planned_end_time, row.plan_end);
   const display = (value: string) => value.replace(/(\d)T(?=\d)/, '$1 ').replace(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}):00$/, '$1');
   return { start: display(start), end: display(end) };

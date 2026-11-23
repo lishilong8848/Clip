@@ -27,6 +27,7 @@ try{
         stem:`隔离${mode==='daily'?'每日题单':'自主练习'}第${n+1}题`,options:[{id:'A',text:'核对安全条件'},{id:'B',text:'直接操作'}]}))});
     const groupFeedback=[{id:'issue-one',scope:'A',description:'题干建议明确问的是第一步。',created_at:day},{id:'issue-two',scope:'D',description:'建议补充判断依据。',created_at:day}];
     const revision={id:'daily-q1',version:'v1',stem:'设备异常时，应先核对什么？',bank:'written',type:'single',status:'published',options:[{id:'A',text:'确认人员安全与设备状态'},{id:'B',text:'立即复位全部设备'}],correct_option_ids:['A']};
+    const problem={id:'bank-check',stem:'校验待核对的题目',bank:'duty',type:'interview',status:'draft',problems:['缺少参考答案']};
     const editRequests=[];
     const publicPaper=p=>p?{...structuredClone(p),status:p.questions.every(q=>q.attempt)?'completed':'pending',
       stats:{total:2,answered:p.questions.filter(q=>q.attempt).length}}:null;
@@ -50,7 +51,7 @@ try{
         if(url.pathname==='/api/assistant/appearance')return ok({enabled:false});
         if(url.pathname==='/api/learning/bootstrap')return ok({self_person:person,self_scope:'A',scope:'A',can_answer:true,is_admin:admin,can_view_buildings:admin,
           scopes:[],today:profileDay,daily_duty:onDuty?{date:profileDay,shift:'白',scope:'A',end_at:serve?new Date(Date.now()+10800000).toISOString():profileDay+'T18:00:00+08:00'}:null,
-          settings:{enabled:true},sync:{status:'ready',pending:0}});
+          settings:{enabled:true},sync:{status:'ready',pending:0},question_problem_count:admin&&designTest?1:0});
         if(url.pathname==='/api/learning/profile'){
           profileReads++;
           if(profileFailure){res.statusCode=400;res.setHeader('Content-Type','application/json');res.end(JSON.stringify({ok:false,error:'隔离测试：进度暂不可用'}));return;}
@@ -77,7 +78,11 @@ try{
           editRequests.push({method:req.method,grouped});
           return ok({question:revision,editable:true,feedback:grouped?groupFeedback:[],issues_version:grouped?'open-feedback-v1':''});
         }
-        if(designTest&&url.pathname==='/api/learning/questions'){assert(admin);return ok({items:[revision],total:1,page:1});}
+        if(designTest&&url.pathname==='/api/learning/questions'){
+          assert(admin);
+          const items=url.searchParams.get('problems')==='1'?[problem]:[revision,problem];
+          return ok({items,total:items.length,page:1});
+        }
         if(designTest && url.pathname==='/api/learning/history')return ok({items:daily?[publicPaper(daily)]:[],total:daily?1:0});
         if(['/api/learning/review','/api/learning/history','/api/learning/issues','/api/learning/sharing'].includes(url.pathname))return ok({items:[],total:0});
         if(url.pathname==='/api/learning/papers')return ok({today:day,published,items:[url.searchParams.get('mode')==='practice'?practice:daily].filter(Boolean).map(publicPaper)});
@@ -198,6 +203,13 @@ try{
         await editor.getByLabel('题干',{exact:true}).fill('设备异常时，第一步应核对什么？');
         await editor.getByRole('button',{name:'保存题目',exact:true}).click();
         await feedback.getByRole('button',{name:'待处理 0',exact:true}).waitFor();
+        await page.getByRole('button',{name:'题库待核对 1 题',exact:true}).click();
+        await bank.getByText(problem.stem,{exact:true}).waitFor();
+        assert(await bank.getByRole('checkbox',{name:'仅待修正'}).isChecked());
+        assert.equal(await bank.getByText(revision.stem,{exact:true}).count(),0);
+        await page.goto(origin+entry+'&tab=questions&problems=1');
+        await bank.getByText('缺少参考答案',{exact:true}).waitFor();
+        assert(await bank.getByRole('checkbox',{name:'仅待修正'}).isChecked());
         await page.goto(homeUrl);await tile.click();
         await page.locator('.stem').filter({hasText:'隔离每日题单第2题'}).waitFor();
         await page.getByRole('button',{name:'编辑本题',exact:true}).click();
@@ -227,7 +239,7 @@ try{
         assert.equal(claims.length,0);
         assert.deepEqual(errors,[]);
         await context.close();
-        console.log('[LearningRedesign] OK: progress tile, grouped feedback, original revision, paper review, permission gates');
+        console.log('[LearningRedesign] OK: progress tile, separate feedback and bank checks, original revision, paper review, permission gates');
         continue;
       }
       for(const [width,height] of [[402,874],[440,956],[1440,900]]){

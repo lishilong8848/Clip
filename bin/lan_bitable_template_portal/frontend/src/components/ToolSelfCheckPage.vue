@@ -402,6 +402,7 @@ const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
 const library = ref<{ templates: Template[]; legacy_templates: Template[]; warning?: string }>();
+const libraryLoading = ref(false);
 const order = ref<Detail>();
 const records = ref<Entry[]>([]);
 const selected = ref('');
@@ -513,8 +514,13 @@ async function changePage(next: number) {
 
 function fail(value: unknown) { error.value = value instanceof Error ? value.message : '操作暂未确认，请刷新核对。'; }
 async function loadLibrary() {
-  const data = await requestJson(api + '/templates', { cache: 'no-store' }) as NonNullable<typeof library.value>;
-  if (!disposed) library.value = data;
+  libraryLoading.value = true;
+  try {
+    const data = await requestJson(api + '/templates', { cache: 'no-store' }) as NonNullable<typeof library.value>;
+    if (!disposed) library.value = data;
+  } finally {
+    libraryLoading.value = false;
+  }
 }
 async function loadBoard(target = month.value) {
   reader?.abort();

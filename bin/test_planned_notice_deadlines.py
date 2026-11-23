@@ -393,7 +393,7 @@ class SchedulerTests(unittest.TestCase):
         controller = object.__new__(FastAPIPortalController)
         controller._scheduler = None
         controller._write_runtime_heartbeat = Mock()
-        with patch.object(BackgroundScheduler, 'start'):
+        with patch.object(BackgroundScheduler, 'start'), patch('clipflow_backend.main._mock_external_enabled', return_value=True):
             controller._start_scheduler()
         scheduler = controller._scheduler
         try:

@@ -58,6 +58,20 @@ try {
     if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'mop-layout-fixture', name: '界面预览', role: 'admin', level: 'L1', category: 'manager', modules: ['engineer_mop'] }, scope_options: [{ value: 'A', label: 'A楼' }, { value: 'B', label: 'B楼' }] });
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-mop' } });
     if (url.pathname === '/api/signatures/people') return ok({people,count:people.length});
+    if (url.pathname === '/api/engineer/mop/history') {
+      const scope=url.searchParams.get('scope'), specialty=url.searchParams.get('specialty'), page=Number(url.searchParams.get('page')||1);
+      const records=scope==='B'?[]:[{
+        record_id:'recOldMop',title:'2025 年已归档暖通维保',building:'A楼',specialty:'暖通',cycle:'月度',status:'已结束',
+        planned:'2025-04-01',attachments:[{id:'a'.repeat(24),name:'暖通维保归档.xlsx'}],
+      }];
+      return ok({scope,specialties:scope==='B'?[]:['暖通','电气'],records:specialty==='电气'?[]:records,
+        page,page_size:20,total:specialty==='电气'||scope==='B'?0:21});
+    }
+    if (url.pathname === '/api/engineer/mop/history/recOldMop/'+'a'.repeat(24)) {
+      assert.equal(url.searchParams.get('scope'),'A');
+      return route.fulfill({contentType:'application/octet-stream',body:'history attachment fixture',
+        headers:{'Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent('暖通维保归档.xlsx')}});
+    }
     if (url.pathname === '/api/engineer/mop/bootstrap') return ok({ notices: url.searchParams.get('scope') === 'B' ? [] : structuredClone(notices), mop_candidates: candidates, warnings: ['隔离测试提示：请核对本次维护单填写内容。'], auth: { user: { open_id: 'mop-layout-fixture', name: '界面预览' } } });
     if (url.pathname === '/api/engineer/mop/bind') {
       const body = req.postDataJSON(); writes.push(body);
@@ -106,6 +120,37 @@ try {
       if(width>=1366){const box=await page.locator('.mop-desk-local').boundingBox();assert(box.y+box.height<=height,'local upload must remain reachable on a 768px-high desktop');}
     }
     await page.setViewportSize({width:1440,height:900});
+    await page.getByRole('button',{name:'填写记录',exact:true}).click();
+    const history=page.getByRole('region',{name:'填写记录',exact:true});
+    await history.getByText('2025 年已归档暖通维保',{exact:true}).waitFor();
+    await Promise.all([
+      page.waitForRequest(request=>{
+        const url=new URL(request.url());
+        return url.pathname==='/api/engineer/mop/history' && url.searchParams.get('refresh')==='1';
+      }),
+      history.getByRole('button',{name:'刷新填写记录'}).click(),
+    ]);
+    await history.getByRole('button',{name:'表单显示'}).click();
+    await history.getByRole('table',{name:'已上传维保单'}).waitFor();
+    await history.getByRole('button',{name:'下一页'}).click();
+    await history.getByText('2 / 2',{exact:true}).waitFor();
+    await history.getByRole('combobox',{name:'筛选专业'}).selectOption('电气');
+    await history.getByText('暂无符合条件的已上传维保单',{exact:true}).waitFor();
+    await history.getByRole('combobox',{name:'筛选专业'}).selectOption('暖通');
+    const receipt=page.waitForEvent('download');
+    await history.getByRole('button',{name:'下载 暖通维保归档.xlsx'}).click();
+    assert.equal((await receipt).suggestedFilename(),'暖通维保归档.xlsx');
+    await page.screenshot({path:path.join(output,'history-desktop.png')});
+    await page.setViewportSize({width:390,height:844});
+    await history.getByRole('button',{name:'卡片显示'}).click();
+    await page.screenshot({path:path.join(output,'history-mobile.png')});
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('B');
+    await history.getByText('暂无符合条件的已上传维保单',{exact:true}).waitFor();
+    assert.equal(await history.getByRole('button',{name:'下载 暖通维保归档.xlsx'}).count(),0);
+    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('A');
+    await page.setViewportSize({width:1440,height:900});
+    await page.getByRole('navigation',{name:'维保单办理分区'}).getByRole('button',{name:'办理',exact:true}).click();
     const search = page.getByPlaceholder('搜索通告、楼栋、专业');
     await search.fill('BA系统'); assert.equal(await page.locator('.mop-desk-notice').count(), 2);
     await page.locator('.mop-desk-notice').first().click();

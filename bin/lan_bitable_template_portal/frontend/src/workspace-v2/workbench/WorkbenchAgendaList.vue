@@ -2,12 +2,12 @@
 import { ChevronRight } from 'lucide-vue-next';
 import type { WorkItem } from './sources';
 
-defineProps<{ entries: {key:string;time:string;label:string;title:string;meta:string;task?:WorkItem}[] }>();
+defineProps<{ entries: {key:string;time:string;label:string;title:string;meta:string;task?:WorkItem}[];view?:'cards'|'table' }>();
 defineEmits<{ task:[item:WorkItem] }>();
 </script>
 
 <template>
-  <ol class="timeline">
+  <ol class="timeline" :data-view="view">
     <li v-for="entry in entries" :key="entry.key">
       <time>{{ entry.time }}</time>
       <div>
@@ -29,4 +29,8 @@ defineEmits<{ task:[item:WorkItem] }>();
 .timeline small,.timeline p { margin:0; color:var(--desk-muted); font-size:12px }
 .agenda-task { display:flex; align-items:center; gap:5px; text-align:left; padding:0; border:0; background:transparent; font:inherit; font-weight:650; color:var(--desk-green); cursor:pointer }
 .agenda-task svg { flex:none }
+.timeline[data-view=cards]{display:grid;gap:6px}
+.timeline[data-view=cards] li{padding:4px 7px;border:1px solid var(--desk-line);border-radius:8px;background:var(--soft-face)}
+.timeline[data-view=cards] li>div{border:0;padding-inline-start:0}
+.timeline[data-view=cards] li>div::before{display:none}
 </style>

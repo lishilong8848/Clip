@@ -25,7 +25,7 @@ function goBack() {
       </nav>
       <div class="td-actions">
         <button v-if="r.order || !r.props.embedded" class="td-link" @click="goBack"><ArrowLeft :size="15"/>{{ r.order?'返回列表':'返回' }}</button>
-        <button :disabled="r.busy || r.loading || !!r.workspace?.busy" @click="r.refresh()"><RefreshCw :size="15"/>刷新</button>
+        <button v-if="r.order || r.view!=='settings'" :disabled="r.busy || r.loading || !!r.workspace?.busy" @click="r.refresh()"><RefreshCw :size="15"/>刷新</button>
         <button v-if="r.board?.can_create_orders && !r.order && r.view==='workspace'" :disabled="r.busy" @click="r.openNewTool()">新增工具</button>
       </div>
     </header>
@@ -34,19 +34,25 @@ function goBack() {
     <ToolDeskLibrary v-else-if="r.view==='settings' && r.board?.can_manage_templates" :r="r"/>
     <template v-else-if="r.view==='workspace' || r.view==='followups'">
       <section v-if="r.view==='followups'" class="td-panel tool-worklist">
-        <div class="td-heading"><h2>检修与报废</h2><label class="td-field">办理月份<input type="month" :value="r.month" :disabled="r.loading || r.busy" @change="r.loadBoard(($event.target as HTMLInputElement).value)"/></label></div>
-        <div class="td-row"><div class="td-tabs" aria-label="处置状态"><button v-for="s in r.stateOptions" :key="s.value" :aria-pressed="r.stateFilter===s.value" @click="r.stateFilter=s.value">{{ s.label }}</button></div>
-          <input v-model="r.search" type="search" aria-label="搜索检修与报废记录" placeholder="工具、楼栋或领取人"/></div>
-        <p v-if="!r.pagedOrders.length" class="td-empty">{{ r.loading?'正在读取处置记录…':r.emptyDescription }}</p>
-        <div class="td-record-grid"><article v-for="o in r.pagedOrders" :key="o.id" class="td-row"><div><strong>{{ o.tool_name }}</strong>
+        <div class="td-heading">
+          <div class="td-actions"><h2>检修与报废</h2><span v-if="r.repairCount+r.approvalCount" class="td-chip">{{ r.repairCount+r.approvalCount }} 项待处理</span></div>
+          <div class="followup-filters">
+            <input v-model="r.search" type="search" aria-label="搜索检修与报废记录" placeholder="工具、楼栋或领取人"/>
+            <input type="month" aria-label="办理月份" :value="r.month" :disabled="r.loading || r.busy" @change="r.loadBoard(($event.target as HTMLInputElement).value)"/>
+            <select data-native-select v-model="r.stateFilter" aria-label="处置状态"><option v-for="s in r.stateOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+          </div>
+        </div>
+        <p v-if="!r.pagedOrders.length" class="td-muted" role="status">{{ r.loading?'正在读取处置记录…':r.emptyDescription }}</p>
+        <div v-else class="td-list"><article v-for="o in r.pagedOrders" :key="o.id" class="followup-row"><div><strong>{{ o.tool_name }}</strong>
           <p class="td-muted">{{ [o.scope+'楼',o.location,o.model,r.assignment(o)].filter(Boolean).join(' · ') }}</p>
-          <span class="td-chip">{{ o.tool_status_label || r.outcomeLabels[o.outcome] }}</span>
-          <p v-if="o.deletion_pending || o.deletion_error || o.result_notice">{{ o.deletion_error || o.result_notice || '删除结果核验中' }}</p></div>
+          </div><div><span class="td-chip">{{ o.tool_status_label || r.outcomeLabels[o.outcome] }}</span></div>
           <div class="td-actions"><button :disabled="r.busy" @click="r.workspace?.leave(()=>r.openOrder(o,o.can_claim))">{{ r.orderAction(o) }}</button>
             <NPopconfirm v-if="o.can_remove_followup && !o.deletion_pending" @positive-click="r.removeFollowup(o)">
               <template #trigger><button :disabled="r.busy" class="td-danger">删除记录</button></template>确认删除这条处置记录及对应台账？
-            </NPopconfirm></div></article></div>
-        <div class="td-row"><span class="td-muted">共 {{ r.visibleOrders.length }} 条 · 第 {{ r.page }} 页</span><div class="td-actions">
+            </NPopconfirm></div>
+          <p v-if="o.deletion_pending || o.deletion_error || o.result_notice" class="td-notice" role="status">{{ o.deletion_error || o.result_notice || '删除结果核验中' }}</p>
+        </article></div>
+        <div v-if="r.visibleOrders.length>r.pageSize || (r.board?.can_download_month && r.board?.archived_at)" class="td-row"><span class="td-muted">共 {{ r.visibleOrders.length }} 条 · 第 {{ r.page }} 页</span><div class="td-actions">
           <button :disabled="r.page<=1" @click="r.changePage(r.page-1)">上一页</button><button :disabled="r.page*r.pageSize>=r.visibleOrders.length" @click="r.changePage(r.page+1)">下一页</button>
           <button v-if="r.board?.can_download_month && r.board?.archived_at" :disabled="r.busy" @click="r.download('/archive/'+r.month)">下载月度归档</button></div></div>
       </section>
@@ -72,5 +78,17 @@ function goBack() {
 
 <style scoped>
 .td-section-nav{flex:1 1 auto;min-width:0}
+.tool-desk .tool-worklist{gap:.65rem}
+.followup-filters{display:grid;grid-template-columns:minmax(0,1fr) 10.25rem minmax(7rem,auto);gap:.4rem;width:min(36rem,100%);align-items:center;min-width:0}
+.followup-filters input{width:100%}
+.followup-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(6.5rem,.4fr) auto;align-items:center;gap:.5rem 1rem}
+.followup-row .td-notice{grid-column:1/-1}
+@container(max-width:650px){
+  .followup-filters{grid-template-columns:minmax(0,1fr) minmax(0,.85fr)}
+  .followup-filters input[type=search]{grid-column:1/-1}
+  .followup-row{grid-template-columns:minmax(0,1fr) auto}
+  .followup-row .td-actions{grid-column:1/-1}
+}
+@media(pointer:coarse){.tool-desk .tool-worklist button{min-height:44px}}
 @media(max-width:680px){.td-section-nav{order:1;flex-basis:100%}}
 </style>

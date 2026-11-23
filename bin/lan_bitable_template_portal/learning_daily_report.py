@@ -67,11 +67,15 @@ def render_card(report, portal_url):
     counts = []
     if report.get('question_issues'):
         counts.append(f"待处理质疑 {len(report['question_issues'])} 题")
+    action_row = card['elements'][-1]
     if report.get('question_problem_count'):
-        counts.append(f"题库待核对 {report['question_problem_count']} 题")
+        counts.append(f"题库待核对 {report['question_problem_count']} 题（自动校验）")
+        action_row['actions'].append({'tag': 'button', 'type': 'default',
+            'text': {'tag': 'plain_text', 'content': '查看题库待核对'},
+            'url': portal_url.rstrip('/') + '/learning?' + urlencode({'tab': 'questions', 'problems': '1'})})
     if counts:
         elements.append({'tag': 'div', 'text': {'tag': 'plain_text', 'content': ' · '.join(counts)}})
-    card['elements'] = [*elements, card['elements'][-1]]
+    card['elements'] = [*elements, action_row]
     return card
 
 

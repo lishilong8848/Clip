@@ -571,6 +571,17 @@ try {
     const cellKey = layouts.electrical.schema.sheet + '!C6';
     await page.getByRole('region', { name: '表格预览', exact: true }).waitFor();
     assert.equal(await button('字段填写').count(),0);
+    const firstKey = layouts.electrical.schema.sheet + '!A1';
+    await page.locator('.paper-cell[data-address="A1"]').click({ position: { x: 2, y: 2 } });
+    const firstEditor = page.getByRole('dialog', { name: '填写 ' + firstKey, exact: true });
+    const firstInput = firstEditor.getByRole('textbox');
+    await firstInput.waitFor();
+    assert(await firstInput.evaluate(node => node === document.activeElement), 'The first cell accepts typing on open');
+    await page.keyboard.press('ControlOrMeta+A');
+    await page.keyboard.insertText('首格草稿');
+    await page.keyboard.press('Escape');
+    await firstEditor.waitFor({ state: 'hidden' });
+    assert.equal(await button('编辑 ' + firstKey).innerText(), '首格草稿');
     await button('编辑 ' + cellKey).click();
     const cellEditor = page.getByRole('dialog', { name: '填写 ' + cellKey, exact: true });
     const note = cellEditor.getByLabel('填写 ' + cellKey, { exact: true });
@@ -638,6 +649,7 @@ try {
     assert.equal((await saved).status(), 200);
     const items = actions('save').at(-1).body.items;
     assert.deepEqual(items.map(item => item.id), ['e']);
+    assert.equal(items[0].values[firstKey], '首格草稿');
     assert.equal(items[0].values[cellKey], '手机草稿内容');
   });
   await check('V2 keeps 200 tools reachable in one selector on mobile and desktop', async () => {

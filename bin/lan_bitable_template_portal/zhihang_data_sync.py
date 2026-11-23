@@ -630,17 +630,34 @@ class ZhihangSync:
             item["id"] = confirmed[item["key"]]
         return actual, set(receipts)
 
+    @staticmethod
+    def update_fields(run, item, actual):
+        changes = {name: value for name, value in item["fields"].items() if not matches({name: value}, actual)}
+        # List and batch read-back can return different shapes for the same Feishu field.
+        conflicts = [name for name in changes if not matches({name: item["before"].get(name)}, actual)]
+        if conflicts:
+            facts = run.setdefault("checks", {}).setdefault("同步飞书原表", {})
+            facts.update({"冲突记录": item["id"], "冲突字段": "、".join(conflicts)})
+            raise Pending("原表数据在同步期间被修改，请核对冲突。")
+        return changes
+
+    @staticmethod
+    def verified_update_snapshot(item, actual):
+        # A concurrent edit outside the write set must not become an owned value eligible for cleanup.
+        names = item["fields"]
+        snapshot = {name: value for name, value in item["before"].items() if name not in names}
+        snapshot.update({name: actual[name] for name in names if name in actual})
+        return snapshot
+
     def update_upload_group(self, run, client, group):
         ids = [item["id"] for item in group]
         actual = self.read_upload_rows(client, ids)
         changes = []
         for item in group:
             record_id = item["id"]
-            if matches(item["fields"], actual[record_id]):
-                continue
-            if actual[record_id] != item["before"]:
-                raise Pending("原表数据在同步期间被修改，请核对冲突。")
-            changes.append({"record_id": record_id, "fields": item["fields"]})
+            fields = self.update_fields(run, item, actual[record_id])
+            if fields:
+                changes.append({"record_id": record_id, "fields": fields})
         if changes:
             self.check_upload_enabled(run["kind"])
             client.batch_update(changes)
@@ -668,8 +685,12 @@ class ZhihangSync:
                     rid = item["id"]
                     if not matches(item["fields"], actual[rid]):
                         raise Pending("飞书已受理写入，字段回读尚未一致。")
-                    if rid in receipt_ids or (rid in owned and owned[rid]["fields"] == item["before"]):
+                    if rid in receipt_ids:
                         documents["owned:" + kind + ":" + rid] = {"key": item["key"], "fields": actual[rid]}
+                    elif action == "update" and rid in owned and owned[rid]["fields"] == item["before"]:
+                        documents["owned:" + kind + ":" + rid] = {
+                            "key": item["key"], "fields": self.verified_update_snapshot(item, actual[rid]),
+                        }
                 for item in group:
                     item["done"] = True
                 journal.pop("create_batch", None)
@@ -722,9 +743,11 @@ class ZhihangSync:
                     item["id"] = record_id
                     self.save("journal:" + run["id"], journal)
             elif action == "update" and not matches(fields, current or {}):
-                if current is None or item["before"] != client.get(record_id)["fields"]:
-                    raise Pending("原表数据在同步期间被修改，请核对冲突。")
-                client.update(record_id, fields)
+                if current is None:
+                    raise Pending("待更新记录已从原表移除，保留原批次等待核对。")
+                changes = self.update_fields(run, item, client.get(record_id)["fields"])
+                if changes:
+                    client.update(record_id, changes)
             elif action == "delete" and current is not None:
                 if item["before"] != client.get(record_id)["fields"]:
                     raise Pending("待清理记录已被修改，保留原表记录。")
@@ -737,10 +760,10 @@ class ZhihangSync:
                     raise Pending("飞书已受理写入，字段回读尚未一致。")
                 ownership_key = "owned:" + kind + ":" + record_id
                 owned = self.read(ownership_key)
-                if (action == "create" and item["id"] == record_id) or (
-                    owned and owned["fields"] == item["before"]
-                ):
+                if action == "create" and item["id"] == record_id:
                     self.save(ownership_key, {"key": item["key"], "fields": actual})
+                elif action == "update" and owned and owned["fields"] == item["before"]:
+                    self.save(ownership_key, {"key": item["key"], "fields": self.verified_update_snapshot(item, actual)})
             elif self.read(ownership_key):
                 self.store.delete_document(self.namespace, ownership_key)
             item["done"] = True

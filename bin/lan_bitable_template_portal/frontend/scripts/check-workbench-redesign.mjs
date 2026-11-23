@@ -10,6 +10,7 @@ import { adaptEmbeddedNavigation } from './workspace-embedded-adapter.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const output=path.resolve(root,process.env.WORKBENCH_REDESIGN_OUTPUT||'../../../output/playwright/workbench-redesign');
 const fixture=`<template><NConfigProvider><NDialogProvider><NMessageProvider>
+  <div v-show="shown" class="workbench-fixture-account"><WorkbenchWeather :identity="user.open_id"/></div>
   <KeepAlive :key="user.open_id">
     <WorkbenchHome v-if="shown" :user="user" :scope="scope" :scopes="scopes" :explicit-scope="explicitScope" @open="open" />
   </KeepAlive>
@@ -18,6 +19,7 @@ const fixture=`<template><NConfigProvider><NDialogProvider><NMessageProvider>
   import {ref} from 'vue';
   import {NConfigProvider,NDialogProvider,NMessageProvider} from 'naive-ui';
   import WorkbenchHome from '/src/workspace-v2/workbench/WorkbenchHome.vue';
+  import WorkbenchWeather from '/src/workspace-v2/workbench/WorkbenchWeather.vue';
   import {runNavigationAction} from '/src/workspace-v2/navigation';
   import '/src/workspace-v2/workspace.css';
   import '/src/workspace-v2/night.css';
@@ -98,8 +100,16 @@ try {
     });
     if(url.pathname==='/api/personal-calendar'){
       if(holdAgenda&&url.searchParams.get('view')!=='roster')await new Promise(resolve=>releaseAgenda=resolve);
+      const allowed=building=>scope==='ALL'||scope===building;
+      const staff=(building,name,detail={})=>({scope:building,people:[{name,...detail}]});
+      const current=[staff('A','验收值班员',{open_id:'ou_fixtureA1',group:'A班',position:'值班员'}),staff('A','白班第二人'),staff('B','B楼当班人员')].filter(row=>allowed(row.scope));
+      const incoming=[staff('A','夜班验收人'),staff('B','B楼当晚值班员')].filter(row=>allowed(row.scope));
+      const sealing={kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00',end:'2026-11-19T13:00:00+08:00',scopes:['A']};
       return ok({
-      month:url.searchParams.get('month'),unavailable:[],
+      month:url.searchParams.get('month'),unavailable:scope==='B'?['封网']:[],
+      seal_status:scope==='B'?'unconfigured':'ready',seal_windows:dailyDesk&&allowed('A')?[sealing]:[],
+      handover:dailyDesk?{current:{date:'2026-11-18',shift:'白',verified:true,staff:current},
+        incoming:{date:'2026-11-18',shift:'夜',verified:true,staff:incoming}}:undefined,
       roster_dates:dailyDesk&&url.searchParams.get('month')==='2026-11'?['2026-11-18']:[],
       days:dailyDesk&&url.searchParams.get('month')==='2026-11'?{'2026-11-18':{
         items:scope==='A'?[{kind:'封网',title:'隔离封网安排',start:'2026-11-18T10:00:00+08:00'},
@@ -152,6 +162,15 @@ try {
     if(url.pathname==='/api/workbench'){
       const planPage=Number(url.searchParams.get('records_page')||1);
       const type=url.searchParams.get('work_type');
+      if(url.searchParams.get('sections')==='records'&&url.searchParams.get('records_page_size')==='0'){
+        const row=(building,title,progress)=>({record_id:'plan-'+building+progress,work_type:'maintenance',title,building_codes:[building],
+          source_progress:progress,owner_level:'L4',specialty:'电气',planned_start_time:'2026-11-18 08:00',planned_end_time:'2026-11-19 18:00'});
+        const records=url.searchParams.get('month')==='11月'?
+          [row('A','隔离明日截止维保','未开始'),row('B','B楼待开始维保','未开始'),row('A','隔离已完成计划','已完成')]:[];
+        if(currentAccount.open_id==='period-review'&&url.searchParams.get('month')==='11月')
+          records.push({...row('A','隔离逾期维保','未开始'),record_id:'plan-overdue',planned_start_time:'2026-11-12 09:00',planned_end_time:'2026-11-13 18:00'});
+        return ok({scope,source_snapshot_ready:true,records:records.filter(row=>scope==='ALL'||row.building_codes.includes(scope))});
+      }
       if(aggregateTrial && url.searchParams.get('sections')==='ongoing'){
         const ongoing=[
           {active_item_id:'today-a',title:'A楼今日进行中',start_time:'2026-11-18 08:00',building_codes:['A']},
@@ -364,51 +383,61 @@ try {
   assert.equal(await page.getByText('每日学练',{exact:true}).count(),1,'per-paper daily_exempt still excludes the task');
 
   const period=page.getByRole('region',{name:'工作状态'});
-  const card=label=>period.locator('.wb-period-card').filter({has:page.getByRole('heading',{name:label,exact:true})});
-  const marker=async(label,value)=>{
-    const locator=card(label).locator('.wb-period-value strong');
-    await locator.filter({hasText:new RegExp('^'+value+'$')}).waitFor();
-  };
   await set(account('period-review','other',['daily','event','maintenance','learning']),['A','B']);
-  await marker('每日任务','5');
-  await marker('个人学练','4 / 15');
-  await marker('事件','1');
-  await marker('通告办理记录','2');
+  const personalCard=period.getByRole('article',{name:'个人卡片'});
+  await period.getByRole('button',{name:'今日',exact:true}).click();
+  await personalCard.getByText(/已答.*4 \/ 15/).waitFor();
+  const buildingCard=period.getByRole('article',{name:'楼栋卡片'});
+  await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
+  assert.equal(await period.getByText('隔离已完成计划',{exact:true}).count(),0);
+  await period.getByRole('button',{name:'表单显示'}).click();
+  assert.equal(await period.locator('.period-grid').getAttribute('data-view'),'table');
+  await period.getByRole('button',{name:'卡片显示'}).click();
+  const status=period.getByRole('group',{name:'工作状态筛选'});
+  await status.getByRole('button',{name:'逾期 1',exact:true}).click();
+  await buildingCard.getByRole('button',{name:/隔离逾期维保.*已逾期/}).waitFor();
+  assert.equal(await period.getByText('隔离明日截止维保',{exact:true}).count(),0);
+  await status.getByRole('button',{name:'今明截止 1',exact:true}).click();
+  await buildingCard.getByRole('button',{name:/隔离明日截止维保.*明日截止/}).waitFor();
+  assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
+  await status.getByRole('button',{name:'待开始 2',exact:true}).click();
+  assert.equal(await buildingCard.locator('.period-entry').count(),2,'both unstarted plans can be found without also showing active notices');
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
   await absent('notices:维保','已结束的计划');
   await absent('notices:维保','本月计划通告');
+  await pop.press('Escape');
+  await pop.waitFor({state:'hidden'});
+  await status.getByRole('button',{name:/^进行中 [1-9]/}).click();
   embeddedTest=true;
-  const noticeDetail=page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('active_item_id')==='active-1');
-  await reveal('notices:维保');
-  await task('计划和进行中同一条').click();
-  assert.equal(new URL((await noticeDetail).url()).searchParams.get('scope'),'A');
+  const statusNotice=buildingCard.getByRole('button',{name:/计划和进行中同一条/});
+  await statusNotice.waitFor({timeout:5000});
+  assert.match(await statusNotice.innerText(),/办理/);
+  const [noticeDetail]=await Promise.all([
+    page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('active_item_id')==='active-1',{timeout:20000}),
+    statusNotice.click({timeout:6000}),
+  ]);
+  assert.equal(new URL(noticeDetail.url()).searchParams.get('scope'),'A');
   assert.equal(new URL(page.url()).pathname,'/fixture');
   await closeTask('计划和进行中同一条');
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
   assert.equal(await todo.getByRole('button',{name:'读取更多待办'}).count(),0);
-  assert.equal(await card('每日任务').locator('meter[aria-label="已完成"]').getAttribute('value'),'3');
-  const dailyReads=()=>requests.filter(([,url])=>url==='/api/daily-tasks').length;
-  const initialDaily=dailyReads();
+  await pop.press('Escape');
+  await pop.waitFor({state:'hidden'});
+  await status.getByRole('button',{name:/^全部 /}).click();
   await period.getByRole('button',{name:'本周',exact:true}).click();
-  await marker('事件','2');await marker('通告办理记录','5');await marker('个人学练','9 / 30');
-  assert.equal(await card('每日任务').count(),0);
-  assert.equal(await card('事件').locator('meter[aria-label="已恢复"]').getAttribute('value'),'1');
+  await personalCard.getByText(/已答.*9 \/ 30/).waitFor();
   await period.getByRole('button',{name:'本月',exact:true}).click();
-  await marker('事件','3');await marker('通告办理记录','9');await marker('个人学练','23 / 60');
-  assert.equal(await card('事件').locator('meter[aria-label="已恢复"]').getAttribute('value'),'2');
-  assert.equal(dailyReads(),initialDaily,'week and month do not request a daily snapshot');
+  await personalCard.getByText(/已答.*23 \/ 60/).waitFor();
   await page.locator('.wb-scope select').selectOption('B');
-  await marker('事件','4');await marker('通告办理记录','12');
-  assert.ok(requests.some(([,url,scope,query])=>url==='/api/events/monthly'&&scope==='B'&&query.get('date_field')==='occurrence_time'));
-  assert.ok(requests.some(([,url,scope,query])=>url==='/api/history-summary'&&scope==='B'&&query.get('work_type')==='maintenance'));
-  await period.getByRole('button',{name:'打开事件',exact:true}).click();
-  assert.equal(new URL(await page.evaluate(()=>window.opened),origin).searchParams.get('scope'),'B');
-  await period.getByRole('button',{name:'今日',exact:true}).click();
-  await marker('事件','2');await marker('每日任务','5');
-  assert.ok(requests.some(([,url,scope])=>url==='/api/daily-tasks'&&scope==='B'));
+  await personalCard.getByText('本楼暂无个人题单').waitFor();
+  await buildingCard.getByRole('button',{name:/B楼待开始维保/}).waitFor();
+  assert.equal(await buildingCard.getByText('隔离明日截止维保',{exact:true}).count(),0);
+  await status.getByRole('button',{name:'逾期 0',exact:true}).click();
+  await period.getByText('本周期暂无此类事项',{exact:true}).waitFor();
+  assert.ok(requests.some(([,url,scope,query])=>url==='/api/workbench'&&scope==='B'&&query.get('sections')==='records'));
 
   hold=true;
   await set(account('manager','manager'),['A','B']);
@@ -473,7 +502,7 @@ try {
   await task('B楼隔离维修').waitFor();
   await reveal('repair_management');
   await task('A楼隔离维修').waitFor();
-  await marker('画像学练情况汇总','7');
+  await period.getByText(/已完成.*4 \/ 7/).waitFor();
   await reveal('notices:变更');
   await pop.getByText('A楼隔离变更',{exact:true}).waitFor();
   await reveal('notices:上下电');
@@ -504,7 +533,7 @@ try {
   await set(account('building-dashboard','supervisor',full),['A','B']);
   await reveal('cabinet');
   await task('机柜待确认').waitFor();
-  await marker('画像学练情况汇总','7');
+  await period.getByText(/已完成.*4 \/ 7/).waitFor();
   assert.equal(await page.locator('.wb-scope select').count(),0);
   await absent('cabinet','机柜已确认');
   await absent('repair_management','B楼隔离维修');
@@ -603,7 +632,7 @@ try {
   mopDelayed=true; riskDenied=true;
   await page.setViewportSize({width:1440,height:1000});
   await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B'],false);
-  await page.getByRole('region',{name:'今日上班人员'}).getByRole('rowheader',{name:'B楼'}).waitFor();
+  await page.getByRole('region',{name:'交接班人员'}).getByRole('rowheader',{name:'B楼'}).waitFor();
   holdAgenda=false;
   releaseAgenda?.();
   const health=todo.locator('.desk-queue-health');
@@ -611,16 +640,16 @@ try {
   assert.equal(await health.getAttribute('open'),null);
   assert.equal(await todo.getByText(/明细尚未读全|当前无权查看|数据待更新/).count(),0);
   await health.locator('summary').click();
-  await health.getByRole('button',{name:'重试待处理维护单'}).waitFor();
+  await health.getByRole('button',{name:'重试待处理维保单'}).waitFor();
   assert.equal(await health.getByText('专项排查待办',{exact:true}).count(),0);
   mopDelayed=false; riskDenied=false; mopRetryFailures=1;
-  await health.getByRole('button',{name:'重试待处理维护单'}).click();
+  await health.getByRole('button',{name:'重试待处理维保单'}).click();
   await reveal('engineer_mop');
   await task('待处理维护单甲').first().waitFor();
   assert.equal(mopRetryFailures,0);
   const overview=page.getByRole('region',{name:'工作状态',exact:true});
   await overview.getByRole('heading',{name:'画像学练情况汇总',exact:true}).waitFor();
-  await overview.getByText('人天',{exact:true}).waitFor();
+  await overview.getByText(/已完成.*4 \/ 7/).waitFor();
   await settleQueue();
   await reveal('notices:设备调整');
   await pop.getByText('隔离设备调整',{exact:true}).first().waitFor();
@@ -636,7 +665,9 @@ try {
   await page.getByRole('region',{name:'搜索结果'}).getByRole('button',{name:'维修项目'}).waitFor();
   await search.press('Enter');
   assert.match(await page.evaluate(()=>window.opened),/^\/repair-management/);
-  const weather=page.getByRole('region',{name:'今日天气'});
+  const weatherKey=page.getByRole('button',{name:'查看今日天气和未来10小时气温'});
+  await weatherKey.click();
+  const weather=page.getByRole('dialog',{name:'今日天气和未来10小时气温'});
   await weather.getByText('16°C',{exact:true}).waitFor();
   const trend=weather.getByRole('group',{name:/未来 10 小时气温趋势/});
   await trend.waitFor();
@@ -650,9 +681,20 @@ try {
   await trend.press('Escape');
   await trend.locator('output').waitFor({state:'detached'});
   assert.equal(await page.getByRole('button',{name:'天气详情'}).count(),0);
-  const roster=agenda.getByRole('region',{name:'今日上班人员'});
+  const roster=agenda.getByRole('region',{name:'交接班人员'});
   await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
+  await roster.getByRole('button',{name:'查看验收值班员的基本信息'}).click();
+  const person=page.getByRole('dialog',{name:'验收值班员的基本信息'});
+  await person.getByText('A班',{exact:true}).waitFor();
+  assert.equal(await person.getByRole('link',{name:'飞书对话'}).getAttribute('href'),'https://applink.feishu.cn/client/chat/open?openId=ou_fixtureA1');
+  await page.locator('.title-line h1').click();
+  await reveal('notices:变更');
+  await pop.getByRole('region',{name:'A楼待办'}).waitFor();
+  await pop.getByRole('region',{name:'B楼待办'}).waitFor();
+  await pop.getByRole('button',{name:'卡片显示'}).click();
+  assert.equal(await pop.locator('.queue-list').getAttribute('data-view'),'cards');
+  await pop.press('Escape');
   const beforeReturn=requests.length;
   await page.evaluate(()=>window.showWorkbench(false));
   await todo.waitFor({state:'detached'});
@@ -660,10 +702,10 @@ try {
   await todo.waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
   assert.equal(requests.length,beforeReturn,'returning to the workbench reuses loaded data within the freshness window');
-  await agenda.getByLabel('日程楼栋').selectOption('B');
+  await page.getByLabel('工作台楼栋').selectOption('B');
   await agenda.getByRole('button',{name:/2026-11-18.*项日程/}).waitFor();
   await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
-  await agenda.getByLabel('日程楼栋').selectOption('A');
+  await page.getByLabel('工作台楼栋').selectOption('A');
   const futureDate=agenda.getByRole('button',{name:/^2026-11-20/});
   await futureDate.hover();
   const preview=page.getByRole('region',{name:'2026-11-20 通告预览'});
@@ -683,12 +725,19 @@ try {
   await agenda.getByRole('button',{name:'上个月',exact:true}).click();
   await agenda.getByRole('button',{name:/^2026-10-01/}).waitFor();
   await aRoster.getByText('验收值班员',{exact:true}).waitFor();
-  await agenda.getByLabel('日程楼栋').selectOption('B');
+  await page.getByLabel('工作台楼栋').selectOption('B');
   await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
   assert.equal(await roster.getByText('验收值班员',{exact:true}).count(),0);
-  await agenda.getByLabel('日程楼栋').selectOption('A');
+  await page.getByLabel('工作台楼栋').selectOption('A');
   await agenda.getByRole('button',{name:'今天',exact:true}).click();
   await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
+  const sealFilter=overview.getByRole('button',{name:'封网 1',exact:true});
+  await sealFilter.click();
+  const sealList=overview.getByLabel('周期内封网');
+  await sealList.getByText('封网中',{exact:true}).waitFor();
+  assert.equal(await sealList.getByRole('button').count(),0,'freeze windows are informational');
+  assert.equal(await overview.getByText('隔离封网安排',{exact:true}).count(),1);
+  await overview.getByRole('button',{name:/^全部 /}).click();
   await agenda.getByText('隔离智航风险',{exact:true}).waitFor();
   const openAgenda=agenda.getByRole('button',{name:/展开全部 .* 项日程/});
   const railHeight=(await agenda.boundingBox()).height;
@@ -719,7 +768,7 @@ try {
   assert.equal(await agenda.getByText('16°C',{exact:true}).count(),0,'temperature is only shown in the masthead');
   await agenda.getByText('大风预警',{exact:true}).waitFor();
   await agenda.getByText('戒备等级 三级',{exact:true}).waitFor();
-  await agenda.getByLabel('日程楼栋').selectOption('');
+  await page.getByLabel('工作台楼栋').selectOption('ALL');
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
   await page.setViewportSize({width:390,height:844});
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'workbench fits a phone viewport');
@@ -738,9 +787,11 @@ try {
   await page.screenshot({path:path.join(output,'daily-desktop.png'),animations:'disabled'});
   await page.evaluate(()=>{document.querySelector('#app').style.padding='';});
   await page.setViewportSize({width:1440,height:1000});
-  await agenda.getByLabel('日程楼栋').selectOption('A');
+  await page.getByLabel('工作台楼栋').selectOption('A');
   await page.locator('.wb-scope select').selectOption('B');
-  assert.equal(await agenda.getByLabel('日程楼栋').inputValue(),'A','agenda scope is independent');
+  await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
+  await agenda.getByText('封网数据源未配置',{exact:true}).waitFor();
+  assert.equal(await agenda.getByText('隔离封网安排',{exact:true}).count(),0,'switching the workbench building changes the calendar');
   await page.getByRole('navigation',{name:'常用业务'}).getByRole('button',{name:'维修项目',exact:true}).click();
   assert.equal(new URL(await page.evaluate(()=>window.opened),origin).searchParams.get('scope'),'B');
   await absent('repair_management','A楼隔离维修');
@@ -818,7 +869,7 @@ try {
   repairTrial=true;
   await page.setViewportSize({width:1440,height:900});
   await set(account('repair-desk','engineer',['repair_management']),['A']);
-  const list=pop.getByRole('list',{name:'待办清单',exact:true});
+  const list=pop.getByRole('region',{name:'待办清单',exact:true});
   await tile('repair_management').waitFor();
   await settleQueue();
   const documentHeight=()=>page.evaluate(()=>document.documentElement.scrollHeight);
@@ -884,14 +935,25 @@ try {
   await page.clock.setFixedTime(new Date('2026-11-18T14:30:00Z'));
   await set(account('visual-check','manager'),['A','B']);
   await page.setViewportSize({width:390,height:844});
-  await page.evaluate(()=>document.documentElement.dataset.v2Theme='dark');
+  await page.evaluate(()=>{
+    document.documentElement.dataset.v2Theme='dark';
+    document.querySelector('.workbench-fixture-account').style.paddingLeft='205px';
+  });
+  await weatherKey.click();
   await trend.waitFor();
+  await page.waitForFunction(()=>{
+    const panel=document.querySelector('.workbench-forecast');
+    const rect=panel?.getBoundingClientRect();
+    return rect&&rect.left>=7&&rect.right<=innerWidth-7;
+  });
   assert.equal(await trend.locator('.weather-point').count(),10,'the hourly window crosses midnight');
   const midnight=await trend.locator('.weather-point').nth(1).boundingBox();
   await trend.dispatchEvent('pointerdown',{pointerType:'touch',clientX:midnight.x+midnight.width/2,clientY:midnight.y+midnight.height/2});
   await trend.getByText('次日 00:00 · 13°C',{exact:true}).waitFor();
   missingWeather=true;
   await set(account('weather-gap','manager'),['A','B']);
+  await weather.waitFor({state:'hidden'});
+  await weatherKey.click();
   await page.waitForFunction(()=>document.querySelectorAll('.weather-plot .weather-point').length===9);
   assert.equal(await trend.locator('.weather-point').count(),9,'missing hours are not estimated');
   assert.equal(await trend.locator('polyline').count(),2,'a missing hour leaves a gap in the line');

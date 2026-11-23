@@ -2734,6 +2734,46 @@ class FastAPIPortalController:
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=403)
 
+        @app.get("/api/engineer/mop/history")
+        async def engineer_mop_history(request: Request):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(session, request.query_params.get("scope") or "ALL")
+                service = PortalRuntime.service
+                app_id = PortalRuntime.auth_manager.current_feishu_app_id()
+                data = await asyncio.to_thread(
+                    self._cached_service_payload, ("mop_history", app_id, scope),
+                    lambda: service.engineer_mop_history(scope=scope),
+                    fresh=request.query_params.get('refresh') == '1',
+                )
+                page = service.engineer_mop_history_page(
+                    data["records"], scope=scope, search=request.query_params.get("search", ""),
+                    specialty=request.query_params.get("specialty", ""), page=request.query_params.get("page", "1"),
+                )
+                return self._json_ok(request, session, page)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
+        @app.get("/api/engineer/mop/history/{record_id}/{attachment_id}")
+        async def engineer_mop_history_attachment(request: Request, record_id: str, attachment_id: str):
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                scope = self._authorized_scope_or_error(session, request.query_params.get("scope") or "ALL")
+                content, content_type, name = await asyncio.to_thread(
+                    PortalRuntime.service.download_engineer_mop_history,
+                    scope=scope, record_id=record_id, attachment_id=attachment_id,
+                )
+                return Response(content, media_type=content_type or "application/octet-stream", headers={
+                    "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": f"attachment; filename*=UTF-8''{quote(name, safe='')}",
+                })
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+
         @app.post("/api/engineer/mop/bind")
         async def engineer_mop_bind(request: Request):
             session = self._current_session(request)
@@ -7989,6 +8029,7 @@ class FastAPIPortalController:
                         "source_app_token": validation.get("source_app_token") or "",
                         "source_table_id": validation.get("source_table_id") or "",
                         "_source_period": validation.get("_source_period") or {},
+                        "_target_actual_start_ms": validation.get("target_actual_start_ms"),
                     }
                 )
                 if target_finished:
@@ -8299,6 +8340,29 @@ class FastAPIPortalController:
                     }
 
                 result = await asyncio.to_thread(persist_binding)
+                source_time_warning = ''
+                if (not target_finished and source_record_id and target_record_id
+                        and MaintenancePortalService.notice_source_uses_actual_start(PortalRuntime.service, identity_payload)):
+                    from lan_bitable_template_portal.account_impersonation import COOKIE as impersonation_cookie
+                    from lan_bitable_template_portal.portal_auth import topic_execution
+                    actor = str((session.get('user') or {}).get('open_id') or '').strip()
+                    if (actor and not hasattr(request.state, 'admin_impersonation_session')
+                            and not request.cookies.get(impersonation_cookie)
+                            and topic_execution(PortalRuntime.auth_manager, session) is None):
+                        source_time_warning = await asyncio.to_thread(PortalRuntime._queue_source_end_sync,
+                            {**identity_payload, '_source_binding_actor': actor, 'operation_id': uuid.uuid4().hex},
+                            target_record_id, notice_type, start_only=True)
+                    else:
+                        try:
+                            synced = await asyncio.to_thread(PortalRuntime._sync_confirmed_source_end,
+                                {**identity_payload, '_source_actual_start_only': True})
+                            if not synced:
+                                source_time_warning = '关联已保存，需核对目标通告的实际开始时间。'
+                        except Exception as exc:
+                            source_time_warning = '关联已保存，实际开始时间未确认：' + str(exc)
+                binding_warnings = [*(repair_relation.get('warnings') or [])]
+                if source_time_warning:
+                    binding_warnings.append(source_time_warning)
                 PortalRuntime.clear_payload_cache()
                 with suppress(Exception):
                     PortalRuntime.service._touch_state_cache_version()
@@ -8331,9 +8395,7 @@ class FastAPIPortalController:
                             if key != "_target_active_payload"
                         },
                         "repair_relation": repair_relation,
-                        "warnings": list(
-                            dict.fromkeys(repair_relation.get("warnings") or [])
-                        ),
+                        "warnings": list(dict.fromkeys(binding_warnings)),
                         **result,
                     },
                 )
@@ -11596,13 +11658,13 @@ class FastAPIPortalController:
         return normalized
 
     @staticmethod
-    def _cached_service_payload(key_parts: tuple, builder) -> dict:
+    def _cached_service_payload(key_parts: tuple, builder, *, fresh: bool = False) -> dict:
         class _CacheAdapter:
             @property
             def service(self):
                 return PortalRuntime.service
 
-        return PortalRuntime._cached_service_payload(_CacheAdapter(), key_parts, builder)
+        return PortalRuntime._cached_service_payload(_CacheAdapter(), key_parts, builder, fresh=fresh)
 
     @staticmethod
     def _diagnostic_work_type(item: dict) -> str:
