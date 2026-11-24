@@ -184,7 +184,7 @@ def install_learning_routes(app, controller, runtime):
         if not global_view:
             home = user.get("home_scope") or (allowed[0] if len(allowed) == 1 else "")
             allowed = [scope for scope in allowed if scope == home]
-        if requested in {"", "ALL", "CAMPUS"} and global_view and allowed:
+        if requested in {"", "ALL", "CAMPUS"} and allowed:
             return allowed
         if requested in allowed:
             return [requested]

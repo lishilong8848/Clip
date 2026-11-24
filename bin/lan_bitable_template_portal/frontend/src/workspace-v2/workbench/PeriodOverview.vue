@@ -29,12 +29,13 @@ const filter=ref<Filter>('all');
 const today=computed(()=>beijingDate(props.clock));
 const canSeeCampus=computed(()=>props.role==='manager'||props.user.category==='manager');
 const canSeeBuilding=computed(()=>!['guest','temporary'].includes(props.user.role)&&!!props.scope);
-const canSeePersonal=computed(()=>!props.user.impersonation&&!['guest','temporary'].includes(props.user.role));
-const canReadLearning=computed(()=>!props.user.impersonation&&props.user.modules?.includes('learning'));
+const canSeePersonal=computed(()=>!['guest','temporary'].includes(props.user.role));
+const canReadLearning=computed(()=>canSeePersonal.value&&props.user.modules?.includes('learning'));
 const canReadPersonalLearning=computed(()=>canReadLearning.value&&props.user.category!=='duty');
 const hasPersonalDuty=computed(()=>!!inspectionTask.value||['stale','down'].includes(props.inspectionState||''));
-const canReadTeam=computed(()=>canReadLearning.value&&(canSeeCampus.value||props.role==='supervisor')
+const canReadTeam=computed(()=>canReadLearning.value&&!props.user.impersonation&&(canSeeCampus.value||props.role==='supervisor')
   &&/^(?:ALL|CAMPUS|[A-EH])$/.test(props.scope));
+const learningIdentity=computed(()=>JSON.stringify([props.user.open_id,props.user.impersonation?.id,props.user.modules,props.scopes]));
 const range=computed(()=>{
   const at=Date.parse(today.value+'T12:00:00+08:00');
   return period.value==='day'?eventPeriodRange('custom','',at,[today.value,today.value]):eventPeriodRange(period.value,'',at);
@@ -151,7 +152,8 @@ type Count = {done:number;total:number;pending:number;late:number;checking:numbe
 const team=ref<Count>(), personal=ref<{done:number;total:number}>();
 const reviewQueue=ref<Dict>({}), reviewOpen=ref(false), reviewPage=ref(1), reviewRefresh=ref(0);
 const reviewDayPart=computed(()=>Math.floor(props.clock/90000));
-watch([canReadPersonalLearning,reviewPage,reviewRefresh,reviewDayPart],async([permitted,page],_old,onCleanup)=>{
+const canReviewQuestions=computed(()=>canReadPersonalLearning.value&&!props.user.impersonation);
+watch([canReviewQuestions,reviewPage,reviewRefresh,reviewDayPart,learningIdentity],async([permitted,page],_old,onCleanup)=>{
   if(!permitted){reviewQueue.value={};reviewOpen.value=false;return;}
   const request=new AbortController();
   onCleanup(()=>request.abort());
@@ -167,47 +169,58 @@ watch([canReadPersonalLearning,reviewPage,reviewRefresh,reviewDayPart],async([pe
     }
   }
 },{immediate:true});
-const teamOpen=ref(false), teamDetail=ref<Record<string,{date:string;summary:Record<string,number>}[]>>({});
+type LearningProgress={scope:string;name:string;shift:string;status:string;answered:number;assigned:number};
+const teamOpen=ref(false), teamDetail=ref<LearningProgress[]>([]), detailBuildings=ref<string[]>([]);
 const detailScope=ref(''), detailLoading=ref(false), detailError=ref(''), detailRevision=ref(0);
-watch([teamOpen,detailRevision],async([open],_old,onCleanup)=>{
-  if(!open || !canReadTeam.value)return;
+const detailDate=ref(''),detailFilter=ref('all');
+const dateStart=computed(()=>beijingDate(range.value.start));
+const unfinished=(row:LearningProgress)=>['待答','答题中','逾期'].includes(row.status);
+function openTeam(){
+  detailDate.value=today.value;detailScope.value='';detailFilter.value='all';teamOpen.value=true;
+}
+watch([teamOpen,detailDate,detailRevision,learningIdentity],async([open,date],_old,onCleanup)=>{
+  if(!open || !canReadTeam.value || !date){detailLoading.value=false;detailError.value='';teamDetail.value=[];return;}
   const request=new AbortController();
   onCleanup(()=>request.abort());
-  detailLoading.value=true;detailError.value='';teamDetail.value={};
+  detailLoading.value=true;detailError.value='';teamDetail.value=[];
   try {
-    const query=new URLSearchParams({scope:props.scope,from:beijingDate(range.value.start),to:today.value,detail:'1'});
+    const query=new URLSearchParams({scope:'ALL',date,people:'1'});
     const data=await readWorkbenchRequest('/api/learning/workbench-summary?'+query,request.signal);
     if(request.signal.aborted)return;
-    const allowed=['ALL','CAMPUS'].includes(props.scope)?issuerScopes.value:new Set([props.scope]);
-    if(!data.by_scope || Object.keys(data.by_scope).some(scope=>!allowed.has(scope)||!Array.isArray(data.by_scope[scope])))
+    if(data.from!==date||data.to!==date||!validTeamScopes(data.scopes)||!Array.isArray(data.people)||
+      data.people.some((row:LearningProgress)=>!row||!data.scopes.includes(row.scope)||typeof row.name!=='string'||
+        typeof row.status!=='string'||!Number.isSafeInteger(row.answered)||!Number.isSafeInteger(row.assigned)||row.answered<0||row.assigned<0))
       throw new Error('学练明细楼栋未核验');
-    teamDetail.value=data.by_scope;
-    detailScope.value=Object.keys(teamDetail.value)[0]||'';
+    detailBuildings.value=data.scopes;
+    if(!data.scopes.includes(detailScope.value))detailScope.value='';
+    teamDetail.value=data.people;
   } catch(error) {
     if(!request.signal.aborted)detailError.value=[401,403].includes((error as {status?:number})?.status||0)
       ?'当前账号无权查看学练明细':'学练明细暂未读到';
   } finally {if(!request.signal.aborted)detailLoading.value=false;}
 });
-watch([()=>props.scope,canReadTeam,period,today],()=>{teamOpen.value=false;});
-const detailRows=computed(()=>[...(teamDetail.value[detailScope.value]||[])].reverse());
-const pendingCount=(summary:Record<string,number>)=>(summary['待答']||0)+(summary['答题中']||0)+(summary['逾期']||0);
+watch([()=>props.scope,canReadTeam,period,today,learningIdentity],()=>{teamOpen.value=false;teamDetail.value=[];detailBuildings.value=[];},{flush:'sync'});
+const detailRows=computed(()=>teamDetail.value.filter(row=>(!detailScope.value||row.scope===detailScope.value)
+  && (detailFilter.value==='all'||unfinished(row)&&(detailFilter.value!=='unanswered'||row.answered===0)))
+  .sort((a,b)=>a.scope.localeCompare(b.scope)||Number(unfinished(b))-Number(unfinished(a))||a.answered-b.answered||a.name.localeCompare(b.name,'zh-CN')));
 const teamError=ref(''), revision=ref(0);
+function validTeamScopes(value:unknown):value is string[]{
+  return Array.isArray(value)&&value.length>0&&value.every(scope=>issuerScopes.value.has(scope));
+}
 function count(value:unknown){
   if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error('完成数据待核验');
   return value;
 }
-watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePersonal,revision],async(_current,_previous,onCleanup)=>{
+watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePersonal,revision,learningIdentity],async(_current,_previous,onCleanup)=>{
   const request=new AbortController();
   onCleanup(()=>request.abort());
   team.value=undefined;personal.value=undefined;teamError.value='';
   const from=beijingDate(range.value.start),to=today.value,scope=props.scope,signal=request.signal;
   const read=(path:string,params:Record<string,string>)=>readWorkbenchRequest(path+'?'+new URLSearchParams(params),signal);
   const requests:Promise<unknown>[]=[];
-  if(canReadTeam.value)requests.push(read('/api/learning/workbench-summary',{scope,from,to}).then(data=>{
+  if(canReadTeam.value)requests.push(read('/api/learning/workbench-summary',{scope:'ALL',from,to}).then(data=>{
     if(signal.aborted)return;
-    if(!Array.isArray(data.scopes)||!data.scopes.length||data.scopes.some((building:string)=>
-      ['ALL','CAMPUS'].includes(scope)?issuerScopes.value.size>0&&!issuerScopes.value.has(building):scope!==building))
-      throw new Error('学练汇总楼栋未核验');
+    if(!validTeamScopes(data.scopes))throw new Error('学练汇总楼栋未核验');
     const done=count(data.summary?.['已完成']),late=count(data.summary?.['逾期']);
     const pending=count(data.summary?.['待答'])+count(data.summary?.['答题中'])+late;
     team.value={done,total:done+pending,pending,late,checking:count(data.summary?.['待核对']),upcoming:count(data.summary?.['未到时'])};
@@ -288,7 +301,7 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
         </div>
 
         <div v-if="filter==='all'&&canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building')" class="learning-summary">
-          <button type="button" class="learning-open" aria-haspopup="dialog" @click="teamOpen=true">画像学练情况汇总 <ChevronRight :size="15" aria-hidden="true"/></button>
+          <button type="button" class="learning-open" aria-haspopup="dialog" @click="openTeam">画像学练情况汇总 <ChevronRight :size="15" aria-hidden="true"/></button>
           <template v-if="team">
             <div class="learning-kpis"><span>已完成 <b>{{ team.done }} / {{ team.total }}</b> 人天</span>
               <span :data-warn="team.pending>0">未完成 <b>{{ team.pending }}</b></span><span v-if="team.late" data-warn="true">其中逾期 <b>{{ team.late }}</b></span></div>
@@ -332,23 +345,33 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
         </div>
       </article>
     </div>
-    <NModal v-model:show="teamOpen" preset="card" title="画像学练情况汇总" style="width:min(580px,calc(100vw - 24px))">
+    <NModal v-model:show="teamOpen" preset="card" title="画像学练情况汇总" style="width:min(700px,calc(100vw - 20px))">
       <div class="learning-detail" :aria-busy="detailLoading">
-        <header><span>{{ beijingDate(range.start) }} 至 {{ today }}</span>
-          <select v-if="Object.keys(teamDetail).length>1" v-model="detailScope" data-native-select aria-label="学练明细楼栋">
-            <option v-for="building in Object.keys(teamDetail)" :key="building" :value="building">{{ scopeName(building) }}</option>
-          </select><strong v-else-if="detailScope&&!detailLoading&&!detailError">{{ scopeName(detailScope) }}</strong>
+        <header>
+          <input v-model="detailDate" type="date" :min="dateStart" :max="today" aria-label="学练明细日期" />
+          <select v-model="detailScope" data-native-select aria-label="学练明细楼栋">
+            <option value="">全部授权楼栋</option>
+            <option v-for="building in detailBuildings" :key="building" :value="building">{{ scopeName(building) }}</option>
+          </select>
+          <select v-model="detailFilter" data-native-select aria-label="学练明细状态">
+            <option value="all">全部状态</option><option value="unfinished">未完成</option><option value="unanswered">未作答</option>
+          </select>
         </header>
         <p v-if="detailLoading" role="status">正在读取学练明细…</p>
         <p v-else-if="detailError" role="alert">{{ detailError }} <button type="button" @click="detailRevision++">重试</button></p>
-        <table v-else-if="detailRows.length">
-          <thead><tr><th>日期</th><th>已完成</th><th>未完成</th><th>其中逾期</th><th>待核对</th></tr></thead>
-          <tbody><tr v-for="row in detailRows" :key="row.date">
-            <td>{{ row.date }}</td><td>{{ row.summary['已完成']||0 }}</td><td>{{ pendingCount(row.summary) }}</td>
-            <td>{{ row.summary['逾期']||0 }}</td><td>{{ row.summary['待核对']||0 }}</td>
-          </tr></tbody>
-        </table>
-        <p v-else>本周期暂无记录</p>
+        <div v-else-if="detailRows.length" class="learning-roster-table">
+          <table aria-label="逐人答题明细">
+            <thead><tr><th>楼栋</th><th>姓名</th><th>班次</th><th>已答 / 应答</th><th>状态</th></tr></thead>
+            <tbody><tr v-for="(row,index) in detailRows" :key="`${row.scope}:${row.name}:${index}`">
+              <td>{{ scopeName(row.scope) }}</td><td>{{ row.name }}</td><td>{{ row.shift||'—' }}</td>
+              <td>{{ row.answered }} / {{ row.assigned }}</td>
+              <td><span class="learning-row-status" :data-state="row.status" :data-unanswered="unfinished(row)&&row.answered===0">
+                {{ unfinished(row)&&row.answered===0&&row.status!=='逾期'?'未作答':row.status }}
+              </span></td>
+            </tr></tbody>
+          </table>
+        </div>
+        <p v-else>{{ detailDate?'当天暂无符合条件的记录':'请选择日期' }}</p>
       </div>
     </NModal>
   </section>
@@ -398,12 +421,18 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
 .review-open span{flex:1;min-width:0}.review-open small{white-space:nowrap}
 .seal-row{cursor:pointer}
 .seal-details{display:block;padding:2px 8px 8px;overflow-wrap:anywhere}
-.learning-detail{max-height:65dvh;overflow:auto;font-size:13px}
-.learning-detail header{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:8px}
-.learning-detail select{min-height:36px;background:var(--soft-field);color:inherit;border:1px solid var(--soft-edge);border-radius:7px;padding:4px 7px}
+.learning-detail{font-size:13px;min-width:0}
+.learning-detail header{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px}
+.learning-detail :is(select,input){min-height:36px;min-width:0;max-width:100%;background:var(--soft-field);color:inherit;
+  border:1px solid var(--soft-edge);border-radius:7px;padding:4px 7px;font:inherit}
+.learning-roster-table{max-height:55dvh;overflow:auto;overscroll-behavior:contain}
 .learning-detail table{width:100%;border-collapse:collapse;text-align:center;font-variant-numeric:tabular-nums}
-.learning-detail :is(th,td){padding:7px 3px;border-bottom:1px solid var(--soft-edge)}
-.learning-detail :is(th,td):first-child{text-align:start}
+.learning-detail :is(th,td){padding:7px 3px;border-bottom:1px solid var(--soft-edge);overflow-wrap:anywhere}
+.learning-detail :is(th,td):nth-child(2){text-align:start}
+.learning-detail th{position:sticky;top:0;background:var(--soft-face,#fff);color:var(--v2-ink)}
+.learning-row-status[data-state="已完成"]{color:var(--v2-green,var(--v2-palette-accent-text))}
+.learning-row-status:is([data-unanswered=true],[data-state="逾期"]){color:var(--cf-danger,#a43c31);font-weight:650}
+@media(pointer:coarse){.learning-detail :is(select,input){min-height:44px;font-size:16px}}
 @media(max-width:600px){.learning-summary .learning-open{min-height:44px}}
 .personal-duty{display:grid;gap:4px}
 .personal-duty-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:5px;text-align:start;

@@ -281,20 +281,25 @@ class Inbox:
             db.execute('CREATE INDEX IF NOT EXISTS topic_posts_expiry ON topic_posts(created_at)')
             db.execute('CREATE INDEX IF NOT EXISTS topic_plans_expiry ON topic_plans(updated_at)')
             db.execute('CREATE INDEX IF NOT EXISTS messages_retention ON messages(state,updated_at)')
+            db.execute("""UPDATE messages SET state=CASE WHEN reply IS NULL THEN 'pending' ELSE 'reply' END,retry_at=0
+                WHERE state='processing' AND json_extract(payload,'$.kind')='tool_review'""")
             for row in db.execute("SELECT id FROM messages WHERE state='processing'").fetchall():
                 db.execute("UPDATE messages SET state='reply',reply=COALESCE(reply,?),retry_at=0 WHERE id=?",
                            (json.dumps(_uncertain_reply(row[0]), ensure_ascii=False), row[0]))
 
     @contextmanager
-    def connect(self):
-        with closing(sqlite3.connect(self.path, timeout=5)) as db:
+    def connect(self, *, timeout=5):
+        with closing(sqlite3.connect(self.path, timeout=timeout)) as db:
             with db:
                 yield db
 
-    def add(self, message):
-        with self.connect() as db:
+    def add(self, message, *, timeout=5):
+        with self.connect(timeout=timeout) as db:
             added = db.execute("INSERT OR IGNORE INTO messages(id,owner,payload,state,created_at,updated_at) VALUES(?,?,?,'pending',?,?)",
                 (message["message_id"], message["union_id"] or "sender:" + message["sender_id"], json.dumps(message, ensure_ascii=False), time.time(), time.time())).rowcount == 1
+            if not added and message.get('kind') == 'tool_review':
+                db.execute("""UPDATE messages SET state='reply',retry_at=0,retries=0,updated_at=?
+                    WHERE id=? AND state='stopped'""", (time.time(), message['message_id']))
             if added and not message.get('kind'):
                 db.execute('INSERT INTO topic_roots VALUES(?,?,?,?) ON CONFLICT(chat_id,root_id) DO UPDATE SET updated_at=excluded.updated_at',
                            (message['chat_id'], message.get('root_id') or message['message_id'], message['chat_type'], time.time()))
@@ -334,6 +339,8 @@ class Inbox:
                 "AND COALESCE(json_extract(payload,'$.kind'),'')<>'plan_status'", (time.time(),))]
 
     def queue_key(self, message):
+        if message.get('kind') == 'tool_review':
+            return (message.get('app_id', ''), message['sender_id'], 'tool_review')
         topic = self.context_topic(message) if message.get('chat_type') == 'group' else None
         return (message.get('app_id', ''), message.get('chat_id', ''),
                 (topic or {}).get('root_id', '') if topic else 'p2p')
@@ -510,7 +517,12 @@ class Inbox:
     def recover_processing(self, owner, lane=None):
         with self.connect() as db:
             for row in db.execute("SELECT id,payload FROM messages WHERE owner=? AND state='processing'", (owner,)).fetchall():
-                if lane is not None and self.queue_key(json.loads(row[1])) != lane:
+                payload = json.loads(row[1])
+                if lane is not None and self.queue_key(payload) != lane:
+                    continue
+                if payload.get('kind') == 'tool_review':
+                    db.execute("""UPDATE messages SET state=CASE WHEN reply IS NULL THEN 'pending' ELSE 'reply' END,
+                        retry_at=?,updated_at=? WHERE id=?""", (time.time() + 5, time.time(), row[0]))
                     continue
                 db.execute("UPDATE messages SET state='reply',reply=COALESCE(reply,?),retry_at=?,updated_at=? WHERE id=?",
                     (json.dumps(_uncertain_reply(row[0]), ensure_ascii=False), time.time() + 5, time.time(), row[0]))
@@ -1138,8 +1150,17 @@ class FeishuAssistant:
                     from .signature_usage_cards import callback
                     return JSONResponse(await callback(self.runtime, data, self.config['app_id']))
                 if isinstance(action_value, dict) and action_value.get('kind') == 'tool_review':
-                    from .tool_review_cards import callback
-                    return JSONResponse(await callback(self.runtime, data, app_id))
+                    from .risk_inspection import RiskError
+                    from .tool_review_cards import queued_review
+                    try:
+                        message = queued_review(data, app_id)
+                        added = await asyncio.to_thread(inbox.add, message, timeout=.7)
+                    except RiskError as exc:
+                        return JSONResponse({'ok': False, 'toast': str(exc)})
+                    except sqlite3.Error:
+                        return JSONResponse({'ok': False, 'toast': '审批请求暂未保存，请稍后重试原卡片。'})
+                    self.event.set()
+                    return JSONResponse({'ok': True, 'toast': '已受理，正在后台审核。' if added else '该请求已受理，请查看原卡片。'})
                 if isinstance(action_value, dict) and action_value.get('kind') == 'learning_weekly':
                     weekly = getattr(self.runtime, 'learning_weekly_cards', None)
                     if weekly is None:
@@ -2398,6 +2419,10 @@ class FeishuAssistant:
         await self._require_current_config()
         if message.get('app_id') and self.config.get('app_id') and message['app_id'] != self.config['app_id']:
             await asyncio.to_thread(self.inbox.set, message['message_id'], 'stopped')
+            return
+        if message.get('kind') == 'tool_review':
+            from .tool_review_cards import process_queued
+            await process_queued(self, message)
             return
         reply = message.get("reply")
         if reply is None:

@@ -14,8 +14,8 @@ export const deskSources:Record<DeskRole,SourceId[]> = {
   L0:[...common,'ali_confirmation'], L1:[...common,'ali_confirmation'],
   L2:['notices','repair_management','events','engineer_mop','water'],
   L3:['events','critical_guard','risk_inspection','notices','engineer_mop','repair_management','water'],
-  L4:['notices','events','repair_management','water','inspection'],
-  duty:['ali_confirmation','inspection','notices','event_notices','events','repair_management','critical_guard','drills','engineer_mop','water'],
+  L4:['notices','events','repair_management','water','inspection','learning'],
+  duty:['ali_confirmation','inspection','notices','event_notices','events','repair_management','critical_guard','drills','engineer_mop','water','learning'],
 };
 const owned = (user:Dict,item:WorkItem) =>
   [user.open_id,user.union_id].some(id=>typeof id==='string'&&id&&item.actorIds?.includes(id));

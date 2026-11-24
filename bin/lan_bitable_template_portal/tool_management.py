@@ -1284,14 +1284,18 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 self._finish_scrap(db, row, {'id': receipt['actor'], 'name': name}, 'approve',
                                    clock().isoformat(timespec='seconds'))
 
-    def scrap_review_batch(self, actor, entries, action, note):
+    def scrap_review_batch(self, actor, entries, action, note, *, card_receipt=''):
         self.access(actor)
         approver = self.scrap_approver(actor)
         if not approver:
             raise RiskError('只有指定的两位经理可处理报废审批。', 403)
-        results = []
+        reviewed = 0
         result_batch = uuid.uuid4().hex
         with self.connect(True) as db:
+            if card_receipt:
+                count = self._card_review_count(db, card_receipt)
+                if count is not None:
+                    return count
             for entry in entries:
                 row = db.execute('SELECT * FROM tool_work_orders WHERE id=?', (entry['order'],)).fetchone()
                 if (not row or row['ledger_deleted_at'] or self._tool_delete_job(db, row['id'])
@@ -1301,11 +1305,13 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                              if vote['employee_no'] == approver), None)
                 if not vote or vote['request_revision'] != entry['revision']:
                     continue
-                if vote['decision'] != action and (row['outcome'] != 'scrap' or vote['decision']):
+                if row['outcome'] != 'scrap' or vote['decision']:
                     continue
-                results.append(self._decide_scrap(db, row, actor, action,
-                                                 {'approval_round': entry['revision'], 'reason': note}, result_batch=result_batch))
-        return results
+                result = self._decide_scrap(db, row, actor, action,
+                                            {'approval_round': entry['revision'], 'reason': note}, result_batch=result_batch)
+                reviewed += int(action == 'reject' or result['outcome'] == 'scrapped')
+            self._save_card_review_count(db, card_receipt, reviewed)
+        return reviewed
 
     def sync_one(self):
         now = int(time.time())

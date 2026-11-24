@@ -167,10 +167,10 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(review.call_count,2)
 
     def test_workbench_question_routes_use_resolved_scopes_not_client_scope(self):
-        from lan_bitable_template_portal import learning_issue_cards as cards
-
-        with patch.object(cards, "workbench_review_scopes", return_value=("A",)) as allowed, \
-                patch.object(cards, "review_question", return_value={"editable": True}) as review:
+        with patch("lan_bitable_template_portal.learning_issue_cards.workbench_review_scopes",
+                   return_value=("A",)) as allowed, \
+                patch("lan_bitable_template_portal.learning_issue_cards.review_question",
+                      return_value={"editable": True}) as review:
             url = "/api/learning/issues/issue-one/question?workbench=1&scope=E"
             self.assertEqual(self.client.get(url).status_code, 200)
             self.assertEqual(review.call_args.kwargs["workbench_scopes"], ("A",))
@@ -190,7 +190,7 @@ class LearningRouteTests(unittest.TestCase):
                                       SimpleNamespace(workbench_summary=summary)}):
             self.assertEqual(self.client.get(path + "?scope=A").json()["data"]["scopes"], ["A"])
             self.assertEqual(self.client.get(path + "?scope=B").status_code, 403)
-            self.assertEqual(self.client.get(path + "?scope=ALL").status_code, 403)
+            self.assertEqual(self.client.get(path + "?scope=ALL").json()["data"]["scopes"], ["A"])
             profile["category"] = "manager"
             self.assertEqual(self.client.get(path + "?scope=ALL").json()["data"]["scopes"], ["A", "B"])
             self.assertEqual(self.client.get(path + "?scope=E").status_code, 403)
@@ -206,7 +206,7 @@ class LearningRouteTests(unittest.TestCase):
                 self.assertEqual(self.client.get(path + "?scope=E").status_code, 403)
             profile["impersonation"] = {"active": True}
             self.assertEqual(self.client.get(path + "?scope=A").status_code, 403)
-            self.assertEqual(summary.call_count, 4)
+            self.assertEqual(summary.call_count, 5)
             self.assertFalse(any(name == "resolve_self" for name, _ in self.events))
 
     def test_personnel_password_session_uses_virtual_directory_resolver(self):

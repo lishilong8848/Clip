@@ -12,6 +12,8 @@ import uuid
 from functools import lru_cache
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from requests.exceptions import ConnectionError as RequestsConnectionError, Timeout as RequestsTimeout
+
 from .risk_inspection import RiskError, digest, text
 from .tool_self_check import TZ, dumps, timestamp
 from . import tool_result_notices
@@ -54,6 +56,9 @@ class ToolWorkspaceMixin:
         with self.connect(True) as db:
             tool_result_notices.init_tables(db)
             db.executescript("""
+                CREATE TABLE IF NOT EXISTS tool_card_review_receipts(
+                    id TEXT PRIMARY KEY, reviewed INTEGER NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS tool_workspace_templates(
                     cache_key TEXT PRIMARY KEY, content BLOB NOT NULL, layout TEXT NOT NULL
                 );
@@ -1304,11 +1309,26 @@ class ToolWorkspaceMixin:
                         'inspector_name': inspector_name, 'checked_at_text': value,
                         "reviewer": "", "reviewed_at": "", "signature": ""}
 
-    def workspace_review(self, actor, identity, body, *, from_card=False):
+    @staticmethod
+    def _card_review_count(db, receipt):
+        row = db.execute('SELECT reviewed FROM tool_card_review_receipts WHERE id=?', (receipt,)).fetchone()
+        return row['reviewed'] if row is not None else None
+
+    @staticmethod
+    def _save_card_review_count(db, receipt, count):
+        if receipt:
+            db.execute('INSERT INTO tool_card_review_receipts VALUES(?,?)', (receipt, count))
+
+    def workspace_review(self, actor, identity, body, *, from_card=False, card_receipt=''):
         from .tool_management import MAX_REPORT, clock
         from .tool_workspace_workbook import fill, validate_signature
 
         self._workspace_access(actor)
+        if card_receipt:
+            with self.connect() as db:
+                count = self._card_review_count(db, card_receipt)
+            if count is not None:
+                return {'card_review_count': count}
         approval = body.get("action") == "approve"
         if not approval and body.get("action") != "reject":
             raise RiskError("请选择通过或驳回。")
@@ -1325,11 +1345,18 @@ class ToolWorkspaceMixin:
             try:
                 saved_signature = self.workspace_signature(actor["id"])
                 shared = "data:image/png;base64," + base64.b64encode(saved_signature).decode("ascii")
-            except Exception:
+            except Exception as exc:
+                if card_receipt and (isinstance(exc, (ConnectionError, TimeoutError, RequestsConnectionError, RequestsTimeout))
+                                     or isinstance(exc, RiskError) and (exc.status == 429 or exc.status >= 500)):
+                    raise RiskError("签名读取暂不可用，将自动重试。", 503) from None
                 raise RiskError("读取本人已登记签名失败，请核对签名或手绘签名。", 409) from None
             validate_signature(shared)
         now = clock()
         with self.connect(True) as db:
+            if card_receipt:
+                count = self._card_review_count(db, card_receipt)
+                if count is not None:
+                    return {'card_review_count': count}
             row, items = self._workspace_session(db, actor, identity)
             by_id = {item["asset_id"]: item for item in items}
             seen = set()
@@ -1413,6 +1440,7 @@ class ToolWorkspaceMixin:
             if reviewed or not from_card:
                 self._workspace_bump(db, identity)
             if from_card:
+                self._save_card_review_count(db, card_receipt, reviewed)
                 return {'card_review_count': reviewed}
             return self._workspace_detail(db, *self._workspace_session(db, actor, identity), actor)
 

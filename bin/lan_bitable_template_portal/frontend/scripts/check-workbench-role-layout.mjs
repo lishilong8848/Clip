@@ -55,6 +55,7 @@ try {
   let truncatedRepairPage=false,liveGuard=false,mixedProfessions=false;
   let checkFixture=false, checkSubmitted=false, calendarFailure=false, planFixture=false, inspectionOnDuty=false, ownRepair='';
   let personalAssigned=30, pendingLearning=false, learningSaved=false, failLearningSave=false, denseRoster=false;
+  let fixtureAccount, delegatedCalendar=false;
   const checkItems=[{id:'valves',text:'核查机房阀门编号、位置和现场状态'},{id:'keys',text:'核对值班钥匙'}];
   await page.route('**/*', async route=>{
     const request=route.request(), url=new URL(request.url()), scope=url.searchParams.get('scope')||'A';
@@ -100,10 +101,12 @@ try {
     if (url.pathname==='/api/personal-calendar/weather') return calendarFailure?route.fulfill({status:503,json:{ok:false,error:'fixture unavailable'}}):
       ok({warning_ready:true,alerts:[],guard_level:'一级',guard_actions:[]});
     if (url.pathname==='/api/personal-calendar') return calendarFailure?route.fulfill({status:503,json:{ok:false,error:'fixture unavailable'}}):
-      ok({month:url.searchParams.get('month'),days:{'2026-11-18':{items:[],staff:[]}},
+      ok({month:url.searchParams.get('month'),days:{'2026-11-18':{items:delegatedCalendar?[{
+        key:'delegated-plan',title:'隔离代登录维保日程',kind:'maintenance',scope,
+      }]:[],staff:[]}},
         roster_dates:['2026-11-18'],unavailable:[],
         handover:{current:{date:'2026-11-18',shift:'白',end:'2026-11-18T17:50:00+08:00',verified:true,staff:denseRoster?['H','A','B','C','D','E','110'].map(building=>({scope:building,people:[{name:building+'人员甲'},{name:building+'人员乙'},{name:building+'人员丙'}]})):[{scope,people:[
-          {name:scope+'楼排班测试'},{name:'刘冉'},{name:'薛小明',position:'运维实习生',duty_kind:'长白'},
+          {name:scope+'楼排班测试',system_position:'值班员'},{name:'刘冉',system_position:'值班长'},{name:'薛小明',position:'运维实习生',duty_kind:'长白'},
         ]}]}}});
     if (url.pathname.startsWith('/api/workspace-layouts/')) return ok({revision:1,value:{version:1,widgets:[
       {kind:'shortcuts',links:['accounts','learning','event','learning','cabinet']},
@@ -170,10 +173,14 @@ try {
       return ok({items,total:items.length,page:1,page_size:20});
     }
     if (url.pathname==='/api/learning/workbench-summary') {
-      const scopes=['ALL','CAMPUS'].includes(scope)?['A','B']:[scope];
+      const scopes=['ALL','CAMPUS'].includes(scope)?(fixtureAccount?.testScopes||['A']):[scope];
       const summary={已完成:4,待答:2,答题中:1,逾期:0,待核对:0,未到时:0};
-      return ok({scopes,summary,by_scope:url.searchParams.get('detail')==='1'?
-        Object.fromEntries(scopes.map((building,i)=>[building,[{date:'2026-11-18',summary:{...summary,已完成:4+i}}]])):undefined});
+      const date=url.searchParams.get('date');
+      return ok({scopes,summary,from:date,to:date,people:date?[
+        {name:'隔离已作答',scope:'A',shift:'白',answered:8,assigned:15,status:'答题中'},
+        {name:'隔离未作答',scope:'B',shift:'白',answered:0,assigned:15,status:'待答'},
+        {name:'隔离已完成',scope:'B',shift:'夜',answered:15,assigned:15,status:'已完成'},
+      ].filter(person=>scopes.includes(person.scope)):undefined});
     }
     if (url.pathname==='/api/signatures/management/account') return ok({person:{is_self:true,building:'A楼',signature_status:'signed'}});
     if (url.pathname==='/api/auth/permission-requests/admin') return ok({items:[{request_id:'permission',name:'隔离权限申请 '+permissionVersion,status:'pending'}]});
@@ -191,7 +198,7 @@ try {
     const home=document.querySelector('.wb-home');
     return home&&!home.querySelector('.wb-todo-panel[aria-busy="true"]')&&!/正在读取|待加载/.test(home.textContent);
   });
-  const set=async account=>{await page.evaluate(account=>window.setAccount(account),account);await settle();};
+  const set=async account=>{fixtureAccount=account;await page.evaluate(account=>window.setAccount(account),account);await settle();};
   const todo=page.getByRole('region',{name:'待办办理',exact:true});
   const queue=todo.getByRole('list',{name:'待办模块',exact:true});
   const tiles=queue.locator('.wb-task-tile');
@@ -317,22 +324,27 @@ try {
   }
   checks.push('six role/scope combinations at five widths: one tile grid, no overlaps or horizontal overflow, compact controls');
   await set(actor('learning-detail','manager',['learning'],{testScopes:['A','B']}));
-  await page.evaluate(()=>window.setScope('CAMPUS'));
   const team=page.getByRole('button',{name:'画像学练情况汇总',exact:true});
   await team.click();
   const detail=page.locator('.learning-detail');
+  await detail.getByText('隔离已作答',{exact:true}).waitFor();
+  assert.equal(await detail.locator('tbody tr').count(),3);
+  await detail.getByRole('combobox',{name:'学练明细状态'}).selectOption('unanswered');
+  assert.equal(await detail.locator('tbody tr').count(),1);
+  assert.match(await detail.locator('tbody tr').innerText(),/隔离未作答[\s\S]*0\s*\/\s*15[\s\S]*未作答/);
+  await detail.getByRole('combobox',{name:'学练明细状态'}).selectOption('all');
   await detail.getByRole('combobox',{name:'学练明细楼栋'}).selectOption('B');
-  assert.deepEqual(await detail.locator('tbody td').allTextContents(),['2026-11-18','5','3','0','0']);
+  assert.equal(await detail.locator('tbody tr').count(),2);
   await page.screenshot({path:path.join(output,'learning-detail-mobile.png'),animations:'disabled'});
   await page.keyboard.press('Escape');
   await detail.waitFor({state:'hidden'});
-  await page.evaluate(()=>window.setScope('A'));
+  await set(actor('learning-supervisor','supervisor',['learning'],{level:'L3'}));
   await team.click();
-  await detail.getByText('A楼',{exact:true}).waitFor();
-  assert.equal(await detail.getByRole('combobox').count(),0);
+  await detail.getByText('隔离已作答',{exact:true}).waitFor();
+  assert.equal(await detail.locator('tbody tr').count(),1);
   await page.keyboard.press('Escape');
   await detail.waitFor({state:'hidden'});
-  checks.push('learning summary opens authorized date and building details, with no previous-building rows displayed');
+  checks.push('learning details show all authorized buildings by default and filter to unanswered people, with no old account data');
   personalAssigned=0;
   await set(actor('learning-no-personal-content','manager',['learning']));
   await page.getByRole('button',{name:'画像学练情况汇总',exact:true}).waitFor();
@@ -569,6 +581,32 @@ try {
   ownRepair='';
   checks.push('a personally assigned repair is shown once in the personal card');
 
+  delegatedCalendar=true;
+  checkFixture=true;
+  checkSubmitted=false;
+  ownRepair='delegated-operator';
+  await set(actor(ownRepair,'operator',['learning','pre_shift','repair_management'],{level:'L4',name:'隔离代登录目标',
+    impersonation:{active:true,grant_id:'fixture-delegation'}}));
+  await personalCard.getByText('隔离维修待办',{exact:true}).waitFor();
+  await personalCard.getByText(/0\s*\/\s*30/).waitFor();
+  await todo.getByText('班前检查',{exact:true}).waitFor();
+  await page.getByText('隔离代登录维保日程',{exact:true}).waitFor();
+  await page.getByText('戒备等级 一级',{exact:true}).waitFor();
+  await page.getByText('A楼排班测试',{exact:true}).waitFor();
+  const delegatedRoster=page.locator('.workbench-roster');
+  assert.equal(await delegatedRoster.getByRole('button',{name:/查看A楼排班测试的基本信息/}).locator('.leader-mark').count(),0);
+  assert.equal(await delegatedRoster.getByRole('button',{name:/查看刘冉的基本信息/}).locator('.leader-mark').count(),1);
+  await personalCard.getByRole('button',{name:/白班班前检查/}).click();
+  const delegatedCase=page.getByRole('dialog',{name:'待办办理'});
+  await delegatedCase.waitFor();
+  assert.equal(await delegatedCase.getByRole('button',{name:'提交检查',exact:true}).count(),0);
+  await delegatedCase.getByRole('button',{name:'关闭只读详情'}).click();
+  await delegatedCase.waitFor({state:'hidden'});
+  delegatedCalendar=false;
+  checkFixture=false;
+  ownRepair='';
+  checks.push('delegated operator sees personal learning and tasks, scoped agenda, duty names and guard; pre-shift cannot be submitted');
+
   planFixture=true;
   await page.setViewportSize({width:1440,height:1000});
   await set(actor('period-panels','manager',['maintenance','learning','event','repair_management'],{level:'L1'}));
@@ -590,7 +628,8 @@ try {
 
   const roster=page.getByRole('region',{name:'交接班人员'});
   await roster.getByText('A楼排班测试',{exact:true}).waitFor();
-  assert.equal(await roster.getByRole('button',{name:/查看A楼排班测试/}).getAttribute('title'),'值班长');
+  assert.equal(await roster.getByRole('button',{name:/查看A楼排班测试/}).getAttribute('title'),'值班员');
+  assert.equal(await roster.getByRole('button',{name:/查看刘冉/}).getAttribute('title'),'值班长');
   assert.equal(await roster.getByRole('button',{name:/查看薛小明/}).getAttribute('title'),'长白实习生');
   assert.equal(await roster.getByText(/长白实习|11\/18|白班|夜班/).count(),0);
   const guard=page.getByRole('region',{name:'天气预警与戒备'});
@@ -599,7 +638,7 @@ try {
   await guard.getByRole('button',{name:'刷新',exact:true}).click();
   await guard.getByText('显示上次识别结果',{exact:true}).waitFor();
   await guard.getByText('戒备等级 一级',{exact:true}).waitFor();
-  checks.push('weather guard retains its verified result during a transient outage');
+  checks.push('roster titles follow system positions, and weather guard retains its verified result during a transient outage');
 
   await set(actor('calendar-recovery','operator',['event']));
   await tile('events').waitFor();

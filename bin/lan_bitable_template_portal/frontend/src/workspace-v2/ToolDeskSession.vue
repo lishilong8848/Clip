@@ -8,6 +8,7 @@ const props=defineProps<{r:Record<string,any>}>();
 const tools=computed(() => props.r.session.items.map((entry:{asset:{id:string;name:string;model?:string}})=>entry.asset));
 const writable=computed(()=>props.r.editable && !!props.r.item?.can_edit);
 const external=computed(()=>props.r.session.kind==='external');
+const uploadedReport=computed(()=>props.r.session.report_available===false?'':props.r.session.report_name||'');
 const ready=computed(()=>!external.value || (!!props.r.session.report_name && !props.r.report && inspectionReady(props.r.reportCheck,props.r.reportAssets,props.r.actualDate)));
 const submitLabel=computed(()=>external.value?'提交送检报告':props.r.resubmitAsset?'重新提交本台审核':'提交自检审核');
 const workbookControls=computed(()=>{
@@ -39,9 +40,7 @@ const workbookControls=computed(()=>{
     
   </section>
   <section v-if="external" class="td-panel">
-    <div class="td-heading"><h2>报告与覆盖工具</h2>
-      <a v-if="r.session.report_available!==false && r.session.report_name" class="td-button td-report-link"
-        :href="r.sessionUrl+'/report-file'" target="_blank" rel="noopener">{{ r.session.report_name }}</a></div>
+    <div class="td-heading"><h2>报告与覆盖工具</h2></div>
     <p v-if="r.session.report_available===false" class="td-notice">共用报告包含其他权限范围的工具。</p>
     <template v-else>
       <div class="td-report-inputs">
@@ -49,6 +48,11 @@ const workbookControls=computed(()=>{
         <div v-if="r.editable" class="td-report-inputs td-report-attachment">
           <label class="td-field">送检报告附件（最多 12 MB）<input type="file" accept=".pdf,.jpg,.jpeg,.png,.xlsx,.docx" @change="r.pickReport"/></label>
           <button :disabled="!r.report" :title="r.report?.name" @click="r.uploadReport()">上传报告</button>
+        </div>
+        <div v-if="uploadedReport" class="td-uploaded-report">
+          <span role="status">已上传 1 个文件</span>
+          <a class="td-button td-report-link" :href="r.sessionUrl+'/report-file'"
+            target="_blank" rel="noopener">{{ uploadedReport }}</a>
         </div>
       </div>
       <ToolInspectionReportFields :model="r.reportCheck" :asset-ids="r.reportAssets" :assets="tools" :actual="r.actualDate" :expires-on="r.session.inspection_expires_on" :editable="r.editable" :disabled="!!r.busy"/>
@@ -89,7 +93,8 @@ const workbookControls=computed(()=>{
 @container(max-width:1050px){.td-workbook-editor{grid-template-columns:minmax(0,1fr)}}
 .td-report-inputs {display:flex;align-items:end;flex-wrap:wrap;gap:.45rem .8rem;min-width:0;max-width:100%}
 .td-report-inputs .td-field,.td-report-inputs input {min-width:0;max-width:100%}
-.td-report-attachment {flex-wrap:nowrap}
 .td-report-attachment button {flex:none}
+.td-uploaded-report {display:flex;align-items:center;flex-wrap:wrap;gap:.35rem .65rem;min-width:0;max-width:100%}
+.td-uploaded-report [role=status],.tool-desk .td-uploaded-report .td-report-link {color:var(--cf-success,#13836c)}
 .td-report-link {min-width:0;max-width:100%;overflow-wrap:anywhere}
 </style>

@@ -14,7 +14,7 @@ URL = f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}'
 EXTERNAL_APP_TOKEN = 'HU38bc1vnamMK9sCeOgclUvXnFc'
 EXTERNAL_TABLE_ID = 'tblC77nllNrprHBY'
 ROSTER_NAMESPACE = 'personnel_daily_roster'
-ROSTER_PARSER_VERSION = 6
+ROSTER_PARSER_VERSION = 7
 TZ = dt.timezone(dt.timedelta(hours=8))
 ROSTER_FIELDS = ['姓名', '员工姓名', '员工工号', '机楼/专业', '体系岗位', '岗位',
                  '账号性质', '离职/异动情况', '班组', '班次']
@@ -164,7 +164,8 @@ def daily_roster(service, day, *, force=False):
                 'employee_linked': bool(employee),
                 'scope': scopes[0], 'shift': '白' if kind == '长白' else kind,
                 **({'combined_day_labels': True} if kind == '长白' and len(set(values(fields.get('班次')))) == 2 else {}),
-                'group': text(fields.get('班组')), 'duty_kind': kind, 'position': text(fields.get('岗位'))})
+                'group': text(fields.get('班组')), 'duty_kind': kind, 'position': text(fields.get('岗位')),
+                'system_position': text(fields.get('体系岗位'))})
         # Do not label yesterday's lookup result as today's after a midnight page read.
         if dt.datetime.now(TZ).date().isoformat() != day:
             raise ValueError('人员排班读取跨越零点，请重新读取。')

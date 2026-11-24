@@ -538,6 +538,14 @@ class AdminImpersonationTests(_TempDirTestCase, unittest.IsolatedAsyncioTestCase
         self.assertEqual(result.status_code, 403, result.text)
         self.assertEqual(self.ops, [])
 
+    def test_workbench_data_allowlist_permissions_are_read_only(self):
+        for path in ('/api/personal-calendar', '/api/personal-calendar/weather',
+                     '/api/daily-inspection/status', '/api/workbench-events'):
+            with self.subTest(path=path):
+                self.assertTrue(imp.request_allowed(path, 'GET'))
+                self.assertFalse(imp.request_allowed(path, 'POST'))
+                self.assertFalse(imp.request_allowed(path + '/other', 'GET'))
+
     async def test_authorized_learning_history_is_readable_but_answers_cannot_be_submitted(self):
         self.configure('a', modules=['maintenance', 'repair_management', 'learning'])
         grant_id = await self.start()

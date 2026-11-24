@@ -67,6 +67,21 @@ class CompletionTests(unittest.TestCase):
     def actor(self, pid='p1'):
         return {'id': 'oid-' + pid, 'person_id': pid, 'is_admin': False, 'shared_account': False, 'can_answer': True}
 
+    def test_workbench_people_returns_minimal_daily_progress_in_authorized_buildings(self):
+        data = {
+            'A': [{'person_id': 'p1', 'person': {'name': '隔离已答'}, 'status': '答题中', 'answered': 2, 'assigned': 4,
+                   'tasks': [{'shift': '白', 'answers': 'private'}]},
+                  {'person_id': 'p2', 'name': '隔离未安排', 'status': '未安排', 'tasks': []}],
+            'B': [{'person_id': 'p3', 'person': {'name': '隔离未答'}, 'status': '待答', 'answered': 0, 'assigned': 4,
+                   'tasks': [{'shift': '夜'}]}],
+        }
+        with patch.object(completion, 'project', side_effect=lambda _, date, *, scope, **kw: data[scope]):
+            result = completion.workbench_summary(self.service, ['A', 'B'], {'date': DATE, 'people': '1'})
+        self.assertEqual(result['people'], [
+            {'name': '隔离已答', 'scope': 'A', 'status': '答题中', 'shift': '白', 'answered': 2, 'assigned': 4},
+            {'name': '隔离未答', 'scope': 'B', 'status': '待答', 'shift': '夜', 'answered': 0, 'assigned': 4},
+        ])
+
     def test_workbench_summary_deduplicates_person_days_and_returns_only_counts(self):
         data = {'A': [{'person_id': 'shared', 'status': '已完成'}, {'person_id': 'local', 'status': '待答'}],
                 'B': [{'person_id': 'shared', 'status': '答题中'}],

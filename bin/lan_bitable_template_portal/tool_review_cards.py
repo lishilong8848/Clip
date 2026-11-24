@@ -3,8 +3,10 @@
 import asyncio
 import base64
 import copy
+import hashlib
 import io
 import json
+import logging
 import re
 import time
 import uuid
@@ -185,11 +187,10 @@ def batch_card(title, color, elements, value, url, open_id):
     return make([fallback, button])
 
 
-def apply(runtime, data, app_id):
+def review_action(data, app_id):
     header, event = data.get('header') or {}, data.get('event') or {}
     value, sender = (event.get('action') or {}).get('value') or {}, (event.get('operator') or {}).get('open_id') or ''
     if (header.get('event_type') != 'card.action.trigger' or header.get('app_id') != app_id
-            or runtime.auth_manager.current_feishu_app_id() != app_id
             or value.get('kind') != 'tool_review' or not re.fullmatch(r'ou_[A-Za-z0-9]+', sender)
             or value.get('recipient') != sender or value.get('decision') not in ('approve', 'reject')):
         raise RiskError('仅卡片指定审核人可以处理本次审核。', 403)
@@ -199,42 +200,99 @@ def apply(runtime, data, app_id):
             or not re.fullmatch(r'[a-f0-9]{32}', str(entry.get('order') or '')) for entry in entries)
             or len({entry['order'] for entry in entries}) != len(entries)):
         raise RiskError('审批卡片的任务范围已变化，请重新打开记录。', 409)
+    review = value.get('review')
+    if review not in ('self', 'scrap'):
+        raise RiskError('审核类型无效。')
+    if review == 'self' and (not re.fullmatch(r'[a-f0-9]{32}', str(value.get('session') or '')) or any(
+            not re.fullmatch(r'rec[A-Za-z0-9]+', str(entry.get('asset') or '')) for entry in entries)):
+        raise RiskError('自检审核卡片已失效。', 409)
+    return value, sender
+
+
+def queued_review(data, app_id):
+    value, sender = review_action(data, app_id)
+    context = data['event'].get('context') or {}
+    original = context.get('open_message_id') or ''
+    chat = context.get('open_chat_id') or ''
+    if not re.fullmatch(r'om_[A-Za-z0-9]+', original) or not re.fullmatch(r'oc_[A-Za-z0-9]+', chat):
+        raise RiskError('未识别到原审批卡片，请从飞书原卡片操作。')
+    items = sorted(([entry['order'], entry['revision']] for entry in value['items']))
+    # Both buttons on the same review round share the first accepted request.
+    key = json.dumps([app_id, original, sender, value['review'], value.get('session'), items])
+    identity = 'tool_review_' + hashlib.sha256(key.encode()).hexdigest()
+    return {'kind': 'tool_review', 'message_id': identity, 'app_id': app_id, 'sender_id': sender,
+            'union_id': '', 'chat_id': chat, 'chat_type': 'p2p', 'reply_to_message_id': original, 'callback': data}
+
+
+def review_reply(message, *, ok=True):
+    return {'ok': ok, 'toast': message, 'card': {'schema': '2.0',
+            'header': {'template': 'grey' if ok else 'orange', 'title': plain('工具管理审核')},
+            'body': {'elements': [{'tag': 'div', 'text': plain(message)}]}}}
+
+
+def apply(runtime, data, app_id, *, card_receipt=''):
+    value, sender = review_action(data, app_id)
+    if runtime.auth_manager.current_feishu_app_id() != app_id:
+        raise RiskError('飞书应用已变更，请在灯塔查看原记录。', 403)
+    entries = value['items']
     service = runtime.tool_management()
     actor = runtime.risk_inspection_actor(sender)
     decision = value['decision']
     note = '' if decision == 'approve' else '审批人在飞书卡片驳回'
     if value.get('review') == 'scrap':
-        results = service.scrap_review_batch(actor, entries, decision, note)
-        count = sum(result['outcome'] == 'scrapped' for result in results) if decision == 'approve' else len(results)
+        count = service.scrap_review_batch(actor, entries, decision, note, card_receipt=card_receipt)
         message = ''
         if count:
             message = f'{count} 项已批准报废。' if decision == 'approve' else f'已驳回 {count} 项报废申请。'
-    elif value.get('review') == 'self':
-        if not re.fullmatch(r'[a-f0-9]{32}', str(value.get('session') or '')) or any(
-                not re.fullmatch(r'rec[A-Za-z0-9]+', str(entry.get('asset') or '')) for entry in entries):
-            raise RiskError('自检审核卡片已失效。', 409)
+    else:
         result = service.workspace_review(actor, value['session'], {'action': decision, 'note': note,
             'use_saved_signature': decision == 'approve',
             'items': [{'asset_id': entry['asset'], 'revision': entry['revision'], 'order_id': entry['order']} for entry in entries]},
-            from_card=True)
+            from_card=True, card_receipt=card_receipt)
         count = result['card_review_count']
         message = ''
         if count:
             message = f'{count} 项自检审核通过。' if decision == 'approve' else f'已驳回 {count} 项自检记录。'
-    else:
-        raise RiskError('审核类型无效。')
     if count < len(entries):
         message = f'{message} {len(entries) - count} 项已处理或已变更，已跳过。'.strip()
     if count:
         message += ' 结果通知的投递异常可在灯塔办理记录中查看。'
-    return {'ok': True, 'toast': message, 'card': {'schema': '2.0', 'header': {'template': 'grey', 'title': plain('工具管理审核')},
-                                                 'body': {'elements': [{'tag': 'div', 'text': plain(message)}]}}}
+    return review_reply(message)
 
 
-async def callback(runtime, data, app_id):
+async def process_queued(bot, task):
+    from .portal_service import external_real_write_guard
+
+    inbox, identity = bot.inbox, task['message_id']
+    reply = task.get('reply') or {}
     try:
-        return await asyncio.wait_for(asyncio.to_thread(apply, runtime, data, app_id), timeout=2)
-    except RiskError as exc:
-        return {'ok': False, 'toast': str(exc)}
-    except Exception:
-        return {'ok': False, 'toast': '审核结果暂未确认，请重试原卡片或到灯塔核对。'}
+        if not reply.get('card'):
+            try:
+                reply = await asyncio.to_thread(apply, bot.runtime, task['callback'], task['app_id'], card_receipt=identity)
+            except RiskError as exc:
+                if exc.status == 429 or exc.status >= 500:
+                    raise
+                reply = review_reply('审核未完成。' + str(exc) + ' 请在灯塔办理记录中核对。', ok=False)
+            # Retry the original card update independently of the committed approval.
+            await asyncio.to_thread(inbox.set, identity, 'processing', reply)
+        await bot._require_current_config()
+        if bot.config.get('app_id') != task['app_id']:
+            await asyncio.to_thread(inbox.set, identity, 'stopped')
+            return
+        if not external_real_write_guard()['real_write_allowed']:
+            await asyncio.to_thread(inbox.defer_delivery, identity, reason='飞书卡片更新暂不可用')
+            return
+        client = await bot.messenger.client()
+        response = await client.patch('https://open.feishu.cn/open-apis/im/v1/messages/' + task['reply_to_message_id'],
+            headers=await bot.messenger.headers(), json={'content': json.dumps(reply['card'], ensure_ascii=False)})
+        if response.status_code in (403, 404, 410):
+            await asyncio.to_thread(inbox.defer_delivery, identity, permanent=True, reason='原飞书审批卡片已无法更新')
+            return
+        response.raise_for_status()
+        if response.json().get('code') != 0:
+            raise RiskError('飞书未确认原卡片更新。', 503)
+        await asyncio.to_thread(inbox.set, identity, 'done')
+    except Exception as exc:
+        logging.warning('Feishu tool review retry deferred: %s', type(exc).__name__)
+        await asyncio.to_thread(inbox.defer_delivery, identity,
+                                reason='原卡片更新待重试' if reply.get('card') else '工具审批待重试')

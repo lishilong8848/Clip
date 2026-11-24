@@ -124,11 +124,12 @@ class PersonnelSourceTests(unittest.TestCase):
         service = SimpleNamespace(_state_store=Store())
         today = dt.datetime.now(source.TZ).date()
         rows = [row('rec1', 班组='长白', 班次={'value':['白']}),
-                row('rec2', name='人员乙', oid='ou_two', 班组='A班', 班次={'value':['白']}),
+                row('rec2', name='人员乙', oid='ou_two', 班组='A班', 班次={'value':['白']}, 岗位='FOC', 体系岗位='值班长'),
                 row('rec3', name='休班', 班组='B班', 班次={'value':[]})]
         with patch.object(source, 'read_records', return_value=rows):
             data = source.daily_roster(service, today.isoformat())
             self.assertEqual([p['duty_kind'] for p in data['people']], ['长白', '白'])
+            self.assertEqual((data['people'][1]['position'], data['people'][1]['system_position']), ('FOC', '值班长'))
             self.assertEqual({p['scope'] for p in data['people']}, {'B'})
             with self.assertRaises(ValueError): source.daily_roster(service, (today-dt.timedelta(days=1)).isoformat())
             from lan_bitable_template_portal.learning_reminders import read_roster

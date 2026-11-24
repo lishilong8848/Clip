@@ -1,1 +1,0 @@
-import{ct as c,b9 as s,b8 as i,bF as t}from"./app-v2-BFk3s9yc.js";function m(){const o=c(s,null);return i(()=>{if(o===null)return t;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||t;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{m as u};

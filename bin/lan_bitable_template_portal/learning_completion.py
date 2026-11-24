@@ -478,18 +478,22 @@ def _report_dates(query, today):
 
 
 def workbench_summary(service, scopes, query):
-    """Summarize authorized buildings without returning personnel or paper identifiers."""
+    """Summarize authorized buildings and optionally return one day's progress by person."""
     from .learning_onboarding import directory_for_learning
 
     current = core.now()
     dates = _report_dates(query, current.date().isoformat())
-    data, directory = _data(service), directory_for_learning(service)
     include_detail = query.get('detail') == '1'
-    filters = [''] if not include_detail and set(scopes) == set(core.SCOPES) else scopes
+    include_people = query.get('people') == '1'
+    if include_people and len(dates) != 1:
+        raise core.LearningError('逐人明细请按单日查询。')
+    data, directory = _data(service), directory_for_learning(service)
+    filters = [''] if not (include_detail or include_people) and set(scopes) == set(core.SCOPES) else scopes
     priority = {state: rank for rank, state in enumerate(
         ('未安排', '已完成', '未到时', '待答', '答题中', '逾期', '待核对'))}
     counts = Counter()
     detail = defaultdict(list)
+    progress = []
     for date in dates:
         people = {}
         for scope in filters:
@@ -497,13 +501,21 @@ def workbench_summary(service, scopes, query):
             if include_detail:
                 daily = Counter(row['status'] for row in rows)
                 detail[scope].append({'date': date, 'summary': {state: daily[state] for state in STATES}})
+            if include_people:
+                for row in rows:
+                    if not row['tasks'] and row['status'] == '未安排':
+                        continue
+                    progress.append({'name': row['person']['name'], 'scope': scope,
+                                     'shift': '、'.join(sorted({task['shift'] for task in row['tasks'] if task['shift']})),
+                                     'status': row['status'], 'answered': row['answered'], 'assigned': row['assigned']})
             for row in rows:
                 person, status = row['person_id'], row['status']
                 if priority[status] > priority.get(people.get(person), -1):
                     people[person] = status
         counts.update(people.values())
     return {'summary': {state: counts[state] for state in STATES}, 'scopes': list(scopes),
-            'from': dates[0], 'to': dates[-1], **({'by_scope': dict(detail)} if include_detail else {})}
+            'from': dates[0], 'to': dates[-1], **({'by_scope': dict(detail)} if include_detail else {}),
+            **({'people': progress} if include_people else {})}
 
 
 def report(service, actor, query):

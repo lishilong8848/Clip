@@ -130,6 +130,15 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['incoming']['staff'], [])
         self.assertNotIn('duty_kind', person)
 
+    def test_impersonated_roster_reads_names_without_chat_identifiers(self):
+        person = {'name':'隔离值班员', 'position':'运维值班员', 'open_id':'ou_fixture', 'phone':'fixture'}
+        staff = [{'building':'A', 'scheduleDate':'2026-11-18', 'shiftText':'白', 'people':[person]}]
+        current = dt.datetime(2026, 11, 18, 11, tzinfo=TZ)
+        args = ({'A'}, staff, ['2026-11-18'], current)
+        self.assertEqual(handover_roster(*args)['current']['staff'][0]['people'], [person])
+        self.assertEqual(handover_roster(*args, include_chat_ids=False)['current']['staff'][0]['people'],
+                         [{'name':'隔离值班员', 'position':'运维值班员'}])
+
     async def test_seal_scope_and_missing_source_state(self):
         auth = SimpleNamespace(session_scopes=lambda _: ['A','B'], account_profile=lambda _: {'level':'L1'})
         controller = SimpleNamespace(_current_session=lambda _: {'user':{'open_id':'isolated'}})

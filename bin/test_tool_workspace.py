@@ -428,6 +428,118 @@ class WorkspaceTests(unittest.TestCase):
                 return calls
         self.fail('通知队列应在退避前完成本轮处理')
 
+    def test_feishu_review_accepts_before_signing_and_recovers_without_repeating_effects(self):
+        import httpx
+        from starlette.requests import Request
+        from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant, Inbox
+
+        inspector, pending = self.result_fixture(('repair', 'repair'))
+        sender = self.leader['open_id']
+        runtime = SimpleNamespace(state_store=SimpleNamespace(db_path=self.path),
+            tool_management=lambda: self.service, risk_inspection_actor={sender: self.leader}.__getitem__,
+            auth_manager=SimpleNamespace(current_feishu_app_id=lambda: 'cliFixture'))
+        payload = {'header': {'app_id': 'cliFixture', 'event_type': 'card.action.trigger', 'event_id': 'first'},
+                   'event': {'operator': {'open_id': sender},
+                             'context': {'open_message_id': 'om_FixtureCard', 'open_chat_id': 'oc_FixtureChat'},
+                             'action': {'value': {'kind': 'tool_review', 'review': 'self', 'decision': 'approve',
+                                                  'recipient': sender, 'session': pending['id'],
+                                                  'items': [dict(order=i['order_id'], revision=i['order_revision'], asset=i['id'])
+                                                            for i in pending['items']]}}}}
+        inbox_path = self.path.with_name('assistant.sqlite')
+        started, release = Event(), Event()
+        signature = base64.b64decode(self.signature().split(',')[1])
+
+        def slow_signature(_):
+            started.set()
+            if not release.wait(8):
+                raise AssertionError('isolated signature was never released')
+            return signature
+
+        self.service.workspace_signature = Mock(side_effect=slow_signature)
+        http = SimpleNamespace(patch=AsyncMock(side_effect=[httpx.ReadTimeout('receipt lost'),
+                                                            httpx.Response(200, json={'code': 0},
+                                                                request=httpx.Request('PATCH', 'https://fixture.test'))]))
+        bot = FeishuAssistant(None, runtime, None)
+        bot.secret, bot.config, bot.inbox = 'fixture', {'app_id': 'cliFixture'}, Inbox(inbox_path)
+        bot.messenger = SimpleNamespace(client=AsyncMock(return_value=http), headers=AsyncMock(return_value={}))
+
+        async def click(data):
+            async def receive():
+                return {'type': 'http.request', 'body': json.dumps(data).encode()}
+            request = Request({'type': 'http', 'client': ('127.0.0.1', 1),
+                               'headers': [(b'authorization', b'Bearer fixture')]}, receive)
+            return json.loads((await asyncio.wait_for(bot.receive(request), 1.5)).body)
+
+        async def scenario():
+            invalid = copy.deepcopy(payload)
+            invalid['event']['operator']['open_id'] = 'ou_NotReviewer'
+            self.assertFalse((await click(invalid))['ok'])
+            with patch.object(bot.inbox, 'add', side_effect=sqlite3.OperationalError('busy')):
+                self.assertFalse((await click(payload))['ok'])
+            self.assertIn('已受理，正在后台审核', (await click(payload))['toast'])
+            self.assertFalse(started.is_set())
+            bot.inbox = Inbox(inbox_path)
+            owner = 'sender:' + sender
+            with patch.object(self.service, 'workspace_signature', side_effect=TimeoutError('signature download stalled')):
+                await bot._process_message(bot.inbox.take(owner))
+            http.patch.assert_not_awaited()
+            with bot.inbox.connect() as db:
+                self.assertEqual(db.execute('SELECT state FROM messages').fetchone()[0], 'reply')
+                db.execute('UPDATE messages SET retry_at=0')
+            task = bot.inbox.take(owner)
+            with patch.object(bot.inbox, 'set', side_effect=asyncio.CancelledError):
+                processing = asyncio.create_task(bot._process_message(task))
+                try:
+                    self.assertTrue(await asyncio.to_thread(started.wait, 5))
+                    await asyncio.sleep(2.05)
+                    self.assertFalse(processing.done())
+                    duplicate = copy.deepcopy(payload)
+                    duplicate['header']['event_id'] = 'second'
+                    duplicate['event']['action']['value']['decision'] = 'reject'
+                    duplicate['event']['action']['value']['items'].reverse()
+                    self.assertIn('该请求已受理', (await click(duplicate))['toast'])
+                finally:
+                    release.set()
+                with self.assertRaises(asyncio.CancelledError):
+                    await processing
+            http.patch.assert_not_awaited()
+
+            self.service = self.restart()
+            self.service.workspace_signature = Mock(side_effect=AssertionError('signature must not be repeated'))
+            bot.inbox = Inbox(inbox_path)
+            await bot._process_message(bot.inbox.take(owner))
+            self.service.workspace_signature.assert_not_called()
+            with bot.inbox.connect() as db:
+                self.assertEqual(db.execute('SELECT state FROM messages').fetchone()[0], 'reply')
+                db.execute('UPDATE messages SET retry_at=0')
+            bot.inbox = Inbox(inbox_path)
+            await bot._process_message(bot.inbox.take(owner))
+            self.assertEqual(http.patch.await_count, 2)
+            self.assertEqual(http.patch.await_args_list[0], http.patch.await_args_list[1])
+            call = http.patch.await_args
+            self.assertTrue(call.args[0].endswith('/om_FixtureCard'))
+            card = json.loads(call.kwargs['json']['content'])
+            self.assertIn('2 项自检审核通过', card['body']['elements'][0]['text']['content'])
+            with bot.inbox.connect() as db:
+                self.assertEqual(db.execute('SELECT state FROM messages').fetchone()[0], 'done')
+            self.assertIn('该请求已受理', (await click(payload))['toast'])
+            self.assertIsNone(bot.inbox.take(owner))
+
+        with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard',
+                   return_value={'real_write_allowed': True}):
+            asyncio.run(scenario())
+        self.service.workspace_directory = lambda: [dict(record_id=p['id'], selectable=True, **p) for p in self.result_people]
+        self.service.person_for = {p['id']: p for p in self.result_people}.__getitem__
+        with self.service.connect() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM tool_work_audit WHERE action='通过（楼长）'").fetchone()[0], 2)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM tool_result_targets').fetchone()[0], 2)
+        failed = self.result_deliveries(accepted=False)
+        self.assertEqual([call[0] for call in failed], [inspector['open_id']])
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_result_messages SET next_try=0')
+        self.assertEqual(self.result_deliveries(), failed)
+        self.assertEqual(self.result_deliveries(), [])
+
     def test_rejected_results_link_each_original_asset_and_retry_same_private_card(self):
         inspector, pending = self.result_fixture(('normal', 'repair'))
         entries = [{'revision': i['order_revision'], 'asset_id': i['id']} for i in pending['items']]
@@ -627,7 +739,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(len(sent[-1][1]['body']['elements']), 4)
 
     def test_two_tools_share_one_card_per_manager_and_first_approval_finishes_both(self):
-        from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant
+        import httpx
+        from bin.lan_bitable_template_portal.feishu_assistant import FeishuAssistant, Inbox
         from bin.lan_bitable_template_portal.tool_review_cards import send_scrap_review_one
 
         first = actor(identity='mei') | {'name': '梅冰冰', 'employee_no': '14258'}
@@ -638,12 +751,14 @@ class WorkspaceTests(unittest.TestCase):
             dict(record_id=person['id'], selectable=True, **person) for person in (first, second)]
         self.service.workspace_signature = lambda _: base64.b64decode(self.signature().split(',')[1])
         self.cloud.review_photo = Mock(return_value='img_fixture')
-        self.runtime = SimpleNamespace(tool_management=lambda: self.service,
+        self.runtime = SimpleNamespace(state_store=SimpleNamespace(db_path=self.path), tool_management=lambda: self.service,
             risk_inspection_actor={person['open_id']: person for person in people}.__getitem__,
             auth_manager=SimpleNamespace(current_feishu_app_id=lambda: 'test_app'))
-        channel = FeishuAssistant.__new__(FeishuAssistant)
-        channel.inbox, channel.config, channel.runtime, channel.secret = object(), {'app_id': 'test_app'}, self.runtime, 'fixture'
-        channel._configuration_current = AsyncMock(return_value=True)
+        channel = FeishuAssistant(None, self.runtime, None)
+        channel.inbox, channel.config, channel.secret = Inbox(self.path.with_name('manager-inbox.db')), {'app_id': 'test_app'}, 'fixture'
+        http = SimpleNamespace(patch=AsyncMock(return_value=httpx.Response(200, json={'code': 0},
+            request=httpx.Request('PATCH', 'https://fixture.test'))))
+        channel.messenger = SimpleNamespace(client=AsyncMock(return_value=http), headers=AsyncMock(return_value={}))
 
         draft = self.complete(self.open(), ('scrap', 'scrap'))
         item = draft['items'][0] | {'scrap_photos': [self.signature()]}
@@ -655,17 +770,31 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(len(out), 1)
 
         def approve(delivery, sender=None):
-            recipient, card, _ = delivery
+            recipient, card, identifier = delivery
             values = [behavior['value'] for element in card['body']['elements']
                       for behavior in element.get('behaviors', []) if behavior.get('type') == 'callback']
             value = next(value for value in values if value['decision'] == 'approve')
             self.assertEqual(len(value['items']), 2)
             async def stream():
                 yield json.dumps({'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
-                    'event': {'action': {'value': value}, 'operator': {'open_id': sender or recipient}}}).encode()
+                    'event': {'action': {'value': value}, 'operator': {'open_id': sender or recipient},
+                              'context': {'open_message_id': 'om_' + identifier.replace('-', ''),
+                                          'open_chat_id': 'oc_FixtureChat'}}}).encode()
             request = SimpleNamespace(headers={'authorization': 'Bearer fixture'},
                                       client=SimpleNamespace(host='127.0.0.1'), stream=stream)
-            return json.loads(asyncio.run(channel.receive(request)).body)
+            async def accept_and_process():
+                result = json.loads((await channel.receive(request)).body)
+                if result['ok']:
+                    message = channel.inbox.take('sender:' + (sender or recipient))
+                    if message:
+                        await channel._process_message(message)
+                return result
+            with patch('bin.lan_bitable_template_portal.portal_service.external_real_write_guard',
+                       return_value={'real_write_allowed': True}):
+                return asyncio.run(accept_and_process())
+
+        def last_card_text():
+            return json.loads(http.patch.await_args.kwargs['json']['content'])['body']['elements'][0]['text']['content']
 
         self.assertTrue(approve(out[0])['ok'])
         out.clear()
@@ -680,11 +809,14 @@ class WorkspaceTests(unittest.TestCase):
         self.assertTrue(any('任一位同意' in element.get('text', {}).get('content', '') for element in elements))
         ids = [entry['order_id'] for entry in pending['items']]
         self.assertFalse(approve(out[0], self.leader['open_id'])['ok'])
-        self.assertIn('2 项已批准报废', approve(out[0])['toast'])
+        self.assertIn('已受理', approve(out[0])['toast'])
+        self.assertIn('2 项已批准报废', last_card_text())
         finished = [self.service.detail(self.filler, identity) for identity in ids]
         self.assertEqual([detail['tool_status_label'] for detail in finished], ['报废', '报废'])
-        self.assertIn('2 项已批准报废', approve(out[0])['toast'])
-        self.assertIn('2 项已处理', approve(out[1])['toast'])
+        self.assertIn('该请求已受理', approve(out[0])['toast'])
+        self.assertEqual(http.patch.await_count, 2)
+        self.assertIn('已受理', approve(out[1])['toast'])
+        self.assertIn('2 项已处理', last_card_text())
         self.assertEqual([self.service.detail(self.filler, identity) for identity in ids], finished)
 
     def test_lost_card_receipt_after_partial_web_review_replays_original_card(self):
@@ -717,13 +849,13 @@ class WorkspaceTests(unittest.TestCase):
                 return False
             return True
 
-        def click(identifier):
+        def click(identifier, *, receipt=''):
             recipient, card = receipts[identifier]
             value = next(behavior['value'] for element in card['body']['elements']
                          for behavior in element.get('behaviors', [])
                          if behavior['type'] == 'callback' and behavior['value']['decision'] == 'approve')
             result = apply(runtime, {'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
-                'event': {'action': {'value': value}, 'operator': {'open_id': recipient}}}, 'test_app')
+                'event': {'action': {'value': value}, 'operator': {'open_id': recipient}}}, 'test_app', card_receipt=receipt)
             self.assertNotRegex(result['toast'], r'(^|\s)0 项')
             self.assertEqual(result['card']['body']['elements'][0]['text']['content'], result['toast'])
             return result['toast']
@@ -759,7 +891,10 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(attempts.count(mei_card), 2)
         self.assertEqual(len(receipts), 3)
         self.assertEqual(self.cloud.review_photo.call_count, 2)
-        self.assertIn('1 项已批准报废', click(mei_card))
+        confirmed = click(mei_card, receipt='approval-click-fixture')
+        self.assertIn('1 项已批准报废', confirmed)
+        self.service = configure(self.restart())
+        self.assertEqual(click(mei_card, receipt='approval-click-fixture'), confirmed)
         self.assertEqual(self.service.detail(self.filler, second['order_id'])['outcome'], 'scrapped')
         self.assertIn('2 项已处理', click(manager_cards[ma['open_id']]))
         self.assertEqual(self.service.detail(self.filler, first['order_id'])['outcome'], 'rejected')

@@ -22,6 +22,7 @@ TTL = 20 * 60
 READ_ROUTES = re.compile(r'/api/(?:' + '|'.join((
     r'bootstrap|scope-overview|records|history-summary|source-refresh-status|link-directory',
     r'workbench(?:/(?:lite-fragment|lite-detail|closed|repair-event-candidates|repair-event-prefill|polling-delay-status|source-options|planned-notice-prefill))?',
+    r'personal-calendar(?:/weather)?|daily-inspection/status|workbench-events',
     r'jobs/(?:recent|stream|batch|[a-f0-9]{32})|qt-active-items/stream',
     r'daily-tasks(?:/morning-meeting/(?:preview|download|print-model))?',
     r'engineer/mop/(?:bootstrap|preview)',

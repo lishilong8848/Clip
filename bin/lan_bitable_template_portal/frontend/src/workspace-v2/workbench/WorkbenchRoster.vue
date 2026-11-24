@@ -4,7 +4,7 @@ import { NModal, NPopover } from 'naive-ui';
 import { ChevronRight, MessageCircle, ShieldCheck, UsersRound } from 'lucide-vue-next';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 
-export type RosterPerson = {name:string;open_id?:string;group?:string;position?:string;duty_kind?:string};
+export type RosterPerson = {name:string;open_id?:string;group?:string;position?:string;system_position?:string;duty_kind?:string};
 type BuildingStaff = {scope:string;people:RosterPerson[]};
 export type ShiftRoster = {date:string;shift:'白'|'夜';verified:boolean;end?:string;staff:BuildingStaff[]};
 export type Handover = {current?:ShiftRoster;incoming?:ShiftRoster};
@@ -21,9 +21,9 @@ const rows=computed(()=>order.flatMap(scope=>{
 const label=(scope:string)=>scope==='110'?'110站':scope+'楼';
 const columns=[{id:'current',label:'当班人员'},{id:'incoming',label:'接班人员'}] as const;
 const isLongDayIntern=(person:RosterPerson)=>person.position==='运维实习生'&&(person.duty_kind==='长白'||person.group==='长白');
-const leadIndex=(people:RosterPerson[])=>people.findIndex(person=>person.duty_kind!=='长白'&&person.group!=='长白');
-function personRole(person:RosterPerson,lead:boolean){
-  return isLongDayIntern(person)?'长白实习生':lead?'值班长':'';
+const isLeader=(person:RosterPerson)=>!!person.system_position?.includes('值班长');
+function personRole(person:RosterPerson){
+  return isLongDayIntern(person)?'长白实习生':person.system_position||'';
 }
 function chatLink(person:RosterPerson) {
   return !props.impersonating&&/^ou_[A-Za-z0-9]+$/.test(person.open_id||'')
@@ -55,17 +55,17 @@ function chatLink(person:RosterPerson) {
               trigger="click" placement="top" :show-arrow="false" raw>
               <template #trigger>
                 <button type="button" class="person-key" :class="{'is-intern':isLongDayIntern(person)}"
-                  :title="personRole(person,index===leadIndex(row[column.id]))||undefined"
-                  :aria-label="['查看'+person.name+'的基本信息',personRole(person,index===leadIndex(row[column.id]))].filter(Boolean).join(' · ')" aria-haspopup="dialog">
-                  <ShieldCheck v-if="index===leadIndex(row[column.id])" class="leader-mark" :size="12" aria-hidden="true" />
+                  :title="personRole(person)||undefined"
+                  :aria-label="['查看'+person.name+'的基本信息',personRole(person)].filter(Boolean).join(' · ')" aria-haspopup="dialog">
+                  <ShieldCheck v-if="isLeader(person)" class="leader-mark" :size="12" aria-hidden="true" />
                   <span>{{ person.name }}</span>
                 </button>
               </template>
               <section class="roster-person" role="dialog" :aria-label="person.name+'的基本信息'">
                 <strong>{{ person.name }}</strong>
-                <dl><template v-if="personRole(person,index===leadIndex(row[column.id]))"><dt>当班角色</dt><dd>{{ personRole(person,index===leadIndex(row[column.id])) }}</dd></template>
+                <dl><template v-if="person.system_position"><dt>体系岗位</dt><dd>{{ person.system_position }}</dd></template>
                   <template v-if="person.group"><dt>班组</dt><dd>{{ person.group }}</dd></template>
-                  <template v-if="person.position"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
+                  <template v-if="person.position&&person.position!==personRole(person)"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
                 </dl>
                 <a v-if="chatLink(person)" :href="chatLink(person)" target="_blank" rel="noopener noreferrer">
                   <MessageCircle :size="16" aria-hidden="true"/>飞书对话</a>

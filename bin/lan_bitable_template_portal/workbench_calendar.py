@@ -234,7 +234,7 @@ def read_roster(service, month, today, *, cached_only=False, today_only=False):
             if person.get('name') and person.get('scope') in BUILDINGS:
                 shift = person.get('shift') if person.get('duty_kind') != '长白' else '长白'
                 groups[(person['scope'], shift)].append({
-                    key: str(person.get(key) or '') for key in ('name', 'open_id', 'group', 'position')
+                    key: str(person.get(key) or '') for key in ('name', 'open_id', 'group', 'position', 'system_position')
                 })
         for (scope, shift), people in groups.items():
             rows.append({'building':scope,'scheduleDate':date,'shiftText':shift,
@@ -242,7 +242,7 @@ def read_roster(service, month, today, *, cached_only=False, today_only=False):
     return rows, covered
 
 
-def handover_roster(scopes, roster, covered, current):
+def handover_roster(scopes, roster, covered, current, *, include_chat_ids=True):
     today = current.date()
     start, end = windows(today.isoformat(), '白')
     if current < start:
@@ -267,6 +267,9 @@ def handover_roster(scopes, roster, covered, current):
             people = row.get('people') or [{'name': name} for name in strings(row.get('dutyStaffActual'))]
             if label == '长白':
                 people = [{**person, 'duty_kind': '长白'} for person in people]
+            if not include_chat_ids:
+                people = [{key: person[key] for key in ('name', 'position', 'system_position', 'group', 'duty_kind') if key in person}
+                          for person in people]
             staff.append({'scope':scope, 'people':people})
         return {'date':date, 'shift':shift, 'end':finish.isoformat(), 'verified':date in covered, 'staff':staff}
 
@@ -446,7 +449,7 @@ def install_workbench_calendar(app, controller, runtime):
                     if stored and today.isoformat() in stored[1]:
                         roster, covered = stored
             return JSONResponse({'ok':True,'data':{'month':month,'days':public_schedule(month, scopes, roster, [], [], today),
-                'handover':handover_roster(scopes, roster, covered, current),
+                'handover':handover_roster(scopes, roster, covered, current, include_chat_ids=not session.get('impersonation')),
                 'unavailable':[] if today.isoformat() in covered else ['排班'],'roster_dates':covered,
                 'roster_pending':key in reads.pending and today.isoformat() not in covered}},
                 headers={'Cache-Control':'private, no-store'})

@@ -62,15 +62,15 @@ const selectedScope=computed(()=>{
   return (scopeOptions.value.find(option=>option.value===props.scope)||scopeOptions.value[0])?.value||'';
 });
 const dataScope=selectedScope;
-const canReadPreShift=computed(()=>!props.user.impersonation&&!!checkScope.value
+const canReadPreShift=computed(()=>!!checkScope.value
   &&(dataScope.value===checkScope.value||composite(dataScope.value)));
 const dutyOverview=computed(()=>canReadPreShift.value&&preShiftHomeVisible(checkUser.value,checkSnapshot.value));
 function checkItem(scope:string, task?:Dict):WorkItem{
   if(!task)return {key:'pre_shift:'+scope+':history',kind:'pre_shift',module:'pre_shift',
-    title:'班前检查记录',scope,status:'',time:'',url:scopedUrl('/',{scope})};
+    title:'班前检查记录',scope,status:'',time:'',url:scopedUrl('/',{scope}),readOnly:!!props.user.impersonation};
   return {key:'pre_shift:'+scope+':'+task.id,kind:'pre_shift',module:'pre_shift',
     title:(task.shift||'')+'班班前检查',scope,status:task.items.length+' 项待检查',
-    time:task.day,dueAt:task.deadline*1000,url:scopedUrl('/',{scope,check_task:task.id})};
+    time:task.day,dueAt:task.deadline*1000,url:scopedUrl('/',{scope,check_task:task.id}),readOnly:!!props.user.impersonation};
 }
 const readScopes=computed(()=>composite(dataScope.value)&&concreteScopes.value.length>0
   &&(dataScope.value==='CAMPUS'||!authorizedScopes.value.some(option=>option.value==='ALL'))
@@ -428,13 +428,13 @@ function canOpenNoticeDeletion(item:WorkItem){
 }
 function openItem(item:WorkItem){
   if(activeCase.value?.item.key===item.key){caseListOpen.value=false;focusCasePanel();return;}
+  if (readOnly(item)) {
+    changeCase({item,mode:'read',url:item.url,scope:item.scope});
+    return;
+  }
   if(item.kind==='pre_shift'){
     if(dutyOverview.value&&item.scope===checkScope.value)
       changeCase({item,mode:'pre_shift',scope:item.scope,url:item.url,focusId:new URL(item.url,location.origin).searchParams.get('check_task')||undefined});
-    return;
-  }
-  if (readOnly(item)) {
-    changeCase({item,mode:'read',url:item.url,scope:item.scope});
     return;
   }
   const url=new URL(item.url,location.origin);

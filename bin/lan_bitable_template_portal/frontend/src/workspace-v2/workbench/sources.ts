@@ -77,7 +77,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
     if (ctx.pending&&!ctx.pending.includes(id) || id==='learning'&&ctx.user.category==='duty') return [];
     if (!scoped && ['critical_guard','water'].includes(id)) return [];
     if (id==='signatures' && ctx.user.impersonation) return [];
-    const readOnly=ctx.role==='manager'&&id==='notices'&&!ctx.accessLevel;
+    const readOnly=(ctx.role==='manager'&&id==='notices'&&!ctx.accessLevel)||!!ctx.user.impersonation&&id==='learning';
     const selectedScopes=id==='notices'&&ctx.scope==='CAMPUS'&&ctx.selectedScopes
       ? [...ctx.selectedScopes,ctx.scope]
       : id==='risk_inspection'&&ctx.scope==='CAMPUS'
@@ -156,7 +156,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
         const title=String(item.metadata?.summary||item.text||'事件通告').split('\n').slice(0,2).join(' ').slice(0,160);
         const created=todoTimestamp(item.created_at);
         return [row('event_notices',item.event_id,scope,title,'进行中',link('/workbench-lite',{scope,work_type:'event',event_id:item.event_id}),
-          {ongoing:true,detail:'事件通告',time:created===undefined?'':new Date(created).toISOString()})];
+          {ongoing:true,detail:'事件通告',time:created===undefined?'':new Date(created).toISOString(),readOnly:!!ctx.user.impersonation})];
       }),delayed:Boolean(data.warning)};
     });
   }
@@ -171,13 +171,13 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
           {time:String(item.started_at||item.start_time||'')})]:[]),delayed:!!data.warning};
     });
   }
-  if(!ctx.user.impersonation&&['operator','shift_leader','duty'].includes(ctx.user.category)&&['D','E'].includes(ctx.scope)
+  if(['operator','shift_leader','duty'].includes(ctx.user.category)&&['D','E'].includes(ctx.scope)
     &&ctx.user.modules?.includes('daily_inspection')){
     const url=link('/daily-inspection');
     add('inspection',url,[ctx.scope],async(scope,signal)=>{
       const data=await get(scopedUrl('/api/daily-inspection/status',{view_scope:scope}),signal);
       if(data.duty_warning)return {rows:[],delayed:true};
-      if(ctx.user.category!=='duty'&&(!(data.viewer_on_duty??ctx.inspectionOnDuty)||data.can_edit===false))return {rows:[]};
+      if(ctx.user.category!=='duty'&&(!(data.viewer_on_duty??ctx.inspectionOnDuty)||data.can_edit===false&&!ctx.user.impersonation))return {rows:[]};
       if((data.view_scope||data.duty?.scope)!==scope||data.duty?.scope!==scope||!Number.isSafeInteger(data.next_round)||!Number.isSafeInteger(data.round_limit))
         return {rows:[],delayed:true};
       const sameShift=data.active?.duty?.date===data.duty.date&&data.active?.duty?.shift===data.duty.shift;
@@ -187,7 +187,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
       if(round>data.round_limit) return {rows:[]};
       return {rows:[row('inspection',data.duty.date+':'+data.duty.shift+':'+round,scope,
         scope+'楼'+data.duty.shift+'班第 '+round+' 轮巡检',active?'进行中':'待开始',url,
-        {detail:'巡检',time:String(data.duty.date||''),scheduledAt:!active?data.opens_at:undefined})]};
+        {detail:'巡检',time:String(data.duty.date||''),scheduledAt:!active?data.opens_at:undefined,readOnly:!!ctx.user.impersonation})]};
     });
   }
   if (enabled('drills')) add('drills',link('/drill-management'),operated,async(scope,signal)=>{

@@ -159,7 +159,8 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
         if(row.person_id!==person.id||row.legacy||row.status==='completed'||row.deleted_at)return [];
         if(ctx.home&&(row.daily_exempt===true||exemption)&&row.mode!=='practice')return [];
         if(row.status!=='pending'||!row.id)throw new Error('个人题单状态未完整返回。');
-        return [{key:'learning:'+row.id,kind,module:kind,title:row.mode==='practice'?'自主练习':'每日学练',scope:text(row.scope),status:row.started_at?'答题中':'未开始',time:text(row.date),detail:`已答 ${number(row.stats?.answered)} / ${number(row.stats?.total)} 题`,url:link('/learning',{view:'practice',paper_id:row.id})}];
+        return [{key:'learning:'+row.id,kind,module:kind,title:row.mode==='practice'?'自主练习':'每日学练',scope:text(row.scope),status:row.started_at?'答题中':'未开始',time:text(row.date),detail:`已答 ${number(row.stats?.answered)} / ${number(row.stats?.total)} 题`,
+          actorIds:[ctx.user.open_id].filter(Boolean),url:link('/learning',{view:'practice',paper_id:row.id})}];
       }),more:page*number(data.page_size)<number(data.total),note:ctx.home&&exemption
         ? '入职首月免做当班题单'+(/^\d{4}-\d{2}-\d{2}$/.test(exemption.resume_date)?' · '+exemption.resume_date+' 起按排班安排':'')
         : '仅本人已分配或已领取的题单'};
