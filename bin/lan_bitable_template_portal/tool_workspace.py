@@ -348,6 +348,7 @@ class ToolWorkspaceMixin:
                 assets.append(self._workspace_asset(asset) | {
                     "kind": kind, "eligible_kinds": [kind] if selectable else [],
                     "selectable": selectable, "monthly_locked": monthly_locked,
+                    "filled_this_month": bool(submissions.get((asset['id'], kind))),
                     "disabled_reason": reason, "plan": plan,
                 })
             history = self._workspace_history_page(db, actor)

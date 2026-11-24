@@ -471,7 +471,7 @@ import LearningSharing from "./LearningSharing.vue";
 import LearningCompletion from "./LearningCompletion.vue";
 import LearningPendingQuestions from "./LearningPendingQuestions.vue";
 
-const props = defineProps<{ scope?: string; personId?: string; userId: string }>();
+const props = defineProps<{ scope?: string; personId?: string; userId: string; embedded?: boolean }>();
 type Tab = "home" | "today" | "review" | "history" | "issues" | "pending" | "profile" | "questions" | "settings" | "sharing" | "completion";
 const completionRefresh = ref(0);
 const completionReturn = ref<{ person:Dict|null }|null>(null);

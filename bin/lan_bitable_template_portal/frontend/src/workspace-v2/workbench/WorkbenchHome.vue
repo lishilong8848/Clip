@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type VNode } from 'vue';
-import { NModal, NPopover } from 'naive-ui';
+import { NModal, NPopover, useMessage } from 'naive-ui';
 import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Droplets, FileCheck2, KeyRound, Layers3, ListChecks, Package, PenLine, Route, ScanLine, Search, ShieldCheck, Siren, SlidersHorizontal, Wrench, X, Zap } from 'lucide-vue-next';
 import type { Dict } from '../client';
 import { moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
@@ -24,6 +24,7 @@ import { beijingDate, eventPeriodRange } from '../eventPeriod';
 
 const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean}>(),{explicitScope:true});
 const emit=defineEmits<{open:[url:string]}>();
+const message=useMessage();
 const content=ref<HTMLElement>();
 const clock=ref(Date.now());
 const authorizedScopes=computed(()=>workbenchScopes(props.scopes));
@@ -83,6 +84,7 @@ const NoticeChangeConfirmations=lazy(()=>import('../NoticeChangeConfirmations.vu
 const ModuleWidget=lazy(()=>import('../ModuleWidget.vue'));
 type OpenCase={item:WorkItem;mode:'read'|'module'|'notice'|'event'|'change'|'pre_shift';scope:string;url:string;focusId?:string;widget?:Widget};
 const activeCase=ref<OpenCase>();
+const learningRevision=ref(0);
 const casePanel=ref<HTMLElement>();
 const caseBody=ref<HTMLElement>();
 const caseEditor=ref<{guardNavigation:(proceed:()=>void)=>boolean}>();
@@ -433,15 +435,19 @@ function openItem(item:WorkItem){
     return;
   }
   if(item.kind==='pre_shift'){
-    if(dutyOverview.value&&item.scope===checkScope.value)
+    if(canReadPreShift.value&&item.scope===checkScope.value)
       changeCase({item,mode:'pre_shift',scope:item.scope,url:item.url,focusId:new URL(item.url,location.origin).searchParams.get('check_task')||undefined});
+    else message.warning('当前账号无法打开这条班前检查。');
     return;
   }
   const url=new URL(item.url,location.origin);
   const explicitScope=url.searchParams.get('scope');
-  if(url.origin!==location.origin || explicitScope&&!authorizedScopes.value.some(option=>option.value===explicitScope))return;
+  if(url.origin!==location.origin || explicitScope&&!authorizedScopes.value.some(option=>option.value===explicitScope)){
+    message.warning('当前账号无法打开这条记录。');
+    return;
+  }
   const module=moduleForRoute(url), work=url.searchParams.get('work_type')||'';
-  if(!module)return;
+  if(!module){message.warning('这条记录暂时无法定位，请刷新工作台。');return;}
   const scope=explicitScope||authorizedScopes.value.find(option=>option.value===selectedScope.value)?.value||authorizedScopes.value[0]?.value||'';
   const path=url.pathname+url.search;
   if(item.kind==='ali_confirmation')changeCase({item,scope,url:path,mode:'change',focusId:url.searchParams.get('change_confirmation')||''});
@@ -455,6 +461,7 @@ function openItem(item:WorkItem){
 }
 function refreshClosedCase(current:OpenCase){
   if(current.mode==='read')return;
+  if(current.item.kind==='learning')learningRevision.value++;
   if(current.mode==='event')refresh(['event_notices','events']);
   else if(current.mode==='notice')refresh(['notices','notice_plans','engineer_mop','repair_management']);
   else if(current.mode==='change')refresh(['ali_confirmation','notices','notice_plans']);
@@ -650,7 +657,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
         :scopes="concreteScopes" :role="role" :clock="clock" :tasks="periodTasks" :plan-state="states.notice_plans?.status"
         :seal-status="sealStatus" :seals="seals" :partial="!!queueNote && queueNote!=='暂无待办'" :action="actionLabel"
         :inspection-state="orderedSources.some(source=>source.id==='inspection')?states.inspection?.status||'loading':undefined"
-        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)"
+        :learning-revision="learningRevision" @task="openItem" @retry="load('notice_plans',true)"
         @retry-inspection="load('inspection',true)" /></template>
     </WorkbenchDailyLayout>
 

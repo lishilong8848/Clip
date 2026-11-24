@@ -33,9 +33,14 @@ const fixture = `<template><NConfigProvider><NDialogProvider><NMessageProvider>
   window.setRepairText=value=>{repairText.value=value;};
   const opened=url=>{window.opened=url;};
   </script>`;
-const entry = `import {createApp} from 'vue';import Fixture from '/@role-layout.vue';createApp(Fixture).mount('#app');`;
+const entry = `import {createApp} from 'vue';
+  import LoadingIndicator from '/src/components/LoadingIndicator.vue';
+  import UiTransition from '/src/components/UiTransition.vue';
+  import Fixture from '/@role-layout.vue';
+  createApp(Fixture).component('LoadingIndicator',LoadingIndicator).component('UiTransition',UiTransition).mount('#app');`;
 const server = await createServer({root, base:'/', configFile:path.join(root,'vite.workspace-v2.config.ts'), logLevel:'error',
-  cacheDir:path.join(output, 'vite'), optimizeDeps:{entries:[], include:['vue','naive-ui','lucide-vue-next']},
+  cacheDir:path.join(output, 'vite'),
+  optimizeDeps:{entries:[], include:['vue','naive-ui','lucide-vue-next','@tanstack/vue-virtual','gridstack']},
   server:{host:'127.0.0.1',port:0}, plugins:[{
     name:'isolated-role-layout', enforce:'pre',
     resolveId(id) { if (id.startsWith('/@role-layout.')) return id; },
@@ -55,7 +60,11 @@ try {
   let truncatedRepairPage=false,liveGuard=false,mixedProfessions=false;
   let checkFixture=false, checkSubmitted=false, calendarFailure=false, planFixture=false, inspectionOnDuty=false, ownRepair='';
   let personalAssigned=30, pendingLearning=false, learningSaved=false, failLearningSave=false, denseRoster=false;
-  let fixtureAccount, delegatedCalendar=false;
+  let fixtureAccount, delegatedCalendar=false, checkRosterChanged=false, answerFixture=false, answerSaved=false;
+  const learningPaper=()=>({id:'desk-paper',person_id:'self',scope:'A',date:'2026-11-18',mode:'daily',
+    status:answerSaved?'completed':'pending',version:answerSaved?2:1,stats:{answered:Number(answerSaved),total:1},
+    questions:[{id:'desk-question',version:'1',stem:'隔离工作台答题',type:'single',bank:'written',options:[{id:'yes',text:'隔离选项'}],
+      ...(answerSaved?{attempt:{correct:true,option_ids:['yes'],submitted_at:'2026-11-18T11:00:00+08:00'}}:{})}]});
   const checkItems=[{id:'valves',text:'核查机房阀门编号、位置和现场状态'},{id:'keys',text:'核对值班钥匙'}];
   await page.route('**/*', async route=>{
     const request=route.request(), url=new URL(request.url()), scope=url.searchParams.get('scope')||'A';
@@ -65,6 +74,18 @@ try {
     if (!url.pathname.startsWith('/api/')) return route.continue();
     requests.push([request.method(),url.pathname,scope]);
     const ok=data=>route.fulfill({json:{ok:true,data}});
+    if(answerFixture&&url.pathname==='/api/learning/papers/desk-paper/start'&&request.method()==='POST'){
+      assert.equal(request.postDataJSON().person_id,'self');
+      return ok({started_at:'2026-11-18T11:00:00+08:00'});
+    }
+    if(answerFixture&&url.pathname==='/api/learning/papers/desk-paper/answer'&&request.method()==='POST'){
+      const body=request.postDataJSON();
+      assert.equal(body.person_id,'self');
+      assert.equal(body.question_id,'desk-question');
+      assert.deepEqual(body.option_ids,['yes']);
+      answerSaved=true;
+      return ok(learningPaper());
+    }
     if(checkFixture&&url.pathname==='/api/pre-shift-checks/submit'&&request.method()==='POST'){
       const body=request.postDataJSON();
       assert.equal(body.task_id,'fixture-check');
@@ -158,16 +179,20 @@ try {
     if (url.pathname==='/api/engineer/mop/bootstrap') return ok({notices:[]});
     if (url.pathname==='/api/capacity/water/records') return ok({total:0,records:[]});
     if (url.pathname==='/api/pre-shift-checks') return ok({scope,scopes:[scope],can_manage:false,roster_ready:checkFixture,
-      viewer_on_roster:checkFixture,viewer_active_shift:'白',server_time:'2026-11-18T11:00:00+08:00',
+      viewer_on_roster:checkFixture&&!checkRosterChanged,viewer_active_shift:'白',server_time:'2026-11-18T11:00:00+08:00',
       definition:{items:checkFixture?checkItems:[],version:1},tasks:checkFixture?[{
         id:'fixture-check',scope,shift:'白',day:'2026-11-18',items:checkItems,definition_version:1,
         due:Date.parse('2026-11-18T08:50:00+08:00')/1000,deadline:Date.parse('2026-11-18T12:00:00+08:00')/1000,
         can_submit:!checkSubmitted,submitted:checkSubmitted?'2026-11-18T11:00:00+08:00':null,
         answers:checkItems.map(item=>({id:item.id,status:'normal',note:''})),files:[],
       }]:[]});
-    if (url.pathname==='/api/learning/bootstrap') return ok({self_scope:'A',self_person:{id:'self'},can_answer:true,today:'2026-11-18'});
-    if (url.pathname==='/api/learning/papers') return ok({total:0,page_size:20,items:[]});
-    if (url.pathname==='/api/learning/profile') return ok({today_summary:{assigned:personalAssigned,task_answered:0},summary:{assigned:personalAssigned,task_answered:0}});
+    if (url.pathname==='/api/learning/bootstrap') return ok({self_scope:'A',self_person:{id:'self',name:'隔离学员'},can_answer:true,today:'2026-11-18',
+      ...(answerFixture?{can_view_buildings:false,daily_duty:{date:'2026-11-18',scope:'A',shift:'白',end_at:'2026-11-18T18:00:00+08:00'},settings:{enabled:true}}:{})});
+    if (url.pathname==='/api/learning/papers') return ok({total:Number(answerFixture),page_size:20,items:answerFixture?[learningPaper()]:[]});
+    if (url.pathname==='/api/learning/profile') {
+      const summary={assigned:answerFixture?1:personalAssigned,task_answered:answerFixture?Number(answerSaved):0};
+      return ok({today_summary:summary,summary});
+    }
     if (url.pathname==='/api/learning/issues/workbench-questions') {
       const items=pendingLearning&&!learningSaved?[{question_id:'review-question',issue_id:'issue-review-fixture',stem:'隔离原题',feedback_count:1}]:[];
       return ok({items,total:items.length,page:1,page_size:20});
@@ -538,14 +563,14 @@ try {
 
   checkFixture=true;
   await page.setViewportSize({width:390,height:860});
-  await set(actor('fixture-check-duty','duty',['pre_shift']));
+  await set(actor('fixture-check-duty','operator',['pre_shift'],{level:'L4'}));
   const personalCard=page.getByRole('article',{name:'个人卡片',exact:true});
   await personalCard.getByRole('button',{name:/白班班前检查/}).waitFor();
   assert.equal(await page.getByRole('searchbox',{name:'全局搜索'}).count(),0);
   assert.equal(await page.getByRole('region',{name:'班前检查',exact:true}).count(),0);
   assert.equal(await page.getByRole('region',{name:'紧急事项',exact:true}).count(),0);
-  await open('pre_shift');
-  await dialog.getByRole('button',{name:'办理 白班班前检查'}).click();
+  checkRosterChanged=true;
+  await personalCard.getByRole('button',{name:/白班班前检查/}).click();
   const checkCase=page.getByRole('region',{name:'办理 白班班前检查'});
   await checkCase.locator('legend').filter({hasText:checkItems[0].text}).waitFor().catch(async error=>{
     await page.screenshot({path:path.join(output,'pre-shift-failure.png'),fullPage:true});
@@ -561,8 +586,30 @@ try {
   assert(checkSubmitted);
   await checkCase.getByRole('button',{name:'关闭待办办理'}).click();
   await checkCase.waitFor({state:'hidden'});
-  checks.push('mobile pre-shift work opens in a dialog, uses the body text size, submits once and leaves the queue');
+  checks.push('the personal card opens the exact pre-shift form on mobile, even when roster indicators are stale; the allowed submission clears the queue');
+  checkRosterChanged=false;
   checkFixture=false;
+
+  answerFixture=true;
+  await set(actor('fixture-personal-answer','operator',['learning'],{level:'L4'}));
+  const deskUrl=page.url();
+  await personalCard.getByRole('button',{name:'打开画像学练',exact:true}).click();
+  const learningCase=page.getByRole('region',{name:'办理 我的画像学练'});
+  await learningCase.getByText('隔离工作台答题',{exact:true}).waitFor({timeout:30000}).catch(async error=>{
+    await page.screenshot({path:path.join(output,'inline-learning-failure.png')});
+    console.error(await page.locator('.task-dialog').innerText({timeout:1000}).catch(()=>'(no dialog)'),errors,requests.slice(-12),unexpected);
+    throw error;
+  });
+  await learningCase.getByText('隔离选项',{exact:true}).click();
+  await page.screenshot({path:path.join(output,'inline-learning-mobile.png'),animations:'disabled'});
+  await learningCase.getByRole('button',{name:'确认作答',exact:true}).click();
+  await learningCase.getByRole('button',{name:'已确认作答',exact:true}).waitFor();
+  await learningCase.getByRole('button',{name:'关闭待办办理',exact:true}).click();
+  await personalCard.getByText('1 / 1',{exact:true}).waitFor();
+  assert.equal(page.url(),deskUrl);
+  assert(answerSaved);
+  answerFixture=false;
+  checks.push('personal learning opens in the workbench, answers on mobile and refreshes the progress after closing');
 
   inspectionOnDuty=true;
   const operator=actor('independent-inspection','operator',['daily_inspection'],{level:'L4',home_scope:'D',testScopes:['D']});
@@ -625,6 +672,18 @@ try {
   assert(await panelBody.evaluate(el=>el.scrollHeight>el.clientHeight),'long period lists scroll inside the card');
   await page.screenshot({path:path.join(output,'period-cards-desktop.png'),animations:'disabled'});
   checks.push('planned notices start folded, only deadlines today or tomorrow qualify, and long work-state lists align');
+  const periodUrl=page.url();
+  await overview.getByRole('article',{name:'园区卡片'}).getByRole('button',{name:/隔离处理中事件/}).click();
+  await eventPanel.locator('[data-module-widget="event"]').waitFor();
+  await eventPanel.getByRole('button',{name:'关闭待办办理',exact:true}).click();
+  await eventPanel.waitFor({state:'hidden'});
+  await overview.getByRole('article',{name:'楼栋卡片'}).getByRole('button',{name:/隔离维修待办/}).click();
+  const buildingRepair=page.getByRole('region',{name:'办理 隔离维修待办',exact:true});
+  await buildingRepair.getByRole('navigation',{name:'维修办理内容'}).getByText(/跟进记录/).waitFor();
+  await buildingRepair.getByRole('button',{name:'关闭待办办理',exact:true}).click();
+  await buildingRepair.waitFor({state:'hidden'});
+  assert.equal(page.url(),periodUrl);
+  checks.push('campus events and building repair records open their exact in-place workbench cases');
 
   const roster=page.getByRole('region',{name:'交接班人员'});
   await roster.getByText('A楼排班测试',{exact:true}).waitFor();
@@ -702,6 +761,8 @@ try {
     ['PUT','/api/learning/issues/issue-review-fixture/question'],
     ['PUT','/api/learning/issues/issue-review-fixture/question'],
     ['POST','/api/pre-shift-checks/submit'],
+    ['POST','/api/learning/papers/desk-paper/start'],
+    ['POST','/api/learning/papers/desk-paper/answer'],
   ]);
   assert.deepEqual(unexpected,[]); assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'results.json'),JSON.stringify({checks,apiReads:requests.length,unexpected,errors},null,2));

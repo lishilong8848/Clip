@@ -26,7 +26,7 @@ def init_tables(db):
     """)
 
 
-def queue_result(db, row, event, actor, at, note='', batch=None):
+def queue_result(db, row, event, actor, at, note='', batch=None, *, profession=''):
     review = db.execute('SELECT * FROM tool_work_reviews WHERE order_id=?', (row['id'],)).fetchone()
     draft = json.loads(review['payload']) if review else {}
     linked = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
@@ -46,13 +46,15 @@ def queue_result(db, row, event, actor, at, note='', batch=None):
     if event.startswith('manager_'):
         reviewer_name = next((r.get('reviewer') for r in records if r.get('reviewer')), '')
         targets.append(('审核人', reviewer_name, review['reviewer'] if review else ''))
+    if event == 'repaired':
+        targets = [('楼长', '', ''), ('专业工程师', '', '')]
     archived_revision = 0
     if event == 'normal':
         archived_revision = db.execute("""SELECT revision FROM tool_work_sync
             WHERE order_id=? AND dest='maintenance'""", (row['id'],)).fetchone()[0]
     payload = json.dumps(dict(scope=row['scope'], asset=row['asset_id'], session=linked[0] if linked else '',
         tool=asset['name'], model=asset.get('model') or '', quantity=row['scrap_qty'],
-        reason=row['scrap_reason'], by=actor['name'], at=at, note=note), ensure_ascii=False)
+        reason=row['scrap_reason'], by=actor['name'], at=at, note=note, profession=profession), ensure_ascii=False)
     batch = batch or uuid.uuid4().hex
     db.executemany("""INSERT OR IGNORE INTO tool_result_targets
         (batch,order_id,revision,event,review_round,role,name,person_id,payload,archive_revision)
@@ -62,6 +64,10 @@ def queue_result(db, row, event, actor, at, note='', batch=None):
 
 
 def current_participant(db, order_id, actor, *, refill=False):
+    if not refill and db.execute("""SELECT 1 FROM tool_result_targets
+        WHERE order_id=? AND event='repaired' AND person_id=? AND open_id=? AND open_id<>''""",
+        (order_id, actor['id'], actor.get('open_id', ''))).fetchone():
+        return True
     # A prior rejected round must not authorize changes after resubmission.
     return db.execute("""SELECT 1 FROM tool_work_reviews r WHERE r.order_id=? AND
         ((?=0 AND r.submitted_by=? AND EXISTS (SELECT 1 FROM tool_result_targets t
@@ -92,6 +98,52 @@ def pending_labels(db, order_ids):
             for key, errors in result.items()}
 
 
+def resolve_repaired_targets(service, row, directory):
+    from .account_policy import categorize_position
+    from .module_access import profession_codes
+    from .tool_management import can_scope
+
+    payload = json.loads(row['payload'])
+    scope, professions = payload['scope'], profession_codes(payload.get('profession'))
+    if row['role'] == '楼长':
+        with service.connect() as db:
+            ids = set(json.loads(service.state(db, 'leaders') or '{}').get(scope, ()))
+        candidates = [person for person in directory if person.get('open_id') in ids]
+    else:
+        if not professions:
+            raise RiskError('工具专业未核对，暂无法确定对应专业工程师。')
+        candidates = [person for person in directory if scope in person.get('scopes', ())
+                      and categorize_position(person.get('position') or '') == 'engineer'
+                      and professions.intersection(profession_codes(person.get('specialties')))]
+    people = {}
+    for person in candidates:
+        try:
+            actor = service.directory_actor(person)
+        except RiskError as exc:
+            if exc.status >= 500 or exc.status == 429:
+                raise
+            continue
+        oid = actor.get('open_id', '')
+        if (actor['id'] == person.get('record_id') and oid == person.get('open_id')
+                and re.fullmatch(r'ou_[A-Za-z0-9]+', oid) and service.available_to(actor) and can_scope(actor, scope)
+                and (row['role'] == '楼长' or professions.intersection(profession_codes(actor.get('specialties'))))):
+            people[oid] = actor
+    if not people:
+        raise RiskError(f"未找到有本楼工具查看权限的{row['role']}，请核对人员配置。")
+    with service.connect(True) as db:
+        removed = db.execute("DELETE FROM tool_result_targets WHERE id=? AND open_id=''", (row['id'],)).rowcount
+        if not removed:
+            return
+        for oid, actor in people.items():
+            name = actor['name']
+            if sum(p['name'] == name for p in people.values()) > 1:
+                name += f"（{actor.get('employee_no') or actor['id']}）"
+            db.execute("""INSERT INTO tool_result_targets
+                (batch,order_id,revision,event,review_round,role,name,person_id,open_id,payload,archive_revision)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?)""", (row['batch'], row['order_id'], row['revision'], row['event'],
+                row['review_round'], row['role'], name, actor['id'], oid, row['payload'], row['archive_revision']))
+
+
 def resolve_targets(service):
     from .tool_management import can_scope
 
@@ -109,6 +161,11 @@ def resolve_targets(service):
     for row in rows:
         identity, name = row['person_id'], row['name']
         try:
+            if row['event'] == 'repaired':
+                if directory is None:
+                    directory = service.workspace_directory() if service.workspace_directory else []
+                resolve_repaired_targets(service, row, directory)
+                continue
             if not identity:
                 if not name:
                     raise RiskError('记录缺少对应人员，请核对人员资料。')
@@ -144,6 +201,7 @@ RESULTS = {
     'rejected': '自检记录已被驳回，请打开原记录重新填写并提交。',
     'normal': '工具检验已通过审核，检查记录已归档。',
     'repair': '工具检验已审核，请进行后续检修。',
+    'repaired': '检修完成，复检合格。',
     'scrap': '工具检验已审核，报废申请已移交园区经理审批。',
     'manager_approve': '园区经理已通过报废申请，工具已批准报废。',
     'manager_reject': '园区经理已驳回报废申请。',
@@ -152,7 +210,9 @@ RESULTS = {
 
 def make_card(rows, review_link, order_link):
     elements = []
-    title = '工具报废审批结果' if rows[0]['event'].startswith('manager_') else '工具自检审核结果'
+    event = rows[0]['event']
+    title = ('工具检修合格' if event == 'repaired' else '工具报废审批结果'
+             if event.startswith('manager_') else '工具自检审核结果')
     card = {'schema': '2.0', 'header': {'title': plain(title), 'template': 'blue'}, 'body': {'elements': elements}}
     size = len(json.dumps(card, ensure_ascii=False).encode())
     members = []
@@ -166,10 +226,13 @@ def make_card(rows, review_link, order_link):
         lines = [f"{data['scope']}楼 · {data['tool']}" + (' · '+data['model'] if data['model'] else ''), RESULTS[event]]
         if event.startswith('manager_'):
             lines.extend([f"报废单号：{row['order_id']}　数量：{data['quantity']}", '报废原因：'+data['reason']])
-        lines.extend([('审批人：' if event.startswith('manager_') else '审核人：') + data['by'],
-                      ('审批时间：' if event.startswith('manager_') else '审核时间：') + data['at'][:19].replace('T', ' ') + '（北京时间）'])
+        action = '确认' if event == 'repaired' else '审批' if event.startswith('manager_') else '审核'
+        if event == 'repaired' and data['profession']:
+            lines.append('专业：'+data['profession'])
+        lines.extend([action+'人：' + data['by'],
+                      action+'时间：' + data['at'][:19].replace('T', ' ') + '（北京时间）'])
         if data['note']:
-            lines.append('意见：'+data['note'])
+            lines.append(('检修说明：' if event == 'repaired' else '意见：')+data['note'])
         if event.startswith('manager_'):
             item = [{'tag': 'div', 'text': plain('\n'.join(lines))}]
         else:

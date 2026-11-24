@@ -14,9 +14,9 @@ import type { WorkItem } from './sources';
 import type { CalendarItem, SealStatus } from './WorkbenchDailyLayout.vue';
 
 const props=defineProps<{user:Dict;scope:string;scopeLabel:string;scopes:ScopeOption[];role:Role;clock:number;tasks:WorkItem[];
-  planState?:'loading'|'ok'|'stale'|'down'|'deny';sealStatus?:SealStatus;seals:CalendarItem[];partial:boolean;
+  planState?:'loading'|'ok'|'stale'|'down'|'deny';sealStatus?:SealStatus;seals:CalendarItem[];partial:boolean;learningRevision:number;
   inspectionState?:'loading'|'ok'|'stale'|'down'|'deny';action:(item:WorkItem)=>string}>();
-defineEmits<{open:[url:string];task:[item:WorkItem];retry:[];retryInspection:[]}>();
+defineEmits<{task:[item:WorkItem];retry:[];retryInspection:[]}>();
 const period=ref<'day'|'week'|'month'>('week');
 const view=ref<'cards'|'table'>('cards');
 const periods=[{id:'day',label:'今日'},{id:'week',label:'本周'},{id:'month',label:'本月'}] as const;
@@ -95,7 +95,7 @@ const campusFocus=(row:WorkItem)=>highLevel.has(row.kind)&&!isPersonal(row);
 const campusRows=computed(()=>active.value.filter(campusFocus));
 const buildingRows=computed(()=>active.value.filter(row=>(!canSeePersonal.value||!isPersonal(row))&&(!canSeeCampus.value||!campusFocus(row))));
 const personalRows=computed(()=>active.value.filter(row=>isPersonal(row)&&row.kind!=='inspection'
-  &&!(row.kind==='learning'&&(props.user.category==='duty'||canReadPersonalLearning.value))));
+  &&!(row.kind==='learning'&&(props.user.category==='duty'||hasPersonalLearning.value))));
 const hasPersonalLearning=computed(()=>Boolean(personal.value?.total));
 const hasQuestionReviews=computed(()=>reviewQueue.value.total>0);
 const cards=computed(()=>[
@@ -149,7 +149,14 @@ watch([period,filter],()=>{expanded.value={};plannedOpen.value=filter.value==='p
 watch(()=>props.scope,()=>{filter.value='all';expanded.value={};plannedOpen.value=false;});
 const issuerScopes=computed(()=>new Set(props.scopes.map(item=>item.value)));
 type Count = {done:number;total:number;pending:number;late:number;checking:number;upcoming:number};
-const team=ref<Count>(), personal=ref<{done:number;total:number}>();
+const team=ref<Count>(), personal=ref<{done:number;total:number;scope:string;canAnswer:boolean}>();
+const learningEntry=computed<WorkItem|undefined>(()=>{
+  const progress=personal.value;
+  if(!progress?.total)return;
+  return {key:'learning:personal',kind:'learning',module:'learning',title:'我的画像学练',
+    scope:progress.scope,status:`已答 ${progress.done} / ${progress.total} 题`,time:today.value,
+    readOnly:!progress.canAnswer,url:'/learning?'+new URLSearchParams({view:'practice',tab:'today',scope:progress.scope})};
+});
 const reviewQueue=ref<Dict>({}), reviewOpen=ref(false), reviewPage=ref(1), reviewRefresh=ref(0);
 const reviewDayPart=computed(()=>Math.floor(props.clock/90000));
 const canReviewQuestions=computed(()=>canReadPersonalLearning.value&&!props.user.impersonation);
@@ -211,7 +218,7 @@ function count(value:unknown){
   if(typeof value!=='number'||!Number.isFinite(value)||value<0)throw new Error('完成数据待核验');
   return value;
 }
-watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePersonal,revision,learningIdentity],async(_current,_previous,onCleanup)=>{
+watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePersonal,revision,learningIdentity,()=>props.learningRevision],async(_current,_previous,onCleanup)=>{
   const request=new AbortController();
   onCleanup(()=>request.abort());
   team.value=undefined;personal.value=undefined;teamError.value='';
@@ -227,13 +234,13 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
   }).catch(cause=>{if(!signal.aborted)teamError.value=[401,403].includes(cause?.status)?'当前账号无权查看学练汇总':'学练汇总读取失败';}));
   if(canReadPersonalLearning.value&&canSeePersonal.value)requests.push(read('/api/learning/bootstrap',{}).then(async boot=>{
     if(signal.aborted)return;
-    if(!boot.self_person?.id||!['ALL','CAMPUS'].includes(scope)&&boot.self_scope&&boot.self_scope!==scope)return;
+    if(!boot.self_person?.id||!issuerScopes.value.has(boot.self_scope)||!['ALL','CAMPUS',boot.self_scope].includes(scope))return;
     if(period.value==='day'&&boot.daily_exemption?.status==='exempt')return;
     const data=await read('/api/learning/profile',{scope:boot.self_scope||'',person_id:boot.self_person.id,from,to});
     if(signal.aborted)return;
     const summary=period.value==='day'?data.today_summary:data.summary;
     const done=count(summary?.task_answered),total=count(summary?.assigned);
-    personal.value={done,total};
+    personal.value={done,total,scope:boot.self_scope,canAnswer:boot.can_answer===true&&!props.user.impersonation};
   }));
   await Promise.allSettled(requests);
 },{immediate:true});
@@ -319,8 +326,8 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
             <Pencil :size="15" aria-hidden="true"/><span>待处理题目</span><small>{{ reviewQueue.total }} 题</small><ChevronRight :size="15" aria-hidden="true"/>
           </button>
         </div>
-        <div v-if="filter==='all'&&card.id==='personal'&&personal?.total" class="learning-summary">
-          <button type="button" class="learning-open" aria-label="打开画像学练" @click="$emit('open','/learning?view=practice')">
+        <div v-if="filter==='all'&&card.id==='personal'&&personal?.total&&learningEntry" class="learning-summary">
+          <button type="button" class="learning-open" aria-label="打开画像学练" aria-haspopup="dialog" @click="$emit('task',learningEntry)">
             我的画像学练 <ChevronRight :size="15" aria-hidden="true"/>
           </button>
           <div class="learning-kpis"><span>已答 <b>{{ personal.done }} / {{ personal.total }}</b> 题</span>

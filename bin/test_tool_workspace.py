@@ -255,6 +255,53 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual([item['id'] for item in batch['history_items']], ['recTool1'])
         self.assertEqual(len(self.service.workspace_get(self.filler, saved['id'])['items']), 1)
 
+    def test_repair_pass_notifies_building_leader_and_matching_engineer_once(self):
+        self.cloud.assets[0]['profession'] = '强电'
+        self.service.refresh()
+        draft = self.complete(self.open(), ('repair', 'normal'))
+        pending = self.service.workspace_submit(self.filler, draft['id'], {'revision': draft['revision']})
+        self.approve(pending)
+        order, = self.service.list(self.leader)['followups']
+        electrical = actor(identity='electrical') | {
+            'name': '隔离电气工程师', 'level': 'L2', 'category': 'engineer',
+            'position': '电气工程师', 'specialties': ['电气']}
+        hvac = electrical | {'id': 'hvac', 'open_id': 'ou_hvac', 'specialties': ['暖通']}
+        offsite = electrical | actor(scope='B', identity='offsite') | {'level': 'L2', 'category': 'engineer'}
+        people = {person['id']: person for person in (self.leader, electrical, hvac, offsite)}
+
+        def configure():
+            self.service.workspace_directory = lambda: [
+                dict(person, record_id=person['id'], scopes=[person['home_scope']], selectable=True)
+                for person in people.values()]
+            self.service.directory_actor = lambda row: people[row['record_id']]
+
+        configure()
+        body = {'revision': order['revision'], 'reason': '隔离检修复测通过'}
+        self.assertEqual(self.service.action(self.leader, order['id'], 'repaired', body)['outcome'], 'repaired')
+        with self.assertRaises(RiskError):
+            self.service.action(self.leader, order['id'], 'repaired', body)
+        with self.service.connect(True) as db:
+            db.execute("UPDATE tool_result_targets SET next_try=9999999999 WHERE event<>'repaired'")
+        failed = self.result_deliveries(accepted=False)
+        self.assertEqual({call[0] for call in failed}, {self.leader['open_id'], electrical['open_id']})
+        for _, card, _ in failed:
+            self.assertEqual(card['header']['title']['content'], '工具检修合格')
+            self.assertIn('复检合格', card['body']['elements'][1]['content'])
+            self.assertIn('隔离检修复测通过', card['body']['elements'][2]['text']['content'])
+            self.assertIn(f"tool_session={draft['id']}&tool_asset=recTool0", card['body']['elements'][-1]['behaviors'][0]['default_url'])
+        self.service = self.restart()
+        configure()
+        with self.service.connect(True) as db:
+            db.execute('UPDATE tool_result_messages SET next_try=0')
+            self.assertEqual(db.execute("SELECT count(*) FROM tool_result_targets WHERE event='repaired'").fetchone()[0], 2)
+        self.assertEqual(self.result_deliveries(), failed)
+        self.assertEqual(self.result_deliveries(), [])
+        self.assertEqual(self.service.detail(electrical, order['id'])['outcome'], 'repaired')
+        self.assertEqual([item['id'] for item in self.service.workspace_get(electrical, draft['id'])['items']], ['recTool0'])
+        for actor_without_access in (hvac, offsite):
+            with self.assertRaises(RiskError):
+                self.service.detail(actor_without_access, order['id'])
+
     def test_pending_ledger_delete_keeps_row_until_retry_is_confirmed(self):
         saved = self.complete(self.open(), ('repair', 'normal'))
         submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
@@ -1216,6 +1263,7 @@ class WorkspaceTests(unittest.TestCase):
         locked = board['assets'][-1]
         self.assertEqual((locked['id'], locked['monthly_locked'], locked['disabled_reason']),
                          ('recTool0', True, '本月已填写'))
+        self.assertTrue(locked['filled_this_month'])
         self.assertEqual(locked['eligible_kinds'], [])
         with self.assertRaisesRegex(RiskError, '本月已填写'):
             self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-third'})
@@ -1224,7 +1272,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.service.workspace_submit(self.filler, first['id'], payload)['id'], submitted['id'])
         reset = dt.datetime.fromisoformat(board['monthly_reset_at'])
         with patch('bin.lan_bitable_template_portal.tool_management.clock', return_value=reset):
-            self.assertTrue(any(row['id'] == 'recTool0' and row['selectable']
+            self.assertTrue(any(row['id'] == 'recTool0' and row['selectable'] and not row['filled_this_month']
                                 for row in self.service.workspace_list(self.filler)['assets']))
             self.assertNotEqual(self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-third'})['id'], first['id'])
 

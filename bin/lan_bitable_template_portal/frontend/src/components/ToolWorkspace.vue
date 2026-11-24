@@ -37,7 +37,9 @@
                     <small v-if="kind === 'self' && asset.template_name">{{ asset.template_name }}</small>
                   </td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
-                  <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
+                  <td>{{ cycleText(asset) }}
+                    <NTag v-if="asset.filled_this_month||asset.monthly_locked" type="success" size="small">本月已填写</NTag>
+                    <small v-if="reason(asset)&&!asset.monthly_locked" class="asset-reason">{{ reason(asset) }}</small>
                     <small class="workspace-actions asset-actions">
                       <NButton text size="tiny" :disabled="!!busy" @click="showRecords(asset)">办理记录</NButton>
                       <NButton v-if="asset.plan?.mode === 'transfer'" size="tiny" :disabled="!!busy" @click="transferAsset(asset)">接收移交</NButton>
@@ -372,7 +374,7 @@ type Kind = 'self' | 'external';
 type OrderPlan = { mode: string; workspace_id: string; order_id?: string; revision?: number };
 type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
   self_cycle?: string | number; external_cycle?: string | number; profession?: string; template_name?: string; eligible_kinds?: Kind[];
-  disabled_reason?: string; monthly_locked?: boolean; responsible_name?: string };
+  disabled_reason?: string; monthly_locked?: boolean; filled_this_month?: boolean; responsible_name?: string };
 type Template = { id: string; name?: string; label?: string };
 type Cell = { address: string; value: string | number | boolean | null; rowspan: number; colspan: number;
   style?: Record<string, string | number>; editable?: boolean; text_editable?: boolean; check?: boolean; input_kind?:ToolDateKind; picker_default?:string };

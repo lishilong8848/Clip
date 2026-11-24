@@ -67,7 +67,7 @@
         </form>
         <section class="v2-check-handover" :class="{'ps-evidence':compact}"><h3 v-if="!compact">交接班附件 <small>{{task.handover_photo?'本班已上传':'本楼本班共用一份'}}</small></h3><CheckAttachments :task-id="task.id" kind="handover" :files="task.handover_photo?[task.handover_photo]:[]" :revision="task.submitted?task.revision:undefined" :locked="busy||uploading" :allow-upload="task.can_upload_handover===true" @busy="uploading=$event" @changed="load(true)" /></section>
       </template>
-      <NEmpty v-else :description="!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
+      <NEmpty v-else :description="focusedTask?'原检查已不在当前清单，可打开历史检查记录核对。':!state.definition.items.length?'尚未配置班前检查清单':!state.roster_ready?'正在准备当天排班':'当前没有已发布的本楼班前检查'" size="small" />
       <ol v-if="!task && state.definition.items.length" class="v2-check-preview"><li v-for="item in state.definition.items" :key="item.id">{{ item.text }}<small> · {{frequencyLabel(item.frequency)}}</small></li></ol>
       </div>
       </div>
@@ -110,7 +110,8 @@ const emit=defineEmits<{snapshot:[data:Dict]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
 const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(props.initialTaskId||''),error=ref(''),loading=ref(false),busy=ref(false);
-const showCheck=computed(()=>!props.workbench||!state.value||preShiftHomeVisible(props.user,state.value));
+const focusedTask=computed(()=>props.workbench?props.initialTaskId:'');
+const showCheck=computed(()=>!!focusedTask.value||!props.workbench||!state.value||preShiftHomeVisible(props.user,state.value));
 const editing=ref(false),saving=ref(false),locationSaving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict;fixed_recipients:string[]}[]>([]),version=ref(0);
 const recipientOptions=ref<{value:string;label:string}[]>([]),recipientsLoading=ref(false),recipientError=ref('');let recipientController:AbortController|undefined;
 const overviewOpen=ref(false);let firstState=true;
@@ -122,7 +123,8 @@ const drafts=ref<Record<string,Record<string,{status:string;note:string}>>>({});
 const draftVersions:Record<string,number>={};
 const message=useMessage(),dialog=useDialog();let timer:ReturnType<typeof setInterval>|undefined,controller:AbortController|undefined,disposed=false;
 const serverNow=computed(()=>Date.parse(state.value?.server_time||'')/1000);
-const visibleTasks=computed<Dict[]>(()=>[...(state.value?.tasks||[])].filter((t:Dict)=>!t.submitted||t.deadline>serverNow.value).sort((a,b)=>a.due-b.due||String(a.id).localeCompare(String(b.id))));
+const visibleTasks=computed<Dict[]>(()=>[...(state.value?.tasks||[])].filter((t:Dict)=>focusedTask.value
+  ?t.id===focusedTask.value:!t.submitted||t.deadline>serverNow.value).sort((a,b)=>a.due-b.due||String(a.id).localeCompare(String(b.id))));
 const task=computed<Dict|undefined>(()=>visibleTasks.value.find((t:Dict)=>t.id===selectedId.value)||visibleTasks.value.find((t:Dict)=>!t.submitted)||visibleTasks.value[0]);
 const needsAttention=computed(()=>Boolean(state.value&&(overviewOpen.value&&state.value.can_manage
   ?(state.value.overview?.pending??state.value.overview?.rows?.some((row:Dict)=>['待完成','逾期待补做'].includes(row.status)))

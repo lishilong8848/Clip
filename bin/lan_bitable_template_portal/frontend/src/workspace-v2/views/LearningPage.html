@@ -75,8 +75,8 @@
               </div>
               <div v-else class="lp-interview"><label class="lp-field">我的回答<textarea v-model="draft.answer_text" :disabled="locked || busy || loading" rows="3" /></label>
                 <div class="lp-tools"><span>掌握程度</span><button v-for="r in ratingLabels" :key="r" class="lp-btn" :aria-pressed="draft.self_rating===r" :disabled="locked || busy || loading" @click="draft.self_rating=r">{{ r }}</button></div></div>
-              <Teleport to="body" :disabled="!v2Mobile || !!modalKind || confirm.open">
-              <div class="lp-answer-actions" :class="{ 'lp-mobile-answer': v2Mobile && !modalKind && !confirm.open }" role="group" aria-label="答题操作"><span>{{ !canAnswer ? '只读题单' : draftRestored ? '草稿已恢复' : practice ? '复习作答' : current.invalid ? '题目已失效' : current.attempt ? '已记录作答' : '首次作答' }}</span>
+              <Teleport to="body" :disabled="embedded || !v2Mobile || !!modalKind || confirm.open">
+              <div class="lp-answer-actions" :class="{ 'lp-mobile-answer': !embedded && v2Mobile && !modalKind && !confirm.open }" role="group" aria-label="答题操作"><span>{{ !canAnswer ? '只读题单' : draftRestored ? '草稿已恢复' : practice ? '复习作答' : current.invalid ? '题目已失效' : current.attempt ? '已记录作答' : '首次作答' }}</span>
                 <div class="lp-tools"><button class="lp-btn" :disabled="busy || loading || !index" @click="v2Question(index-1)">上一题</button>
                 <button v-if="!locked" class="lp-btn primary" :disabled="busy || loading" @click="submitAnswer">{{ busy ? '正在保存…' : '确认作答' }}</button>
                 <button v-else-if="current.invalid || current.attempt" class="lp-btn" disabled>{{ current.invalid ? '题目已失效' : '已确认作答' }}</button>
@@ -165,7 +165,7 @@
     </section>
     <nav v-if="!reading && ['history','review','questions','issues'].includes(tab) && total && (!v2FocusedLearning || pageCount>1)" aria-label="记录分页" class="lp-tools lp-pages"><span>共 {{ total }} 条 · 第 {{ pageNumber }} / {{ pageCount }} 页</span><button class="lp-btn" :disabled="busy || loading || pageNumber<=1" @click="turnPage(-1)">上一页</button><button class="lp-btn" :disabled="busy || loading || pageNumber>=pageCount" @click="turnPage(1)">下一页</button><label class="lp-field">跳至页<input type="number" min="1" :max="pageCount" v-model.number="jumpPage" @keyup.enter="gotoPage(jumpPage)"></label><button class="lp-btn" :disabled="busy || loading" @click="gotoPage(jumpPage)">跳转</button></nav>
   </template>
-  <Teleport to="body">
+  <Teleport to="body" :disabled="embedded">
     <div v-if="modalKind" class="lp-modal-wrap" @click.self="closeModal">
       <section ref="modalElement" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="lp-dialog-title" class="lp-modal" @paste="['question','issue'].includes(modalKind) && pasteFiles($event)">
         <header class="lp-modal-head"><h2 id="lp-dialog-title">{{ modalKind==='question' ? editor.id?'编辑题目':'新建题目' : modalKind==='issue' ? issue.id?'处理反馈':'提交题目反馈' : modalKind==='import'?'批量导入题目':modalKind==='people'?'选择人员':'附件预览' }}</h2><div class="lp-tools"><small v-if="modalDirty">有未保存内容</small>

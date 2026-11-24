@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {ref,watch} from 'vue';
-import {ArrowRight, ClipboardCheck, FileCheck2, ListFilter, X} from 'lucide-vue-next';
+import {ArrowRight, CheckCircle2, ClipboardCheck, FileCheck2, ListFilter, X} from 'lucide-vue-next';
 const props=defineProps<{r:Record<string,any>}>();
 const limit=ref(40),basket=ref<HTMLElement>();
 watch(()=>[props.r.kind,props.r.search,props.r.scope,props.r.profession],()=>{limit.value=40});
@@ -19,10 +19,12 @@ function focusPanel(panel?:HTMLElement){panel?.focus({preventScroll:true});panel
         <div class="pair-head"><h2 id="tool-assets-title" tabindex="-1">工具清单 <small>{{ r.visibleAssets.length }}</small></h2>
           <label class="td-check"><input type="checkbox" :checked="r.allVisibleSelected" :indeterminate="r.someVisibleSelected && !r.allVisibleSelected" :disabled="!r.visibleEligible.length" @change="r.toggleVisible(($event.target as HTMLInputElement).checked)"/>全选可办</label></div>
         <div v-if="r.visibleAssets.length" class="pair-asset-list" role="region" aria-label="筛选后的工具" tabindex="0">
-          <article v-for="a in r.visibleAssets.slice(0,limit)" :key="a.id" class="pair-asset" :data-selected="r.selected.has(a.id)">
+          <article v-for="a in r.visibleAssets.slice(0,limit)" :key="a.id" class="pair-asset"
+            :data-selected="r.selected.has(a.id)" :data-filled="a.filled_this_month||a.monthly_locked||undefined">
           <label class="td-check"><input type="checkbox" :aria-label="'选择'+a.name" :checked="r.selected.has(a.id)" :disabled="!r.selectable(a)" @change="r.toggleAsset(a.id,($event.target as HTMLInputElement).checked)"/>
             <span><strong>{{ a.name }}</strong><small>{{ [r.scopeLabel(a.scope),a.profession || '专业未填写',a.location,a.model,a.brand].filter(Boolean).join(' · ') }}</small><small v-if="a.responsible_name">负责人 {{ a.responsible_name }}</small></span></label>
-          <div class="pair-meta"><small>{{ r.cycleText(a) }}</small><small v-if="!r.eligible(a)">{{ r.reason(a) }}</small><small v-else-if="r.kind==='self'">{{ a.template_name }}</small></div>
+          <div class="pair-meta"><span v-if="a.filled_this_month||a.monthly_locked" class="pair-filled"><CheckCircle2 :size="14" aria-hidden="true"/>本月已填写</span>
+            <small>{{ r.cycleText(a) }}</small><small v-if="!r.eligible(a)&&!a.monthly_locked">{{ r.reason(a) }}</small><small v-else-if="r.kind==='self'&&!a.monthly_locked">{{ a.template_name }}</small></div>
           <div class="td-actions"><button class="td-link" @click="r.showRecords(a)">记录</button><button v-if="a.plan?.mode==='resume'" @click="r.openSaved(a.plan.workspace_id,a.id)">接续办理</button><button v-if="a.plan?.mode==='transfer'" @click="r.transferAsset(a)">接收移交</button></div>
           </article>
           <button v-if="limit<r.visibleAssets.length" class="td-link" @click="limit+=40">显示更多工具</button>
@@ -53,7 +55,10 @@ function focusPanel(panel?:HTMLElement){panel?.focus({preventScroll:true});panel
 .pair-columns>.pair-batch{background:color-mix(in srgb,var(--td-mint) 60%,var(--td-face));display:flex;flex-direction:column;align-items:stretch;gap:.65rem}
 .pair-head{min-height:32px}.pair-head h2[tabindex]{scroll-margin-block-start:1rem}
 .pair-asset{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,.85fr) auto;align-items:center;gap:.35rem;padding:.35rem .3rem;border-top:1px solid var(--td-line);overflow-wrap:anywhere}.pair-assets{container:inventory / inline-size}
-.pair-asset .td-check{flex-wrap:nowrap;cursor:pointer}.pair-asset input{flex:none}.pair-asset small{display:block}.pair-asset[data-selected=true]{background:var(--td-sky)}
+.pair-asset .td-check{flex-wrap:nowrap;cursor:pointer}.pair-asset input{flex:none}.pair-asset small{display:block}
+.pair-asset[data-filled=true]{box-shadow:inset 3px 0 var(--cf-success,#17824f);background:color-mix(in srgb,var(--cf-success,#17824f) 8%,var(--td-face))}
+.pair-asset[data-selected=true]{background:var(--td-sky)}
+.pair-filled{display:inline-flex;align-items:center;gap:.25rem;padding:.13rem .4rem;border-radius:5px;color:var(--cf-success,#17824f);font-size:.8rem;font-weight:700}
 .pair-asset-list{max-height:min(63dvh,38rem);overflow:auto;scrollbar-gutter:stable}
 .pair-members{list-style:none;max-height:min(48dvh,28rem);overflow:auto;display:grid;gap:.35rem;margin:0;padding:2px;scrollbar-gutter:stable}
 .pair-members li{display:flex;align-items:center;justify-content:space-between;gap:.45rem;border-radius:6px;padding:.4rem .55rem;background:var(--td-face);overflow-wrap:anywhere}

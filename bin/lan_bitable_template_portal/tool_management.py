@@ -1183,6 +1183,9 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             self.enqueue(db, identity, *dests)
             if reviewing:
                 tool_result_notices.queue_result(db, row, updates['outcome'], actor, now, note)
+            if action == 'repaired':
+                tool_result_notices.queue_result(db, row, 'repaired', actor, now, note,
+                    profession=self._tool_profession(db, json.loads(row['asset'])))
             if row['submitted_at'] or updates.get('submitted_at'):
                 db.execute('UPDATE tool_work_archives SET needs_refresh=1 WHERE month=?', (row['month'],))
             return self.work_info(db, actor, self._work(db, actor, identity))
