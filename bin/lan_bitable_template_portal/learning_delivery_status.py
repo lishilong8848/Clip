@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from contextlib import closing
 
 from . import learning as core
-from .learning_reminders import ROSTER_VERSION, resolve_roster, shift_times
+from .learning_reminders import ROSTER_VERSION, resolve_roster, shift_times, suppress_long_day_backfill
 from .learning_onboarding import daily_eligibility
 from .learning_shift_storage import current_directory
 
@@ -31,6 +31,8 @@ def _people(snapshot, shift):
     selected = {}
     for row in people:
         if isinstance(row, dict) and row.get('employee_linked') is False:
+            continue
+        if isinstance(row, dict) and suppress_long_day_backfill(row, snapshot.get('date')):
             continue
         if not isinstance(row, dict) or row.get('shift') not in ('白', '夜'):
             reason = '排班名单格式待核对'

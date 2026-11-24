@@ -87,6 +87,14 @@ class PersonnelSourceTests(unittest.TestCase):
         self.assertEqual(source.shift_kind({'班组': 'A班', '班次': ['长白', '夜'], '岗位': '运维实习生'}), '待核对')
         self.assertEqual(source.shift_kind({'班次': '长白', '岗位': 'FOC', '体系岗位': '实习生'}), '待核对')
 
+    def test_day_and_long_day_aliases_only_match_long_day_operations_interns(self):
+        for shifts in (['白', '长白'], ['长白', '白', '白']):
+            fields = {'班组': ['长白'], '岗位': ['运维实习生'], '班次': {'value': shifts}}
+            self.assertEqual(source.shift_kind(fields), '长白')
+            self.assertEqual(source.shift_kind(fields | {'班组': 'A班'}), '待核对')
+            self.assertEqual(source.shift_kind(fields | {'岗位': 'FOC', '体系岗位': '实习生'}), '待核对')
+            self.assertEqual(source.shift_kind(fields | {'班次': shifts + ['夜']}), '待核对')
+
     def test_full_table_read_projects_fields_and_rejects_incomplete_pages(self):
         service = Mock()
         service._request_json.side_effect = [
@@ -143,7 +151,7 @@ class PersonnelSourceTests(unittest.TestCase):
         service = SimpleNamespace(_state_store=Store())
         today = dt.datetime.now(source.TZ).date().isoformat()
         rows = [
-            row('recIntern', name='当班实习', 班组='长白', 班次={'value':['白']}, 岗位=['运维实习生'], 体系岗位=''),
+            row('recIntern', name='当班实习', 班组='长白', 班次={'value':['白','长白']}, 岗位=['运维实习生'], 体系岗位=''),
             row('recLongShift', name='长白班次实习', 班组='', 班次={'value':['长白']}, 岗位='运维实习生'),
             row('recRest', name='休班实习', 班组='长白', 班次={'value':[]}, 岗位='运维实习生'),
             row('recFoc', name='其他岗位', 班组='长白', 班次='白', 岗位='FOC', 体系岗位='实习生'),

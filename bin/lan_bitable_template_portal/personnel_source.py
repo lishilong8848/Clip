@@ -14,7 +14,7 @@ URL = f'https://vnet.feishu.cn/base/{APP_TOKEN}?table={TABLE_ID}'
 EXTERNAL_APP_TOKEN = 'HU38bc1vnamMK9sCeOgclUvXnFc'
 EXTERNAL_TABLE_ID = 'tblC77nllNrprHBY'
 ROSTER_NAMESPACE = 'personnel_daily_roster'
-ROSTER_PARSER_VERSION = 5
+ROSTER_PARSER_VERSION = 6
 TZ = dt.timezone(dt.timedelta(hours=8))
 ROSTER_FIELDS = ['姓名', '员工姓名', '员工工号', '机楼/专业', '体系岗位', '岗位',
                  '账号性质', '离职/异动情况', '班组', '班次']
@@ -53,8 +53,11 @@ def shift_kind(fields):
     if not shifts:
         return ''
     group = text(fields.get('班组'))
+    is_operations_intern = text(fields.get('岗位')) == '运维实习生'
+    if group == '长白' and is_operations_intern and set(shifts) == {'白', '长白'}:
+        return '长白'
     if len(shifts) == 1:
-        if shifts[0] == '长白' and text(fields.get('岗位')) == '运维实习生':
+        if shifts[0] == '长白' and is_operations_intern:
             return '长白'
         if group == '长白' and shifts[0] == '白':
             return '长白'
@@ -160,6 +163,7 @@ def daily_roster(service, day, *, force=False):
                 'open_id': oid if re.fullmatch(r'ou_[A-Za-z0-9]+', oid) else '',
                 'employee_linked': bool(employee),
                 'scope': scopes[0], 'shift': '白' if kind == '长白' else kind,
+                **({'combined_day_labels': True} if kind == '长白' and len(set(values(fields.get('班次')))) == 2 else {}),
                 'group': text(fields.get('班组')), 'duty_kind': kind, 'position': text(fields.get('岗位'))})
         # Do not label yesterday's lookup result as today's after a midnight page read.
         if dt.datetime.now(TZ).date().isoformat() != day:

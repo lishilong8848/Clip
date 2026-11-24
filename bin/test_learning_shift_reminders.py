@@ -204,40 +204,59 @@ class ShiftReminderTests(TestCase):
         self.assertEqual(self.reader.call_count,1)
         self.assertEqual(self.service._get('notification',f'shift:{day}:白:ou_intern')['status'],'sent')
 
-    def test_personnel_long_day_intern_sends_once_and_blank_shift_does_not_send(self):
+    def test_personnel_long_day_aliases_skip_cutover_backfill_and_send_once_other_days(self):
         from types import SimpleNamespace
         from bin.test_personnel_source import Store, row
-        from lan_bitable_template_portal import personnel_source as source
+        from lan_bitable_template_portal import learning_delivery_status, personnel_source as source
 
         current = dt.datetime.now(learning.TZ).replace(hour=13, minute=0, second=0, microsecond=0)
         day = current.date().isoformat()
         raw_service = SimpleNamespace(_state_store=Store())
         source_rows = []
         for rid, name, group, shift, position in (
-            ('intern', '长白班次实习', '', '长白', '运维实习生'),
-            ('rest', '休班实习', '长白', '', '运维实习生'),
-            ('engineer', '普通长白', '长白', '白', '电气工程师'),
-            ('external', '外部人员', 'A班', '白', '值班员'),
-            ('night', '夜班人员', 'B班', '夜', '值班长'),
+            ('intern', '长白班次实习', '长白', ['白', '长白'], '运维实习生'),
+            ('rest', '休班实习', '长白', [], '运维实习生'),
+            ('conflict', '班次冲突实习', '长白', ['白', '夜', '长白'], '运维实习生'),
+            ('engineer', '普通长白', '长白', ['白'], '电气工程师'),
+            ('external', '外部人员', 'A班', ['白'], '值班员'),
+            ('night', '夜班人员', 'B班', ['夜'], '值班长'),
         ):
-            source_rows.append(row(rid, name=name, oid='ou_' + rid, 班组=group, 班次={'value': [shift] if shift else []},
+            source_rows.append(row(rid, name=name, oid='ou_' + rid, 班组=group, 班次={'value': shift},
                                    岗位=position, **{'机楼/专业': ['A楼']}))
             self.people['people'][rid] = {'name': name, 'scopes': ['A'], 'selectable': True,
                                           'position': position, 'login_ids': ['ou_' + rid]}
         self.reader.side_effect = lambda date: reminders.read_roster(raw_service, date, scopes=['A'], with_status=True)
+        with self.service.transaction() as conn:
+            self.service._put('local', 'shift_roster', {'date': day, 'version': reminders.ROSTER_VERSION,
+                'policy_version': reminders.ROSTER_POLICY_VERSION - 1, 'observed_at': current.timestamp(),
+                'cached_at': current.timestamp(), 'people': [], 'issues': []}, conn, False)
+            previous = f'shift:{day}:白:ou_external'
+            self.service._put('notification', previous, {'id': previous, 'date': day, 'shift': '白', 'kind': 'shift',
+                'open_id': 'ou_external', 'scope': '', 'status': 'sent'}, conn, False)
         with patch.object(source, 'read_records', return_value=source_rows), \
              patch('socket.socket.connect', side_effect=AssertionError('offline only')):
             self.service.send_notifications(current.replace(hour=12, minute=59))
             self.sender.assert_not_called()
-            self.service.send_notifications(current)
-            self.service = self.make_service()
-            self.service.send_notifications(current)
-        self.assertCountEqual([call.args[0] for call in self.sender.call_args_list], ['ou_intern', 'ou_external'])
+            with patch.object(reminders, 'LONG_DAY_ALIAS_NO_BACKFILL_DATE', day):
+                self.service.send_notifications(current)
+                self.sender.assert_not_called()
+                self.assertFalse(self.service._get('notification', f'shift:{day}:白:ou_intern'))
+                snapshot = self.service._get('local', 'shift_roster')
+                self.assertIn('ou_intern', {p['open_id'] for p in snapshot['people']})
+                expected, _ = learning_delivery_status._people(snapshot, '白')
+                self.assertEqual([p['open_id'] for p in expected], ['ou_external'])
+            previous_day = (current.date() - dt.timedelta(days=1)).isoformat()
+            with patch.object(reminders, 'LONG_DAY_ALIAS_NO_BACKFILL_DATE', previous_day):
+                self.service.send_notifications(current)
+                self.service = self.make_service()
+                self.service.send_notifications(current)
+        self.assertEqual([call.args[0] for call in self.sender.call_args_list], ['ou_intern'])
+        self.assertEqual(self.sender.call_args.args[2], f'shift:{day}:白:ou_intern')
         saved = self.service._get('notification', f'shift:{day}:白:ou_intern')
         self.assertEqual(saved['status'], 'sent')
         self.assertEqual(saved['expires_at'], current.replace(hour=18).timestamp())
         snapshot = self.service._get('local', 'shift_roster')
-        self.assertFalse(snapshot['issues'])
+        self.assertEqual([issue['name'] for issue in snapshot['issues']], ['班次冲突实习'])
         self.assertEqual({p['open_id'] for p in snapshot['people']}, {'ou_intern', 'ou_external', 'ou_night'})
         self.assertFalse(self.service._get('notification', f'shift:{day}:白:ou_rest'))
         self.assertFalse(self.service._get('notification', f'shift:{day}:白:ou_engineer'))

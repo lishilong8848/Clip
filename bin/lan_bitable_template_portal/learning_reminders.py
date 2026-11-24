@@ -11,7 +11,8 @@ VIEW_ID = ''
 TZ = dt.timezone(dt.timedelta(hours=8))
 SHIFT_TIMES = {'夜': '20:00', '白': '13:00'}
 ROSTER_VERSION = 6
-ROSTER_POLICY_VERSION = 3
+ROSTER_POLICY_VERSION = 4
+LONG_DAY_ALIAS_NO_BACKFILL_DATE = '2026-11-24'
 APP_ACCESS_URL = 'https://applink.feishu.cn/T9aTCORtUJLb'
 
 
@@ -51,6 +52,10 @@ def excluded_long_day(person):
     # includes other jobs (e.g. FOC) and must not broaden the recipient set.
     return (person.get('duty_kind') == '长白' or person.get('group') == '长白'
             or person.get('shift') == '长白') and person.get('position') != '运维实习生'
+
+
+def suppress_long_day_backfill(person, day):
+    return day == LONG_DAY_ALIAS_NO_BACKFILL_DATE and person.get('combined_day_labels') is True
 
 
 def read_roster(service, day, *, scopes=tuple('ABCDEH'), include_long_day=False, with_status=False):
@@ -212,7 +217,8 @@ def enqueue_shift_reminders(service, current):
                     for issue in snapshot.get('issues', []))
     if warnings:
         service._last_error = '学练排班待核对：' + '；'.join(warnings)
-    people = [person for person in people if daily_eligibility(person, day, directory)[0] != 'exempt']
+    people = [person for person in people if not suppress_long_day_backfill(person, day)
+              and daily_eligibility(person, day, directory)[0] != 'exempt']
     with service.transaction() as conn:
         for person in people:
             if current.strftime('%H:%M') < times[person['shift']]:
