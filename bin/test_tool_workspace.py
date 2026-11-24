@@ -141,6 +141,22 @@ class WorkspaceTests(unittest.TestCase):
             'signature': self.signature(), 'action': 'approve',
             'items': [{'asset_id': item['id'], 'revision': item['order_revision']} for item in session['items']]})
 
+    def test_engineer_sees_only_own_profession_and_unclassified_tools_and_history(self):
+        engineering = self.filler | {'level': 'L2', 'role': 'building', 'category': 'engineer', 'specialties': ['电气']}
+        self.cloud.assets[0]['profession'] = '电气'
+        self.cloud.assets[1]['profession'] = '暖通'
+        self.service.refresh()
+        draft = self.open()
+        board = self.service.workspace_list(engineering)
+        self.assertEqual({item['id'] for item in board['assets']}, {'recTool0', 'recTool2', 'recTool3'})
+        self.assertEqual({item['id'] for item in self.service.workspace_get(engineering, draft['id'])['items']}, {'recTool0'})
+        self.assertEqual([item['id'] for item in self.service.workspace_history(engineering)['sessions'][0]['history_items']], ['recTool0'])
+        with self.assertRaises(RiskError):
+            self.service.tool_history(engineering, 'recTool1')
+        with self.assertRaises(RiskError):
+            self.service.workspace_open(engineering, {'kind': 'self', 'asset_ids': ['recTool1'], 'operation_id': 'other-profession'})
+        self.assertEqual(len(self.service.workspace_get(self.filler, draft['id'])['items']), 2)
+
     def test_general_cells_survive_restart_review_and_each_archived_workbook(self):
         from bin.lan_bitable_template_portal.tool_form_titles import restore_titles, title_anchors
         from openpyxl.styles import Border, Side
@@ -263,6 +279,9 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(self.cloud.removed_records, {'recArchiverecTool0'})
 
     def test_inventory_refresh_does_not_block_or_replace_existing_history(self):
+        for asset in self.cloud.assets[:2]:
+            asset['self_cycle'] = '季度'
+        self.service.refresh()
         saved = self.complete(self.open())
         submitted = self.service.workspace_submit(self.filler, saved['id'], {'revision': saved['revision']})
         self.approve(submitted)
@@ -703,8 +722,11 @@ class WorkspaceTests(unittest.TestCase):
             value = next(behavior['value'] for element in card['body']['elements']
                          for behavior in element.get('behaviors', [])
                          if behavior['type'] == 'callback' and behavior['value']['decision'] == 'approve')
-            return apply(runtime, {'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
-                'event': {'action': {'value': value}, 'operator': {'open_id': recipient}}}, 'test_app')['toast']
+            result = apply(runtime, {'header': {'app_id': 'test_app', 'event_type': 'card.action.trigger'},
+                'event': {'action': {'value': value}, 'operator': {'open_id': recipient}}}, 'test_app')
+            self.assertNotRegex(result['toast'], r'(^|\s)0 项')
+            self.assertEqual(result['card']['body']['elements'][0]['text']['content'], result['toast'])
+            return result['toast']
 
         link = lambda *_: 'https://fixture.test/original'
         draft = self.complete(self.open(), ('scrap', 'scrap'))
@@ -1020,6 +1042,8 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(item['order_status'], 'cancelled' if item['order_id'] == order_id else 'pending')
 
     def test_two_records_for_same_tool_approve_and_archive_separately(self):
+        self.cloud.assets[0]['self_cycle'] = '季度'
+        self.service.refresh()
         request = {'kind': 'self', 'asset_ids': ['recTool0'], 'template_id': 'recTemplate', 'new_record': True}
         pending = []
         for operation in ('first-check', 'second-check'):
@@ -1044,6 +1068,63 @@ class WorkspaceTests(unittest.TestCase):
             self.service.workspace_get(self.filler, first['id'])
         self.assertEqual(len(self.cloud.writes), 2)
 
+    def test_monthly_tool_locks_after_submission_and_reopens_next_month(self):
+        request = {'kind': 'self', 'asset_ids': ['recTool0'], 'template_id': 'recTemplate', 'new_record': True}
+        first = self.complete(self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-first'}))
+        second = self.complete(self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-second'}))
+        self.assertTrue(any(row['id'] == 'recTool0' and row['selectable']
+                            for row in self.service.workspace_list(self.filler)['assets']))
+        payload = {'revision': first['revision']}
+        submitted = self.service.workspace_submit(self.filler, first['id'], payload)
+        self.service = self.restart()
+        board = self.service.workspace_list(self.filler)
+        locked = board['assets'][-1]
+        self.assertEqual((locked['id'], locked['monthly_locked'], locked['disabled_reason']),
+                         ('recTool0', True, '本月已填写'))
+        self.assertEqual(locked['eligible_kinds'], [])
+        with self.assertRaisesRegex(RiskError, '本月已填写'):
+            self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-third'})
+        with self.assertRaisesRegex(RiskError, '本月已填写'):
+            self.service.workspace_submit(self.filler, second['id'], {'revision': second['revision']})
+        self.assertEqual(self.service.workspace_submit(self.filler, first['id'], payload)['id'], submitted['id'])
+        reset = dt.datetime.fromisoformat(board['monthly_reset_at'])
+        with patch('bin.lan_bitable_template_portal.tool_management.clock', return_value=reset):
+            self.assertTrue(any(row['id'] == 'recTool0' and row['selectable']
+                                for row in self.service.workspace_list(self.filler)['assets']))
+            self.assertNotEqual(self.service.workspace_open(self.filler, request | {'operation_id': 'monthly-third'})['id'], first['id'])
+
+    def test_uses_each_tools_attachment_and_pins_it_for_existing_drafts(self):
+        electrical, hvac = self.cloud.assets[:2]
+        electrical.update(profession='电气', template_attachment={'name': '电气自检.xlsx', 'file_token': 'fileA'})
+        hvac.update(profession='暖通', template_attachment={'name': '暖通自检.xlsx', 'file_token': 'fileB'})
+        source_hvac = (TEMPLATES / 'folder_imports' / '暖通自检记录单' / '温湿度仪自检记录.xlsx').read_bytes()
+        self.service.refresh()
+        board = self.service.workspace_list(self.filler)
+        self.assertEqual([(a['profession'], a['template_name']) for a in board['assets'][:2]],
+                         [('电气', '电气自检.xlsx'), ('暖通', '暖通自检.xlsx')])
+        request = {'kind': 'self', 'asset_ids': [electrical['id'], hvac['id']], 'operation_id': 'asset-files', 'new_record': True}
+        with patch.object(self.cloud, 'download_template', side_effect=[self.cloud.content, source_hvac]) as download:
+            draft = self.service.workspace_open(self.filler, request)
+            self.assertEqual([call.args[0]['file_token'] for call in download.call_args_list], ['fileA', 'fileB'])
+            self.assertTrue(all(call.kwargs == {'inventory': True} for call in download.call_args_list))
+        self.assertFalse(self.cloud.bindings)
+        first, second = draft['items']
+        self.assertNotEqual(first['template_version'], second['template_version'])
+        self.assertEqual([item['asset']['profession'] for item in draft['items']], ['电气', '暖通'])
+        for item in draft['items']:
+            content = item['template']
+            address = content['prefill_fields']['assets']['profession']
+            self.assertEqual(item['values'][content['schema']['sheet'] + '!' + address], item['asset']['profession'])
+        self.assertNotIn('template_attachment', second['asset'])
+        self.assertEqual(self.service.workspace_history(self.filler)['sessions'][0]['history_items'][1]['profession'], '暖通')
+        hvac.update(template_attachment=None, template_error='工具台账的「模板」字段未上传文件。')
+        self.service.refresh()
+        self.service = self.restart()
+        self.assertEqual(self.service.workspace_open(self.filler, request)['id'], draft['id'])
+        self.assertEqual(self.service.workspace_get(self.filler, draft['id'])['items'][1]['template_version'], second['template_version'])
+        with self.assertRaisesRegex(RiskError, '未上传文件'):
+            self.service.workspace_open(self.filler, request | {'operation_id': 'missing-file'})
+
     def test_module_holder_can_fill_and_select_completion_without_review_permission(self):
         worker = actor(identity='operator')
         self.assertTrue(self.service.available_to(worker))
@@ -1063,6 +1144,9 @@ class WorkspaceTests(unittest.TestCase):
     def test_upgrade_keeps_old_batches_and_can_open_same_month_after_archive(self):
         from bin.lan_bitable_template_portal.tool_management import WORK_ORDER_SCHEMA
 
+        for asset in self.cloud.assets[:2]:
+            asset['self_cycle'] = '季度'
+        self.service.refresh()
         active = self.open()
         old_schema = WORK_ORDER_SCHEMA.replace('workspace_direct INTEGER NOT NULL DEFAULT 0,', '')
         old_schema = old_schema.rstrip().removesuffix(')') + ',UNIQUE(month,asset_id,kind))'
@@ -1154,7 +1238,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(old['items'][0]['order_status'], 'cancelled')
         self.assertEqual(old['items'][0]['values'], complete['items'][0]['values'])
         self.assertEqual(self.service.workspace_submit(self.filler, old['id'], {'revision': old['revision']})['status'], 'review_pending')
-        new = self.service.workspace_open(receiver, {'kind':'self', 'asset_ids':[moved['id']], 'operation_id':'moved'})
+        new = self.service.workspace_open(receiver, {'kind':'self', 'asset_ids':[moved['id']], 'operation_id':'moved',
+                                                    'template_id': 'recTemplate'})
         self.assertEqual(new['items'][0]['asset']['scope'], 'B')
 
     def test_pending_bindings_allow_verified_tool_to_save_and_resume_after_restart(self):
@@ -1250,6 +1335,10 @@ class WorkspaceTests(unittest.TestCase):
             self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 200)
             body['inspection']['report_no'] = 'OTHER'
             self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 409)
+            self.filler['modules'] = ['risk_inspection']
+            self.assertEqual(client.get(base, headers=headers).status_code, 403)
+            self.assertEqual(client.get(route + '/report-file', headers=headers).status_code, 403)
+            self.assertEqual(client.post(route + '/submit', headers=headers, json=body).status_code, 403)
 
     def test_background_loop_runs_workspace_when_monthly_queue_is_empty(self):
         from bin.lan_bitable_template_portal.tool_management_cloud import run_tool_jobs

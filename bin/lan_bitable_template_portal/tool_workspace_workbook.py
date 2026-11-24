@@ -79,23 +79,25 @@ def _layout(sheet, schema):
     merged = {(item.min_row, item.min_col): item for item in sheet.merged_cells.ranges}
     if hvac:
         assets.update(name='C3', model='C4', brand='G4')
-    else:
-        # Only use explicitly labeled slots in the header of a derived electrical template.
-        for row in sheet.iter_rows(min_row=3, max_row=9, max_col=9):
-            for cell in row:
-                if not isinstance(cell.value, str):
+    labels_by_field = {'profession': {'专业'}}
+    if not hvac:
+        labels_by_field.update(_ASSET_LABELS)
+    for row in sheet.iter_rows(min_row=3, max_row=9, max_col=9):
+        for cell in row:
+            if not isinstance(cell.value, str):
+                continue
+            label = cell.value.strip().rstrip('：:').strip()
+            for field, labels in labels_by_field.items():
+                if field in assets or label not in labels:
                     continue
-                label = cell.value.strip().rstrip('：:').strip()
-                for field, labels in _ASSET_LABELS.items():
-                    if field in assets or label not in labels:
-                        continue
-                    region = merged.get((cell.row, cell.column))
-                    target_column = (region.max_col if region else cell.column) + 1
-                    if target_column > 9:
-                        continue
-                    target = sheet.cell(cell.row, target_column)
-                    if not isinstance(target, MergedCell) and target.value in (None, '') and target.coordinate not in editable | set(assets.values()):
-                        assets[field] = target.coordinate
+                region = merged.get((cell.row, cell.column))
+                target_column = (region.max_col if region else cell.column) + 1
+                if target_column > 9:
+                    continue
+                target = sheet.cell(cell.row, target_column)
+                can_prefill = target.value in (None, '') or field == 'profession' and isinstance(target.value, str) and target.data_type != 'f'
+                if not isinstance(target, MergedCell) and can_prefill and target.coordinate not in editable | set(assets.values()):
+                    assets[field] = target.coordinate
     editable.update(assets.values())
     checks = {f'I{entry["row"]}' for entry in schema['checks']}
     for address in editable | checks:

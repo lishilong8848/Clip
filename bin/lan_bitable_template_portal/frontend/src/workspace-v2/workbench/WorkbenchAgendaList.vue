@@ -13,8 +13,12 @@ defineEmits<{ task:[item:WorkItem] }>();
       <div>
         <small>{{ entry.label }}</small>
         <button v-if="entry.task" type="button" class="agenda-task" @click="$emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></button>
+        <details v-else-if="entry.meta">
+          <summary class="agenda-task">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></summary>
+          <p>{{ entry.meta }}</p>
+        </details>
         <b v-else>{{ entry.title }}</b>
-        <p v-if="entry.meta">{{ entry.meta }}</p>
+        <p v-if="entry.task&&entry.meta">{{ entry.meta }}</p>
       </div>
     </li>
   </ol>
@@ -29,6 +33,7 @@ defineEmits<{ task:[item:WorkItem] }>();
 .timeline small,.timeline p { margin:0; color:var(--desk-muted); font-size:12px }
 .agenda-task { display:flex; align-items:center; gap:5px; text-align:left; padding:0; border:0; background:transparent; font:inherit; font-weight:650; color:var(--desk-green); cursor:pointer }
 .agenda-task svg { flex:none }
+details[open] summary svg{transform:rotate(90deg)}
 .timeline[data-view=cards]{display:grid;gap:6px}
 .timeline[data-view=cards] li{padding:4px 7px;border:1px solid var(--desk-line);border-radius:8px;background:var(--soft-face)}
 .timeline[data-view=cards] li>div{border:0;padding-inline-start:0}

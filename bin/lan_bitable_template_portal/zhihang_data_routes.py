@@ -38,13 +38,13 @@ def install_zhihang_data(app, controller, runtime, browser_login):
         # Long batches already have a durable execution ID and remain visible after disconnect.
         return pending.result() if done else started
 
-    def can_access(request, session):
+    def can_access(request, session, module="zhihang_data"):
         return bool(session and not session.get("is_guest") and not session.get("impersonation")
                     and not getattr(request.state, "admin_impersonation_session", None)
                     and not request.cookies.get(COOKIE)
                     and topic_execution(runtime.auth_manager, session) is None
                     and runtime.auth_manager.is_admin(session)
-                    and "accounts" in allowed_modules(runtime.auth_manager, session))
+                    and module in allowed_modules(runtime.auth_manager, session))
 
     async def endpoint(request: Request):
         session = await asyncio.to_thread(controller._current_session, request)
@@ -111,7 +111,7 @@ def install_zhihang_data(app, controller, runtime, browser_login):
         session = await asyncio.to_thread(controller._current_session, request)
         if not session:
             return controller._auth_required_response()
-        if not await asyncio.to_thread(can_access, request, session) or "drills" not in allowed_modules(runtime.auth_manager, session):
+        if not await asyncio.to_thread(can_access, request, session, "drills"):
             return JSONResponse({"ok": False, "error": "当前账号无权管理 H 楼值班演练。"}, status_code=403)
         try:
             path = request.scope["route"].path
@@ -124,6 +124,11 @@ def install_zhihang_data(app, controller, runtime, browser_login):
                     return JSONResponse({"ok": False, "error": "不允许跨来源提交。"}, status_code=403)
             if path.endswith("/records"):
                 result = await asyncio.to_thread(h_service.records)
+                from .module_access import professional_record_visible, session_engineer_professions
+
+                professions = await asyncio.to_thread(session_engineer_professions, runtime.auth_manager, session)
+                if professions is not None:
+                    result = {**result, 'rows': [row for row in result['rows'] if professional_record_visible(professions, row)]}
             elif path.endswith("/login"):
                 result = await asyncio.to_thread(h_login.start)
             elif path.endswith("/settings"):

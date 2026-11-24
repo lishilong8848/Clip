@@ -6,7 +6,7 @@
         <strong>个人签名</strong>
         <span>{{ openId ? '查看该账号签名状态' : '当前登录账号签名状态' }}</span>
       </div>
-      <button v-if="!loading && !error" type="button" class="as-refresh" :disabled="busy" @click="load({refresh:true})">
+      <button type="button" class="as-refresh" :disabled="busy" aria-label="刷新签名信息" @click="load({refresh:true})">
         <RefreshCw :size="14" :class="{ spin: loading }" />刷新
       </button>
     </header>
@@ -15,7 +15,6 @@
 
     <div v-else-if="error" class="as-state error" role="alert">
       <CircleAlert :size="17" /><span>{{ error }}</span>
-      <button type="button" class="as-link" @click="load({refresh:true})"><RefreshCw :size="14" />重试</button>
     </div>
 
     <template v-else-if="person">
@@ -40,14 +39,14 @@
       </details>
 
       <div class="as-actions">
-        <button v-if="canViewSignature" type="button" class="as-btn" :disabled="busy" @click="togglePreview">
-          <Eye :size="15" />{{ showPreview ? '收起签名' : '查看签名' }}
+        <button v-if="canViewSignature" type="button" class="as-btn" :aria-expanded="showPreview" :disabled="busy" @click="togglePreview">
+          <EyeOff v-if="showPreview" :size="15" /><Eye v-else :size="15" />{{ showPreview ? '收起签名' : '查看签名' }}
         </button>
         <button v-if="canSelfResign" type="button" class="as-btn primary" :disabled="busy" @click="startSelf">
           <RefreshCw :size="15" :class="{ spin: selfBusy }" />{{ selfButtonLabel }}
         </button>
         <button v-else-if="canRequestOther" type="button" class="as-btn primary" :disabled="busy" @click="openConfirm">
-          <Send :size="15" />发起签名
+          <Send :size="15" />发起签名请求
         </button>
         <a v-if="canManageRelay" href="/signature-management" class="as-link">
           <Send :size="15" />签名管理中心
@@ -87,7 +86,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
-import { CircleAlert, Eye, Fingerprint, Info, RefreshCw, Send } from 'lucide-vue-next';
+import { CircleAlert, Eye, EyeOff, Fingerprint, Info, RefreshCw, Send } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
 
 const props = defineProps<{ openId?: string }>();

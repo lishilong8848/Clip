@@ -672,11 +672,7 @@ try {
   const agenda=page.getByRole('complementary',{name:'我的日程'});
   await reveal('notices:变更');
   await pop.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
-  const search=page.getByRole('searchbox',{name:'全局搜索'});
-  await search.fill('维项');
-  await page.getByRole('region',{name:'搜索结果'}).getByRole('button',{name:'维修项目'}).waitFor();
-  await search.press('Enter');
-  assert.match(await page.evaluate(()=>window.opened),/^\/repair-management/);
+  assert.equal(await page.getByRole('searchbox',{name:'全局搜索'}).count(),0);
   const weatherKey=page.getByRole('button',{name:'查看今日天气和未来10小时气温'});
   await weatherKey.click();
   const weather=page.getByRole('dialog',{name:'今日天气和未来10小时气温'});

@@ -43,7 +43,7 @@ function files(id:string){return (p.task.files || []).filter((f:Dict)=>f.item_id
 .ps-form-list{display:grid;align-content:start;min-width:0;container:check-items / inline-size}
 .ps-form-list fieldset.ps-form-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:0 8px;align-items:center;box-sizing:border-box;min-inline-size:0;margin:0;padding:.58rem .7rem;border:0;border-bottom:1px solid var(--v2-palette-border,#d2dfda);border-inline-start:3px solid transparent;border-radius:0;background:var(--soft-face,#fff)}
 .ps-form-list fieldset[data-result=normal]{border-inline-start-color:#589e83}.ps-form-list fieldset[data-result=abnormal]{border-inline-start-color:#bf7647;background:color-mix(in srgb,var(--soft-face,#fff) 95%,#de9668)}
-.ps-form-row legend{float:left;min-width:0;margin:0;padding:.4rem 0;line-height:1.45;overflow-wrap:anywhere;font-weight:600}.ps-form-row legend span{font-variant-numeric:tabular-nums;margin-right:.55rem;color:var(--v2-blue,#43738b)}
+.ps-form-row legend{float:left;min-width:0;margin:0;padding:.25rem 0;font-size:var(--cf-font-body);line-height:1.45;overflow-wrap:anywhere;font-weight:550}.ps-form-row legend span{font-size:var(--cf-font-meta);font-variant-numeric:tabular-nums;margin-right:.4rem;color:var(--v2-blue,#43738b)}
 .ps-form-row>.v2-check-result{display:flex;justify-content:flex-end;align-items:center;gap:.4rem}
 .ps-form-row > :is(.ps-note,.v2-check-attachments){grid-column:1/-1;padding-block-start:.45rem}
 @container check-items (max-width:460px){

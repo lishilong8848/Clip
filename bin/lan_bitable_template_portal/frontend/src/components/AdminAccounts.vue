@@ -30,6 +30,7 @@
       <div v-if="items.some(canSelectModules) || selectedIds.size" class="account-bulk-bar" aria-label="模块权限批量操作">
         <label class="check"><input type="checkbox" aria-label="选择本页可管理人员" :checked="pageSelectable.length > 0 && pageSelectable.every(item => selectedIds.has(item.id))" :indeterminate="pageSelectable.some(item => selectedIds.has(item.id)) && !pageSelectable.every(item => selectedIds.has(item.id))" :disabled="loading || saving || !pageSelectable.length" @change="selectModulePage(($event.target as HTMLInputElement).checked)" />本页可管理人员</label>
         <span role="status">已选 {{ selectedIds.size }} / 300 人</span>
+        <button type="button" :disabled="loading || saving" @click="openGrantByModule"><Settings2 :size="16" />按功能授权</button>
         <button type="button" :disabled="!selectedIds.size || loading || saving" @click="openBulkModules"><Settings2 :size="16" />批量设置模块</button>
         <button type="button" :disabled="!selectedIds.size || loading || saving" @click="selectedIds = new Set(); selectionNotice = ''"><X :size="16" />清空选择</button>
         <small v-if="items.some(item => canEditAccess(item) && !item.enabled)" class="account-bulk-limit">停用账号未返回已保存的模块，暂不可批量修改。</small>
@@ -69,24 +70,37 @@
       <UiTransition name="ui-overlay">
         <div v-if="bulkOpen" class="account-overlay" @click.self="closeBulkModules">
           <section ref="bulkEditor" class="account-editor account-bulk-editor" data-v2-inline-feedback role="dialog" aria-modal="true" aria-labelledby="account-bulk-title" tabindex="-1">
-            <header><div><h2 id="account-bulk-title">批量设置模块</h2><span class="muted">已选 {{ selectedAccounts.length }} 人 · {{ bulkPreview ? '提交前预览' : '选择模块操作' }}</span></div><button type="button" class="icon" aria-label="关闭批量模块设置" :disabled="saving" @click="closeBulkModules"><X :size="20" /></button></header>
+            <header><div><h2 id="account-bulk-title">{{ grantByModule ? '按功能授权' : '批量设置模块' }}</h2><span class="muted">已选 {{ bulkPeople.length }} 人 · {{ bulkPreview ? '提交前预览' : '选择授权范围' }}</span></div><button type="button" class="icon" aria-label="关闭批量模块设置" :disabled="saving" @click="closeBulkModules"><X :size="20" /></button></header>
             <div class="account-bulk-body">
               <p v-if="bulkError" class="error" role="alert">{{ bulkError }}</p>
               <p v-if="selectionNotice" class="warning" role="status">{{ selectionNotice }}</p>
+              <div v-if="grantByModule" v-show="!bulkPreview" class="account-grant-picker">
+                <label>功能<select v-model="grantModule" :disabled="saving || loading" aria-label="选择授权功能"><option value="">请选择功能</option><optgroup v-for="group in moduleGroups" :key="group.label" :label="group.label"><option v-for="opt in group.options" :key="opt.value" :value="opt.value">{{ moduleOptionLabel(opt) }}</option></optgroup></select></label>
+                <template v-if="grantModule">
+                  <div class="grant-filters"><input v-model.trim="grantSearch" type="search" aria-label="筛选授权人员" placeholder="姓名、工号或岗位" />
+                    <select v-model="grantScope" aria-label="按楼栋筛选授权人员"><option value="">全部楼栋</option><option v-for="opt in ownScopeOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option></select></div>
+                  <div class="grant-actions"><small role="status">可选 {{ grantCandidates.length }} 人 · 已选 {{ grantIds.size }} 人</small>
+                    <button type="button" :disabled="!canSelectGrantMatches" @click="selectGrantMatches">选中筛选结果</button>
+                    <button type="button" :disabled="saving || loading || !grantIds.size" @click="grantIds.clear()">清空已选</button></div>
+                  <div class="account-grant-people" role="group" aria-label="可授权人员"><label v-for="item in grantCandidates" :key="item.id" class="check"><input type="checkbox" :checked="grantIds.has(item.id)" :disabled="saving || loading || (!grantIds.has(item.id) && grantIds.size >= 300)" @change="selectGrantAccount(item.id, ($event.target as HTMLInputElement).checked)" />{{ item.name }} · {{ scopesLabel(item.own_scopes) }} · {{ categoryLabel(item.category) }}</label><p v-if="!grantCandidates.length">没有符合条件且尚未授权的人员。</p></div>
+                </template>
+              </div>
+              <template v-else>
               <fieldset class="account-bulk-mode" :disabled="saving || loading"><legend>模块操作</legend><label class="check"><input v-model="bulkMode" type="radio" value="add" name="account-module-mode" />添加模块</label><label class="check"><input v-model="bulkMode" type="radio" value="remove" name="account-module-mode" />移除模块</label></fieldset>
               <div class="module-groups">
                 <fieldset v-for="group in bulkModuleGroups" :key="group.label" class="module-group" :disabled="saving || loading"><legend><label class="check"><input type="checkbox" :aria-label="`选择${group.label}全部模块`" :checked="group.selectable.length > 0 && group.selectedCount === group.selectable.length" :indeterminate="group.selectedCount > 0 && group.selectedCount < group.selectable.length" :disabled="saving || loading || !group.selectable.length" @change="selectBulkGroup(group.selectable.map(option => option.value), ($event.target as HTMLInputElement).checked)" />{{ group.label }}</label></legend>
-                  <div class="module-options"><label v-for="mod in group.options" :key="mod.value" class="check" :class="{ granted: bulkModules.includes(mod.value) }"><input v-model="bulkModules" type="checkbox" :value="mod.value" :disabled="bulkMode === 'add' && mod.value === 'accounts' && selectedAccounts.some(item => item.level === 'L4')" />{{ mod.label }}</label></div>
+                  <div class="module-options"><label v-for="mod in group.options" :key="mod.value" class="check" :class="{ granted: bulkModules.includes(mod.value) }"><input v-model="bulkModules" type="checkbox" :value="mod.value" :disabled="bulkMode === 'add' && selectedAccounts.some(item => !grantableModule(mod.value,item.level))" /><span>{{ mod.label }}<small v-if="mod.includes">含 {{ mod.includes }}</small></span></label></div>
                 </fieldset>
               </div>
-              <p v-if="bulkMode === 'add' && selectedAccounts.some(item => item.level === 'L4')" class="muted">所选人员含 L4，不能添加账号与设置模块。</p>
-              <section ref="bulkSummary" class="account-bulk-preview" aria-label="模块操作预览" tabindex="-1">
-                <h3>{{ bulkMode === 'add' ? '添加' : '移除' }}：{{ moduleLabel(bulkModules) }}</h3>
+              <p v-if="bulkMode === 'add' && selectedAccounts.some(item => item.level === 'L4')" class="muted">所选人员含 L4，不能添加账号与权限模块。</p>
+              </template>
+              <section v-show="!grantByModule || bulkPreview" ref="bulkSummary" class="account-bulk-preview" aria-label="模块操作预览" tabindex="-1">
+                <h3>{{ bulkMode === 'add' ? '添加' : '移除' }}：{{ moduleLabel(selectedModules) }}</h3>
                 <p class="muted">仅调整指定模块；其他模块、级别、角色、楼栋、启用状态、密码、签名及历史记录保留。</p>
-                <ul aria-label="所选人员"><li v-for="item in selectedAccounts" :key="item.id"><span>{{ item.name }}<small>{{ item.employee_no || item.open_id }} · {{ levelLabel(item.level) }}</small></span><span v-if="bulkPreview" class="muted">{{ moduleDelta(item) }} 项变更</span></li></ul>
+                <ul aria-label="所选人员"><li v-for="item in bulkPeople" :key="item.id"><span>{{ item.name }}<small>{{ item.employee_no || item.open_id }} · {{ levelLabel(item.level) }}</small></span><span v-if="bulkPreview" class="muted">{{ moduleDelta(item) }} 项变更</span></li></ul>
               </section>
             </div>
-            <footer class="editor-footer"><button v-if="bulkNeedsRefresh" type="button" :disabled="loading || saving" @click="load(true)"><RefreshCw :size="16" />刷新账号</button><button type="button" :disabled="saving" @click="closeBulkModules">取消</button><button v-if="bulkPreview" type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh" @click="saveBulkModules"><Save :size="16" />{{ saving ? '正在提交' : `确认提交 ${bulkPreview.length} 人` }}</button><button v-else type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh || !selectedAccounts.length || !bulkModules.length" @click="previewBulkModules">预览变更<ChevronRight :size="16" /></button></footer>
+            <footer class="editor-footer"><button v-if="bulkNeedsRefresh" type="button" :disabled="loading || saving" @click="load(true)"><RefreshCw :size="16" />刷新账号</button><button v-if="grantByModule && bulkPreview" type="button" :disabled="saving" @click="bulkPreview=null">返回修改</button><button type="button" :disabled="saving" @click="closeBulkModules">取消</button><button v-if="bulkPreview" type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh" @click="saveBulkModules"><Save :size="16" />{{ saving ? '正在提交' : `确认提交 ${bulkPreview.length} 人` }}</button><button v-else type="button" class="primary" :disabled="saving || loading || bulkNeedsRefresh || !bulkPeople.length || !selectedModules.length" @click="previewBulkModules">预览变更<ChevronRight :size="16" /></button></footer>
           </section>
         </div>
       </UiTransition>
@@ -124,9 +138,9 @@
                   </label>
                 </fieldset>
                 <div class="module-groups">
-                  <fieldset v-for="group in moduleGroups" :key="group.label" class="module-group" :disabled="!canSaveAccess(draft)"><legend>{{ group.label }}</legend>
+                  <fieldset v-for="group in catalogModuleGroups" :key="group.label" class="module-group" :disabled="!canSaveAccess(draft)"><legend>{{ group.label }}</legend>
                     <div class="module-options"><label class="check" v-for="mod in group.options" :key="mod.value" :class="{ granted: draft.modules?.includes(mod.value) }">
-                      <input type="checkbox" :value="mod.value" v-model="draft.modules" :disabled="mod.value === 'accounts' && draft.level === 'L4'" />{{ mod.label }}
+                      <input type="checkbox" :value="mod.value" v-model="draft.modules" :disabled="!actorModules.includes(mod.value) || !grantableModule(mod.value,draft.level)" /><span>{{ mod.label }}<small v-if="mod.includes">含 {{ mod.includes }}</small></span>
                     </label></div>
                   </fieldset>
                 </div>
@@ -152,13 +166,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { ChevronLeft, ChevronRight, KeyRound, RefreshCw, Save, Search, Settings2, Trash2, UserRoundCog, X } from 'lucide-vue-next';
-import { requestJson, type Dict } from '../api/client';
+import { invalidateReadCache, requestJson, type Dict } from '../api/client';
+import { cachedRead, readCacheGeneration, readCacheKey, saveRead } from '../api/readCache';
 import { acquireModal } from '../modalState';
 import AccountSignature from './AccountSignature.vue';
 import ConfirmDialog from './ConfirmDialog.vue';
 import { finishImpersonation } from './ImpersonationBanner.vue';
 type Account = { id: string; record_id: string; open_id: string; name: string; employee_no: string; kind: string; account_nature: string; position: string; category: string; own_scopes: string[]; scopes: string[]; role: string; enabled: boolean; authorized: boolean; locked: boolean; blocked_reason: string; can_set_password: boolean; password_set: boolean; revision: string; last_login?: number; level?: string; can_edit?: boolean; can_delete?: boolean; modules?: string[]; can_edit_access?: boolean; can_grant_l0?: boolean; home_scope?: string; can_impersonate?: boolean; can_access_signature?: boolean; is_self?: boolean };
-type ModuleChange = Pick<Account, 'id' | 'revision' | 'enabled'> & { modules: string[] };
+type ModuleChange = Pick<Account, 'id' | 'revision' | 'enabled'> & ({ modules: string[] } | { add_modules: string[] });
+type ModuleOption = { value: string; label: string; group?: string; includes?: string; admin_only?: boolean };
 const props = defineProps<{ pendingCount: number; permissions: Dict[] }>();
 const emit = defineEmits<{ changed: [] }>();
 const kinds: Record<string, string> = { vnet: 'VNET人员', external: '非VNET人员', duty: '值班账号', legacy: '历史账号', unknown: '类型待核对' };
@@ -174,7 +190,7 @@ const tabs = computed(() => {
   list.push({ value: 'audit', label: '变更记录' });
   return list;
 });
-const tab = ref('accounts'), items = ref<Account[]>([]), scopeOptions = ref<{value: string; label: string}[]>([]), categoryOptions = ref<{value: string; label: string}[]>([]), moduleOptions = ref<{value: string; label: string; group?: string}[]>([]), levelOptions = ref<{value: string; label: string}[]>([]);
+const tab = ref('accounts'), items = ref<Account[]>([]), scopeOptions = ref<{value: string; label: string}[]>([]), categoryOptions = ref<{value: string; label: string}[]>([]), moduleOptions = ref<ModuleOption[]>([]), levelOptions = ref<{value: string; label: string}[]>([]);
 const search = ref(''), kind = ref(''), building = ref(''), state = ref(''), category = ref(''), page = ref(1);
 const loading = ref(false), saving = ref(false), error = ref(''), notice = ref(''), warning = ref(''), loadedAt = ref(0);
 const draft = ref<Account | null>(null), editor = ref<HTMLElement | null>(null);
@@ -192,6 +208,8 @@ async function confirmImpersonation(confirmed:boolean){
 const audits = ref<Dict[]>([]), auditLoading = ref(false);
 let modal: ReturnType<typeof acquireModal> | null = null;
 const abort = new AbortController();
+let directoryCheck:ReturnType<typeof setTimeout>|undefined;
+const directorySyncing=ref(false);
 const ownScopeOptions = computed(() => scopeOptions.value.filter(x => !['ALL', 'CAMPUS'].includes(x.value)));
 const baseFiltered = computed(() => items.value.filter(x => (!search.value || `${x.name} ${x.employee_no} ${x.position}`.toLowerCase().includes(search.value.toLowerCase()))
   && (!kind.value || x.kind === kind.value) && (!building.value || x.own_scopes.includes(building.value))
@@ -224,6 +242,32 @@ const pageSelectable = computed(() => pageItems.value.filter(canSelectModules));
 const bulkOpen = ref(false), bulkEditor = ref<HTMLElement | null>(null), bulkMode = ref('add');
 const bulkSummary = ref<HTMLElement | null>(null);
 const bulkModules = ref<string[]>([]), bulkPreview = ref<ModuleChange[] | null>(null), bulkError = ref(''), bulkNeedsRefresh = ref(false);
+const grantByModule = ref(false), grantModule = ref(''), grantSearch = ref(''), grantScope = ref(''), grantIds = ref(new Set<string>());
+const bulkPeople = computed(() => grantByModule.value ? items.value.filter(item => grantIds.value.has(item.id)) : selectedAccounts.value);
+const selectedModules = computed(() => grantByModule.value ? (grantModule.value ? [grantModule.value] : []) : bulkModules.value);
+const grantCandidates = computed(() => items.value.filter(item => canGrantModule(item) &&
+  (!grantScope.value || item.own_scopes.includes(grantScope.value)) && (!grantSearch.value ||
+  `${item.name} ${item.employee_no} ${item.position} ${scopesLabel(item.own_scopes)} ${categoryLabel(item.category)}`.toLowerCase().includes(grantSearch.value.toLowerCase()))));
+const grantMatches = computed(() => grantCandidates.value.filter(item => !grantIds.value.has(item.id)));
+const canSelectGrantMatches = computed(() => !saving.value && !loading.value && grantMatches.value.length > 0 &&
+  grantMatches.value.length + grantIds.value.size <= 300);
+function selectGrantMatches() {
+  if (canSelectGrantMatches.value) grantIds.value = new Set([...grantIds.value, ...grantMatches.value.map(item => item.id)]);
+}
+function canGrantModule(item: Account) {
+  return !!grantModule.value && canSelectModules(item) && !item.modules?.includes(grantModule.value) &&
+    grantableModule(grantModule.value, item.level);
+}
+function selectGrantAccount(id: string, checked: boolean) {
+  if (saving.value || loading.value || (checked && grantIds.value.size >= 300)) return;
+  if (checked) grantIds.value.add(id); else grantIds.value.delete(id);
+}
+function grantableModule(module: string, level?: string) {
+  return !(module==='accounts' && level==='L4') && (!moduleOptions.value.find(option=>option.value===module)?.admin_only || level==='L0' || level==='L1');
+}
+function moduleOptionLabel(option: ModuleOption) {
+  return option.includes ? `${option.label}（含${option.includes}）` : option.label;
+}
 function canSelectModules(item: Account) {
   // Disabled profiles expose effective [] instead of saved modules; merging would lose grants.
   return canEditAccess(item) && item.enabled && !!item.open_id && !item.is_self && item.open_id !== policy.value.open_id && !item.locked && !item.blocked_reason;
@@ -246,6 +290,15 @@ function selectModulePage(checked: boolean) {
 }
 function openBulkModules() {
   if (saving.value || loading.value || !selectedAccounts.value.length) return;
+  grantByModule.value = false;
+  resetBulk();
+}
+function openGrantByModule() {
+  if (saving.value || loading.value || !items.value.some(canSelectModules)) return;
+  grantByModule.value = true; grantModule.value = ''; grantSearch.value = ''; grantScope.value = ''; grantIds.value.clear();
+  resetBulk();
+}
+function resetBulk() {
   bulkMode.value = 'add'; bulkModules.value = []; bulkPreview.value = null; bulkError.value = ''; bulkNeedsRefresh.value = false;
   notice.value = ''; bulkOpen.value = true;
 }
@@ -255,23 +308,32 @@ function selectBulkGroup(modules: string[], checked: boolean) {
   bulkModules.value = checked ? [...new Set([...bulkModules.value, ...modules])] : bulkModules.value.filter(module => !modules.includes(module));
 }
 function moduleDelta(item: Account) {
-  const final = bulkPreview.value?.find(change => change.id === item.id)?.modules || [];
+  const change = bulkPreview.value?.find(change => change.id === item.id);
+  if (!change) return 0;
+  if ('add_modules' in change) return change.add_modules.length;
+  const final = change.modules;
   const current = item.modules || [];
   return final.filter(module => !current.includes(module)).length + current.filter(module => !final.includes(module)).length;
 }
 function previewBulkModules() {
   bulkPreview.value = null; bulkError.value = '';
   if (saving.value || loading.value || bulkNeedsRefresh.value) return;
-  const people = selectedAccounts.value, modules = bulkModules.value;
-  if (!people.length || people.length > 300 || people.length !== selectedIds.value.size || people.some(item => !canSelectModules(item))) {
+  const people = bulkPeople.value, modules = selectedModules.value;
+  const ids = grantByModule.value ? grantIds.value : selectedIds.value;
+  if (!people.length || people.length > 300 || people.length !== ids.size || people.some(item => !(grantByModule.value ? canGrantModule(item) : canSelectModules(item)))) {
     bulkError.value = '请选择 1 至 300 名可管理人员；人员权限变化后请刷新重试。'; return;
   }
   if (!modules.length || modules.some(module => !accessModuleOptions.value.some(option => option.value === module))) {
     bulkError.value = '请选择本人拥有权限的模块。'; return;
   }
-  const changes: ModuleChange[] = people.map(item => ({ id: item.id, revision: item.revision, enabled: item.enabled,
+  if (grantByModule.value) {
+    bulkPreview.value = people.map(item => ({ id: item.id, revision: item.revision, enabled: true, add_modules: modules }));
+    void nextTick(() => bulkSummary.value?.focus());
+    return;
+  }
+  const changes = people.map(item => ({ id: item.id, revision: item.revision, enabled: item.enabled,
     modules: bulkMode.value === 'add' ? [...new Set([...(item.modules || []), ...modules])] : (item.modules || []).filter(module => !modules.includes(module)) }));
-  const invalid = changes.find((change, index) => change.modules.some(module => !actorModules.value.includes(module) || (module === 'accounts' && people[index].level === 'L4')));
+  const invalid = changes.find((change, index) => change.modules.some(module => !actorModules.value.includes(module) || !grantableModule(module, people[index].level)));
   if (invalid) { bulkError.value = `${people.find(item => item.id === invalid.id)?.name}的模块权限超出可设置范围，请交由上级处理；未删除其他模块。`; return; }
   if (changes.every((change, index) => JSON.stringify(change.modules) === JSON.stringify(people[index].modules || []))) {
     bulkError.value = '所选账号已符合此模块设置，无需提交。'; return;
@@ -296,9 +358,10 @@ async function saveBulkModules() {
     }
   } finally { saving.value = false; }
 }
-watch([bulkMode, bulkModules, selectedIds], () => { bulkPreview.value = null; }, { deep: true });
+watch([bulkMode, bulkModules, selectedIds, grantModule, grantIds], () => { bulkPreview.value = null; }, { deep: true });
+watch(grantModule, () => { grantIds.value.clear(); grantSearch.value = ''; bulkError.value = ''; });
 watch([bulkMode, selectedAccounts], () => {
-  if (bulkMode.value === 'add' && selectedAccounts.value.some(item => item.level === 'L4')) bulkModules.value = bulkModules.value.filter(module => module !== 'accounts');
+  if (bulkMode.value === 'add') bulkModules.value = bulkModules.value.filter(module => selectedAccounts.value.every(item=>grantableModule(module,item.level)));
 });
 const isSuperAdmin = computed(() => ['L0', 'L1'].includes(myLevel.value));
 const accessLevelOptions = computed(() => {
@@ -313,9 +376,12 @@ const accessLevelOptions = computed(() => {
 const accessCategoryOptions = computed(() => categoryOptions.value.filter(option =>
   !draft.value || canEditAccess(draft.value) || option.value === 'engineer'));
 const accessModuleOptions = computed(() => moduleOptions.value.filter(option => actorModules.value.includes(option.value)));
-const moduleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: accessModuleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
+const catalogModuleGroups = computed(() => ['业务管理', '通告办理', '协作与资料', '系统管理', '功能模块'].map(label => ({ label, options: moduleOptions.value.filter(option => (option.group || '功能模块') === label) })).filter(group => group.options.length));
+const moduleGroups = computed(() => catalogModuleGroups.value.map(group => ({
+  ...group, options: group.options.filter(option => actorModules.value.includes(option.value)),
+})).filter(group => group.options.length));
 const bulkModuleGroups = computed(() => moduleGroups.value.map(group => {
-  const selectable = group.options.filter(option => bulkMode.value !== 'add' || option.value !== 'accounts' || !selectedAccounts.value.some(item => item.level === 'L4'));
+  const selectable = group.options.filter(option => bulkMode.value !== 'add' || selectedAccounts.value.every(item=>grantableModule(option.value,item.level)));
   return { ...group, selectable, selectedCount: selectable.filter(option => bulkModules.value.includes(option.value)).length };
 }));
 const accessScopeOptions = computed(() => {
@@ -331,7 +397,7 @@ const accessScopeOptions = computed(() => {
 });
 
 function modulesForLevel(level?: string): string[] {
-  return accessModuleOptions.value.filter(option => level !== 'L4' || option.value !== 'accounts').map(option => option.value);
+  return accessModuleOptions.value.filter(option => grantableModule(option.value, level)).map(option => option.value);
 }
 function scopesForLevel(level?: string): string[] {
   const d = draft.value;
@@ -358,21 +424,40 @@ function statusLabel(status: string) { return status === 'request_finished' ? '�
 function stateLabel(item: Account) { return item.blocked_reason ? '待核对' : !item.enabled ? '已停用' : item.scopes.length ? '已授权' : '未授权'; }
 function scopesLabel(scopes: string[]) { return scopes.map(scope => scopeOptions.value.find(x => x.value === scope)?.label || scope).join('、') || '未配置'; }
 function formatTime(timestamp?: number) { return timestamp ? new Date(timestamp * 1000).toLocaleString('zh-CN', { hour12: false }) : '暂无记录'; }
-async function load(refresh = false) {
+const accountsPath = '/api/auth/accounts';
+async function load(refresh = false, reuse = false) {
   if (loading.value) return;
+  clearTimeout(directoryCheck);
   loading.value = true; error.value = '';
   try {
-    const data = await requestJson(`/api/auth/accounts${refresh ? '?refresh=true' : ''}`, { signal: abort.signal, fresh: true });
+    const key = readCacheKey(accountsPath, location.origin);
+    const generation = readCacheGeneration();
+    const cached = reuse ? cachedRead(key) : null;
+    const useCached = !!cached && Date.now() - cached.at < 30_000;
+    const data = useCached ? cached.data : await requestJson(accountsPath + (refresh ? '?refresh=true' : ''), {
+      signal: abort.signal, cache: 'no-store',
+    });
+    if (abort.signal.aborted) return;
+    if (!useCached && Array.isArray(data.items) && data.policy?.level && !data.directory_syncing && !data.warning)
+      saveRead(key, data, generation);
     const previousSelection = selectedAccounts.value;
+    const previousGrant = grantByModule.value && bulkOpen.value ? bulkPeople.value : [];
     items.value = data.items || []; scopeOptions.value = data.scope_options || []; categoryOptions.value = data.category_options || [];
     moduleOptions.value = data.module_options || []; levelOptions.value = data.level_options || [];
     policy.value = data.policy || {};
     loadedAt.value = data.loaded_at || 0; warning.value = data.warning || '';
+    directorySyncing.value=Boolean(data.directory_syncing);
+    if(directorySyncing.value)warning.value=items.value.length ? '正在后台同步人员，当前显示上次核验的名单。' : '正在同步人员目录。';
     const removed = previousSelection.filter(old => !items.value.some(item => item.id === old.id && item.open_id === old.open_id && canSelectModules(item)));
     if (removed.length) {
       selectedIds.value = new Set([...selectedIds.value].filter(id => !removed.some(item => item.id === id)));
       selectionNotice.value = `已移除不可管理、身份变化或已离开名单的 ${removed.length} 人：${removed.map(item => item.name).join('、')}；其余选择保留。`;
     } else if (previousSelection.length) selectionNotice.value = `已刷新账号，保留 ${selectedIds.value.size} 人选择，请重新预览模块操作。`;
+    if (previousGrant.length) {
+      grantIds.value = new Set(previousGrant.filter(old => items.value.some(item => item.id === old.id &&
+        item.open_id === old.open_id && canGrantModule(item))).map(item => item.id));
+      bulkError.value = previousGrant.length === grantIds.value.size ? '' : '已移除身份变化、已有权限或不可管理的账号，请核对后重新预览。';
+    }
     bulkPreview.value = null; bulkNeedsRefresh.value = false;
     // Permission reload downgrade guard: switch stale tabs back to accounts and close a
     // stale editor when the acting profile no longer has access to the open target.
@@ -383,9 +468,25 @@ async function load(refresh = false) {
       const fresh = items.value.find(item => item.id === currentDraft.id);
       if (!fresh || !canEdit(fresh)) closeEditor();
     }
-  } catch (e: any) { if (!abort.signal.aborted) error.value = e.message || '账号加载失败'; }
-  finally { loading.value = false; }
+  } catch (e: any) {
+    if (!abort.signal.aborted) {
+      directorySyncing.value=false;
+      error.value = e.message || '账号加载失败';
+      if ([401,403].includes(e.status)) {
+        invalidateReadCache();
+        items.value=[]; policy.value={}; audits.value=[]; tab.value='accounts';
+        selectedIds.value.clear(); grantIds.value.clear(); bulkPreview.value=null;
+        bulkOpen.value=false; draft.value=null; impersonationTarget.value=null;
+        newPassword.value=''; confirmPassword.value=''; draftOriginal=null; warning.value='';
+      }
+    }
+  } finally { loading.value = false; }
 }
+watch([directorySyncing,loading,saving,draft,bulkOpen],()=>{
+  clearTimeout(directoryCheck);
+  if(directorySyncing.value&&!loading.value&&!saving.value&&!draft.value&&!bulkOpen.value)
+    directoryCheck=setTimeout(()=>void load(),3500);
+});
 async function loadAudit() {
   auditLoading.value = true;
   try { audits.value = (await requestJson('/api/auth/accounts/audit', { signal: abort.signal })).items || []; }
@@ -485,8 +586,8 @@ function changeLevel(): void {
   d.modules = modulesForLevel(level);
 }
 watch(() => JSON.stringify(props.permissions), () => { if (!saving.value) void load(); });
-onMounted(() => { void load(); window.addEventListener('keydown', escape, true); });
-onBeforeUnmount(() => { abort.abort(); newPassword.value = ''; confirmPassword.value = ''; modal?.release(); window.removeEventListener('keydown', escape, true); });
+onMounted(() => { void load(false, true); window.addEventListener('keydown', escape, true); });
+onBeforeUnmount(() => { clearTimeout(directoryCheck); abort.abort(); newPassword.value = ''; confirmPassword.value = ''; modal?.release(); window.removeEventListener('keydown', escape, true); });
 </script>
 
 <style scoped>
@@ -509,6 +610,17 @@ onBeforeUnmount(() => { abort.abort(); newPassword.value = ''; confirmPassword.v
 .account-bulk-preview li>span:first-child { min-width: 0; overflow-wrap: anywhere; }
 .account-bulk-preview li>span:last-child:not(:first-child) { flex: none; }
 .account-bulk-preview small { display: block; overflow-wrap: anywhere; }
+.account-grant-picker { display: grid; gap: 8px; min-width: 0; }
+.account-grant-picker > label { display: grid; gap: 4px; min-width: 0; }
+.account-grant-picker select { width: 100%; }
+.grant-filters { display:grid;grid-template-columns:minmax(0,1fr) minmax(100px,auto);gap:8px }
+.grant-filters>* { min-width:0 }
+.grant-actions { display:flex;align-items:center;flex-wrap:wrap;gap:6px }
+.grant-actions small { margin-inline-end:auto }
+.account-grant-people { max-height: min(34dvh, 270px); overflow: auto; }
+.account-grant-people label { display: flex; align-items: center; gap: 8px; min-height: 36px; overflow-wrap: anywhere; }
+.module-options small { display: block; white-space: normal; overflow-wrap: anywhere; }
+.account-dialog fieldset label small { display: block; overflow-wrap: anywhere; white-space: normal; line-height: 1.4; }
 @media(max-width:760px) {
   .account-bulk-bar>.check { flex-basis: 100%; min-height: 44px; }
   .account-bulk-bar>button { min-height: 44px; }

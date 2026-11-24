@@ -1,5 +1,14 @@
 import type { Dict } from "./api/client";
 
+export const isMopBuilding=(scope:string)=>scope==='D'||scope==='E';
+export function mopBuildingOptions(options:{value:string;label:string}[]){
+  const all=options.some(option=>option.value==='ALL');
+  return ['D','E'].flatMap(value=>{
+    const option=options.find(item=>item.value===value);
+    return option?[option]:all?[{value,label:value+'楼'}]:[];
+  });
+}
+
 export function mopMonthOptions(now = new Date()): Array<{ value: string; label: string }> {
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'numeric' }).formatToParts(now);
   const year = Number(parts.find(part => part.type === 'year')?.value);

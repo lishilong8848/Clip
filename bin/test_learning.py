@@ -731,6 +731,47 @@ class LearningTests(unittest.TestCase):
         self.assertEqual(self.service._get('paper', paper['id']), issued_before)
         self.assertEqual(self.service._get('record', paper['id']), record_before)
 
+    def test_workbench_reviewer_only_resolves_feedback_in_granted_buildings(self):
+        from lan_bitable_template_portal import learning_issue_cards as cards
+
+        self.enable()
+        paper, question = self.fixture()
+        self.dispatch('paper.answer', self.answer_payload(paper, question))
+        record_before = self.service._get('record', paper['id'])
+        first = self.dispatch('issue.create', {'paper_id': paper['id'], 'question_id': question['id'],
+                                              'category': '答案', 'description': 'A楼反馈'})
+        with self.service.transaction() as conn:
+            feedback = self.service._get('issue', first['id'], conn)
+            self.service._put('issue', 'review-other-building', {**feedback, 'id': 'review-other-building',
+                              'scope': 'E', 'description': 'E楼反馈'}, conn)
+        reviewer = {**ACTOR, 'id': 'ou_TestReviewer'}
+        auth = Mock()
+        auth.public_user.return_value = {'role': 'building', 'modules': ['learning']}
+        auth.session_scopes.return_value = ['A']
+        auth.current_feishu_app_id.return_value = 'review-app'
+        auth.account_profile.return_value = {'enabled': True, 'modules': ['learning']}
+        directory = {'reviewer': {'name': '陶必亮', 'selectable': True,
+                                  'feishu_open_ids': {'review-app': reviewer['id']}}}
+        with patch.object(cards, 'current_directory', return_value=(directory, True, 'review-app')):
+            scopes = cards.workbench_review_scopes(self.service, auth, {}, reviewer)
+            self.assertEqual(scopes, ('A',))
+            self.assertEqual(cards.workbench_review_scopes(self.service, auth, {}, ACTOR), ())
+            auth.public_user.return_value['impersonation'] = True
+            self.assertEqual(cards.workbench_review_scopes(self.service, auth, {}, reviewer), ())
+        queue = self.service.pending_questions(reviewer, {}, workbench_scopes=scopes)
+        self.assertEqual([(row['issue_id'], row['feedback_count']) for row in queue['items']], [(first['id'], 1)])
+        self.assert_status(403, cards.review_question, self.service, auth, reviewer, 'review-other-building',
+                           '', workbench_scopes=scopes)
+        detail = cards.review_question(self.service, auth, reviewer, first['id'], '', workbench_scopes=scopes)
+        self.assertEqual([entry['scope'] for entry in detail['feedback']], ['A'])
+        payload = {'version': detail['question']['version'], 'issues_version': detail['issues_version'], 'stem': '修订题干'}
+        saved = cards.review_question(self.service, auth, reviewer, first['id'], '', payload, workbench_scopes=scopes)
+        replay = cards.review_question(self.service, auth, reviewer, first['id'], '', payload, workbench_scopes=scopes)
+        self.assertEqual(replay['question'], saved['question'])
+        self.assertEqual(self.service.pending_questions(reviewer, {}, workbench_scopes=scopes)['total'], 0)
+        self.assertEqual(self.service._get('issue', 'review-other-building')['status'], 'pending')
+        self.assertEqual(self.service._get('record', paper['id']), record_before)
+
     def test_issue_creation_does_not_leak_unrevealed_answer_or_attachment_secrets(self):
         paper, question = self.fixture(attachments=True)
         issue = self.dispatch("issue.create", {"paper_id": paper["id"], "question_id": question["id"],

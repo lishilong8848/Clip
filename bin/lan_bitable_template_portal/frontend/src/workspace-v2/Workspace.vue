@@ -4,7 +4,7 @@
       <div :key="impersonationSession" class="v2-shell" :class="{ 'has-topnav':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink)" class="v2-header">
-          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="vnetLogo" alt="世纪互联 VNET" /><span>灯塔<small>南通运维工作空间</small></span></a>
+          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="vnetLogo" alt="世纪互联 VNET" /><span>南通灯塔运维平台</span></a>
           <div class="v2-header-actions">
             <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" />
             <NButton v-if="loggedIn || !checking && !publicLink" data-v2-navigation size="small" secondary :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" :style="!loggedIn ? {minHeight:'44px'} : undefined" @click="requestVersion(switchLegacy)">切换旧版</NButton>
@@ -41,7 +41,7 @@
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/?view=my')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
             <div v-if="user.role==='guest' && !publicLink" class="wb-home">
-              <GuestWorkbenchHeader guest :name="String(user.name||'访客')" :clock="Date.now()" :links="guestSearchLinks" :tasks="[]" :unread="[]"
+              <GuestWorkbenchHeader guest :name="String(user.name||'访客')" :clock="Date.now()" :tasks="[]" :unread="[]"
                 @open="navigate" @guest-account="selectAccountAction('logout')" />
             </div>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
@@ -49,7 +49,7 @@
             </nav>
             <KeepAlive :key="identityKey">
               <WorkbenchHome v-if="workbenchActive" :user="user" :scopes="scopes" :scope="currentScope"
-                :explicit-scope="route.searchParams.has('scope')" :search-links="workbenchSearchLinks" @open="openWorkspaceModule($event,true)" />
+                :explicit-scope="route.searchParams.has('scope')" @open="openWorkspaceModule($event,true)" />
             </KeepAlive>
             <template v-if="workbenchActive" />
             <HomePage v-else-if="homeViews.includes(view) && route.pathname === '/' && !route.searchParams.get('mode')" :key="identityKey" :user="user" :scopes="scopes" :scope="currentScope" :view="view" :menu-groups="menuGroups" :initial-kind="route.searchParams.get('kind')||undefined" @select-menu="selectMenu" />
@@ -67,7 +67,7 @@
               <AccountSignature v-if="!user.impersonation && granted.includes('signatures')" :key="identityKey"/>
             </AccountHome>
             <section v-else-if="view === 'assistant' && route.pathname === '/'" ref="assistantPageHost" class="ld-page-host" aria-label="灯塔助手工作区"><p v-if="user.impersonation">代操作期间无法使用个人助手。</p></section>
-            <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)&&granted.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
+            <NoticeSopManager v-else-if="activeModule==='sops'" :key="identityKey" :initial-scope="currentScope" :initial-type="route.searchParams.get('work_type')||''" :scopes="scopes.filter(s=>['110',...'ABCDEH'].includes(s.value))" :types="modules.filter(m=>SOP_IDS.includes(m.id)).map(m=>({value:m.id,label:m.label}))" :can-delete="user.can_delete_business===true" />
             <WorkOrderWorkspace v-else-if="route.pathname.startsWith('/polling-work-order')" :key="route.pathname+route.search" :url="route.pathname + route.search + route.hash" />
             <template v-else-if="route.pathname === '/workbench-lite'" />
             <component v-else-if="activeComponent" :is="activeComponent" :key="componentKey" v-bind="{...componentProps,...(componentName==='daily_inspection'?{immersive:immersiveInspection}:{})}" :embedded="['tool_management','daily_inspection','eop_scenarios'].includes(componentName) || undefined" @switch-scope="changeScope" @status="onStatus" @close="activeModule==='accounts'?navigate('/?view=my'):['daily_inspection','eop_scenarios'].includes(activeModule)?navigate('/?view=functions'):navigateBack()" @select-tab="selectAdminTab" @changed="loadAuth" />
@@ -78,7 +78,7 @@
         <HandoverReviewDialog v-if="handoverOpen && loggedIn && canReviewHandover(user) && !impersonationBlocked && !denied && view==='home' && route.pathname==='/'"
           :scopes="scopes" @close="handoverOpen=false" />
         <MobileNavigation v-if="!desktopNavigation && !immersiveInspection && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :tabs="mobileTabs" :active="mobileActive" @select="selectMobileTab" @direction="animateMobilePage" />
-        <LighthouseAssistant v-if="loggedIn && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" ref="assistantInstance" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
+        <LighthouseAssistant v-if="loggedIn && granted.includes('assistant') && !user.impersonation && user.role !== 'guest' && !printMode && !publicLink" ref="assistantInstance" :key="String(user.open_id)" :user-id="String(user.open_id)" :user-name="String(user.name || '')" />
         <NModal v-if="!impersonationBlocked" v-model:show="confirmVersion" preset="dialog" title="切换后需要重新填写" content="当前填写内容尚未提交，切换版本不会保留密码或身份信息。" positive-text="放弃填写并切换" negative-text="继续填写" @positive-click="finishVersion" />
         <NModal v-model:show="accountConfirm" preset="dialog" :title="accountAction==='switch'?'切换账号':'退出登录'" :content="accountAction==='switch'?'将退出当前账号并返回登录页，已保存的资料会保留。':'确定退出当前账号？已保存的资料会保留。'" positive-text="继续" negative-text="取消" @positive-click="confirmAccountAction" />
       </div>
@@ -91,8 +91,9 @@ import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, 
 import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, MessageCircle, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
-import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, canReviewHandover, zhihangDataModule } from './modules';
+import { modules, moduleIcons, modulePermission, navigationModules, moduleForRoute, moduleUrl, NOTICE_IDS, SOP_IDS, beijingDate, canManageZhihangData, canReviewHandover, zhihangDataModule, settingsPermissions } from './modules';
 import { canViewInspectionHistory } from '../inspectionAccess';
+import { mopBuildingOptions } from '../mopSelectionUtils';
 import { personaFor } from './persona';
 import { sidebarGroups, sidebarRole } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
@@ -184,7 +185,8 @@ function cancelAuth(){authRead?.abort();authRead=undefined;checkingAuth=false;wi
 function refreshAuth(){cancelAuth();void loadAuth();}
 const watermarkDay=beijingDate();
 function preventSignatureDrag(event:DragEvent){const image=(event.target as Element)?.closest?.('img');if(image&&(image.src.includes('/api/signatures/')||image.alt.includes('签名')))event.preventDefault();}
-const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.modules, scopes.value, impersonationIdentity(user.value)]));
+const identityKey = computed(() => JSON.stringify([user.value.open_id, user.value.level, user.value.category,
+  user.value.specialties, user.value.modules, scopes.value, impersonationIdentity(user.value)]));
 const toolManagementAvailable = computed(() => user.value.tool_management_enabled === true);
 const granted = computed<string[]>(() => Array.isArray(user.value.modules) ? user.value.modules : []);
 const inspectionHistory = computed(()=>canViewInspectionHistory(user.value));
@@ -195,13 +197,23 @@ const homeViews = ['home', 'tasks', 'functions'];
 const mobileActive = computed(() => route.value.pathname === '/' && (route.value.searchParams.get('account') === 'password' || ['my', 'permission'].includes(view.value)) ? 'my' : route.value.pathname === '/' && !route.value.searchParams.get('mode') && (homeViews.includes(view.value)||view.value==='assistant') ? view.value : 'functions');
 const publicLink = computed(() => route.value.pathname.startsWith('/polling-work-order') || route.value.pathname === '/signature' && ['record_id', 'request_id', 'temporary_id'].some(k => route.value.searchParams.has(k)));
 const printMode = computed(() => route.value.pathname.endsWith('/print'));
-const assignedRiskPage = computed(() => route.value.pathname === '/risk-inspections' && user.value.risk_inspection_assigned === true);
+const assignedRiskPage = computed(() => activeModule.value === 'risk_inspection' && user.value.risk_inspection_assigned === true);
 const zhihangDataAllowed = computed(() => canManageZhihangData(user.value));
 const denied = computed(() => {
   if (!loggedIn.value || publicLink.value) return false;
   if (activeModule.value==='handover' && !canReviewHandover(user.value)) return true;
   if (activeModule.value === zhihangDataModule.id) return !zhihangDataAllowed.value;
-  return activeModule.value==='tool_management'&&!toolManagementAvailable.value || !!activeModule.value && !(['signatures','assistant'].includes(activeModule.value) && user.value.role !== 'guest' || activeModule.value==='tool_management' && toolManagementAvailable.value || activeModule.value==='daily_inspection' && inspectionHistory.value || (activeModule.value === 'all' ? NOTICE_IDS.some(id => granted.value.includes(id)) : activeModule.value==='sops' ? SOP_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value)))) || !(activeModule.value==='tool_management' && user.value.tool_management_full_access===true) && !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s => s.value === route.value.searchParams.get('scope'));
+  if(activeModule.value==='accounts') return !visibleSettings.value.some(item=>item.key===(route.value.searchParams.get('tab')||'permissions'));
+  if(activeModule.value==='notice_history' && user.value.role!=='admin') return true;
+  if(activeModule.value==='tool_management' && !toolManagementAvailable.value) return true;
+  if(activeModule.value==='engineer_mop'){
+    const requested=route.value.searchParams.get('scope');
+    const buildings=mopBuildingOptions(scopes.value);
+    return !granted.value.includes('engineer_mop')||!buildings.length
+      ||!!requested&&!['ALL','CAMPUS'].includes(requested)&&!buildings.some(option=>option.value===requested);
+  }
+  const hasGrant = activeModule.value === 'all' ? NOTICE_IDS.some(id=>granted.value.includes(id)) : granted.value.includes(modulePermission(activeModule.value));
+  return !!activeModule.value && !hasGrant || !(activeModule.value==='tool_management' && user.value.tool_management_full_access===true) && !assignedRiskPage.value && !!route.value.searchParams.get('scope') && !scopes.value.some(s=>s.value===route.value.searchParams.get('scope'));
 });
 const immersiveInspection=computed(()=>phoneViewport.value && !desktopNavigation.value && loggedIn.value && !checking.value && !denied.value && !publicLink.value && !printMode.value && !impersonationBlocked.value && user.value.role!=='guest' && activeModule.value==='daily_inspection');
 watch(immersiveInspection,value=>document.documentElement.classList.toggle('inspection-mobile-active',value),{immediate:true});
@@ -210,7 +222,7 @@ const rememberedScopes=ref<Record<string,string>>({});
 watch(()=>scopeOwner(user.value),()=>{rememberedScopes.value=readScopeMemory(user.value);},{immediate:true,flush:'sync'});
 const authDefaultScope=ref('');
 const noticeDefaultScope=computed(()=>scopes.value.some(s=>s.value==='ALL')?'ALL':scopes.value.some(s=>s.value===authDefaultScope.value)?authDefaultScope.value:scopes.value[0]?.value||'');
-function scopeFor(module:string){return moduleScope(module,scopes.value,rememberedScopes.value[scopeFamily(module)]||'',scopeFamily(module)==='notices'?noticeDefaultScope.value:authDefaultScope.value);}
+function scopeFor(module:string){return moduleScope(module,module==='engineer_mop'?mopBuildingOptions(scopes.value):scopes.value,rememberedScopes.value[scopeFamily(module)]||'',scopeFamily(module)==='notices'?noticeDefaultScope.value:authDefaultScope.value);}
 const currentScope = computed(() => route.value.pathname === '/cabinet-power' && route.value.searchParams.get('view') === 'overview' && !route.value.searchParams.has('scope') ? '' : route.value.searchParams.get('scope') || scopeFor(activeModule.value));
 const workbenchReturn = computed(() => {
   const scope = route.value.searchParams.get('workbench_return');
@@ -236,8 +248,8 @@ const categoryLabel = computed(() => ({ manager:'经理',supervisor:'主管',eng
 const settingsTabs = [{key:'permissions',label:'账号与权限'},{key:'status',label:'后台状态'},{key:'handover',label:'交接班链接'},{key:'mop',label:'MOP 配置'},{key:'feishu',label:'飞书智能体'},{key:'dingtalk',label:'钉钉推送'},{key:'development',label:'开发问题与更新记录'},{key:'pressure',label:'高级诊断'}];
 const diagnosticsAvailable = ref(true);
 const visibleSettings = computed(() => {
-  if (!granted.value.includes('accounts') || user.value.impersonation) return [];
-  return settingsTabs.filter(item => (user.value.role === 'admin' || item.key === 'permissions')
+  if (user.value.impersonation) return [];
+  return settingsTabs.filter(item => granted.value.includes(settingsPermissions[item.key]) && (user.value.role === 'admin' || item.key === 'permissions')
     && (diagnosticsAvailable.value || !['status','pressure'].includes(item.key)));
 });
 provide('workspace-visible-settings', visibleSettings);
@@ -249,9 +261,10 @@ const impersonationPages = new Set(['daily','water','work_handover','notices','p
   'engineer_mop','sops','event','drills','risk_inspection','critical_guard','cabinet','learning','links','life_guide']);
 const permittedModules = computed(() => {
   const entries = navigationModules(granted.value, toolManagementAvailable.value, inspectionHistory.value).filter(module =>
-    module.id !== 'accounts' && module.id !== 'handover' &&
+    module.id !== 'accounts' && module.id !== 'handover' && (module.id !== 'notice_history' || user.value.role==='admin') &&
     (!user.value.impersonation || impersonationPages.has(module.id)) &&
     (module.id !== 'signatures' || user.value.role !== 'guest') &&
+    (module.id !== 'engineer_mop' || mopBuildingOptions(scopes.value).length>0) &&
     (module.id !== 'daily_inspection' || scopes.value.some(scope => ['ALL', 'D', 'E'].includes(scope.value))));
   if (granted.value.includes('event') && !entries.some(module => module.id === 'notices')) {
     entries.push({ id: 'notices', label: '通告办理', group: '运行管理', path: '/workbench-lite?work_type=event', icon: 'notice' });
@@ -259,12 +272,6 @@ const permittedModules = computed(() => {
   if (zhihangDataAllowed.value) entries.push(zhihangDataModule);
   return entries;
 });
-const workbenchSearchLinks = computed(() => [
-  ...permittedModules.value.map(module => ({label:module.label,url:moduleUrl(module,scopeFor(module.id))})),
-  ...visibleSettings.value.map(item => ({label:item.label,url:'/admin/settings?tab='+item.key})),
-  {label:'个人信息',url:'/?view=my'},
-]);
-const guestSearchLinks = [{label:'机柜查询',url:'/cabinet-power'}];
 const menuGroups = computed(() => sidebarGroups([
   ...permittedModules.value.map(module => ({ key: module.id, label: module.label, icon: moduleIcons[module.icon as keyof typeof moduleIcons] })),
   ...visibleSettings.value.map(item => ({ key: 'settings:' + item.key, label: item.label })),
@@ -302,7 +309,7 @@ function confirmAccountAction(){
 }
 const mobileTabs = computed(() => [
   {value:'home',label:'首页',icon:House},{value:'tasks',label:'待办',icon:ClipboardList},{value:'functions',label:'功能',icon:Grid2X2},
-  ...(!user.value.impersonation?[{value:'assistant',label:'助手',icon:MessageCircle}]:[]),{value:'my',label:'我的',icon:UserRound},
+  ...(!user.value.impersonation&&granted.value.includes('assistant')?[{value:'assistant',label:'助手',icon:MessageCircle}]:[]),{value:'my',label:'我的',icon:UserRound},
 ]);
 function selectMobileTab(value:string){
  const current=route.value;
@@ -388,7 +395,7 @@ const componentProps = computed(() => {
     case 'cabinet': return {...common, scope:['ALL','CAMPUS'].includes(currentScope.value)?'':currentScope.value, userId:String(user.value.open_id || ''), readOnly:user.value.role === 'guest', canDelete:user.value.can_delete_business === true};
     case 'cabinet_batch': return {...common, userId:String(user.value.open_id || '')};
     case 'signature': return {defaultScope:currentScope.value};
-    case 'accounts': return {open:true, systemAdmin:admin, initialTab:p.get('tab') || 'permissions', scopeOptions:scopes.value, focusPermissionRequestId:p.get('request_id')||''};
+    case 'accounts': return {open:true, systemAdmin:admin, allowedTabs:visibleSettings.value.map(tab=>tab.key), initialTab:p.get('tab') || 'permissions', scopeOptions:scopes.value, focusPermissionRequestId:p.get('request_id')||''};
     case 'daily': return {...common, printMode:printMode.value};
     default:return common;
   }

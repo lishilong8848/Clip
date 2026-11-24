@@ -1,5 +1,7 @@
 export type AdminTabKey = "status" | "permissions" | "handover" | "mop" | "feishu" | "dingtalk" | "pressure" | "development";
 
+export const settingsPermissions: Record<string,string> = { permissions:'accounts', status:'backend_status', handover:'handover_settings', mop:'mop_settings', feishu:'feishu_settings', dingtalk:'dingtalk_settings', development:'release_journal', pressure:'backend_diagnostics' };
+
 export type ScopeLabelOption = {
   value: string;
   label: string;

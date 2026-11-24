@@ -9,12 +9,16 @@
         </div>
       </div>
       <div class="tool-bar">
+        <NButton v-if="board?.can_manage_templates && !order && view==='workspace'" :disabled="busy || !!workspace?.busy" @click="responsibilityOpen=true">责任人配置</NButton>
         <NButton v-if="board && !order && !workspace?.busy" :disabled="busy || addingTool" @click="openNewTool">添加工具</NButton>
         <NButton class="tool-refresh" :disabled="busy || !!workspace?.busy" :loading="loading || workspace?.busy === 'read'" @click="refresh"><RefreshCw :size="16" />刷新</NButton>
       </div>
     </header>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-if="message" type="success" :bordered="false" role="status">{{ message }}</NAlert>
+    <NModal v-if="responsibilityOpen" v-model:show="responsibilityOpen" preset="card" title="责任人配置" style="width:min(540px,calc(100vw - 24px))">
+      <ToolManagementSettings :scope="scope" @changed="workspace?.reloadInventory()" />
+    </NModal>
 
     <section v-if="addingTool" class="tool-library" aria-label="添加工具">
       <h3>添加工具到底表</h3><p>仅填写需要的字段；结果未确认时请先核对底表，避免重复添加。</p>
@@ -37,75 +41,9 @@
             <span v-if="tab.count" class="tool-nav-count">{{ tab.count }}</span>
           </NButton>
         </nav>
-        <NAlert v-if="view === 'settings' && board?.inventory_error && board.inventory_error !== error" class="tool-source-error" type="warning" :bordered="false">{{ board.inventory_error }}</NAlert>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
           :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event"
           @inventory-status="updateInventoryStatus" @records="selectView('followups')" />
-        <div v-else-if="view === 'settings'" class="tool-settings-layout">
-          <ToolManagementSettings />
-          <section class="tool-library" aria-label="自检模板">
-            <div class="tool-panel-heading">
-              <div><h3>自检模板库</h3><span>{{ library?.templates.length ?? 0 }} 份 · XLSX</span></div>
-              <div class="tool-bar">
-                <NButton :disabled="busy" @click="chooseImport()"><Upload :size="16" />导入模板</NButton>
-                <NButton :disabled="busy" @click="folderInput?.click()"><Upload :size="16" />导入文件夹</NButton>
-              </div>
-            </div>
-            <p v-if="library?.warning" class="tool-muted" role="status">{{ library.warning }}</p>
-            <p v-if="folderProgress" class="tool-muted" role="status">{{ folderProgress }}</p>
-            <details v-if="folderFailures.length" open>
-              <summary>{{ folderFailures.length }} 份模板未导入</summary>
-              <ul><li v-for="(item,index) in folderFailures" :key="index">{{ item.file }} · {{ item.reason }}</li></ul>
-            </details>
-            <article v-for="template in library?.templates || []" :key="template.id" class="tool-template">
-              <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.schema.checks.length }} 项 · {{ template.active ? '已启用' : '已停用' }} · {{ template.linked_tools_count || 0 }} 台已关联</small></div>
-              <div class="tool-bar">
-                <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">基于此模板新建</NButton>
-                <NButton size="small" :disabled="busy" @click="chooseImport(template)">导入新版</NButton>
-                <NButton size="small" :disabled="busy" @click="toggleTemplate(template)">{{ template.active ? '停用' : '启用' }}</NButton>
-                <NButton v-if="template.linked_tools_count" size="small" :disabled="busy" @click="startRebind(template)">批量换绑</NButton>
-                <NPopconfirm positive-text="确认删除" negative-text="取消" :positive-button-props="{ type: 'error' }"
-                  @positive-click="deleteTemplate(template)">
-                  <template #trigger><NButton size="small" type="error" quaternary :disabled="busy || !!template.linked_tools_count">删除</NButton></template>
-                  删除「{{ template.name }}」？<template v-if="template.open_usage">该模板正被 {{ template.open_usage }} 张未提交工单引用：删除后这些工单仍按已保存的版本继续填写和提交，但不能再新选此模板。</template><template v-else>当前没有未提交工单引用它。</template>已有自检记录仍可查看和导出。
-                </NPopconfirm>
-              </div>
-            </article>
-            <NModal :show="!!rebindTemplate" preset="card" title="批量换绑自检模板" class="tool-workspace-dialog"
-              @update:show="closeRebind">
-              <p>将授权楼栋内仍关联「{{ rebindTemplate?.name }}」的工具关联至目标模板。已有草稿和历史继续使用原版本。</p>
-              <NSelect v-model:value="rebindTarget" :options="rebindOptions" aria-label="目标自检模板" placeholder="选择目标模板" :disabled="busy" />
-              <p v-if="rebindProgress" role="status">{{ rebindProgress }}</p>
-              <p v-if="error" role="alert">{{ error }}</p>
-              <ul v-if="rebindFailures.length"><li v-for="(failure, index) in rebindFailures" :key="index">{{ failure.scope }}楼 · {{ failure.name }} · {{ failure.error }}</li></ul>
-              <template #footer><div class="tool-bar">
-                <NButton :disabled="busy" @click="rebindTemplate = undefined">关闭</NButton>
-                <NButton type="primary" :disabled="busy || !rebindTarget" :loading="busy" @click="applyRebind">确认换绑</NButton>
-              </div></template>
-            </NModal>
-            <details v-if="library?.legacy_templates.length" class="tool-context">
-              <summary>原有本地模板（{{ library.legacy_templates.length }} 份）</summary>
-              <article v-for="template in library.legacy_templates" :key="template.id" class="tool-template">
-                <div><strong>{{ template.name }}</strong><small>V{{ template.version }} · {{ template.open_usage || 0 }} 张未提交工单引用</small></div>
-                <NButton size="small" :disabled="busy" @click="startTemplateClone(template)">另存到模板库</NButton>
-              </article>
-            </details>
-            <section v-if="templateClone" class="tool-edit-panel" aria-label="新建自检模板">
-              <h3>新建自检模板</h3>
-              <label>模板名称 <input v-model="templateClone.name" maxlength="100" /></label>
-              <div v-for="(item,index) in templateClone.checks" :key="index" class="tool-edit-panel">
-                <strong>检查项 {{ index+1 }}</strong>
-                <label v-if="!item.sharedName">自检项目 <input v-model="item.name" maxlength="300" /></label>
-                <strong v-else>{{ item.name }}</strong>
-                <label>操作方法 <textarea v-model="item.method" maxlength="1500" /></label>
-                <label v-if="!templateClone.hvac">合格标准 <textarea v-model="item.standard" maxlength="1500" /></label>
-              </div>
-              <div class="tool-bar"><NButton :disabled="busy" @click="templateClone=null">取消</NButton><NButton type="primary" :disabled="busy" @click="saveTemplateClone">保存新模板</NButton></div>
-            </section>
-            <input ref="fileInput" type="file" accept=".xlsx" hidden @change="importTemplate" />
-            <input ref="folderInput" type="file" accept=".xlsx" webkitdirectory multiple hidden @change="importTemplateFolder" />
-          </section>
-        </div>
         <ToolWorkspace v-else key="records" ref="workspace" records-only :scope="scope"
           :followup-order-ids="followupOrderIds" :inventory-warning="board?.inventory_error"
           @records-refresh="loadBoard()" @inventory-status="updateInventoryStatus" @choose="selectView('workspace')">
@@ -124,6 +62,7 @@
               <template #prefix><Search :size="16" /></template>
             </NInput>
             <NSelect v-model:value="stateFilter" aria-label="工单状态" :options="stateOptions" :disabled="busy" />
+            <NSelect v-model:value="followupProfession" aria-label="筛选检修与报废专业" :options="followupProfessions" :disabled="busy" />
           </div>
           <div v-if="visibleOrders.length" class="tool-orders" role="table" aria-label="检修和报废记录">
             <div class="tool-column-labels" role="row">
@@ -144,7 +83,7 @@
                   <small v-if="row.deletion_pending" class="tool-pending" role="status">{{ row.deletion_error || '等待飞书确认删除' }}</small>
                 </div>
               </div>
-              <div class="tool-order-kind" role="cell"><strong>{{ row.scope }}楼</strong><small>{{ kindLabel(row) }}工单</small></div>
+              <div class="tool-order-kind" role="cell"><strong>{{ row.scope }}楼</strong><small>{{ row.profession || '专业未填写' }} · {{ kindLabel(row) }}工单</small></div>
               <div class="tool-order-meta" role="cell">
                 <small>{{ assignment(row) }}</small>
                 <small v-if="row.submitted_at">提交 {{ row.submitted_at.slice(0,10) }}</small>
@@ -331,12 +270,13 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
-import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, Settings2, Trash2, Upload, Wrench } from 'lucide-vue-next';
+import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, Trash2, Upload, Wrench } from 'lucide-vue-next';
 import { ApiError, downloadFile, requestBinaryJson, requestJson } from '../api/client';
 import { navigateBack, registerNavigationGuard } from '../navigation';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 import ToolAssetHistory from './ToolAssetHistory.vue';
 import ToolWorkspace from './ToolWorkspace.vue';
+import { toolProfession, toolProfessionOptions } from './tool-profession';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
 const props = defineProps<{ scope?: string; embedded?: boolean; toolView?: string; toolSession?: string; toolAsset?: string; toolOrder?: string }>();
@@ -354,6 +294,7 @@ interface Entry {
 }
 interface Order {
   workspace_id?: string; asset_id?: string;
+  profession?: string;
   id: string; month: string; scope: string; revision: number; status: 'pending' | 'review_pending' | 'submitted' | 'cancelled'; owner_name: string;
   submitted_at: string | null; can_claim: boolean; can_edit: boolean; can_release: boolean;
   kind: 'self' | 'external'; due: string; tool_name: string; model: string; location: string; quantity: number;
@@ -377,12 +318,14 @@ const outcomeOptions = [{ value: 'normal', label: '正常' }, { value: 'repair',
 const outcomeLabels: Record<string, string> = { normal: '正常', repair: '检修中', repaired: '检修完成', scrap: '待报废审批',
   scrapped: '已批准报废', rejected: '报废未通过' };
 const view = ref('workspace');
+const responsibilityOpen = ref(false);
 const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref(/^[a-f0-9]{32}$/.test(props.toolSession || '') && /^rec[A-Za-z0-9]{1,119}$/.test(props.toolAsset || '')
   ? props.toolSession! : '');
 const linkedAsset = ref(linkedSession.value ? props.toolAsset! : '');
 const stateFilter = ref('all');
+const followupProfession = ref('');
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
 const search = ref('');
@@ -402,7 +345,6 @@ const reportInput = ref<HTMLInputElement>();
 const month = ref('');
 const board = ref<Board>();
 const library = ref<{ templates: Template[]; legacy_templates: Template[]; warning?: string }>();
-const libraryLoading = ref(false);
 const order = ref<Detail>();
 const records = ref<Entry[]>([]);
 const selected = ref('');
@@ -412,17 +354,6 @@ const busy = ref(false);
 const error = ref('');
 const message = ref('');
 const saved = ref('[]');
-const fileInput = ref<HTMLInputElement>();
-const folderInput = ref<HTMLInputElement>();
-const folderProgress = ref('');
-const folderFailures = ref<{file:string;reason:string}[]>([]);
-const replacing = shallowRef<Template>();
-const rebindTemplate = shallowRef<Template>();
-const rebindTarget = ref<string | null>(null);
-const rebindProgress = ref('');
-const rebindFailures = ref<{name:string; scope:string; error:string}[]>([]);
-const rebindOptions = computed(() => (library.value?.templates || []).filter(template =>
-  template.active && template.id !== rebindTemplate.value?.id).map(template => ({value:template.id, label:template.name})));
 const afterDiscard = shallowRef<(() => void) | null>(null);
 let reader: AbortController | undefined;
 let disposed = false;
@@ -431,6 +362,7 @@ let listPosition = 0;
 const active = computed(() => records.value.find(record => record.entry_id === selected.value));
 const scopedFollowups = computed(() => (board.value?.followups || []).filter(row =>
   !props.scope || ['ALL', 'CAMPUS'].includes(props.scope) || row.scope === props.scope));
+const followupProfessions = computed(() => toolProfessionOptions(scopedFollowups.value));
 const repairCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'repair').length);
 const approvalCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'scrap').length);
 const completed = (row: Order) => ['repaired', 'scrapped', 'rejected'].includes(row.outcome);
@@ -440,27 +372,26 @@ const voteLabel = (decision: string) => ({ approve: '已同意', reject: '已驳
 const tabs = computed(() => [
   { value: 'workspace', label: '工作台', icon: ClipboardList, count: 0 },
   { value: 'followups', label: '办理记录', icon: Wrench, count: repairCount.value + approvalCount.value },
-  ...(board.value?.can_manage_templates ? [{ value: 'settings', label: '工具与模板', icon: Settings2, count: 0 }] : []),
 ]);
 const stateOptions = [{ value: 'pending', label: '待处理' }, { value: 'repair', label: '检修中' },
   { value: 'scrap', label: '待报废审批' }, { value: 'done', label: '已处置' }, { value: 'all', label: '全部状态' }];
 const visibleOrders = computed(() => {
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return scopedFollowups.value.filter(row =>
+    (!followupProfession.value || toolProfession(row.profession) === followupProfession.value) &&
     (stateFilter.value === 'all' || row.outcome === stateFilter.value
       || (stateFilter.value === 'done' ? completed(row) : stateFilter.value === 'pending' && !completed(row))) &&
-    terms.every(term => [row.tool_name, row.model, row.location, row.scope + '楼', row.owner_name]
+    terms.every(term => [row.tool_name, row.model, row.location, row.scope + '楼', row.owner_name, row.profession]
       .join(' ').toLowerCase().includes(term)))
     .sort((left, right) => Number(completed(left)) - Number(completed(right)));
 });
 const pagedOrders = computed(() => visibleOrders.value.slice((page.value - 1) * pageSize, page.value * pageSize));
-const emptyDescription = computed(() => search.value.trim() || stateFilter.value !== 'all'
+const emptyDescription = computed(() => search.value.trim() || stateFilter.value !== 'all' || followupProfession.value
   ? '没有符合筛选条件的记录' : '暂无检修或报废记录');
 watch(view, () => {
   stateFilter.value = 'all';
-  if (view.value === 'settings') void loadLibrary().catch(fail);
 });
-watch([view, search, stateFilter], () => { page.value = 1; });
+watch([view, search, stateFilter, followupProfession], () => { page.value = 1; });
 watch(() => visibleOrders.value.length, count => { page.value = Math.min(page.value, Math.max(1, Math.ceil(count / pageSize))); });
 const transitions = computed<{ action: string; label: string; type: 'primary' | 'warning' }[]>(() => order.value?.can_repair
   ? [{ action: 'repaired', label: '检修后合格', type: 'primary' }, { action: 'repair-scrap', label: '申请检修后报废', type: 'warning' }]
@@ -468,12 +399,6 @@ const transitions = computed<{ action: string; label: string; type: 'primary' | 
 const availableTemplates = computed(() => library.value?.templates ?? board.value?.templates ?? []);
 const templateOptions = computed(() => availableTemplates.value.filter(template => template.active)
   .map(template => ({ value: template.id, label: template.name })));
-const templateClone=ref<{id:string;version:number;name:string;hvac:boolean;checks:{name:string;method:string;standard:string;sharedName:boolean}[]}|null>(null);
-function startTemplateClone(template:Template){
-  templateClone.value={id:template.id,version:template.version,name:template.name+'（新模板）',hvac:template.schema.layout==='hvac',
-    checks:template.schema.checks.map(item=>({name:item.name,method:item.method,standard:item.standard,sharedName:!!item.group_row&&item.group_row!==item.row}))};
-}
-async function saveTemplateClone(){const value=templateClone.value;if(!value)return;await mutate(async()=>{await requestJson(`${api}/templates/${value.id}/clone`,{method:'POST',body:JSON.stringify(value)});templateClone.value=null;await loadLibrary();message.value='新模板已保存。';});}
 const payload = computed(() => records.value.map(({ template: _template, ...record }) => record));
 const form = computed(() => order.value?.kind === 'external' ? { actual: actual.value, inspection: reportCheck.value } :
   { records: payload.value, outcome: outcome.value, reason: reason.value, quantity: quantity.value });
@@ -514,13 +439,8 @@ async function changePage(next: number) {
 
 function fail(value: unknown) { error.value = value instanceof Error ? value.message : '操作暂未确认，请刷新核对。'; }
 async function loadLibrary() {
-  libraryLoading.value = true;
-  try {
-    const data = await requestJson(api + '/templates', { cache: 'no-store' }) as NonNullable<typeof library.value>;
-    if (!disposed) library.value = data;
-  } finally {
-    libraryLoading.value = false;
-  }
+  const data = await requestJson(api + '/templates', { cache: 'no-store' }) as NonNullable<typeof library.value>;
+  if (!disposed) library.value = data;
 }
 async function loadBoard(target = month.value) {
   reader?.abort();
@@ -631,7 +551,6 @@ function back() {
 function refresh() {
   if (order.value) { const row = order.value; leave(() => void openOrder(row)); }
   else if (workspace.value) void workspace.value.refresh();
-  else if (view.value === 'settings') void mutate(loadLibrary);
   else void loadBoard();
 }
 function updateInventoryStatus(warning: string) {
@@ -738,98 +657,6 @@ async function mutate(operation: () => Promise<void>) {
   finally { busy.value = false; }
 }
 function download(path: string) { return mutate(() => downloadFile(api + path)); }
-function chooseImport(template?: Template) {
-  replacing.value = template;
-  fileInput.value?.click();
-}
-async function importTemplate(event: Event) {
-  const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  input.value = '';
-  if (!file) return;
-  const previous = replacing.value;
-  const params = new URLSearchParams({ name: previous?.name || file.name.replace(/\.xlsx$/i, '') });
-  if (previous) { params.set('id', previous.id); params.set('version', String(previous.version)); }
-  await mutate(async () => {
-    await requestBinaryJson(api + '/templates?' + params, file);
-    await loadLibrary();
-    message.value = '模板已保存。';
-  });
-}
-async function importTemplateFolder(event:Event){
-  const input=event.target as HTMLInputElement;
-  const files=Array.from(input.files || []).filter(file=>/\.xlsx$/i.test(file.name)&&!file.name.startsWith('~$'));
-  input.value='';
-  if(!files.length){error.value='所选文件夹没有可导入的 XLSX 模板。';return;}
-  await mutate(async()=>{
-    folderFailures.value=[];
-    let imported=0,skipped=0,processed=0;
-    for(const file of files){
-      if(disposed)break;
-      folderProgress.value=`正在导入 ${processed+1}/${files.length} · ${file.name}`;
-      try{
-        const params=new URLSearchParams({name:file.name.replace(/\.xlsx$/i,'')});
-        const receipt = await requestBinaryJson(api+'/templates?'+params,file) as { existing?: boolean };
-        if (receipt.existing) skipped++;
-        else imported++;
-      }catch(failure){
-        if(failure instanceof ApiError && failure.status===409 && failure.message.includes('相同模板已导入'))skipped++;
-        else folderFailures.value.push({file:file.webkitRelativePath || file.name,reason:failure instanceof Error?failure.message:'上传未确认'});
-      }
-      processed++;
-    }
-    if(disposed)return;
-    await loadLibrary();
-    folderProgress.value=`已导入 ${imported} 份，跳过重复 ${skipped} 份，失败 ${folderFailures.value.length} 份。`;
-  });
-}
-async function toggleTemplate(template: Template) {
-  await mutate(async () => {
-    await requestJson(`${api}/templates/${template.id}/availability`, { method: 'POST',
-      body: JSON.stringify({ version: template.version, active: !template.active }) });
-    await loadLibrary();
-  });
-}
-function startRebind(template: Template) {
-  rebindTemplate.value = template;
-  rebindTarget.value = null;
-  rebindProgress.value = '';
-  rebindFailures.value = [];
-}
-function closeRebind(show: boolean) {
-  if (!show && !busy.value) rebindTemplate.value = undefined;
-}
-async function applyRebind() {
-  const template = rebindTemplate.value;
-  const target = rebindTarget.value;
-  if (!template || !target) return;
-  await mutate(async () => {
-    let total = 0;
-    rebindFailures.value = [];
-    for (;;) {
-      const result = await requestJson(`${api}/templates/${encodeURIComponent(template.id)}/rebind`, {
-        method: 'POST', timeoutMs: 120000, body: JSON.stringify({ version: template.version, target_id: target }),
-      }) as { updated: number; remaining: number; failed: typeof rebindFailures.value };
-      total += result.updated;
-      rebindFailures.value = result.failed;
-      rebindProgress.value = `已核验 ${total} 台${result.failed.length ? `，本批 ${result.failed.length} 台待处理` : ''}${result.remaining ? `，另有 ${result.remaining} 台未处理` : ''}。`;
-      if (!result.remaining || result.failed.length || !result.updated || disposed) break;
-    }
-    if (!disposed) await loadLibrary();
-  });
-}
-async function deleteTemplate(template: Template) {
-  await mutate(async () => {
-    await requestJson(`${api}/templates/${template.id}/delete`, {
-      method: 'POST', body: JSON.stringify({ version: template.version }),
-    });
-    if (board.value) board.value.templates = board.value.templates.filter(item => item.id !== template.id);
-    if (templateClone.value?.id === template.id) templateClone.value = null;
-    if (templateId.value === template.id) templateId.value = null;
-    await loadLibrary();
-    message.value = '模板已删除。';
-  });
-}
 function leave(proceed: () => void) {
   if (busy.value) return;
   if (dirty.value) afterDiscard.value = proceed;
@@ -895,7 +722,6 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
 .tool-nav :deep(.n-button__content) { gap:4px; }
 .tool-nav-count { font-size:12px; opacity:.88; }
 .tool-nav-count::before { content:'·'; margin-right:4px; }
-.tool-source-error { margin-bottom:12px; }
 .tool-worklist { overflow:hidden; }
 .tool-list-head,.tool-filters,.tool-list-foot { padding:10px 14px; }
 .tool-list-head,.tool-list-foot { display:flex; justify-content:space-between; align-items:center; gap:8px; flex-wrap:wrap; }
@@ -905,7 +731,7 @@ onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.r
 .tool-counts strong { font-size:17px; font-variant-numeric:tabular-nums; }
 .tool-counts span:first-child { background:var(--tool-tint); }
 .tool-filters {
-  display:grid; grid-template-columns:minmax(200px,1fr) minmax(0,155px); gap:8px; align-items:stretch;
+  display:grid; grid-template-columns:minmax(0,1fr) repeat(2,minmax(0,155px)); gap:8px; align-items:stretch;
   border-top:1px solid var(--tool-line);
 }
 input,.tool-fields textarea,.tool-result textarea {
@@ -919,7 +745,7 @@ input,.tool-fields textarea,.tool-result textarea {
 .tool-column-labels { background:var(--tool-soft); font-weight:650; font-size:12px; color:var(--tool-muted); }
 .tool-order { border-top:1px solid var(--tool-line); font-size:13px; }
 .tool-order>div { min-width:0; overflow-wrap:anywhere; }
-.tool-order small,.tool-template small,.tool-report-file small { display:block; margin-top:2px; font-size:12px; color:var(--tool-muted); }
+.tool-order small,.tool-report-file small { display:block; margin-top:2px; font-size:12px; color:var(--tool-muted); }
 .tool-order-name { display:flex; align-items:center; gap:8px; }
 .tool-order-name>div { min-width:0; }
 .tool-order-name strong { font-size:14px; }
@@ -931,16 +757,12 @@ input,.tool-fields textarea,.tool-result textarea {
   --n-text-color:var(--tool-muted) !important;
 }
 .tool-empty { padding:28px 12px; }
-.tool-settings-layout,.tool-form-layout { display:grid; gap:12px; align-items:start; min-width:0; }
-.tool-settings-layout { grid-template-columns:minmax(0,1.25fr) minmax(0,1fr); }
+.tool-form-layout { display:grid; gap:12px; align-items:start; min-width:0; }
 .tool-library,.tool-edit-panel,.tool-result,.tool-overview { padding:12px 14px; }
 .tool-panel-heading { justify-content:space-between; }
 .tool-panel-heading h3 { margin:0; font-size:15px; }
 .tool-panel-heading span,.tool-library p { font-size:12px; color:var(--tool-muted); }
 .tool-library p { margin:6px 0; }
-.tool-template { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:8px 0; border-top:1px solid var(--tool-line); }
-.tool-template>div:first-child { min-width:0; overflow-wrap:anywhere; font-size:13px; }
-.tool-template .tool-bar { gap:5px; }
 .tool-form { display:grid; gap:12px; min-width:0; }
 .tool-overview { display:grid; gap:8px; font-size:13px; }
 .tool-download { margin-inline-start:auto; }
@@ -991,13 +813,14 @@ input,.tool-fields textarea,.tool-result textarea {
 .tool-submit>span { margin-right:auto; color:var(--tool-muted); font-size:13px; }
 :global(.workspace-v2 .tool-check .tool-submit) { padding-inline-end:64px; }
 @container (max-width:840px) {
-  .tool-form-layout.tool-has-aside,.tool-settings-layout { grid-template-columns:minmax(0,1fr); }
+  .tool-form-layout.tool-has-aside { grid-template-columns:minmax(0,1fr); }
 }
 @container (max-width:680px) {
   .tool-nav>.n-button { flex:1 1 0; padding-inline:4px; }
   .tool-nav-count { display:none; }
   .tool-list-head,.tool-filters,.tool-list-foot { padding:8px 10px; }
-  .tool-filters { grid-template-columns:minmax(0,1fr) minmax(0,124px); }
+  .tool-filters { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .tool-filters .tool-search { grid-column:1/-1; }
   .tool-column-labels { position:absolute; width:1px; height:1px; padding:0; overflow:hidden; clip-path:inset(50%); }
   .tool-orders { display:grid; gap:7px; padding:0 8px 8px; }
   .tool-order {

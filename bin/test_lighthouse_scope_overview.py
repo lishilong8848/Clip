@@ -12,20 +12,20 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fastapi import Request
 from lan_bitable_template_portal.lighthouse_model import scoped_operation
 from lan_bitable_template_portal.portal_service import PortalError
-from lan_bitable_template_portal.module_access import MODULE_IDS
+from lan_bitable_template_portal.module_access import MODULE_IDS, profession_query
 from test_lighthouse_frontend_contracts import build_native_catalog
 
 OPTIONS = [{'value': code, 'label': code + '楼'} for code in ('A', 'B', 'C', 'D', 'E', 'H', '110', 'CAMPUS', 'ALL')]
 
 
 class ScopeOverviewTests(unittest.IsolatedAsyncioTestCase):
-    async def run_endpoint(self, query, allowed=('ALL',)):
+    async def run_endpoint(self, query, allowed=('ALL',), profile=None):
         session = {'allowed_scopes': list(allowed), 'user': {'open_id': 'fixture'}}
         service = Mock()
         service.get_scope_overview.side_effect = lambda **kw: {'source_snapshot_ready': True,
             'scope_options': OPTIONS, 'scopes': {scope: {'scope': scope, 'ongoing': 1} for scope in kw['scopes']}}
         auth = SimpleNamespace(filter_scope_options=lambda options, _session: options if 'ALL' in allowed else [o for o in options if o['value'] in allowed],
-                               account_profile=lambda _: {'modules': list(MODULE_IDS)},
+                               account_profile=lambda _: {'modules': list(MODULE_IDS), **(profile or {})},
                                filter_scope_overview=lambda data, _session: data)
         def authorized(_session, scope):
             if scope not in {o['value'] for o in OPTIONS} or ('ALL' not in allowed and scope not in allowed):
@@ -40,6 +40,7 @@ class ScopeOverviewTests(unittest.IsolatedAsyncioTestCase):
         node = copy.deepcopy(next(node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == 'scope_overview'))
         node.decorator_list = []
         namespace = {'self': controller, 'Request': Request, 'asyncio': asyncio, 'SCOPE_OPTIONS': OPTIONS, 'PortalError': PortalError,
+            'profession_query': profession_query,
             'PortalRuntime': SimpleNamespace(auth_manager=auth, service=service, _ongoing_items_marker=lambda _: 'fixture')}
         exec(compile(ast.fix_missing_locations(ast.Module(body=[node], type_ignores=[])), '<native-scope-overview>', 'exec'), namespace)
         request = Request({'type': 'http', 'method': 'GET', 'path': '/api/scope-overview', 'query_string': query.encode(), 'headers': []})
@@ -50,6 +51,12 @@ class ScopeOverviewTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(data['scopes']), {'E'})
         self.assertEqual([o['value'] for o in data['scope_options']], ['E'])
         self.assertEqual(service.get_scope_overview.call_args.kwargs['scopes'], ['E'])
+
+    async def test_engineer_profession_comes_from_account_not_query(self):
+        data, service = await self.run_endpoint('scope=E&profession=暖通', ('E',),
+            {'category': 'engineer', 'level': 'L4', 'specialties': ['电气']})
+        self.assertEqual(set(data['scopes']), {'E'})
+        self.assertEqual(service.get_scope_overview.call_args.kwargs['professions'], ('电气',))
 
     async def test_no_parameter_preserves_homepage_all_scope_contract(self):
         data, _ = await self.run_endpoint('')

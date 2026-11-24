@@ -32,7 +32,7 @@
   flex-wrap: wrap; padding: 15px 18px;
   background: linear-gradient(108deg, #dbeefa, #e4efef 55%, #daeee2);
 }
-.ops-desk .ops-head h1 { font-size: clamp(21px,2.2vw,29px); line-height: 1.25; font-weight: 720; letter-spacing: -.035em; }
+.ops-desk .ops-head h1 { font-size: var(--cf-font-page); line-height: 1.25; font-weight: 720; letter-spacing: -.035em; }
 .ops-desk .ops-heading, .ops-desk .ops-head .ops-title:not(h1), .ops-desk .ops-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 9px; }
 .ops-desk .ops-heading { gap: 10px; }
 .ops-desk .ops-daily-symbol { display: grid; place-items: center; width: 39px; height: 39px; border-radius: 12px; color: #256477; background: linear-gradient(135deg,#fbffff,#deedef); border: 1px solid #f6ffff; }

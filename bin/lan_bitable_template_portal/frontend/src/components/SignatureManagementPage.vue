@@ -237,7 +237,7 @@ import VnetBackButton from "./VnetBackButton.vue";
 import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { CheckCircle2, CircleAlert, Eye, Fingerprint, Link2, Plus, RefreshCw, Search, ShieldCheck, UserRound, UsersRound, X } from "lucide-vue-next";
 import ConfirmDialog from "./ConfirmDialog.vue";
-import { requestJson, type Dict } from "../api/client";
+import { requestJson, requestPeople, type Dict } from "../api/client";
 
 const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean; userId?: string }>();
 const workspaceV2 = document.documentElement.classList.contains('workspace-v2');
@@ -321,7 +321,7 @@ async function load(refresh = false) {
   try {
     const params = new URLSearchParams({ q: query.value, source: source.value, status: status.value, scope: scope.value, page: String(page.value) });
     if (refresh) params.set("refresh", "1");
-    const data = await requestJson("/api/signatures/management/people?" + params, { cache: "no-store", signal: controller.signal });
+    const data = await (hasPending.value ? requestJson : requestPeople)("/api/signatures/management/people?" + params, { signal: controller.signal, fresh: refresh });
     if (n !== seq || disposed) return;
     people.value = data.people || []; sources.value = data.sources || {}; counts.value = data.counts || {}; count.value = data.count || 0;
     relayBuildings.value = (data.recipients || []).map((item: Dict) => String(item.value));
@@ -405,7 +405,7 @@ async function searchStaff() {
   staffLoading.value = true;
   modalError.value = "";
   try {
-    const data = await requestJson("/api/signatures/management/people?" + new URLSearchParams({ source: "staff", page: "1", page_size: "500" }));
+    const data = await requestPeople("/api/signatures/management/people?" + new URLSearchParams({ source: "staff", page: "1", page_size: "500" }));
     if (n === staffSeq && !disposed) staffDirectory.value = data.people || [];
   } catch (error: any) { if (n === staffSeq) modalError.value = error.message || "正式人员搜索失败。"; }
   finally { if (n === staffSeq) staffLoading.value = false; }

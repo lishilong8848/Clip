@@ -119,7 +119,7 @@ class ColdSourceTests(unittest.TestCase):
             self.store.put_document(monitor.NS,'job:'+str(i),{'id':str(i),'row':row,'created_at':i,'status':'sent'})
         self.store.put_document(monitor.NS,'job:other',{'id':'other','row':{**row,'scope':'D'},'created_at':99,'status':'sent'})
         with patch.object(monitor,'snapshot',return_value=[row,{**row,'id':'rec2','scope':'D'}]), \
-             patch.object(monitor,'allowed_modules',return_value=['daily']):
+             patch.object(monitor,'allowed_modules',return_value=['cold_source']):
             response=TestClient(app).get('/api/cold-source-monitor?page=6')
             with patch.object(runtime.state_store,'list_documents',side_effect=AssertionError('状态页不应读推送历史')):
                 status_only=TestClient(app).get('/api/cold-source-monitor?status_only=1')

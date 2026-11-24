@@ -4612,6 +4612,8 @@ class PortalRuntime:
             if session is None:
                 return
             try:
+                from .module_access import profession_query
+
                 qs = parse_qs(parsed.query)
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
@@ -4622,6 +4624,7 @@ class PortalRuntime:
                     ongoing_items=ongoing,
                     month=(qs.get("month") or [""])[0],
                     todo_only=(qs.get("view") or [""])[0] == "todos",
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._send_json(
                     200,
@@ -4637,7 +4640,8 @@ class PortalRuntime:
             if session is None:
                 return
             try:
-                from .module_access import require_module
+                from .module_access import (profession_query, professional_record_visible,
+                                            require_module, session_engineer_professions)
                 require_module(PortalRuntime.auth_manager, session, "engineer_mop")
                 query = parse_qs(parsed.query)
                 scope = self._authorized_scope_or_error(session, (query.get("scope") or ["ALL"])[0])
@@ -4645,6 +4649,7 @@ class PortalRuntime:
                     record_id, attachment_id = parsed.path.removeprefix("/api/engineer/mop/history/").split("/")
                     content, content_type, name = self.service.download_engineer_mop_history(
                         scope=scope, record_id=record_id, attachment_id=attachment_id,
+                        **profession_query(PortalRuntime.auth_manager, session),
                     )
                     return self._write_response(200, {
                         "Content-Type": content_type or "application/octet-stream",
@@ -4654,7 +4659,9 @@ class PortalRuntime:
                 app_id = PortalRuntime.auth_manager.current_feishu_app_id()
                 data = self._cached_service_payload(("mop_history", app_id, scope),
                     lambda: self.service.engineer_mop_history(scope=scope), fresh=query.get('refresh') == ['1'])
-                page = self.service.engineer_mop_history_page(data["records"], scope=scope,
+                professions = session_engineer_professions(PortalRuntime.auth_manager, session)
+                records = [item for item in data["records"] if professional_record_visible(professions, item)]
+                page = self.service.engineer_mop_history_page(records, scope=scope,
                     search=(query.get("search") or [""])[0], specialty=(query.get("specialty") or [""])[0],
                     page=(query.get("page") or ["1"])[0])
                 return self._send_json(200, {"ok": True, "data": self._with_auth_context(page, session)})
@@ -4665,6 +4672,8 @@ class PortalRuntime:
             if session is None:
                 return
             try:
+                from .module_access import profession_query
+
                 qs = parse_qs(parsed.query)
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
@@ -4673,6 +4682,7 @@ class PortalRuntime:
                     scope=scope,
                     mop_record_id=(qs.get("mop_record_id") or [""])[0],
                     file_token=(qs.get("file_token") or [""])[0],
+                    **profession_query(PortalRuntime.auth_manager, session),
                     file_name=(qs.get("file_name") or [""])[0],
                     upload_id=(qs.get("upload_id") or [""])[0],
                 )
@@ -4828,15 +4838,18 @@ class PortalRuntime:
                 ongoing = self._get_ongoing(scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                from .module_access import profession_query
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 data = self._cached_service_payload(
                     (
                         "bootstrap",
                         open_id,
+                        professional_scope.get('professions'),
                         scope,
                         self._ongoing_items_marker(ongoing),
                     ),
                     lambda: self.service.get_bootstrap(
-                        scope=scope, ongoing_items=ongoing
+                        scope=scope, ongoing_items=ongoing, **professional_scope
                     ),
                 )
                 return self._send_json(
@@ -4863,10 +4876,13 @@ class PortalRuntime:
                     if str(option.get("value") or "").strip()
                 ]
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                from .module_access import profession_query
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 data = self._cached_service_payload(
                     (
                         "scope-overview",
                         open_id,
+                        professional_scope.get('professions'),
                         tuple(sorted(allowed_scopes)),
                         self._ongoing_items_marker(ongoing),
                     ),
@@ -4874,6 +4890,7 @@ class PortalRuntime:
                         ongoing_items=ongoing,
                         scopes=allowed_scopes,
                         include_prepared=False,
+                        **professional_scope,
                     ),
                 )
                 data = PortalRuntime.auth_manager.filter_scope_overview(data, session)
@@ -4891,12 +4908,15 @@ class PortalRuntime:
         if parsed.path == "/api/daily-tasks":
             qs = parse_qs(parsed.query)
             try:
+                from .module_access import profession_query
+
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
                 data = self.service.get_daily_task_checklist(
                     scope=scope,
                     date=(qs.get("date") or [""])[0],
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._send_json(
                     200,
@@ -4912,6 +4932,8 @@ class PortalRuntime:
         if parsed.path == "/api/history-summary":
             qs = parse_qs(parsed.query)
             try:
+                from .module_access import profession_query
+
                 scope = self._authorized_scope_or_error(
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
@@ -4919,6 +4941,7 @@ class PortalRuntime:
                     scope=scope,
                     month=(qs.get("month") or [""])[0],
                     work_type=(qs.get("work_type") or ["all"])[0],
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._send_json(
                     200,
@@ -4949,10 +4972,12 @@ class PortalRuntime:
                     session, (qs.get("scope") or ["ALL"])[0]
                 )
                 month = (qs.get("month") or [""])[0]
+                from .module_access import profession_query
                 data = PortalRuntime.service.get_event_monthly_snapshot(
                     scope=scope,
                     month=month,
                     date_field=(qs.get("date_field") or [""])[0],
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._send_json(
                     200,
@@ -4964,7 +4989,8 @@ class PortalRuntime:
             qs = parse_qs(parsed.query)
             try:
                 month = (qs.get("month") or [""])[0]
-                data = PortalRuntime.service.get_event_monthly_overview(month=month)
+                from .module_access import profession_query
+                data = PortalRuntime.service.get_event_monthly_overview(month=month, **profession_query(PortalRuntime.auth_manager, session))
                 return self._send_json(
                     200,
                     {"ok": True, "data": self._with_auth_context(data, session)},
@@ -5040,10 +5066,13 @@ class PortalRuntime:
                 month = (qs.get("month") or [""])[0]
                 specialty = (qs.get("specialty") or [""])[0]
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                from .module_access import profession_query
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 payload = self._cached_service_payload(
                     (
                         "records",
                         open_id,
+                        professional_scope.get('professions'),
                         scope,
                         month,
                         specialty,
@@ -5055,6 +5084,7 @@ class PortalRuntime:
                         scope=scope,
                         ongoing_items=ongoing,
                         ongoing_items_authoritative=True,
+                        **professional_scope,
                     ),
                 )
                 return self._send_json(
@@ -5087,10 +5117,13 @@ class PortalRuntime:
                     if item.strip()
                 )
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                from .module_access import profession_query
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 payload = self._cached_service_payload(
                     (
                         "workbench",
                         open_id,
+                        professional_scope.get('professions'),
                         scope,
                         month,
                         specialty,
@@ -5108,6 +5141,7 @@ class PortalRuntime:
                         work_type=work_type,
                         sections=sections,
                         ongoing_items_authoritative=True,
+                        **professional_scope,
                     ),
                 )
                 if work_type and isinstance(payload, dict):
@@ -5130,6 +5164,7 @@ class PortalRuntime:
                             work_type="",
                             sections=sections,
                             ongoing_items_authoritative=True,
+                            **professional_scope,
                         )
                         if isinstance(broad_payload, dict):
                             payload["records"] = [
@@ -5589,6 +5624,9 @@ class PortalRuntime:
                 return self._send_json(403, {"ok": False, "error": str(exc)})
         if parsed.path in {"/api/change-target-candidates", "/api/notice-target-candidates"}:
             try:
+                from .module_access import profession_query
+
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 payload = self._read_json_body()
                 scope = self._authorized_scope_or_error(
                     session, payload.get("scope") or "ALL"
@@ -5616,6 +5654,7 @@ class PortalRuntime:
                         text=payload.get("text") or "",
                         all_active=lookup_context != "ongoing_list",
                         all_ongoing=lookup_context == "ongoing_list",
+                        **professional_scope,
                     )
                 else:
                     data = self.service.lookup_notice_target_candidates(
@@ -5632,6 +5671,7 @@ class PortalRuntime:
                         text=payload.get("text") or "",
                         all_active=lookup_context != "ongoing_list",
                         all_ongoing=lookup_context == "ongoing_list",
+                        **professional_scope,
                     )
                 return self._send_json(200, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:

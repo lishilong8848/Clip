@@ -89,6 +89,91 @@ class AccountBulkModuleTests(_TempDirTestCase):
         self.manager.update({"changes": [self.change("B", ["learning"])]}, self.actor)
         self.assert_rejected_atomically([self.change("A", ["change"]), stale], message="已变化")
 
+    def test_permission_first_addition_preserves_grants_the_supervisor_cannot_edit(self):
+        self.manager.update({"changes": [self.change("AS", ["maintenance", "accounts", "daily"])]}, self.actor)
+        actor = {"open_id": "ou_bulkAS"}
+        first = self.change("A", ["daily"])
+        first["add_modules"] = first.pop("modules")
+        foreign = self.change("B", ["daily"])
+        foreign["add_modules"] = foreign.pop("modules")
+        self.assert_rejected_atomically([first, foreign], actor)
+        self.assert_rejected_atomically([{**first, "add_modules": ["water"]}], actor, "自己没有的模块")
+        before = self.persisted()["users"]["ou_bulkA"]
+        self.assertEqual(self.manager.update({"changes": [first]}, actor), {"changed": 1})
+        self.assertEqual(self.persisted()["users"]["ou_bulkA"],
+                         {**before, "modules": [*before["modules"], "daily"]})
+        self.assert_rejected_atomically([first], actor, "已变化")
+
+    def test_tool_access_is_independent_and_revocation_survives_legacy_migration(self):
+        import asyncio
+        from starlette.requests import Request
+        from lan_bitable_template_portal.module_access import module_denial
+        from lan_bitable_template_portal.risk_inspection_routes import tool_management_access
+        from lan_bitable_template_portal.tool_management import ToolManagement
+        from types import SimpleNamespace
+
+        def tools_for(open_id, _name):
+            return {**self.h.auth.account_profile(open_id), "id": "recA"}
+
+        service = ToolManagement.__new__(ToolManagement)
+        runtime = SimpleNamespace(tool_management=lambda: service, risk_inspection_actor=tools_for)
+        user = {"open_id": "ou_bulkA", "name": "隔离A"}
+        session = {"user": user, "role": "building"}
+        runtime.auth_manager = self.h.auth
+        controller = SimpleNamespace(_current_session=lambda _:session)
+
+        def denied(path, method="GET", query=b""):
+            request = Request({'type':'http','path':path,'query_string':query,'headers':[],
+                               'method':method,'scheme':'http','server':('testserver',80)})
+            result = asyncio.run(module_denial(request, controller, runtime))
+            return result is not None and result.status_code == 403
+
+        self.assertFalse(tool_management_access(runtime, session, user))
+        self.manager.update({"changes": [self.change("A", ["risk_inspection"])]}, self.actor)
+        self.assertFalse(tool_management_access(runtime, session, user))
+        self.assertTrue(denied('/api/tool-self-check/workspace/open', 'POST'))
+        self.assertFalse(denied('/api/risk-inspections/people'))
+
+        legacy = self.persisted()
+        legacy['users']['ou_bulkA'].pop('module_grants_version')
+        self.h.auth._save_permissions_locked(legacy)
+        self.assertTrue(tool_management_access(runtime, session, user))
+        self.manager.update({"changes": [self.change("A", ["risk_inspection"])]}, self.actor)
+        self.h.auth._permissions_cache = None
+        self.assertFalse(tool_management_access(runtime, session, user))
+        self.assertTrue(denied('/risk-inspections', query=b'view=tool-self-check'))
+
+        self.manager.update({"changes": [self.change("A", [])]}, self.actor)
+        changes = []
+        for key in ('A','B'):
+            grant = self.change(key, ['tool_management'])
+            grant['add_modules'] = grant.pop('modules')
+            changes.append(grant)
+        self.manager.update({"changes": changes}, self.actor)
+        self.assertEqual(self.item("A")["modules"], ["tool_management"])
+        self.assertFalse(denied('/api/tool-self-check/workspace/inventory'))
+        self.assertFalse(denied('/risk-inspections', query=b'view=tool-self-check'))
+        self.assertTrue(denied('/api/risk-inspections/people'))
+        self.assertTrue(tool_management_access(runtime, session, user))
+        self.assertFalse(user["tool_management_full_access"])
+        self.assertEqual(self.item("A")["scopes"], ["A"])
+        self.manager.update({"changes": [self.change("A", ["maintenance"])]}, self.actor)
+        self.assertFalse(tool_management_access(runtime, session, user))
+
+    def test_verified_legacy_tool_special_grant_can_also_be_revoked(self):
+        snapshot = self.h.login.snapshot
+        snapshot['people']['recA']['name'] = '刘小杏'
+        self.h.auth._account_index_cache = (None, {})
+        legacy = self.persisted()
+        before = legacy['users']['ou_bulkA']
+        before['modules'] = []
+        before.pop('module_grants_version')
+        self.h.auth._save_permissions_locked(legacy)
+        self.assertEqual(self.h.auth.account_profile('ou_bulkA')['modules'], ['tool_management'])
+        self.manager.update({"changes": [self.change("A", [])]}, self.actor)
+        self.h.auth._permissions_cache = None
+        self.assertEqual(self.h.auth.account_profile('ou_bulkA')['modules'], [])
+
     def test_disabled_listing_hides_saved_modules_so_client_must_not_merge_it(self):
         disabled = self.change("B", ["learning", "knowledge"])
         disabled["enabled"] = False

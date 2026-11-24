@@ -23,7 +23,7 @@ class MaintenancePermissionTests(fixtures.LibraryFixture):
     def setUp(self):
         self.enterContext(patch('openclaw_service.assistant.lighthouse_knowledge._load_local', return_value=None))
         super().setUp()
-        self.profile = {'role': 'building', 'modules': ['knowledge'], 'scopes': ['A']}
+        self.profile = {'role': 'building', 'modules': ['documents'], 'scopes': ['A']}
         self.session = {'user': {'open_id': fixtures.actor()['id'], 'name': 'Fixture reader'}}
         auth = SimpleNamespace(
             account_profile=lambda identity: copy.deepcopy(self.profile),

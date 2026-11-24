@@ -45,6 +45,7 @@ ROUTES = {
     "workbench-summary": {"GET": "workbench_summary"},
     "issues": {"GET": "issues.list", "POST": "issue.create"},
     "issues/pending-questions": {"GET": "issues.pending_questions"},
+    "issues/workbench-questions": {"GET": "issues.workbench_questions"},
     "issues/{id}/question": {"GET": "issue.question.get", "PUT": "issue.question.save"},
     "issues/{id}": {"GET": "issue.get", "PATCH": "issue.update"},
     "questions": {"GET": "questions.list", "POST": "question.save"},
@@ -145,6 +146,8 @@ def install_learning_routes(app, controller, runtime):
         lookup = f"personnel_{personnel_rid}" if personnel and personnel_rid else open_id
         name = str(user.get("name") or session.get("name") or "")
         base = {"id": open_id, "name": name, "is_admin": admin, "scope": scope}
+        from .module_access import profession_query
+        base.update(profession_query(runtime.auth_manager, session))
         if not admin and not scope:
             # Formal ordinary personal account: self-only, never shared/duty.
             info = get_service().resolve_self(lookup)
@@ -349,11 +352,18 @@ def install_learning_routes(app, controller, runtime):
             if action == "bootstrap":
                 scope = query.get("scope", "" if actor["is_admin"] else actor["scope"])
                 data = await asyncio.to_thread(current.bootstrap, scope, actor)
+            elif action == "issues.workbench_questions":
+                from .learning_issue_cards import workbench_review_scopes
+                scopes = await asyncio.to_thread(workbench_review_scopes, current, runtime.auth_manager, session, actor)
+                data = await asyncio.to_thread(current.pending_questions, actor, query, workbench_scopes=scopes)
             elif action in {"issue.question.get", "issue.question.save"}:
-                from .learning_issue_cards import review_question
+                from .learning_issue_cards import review_question, workbench_review_scopes
+                workbench = query.get("workbench") == "1"
+                scopes = (await asyncio.to_thread(workbench_review_scopes, current, runtime.auth_manager, session, actor)
+                          if workbench else None)
                 data = await asyncio.to_thread(review_question, current, runtime.auth_manager, actor, request.path_params["id"],
                                                query.get("review_ticket", ""), payload if action.endswith(".save") else None,
-                                               group=query.get("group") == "1")
+                                               group=query.get("group") == "1", workbench_scopes=scopes)
             elif action == "profile" and request.query_params.get("view") == "participation":
                 from .learning_personal import participation
                 data = await asyncio.to_thread(participation, current, actor, query)

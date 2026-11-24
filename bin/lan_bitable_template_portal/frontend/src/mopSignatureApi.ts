@@ -1,4 +1,4 @@
-import { requestJson, type Dict } from "./api/client";
+import { requestJson, requestPeople, type Dict } from "./api/client";
 
 export function refreshSignatureDirectory(): Promise<Dict> {
   return requestJson("/api/signatures/management/refresh", { method: "POST", body: "{}" });
@@ -37,13 +37,15 @@ function appendCommonSignatureQuery(url: URLSearchParams, query: SignaturePeople
 export function fetchSignaturePeople(query: SignaturePeopleQuery): Promise<Dict> {
   const params = new URLSearchParams();
   appendCommonSignatureQuery(params, query);
-  return requestJson(`/api/signatures/people?${params.toString()}`);
+  const read = query.recordId || query.noticeKey ? requestJson : requestPeople;
+  return read(`/api/signatures/people?${params.toString()}`, { fresh: query.refresh });
 }
 
 export function fetchExternalSignaturePeople(query: SignaturePeopleQuery): Promise<Dict> {
   const params = new URLSearchParams();
   appendCommonSignatureQuery(params, query);
-  return requestJson(`/api/signatures/temporary/people?${params.toString()}`);
+  const read = query.recordId || query.noticeKey ? requestJson : requestPeople;
+  return read(`/api/signatures/temporary/people?${params.toString()}`, { fresh: query.refresh });
 }
 
 export function sendSignatureUsageConfirmations(payload: {

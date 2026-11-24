@@ -38,9 +38,9 @@ from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_S
 from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views, frozen_readings
 from .daily_inspection_template_art import preserve_artwork, read_artwork
 from .eop_scenario_editor import plain
-from .module_access import allowed_modules
+from .module_access import allowed_modules, engineer_professions, profession_visible
 from .inspection_collection import InspectionCollection, minimum_source_time, FRESH_SECONDS
-from .risk_inspection import RiskError
+from .risk_inspection import RiskError, digest
 from .risk_inspection_cloud import API, RiskCloud
 
 BASE = 'ASLxbfESPahdTKs0A9NccgbrnXc'
@@ -1529,6 +1529,64 @@ def default_sheet_groups(scope):
             for sheet in item['sheets'] if sheet['name'].strip() != '封面'}
 
 
+def allowed_inspection_sheets(scope, professions, groups=None):
+    from .module_access import profession_visible
+
+    groups = groups or {}
+    return {key for key, default in default_sheet_groups(scope).items()
+            if profession_visible(professions, groups.get(key, default))}
+
+
+def inspection_templates_for_sheets(templates, allowed):
+    result = []
+    for template in templates:
+        sheets = [sheet for sheet in template['sheets'] if form_sheet_key(template['name'], sheet['name']) in allowed]
+        if sheets:
+            result.append({**template, 'sheets': sheets})
+    return result
+
+
+def narrow_inspection_progress(data, allowed):
+    data['visited_sheets'] = [key for key in data.get('visited_sheets', []) if key in allowed]
+    data['presence'] = [value for value in data.get('presence', []) if value.get('sheet') in allowed]
+
+
+def inspection_history_metadata(row, professions):
+    if professions is None:
+        return row
+    # Archive links and counters refer to the full building workbook.
+    return {key: value for key, value in row.items() if key not in {'url', 'confirmed', 'devices', 'abnormal'}}
+
+
+def narrow_inspection_state(data, scope, professions):
+    data['template_version'] = digest([template_version(), professions])
+    data['visible_professions'] = list(professions)
+    data['history'] = [inspection_history_metadata(row, professions) for row in data.get('history', [])]
+    active = data.get('active')
+    if not active:
+        return
+    allowed = allowed_inspection_sheets(scope, professions, active.get('sheet_groups'))
+    narrow_inspection_progress(active, allowed)
+    active['other_professions_pending'] = any(not profession_visible(professions, key) and key not in active.get('profession_confirmations', {})
+                                              for key in (active.get('professions') or []))
+    if isinstance(active.get('manual_sheet_cells'), list):
+        active['manual_sheet_cells'] = [cell for cell in active['manual_sheet_cells']
+                                       if form_sheet_key(cell['template'], cell['sheet']) in allowed]
+    for field in ('available_professions', 'professions'):
+        if isinstance(active.get(field), list):
+            active[field] = [value for value in active[field] if profession_visible(professions, value)]
+    for field in ('profession_confirmations', 'confirmation_invalidations', 'profession_versions'):
+        active[field] = {key: value for key, value in active.get(field, {}).items() if profession_visible(professions, key)}
+    devices = active['batch']
+    for field in ('devices', 'form_devices'):
+        devices[field] = [row for row in devices.get(field, []) if profession_visible(professions, row.get('profession'))]
+    ids = {row['id'] for field in ('devices', 'form_devices') for row in devices[field]}
+    devices['count'] = len(ids)
+    active['reviews'] = {key: value for key, value in active.get('reviews', {}).items() if key in ids}
+    active['orders'] = {key: [identity for identity in values if identity in ids]
+                        for key, values in active.get('orders', {}).items() if key == 'ALL' or profession_visible(professions, key)}
+
+
 def required_sheets(active, scope, professions=None):
     defaults = default_sheet_groups(scope)
     overrides = active.get('sheet_groups', {})
@@ -1782,7 +1840,7 @@ class DailyInspection:
             return data
 
     def export_report(self, report):
-        if any(item['local_draft'] for item in report['rounds']):
+        if 'visible_professions' in report or any(item['local_draft'] for item in report['rounds']):
             return inspection_report_workbook(report)
         scope = report['scope']
         key = (report['date'], report['template_version'], tuple(
@@ -3365,7 +3423,7 @@ def archived_report_content(content, scope, identity, shift, number, frozen, exe
 
 
 def inspection_report(service, scope, day, owner, actor, *, include_active=False, drafts=None, active_id=None,
-                      summary_only=False, view_sheet=None, lookup=None, lookup_round=None, archive_mode=None):
+                      summary_only=False, view_sheet=None, lookup=None, lookup_round=None, archive_mode=None, professions=None):
     """Read one duty date's archived sheets and, when authorized, the current snapshot."""
     try:
         day = dt.date.fromisoformat(day).isoformat()
@@ -3430,9 +3488,11 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
               'sheet_filter': list(view_sheet) if view_sheet else None, 'summary_only': summary_only,
               'exemptions': state.get('exemptions', {'revision': 0, 'sheets': {}})}
     cells = 0
+    visible_sheets = allowed_inspection_sheets(scope, professions) if professions is not None else set()
 
     def collect(summary, content=None, parsed=None, exemptions=None):
         nonlocal cells
+        summary = inspection_history_metadata(summary, professions)
         if summary_only:
             result['rounds'].append({**summary, 'original_cells': [], 'extra_cells': []})
             return
@@ -3442,6 +3502,12 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             args = (content, scope, summary['round_id'], summary['shift'], summary['round'], frozen)
             parsed = reader(*args, exemptions) if exemptions else reader(*args)
         count, data = parsed
+        if professions is not None:
+            allowed = allowed_inspection_sheets(scope, professions, data.get('sheet_groups'))
+            visible_sheets.update(allowed)
+            data = {**data, 'sheets': [],
+                    **{key: [cell for cell in data[key] if form_sheet_key(cell['template'], cell['sheet']) in allowed]
+                       for key in ('original_cells', 'extra_cells')}}
         if active and summary['round_id'] == active['id']:
             batch = active['batches'][scope]
             template = batch.get('operating_template')
@@ -3577,6 +3643,10 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                                           'auto_closed': bool(record and record.get('auto_closed'))})
     group_shift = active['duty']['shift'] if active and active['duty']['date'] == day else (result['rounds'][-1]['shift'] if result['rounds'] else duty_period(dt.datetime.now(CN))[1])
     result['sheet_groups'] = (service.store.get_document(NS, 'sheet-groups:' + scope + ':' + day + ':' + group_shift) or {}).get('groups', {})
+    if professions is not None:
+        visible_sheets.update(allowed_inspection_sheets(scope, professions, result['sheet_groups']))
+        result['original_templates'] = inspection_templates_for_sheets(templates, visible_sheets)
+        result['visible_professions'] = list(professions)
     result['archive_incomplete'] = archive_incomplete
     if archive_incomplete and not result['archive_warning']:
         result['archive_warning'] = '部分云端归档正在读取，已显示本地可用数据。'
@@ -3712,8 +3782,12 @@ def install_daily_inspection(app, controller, runtime):
             owner = user.get('open_id')
             scopes = [scope for scope in SOURCES if scope in scopes or 'ALL' in scopes]
             if not owner or not scopes:
-                raise RiskError('需要每日任务权限及 D 楼或 E 楼范围。', 403)
-            can_manage = 'daily' in granted
+                raise RiskError('需要日常巡检权限及 D 楼或 E 楼范围。', 403)
+            if 'daily_inspection' not in granted:
+                raise RiskError('需要日常巡检权限。', 403)
+            profile = await asyncio.to_thread(auth.account_profile, owner)
+            professions = engineer_professions(profile)
+            can_manage = not profile.get('inspection_home_only')
             home_scopes = await asyncio.to_thread(inspection_history_scopes, auth, session)
             from .portal_service import LI_SHILONG_OPEN_ID
             viewer = owner == LI_SHILONG_OPEN_ID and not session.get('impersonation') and session.get('source') != 'admin_impersonation'
@@ -3737,8 +3811,12 @@ def install_daily_inspection(app, controller, runtime):
                 template_scope = request.query_params.get('scope')
                 if template_scope not in history_scopes:
                     raise RiskError('没有该楼栋的巡检权限。',403)
-                data = {'version':template_version(),'scope':template_scope,
-                        'templates':display_templates(template_scope)}
+                templates = display_templates(template_scope)
+                version = template_version()
+                if professions is not None:
+                    templates = inspection_templates_for_sheets(templates, allowed_inspection_sheets(template_scope, professions))
+                    version = digest([version, professions])
+                data = {'version':version,'scope':template_scope,'templates':templates}
                 return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, max-age=3600'})
             if request.method == 'GET' and action in ('','status') and (viewer or home_scopes and (not selected_scope or selected_scope in home_scopes)):
                 scope = selected_scope or (scopes[0] if viewer else home_scopes[0])
@@ -3752,9 +3830,13 @@ def install_daily_inspection(app, controller, runtime):
                     duty=state['active']['duty']
                 if action=='status' and state.get('active') and request.query_params.get('id')==state['active']['id'] and request.query_params.get('version')==str(state['active'].get('review_version',0)) and request.query_params.get('pending')==str(int('completed' in state['active'])) and request.query_params.get('date')==date and request.query_params.get('shift')==shift and request.query_params.get('archive_revision', svc.archive_revision(state)) == svc.archive_revision(state):
                     data={'unchanged':True,'history_scopes':history_scopes, **svc.collaboration(state['active'], owner)}
+                    if professions is not None:
+                        narrow_inspection_progress(data, allowed_inspection_sheets(scope, professions, state['active'].get('sheet_groups')))
                 else:
                     data=await asyncio.to_thread(svc.view,state,owner,duty)
                     data.update(history_scopes=history_scopes,view_scope=scope,view_scopes=scopes if viewer else home_scopes,can_edit=not session.get('impersonation') and session.get('source')!='admin_impersonation')
+                    if professions is not None:
+                        narrow_inspection_state(data, scope, professions)
                 return JSONResponse({'ok':True,'data':data},headers={'Cache-Control':'private, no-store'})
             report_action = action in {'day-sheet', 'day-export'}
             if request.method == 'POST':
@@ -3784,6 +3866,13 @@ def install_daily_inspection(app, controller, runtime):
                 if action in {'sheet-group', 'view-sheet', 'append-profession', 'confirm-profession'} and (
                         session.get('impersonation') or session.get('source') == 'admin_impersonation'):
                     raise RiskError('代登录仅可查看巡检。', 403)
+                if professions is not None:
+                    selected = payload.get('professions') if action == 'start' else [payload.get('profession')] if action in {'append-profession', 'confirm-profession'} else None
+                    if action == 'start' and selected is None:
+                        selected = [name for name in SHEET_PROFESSIONS if profession_visible(professions, name)]
+                        payload['professions'] = selected
+                    if isinstance(selected, list) and any(not profession_visible(professions, name) for name in selected):
+                        raise RiskError('请在当前专业范围内办理巡检。', 403)
                 if action == 'exemptions':
                     scope = payload.get('scope')
                     if scope not in scopes or impersonating or not await asyncio.to_thread(auth.is_admin, session):
@@ -3830,6 +3919,8 @@ def install_daily_inspection(app, controller, runtime):
                     include_active=viewer or can_write_scope or scope in home_scopes,
                     drafts=submitted, active_id=payload.get('active_id'), summary_only=summary_only, view_sheet=sheet_filter,
                     lookup=lookup.strip().casefold() if lookup else None, lookup_round=lookup_round)
+                if professions is not None:
+                    report_args['professions'] = professions
                 report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
                     user.get('name') or owner, archive_mode=archive_mode, **report_args)
                 if action == 'day-export' and report['archive_incomplete']:
@@ -3845,11 +3936,15 @@ def install_daily_inspection(app, controller, runtime):
                 if form_only:
                     for item in report['rounds']:
                         item.pop('sheets', None)
-                if action=='day-sheet' and payload.get('template_version')==template_version():
+                if action=='day-sheet' and professions is not None:
+                    allowed = {form_sheet_key(template['name'], sheet['name']) for template in report['original_templates']
+                               for sheet in template['sheets']}
+                    report['original_templates'] = inspection_templates_for_sheets(display_templates(scope), allowed)
+                elif action=='day-sheet' and payload.get('template_version')==template_version():
                     report.pop('original_templates',None)
                 elif action=='day-sheet':
                     report['original_templates']=display_templates(scope)
-                report['template_version']=template_version()
+                report['template_version'] = template_version() if professions is None else digest([template_version(), professions])
                 report['can_edit_history'] = bool((viewer or can_manage or (local_write and scope in home_scopes)) and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
                 if action == 'day-sheet':
                     report['can_edit_exemptions'] = bool(can_manage and not impersonating
@@ -3883,9 +3978,15 @@ def install_daily_inspection(app, controller, runtime):
                     data = await asyncio.to_thread(svc.edit_archive, scope, payload['id'], payload, user.get('name') or owner)
                 else:
                     raise RiskError('巡检操作不存在。', 404)
-                if action in {'history-record', 'history-edit'}:
+                if action == 'history':
+                    data = [inspection_history_metadata(row, professions) for row in data]
+                else:
+                    data = inspection_history_metadata(data, professions)
                     data['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{data["id"]}'.encode()).hexdigest()
                     data['can_edit'] = can_edit_history
+                    if professions is not None:
+                        data['devices_data'] = [row for row in data.get('devices_data', [])
+                                                if profession_visible(professions, row.get('profession'))]
                 return JSONResponse({'ok': True, 'data': {'history': data} if action == 'history' else data},
                                     headers={'Cache-Control': 'private, no-store'})
             if not can_manage and not local_write and not viewer and (request.method != 'GET' or action not in ('', 'status', 'source', 'xlsx')):
@@ -3902,6 +4003,7 @@ def install_daily_inspection(app, controller, runtime):
                     raise
                 else:
                     recent = await asyncio.to_thread(svc.recent_history, history_scopes, owner)
+                    recent = [inspection_history_metadata(row, professions) for row in recent]
                     return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': recent,
                         'history_scopes': history_scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT,
                         'duty_warning': str(error)}}, headers={'Cache-Control': 'private, no-store'})
@@ -3926,6 +4028,7 @@ def install_daily_inspection(app, controller, runtime):
             if not duty:
                 if request.method == 'GET' and action in ('', 'status'):
                     recent = await asyncio.to_thread(svc.recent_history, history_scopes, owner)
+                    recent = [inspection_history_metadata(row, professions) for row in recent]
                     return JSONResponse({'ok': True, 'data': {'duty': None, 'active': None, 'history': recent,
                         'history_scopes': history_scopes, 'completed_rounds': 0, 'round_limit': ROUNDS_PER_SHIFT}},
                         headers={'Cache-Control': 'private, no-store'})
@@ -3943,20 +4046,33 @@ def install_daily_inspection(app, controller, runtime):
                     batches = await asyncio.to_thread(svc.capture, [scope], True)
                     batch = batches[scope]
                     order = await asyncio.to_thread(svc.order, owner, scope)
-                    professions = list(dict.fromkeys(device_profession(device) for device in batch['devices']))
+                    devices = svc.ordered(batch, order)
+                    if professions is not None:
+                        devices = [device for device in devices if profession_visible(professions, device.get('profession'))]
+                        ids = {device['id'] for device in devices}
+                        order = [identity for identity in order if identity in ids]
+                    device_professions = list(dict.fromkeys(device_profession(device) for device in devices))
                     profession_orders = await asyncio.gather(*(asyncio.to_thread(svc.order, owner, scope, name)
-                                                               for name in professions))
+                                                               for name in device_professions))
+                    if professions is not None:
+                        profession_orders = [[identity for identity in values if identity in ids] for values in profession_orders]
                     return JSONResponse({'ok': True, 'data': {'scope': scope, 'batch': batch['batch'],
                         'cache_refreshed_at': batch.get('cache_refreshed_at'), 'cache_stale': batch.get('cache_stale', False),
-                        'count': len(batch['rows']), 'orders': {'ALL': order, **dict(zip(professions, profession_orders))},
-                        'devices': [display_device(device)
-                            for device in svc.ordered(batch, order)]}}, headers={'Cache-Control': 'private, no-store'})
+                        'count': len(batch['rows']) if professions is None else len(devices),
+                        'orders': {'ALL': order, **dict(zip(device_professions, profession_orders))},
+                        'devices': [display_device(device) for device in devices]}}, headers={'Cache-Control': 'private, no-store'})
                 if action == 'xlsx':
                     active = svc.current(state, request.query_params.get('id'))
-                    order = active.get('archive_order')
-                    if order is None:
-                        order = await asyncio.to_thread(svc.order, owner, scope)
-                    content = await asyncio.to_thread(workbook, active, {scope: order})
+                    if professions is not None:
+                        report = await asyncio.to_thread(inspection_report, svc, scope, active['duty']['date'], owner,
+                            user.get('name') or owner, include_active=True, drafts={}, professions=professions, archive_mode='local')
+                        report['rounds'] = [row for row in report['rounds'] if row['round_id'] == active['id']]
+                        content = await asyncio.to_thread(inspection_report_workbook, report)
+                    else:
+                        order = active.get('archive_order')
+                        if order is None:
+                            order = await asyncio.to_thread(svc.order, owner, scope)
+                        content = await asyncio.to_thread(workbook, active, {scope: order})
                     return Response(content, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
                         headers={'Content-Disposition': f'attachment; filename="DE-inspection-{active["id"][:10]}.xlsx"',
                                  'Cache-Control': 'private, no-store'})
@@ -3968,8 +4084,10 @@ def install_daily_inspection(app, controller, runtime):
                             and request.query_params.get('date') == duty['date']
                             and request.query_params.get('shift') == duty['shift']
                             and request.query_params.get('archive_revision', svc.archive_revision(state)) == svc.archive_revision(state)):
-                        return JSONResponse({'ok': True, 'data': {'unchanged': True, 'history_scopes': scopes,
-                                             **svc.collaboration(active, owner)}},
+                        data = {'unchanged': True, 'history_scopes': scopes, **svc.collaboration(active, owner)}
+                        if professions is not None:
+                            narrow_inspection_progress(data, allowed_inspection_sheets(scope, professions, active.get('sheet_groups')))
+                        return JSONResponse({'ok': True, 'data': data},
                                             headers={'Cache-Control': 'private, no-store'})
                 elif action:
                     raise RiskError('巡检操作不存在。', 404)
@@ -3979,8 +4097,15 @@ def install_daily_inspection(app, controller, runtime):
                     raise RiskError('巡检操作不存在。', 404)
                 data = await asyncio.to_thread(svc.change, owner, user.get('name') or owner, duty, action, payload)
                 if action == 'view-sheet':
+                    if professions is not None:
+                        active = svc.load(scope).get('active') or {}
+                        narrow_inspection_progress(data, allowed_inspection_sheets(scope, professions, active.get('sheet_groups')))
                     return JSONResponse({'ok': True, 'data': data}, headers={'Cache-Control': 'private, no-store'})
             data['history_scopes'] = history_scopes
+            if action == 'status' and request.method == 'GET':
+                data['viewer_on_duty'] = roster_scope == scope
+            if professions is not None:
+                narrow_inspection_state(data, scope, professions)
             if viewer or home_scopes:
                 local_views = list(dict.fromkeys(value for value in (roster_scope, *home_scopes) if value))
                 data.update(view_scopes=scopes if viewer else local_views if len(local_views)>1 else [], view_scope=scope, can_edit=can_edit)

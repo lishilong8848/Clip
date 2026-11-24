@@ -152,7 +152,8 @@ class PermissionReviewTests(levels.AccountLevelTests):
         self.assertIsNone(parse_event(payload, "wrongApp"))
         bad = copy.deepcopy(payload);bad["event"]["action"]["form_value"]["scopes"] = ["ALL"]
         self.assertIsNone(parse_event(bad, "cliFixture"))
-        self.assertTrue(any(e["tag"] == "form" for e in card(data)["body"]["elements"]))
+        review_form = next(e for e in card(data)["body"]["elements"] if e["tag"] == "form")
+        self.assertEqual(review_form["elements"][1]["columns"][0]["elements"][0]["text"]["content"], "确认授权")
         data["status"] = "approved"
         self.assertFalse(any(e["tag"] == "form" for e in card(data)["body"]["elements"]))
 
@@ -228,7 +229,7 @@ class PermissionReviewTests(levels.AccountLevelTests):
 
     def test_actual_request_and_web_review_routes_share_state(self):
         auth = self.h.auth
-        for token, oid in (("requester-test", "ou_fixtureAO"), ("reviewer-test", "ou_fixtureHM1")):
+        for token, oid in (("requester-test", "ou_fixtureAO"), ("reviewer-test", "ou_fixtureHM1"), ("fixed-test", LI_SHILONG_OPEN_ID)):
             auth._sessions[token] = {"user":{"open_id":oid,"name":oid}, "role":auth.role_for_open_id(oid), "allowed_scopes":auth.scopes_for_open_id(oid), "expires_at":9999999999}
         with patch.object(PortalRuntime, "auth_manager", auth), patch.object(PortalRuntime, "state_store", auth._state_store):
             controller = FastAPIPortalController(host="127.0.0.1", port=18766)
@@ -238,13 +239,33 @@ class PermissionReviewTests(levels.AccountLevelTests):
             reviewer = {"Cookie":f"{AUTH_COOKIE_NAME}=reviewer-test"}
             options = client.get("/api/auth/permission-approvers", headers=requester)
             self.assertEqual(options.status_code, 200, options.text)
-            self.assertIn(LI_SHILONG_OPEN_ID, [row["open_id"] for row in options.json()["data"]["items"]])
+            choices = options.json()["data"]
+            self.assertIn(LI_SHILONG_OPEN_ID, [row["open_id"] for row in choices["items"]])
+            self.assertFalse(choices["empty_reason"])
+            labels = {row["value"]: row["label"] for row in choices["module_options"]}
+            self.assertEqual(labels["daily_inspection"], "日常巡检")
+            self.assertEqual(labels["tool_management"], "工具管理")
+            fixed = client.get("/api/auth/permission-approvers", headers={"Cookie":f"{AUTH_COOKIE_NAME}=fixed-test"})
+            self.assertEqual(fixed.status_code, 200, fixed.text)
+            self.assertEqual(fixed.json()["data"]["items"], [])
+            self.assertIn("固定管理员", fixed.json()["data"]["empty_reason"])
             with patch.object(controller._permission_cards, "enqueue") as enqueue:
                 response = client.post("/api/auth/permission-requests", headers=requester, json={"scopes":["B"],"approver_open_id":LI_SHILONG_OPEN_ID})
             self.assertEqual(response.status_code, 200, response.text)
             data = response.json()["data"]["request"]
             enqueue.assert_called_once_with(data["request_id"])
             self.assertNotIn("review_card_token", data)
+            cards = controller._permission_cards
+            retry_url = "/api/auth/permission-requests/" + data["request_id"] + "/notify"
+            with patch.object(cards, "enqueue") as retry:
+                self.assertEqual(client.post(retry_url, headers=reviewer, json={}).status_code, 403)
+                cards.update(data["request_id"], notification_status="failed", notification_error="暂未连接")
+                self.assertTrue(client.post(retry_url, headers=requester, json={}).json()["data"]["queued"])
+                retry.assert_called_once_with(data["request_id"])
+                cards.update(data["request_id"], notification_status="sent", review_message_id="om_approval")
+                self.assertFalse(client.post(retry_url, headers=requester, json={}).json()["data"]["queued"])
+                self.assertEqual(cards.request(data["request_id"])["notification_status"], "sent")
+                self.assertEqual(retry.call_count, 1)
             peer = auth.create_permission_request(open_id="ou_fixtureHM2", name="同级经理", approver_open_id=LI_SHILONG_OPEN_ID,
                 requested_access={"level":"L1", "category":"manager", "scopes":["ALL"], "modules":["maintenance"]})
             listing = client.get("/api/auth/permission-requests/admin", headers=reviewer)

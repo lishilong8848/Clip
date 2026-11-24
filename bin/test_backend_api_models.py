@@ -1257,6 +1257,21 @@ class BackendApiModelTests(unittest.TestCase):
         self.assertFalse(FastAPIPortalController._job_visible_to_session(
             {"request": {"_auth_open_id": "ou-allowed", "work_type": "change"}}, session))
 
+    def test_engineer_job_visibility_and_retry_follow_current_profession(self):
+        auth = PortalRuntime.auth_manager
+        session = {"user": {"open_id": "ou-allowed"}, "role": "user"}
+        profile = {**auth.account_profile("ou-allowed"), "category": "engineer", "level": "L2",
+                   "specialties": ["电气"]}
+        request = {"_auth_open_id": "ou-allowed", "_web_action_request": True, "work_type": "maintenance",
+                   "action": "end", "scope": "A"}
+        with patch.object(auth, "account_profile", return_value=profile):
+            for specialty, expected in (("电气", True), ("暖通", False), ("", True)):
+                job = {"request": {**request, "specialty": specialty}}
+                self.assertEqual(FastAPIPortalController._job_visible_to_session(job, session), expected)
+                self.assertEqual(FastAPIPortalController._can_retry_notice_job(job, session), expected)
+            job = {"request": request, "retry_request": {**request, "specialty": "暖通"}}
+            self.assertFalse(FastAPIPortalController._can_retry_notice_job(job, session))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -14,7 +14,7 @@ const scopes=[{value:'A',label:'A楼'},{value:'B',label:'B楼'}],modules=[{value
 const categories=[{value:'operator',label:'值班员'},{value:'engineer',label:'工程师'}],levels=[{value:'L4',label:'L4 本楼基础'}];
 const account={id:'rec-fixture',record_id:'rec-fixture',open_id:'ou_fixtureA',name:'隔离验收人员',employee_no:'TEST',kind:'external',position:'值班员',category:'operator',home_scope:'A',own_scopes:['A'],scopes:['A'],modules:['learning'],level:'L4',role:'building',enabled:true,can_edit:true,can_edit_access:true,can_set_password:true,can_delete:true,revision:'rev1'};
 const application=id=>({request_id:id,name:id==='rich'?'完整权限申请人':'楼栋申请人',open_id:'ou_fixtureA',status:'pending',created_at:'2026-10-14 10:00',reason:'隔离验收申请',requested_scopes:['A'],requested_scope_labels:['A楼'],...(id==='rich'?{requested_access:{level:'L4',category:'operator',scopes:['A'],modules:['learning']}}:{})});
-let requests=[application('rich'),application('scope')],saveFailure=0,reviewFailure=0,delayReview,selfRequest=null;
+let requests=[application('rich'),application('scope')],saveFailure=0,reviewFailure=0,delayReview,selfRequest=null,approversAvailable=false,approverName='隔离上级';
 await context.route('**/*',async route=>{
  const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(!url.pathname.startsWith('/api/'))return route.continue();
  if(await layouts.handle(route,user.open_id))return;
@@ -24,7 +24,11 @@ await context.route('**/*',async route=>{
  if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'account-workflow-test'}});
  if(url.pathname==='/api/auth/accounts')return ok({items:[account],scope_options:scopes,module_options:modules,category_options:categories,level_options:levels,policy:{level:user.level,scope_rules:['A','B'],modules:user.modules}});
  if(url.pathname==='/api/auth/accounts/permissions'){
-  if(saveFailure)return fail(saveFailure,'隔离验收保存失败');Object.assign(account,req.postDataJSON().changes[0]);account.revision='rev2';return ok({changed:1});
+  if(saveFailure)return fail(saveFailure,'隔离验收保存失败');
+  const change=req.postDataJSON().changes[0];
+  if(change.add_modules) account.modules=[...new Set([...account.modules,...change.add_modules])];
+  else Object.assign(account,change);
+  account.revision='rev2';return ok({changed:1});
  }
  if(url.pathname==='/api/auth/permission-requests/admin')return ok({items:requests.filter(row=>url.searchParams.get('status')==='all'||row.status===url.searchParams.get('status'))});
  if(url.pathname.endsWith('/approve')||url.pathname.endsWith('/reject')){
@@ -33,9 +37,9 @@ await context.route('**/*',async route=>{
   const id=url.pathname.split('/').at(-2),row=requests.find(row=>row.request_id===id);row.status=url.pathname.endsWith('/approve')?'approved':'rejected';return ok({request:row,notification:{ok:true,queued:true}});
  }
  if(url.pathname.endsWith('/bulk-approve')){requests[0].status='approved';return ok({items:[requests[0]],failed:[{request_id:'scope',error:'隔离测试权限已变化'}]});}
- if(url.pathname==='/api/auth/permission-approvers')return ok({items:[{open_id:'ou_fixtureBoss',name:'隔离上级',level:'L1',scopes:['A','B'],modules:user.modules,level_options:levels,category_options:categories}],current:{level:selfRequest?.status==='approved'?'L3':'L4',category:'operator',scope_rules:['A'],modules:['learning']},scope_options:scopes,module_options:modules});
+ if(url.pathname==='/api/auth/permission-approvers')return ok({items:approversAvailable?[{open_id:'ou_fixtureBoss',name:approverName,level:'L1',scopes:['A','B'],modules:user.modules,level_options:levels,category_options:categories}]:[],empty_reason:approversAvailable?'':'人员目录暂未读到，请刷新审批人。',current:{level:selfRequest?.status==='approved'?'L3':'L4',category:'operator',scope_rules:['A'],modules:['learning']},scope_options:scopes,module_options:modules});
  if(url.pathname==='/api/auth/permission-requests/current')return ok({request:selfRequest});
- if(url.pathname==='/api/auth/permission-requests'&&req.method()==='POST'){selfRequest={...req.postDataJSON(),request_id:'self-fixture',status:'pending',approver_name:'隔离上级'};return fail(503,'隔离测试响应丢失');}
+ if(url.pathname==='/api/auth/permission-requests'&&req.method()==='POST'){selfRequest={...req.postDataJSON(),request_id:'self-fixture',status:'pending',approver_name:'隔离上级',notification_status:'sent'};return fail(503,'隔离测试响应丢失');}
  if(req.method()!=='GET'){errors.push('Unexpected write: '+url.pathname);return route.abort();}
  return ok({items:[],users:[],records:[],scope_options:scopes,settings:{}});
 });
@@ -58,6 +62,22 @@ try{
  saveFailure=0;await editor.getByRole('combobox',{name:'岗位',exact:true}).selectOption('engineer');
  await editor.getByRole('button',{name:'保存授权',exact:true}).click();await editor.waitFor({state:'hidden'});
  assert.equal(account.category,'engineer');
+ for(const width of [1440,390]){
+  await page.setViewportSize({width,height:width<700?844:900});
+  await page.getByRole('button',{name:'按功能授权',exact:true}).click();
+  const grant=page.getByRole('dialog',{name:'按功能授权',exact:true});
+  await grant.getByRole('combobox',{name:'选择授权功能'}).selectOption('maintenance');
+  await grant.getByRole('checkbox',{name:/隔离验收人员/}).check();
+  await grant.getByRole('button',{name:'预览调整'}).click();
+  assert.equal(await grant.locator('li').count(),1);
+  await grant.evaluate(el=>Promise.all(el.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{}))));
+  assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+  await page.screenshot({path:path.join(output,'grant-by-permission-'+width+'.png'),animations:'disabled'});
+  if(width<700){await grant.getByRole('button',{name:'确认保存'}).click();await grant.waitFor({state:'hidden'});}
+  else await grant.getByRole('button',{name:'关闭批量授权'}).click();
+ }
+ assert.deepEqual(account.modules,['learning','maintenance']);
+ await page.setViewportSize({width:1440,height:900});
  await page.getByRole('button',{name:'权限申请',exact:true}).click();await page.getByText('完整权限申请人',{exact:true}).waitFor();
  assert(!reads.includes('/api/auth/permissions'),'V2 must not fetch an unrestricted legacy directory');
  await page.getByRole('row').filter({hasText:'完整权限申请人'}).getByRole('button',{name:'核对并审批'}).click();
@@ -96,6 +116,10 @@ try{
   await modal.getByRole('button',{name:'取消',exact:true}).click();
  }
  await page.setViewportSize({width:1440,height:900});await page.goto(entry+'?view=permission');
+ await page.getByText('人员目录暂未读到，请刷新审批人。',{exact:true}).waitFor();
+ assert(await page.getByRole('button',{name:'提交申请',exact:true}).isDisabled());
+ approversAvailable=true;
+ await page.getByRole('button',{name:'刷新申请结果',exact:true}).click();
  await page.locator('.access-settings .n-select[aria-label="审批人"]').click();await page.locator('.n-base-select-option').filter({hasText:'隔离上级'}).click();
  await page.getByRole('textbox',{name:'申请原因'}).fill('未提交的申请');await page.getByRole('button',{name:'返回个人信息',exact:true}).click();
  await page.getByRole('button',{name:'继续填写',exact:true}).click();
@@ -103,9 +127,15 @@ try{
  await page.getByRole('button',{name:'提交申请',exact:true}).click();await page.getByText(/提交结果尚未确认/).waitFor();
  assert(await page.getByRole('button',{name:'提交申请',exact:true}).isDisabled());
  await page.getByRole('button',{name:'刷新申请结果',exact:true}).click();await page.getByRole('heading',{name:'等待审批'}).waitFor();
+ await page.getByText('飞书审批卡片已发送',{exact:true}).waitFor();
  assert(await page.getByRole('button',{name:'提交申请',exact:true}).isDisabled(),'recovered pending request must not be sent twice');
  assert.equal(writes.filter(row=>row.path==='/api/auth/permission-requests').length,1);
- selfRequest.status='approved';await page.locator('.v2-access-request header p').filter({hasText:'L3'}).waitFor();
+ const approverReads=reads.filter(path=>path==='/api/auth/permission-approvers').length;
+ selfRequest.status='approved';approverName='隔离已更新的上级';await page.getByRole('button',{name:'刷新申请结果',exact:true}).click();
+ await page.getByRole('heading',{name:'权限已生效'}).waitFor();
+ await page.locator('.v2-access-request header p').filter({hasText:'L3'}).waitFor();
+ await page.locator('.access-settings .n-select[aria-label="审批人"]').getByText(approverName,{exact:false}).waitFor();
+ assert.equal(reads.filter(path=>path==='/api/auth/permission-approvers').length,approverReads+1,'refresh after approval reads the new scope once');
  Object.assign(user,{level:'L1',role:'admin',category:'engineer',modules:['accounts','maintenance','learning','signatures']});
  Object.assign(account,{name:'同级只读人员',level:'L1',role:'admin',category:'manager',can_edit:false,can_edit_access:false,
   can_set_password:false,can_delete:false,can_impersonate:false,can_access_signature:false});

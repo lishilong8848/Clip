@@ -5,7 +5,7 @@
         <span class="topnav-mark" aria-hidden="true"><svg width="30" height="30" viewBox="10 9 44 52" fill="currentColor">
           <path d="M20 18h24l-3 9H23l-3-9ZM27 28h10l5 22H22l5-22ZM16 51h32v5H16z"/>
           <circle cx="32" cy="22.5" r="3.5" fill="#dffbed"/>
-        </svg></span><strong>灯塔</strong>
+        </svg></span><strong>南通灯塔运维平台</strong>
       </span>
       <button v-if="hasHome" type="button" class="topnav-home" data-nav-entry="home" data-group="home"
         :aria-current="selected==='home'?'page':undefined" @click="choose('home')">

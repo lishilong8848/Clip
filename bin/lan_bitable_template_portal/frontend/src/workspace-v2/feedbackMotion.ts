@@ -15,6 +15,7 @@ const selector = [
   '.notice.danger', '.notice.success', '.notice.warning', '.status-banner', '.page-status',
 ].join(',');
 const excluded = '[data-v2-inline-feedback],.async-page-state,.page-state,.save-conflicts,.n-form-item-feedback-wrapper,td,th,.answer-feedback,.notice-tags';
+const action = 'a[href],button:not([data-v2-feedback-close],.n-base-close,[aria-label="关闭提示"],[aria-label="收起提示"],[aria-label="关闭通知"],[aria-label="关闭错误"])';
 type Tone = 'success' | 'error' | 'warning' | 'info';
 type Entry = { el:HTMLElement; signature:string; tone:Tone; dismissed:boolean; shown:boolean;
   persistent:boolean; order:number; timer:number; remaining:number; since:number; cleanup:()=>void };
@@ -60,7 +61,7 @@ export function installFeedbackMotion() {
   function dismiss(item:Entry){
     if(item.dismissed)return;
     const signature=item.signature;
-    const affected=[...entries.values()].filter(e=>e.signature===signature);
+    const affected=item.el.querySelector(action)?[item]:[...entries.values()].filter(e=>e.signature===signature&&!e.el.querySelector(action));
     for(const e of affected){e.dismissed=true;stopTimer(e);}
     const finish=()=>{
       for(const e of affected){
@@ -119,17 +120,19 @@ export function installFeedbackMotion() {
   });
   function flush(){
     scheduled=0;if(stopped)return;
-    const unique=new Map<string,Entry>();
+    const unique=new Map<string|Entry,Entry>();
     for(const item of entries.values()){
       if(!item.el.isConnected){item.cleanup();resize.unobserve(item.el);entries.delete(item.el);continue;}
       const text=(item.el.textContent||'').replace(/\s+/g,' ').trim(),tone=toneOf(item.el),signature=tone+':'+text;
       if(!text){hide(item);continue;}
       if(signature!==item.signature){stopTimer(item);item.signature=signature;item.tone=tone;item.dismissed=false;item.remaining=tone==='success'?4000:6000;item.order=++order;}
-      item.persistent=tone==='error'||tone==='warning'||item.el.classList.contains('n-message--loading-type')||!!item.el.querySelector('a,button:not([data-v2-feedback-close]):not(.n-base-close),progress,[role="progressbar"],.n-spin')||/正在|处理中|等待|上传中|提交中|同步中/.test(text);
+      const hasAction=!!item.el.querySelector(action);
+      item.persistent=tone==='error'||tone==='warning'||hasAction||item.el.classList.contains('n-message--loading-type')||!!item.el.querySelector('progress,[role="progressbar"],.n-spin')||/正在|处理中|等待|上传中|提交中|同步中/.test(text);
       item.el.dataset.v2FeedbackTone=tone;decorate(item);
       if(!sourceVisible(item.el)){hide(item);continue;}
       if(item.dismissed&&!item.persistent){hide(item);continue;}
-      const prior=unique.get(signature);if(!prior||prior.order<item.order)unique.set(signature,item);
+      const key=hasAction?item:signature;
+      const prior=unique.get(key);if(!prior||prior.order<item.order)unique.set(key,item);
     }
     const pending=[...unique.values()].filter(e=>!e.dismissed).sort((a,b)=>b.order-a.order);
     const recalled=[...unique.values()].filter(e=>e.dismissed&&e.persistent);

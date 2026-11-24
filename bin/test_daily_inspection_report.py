@@ -14,7 +14,8 @@ from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 
 from lan_bitable_template_portal.daily_inspection import (
-    CN, DailyInspection, RiskError, SYSTEM_INSPECTION_ACTOR, inspection_report, inspection_report_workbook,
+    CN, DailyInspection, RiskError, SYSTEM_INSPECTION_ACTOR, default_sheet_groups,
+    inspection_report, inspection_report_workbook, narrow_inspection_state,
     install_daily_inspection, workbook,
 )
 from lan_bitable_template_portal.module_access import module_denial
@@ -34,7 +35,7 @@ class InspectionReportTests(unittest.TestCase):
         self.store = LanPortalStateStore(self.folder / 'state.sqlite3')
         self.cloud = InspectionCloud()
         self.service = DailyInspection(self.store, self.cloud)
-        self.service.download_archive = lambda attachment: self.cloud.files[attachment['file_token']]
+        self.service.download_archive = lambda attachment, **kwargs: self.cloud.files[attachment['file_token']]
 
     def test_day_report_uses_persistent_index_and_cached_attachments(self):
         current = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
@@ -71,6 +72,42 @@ class InspectionReportTests(unittest.TestCase):
                              ['夜班', '00:08', '实际巡检人', '2026年', '11月', '4日'])
         finally:
             book.close()
+
+    def test_engineer_report_and_workbook_keep_only_allowed_sheets(self):
+        current = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        self.service.change('a', '甲', DAY, 'finish', fixtures.DailyInspectionTests.submission(current))
+        report = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', drafts={}, archive_mode='refresh')
+        scoped = inspection_report(self.service, 'D', DAY['date'], 'a', '甲', drafts={},
+                                   archive_mode='local', professions=('电气',))
+        defaults = default_sheet_groups('D')
+        self.assertEqual(scoped['visible_professions'], ['电气'])
+        self.assertLess(len(scoped['original_templates']), len(report['original_templates']))
+        self.assertTrue(report['rounds'][0]['url'])
+        self.assertFalse({'url', 'confirmed', 'devices', 'abnormal'} & scoped['rounds'][0].keys())
+        for sheet in scoped['original_templates']:
+            self.assertEqual(sheet['profession'], '电气')
+        for round_data in scoped['rounds']:
+            for cell in round_data['original_cells'] + round_data['extra_cells']:
+                self.assertEqual(defaults[form_sheet_key(cell['template'], cell['sheet'])], '电气')
+        report['template_version'] = 'fixture'
+        full_book = load_workbook(io.BytesIO(self.service.export_report(report)))
+        book = load_workbook(io.BytesIO(self.service.export_report(scoped)))
+        try:
+            self.assertTrue(set(book.sheetnames) < set(full_book.sheetnames))
+        finally:
+            book.close()
+            full_book.close()
+
+    def test_engineer_state_preserves_reassigned_sheet_ownership(self):
+        active = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
+        defaults = default_sheet_groups('D')
+        electrical = next(key for key, value in defaults.items() if value == '电气')
+        active['sheet_groups'] = {electrical: '暖通'}
+        active['visited_sheets'] = [electrical]
+        data = {'active': active}
+        narrow_inspection_state(data, 'D', ('电气',))
+        self.assertEqual(active['sheet_groups'][electrical], '暖通')
+        self.assertEqual(active['visited_sheets'], [])
 
     def test_form_remark_can_be_saved_in_second_round_and_reused_only_in_same_building(self):
         started = self.service.change('a', '甲', DAY, 'start', {'duty': DAY})['active']
@@ -590,14 +627,18 @@ class InspectionAccessTests(unittest.TestCase):
         self.service = DailyInspection(self.store, self.cloud)
         self.service.change('a', '甲', DAY, 'start', {'duty': DAY})
         self.session = {'user': {'open_id': 'ou_person', 'name': '测试'}, 'role': 'user'}
-        self.modules = set()
+        self.modules = {'daily_inspection'}
+        self.inspection_home_only = True
         self.scopes = ['D']
         self.home = 'D'
         self.duty = None
+        self.profile = {}
         owner = self
 
         class Auth:
-            def account_profile(self, _owner): return {'enabled': True, 'home_scope': owner.home}
+            def account_profile(self, _owner):
+                return {'enabled': True, 'home_scope': owner.home,
+                        'inspection_home_only': owner.inspection_home_only, **owner.profile}
             def session_scopes(self, _session): return owner.scopes
             def is_admin(self, session): return session.get('source') == 'test-admin'
 
@@ -642,11 +683,30 @@ class InspectionAccessTests(unittest.TestCase):
         self.assertNotIn('sheets',data['rounds'][0])
         self.assertEqual(self.post('day-sheet',{**body,'scope':'E'}).status_code,403)
 
+    def test_engineer_history_keeps_visible_devices_without_full_building_metadata(self):
+        self.profile = {'level': 'L2', 'category': 'engineer', 'specialties': ['暖通']}
+        summary = {'id': 'recD', 'scope': 'D', 'url': 'https://example.invalid/full-workbook',
+                   'devices': 3, 'abnormal': 2, 'confirmed': 3}
+        detail = {**summary, 'devices_data': [
+            {'id': 'electrical', 'profession': '电气'}, {'id': 'hvac', 'profession': '暖通'}, {'id': 'shared'}]}
+        with patch.object(DailyInspection, 'archive_history', return_value=[summary]), \
+                patch.object(DailyInspection, 'archive_detail', return_value=detail):
+            history = self.client.get('/api/daily-inspection/history?scope=D').json()['data']['history']
+            self.assertEqual(history, [{'id': 'recD', 'scope': 'D'}])
+            record = self.client.get('/api/daily-inspection/history-record?scope=D&id=recD').json()['data']
+            self.assertEqual([row['id'] for row in record['devices_data']], ['hvac', 'shared'])
+            self.assertNotIn('url', record)
+            self.assertEqual(self.client.get('/api/daily-inspection/history-record?scope=E&id=recD').status_code, 403)
+            self.profile = {'level': 'L1'}
+            record = self.client.get('/api/daily-inspection/history-record?scope=D&id=recD').json()['data']
+            self.assertEqual(record['url'], summary['url'])
+            self.assertEqual(len(record['devices_data']), 3)
+
     def test_only_admin_with_building_scope_can_update_exemptions(self):
         template = next(t for t in original_templates() if t['scope'] == 'D' and t['profession'] == '暖通')
         body = {'scope': 'D', 'template': template['name'], 'sheet': '辅助区空调巡检表 (2)', 'ranges': 'G45',
                 'operation': 'remove', 'revision': 0}
-        self.modules = {'daily'}
+        self.inspection_home_only = False
         self.assertEqual(self.post('exemptions', body).status_code, 403)
         self.session['source'] = 'test-admin'
         self.assertEqual(self.post('exemptions', {**body, 'scope': 'E'}).status_code, 403)
@@ -789,7 +849,7 @@ class InspectionAccessTests(unittest.TestCase):
         self.assertEqual(other['orders']['电气'], [])
 
     def test_li_shilong_can_edit_de_without_expanding_other_users(self):
-        self.modules, self.scopes = {'daily'}, ['D', 'E']
+        self.inspection_home_only, self.scopes = False, ['D', 'E']
         self.home = 'H'
         self.session['user']['open_id'] = LI_SHILONG_OPEN_ID
         data = self.client.get('/api/daily-inspection?view_scope=D').json()['data']

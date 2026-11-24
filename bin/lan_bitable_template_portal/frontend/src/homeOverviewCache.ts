@@ -3,7 +3,8 @@ import type { LooseDict, ScopeOption } from './types';
 const PREFIX = 'clipflow:home-overview:';
 const MAX_AGE = 5 * 60 * 1000;
 export function overviewKey(user: LooseDict, scopes: ScopeOption[]): string {
-  return PREFIX + JSON.stringify([user.open_id || '', user.role || '', user.level || '', [...(user.modules || [])].sort(), scopes.map(item => item.value).sort()]);
+  return PREFIX + JSON.stringify([user.open_id || '', user.role || '', user.level || '', user.category || '',
+    user.specialties || [], [...(user.modules || [])].sort(), scopes.map(item => item.value).sort()]);
 }
 export function readOverview(key: string): Record<string, LooseDict> | null {
   try {

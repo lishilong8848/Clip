@@ -2,18 +2,19 @@
   <section class="tool-workspace" aria-label="工具工作台" data-v2-inline-feedback>
     <NAlert v-if="error" type="error" :bordered="false" role="alert">{{ error }}</NAlert>
     <NAlert v-for="warning in sourceWarnings" :key="warning" type="warning" :bordered="false" role="status">{{ warning }}</NAlert>
-    <div v-if="!session && !recordsOpen" class="workspace-grid" :class="{ 'is-external': kind === 'external' }">
+    <div v-if="!session && !recordsOpen" class="workspace-grid">
       <section class="workspace-panel" aria-labelledby="tool-assets-title">
         <header class="panel-heading">
           <h3 id="tool-assets-title" tabindex="-1">工具台账</h3>
-          <small>{{ kind === 'self' ? '本组勾选' : '已勾选' }} {{ selectedIds.length }} 台<span v-if="kind === 'self' && assignedCount"> · 已配模板 {{ assignedCount }} 台</span></small>
+          <small>已勾选 {{ selectedIds.length }} 台</small>
         </header>
         <NRadioGroup :value="kind" size="small" aria-label="办理类型" :disabled="!!busy" @update:value="chooseKind">
           <NRadioButton value="self">维护</NRadioButton><NRadioButton value="external">送检</NRadioButton>
         </NRadioGroup>
         <div class="asset-filters">
           <NSelect v-model:value="scope" :options="scopeOptions" aria-label="筛选楼栋" size="small" />
-          <NInput v-model:value="search" size="small" clearable placeholder="搜索工具、型号、品牌" :input-props="{ 'aria-label': '搜索工具、型号或品牌' }" />
+          <NSelect v-model:value="profession" :options="professionOptions" aria-label="筛选工具专业" size="small" />
+          <NInput v-model:value="search" size="small" clearable placeholder="搜索工具、专业、型号" :input-props="{ 'aria-label': '搜索工具、型号或品牌' }" />
         </div>
         <NSpin :show="loading && !board">
           <div v-if="visibleAssets.length" class="asset-list">
@@ -25,15 +26,15 @@
               </tr></thead>
               <tbody>
                 <tr v-for="asset in visibleAssets" :key="asset.id"
-                  :class="{ 'is-selected': selected.has(asset.id) || assigned[asset.id],
+                  :class="{ 'is-selected': selected.has(asset.id),
                     'is-selectable': !busy && selectable(asset) }"
                   @click="chooseAssetRow(asset, $event)">
-                  <td><NCheckbox :checked="selected.has(asset.id) || !!assigned[asset.id]" :disabled="!!busy || !selectable(asset)"
+                  <td><NCheckbox :checked="selected.has(asset.id)" :disabled="!!busy || !selectable(asset)"
                     :aria-label="'选择工具 ' + asset.name" @update:checked="toggleAsset(asset.id, $event)" /></td>
                   <td><strong>{{ asset.name }}</strong><small>{{ scopeLabel(asset.scope) }} · <NButton text size="tiny" @click="emit('asset-history', asset.id)">履历</NButton></small>
-                    <small v-if="kind === 'self' && assigned[asset.id]">
-                      {{ templateName(assigned[asset.id]) }} · <NButton text size="tiny" :disabled="!!busy" @click="delete assigned[asset.id]">移出本次</NButton>
-                    </small>
+                    <small>专业 {{ asset.profession || '未填写' }}</small>
+                    <small v-if="asset.responsible_name">负责人 {{ asset.responsible_name }}</small>
+                    <small v-if="kind === 'self' && asset.template_name">{{ asset.template_name }}</small>
                   </td>
                   <td>{{ asset.model || '—' }}<small>{{ asset.brand || '—' }}</small></td>
                   <td>{{ cycleText(asset) }}<small v-if="reason(asset)" class="asset-reason">{{ reason(asset) }}</small>
@@ -50,34 +51,16 @@
         </NSpin>
       </section>
 
-      <section v-if="kind === 'self'" class="workspace-panel" aria-labelledby="tool-templates-title">
-        <header class="panel-heading"><h3 id="tool-templates-title">自检模板库</h3></header>
-        <p class="workspace-muted">{{ selectedIds.length ? '为当前勾选的工具选择模板，可继续配下一组。' : '勾选左侧工具后，选择这组工具使用的模板。' }}</p>
-        <NRadioGroup v-if="templates.length" :value="null" :disabled="!!busy || !selectedIds.length" aria-label="选择自检模板" @update:value="chooseTemplate">
-          <div class="template-list">
-            <NRadio v-if="allAssociated" :value="existingTemplate">使用各工具已关联模板</NRadio>
-            <table class="templates" aria-label="自检模板记录">
-              <thead><tr><th scope="col">选择</th><th scope="col">模板名称</th></tr></thead>
-              <tbody><tr v-for="template in templates" :key="template.id">
-                <td><NRadio :value="template.id" :aria-label="'选用模板 ' + (template.label || template.name)" /></td>
-                <td><label @click="chooseTemplate(template.id)">{{ template.label || template.name }}</label></td>
-              </tr></tbody>
-            </table>
-          </div>
-        </NRadioGroup>
-        <NEmpty v-else description="暂无可用的飞书模板" />
-      </section>
-
       <aside class="workspace-panel opening-panel" aria-label="办理操作">
-        <header class="panel-heading"><h3>本次办理</h3></header>
+        <header class="panel-heading"><h3>本次办理</h3><NButton v-if="selectedIds.length" size="tiny" :disabled="!!busy" @click="clearSelection">取消全部</NButton></header>
         <NButton type="primary" :disabled="!!busy || !canOpen" :loading="busy === 'open'" @click="requestOpen">{{ kind === 'self' ? '打开填写' : '打开送检' }}</NButton>
-        <span v-if="kind === 'self' && pendingIds.length" class="workspace-muted">本次 {{ pendingIds.length }} 台<span v-if="unassignedCount"> · {{ unassignedCount }} 台待选模板</span></span>
+        <span v-if="selectedIds.length" class="workspace-muted">本次 {{ selectedIds.length }} 台</span>
         <p v-if="!pendingAssets.length" class="workspace-muted">先在左侧勾选工具。</p>
         <ul v-else class="selection-review" aria-label="本次工具和模板">
           <li v-for="asset in pendingAssets" :key="asset.id">
             <div>
-              <strong>{{ asset.name }}</strong><small>{{ [scopeLabel(asset.scope), asset.model].filter(Boolean).join(' · ') }}</small>
-              <small v-if="kind === 'self'">{{ templateAssignments[asset.id] ? templateName(templateAssignments[asset.id]) : '待选模板' }}</small>
+              <strong>{{ asset.name }}</strong><small>{{ [scopeLabel(asset.scope), asset.profession || '专业未填写', asset.model].filter(Boolean).join(' · ') }}</small>
+              <small v-if="kind === 'self'">{{ asset.template_name }}</small>
               <small v-else>共用本批送检报告</small>
             </div>
             <NButton text size="tiny" :disabled="!!busy" :aria-label="'移出本次 ' + asset.name" @click="removeSelection(asset.id)">移出</NButton>
@@ -95,10 +78,11 @@
     <section v-else-if="!session" class="workspace-panel records-panel" aria-labelledby="tool-records-title">
       <header class="panel-heading">
         <div class="workspace-actions">
-          <NButton size="small" :disabled="!!busy" @click="recordsOnly ? emit('choose') : (recordsOpen = false)">返回选择</NButton>
+          <NButton size="small" :disabled="!!busy && busy !== 'records'" @click="closeRecords">返回选择</NButton>
           <h3 id="tool-records-title" tabindex="-1">办理记录</h3>
         </div>
         <div class="workspace-actions">
+          <NSelect v-model:value="recordProfession" :options="recordProfessionOptions" aria-label="筛选记录专业" size="small" style="min-width:115px" />
           <NButton v-if="recordAsset" size="small" :disabled="!!busy" @click="showRecords()">查看全部</NButton>
           <NButton size="small" :disabled="!!busy" :loading="busy === 'records'" @click="reloadRecords">刷新记录</NButton>
         </div>
@@ -116,7 +100,7 @@
             </div>
             <ul class="record-tools">
               <li v-for="tool in batch.history_items" :key="tool.id">
-                <div><strong>{{ tool.asset_name }}</strong><small v-if="tool.model || tool.location" class="workspace-muted">{{ [tool.model, tool.location].filter(Boolean).join(' · ') }}</small>
+                <div><strong>{{ tool.asset_name }}</strong><small class="workspace-muted">{{ [tool.profession || '专业未填写', tool.model, tool.location].filter(Boolean).join(' · ') }}</small>
                   <small class="workspace-muted">{{ scopeLabel(tool.scope) }} · {{ recordStatus(tool) }}</small>
                   <small v-if="tool.tool_status_label" class="workspace-muted">{{ tool.result_label }} · {{ tool.tool_status_label }}</small>
                   <small v-if="tool.result_notice" role="status">{{ tool.result_notice }}</small>
@@ -155,6 +139,7 @@
               <NButton v-if="item?.can_edit && activeSheet?.name === item.template?.schema?.sheet" size="small" :disabled="!!busy" @click="normalFill">一键正常</NButton>
             </div>
             <template v-if="item">
+              <p class="workspace-muted">专业 {{ item.asset.profession || '未填写' }}<template v-if="item.asset.template_name"> · {{ item.asset.template_name }}</template></p>
               <p v-if="item.result_notice" role="status">{{ item.result_notice }}</p>
               <div v-if="item.can_edit || item.can_reassign || item.can_release || item.can_withdraw" class="workspace-actions item-actions">
                 <label v-if="item.can_edit" class="workspace-actions">完成情况
@@ -378,15 +363,16 @@
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue';
 import ToolWorkbookInput from './ToolWorkbookInput.vue';
 import {boxParts,displayToolDate,type ToolDateKind} from './toolWorkbookFields';
-import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadio, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
-import { requestBinaryJson, requestJson } from '../api/client';
+import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
+import { requestBinaryJson, requestJson, requestPeople } from '../api/client';
+import { toolProfession, toolProfessionOptions } from './tool-profession';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
 type OrderPlan = { mode: string; workspace_id: string; order_id?: string; revision?: number };
 type Asset = { id: string; name: string; scope: string; model?: string; brand?: string; location?: string; plan?: OrderPlan;
-  self_cycle?: string | number; external_cycle?: string | number; template_id?: string; eligible_kinds?: Kind[];
-  disabled_reason?: string };
+  self_cycle?: string | number; external_cycle?: string | number; profession?: string; template_name?: string; eligible_kinds?: Kind[];
+  disabled_reason?: string; monthly_locked?: boolean; responsible_name?: string };
 type Template = { id: string; name?: string; label?: string };
 type Cell = { address: string; value: string | number | boolean | null; rowspan: number; colspan: number;
   style?: Record<string, string | number>; editable?: boolean; text_editable?: boolean; check?: boolean; input_kind?:ToolDateKind; picker_default?:string };
@@ -402,7 +388,7 @@ type Item = Review & { id: string; asset_id: string; asset: Asset; template?: La
   outcome?: string; reason?: string; quantity?: number; scrap_photos?: string[]; order_revision?: number; can_edit?: boolean; can_review?: boolean;
   can_release?: boolean; can_withdraw?: boolean; can_reassign?: boolean; result_notice?: string;
   review_note?: string; review_status?: string; binding_error?: string; binding_pending?: boolean; order_status?: string; completion?: string; reviewer_id?: string; reviewer_name?: string };
-type HistoryItem = { id: string; order_id?: string; asset_name: string; scope: string; order_status?: string; archive_status?: string;
+type HistoryItem = { id: string; order_id?: string; asset_name: string; scope: string; profession?: string; order_status?: string; archive_status?: string;
   binding_pending?: boolean; binding_error?: string; result_label?: string; tool_status_label?: string;
   location?: string; model?: string; deletion_pending?: boolean; deletion_error?: string; result_notice?: string;
   order_revision?: number; can_release?: boolean; can_delete?: boolean };
@@ -430,18 +416,17 @@ const reportAssets = computed(() => session.value?.items.filter(entry => entry.c
 const replacementTemplate = ref<string | null>(null);
 const savedItems = new Map<string, string>();
 type HistoryPage = { sessions: Summary[]; history_cursor?: { before: string; id: string } | null };
-type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: string; inventory_error?: string };
+type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: string; inventory_error?: string; monthly_reset_at?: string };
 
 const api = '/api/tool-self-check/workspace';
-const existingTemplate = '__associated__';
 const board = shallowRef<Board>();
 const session = ref<Session>();
 const kind = ref<Kind>('self');
 const scope = ref(props.scope && props.scope !== 'ALL' ? props.scope : '');
+const profession = ref('');
 const search = ref('');
 const selectedIds = ref<string[]>([]);
 const selected = computed(() => new Set(selectedIds.value));
-const assigned = reactive<Record<string, string>>({});
 const itemId = ref('');
 const sheetName = ref('');
 const editingText = ref('');
@@ -467,7 +452,7 @@ const signed = ref(false);
 const lifetime = new AbortController();
 let pollTimer: ReturnType<typeof setTimeout> | undefined;
 let recordsTimer: ReturnType<typeof setInterval> | undefined;
-let recordRequest = 0;
+let recordsRead: AbortController | undefined;
 let loadedRecordPages = 1;
 let pollVersion = '';
 let boardRead: AbortController | undefined;
@@ -475,8 +460,9 @@ let openOperation: { key: string; id: string } | undefined;
 let strokeId: number | undefined;
 const recordsOpen = ref(!!props.recordsOnly);
 const recordAsset = ref<Asset>();
+const recordProfession = ref('');
 const recordSessions = shallowRef<Summary[]>([]);
-const visibleRecordSessions = computed(() => {
+const scopedRecordSessions = computed(() => {
   const followups = new Set(props.followupOrderIds || []);
   const building = props.scope && !['ALL', 'CAMPUS'].includes(props.scope) ? props.scope : '';
   if (!props.recordsOnly) return recordSessions.value;
@@ -484,6 +470,10 @@ const visibleRecordSessions = computed(() => {
     !followups.has(tool.order_id || '') && (!building || tool.scope === building)),
   })).filter(batch => batch.history_items.length);
 });
+const recordProfessionOptions = computed(() => toolProfessionOptions(scopedRecordSessions.value.flatMap(batch => batch.history_items || [])));
+const visibleRecordSessions = computed(() => !recordProfession.value ? scopedRecordSessions.value :
+  scopedRecordSessions.value.map(batch => ({ ...batch, history_items: (batch.history_items || []).filter(tool =>
+    toolProfession(tool.profession) === recordProfession.value) })).filter(batch => batch.history_items.length));
 const recordCursor = shallowRef<HistoryPage['history_cursor']>();
 const scrapPhotoLimit = 3;
 const scrapPhotoMaxBytes = 1024 * 1024;
@@ -494,34 +484,25 @@ const assets = computed(() => board.value?.assets || []);
 const templates = computed(() => board.value?.templates || []);
 const scopeOptions = computed(() => [{ value: '', label: '全部楼栋' },
   ...[...new Set(assets.value.map(asset => asset.scope).filter(Boolean))].sort().map(value => ({ value, label: scopeLabel(value) }))]);
+const professionOptions = computed(() => toolProfessionOptions(assets.value));
 const visibleAssets = computed(() => {
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return assets.value.filter(asset => (!scope.value || asset.scope === scope.value)
+    && (!profession.value || toolProfession(asset.profession) === profession.value)
     && (!onlyCycle(asset) || onlyCycle(asset) === kind.value)
-    && terms.every(term => [asset.name, asset.model, asset.brand, asset.location, scopeLabel(asset.scope)].join(' ').toLowerCase().includes(term)));
+    && terms.every(term => [asset.name, asset.model, asset.brand, asset.location, asset.profession, scopeLabel(asset.scope)].join(' ').toLowerCase().includes(term)));
 });
 const visibleEligible = computed(() => visibleAssets.value.filter(selectable));
 const allVisibleSelected = computed(() => !!visibleEligible.value.length && visibleEligible.value.every(asset => selected.value.has(asset.id)));
 const someVisibleSelected = computed(() => visibleEligible.value.some(asset => selected.value.has(asset.id)));
-const selectedAssets = computed(() => assets.value.filter(asset => selected.value.has(asset.id)));
 const templatesById = computed(() => new Map(templates.value.map(template => [template.id, template])));
-const allAssociated = computed(() => selectedAssets.value.length > 0 &&
-  selectedAssets.value.every(asset => templatesById.value.has(asset.template_id || '')));
-const assignedCount = computed(() => Object.keys(assigned).length);
-const pendingIds = computed(() => [...new Set([...Object.keys(assigned), ...selectedIds.value])]);
 const pendingAssets = computed(() => {
   const byId = new Map(assets.value.map(asset => [asset.id, asset]));
-  return pendingIds.value.flatMap(id => byId.get(id) || []);
+  return selectedIds.value.flatMap(id => byId.get(id) || []);
 });
-const templateAssignments = computed(() => {
-  const result: Record<string, string> = { ...assigned };
-  for (const asset of selectedAssets.value) if (!result[asset.id] && asset.template_id) result[asset.id] = asset.template_id;
-  return result;
-});
-const unassignedCount = computed(() => pendingIds.value.filter(id => !templatesById.value.has(templateAssignments.value[id])).length);
 const mixedReportBuildings = computed(() => kind.value === 'external' &&
-  new Set(assets.value.filter(asset => pendingIds.value.includes(asset.id)).map(asset => asset.scope)).size > 1);
-const canOpen = computed(() => pendingIds.value.length > 0 && !mixedReportBuildings.value && (kind.value === 'external' || unassignedCount.value === 0));
+  new Set(pendingAssets.value.map(asset => asset.scope)).size > 1);
+const canOpen = computed(() => selectedIds.value.length > 0 && !mixedReportBuildings.value);
 const sessionOptions = computed(() => (board.value?.sessions || []).filter(entry => entry.kind === kind.value)
   .map(entry => ({ value: entry.id, label: `${sessionStatus(entry)} · ${entry.item_count ?? entry.items?.length ?? 0} 台 · ${entry.created_at?.slice(0, 16).replace('T', ' ') || entry.id.slice(0, 8)}` })));
 const sessionUrl = computed(() => api + '/' + encodeURIComponent(session.value?.id || ''));
@@ -563,15 +544,17 @@ function onlyCycle(asset: Asset): Kind | undefined {
   return self ? 'self' : 'external';
 }
 function eligible(asset: Asset) {
-  return asset.eligible_kinds?.includes(kind.value) ?? (onlyCycle(asset) === kind.value);
+  return (kind.value !== 'self' || !!asset.template_name)
+    && (asset.eligible_kinds?.includes(kind.value) ?? (onlyCycle(asset) === kind.value));
 }
 function selectable(asset: Asset) {
-  return eligible(asset) && !assigned[asset.id];
+  return eligible(asset);
 }
 function reason(asset: Asset) {
   if (asset.disabled_reason) return asset.disabled_reason;
   if (asset.self_cycle && asset.external_cycle) return '同时设置了两种周期';
   if (!asset.self_cycle && !asset.external_cycle) return '未设置周期';
+  if (kind.value === 'self' && !asset.template_name) return '工具台账缺少模板文件';
   return eligible(asset) ? '' : '当前账号不可办理';
 }
 function cycleText(asset: Asset) {
@@ -594,33 +577,27 @@ function chooseKind(value: Kind) {
   if (value === kind.value) return;
   leave(() => {
     kind.value = value;
-    selectedIds.value = [];
-    for (const id of Object.keys(assigned)) delete assigned[id];
+    clearSelection();
     clearSession();
   });
-}
-function chooseTemplate(value: string) {
-  if (busy.value || !selectedIds.value.length) return;
-  if (value === existingTemplate ? !allAssociated.value : !templatesById.value.has(value)) return;
-  for (const asset of selectedAssets.value) assigned[asset.id] = value === existingTemplate ? asset.template_id! : value;
-  selectedIds.value = [];
 }
 function templateName(id: string) {
   const template = templatesById.value.get(id);
   return template?.label || template?.name || '模板待核对';
 }
 function toggleAsset(id: string, checked: boolean) {
-  if (assigned[id]) return;
   if (selected.value.has(id) === checked) return;
-  if (checked && !assigned[id] && pendingIds.value.length >= 200) {
+  if (checked && selectedIds.value.length >= 200) {
     error.value = '每批最多选择 200 台工具，请分批办理。';
     return;
   }
   selectedIds.value = checked ? [...selectedIds.value, id] : selectedIds.value.filter(value => value !== id);
 }
 function removeSelection(id: string) {
-  delete assigned[id];
   toggleAsset(id, false);
+}
+function clearSelection() {
+  selectedIds.value = [];
 }
 function chooseAssetRow(asset: Asset, event: MouseEvent) {
   if (busy.value || !selectable(asset) ||
@@ -638,7 +615,7 @@ function transferAsset(asset: Asset) {
 function toggleVisible(checked: boolean) {
   const ids = new Set(visibleEligible.value.map(asset => asset.id));
   const selection = checked ? [...new Set([...selectedIds.value, ...ids])] : selectedIds.value.filter(id => !ids.has(id));
-  if (new Set([...selection, ...Object.keys(assigned)]).size > 200) {
+  if (selection.length > 200) {
     error.value = '筛选结果超过每批 200 台上限，请缩小筛选范围。';
     return;
   }
@@ -715,7 +692,7 @@ async function loadReviewers(showError = true) {
   reviewerLoading.value = true;
   const path = sessionUrl.value + '/people';
   try {
-    const people = await read(path, request.signal) as NonNullable<typeof reviewers.value>;
+    const people = await requestPeople(compactPath(path), { signal: request.signal }) as NonNullable<typeof reviewers.value>;
     if (!request.signal.aborted && session.value?.id === current.id) reviewers.value = people;
   } catch (cause) {
     if (showError && !request.signal.aborted && session.value?.id === current.id) error.value = message(cause);
@@ -857,7 +834,7 @@ function compactPath(path: string) { return path + (path.includes('?') ? '&' : '
 function post(path: string, payload: object, timeoutMs?: number) {
   return requestJson(compactPath(path), { method: 'POST', body: JSON.stringify(payload), signal: lifetime.signal, timeoutMs });
 }
-async function readBoard(refresh = false) {
+async function readBoard(refresh = false, legacyTemplates = false) {
   boardRead?.abort();
   const controller = new AbortController();
   boardRead = controller;
@@ -865,13 +842,12 @@ async function readBoard(refresh = false) {
   try {
     const data = await (refresh
       ? requestJson(api + '/refresh', { method: 'POST', signal: controller.signal })
-      : read(api, controller.signal)) as Board;
+      : read(api + (legacyTemplates ? '?legacy_templates=1' : ''), controller.signal)) as Board;
     if (!controller.signal.aborted) {
       board.value = data;
       if (typeof data.inventory_error === 'string') emit('inventory-status', data.inventory_error);
       const ids = new Set(data.assets.filter(eligible).map(asset => asset.id));
       selectedIds.value = selectedIds.value.filter(id => ids.has(id));
-      for (const id of Object.keys(assigned)) if (!ids.has(id)) delete assigned[id];
     }
   } catch (cause) {
     if (!controller.signal.aborted) error.value = message(cause);
@@ -901,23 +877,29 @@ function loadMoreHistory() {
 async function fetchRecords(more = false, preservePages = false) {
   const cursor = more ? recordCursor.value : null;
   if (more && !cursor) return;
-  const request = ++recordRequest;
+  recordsRead?.abort();
+  const controller = new AbortController();
+  recordsRead = controller;
   const query = new URLSearchParams(cursor || {});
   if (recordAsset.value) query.set('asset_id', recordAsset.value.id);
-  let page = await read(api + '/history?' + query) as HistoryPage;
-  const entries = new Map((more ? recordSessions.value : []).map(batch => [batch.id, batch]));
-  let pages = 1;
-  while (true) {
-    if (request !== recordRequest || lifetime.signal.aborted) return;
-    for (const batch of page.sessions) entries.set(batch.id, batch);
-    if (!preservePages || !page.history_cursor || pages >= loadedRecordPages) break;
-    for (const [key, value] of Object.entries(page.history_cursor)) query.set(key, value);
-    page = await read(api + '/history?' + query) as HistoryPage;
-    pages += 1;
+  try {
+    let page = await read(api + '/history?' + query, controller.signal) as HistoryPage;
+    const entries = new Map((more ? recordSessions.value : []).map(batch => [batch.id, batch]));
+    let pages = 1;
+    while (true) {
+      if (controller.signal.aborted) return;
+      for (const batch of page.sessions) entries.set(batch.id, batch);
+      if (!preservePages || !page.history_cursor || pages >= loadedRecordPages) break;
+      for (const [key, value] of Object.entries(page.history_cursor)) query.set(key, value);
+      page = await read(api + '/history?' + query, controller.signal) as HistoryPage;
+      pages += 1;
+    }
+    loadedRecordPages = more ? loadedRecordPages + 1 : pages;
+    recordSessions.value = [...entries.values()];
+    recordCursor.value = page.history_cursor;
+  } catch (cause) {
+    if (!controller.signal.aborted) throw cause;
   }
-  loadedRecordPages = more ? loadedRecordPages + 1 : pages;
-  recordSessions.value = [...entries.values()];
-  recordCursor.value = page.history_cursor;
 }
 function loadRecords(more = false) {
   return perform('records', () => fetchRecords(more));
@@ -928,11 +910,23 @@ function reloadRecords() {
 }
 function showRecords(asset?: Asset) {
   recordAsset.value = asset;
+  recordProfession.value = '';
   recordSessions.value = [];
   recordCursor.value = null;
   recordsOpen.value = true;
   void loadRecords();
   void nextTick(() => document.getElementById('tool-records-title')?.focus());
+}
+function closeRecords() {
+  recordsRead?.abort();
+  if (props.recordsOnly) {
+    emit('choose');
+    return;
+  }
+  recordsOpen.value = false;
+  recordAsset.value = undefined;
+  error.value = '';
+  void nextTick(() => document.getElementById('tool-assets-title')?.focus());
 }
 function manageRecord(batch: Summary, tool: HistoryItem, action: 'release' | 'delete') {
   const removing = action === 'delete';
@@ -951,17 +945,11 @@ function manageRecord(batch: Summary, tool: HistoryItem, action: 'release' | 'de
 }
 function requestOpen() {
   if (!canOpen.value) return;
-  leave(() => {
-    const mapping = kind.value === 'self' ? { ...templateAssignments.value } : {};
-    const changed = assets.value.filter(asset => mapping[asset.id] && asset.template_id && mapping[asset.id] !== asset.template_id);
-    const run = () => void openSelection(mapping);
-    if (changed.length) ask('更换已关联模板？', `将更新 ${changed.length} 台工具与原模板的关联。`, run);
-    else run();
-  });
+  void openSelection();
 }
-async function openSelection(template_ids: Record<string, string>) {
+async function openSelection() {
   await perform('open', async () => {
-    const payload = { asset_ids: [...pendingIds.value], template_ids, kind: kind.value, defer_bindings: true, new_record: true };
+    const payload = { asset_ids: [...selectedIds.value], kind: kind.value, new_record: true };
     const key = JSON.stringify(payload);
     if (openOperation?.key !== key) openOperation = { key, id: Array.from(crypto.getRandomValues(new Uint8Array(16)), part => part.toString(16).padStart(2, '0')).join('') };
     let result: Session;
@@ -974,8 +962,7 @@ async function openSelection(template_ids: Record<string, string>) {
     openOperation = undefined;
     report.value = undefined;
     applySession(result);
-    selectedIds.value = [];
-    for (const id of Object.keys(assigned)) delete assigned[id];
+    clearSelection();
     void readBoard();
   });
 }
@@ -1000,12 +987,14 @@ function openSaved(id: string, assetId = '') {
     }
     clearSession();
     applySession(data);
+    if (data.status === 'opening' && !templates.value.length) void readBoard(false, true);
     if (targetAsset) selectItem(targetAsset);
   }));
 }
 function refresh() {
   if (recordsOpen.value && !session.value) return perform('records', async () => {
     await readBoard(true);
+    if (!recordsOpen.value || lifetime.signal.aborted) return;
     emit('records-refresh');
     await fetchRecords();
   });
@@ -1063,10 +1052,13 @@ function submit() {
       }
     }
     if (session.value?.kind === 'self') await save();
-    if (session.value && editable.value) applySession(await post(sessionUrl.value + '/submit', {
-      revision: session.value.revision, actual: actualDate.value, inspection: reportCheck.value,
-      ...(target ? { resubmit_asset_id: target } : {}),
-    }) as Session);
+    if (session.value && editable.value) {
+      applySession(await post(sessionUrl.value + '/submit', {
+        revision: session.value.revision, actual: actualDate.value, inspection: reportCheck.value,
+        ...(target ? { resubmit_asset_id: target } : {}),
+      }) as Session);
+      void readBoard();
+    }
   });
 }
 function schedulePoll(delay = 3000) {
@@ -1264,12 +1256,14 @@ function leave(proceed: () => void) {
   if (dirty.value) askDiscard(proceed);
   else proceed();
 }
-defineExpose({ refresh, reloadRecords: loadRecords, leave, busy, dirty });
+defineExpose({ refresh, reloadInventory: readBoard, reloadRecords: loadRecords, leave, busy, dirty });
 onMounted(() => {
   if (props.sessionId) openSaved(props.sessionId);
   if (props.recordsOnly) void loadRecords();
   else void readBoard();
   recordsTimer = setInterval(() => {
+    const resetAt = board.value?.monthly_reset_at;
+    if (resetAt && !loading.value && !busy.value && !document.hidden && Date.now() >= Date.parse(resetAt)) void readBoard();
     if (!recordsOpen.value || session.value || busy.value || document.hidden) return;
     if (props.recordsOnly) emit('records-refresh');
     void fetchRecords(false, true).catch(() => { /* Keep the last successful list until the next refresh. */ });
@@ -1278,6 +1272,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   lifetime.abort();
   boardRead?.abort();
+  recordsRead?.abort();
   reviewerRequest?.abort();
   clearTimeout(pollTimer);
   clearInterval(recordsTimer);
@@ -1288,27 +1283,23 @@ onBeforeUnmount(() => {
 .tool-workspace { --tool-border: var(--v2-border, #dbe3e9); --tool-muted: var(--v2-muted, #617180); min-width: 0; }
 .tool-workspace > .n-alert { margin-bottom: 10px; }
 .confirmation-summary { max-height: min(55vh, 340px); overflow: auto; white-space: pre-line; }
-.workspace-grid { display: grid; grid-template-columns: minmax(0, 6fr) minmax(0, 3fr) minmax(128px, 1.4fr); gap: 12px; align-items: start; }
-.workspace-grid.is-external { grid-template-columns: minmax(0, 1fr) minmax(138px, 22%); }
+.workspace-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(185px, 1fr); gap: 12px; align-items: start; }
 .workspace-panel { min-width: 0; padding: 11px; border: 1px solid var(--tool-border); border-radius: 8px; background: var(--v2-card, var(--cf-surface, transparent)); }
 .panel-heading, .workspace-actions, .review-line, .item-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .panel-heading { justify-content: space-between; min-height: 24px; margin-bottom: 8px; }
 .panel-heading h3 { font-size: 15px; margin: 0; }
 .panel-heading small, .workspace-muted, .assets small { color: var(--tool-muted, #617180); }
 .workspace-muted { margin: 4px 0; font-size: 13px; }
-.asset-filters { display: grid; grid-template-columns: minmax(87px, .58fr) minmax(0, 1fr); gap: 6px; margin: 8px 0; }
+.asset-filters { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin: 8px 0; }
+.asset-filters > :last-child { grid-column: 1 / -1; }
 .asset-list { overflow: auto; max-height: max(280px, calc(100dvh - 290px)); }
-.assets, .templates { border-collapse: collapse; width: 100%; text-align: left; font-size: 12px; }
-.assets th, .assets td, .templates th, .templates td { padding: 6px 4px; border-bottom: 1px solid var(--tool-border); vertical-align: top; overflow-wrap: anywhere; }
-.templates th:first-child { width: 32px; }
-.templates label { cursor: pointer; }
+.assets { border-collapse: collapse; width: 100%; text-align: left; font-size: 12px; }
+.assets th, .assets td { padding: 6px 4px; border-bottom: 1px solid var(--tool-border); vertical-align: top; overflow-wrap: anywhere; }
 .assets th:first-child, .assets td:first-child { width: 22px; }
 .assets small { display: block; margin-top: 3px; }
-.assets tr.is-selected, .templates tr.is-selected { background: color-mix(in srgb, var(--v2-blue, #2364d2) 9%, transparent); }
+.assets tr.is-selected { background: color-mix(in srgb, var(--v2-blue, #2364d2) 9%, transparent); }
 .assets tr.is-selectable { cursor: pointer; }
 .asset-reason { font-weight: 500; }
-.template-list { display: grid; gap: 8px; max-height: max(280px, calc(100dvh - 280px)); overflow: auto; padding-block: 6px; }
-.template-list :deep(.n-radio__label) { white-space: normal; overflow-wrap: anywhere; }
 .workspace-panel > .n-radio-group { width: 100%; }
 .workspace-editor { display: grid; gap: 9px; margin-top: 12px; min-width: 0; }
 .tool-toolbar { display: flex; align-items: center; gap: 8px; min-width: 0; }
@@ -1362,13 +1353,12 @@ onBeforeUnmount(() => {
 .dialog-actions { justify-content: flex-end; }
 canvas { display: block; width: 100%; height: auto; touch-action: none; background: #fff; border: 1px solid #8592a1; }
 @media (max-width: 680px) {
-  .workspace-grid, .workspace-grid.is-external { grid-template-columns: minmax(0, 1fr); }
+  .workspace-grid { grid-template-columns: minmax(0, 1fr); }
   .workspace-panel { padding: 8px; }
   :global(.workspace-v2 .tool-workspace .editor-footer) { padding-inline-end: 38px; }
   .asset-list { max-height: 52dvh; }
-  .template-list { max-height: 28dvh; }
   .tool-workspace :deep(.n-button) { min-height: 40px; }
-  .assets :deep(.n-checkbox), .templates :deep(.n-radio) { padding-block: 10px; }
+  .assets :deep(.n-checkbox) { padding-block: 10px; }
   .review-line input[type=datetime-local] { min-height: 40px; }
   .item-actions select { min-height: 40px; }
   .qualified-options :deep(.n-radio-button) { padding-inline: 7px; min-height: 40px; }

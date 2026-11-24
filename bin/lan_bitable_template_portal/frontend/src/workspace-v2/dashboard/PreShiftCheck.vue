@@ -105,16 +105,16 @@ import CheckOverview from './CheckOverview.vue';
 import CheckHistory from './CheckHistory.vue';
 import CheckRecordEditor from './CheckRecordEditor.vue';
 import PhotoLocationSettings from './PhotoLocationSettings.vue';
-const props=defineProps<{user:Dict;fixedScope?:string;headerToolsId?:string;workbench?:boolean;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
+const props=defineProps<{user:Dict;fixedScope?:string;initialTaskId?:string;showHistory?:boolean;headerToolsId?:string;workbench?:boolean;registerGuard?:(guard:(target:string,proceed:()=>void)=>boolean)=>()=>void}>();
 const emit=defineEmits<{snapshot:[data:Dict]}>();
 const headerTarget=ref<HTMLElement|null>(null);
 watch(()=>props.headerToolsId,async id=>{await nextTick();headerTarget.value=id?document.getElementById(id):null;},{immediate:true});
-const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(''),error=ref(''),loading=ref(false),busy=ref(false);
-const showCheck=computed(()=>!props.workbench||preShiftHomeVisible(props.user,state.value));
+const state=ref<Dict>(),scope=ref(props.fixedScope||props.user.home_scope||'A'),selectedId=ref(props.initialTaskId||''),error=ref(''),loading=ref(false),busy=ref(false);
+const showCheck=computed(()=>!props.workbench||!state.value||preShiftHomeVisible(props.user,state.value));
 const editing=ref(false),saving=ref(false),locationSaving=ref(false),uploading=ref(false),editError=ref(''),items=ref<{id:string;text:string;frequency:Dict;fixed_recipients:string[]}[]>([]),version=ref(0);
 const recipientOptions=ref<{value:string;label:string}[]>([]),recipientsLoading=ref(false),recipientError=ref('');let recipientController:AbortController|undefined;
 const overviewOpen=ref(false);let firstState=true;
-const historyOpen=ref(false);
+const historyOpen=ref(!!props.showHistory);
 const recordId=ref('');
 const compact=document.documentElement.classList.contains('workspace-v2');
 const attachmentOpen=ref<Record<string,boolean>>({});
@@ -188,7 +188,14 @@ async function submit(){
   const row=task.value;busy.value=true;error.value='';
   try{const result=await requestJson('/api/pre-shift-checks/submit',{method:'POST',body:JSON.stringify({task_id:row.id,version:row.definition_version,answers:row.items.map((item:Dict)=>({id:item.id,...answer(item.id)}))})});delete drafts.value[row.id];message.success(result.already_completed?'本次清单已由'+result.actor_name+'提交，无需重复提交':'本次清单已提交，飞书后台同步');window.dispatchEvent(new Event('clipflow-business-changed'));await load(true);}catch(e){error.value=e instanceof Error?e.message:'提交暂未确认，请重试；不会重复新增。';}finally{busy.value=false;}
 }
-const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>{if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}if(!showCheck.value||!dirty.value&&!editing.value)return true;dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});return false;});
+function guardNavigation(proceed:()=>void){
+  if(busy.value||saving.value||locationSaving.value||uploading.value){message.warning('正在保存，请稍候。');return false;}
+  if(!showCheck.value||!dirty.value&&!editing.value)return true;
+  dialog.warning({title:'检查尚未提交',content:'离开会放弃当前未保存的填写。',positiveText:'放弃并离开',negativeText:'继续填写',onPositiveClick:()=>{drafts.value={};editing.value=false;proceed();}});
+  return false;
+}
+defineExpose({guardNavigation});
+const removeGuard=(props.registerGuard||registerNavigationGuard)((_target,proceed)=>guardNavigation(proceed));
 function beforeUnload(event:BeforeUnloadEvent){if(busy.value||saving.value||uploading.value||showCheck.value&&(dirty.value||editing.value)){event.preventDefault();event.returnValue='';}}
 let activeView=true, loadedAt=0;
 function refresh(){if(activeView&&!document.hidden&&!busy.value&&!saving.value&&!editing.value&&!uploading.value&&!recordId.value)void load();}
@@ -257,7 +264,7 @@ onBeforeUnmount(()=>{disposed=true;controller?.abort();recipientController?.abor
 <style scoped>
 .ps-definition-count{align-self:center;margin-right:auto;color:var(--v2-muted)}
 .ps-desk{min-width:0;container:shift-check / inline-size}.ps-heading,.ps-context,.ps-controls,.ps-receipt,.ps-form-head{display:flex;align-items:center;flex-wrap:wrap;gap:.4rem .7rem}
-.ps-heading,.ps-receipt,.ps-form-head{justify-content:space-between}.ps-heading{border-bottom:1px solid var(--v2-palette-border,#cedbd7);padding:.3rem 0 .55rem}.ps-heading strong{font-size:1.05rem}
+.ps-heading,.ps-receipt,.ps-form-head{justify-content:space-between}.ps-heading{border-bottom:1px solid var(--v2-palette-border,#cedbd7);padding:.3rem 0 .55rem}.ps-heading strong{font-size:var(--cf-font-section)}.ps-form-head strong{font-size:var(--cf-font-body);font-weight:600}
 .ps-context small,.ps-receipt small,.ps-form-head span,.ps-shifts-label small{color:var(--v2-muted,#556d66);font-size:.8rem}.ps-controls .n-select{width:6.8rem;max-width:100%}
 .ps-shifts-label{display:flex;align-items:center;justify-content:space-between;gap:.5rem;font-size:.9rem}
 .ps-desk .v2-check-choice{border-radius:7px;border:0;border-inline-start:3px solid transparent;background:var(--soft-field,#eef3f3)}

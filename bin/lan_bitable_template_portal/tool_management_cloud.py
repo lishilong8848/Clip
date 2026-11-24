@@ -29,13 +29,14 @@ TEMPLATE_NAME = '文本'
 TEMPLATE_FILE = '模板文件'
 TEMPLATE_HASH = '文件摘要'
 TEMPLATE_LINK = '与记录表格模板关联关系'
+INVENTORY_TEMPLATE = '模板'
 TABLES = {'maintenance': 'tblutFXoTA0mPkt1', 'inspection': 'tblHtl0cVXn6zci6',
           'repair': 'tblTasmHUxgdtZQd', 'scrap': 'tbl71QoG0R0Q3esn', 'change': 'tblEwY3AbwiT021v'}
 KEY = '灯塔工具工单号'
 STATE = '灯塔处理状态'
 DETAIL = '灯塔处理说明'
 SOURCE_FIELDS = ['楼栋', '工具名称', '规格型号', '放置区域', '一级分类', '区域对应工具数量',
-                 '维护周期', '送检周期', '当前维护日期', '当前送检日期', '是否报废', '品牌', TEMPLATE_LINK]
+                 '维护周期', '送检周期', '当前维护日期', '当前送检日期', '是否报废', '品牌', '专业', INVENTORY_TEMPLATE, TEMPLATE_LINK]
 
 
 def plain(value):
@@ -116,7 +117,7 @@ class ToolCloud:
         self.workspace_lock = threading.RLock()
 
     def inventory_fields(self):
-        allowed={'楼栋','工具名称','规格型号','放置区域','一级分类','二级分类','区域对应工具数量','品牌','计数单位','维护周期','送检周期','当前维护日期','当前送检日期','清洁情况','外观完好无破损','配件齐全','功能正常','检查结论'}
+        allowed={'楼栋','工具名称','规格型号','专业','放置区域','一级分类','二级分类','区域对应工具数量','品牌','计数单位','维护周期','送检周期','当前维护日期','当前送检日期','清洁情况','外观完好无破损','配件齐全','功能正常','检查结论'}
         fields=self.cloud.all(self.cloud.table_path(BASE, INVENTORY)+'/fields')
         return [{'name':field['field_name'],'type':field['type'],
                  'options':[str(item.get('name')) for item in ((field.get('property') or {}).get('options') or []) if isinstance(item,dict) and item.get('name')]}
@@ -161,7 +162,9 @@ class ToolCloud:
             quantity = fields.get('区域对应工具数量')
             if not building or not name:
                 continue
+            template, template_error = self._inventory_template_entry(fields)
             result.append({'id': identity, 'name': name, 'scope': building[1], 'model': plain(fields.get('规格型号')),
+                'profession': plain(fields.get('专业')), 'template_attachment': template, 'template_error': template_error,
                 'brand': plain(fields.get('品牌')), 'template_id': record_id(_template_text(fields.get(TEMPLATE_LINK)).strip()),
                 'location': plain(fields.get('放置区域')), 'quantity': int(quantity) if type(quantity) in (int, float) else 0,
                 'retired': plain(fields.get('是否报废')) in {'是', '已报废', 'true', 'True'},
@@ -289,29 +292,50 @@ class ToolCloud:
                 result.append(entry)
         return result
 
-    def download_template(self, template):
+    @staticmethod
+    def _inventory_template_entry(fields):
+        files = fields.get(INVENTORY_TEMPLATE)
+        if isinstance(files, dict):
+            files = files.get('value')
+        if not files:
+            return None, '工具台账的「模板」字段未上传文件。'
+        if not isinstance(files, list) or len(files) != 1 or not isinstance(files[0], dict):
+            return None, '工具台账的「模板」字段需保留一份 XLSX 文件。'
+        file = files[0]
+        name, token, size = plain(file.get('name')), file.get('file_token'), file.get('size')
+        if not name.lower().endswith('.xlsx') or not isinstance(token, str) or not token.strip():
+            return None, '工具台账的「模板」字段需上传有效的 XLSX 文件。'
+        if type(size) is int and size > MAX_FILE:
+            return None, '工具模板附件不得超过 2 MB。'
+        return {'name': name, 'file_token': token, 'size': size if type(size) is int and size > 0 else 0}, ''
+
+    def download_template(self, template, *, inventory=False):
         """Return at most 2 MiB of bytes from the template's current attachment."""
         identity = record_id(template.get('id'))
         if not identity:
             raise RiskError('工具模板记录编号无效。')
-        path = self.cloud.table_path(BASE, TEMPLATE_TABLE)
+        table, field_name = (INVENTORY, INVENTORY_TEMPLATE) if inventory else (TEMPLATE_TABLE, TEMPLATE_FILE)
+        path = self.cloud.table_path(BASE, table)
         row = self._read_record(path, identity)
-        current = self._template_entry(row)
-        if not current or any(current[key] != template.get(key, '') for key in ('file_token', 'digest')):
-            raise RiskError('飞书模板附件已变化，请重新选择模板。', 409)
+        current = self._inventory_template_entry(row['fields'])[0] if inventory else self._template_entry(row)
+        if not current or any(current.get(key, '') != template.get(key, '') for key in ('file_token', 'digest')):
+            raise RiskError('工具模板附件已变化，请刷新工具台账后重试。', 409)
         if current['size'] > MAX_FILE:
             raise RiskError('工具模板附件不得超过 2 MB。', 413)
-        metadata = next((field for field in self.cloud.all(path + '/fields')
-                         if field.get('field_name') == TEMPLATE_FILE), {})
-        field_id = metadata.get('field_id')
-        if metadata.get('type') != 17 or not field_id:
-            raise RiskError('飞书模板表缺少可读的模板文件附件字段。', 503)
         token = current['file_token']
-        # Use the fixed Drive endpoint and grant context from the verified record.
-        attachment = row['fields'][TEMPLATE_FILE][0]
+        files = row['fields'][field_name]
+        attachment = (files['value'] if isinstance(files, dict) else files)[0]
         reported = parse_qs(urlsplit(plain(attachment.get('url'))).query).get('extra', [''])[0]
-        extra = reported or json.dumps({'bitablePerm': {'tableId': TEMPLATE_TABLE,
-                                       'attachments': {field_id: {identity: [token]}}}}, separators=(',', ':'))
+        if reported:
+            extra = reported
+        else:
+            metadata = next((field for field in self.cloud.all(path + '/fields')
+                             if field.get('field_name') == field_name), {})
+            field_id = metadata.get('field_id')
+            if metadata.get('type') != 17 or not field_id:
+                raise RiskError(f'飞书缺少可读取的「{field_name}」附件字段。', 503)
+            extra = json.dumps({'bitablePerm': {'tableId': table,
+                               'attachments': {field_id: {identity: [token]}}}}, separators=(',', ':'))
         url = API + 'drive/v1/medias/' + quote(token, safe='') + '/download?' + urlencode({'extra': extra})
         with self.cloud.lock:
             headers = self.cloud.headers()
@@ -330,7 +354,7 @@ class ToolCloud:
             raise RiskError('本机无法暂存工具模板，请核对临时目录写入权限。', 503) from None
         if not content or len(content) > MAX_FILE or current['size'] and len(content) != current['size']:
             raise RiskError('工具模板文件为空、过大或下载不完整，请核对飞书附件。', 503)
-        if current['digest'] and hashlib.sha256(content).hexdigest() != current['digest'].lower():
+        if current.get('digest') and hashlib.sha256(content).hexdigest() != current['digest'].lower():
             raise RiskError('工具模板下载内容与文件摘要不符，请核对飞书附件。', 503)
         return content
 

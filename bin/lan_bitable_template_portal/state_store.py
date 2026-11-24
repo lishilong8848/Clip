@@ -7023,6 +7023,7 @@ class LanPortalStateStore:
         limit: int = 200,
         offset: int = 0,
         focus_record_id: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         project_source_key = self._normalize_repair_snapshot_source_key(
             project_source_key
@@ -7043,6 +7044,8 @@ class LanPortalStateStore:
             }
         normalized_scope = self._text(scope).upper() or "ALL"
         clauses = ["p.source_key = ?"]
+        if professions is not None:
+            clauses.append('repair_profession_visible(p.payload_json)')
         params: list[Any] = [project_source_key]
         if normalized_state == "in_progress":
             clauses.append("i.state = ? AND i.workflow = ?")
@@ -7173,6 +7176,12 @@ class LanPortalStateStore:
         with self._lock:
             with closing(self._connect()) as conn:
                 self._ensure_schema_locked(conn)
+                if professions is not None:
+                    from .module_access import professional_record_visible
+
+                    conn.create_function('repair_profession_visible', 1,
+                                         lambda payload: professional_record_visible(professions, self._loads(payload, {})),
+                                         deterministic=True)
                 total_row = conn.execute(
                     f"""
                     SELECT COUNT(*) AS c

@@ -233,7 +233,7 @@ def install_cold_source_monitor(app, controller, runtime):
             session=await asyncio.to_thread(controller._current_session,request)
             if not session: return controller._auth_required_response()
             granted=await asyncio.to_thread(allowed_modules,runtime.auth_manager,session)
-            if 'daily' not in granted: raise RiskError('需要每日任务权限。',403)
+            if 'cold_source' not in granted: raise RiskError('需要冷源运行状态权限。',403)
             scopes=await asyncio.to_thread(runtime.auth_manager.session_scopes,session)
             allowed=lambda scope: 'ALL' in scopes or scope in scopes
             rows=await asyncio.to_thread(snapshot,cloud)

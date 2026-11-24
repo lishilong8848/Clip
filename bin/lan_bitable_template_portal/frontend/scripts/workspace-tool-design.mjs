@@ -5,7 +5,7 @@ import { compileScript, parse } from '@vue/compiler-sfc';
 // Install before the workspace-business-imports and Vue plugins, in the V2 config only.
 // Original module IDs retain the host's API, navigation and lazy-loading resolution.
 const screens = {
-  ToolSelfCheckPage: ['ToolDeskPage', 'ToolDeskLibrary', 'ToolDeskOrder'],
+  ToolSelfCheckPage: ['ToolDeskPage', 'ToolDeskOrder'],
   ToolWorkspace: ['ToolDeskWorkspace', 'ToolDeskSelection', 'ToolDeskSession', 'ToolDeskSheet', 'ToolDeskSheetPreview', 'ToolDeskReview'],
   ToolManagementSettings: ['ToolDeskSettings'],
   ToolAssetHistory: ['ToolDeskHistory'],
@@ -91,7 +91,8 @@ async function checkPairing() {
     {id:'recClamp2',name:'数字万用表',scope:'D',model:'M-02',location:'电气工具柜'},
     {id:'recMeter1',name:'温湿度记录仪',scope:'E',model:'H-03',location:'暖通工具柜'},
     {id:'recMeter2',name:'接触式温度计',scope:'E',model:'T-04',location:'冷站'},
-  ].map(a => ({...a,self_cycle:'每月',eligible_kinds:['self']}));
+  ].map((a,i) => ({...a,self_cycle:'每月',eligible_kinds:['self'],profession:i<2?'电气':'暖通',
+    template_name:templates[Math.floor(i/2)].name}));
   const expected = Object.fromEntries(assets.map((a,i)=>[a.id, templates[Math.floor(i/2)].id]));
   function layout(template) {
     const sheet = template.name;
@@ -150,7 +151,8 @@ async function checkPairing() {
       const body=chunks.length?JSON.parse(Buffer.concat(chunks)):null;
       if (req.method==='POST' && pathname===workspace+'/open') {
         opening=body;
-        assert.deepEqual(body.template_ids,expected);
+        assert(!('template_id' in body) && !('template_ids' in body));
+        assert.deepEqual(body.asset_ids, assets.map(a=>a.id));
         assert.equal(body.new_record,true);
         session={id:'pairing',kind:'self',status:'draft',revision:1,can_edit:true,items:assets.map(a=>({
           id:a.id,asset_id:a.id,asset:a,can_edit:true,order_revision:1,values:{},checks:{},
@@ -191,35 +193,23 @@ async function checkPairing() {
       pen.quadraticCurveTo(95,34,144,18);pen.stroke();
       return pad.toDataURL();
     });
-    const catalog = page.getByRole('region',{name:'可用自检模板',exact:true});
-    const filter = page.getByRole('searchbox',{name:'筛选可用模板'});
-    await catalog.getByRole('button',{name:'配对至'+templates[1].name}).waitFor();
-    await filter.fill('暖通 确认单');
-    await catalog.getByRole('button',{name:'配对至'+templates[0].name}).waitFor({state:'detached'});
-    assert.equal(await catalog.getByRole('button').count(),1);
-    await filter.fill('没有匹配的测试词');
-    await page.getByText('没有匹配的模板',{exact:true}).waitFor();
-    for(const t of templates) {
-      const group=assets.filter(a=>expected[a.id]===t.id);
-      for(const a of group)await page.getByRole('checkbox',{name:'选择'+a.name,exact:true}).check();
-      await filter.fill(t.name);
-      await button('配对至'+t.name).click();
-      assert.equal(await filter.inputValue(),'');
-      assert.equal(await catalog.getByRole('button').count(),templates.length);
-      const basket=page.locator('[data-group="'+t.id+'"]');
-      for(const a of group)await basket.getByRole('button',{name:'移除'+a.name,exact:true}).waitFor();
-      for(const a of assets.filter(a=>expected[a.id]!==t.id))assert(!(await basket.innerText()).includes(a.name));
+    for(const asset of assets) {
+      await page.getByRole('checkbox',{name:'选择'+asset.name,exact:true}).check();
+      const member = page.getByRole('list',{name:'本批工具'}).getByRole('listitem').filter({hasText:asset.name});
+      await member.getByRole('button',{name:'移除'+asset.name,exact:true}).waitFor();
+      assert((await member.innerText()).includes(asset.profession));
+      assert((await member.innerText()).includes(asset.template_name));
     }
-    assert.equal(await page.locator('.pair-group').count(),2);
+    assert.equal(await page.getByRole('heading',{name:'配对模板',exact:true}).count(),0);
     const refresh=await button('刷新').boundingBox(), title=await page.getByRole('heading',{level:1}).boundingBox();
     assert(refresh.y<title.y+title.height && title.y<refresh.y+refresh.height,'Desktop title and actions share a line');
-    const palette=await page.locator('.pair-templates').boundingBox(), batch=await page.locator('.pair-batch').boundingBox();
-    assert(batch.x>=palette.x+palette.width-1 && Math.abs(batch.y-palette.y)<2,'Pairing and batch are side by side');
-    await page.locator('.td-page').screenshot({path:join(output,'两组工具配对.png')});
+    const inventory=await page.locator('.pair-assets').boundingBox(), batch=await page.locator('.pair-batch').boundingBox();
+    assert(batch.x>=inventory.x+inventory.width-1 && Math.abs(batch.y-inventory.y)<2,'The inventory and batch are side by side');
+    await page.locator('.td-page').screenshot({path:join(output,'工具清单与批次.png')});
     for (const [width,height,label] of [[820,1180,'平板'],[393,852,'手机']]) {
       await page.setViewportSize({width,height});
-      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Pairing must fit '+label);
-      await page.locator('.td-page').screenshot({path:join(output,label+'两组工具配对.png')});
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'The workspace must fit '+label);
+      await page.locator('.td-page').screenshot({path:join(output,label+'工具清单与批次.png')});
     }
     await page.setViewportSize({width:1440,height:880});
     await button('开始填写自检').click();
@@ -333,7 +323,7 @@ async function checkPairing() {
     assert.equal(await page.locator('.paper-edit').count(),0);
     await page.getByRole('region',{name:'表格预览',exact:true}).screenshot({path:join(output,'归档封面勾选.png')});
     assert.deepEqual(failures,[]);
-    await writeFile(join(output,'配对核验.json'),JSON.stringify({mapping:opening.template_ids,saved},null,2));
+    await writeFile(join(output,'模板核验.json'),JSON.stringify({asset_ids:opening.asset_ids,saved},null,2));
     console.log('PASS 两组工具逐台填写、原表坐标与合并、标题和图片、完成情况双向切换及只读签名核对。',output);
   } finally {try{await browser?.close();}finally{await new Promise(resolve=>server.close(resolve));}}
 }

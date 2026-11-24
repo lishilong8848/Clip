@@ -1,6 +1,6 @@
 // Real AdminAccounts SFC, legacy + V2 dev transforms, synthetic local API only.
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
@@ -10,6 +10,9 @@ import { createServer } from 'vite';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const output = path.resolve(root, '../../../output/playwright/account-bulk-modules');
 await mkdir(output, { recursive: true });
+const main = await readFile(path.join(root, 'src/workspace-v2/main.ts'), 'utf8');
+const v2Styles = [...main.matchAll(/import '([^']+\.css)';/g)]
+  .map(([, name]) => `import '${path.posix.normalize('/src/workspace-v2/' + name)}';`).join('\n');
 const modules = [
   { value: 'event', label: '事件管理', group: '业务管理' },
   { value: 'water', label: '水耗管理', group: '业务管理' },
@@ -17,6 +20,8 @@ const modules = [
   { value: 'repair_management', label: '检修管理（维修单）', group: '业务管理' },
   { value: 'cabinet', label: '机柜管理', group: '业务管理' },
   { value: 'daily', label: '每日任务', group: '业务管理' },
+  { value: 'daily_inspection', label: '日常巡检', group: '业务管理' },
+  { value: 'tool_management', label: '工具管理', group: '业务管理' },
   { value: 'critical_guard', label: '重保管理', group: '业务管理' },
   { value: 'risk_inspection', label: '风险排查', group: '业务管理' },
   { value: 'drills', label: '演练管理', group: '业务管理' },
@@ -49,10 +54,11 @@ function fixture(count = 34) {
     modules: index % 2 ? ['maintenance', 'knowledge'] : ['event', 'links'], can_delete: false,
   }));
   return { people, policy: { level: 'L0', modules: modules.map(module => module.value), scope_rules: ['A', 'B'], can_manage_accounts: true },
-    posts: [], fail: '', failStatus: 409, readFail: false, changedCount: null, delay: false, reads: 0 };
+    posts: [], fail: '', failStatus: 409, readFail: false, changedCount: null, delay: false, reads: 0, peopleReads: 0 };
 }
 const evidence = [];
 const pageErrors = [];
+const directoryOnly = process.argv.includes('--directory-only');
 let state;
 function harness(v2) {
   return {
@@ -61,16 +67,22 @@ function harness(v2) {
     load(id) {
       if (id !== '\0account-bulk-fixture') return;
       return `
-import { createApp, h } from 'vue';
+import { createApp, h, ref } from 'vue';
 import { NConfigProvider, NDialogProvider, NMessageProvider, darkTheme } from 'naive-ui';
 import Accounts from '/src/components/AdminAccounts.vue';
+import { requestPeople, setReadCacheIdentity } from '/src/api/client';
 import LoadingIndicator from '/src/components/LoadingIndicator.vue';
 import UiTransition from '/src/components/UiTransition.vue';
 import '/src/global.css';
-${v2 ? ["workspace", "interactions", "account", "accountPresentation", "pageFilters", "pageLayout", "feedback", "night"].map(name => `import '/src/workspace-v2/${name}.css';`).join('\n') : ''}
+${v2 ? v2Styles : ''}
 const dark = new URLSearchParams(location.search).has('dark');
-${v2 ? "document.documentElement.classList.add('workspace-v2'); document.documentElement.dataset.v2Theme = dark ? 'dark' : 'light';" : ''}
-const app = createApp({ render: () => h(NConfigProvider, {theme: dark ? darkTheme : null}, {default: () => h(NDialogProvider, null, {default: () => h(NMessageProvider, null, {default: () => h(Accounts, {pendingCount: 0, permissions: []})})})}) });
+${v2 ? "import {applyNightMode} from '/src/workspace-v2/theme'; document.documentElement.classList.add('workspace-v2'); applyNightMode(dark);" : ''}
+const show = ref(true);
+const cacheTest = new URLSearchParams(location.search).has('test_cache');
+if(cacheTest) setReadCacheIdentity('isolated-admin');
+window.accountFixtureView = (visible, identity) => { if(identity) setReadCacheIdentity(identity); show.value = visible; };
+window.fixturePickPeople = scope => requestPeople('/api/repair-management/people?scope=' + scope);
+const app = createApp({ render: () => h(NConfigProvider, {theme: dark ? darkTheme : null}, {default: () => h(NDialogProvider, null, {default: () => h(NMessageProvider, null, {default: () => show.value ? h(Accounts, {pendingCount: 0, permissions: []}) : null})})}) });
 app.component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount('#app');
 `;
     },
@@ -85,10 +97,15 @@ app.component('LoadingIndicator', LoadingIndicator).component('UiTransition', Ui
         const send = (data, status = 200) => { res.statusCode = status; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify(status === 200 ? { ok: true, data } : { ok: false, error: data })); };
         if (url.pathname === '/api/auth/accounts' && req.method === 'GET') {
           state.reads++;
+          if (state.readDelay) await new Promise(resolve => setTimeout(resolve, state.readDelay));
           if (state.readFail) return send('隔离目录读取失败', 503);
           return send({ items: state.people, policy: state.policy, scope_options: scopeOptions,
             category_options: [{ value: 'operator', label: '值班员' }], module_options: modules,
             level_options: ['L1', 'L2', 'L3', 'L4'].map(value => ({ value, label: value })), loaded_at: 1700000000 });
+        }
+        if (url.pathname === '/api/repair-management/people') {
+          state.peopleReads++;
+          return send({people:[{name:url.searchParams.get('scope')+'楼测试人员'}]});
         }
         if (url.pathname === '/api/auth/accounts/permissions' && req.method === 'POST') {
           const chunks = []; for await (const chunk of req) chunks.push(chunk);
@@ -101,7 +118,8 @@ app.component('LoadingIndicator', LoadingIndicator).component('UiTransition', Ui
           if (state.changedCount !== null) return send({ changed: state.changedCount });
           for (const change of payload.changes) {
             const item = state.people.find(item => item.id === change.id);
-            item.modules = [...change.modules]; item.revision += '-saved';
+            item.modules = change.add_modules ? [...new Set([...item.modules, ...change.add_modules])] : [...change.modules];
+            item.revision += '-saved';
           }
           return send({ changed: payload.changes.length });
         }
@@ -157,7 +175,7 @@ async function visualCheck(page, label) {
   evidence.push({ label, url: page.url(), capturedAt: new Date().toISOString(), ...geometry });
 }
 try {
-  for (const v2 of [false, true]) {
+  for (const v2 of directoryOnly ? [true] : [false, true]) {
     state = fixture();
     server = await createServer({ root, configFile: v2 ? path.join(root, 'vite.workspace-v2.config.ts') : false,
       plugins: [...(v2 ? [] : [vue()]), harness(v2)], optimizeDeps: { noDiscovery: true, include: ['vue', 'naive-ui', 'lucide-vue-next'] },
@@ -169,6 +187,62 @@ try {
     const page = await context.newPage();
     page.on('pageerror', error => pageErrors.push(error.message));
     if (v2) {
+      await page.goto(origin + '/__account-bulk-fixture?test_cache');
+      const initialRows = page.locator('.account-directory article');
+      await initialRows.first().waitFor();
+      assert.equal(state.reads,1);
+      const picks = await page.evaluate(()=>Promise.all([window.fixturePickPeople('A'),window.fixturePickPeople('A')]));
+      assert.equal(picks[0].people[0].name,'A楼测试人员');
+      assert.equal(state.peopleReads,1,'simultaneous pickers share one request');
+      await page.evaluate(()=>window.fixturePickPeople('A'));
+      assert.equal(state.peopleReads,1,'reopening the picker uses the verified result');
+      assert.equal((await page.evaluate(()=>window.fixturePickPeople('B'))).people[0].name,'B楼测试人员');
+      assert.equal(state.peopleReads,2);
+      await page.evaluate(()=>window.accountFixtureView(false));
+      await initialRows.first().waitFor({state:'detached'});
+      await page.evaluate(()=>window.accountFixtureView(true));
+      await initialRows.first().waitFor();
+      assert.equal(state.reads,1,'opening the same page again reuses the authorized list');
+      await page.evaluate(()=>window.accountFixtureView(false,'isolated-other-admin'));
+      await initialRows.first().waitFor({state:'detached'});
+      state.people[0].name='隔离新身份';
+      await page.evaluate(()=>window.accountFixtureView(true));
+      await page.getByText('隔离新身份',{exact:true}).waitFor();
+      assert.equal(state.reads,2,'a changed identity never reuses the initial directory');
+      await page.evaluate(()=>window.fixturePickPeople('A'));
+      assert.equal(state.peopleReads,3,'a changed identity also discards picker results');
+      state=fixture();
+      state.readDelay=250;
+      await page.evaluate(()=>window.accountFixtureView(false,'isolated-timing-admin'));
+      await initialRows.first().waitFor({state:'detached'});
+      const openDirectory=async()=>{
+        const started=performance.now();
+        await page.evaluate(()=>window.accountFixtureView(true));
+        await initialRows.first().waitFor();
+        return Math.round(performance.now()-started);
+      };
+      const firstMs=await openDirectory();
+      const building=page.getByRole('combobox',{name:'楼栋',exact:true});
+      await building.selectOption('B');
+      assert.equal(await initialRows.getByText('隔离人员0',{exact:true}).count(),0);
+      assert.equal(await initialRows.getByText('隔离人员1',{exact:true}).count(),1);
+      await building.selectOption('A');
+      assert.equal(await initialRows.getByText('隔离人员1',{exact:true}).count(),0);
+      assert.equal(state.reads,1,'switching buildings filters the authorized list without rereading it');
+      await page.evaluate(()=>window.accountFixtureView(false));
+      await initialRows.first().waitFor({state:'detached'});
+      const reopenMs=await openDirectory();
+      assert.equal(state.reads,1);
+      state.people[0].name='隔离刷新后的新人员';
+      await page.getByRole('button',{name:'刷新账号',exact:true}).click();
+      await initialRows.getByText('隔离刷新后的新人员',{exact:true}).waitFor();
+      assert.equal(state.reads,2,'manual sync gets updated names even with a fresh cache');
+      console.log('Account directory timing (250 ms fixture response delay): '+JSON.stringify({firstMs,reopenMs}));
+      if (directoryOnly) {
+        await context.close();
+        break;
+      }
+      state=fixture();
       await page.goto(origin + '/__account-bulk-fixture');
       const rows = page.locator('.account-directory article');
       await rows.first().waitFor();
@@ -192,7 +266,36 @@ try {
       await page.getByRole('button', { name:'上一页', exact:true }).click();
       assert.equal(await page.getByRole('checkbox', { name:'选择 隔离人员0', exact:true }).isChecked(), true);
       evidence.push({ label:'v2-cross-page', payload:state.posts[0] });
-      console.log('PASS: V2 bulk authorization across 30-account pages.');
+      await page.setViewportSize({width:390,height:844});
+      await page.getByRole('button', {name:'按功能授权',exact:true}).click();
+      const grant = page.getByRole('dialog', {name:'按功能授权',exact:true});
+      assert.notEqual(await grant.evaluate(el=>getComputedStyle(el).backgroundColor),'rgba(0, 0, 0, 0)');
+      assert.match(await grant.getByRole('combobox', {name:'选择授权功能'}).innerText(), /日常巡检/);
+      await grant.getByRole('combobox', {name:'选择授权功能'}).selectOption('tool_management');
+      await grant.getByRole('combobox', {name:'按楼栋筛选授权人员'}).selectOption('B');
+      assert.equal(await grant.getByRole('checkbox').count(),17);
+      await page.screenshot({path:path.join(output,'permission-first-picker-390.png'),animations:'disabled'});
+      await grant.getByRole('searchbox', {name:'筛选授权人员'}).fill('TEST-31');
+      assert.equal(await grant.getByRole('checkbox').count(), 1);
+      await grant.getByRole('button', {name:'选中筛选结果'}).click();
+      assert(await grant.getByRole('checkbox', {name:/隔离人员31/}).isChecked());
+      await grant.getByRole('combobox', {name:'按楼栋筛选授权人员'}).selectOption('A');
+      await grant.getByRole('searchbox', {name:'筛选授权人员'}).fill('TEST-22');
+      await grant.getByRole('checkbox', {name:/隔离人员22/}).check();
+      await grant.getByRole('button', {name:'预览调整'}).click();
+      assert.equal(await grant.locator('li').count(), 2);
+      await grant.getByRole('button', {name:'返回修改'}).click();
+      assert(await grant.getByRole('checkbox', {name:/隔离人员22/}).isChecked());
+      await grant.getByRole('button', {name:'预览调整'}).click();
+      assert.equal(state.posts.length, 1);
+      assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
+      await page.screenshot({path:path.join(output,'permission-first-390.png'),animations:'disabled'});
+      await grant.getByRole('button', {name:'确认保存'}).click();
+      await grant.waitFor({state:'hidden'});
+      assert.deepEqual(state.posts[1].changes.map(({id,add_modules})=>({id,add_modules})),
+        [{id:'rec22',add_modules:['tool_management']},{id:'rec31',add_modules:['tool_management']}]);
+      assert.deepEqual(state.people[31].modules, ['maintenance','knowledge','water','tool_management']);
+      console.log('PASS: V2 account-first and permission-first authorization, pagination, mobile, prior modules preserved.');
       await context.close(); await server.close(); server = null;
       continue;
     }
@@ -226,7 +329,7 @@ try {
     const businessGroup = modal(page).getByRole('checkbox', { name: '选择业务管理全部模块', exact: true });
     const systemGroup = modal(page).getByRole('checkbox', { name: '选择系统管理全部模块', exact: true });
     await businessGroup.check();
-    for (const option of modules.filter(option => option.group === '业务管理')) assert.equal(await modal(page).getByRole('checkbox', { name: option.label, exact: true }).isChecked(), true);
+    for (const option of modules.filter(option => option.group === '业务管理')) assert.equal(await modal(page).getByRole('checkbox', { name: option.label, exact: !option.includes }).isChecked(), true);
     await modal(page).getByRole('checkbox', { name: '水耗管理', exact: true }).uncheck();
     assert.equal(await businessGroup.evaluate(input => input.indeterminate), true, 'group tracks partial module selection');
     await modal(page).getByRole('checkbox', { name: '共享知识库', exact: true }).check();
@@ -356,6 +459,6 @@ try {
     await context.close(); await server.close(); server = null;
   }
   assert.deepEqual(pageErrors, [], 'no browser runtime errors');
-  await writeFile(path.join(output, 'evidence.json'), JSON.stringify(evidence, null, 2));
+  if (!directoryOnly) await writeFile(path.join(output, 'evidence.json'), JSON.stringify(evidence, null, 2));
   console.log('PASS: isolated account bulk module checks; evidence: ' + output);
 } finally { await browser.close(); if (server) await server.close(); }

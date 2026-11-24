@@ -94,7 +94,7 @@
       :checking="authChecking"
       :logged-in="auth.loggedIn"
       :login-url="auth.loginUrl"
-      :scope-options="visibleScopeOptions"
+      :scope-options="auth.scopeOptions"
     />
 
     <KeepAlive v-else-if="isRepairModulePage" :max="2">
@@ -128,6 +128,7 @@
       v-else-if="isAdminSettingsPage && canManageAccounts"
       :open="true"
       :system-admin="isAdmin"
+      :allowed-tabs="Object.keys(settingsPermissions).filter(key => hasModule(settingsPermissions[key]))"
       :initial-tab="adminInitialTab"
       :scope-options="requestableScopes"
       @close="navigate('/')"
@@ -298,7 +299,7 @@ import AsyncPageState from "./components/AsyncPageState.vue";
 import NoticeHistory from './components/NoticeHistory.vue';
 import { AUTH_EXPIRED_EVENT, ApiError, requestJson, setReadCacheIdentity, setImpersonationContext, preferredLoginUrl, rememberLoginMethod, waitWithSignal } from "./api/client";
 import { setModulePermissions } from "./api/modulePermissions";
-import { canViewInspectionHistory } from "./inspectionAccess";
+import { settingsPermissions } from "./adminToolsUtils";
 import { navigate, navigateHard, registerNavigationGuard } from "./navigation";
 import { clearOverview, overviewKey, readOverview, saveOverview } from './homeOverviewCache';
 import { usePageReadRefresh } from './api/usePageReadRefresh';
@@ -541,8 +542,8 @@ function homeEntryModule(entry: string): string {
     case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
-    case "knowledge":
-    case "documents": return "knowledge";
+    case "knowledge": return "knowledge";
+    case "documents": return "documents";
     case "cabinet_power": return "cabinet";
     case "daily": return "daily";
     case "power": return "power";
@@ -558,7 +559,8 @@ function moduleForCurrentRoute(): string {
   const entry = String(routeParams.value.get("entry") || "").trim();
   if (routeParams.value.get("mode") === "events") return "event";
   if (path === "/") return homeEntryModule(entry);
-  if (path === "/admin/settings" || path === "/admin/history-memory") return "accounts";
+  if (path === "/admin/settings") return settingsPermissions[routeParams.value.get("tab") || "permissions"] || "accounts";
+  if (path === "/admin/history-memory") return "notice_history";
   if (path === "/engineer/mop") return "engineer_mop";
   if (path === "/work-handover") return "work_handover";
   if (path === "/repair-management" || path === "/repair-status") return "repair_management";
@@ -566,15 +568,16 @@ function moduleForCurrentRoute(): string {
   if (path === "/plan-convergence") return "plan_convergence";
   if (path === "/life-guide") return "life_guide";
   if (path === "/link-directory") return "links";
-  if (path === "/eop-scenarios") return "drills";
-  if (path === "/daily-inspection") return "daily";
-  if (path === "/knowledge-base" || path === "/document-library") return "knowledge";
+  if (path === "/eop-scenarios") return "eop_scenarios";
+  if (path === "/knowledge-base") return "knowledge";
+  if (path === "/document-library") return "documents";
   if (path === "/water-management") return "water";
   if (path === "/cabinet-power" || path === "/cabinet-power/batches") return "cabinet";
   if (path === "/critical-guard") return "critical_guard";
-  if (path === "/risk-inspections") return "risk_inspection";
+  if (path === "/risk-inspections") return routeParams.value.get("view")==="tool-self-check" ? "tool_management" : "risk_inspection";
   if (path === "/drill-management" || path === "/drill-management/print") return "drills";
-  if (path === "/signature-management") return "";
+  if (path === "/signature-management") return "signatures";
+  if (path === "/daily-inspection") return "daily_inspection";
   if (path === "/signature") return signatureLinkMode.value ? "" : "signatures";
   if (path === "/daily-tasks" || path === "/daily-tasks/morning-meeting/print") return "daily";
   if (path === "/workbench-lite") {
@@ -593,8 +596,7 @@ function moduleForCurrentRoute(): string {
 }
 const pageAccessDenied = computed(() => {
   if (!auth.loggedIn || authChecking.value) return "";
-  if (routePath.value==='/risk-inspections' && routeParams.value.get('view')==='tool-self-check' && auth.user?.tool_management_enabled===true) return '';
-  if (routePath.value === '/daily-inspection' && canViewInspectionHistory(auth.user)) return "";
+  if (routePath.value==='/risk-inspections' && routeParams.value.get('view')==='tool-self-check' && auth.user?.tool_management_enabled!==true) return 'tool_management';
   const required = moduleForCurrentRoute();
   if (!required) return "";
   return hasModule(required) ? "" : required;
@@ -1301,7 +1303,7 @@ onBeforeUnmount(() => {
   min-height: 100vh;
   background: #eef3f8;
   color: #0f172a;
-  font-family: "Microsoft YaHei", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-family: var(--cf-font-family);
 }
 
 .security-watermark {

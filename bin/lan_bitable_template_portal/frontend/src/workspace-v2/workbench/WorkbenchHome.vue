@@ -3,7 +3,7 @@ import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount,
 import { NModal, NPopover } from 'naive-ui';
 import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Droplets, FileCheck2, KeyRound, Layers3, ListChecks, Package, PenLine, Route, ScanLine, Search, ShieldCheck, Siren, SlidersHorizontal, Wrench, X, Zap } from 'lucide-vue-next';
 import type { Dict } from '../client';
-import { canReviewHandover, moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
+import { moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
 import { widget, type Widget } from '../dashboard/layout';
 import { preShiftHomeAccount, preShiftHomeVisible, preShiftSummary } from '../../preShiftUtils';
 import { requestEmbeddedChange, runNavigationAction } from '../navigation';
@@ -14,14 +14,15 @@ import WorkbenchTaskRows from './WorkbenchTaskRows.vue';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 import AsyncPageState from '../../components/AsyncPageState.vue';
 import { recipes, workbenchModules, workbenchRole, workbenchScopes, type ScopeOption } from './recipes';
-import { scopedUrl, workbenchPlanSource, workbenchSources, type SourceId, type WorkItem } from './sources';
+import { scopedUrl, workbenchPlanSource, workbenchSources, type Source, type SourceId, type WorkItem } from './sources';
 import { readWorkbenchRequest, useReadOnlyLayout, useWorkbenchReads } from './useWorkbenchReads';
 import { deskActionOrder, deskRole, deskSources, deskTaskVisible, inDeskScope } from './deskPolicy';
 import { todoTimestamp } from '../businessTodos';
 import { eventLevelTone } from '../../eventManagementUtils';
+import { isMopBuilding } from '../../mopSelectionUtils';
 import { beijingDate, eventPeriodRange } from '../eventPeriod';
 
-const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean;searchLinks?:{label:string;url:string}[]}>(),{explicitScope:true});
+const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean}>(),{explicitScope:true});
 const emit=defineEmits<{open:[url:string]}>();
 const content=ref<HTMLElement>();
 const clock=ref(Date.now());
@@ -61,33 +62,26 @@ const selectedScope=computed(()=>{
   return (scopeOptions.value.find(option=>option.value===props.scope)||scopeOptions.value[0])?.value||'';
 });
 const dataScope=selectedScope;
-const dutyOverview=computed(()=>!props.user.impersonation&&!!checkScope.value
-  &&(dataScope.value===checkScope.value||composite(dataScope.value))&&preShiftHomeVisible(checkUser.value,checkSnapshot.value));
-const checkStatus=computed(()=>{
-  if(!dutyOverview.value)return '';
-  if(!checkSnapshot.value)return '待核对';
-  try{
-    const {pending,completed}=preShiftSummary(checkSnapshot.value);
-    return pending?pending+' 项待检查':completed?'已提交':'暂无待检查';
-  }catch{return '待核对';}
-});
-function focusPreShift(){
-  const section=checkPanel.value?.$el;
-  if(section instanceof HTMLElement){
-    section.scrollIntoView({block:'start'});
-    section.focus({preventScroll:true});
-  }
+const canReadPreShift=computed(()=>!props.user.impersonation&&!!checkScope.value
+  &&(dataScope.value===checkScope.value||composite(dataScope.value)));
+const dutyOverview=computed(()=>canReadPreShift.value&&preShiftHomeVisible(checkUser.value,checkSnapshot.value));
+function checkItem(scope:string, task?:Dict):WorkItem{
+  if(!task)return {key:'pre_shift:'+scope+':history',kind:'pre_shift',module:'pre_shift',
+    title:'班前检查记录',scope,status:'',time:'',url:scopedUrl('/',{scope})};
+  return {key:'pre_shift:'+scope+':'+task.id,kind:'pre_shift',module:'pre_shift',
+    title:(task.shift||'')+'班班前检查',scope,status:task.items.length+' 项待检查',
+    time:task.day,dueAt:task.deadline*1000,url:scopedUrl('/',{scope,check_task:task.id})};
 }
 const readScopes=computed(()=>composite(dataScope.value)&&concreteScopes.value.length>0
   &&(dataScope.value==='CAMPUS'||!authorizedScopes.value.some(option=>option.value==='ALL'))
   ?concreteScopes.value.map(option=>option.value):undefined);
-const context=computed(()=>JSON.stringify([accessKey.value,role.value,dataScope.value]));
+const context=computed(()=>JSON.stringify([accessKey.value,dataScope.value]));
 const lazy=(loader:()=>Promise<any>)=>defineAsyncComponent({loader,loadingComponent:AsyncPageState,errorComponent:AsyncPageState,delay:80,timeout:30000});
 const NoticeWorkspace=lazy(()=>import('../NoticeWorkspace.vue'));
 const EventNoticeBoard=lazy(()=>import('../../components/EventNoticeBoard.vue'));
 const NoticeChangeConfirmations=lazy(()=>import('../NoticeChangeConfirmations.vue'));
 const ModuleWidget=lazy(()=>import('../ModuleWidget.vue'));
-type OpenCase={item:WorkItem;mode:'read'|'module'|'notice'|'event'|'change';scope:string;url:string;focusId?:string;widget?:Widget};
+type OpenCase={item:WorkItem;mode:'read'|'module'|'notice'|'event'|'change'|'pre_shift';scope:string;url:string;focusId?:string;widget?:Widget};
 const activeCase=ref<OpenCase>();
 const casePanel=ref<HTMLElement>();
 const caseBody=ref<HTMLElement>();
@@ -110,13 +104,17 @@ const modules=computed(()=>workbenchModules(props.user,scopeOptions.value).filte
   entry.id!=='handover' && (!recipe.value.pending||recipe.value.actions.includes(entry.id))
   && !(entry.id==='learning'&&props.user.category==='duty')
   && !(entry.id==='daily_inspection'&&!['ALL','CAMPUS','D','E'].includes(selectedScope.value))
+  && !(entry.id==='engineer_mop'&&!(isMopBuilding(selectedScope.value)||
+    composite(selectedScope.value)&&concreteScopes.value.some(option=>isMopBuilding(option.value))))
   && !(['cabinet','critical_guard','drills'].includes(entry.id)&&['H','110'].includes(selectedScope.value))));
 const shortcuts=computed(()=>{
   const entries=new Map(modules.value.map(entry=>[entry.id,entry]));
   return [...new Set([...preferredLinks.value,...recipe.value.actions,...entries.keys()])].flatMap(id=>{
     const entry=entries.get(id);
     if (!entry) return [];
-    const scope=entry.id==='daily_inspection'&&selectedScope.value==='CAMPUS'
+    const scope=entry.id==='engineer_mop'&&composite(selectedScope.value)
+      ?concreteScopes.value.find(option=>isMopBuilding(option.value))?.value||''
+      :entry.id==='daily_inspection'&&selectedScope.value==='CAMPUS'
       ?concreteScopes.value.find(option=>['D','E'].includes(option.value))?.value||''
       :composite(selectedScope.value)?readScopes.value?.[0]||selectedScope.value:selectedScope.value;
     return [{...entry,url:moduleUrl(entry,scope)}];
@@ -137,11 +135,28 @@ const sourceContext=computed(()=>({user:props.user,scope:dataScope.value,scopes:
 const planMonths=computed(()=>[...new Set([beijingDate(clock.value).slice(0,7),
   ...eventPeriodRange('week','',clock.value).months,beijingDate(clock.value+86400000).slice(0,7)])]
   .map(month=>Number(month.slice(5))+'月'));
-const sources=computed(()=>[
+const sources=computed<Source[]>(()=>[
   ...workbenchSources(sourceContext.value,readWorkbenchRequest),
   ...workbenchPlanSource(sourceContext.value,planMonths.value,readWorkbenchRequest),
+  ...(canReadPreShift.value?[{
+    id:'pre_shift' as const,label:'班前检查',section:'operations' as const,url:scopedUrl('/',{scope:checkScope.value}),
+    async load(signal:AbortSignal){
+      const scope=checkScope.value;
+      const snapshot=await readWorkbenchRequest(scopedUrl('/api/pre-shift-checks',{scope}),signal);
+      if(snapshot.scope!==scope)throw new Error('班前检查楼栋未核对');
+      preShiftSummary(snapshot);
+      const rows=preShiftHomeVisible(checkUser.value,snapshot)
+        ? snapshot.tasks.filter((task:Dict)=>task.can_submit&&!task.submitted&&task.items.length)
+          .map((task:Dict)=>checkItem(scope,task)): [];
+      return {rows,snapshot};
+    },
+  }]:[]),
 ]);
 const {states,load,refresh,refreshExpired}=useWorkbenchReads(context,sources);
+watch(()=>states.value.pre_shift,state=>{
+  if(state?.result?.snapshot)readDuty(state.result.snapshot);
+  else if(state?.status==='deny')readDuty({});
+});
 watch(()=>planMonths.value.join(','),()=>refresh(['notice_plans']));
 const allShortcuts=ref(false);
 const sourceOrder=computed(()=>[...new Set<SourceId>([
@@ -200,6 +215,7 @@ const isOverdue=(row:WorkItem)=>!!row.dueAt&&row.dueAt<=clock.value;
 const priorityExpanded=ref(false);
 watch([context,selectedScope],()=>{priorityExpanded.value=false;});
 const priorities=computed(()=>queueTasks.value.flatMap(item=>{
+  if(item.kind==='pre_shift')return [];
   if(item.urgentEvent)return [{item,rank:eventLevelTone(item.urgentEvent)==='critical'?-1:0,label:item.urgentEvent+'事件'}];
   if(isOverdue(item))return [{item,rank:1,label:'已逾期'}];
   if(item.dueAt && item.dueAt-clock.value<=2*3600000)return [{item,rank:2,label:'两小时内截止'}];
@@ -228,7 +244,7 @@ const taskScopeLabel=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope===
 const taskModuleLabels:Partial<Record<SourceId,string>>={
   notices:'通告',events:'事件',event_notices:'事件',repair_management:'维修',critical_guard:'重保',risk_inspection:'专项排查',
   water:'水耗',engineer_mop:'维保单',cabinet:'机柜',drills:'演练',accounts:'权限',ali_confirmation:'阿里确认',
-  tool_management:'工具',inspection:'巡检',learning:'学练',signatures:'签名',
+  tool_management:'工具',inspection:'巡检',learning:'学练',signatures:'签名',pre_shift:'班前检查',
 };
 const taskModuleLabel=(kind:SourceId)=>taskModuleLabels[kind]||sourceLabels.value.get(kind);
 const taskLabel=(item:WorkItem)=>item.kind==='notices'
@@ -249,6 +265,7 @@ const tileStyles:Record<string,[typeof Layers3,number]>={
   engineer_mop:[ClipboardList,220],repair_management:[Wrench,172],cabinet:[Layers3,252],drills:[Activity,205],
   water:[Droplets,202],accounts:[KeyRound,38],tool_management:[Package,26],learning:[BookOpen,270],
   inspection:[ListChecks,157],signatures:[PenLine,219],ali_confirmation:[FileCheck2,219],
+  pre_shift:[ClipboardList,157],
 };
 function rowPriority(item:WorkItem){
   if(item.urgentEvent)return eventLevelTone(item.urgentEvent)==='critical'?0:1;
@@ -315,8 +332,8 @@ function setGroup(key:string,show:boolean){
   if(show)activeGroup.value=key;
   else if(activeGroup.value===key)activeGroup.value='';
 }
-function anchorGroup(event:MouseEvent){
-  tileTrigger=event.currentTarget as HTMLButtonElement;
+function sizeGroup(){
+  if(!tileTrigger?.isConnected)return;
   const nav=tileTrigger.closest('.v2-shell')?.querySelector('.v2-mobile-nav');
   const tile=tileTrigger.getBoundingClientRect();
   const bottom=nav?.getClientRects().length?nav.getBoundingClientRect().top:window.innerHeight;
@@ -326,6 +343,34 @@ function anchorGroup(event:MouseEvent){
   groupPlacement.value=flip?'top-start':'bottom-start';
   groupMaxHeight.value=Math.max(0,flip?above:below);
 }
+function anchorGroup(event:MouseEvent){
+  tileTrigger=event.currentTarget as HTMLButtonElement;
+  sizeGroup();
+}
+watch(activeGroup,(key,_previous,onCleanup)=>{
+  if(!key)return;
+  let frame=0;
+  const keepInView=()=>{
+    sizeGroup();
+    cancelAnimationFrame(frame);
+    frame=requestAnimationFrame(()=>{
+      const panel=document.querySelector<HTMLElement>('.tile-popover[data-group-key="'+CSS.escape(key)+'"]')?.closest<HTMLElement>('.v-binder-follower-content');
+      if(!panel)return;
+      panel.style.translate='';
+      const {left,right}=panel.getBoundingClientRect();
+      const width=document.documentElement.clientWidth;
+      panel.style.translate=`${Math.max(8-left,0)-Math.max(right-width+8,0)}px`;
+    });
+  };
+  keepInView();
+  window.addEventListener('resize',keepInView);
+  document.addEventListener('scroll',keepInView,true);
+  onCleanup(()=>{
+    cancelAnimationFrame(frame);
+    window.removeEventListener('resize',keepInView);
+    document.removeEventListener('scroll',keepInView,true);
+  });
+},{flush:'post'});
 function closeGroup(){
   activeGroup.value='';
   if(tileTrigger?.isConnected)tileTrigger.focus({preventScroll:true});
@@ -344,7 +389,7 @@ const queueIssues=computed(()=>sourcesForQueue.value.filter(({id})=>['stale','do
 const queueStatus=computed(()=>{
   if (taskGroups.value.length) return '';
   if (allLoading.value) return '正在读取…';
-  if (queueIssues.value.length) return '';
+  if (queueIssues.value.length) return '暂无已读取的待办，请重试待更新数据';
   if (missingOwnership.value) return '待办归属待核对';
   if (taskSearch.value.trim()) return '未找到待办';
   if (taskView.value==='today') return '今日暂无待办';
@@ -383,6 +428,11 @@ function canOpenNoticeDeletion(item:WorkItem){
 }
 function openItem(item:WorkItem){
   if(activeCase.value?.item.key===item.key){caseListOpen.value=false;focusCasePanel();return;}
+  if(item.kind==='pre_shift'){
+    if(dutyOverview.value&&item.scope===checkScope.value)
+      changeCase({item,mode:'pre_shift',scope:item.scope,url:item.url,focusId:new URL(item.url,location.origin).searchParams.get('check_task')||undefined});
+    return;
+  }
   if (readOnly(item)) {
     changeCase({item,mode:'read',url:item.url,scope:item.scope});
     return;
@@ -423,6 +473,7 @@ function changeCase(next?:OpenCase){
     else restoreFocus();
   };
   if(current?.widget){requestEmbeddedChange(current.widget.id,proceed);return;}
+  if(current?.mode==='pre_shift'&&checkPanel.value?.guardNavigation(proceed)===false)return;
   if(current&&caseEditor.value?.guardNavigation(proceed)===false)return;
   if(!current&&next&&next.mode!=='read')runNavigationAction(next.url,proceed);
   else proceed();
@@ -484,10 +535,6 @@ onBeforeUnmount(pause);
 
 const currentScopeLabel=computed(()=>scopeOptions.value.find(option=>option.value===selectedScope.value)?.label || '');
 const accountName=computed(()=>String(props.user.name||props.user.display_name||'').trim());
-const deskLinks=computed(()=>{
-  const links=props.searchLinks?.length?props.searchLinks:shortcuts.value.map(({label,url})=>({label,url}));
-  return canReviewHandover(props.user)?[...links,{label:'交接班审核',url:'/?view=handover'}]:links;
-});
 const visibleShortcuts=computed(()=>allShortcuts.value?shortcuts.value:shortcuts.value.slice(0,6));
 const showQueueCount=computed(()=>matchedTasks.value.length>0 && (
   taskView.value!=='all'||!!taskSearch.value.trim()||selectedScope.value!==dataScope.value
@@ -518,7 +565,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 
 <template>
   <div class="wb-home task-desk">
-    <WorkbenchDailyLayout :name="accountName" :avatar="user.avatar_url || user.avatar" :clock="clock" :links="deskLinks"
+    <WorkbenchDailyLayout :name="accountName" :avatar="user.avatar_url || user.avatar" :clock="clock"
       :tasks="periodTasks" :unread="unreadTasks" :calendar-scope="dataScope" :impersonating="!!user.impersonation"
       :calendar-identity="accessKey" :user-id="String(user.open_id||'')" :queue-note="queueNote" @open="emit('open',$event)" @task="openItem" @unread="showQueue('unread')">
       <template #context><span class="wb-identity role-context">{{ [roleLabel,scopeOptions.length<=1?currentScopeLabel:'',shift?shift+'班':''].filter(Boolean).join(' · ') }}</span></template>
@@ -547,10 +594,11 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
           </button>
         </div>
       </section>
-      <section v-if="queueSources.length" ref="content" class="wb-todo-panel queue-panel" tabindex="-1" aria-labelledby="workbench-queue-title" :aria-busy="allLoading">
+      <section ref="content" class="wb-todo-panel queue-panel" tabindex="-1" aria-labelledby="workbench-queue-title" :aria-busy="allLoading">
         <header class="queue-toolbar">
           <div class="queue-title"><h2 id="workbench-queue-title">待办办理</h2>
             <span v-if="showQueueCount" class="wb-task-count" :title="queueNote" :aria-label="'已读取 '+matchedTasks.length+' 项'">{{ matchedTasks.length }}</span>
+            <button v-if="dutyOverview&&checkSnapshot" type="button" class="more-key" @click="openItem(checkItem(checkScope))">检查记录</button>
           </div>
           <div class="queue-switches" role="group" aria-label="待办筛选">
             <button v-for="view in viewButtons" :key="view.view" :aria-pressed="taskView===view.view" @click="taskView=view.view">
@@ -582,7 +630,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
                   <strong class="tile-label">{{ group.label }}</strong>
                 </button>
               </template>
-              <section class="tile-popover" role="dialog" aria-label="模块待办条目" tabindex="-1"
+              <section class="tile-popover" :data-group-key="group.key" role="dialog" aria-label="模块待办条目" tabindex="-1"
                 :style="{'--tile-hue':group.hue,'--tile-available':groupMaxHeight===undefined?undefined:groupMaxHeight+'px'}"
                 @vue:mounted="(node:VNode)=>node.el?.focus({preventScroll:true})" @keydown.esc.stop.prevent="closeGroup">
                 <header><component :is="group.icon" :size="17" aria-hidden="true" /><h3>{{ group.label }}</h3>
@@ -598,18 +646,16 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
           </li>
         </ul>
       </section>
-      <PreShiftCheck v-if="checkScope" ref="checkPanel" :key="accessKey+checkScope" class="wb-check-panel shift-check" tabindex="-1"
-        :user="checkUser" :fixed-scope="checkScope" workbench @snapshot="readDuty" />
       <template #overview="{seals,sealStatus}"><PeriodOverview :key="accessKey" :user="user" :scope="dataScope" :scope-label="currentScopeLabel"
         :scopes="concreteScopes" :role="role" :clock="clock" :tasks="periodTasks" :plan-state="states.notice_plans?.status"
         :seal-status="sealStatus" :seals="seals" :partial="!!queueNote && queueNote!=='暂无待办'" :action="actionLabel"
-        :check-status="checkStatus" :inspection-state="orderedSources.some(source=>source.id==='inspection')?states.inspection?.status||'loading':undefined"
-        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)" @check="focusPreShift"
+        :inspection-state="orderedSources.some(source=>source.id==='inspection')?states.inspection?.status||'loading':undefined"
+        @open="emit('open',$event)" @task="openItem" @retry="load('notice_plans',true)"
         @retry-inspection="load('inspection',true)" /></template>
     </WorkbenchDailyLayout>
 
     <NModal :show="!!activeCase" :mask-closable="false" :close-on-esc="!caseListOpen" :auto-focus="false" @update:show="visible=>!visible&&closeCase()">
-      <div v-if="activeCase" class="task-dialog" role="dialog" aria-modal="true" aria-label="待办办理窗口">
+      <div v-if="activeCase" class="task-dialog" :data-case="activeCase.mode" role="dialog" aria-modal="true" aria-label="待办办理窗口">
         <section ref="casePanel" class="case-panel" tabindex="-1" :aria-label="(activeCase.mode==='read'?'查看 ':'办理 ')+activeCase.item.title" @keydown.esc="escapeCaseList">
           <header class="case-header">
             <div class="case-title"><small>{{ [taskModuleLabel(activeCase.item.kind),taskScopeLabel(activeCase.item.scope||activeCase.scope)].filter(Boolean).join(' · ') }}</small><h2 :title="activeCase.item.title">{{ activeCase.item.title }}</h2></div>
@@ -625,7 +671,9 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
             <p v-if="!switchableCases.length" role="status">{{ caseSearch?'没有匹配的待办':'当前楼栋暂无其他待办' }}</p>
           </section>
           <div v-show="!caseListOpen" ref="caseBody" class="case-body" :key="activeCase.item.key">
-            <ModuleWidget v-if="activeCase.widget" :key="activeCase.url" :item="activeCase.widget" :user="user" :scope="activeCase.scope" :scopes="authorizedScopes"
+            <PreShiftCheck v-if="activeCase.mode==='pre_shift'" ref="checkPanel" :user="checkUser" :fixed-scope="activeCase.scope"
+              :initial-task-id="activeCase.focusId" :show-history="!activeCase.focusId" workbench @snapshot="readDuty" />
+            <ModuleWidget v-else-if="activeCase.widget" :key="activeCase.url" :item="activeCase.widget" :user="user" :scope="activeCase.scope" :scopes="authorizedScopes"
               fixed-scope record-only :initial-url="activeCase.url" header-tools-id="workbench-task-header-tools" @close="closeCase" />
             <NoticeWorkspace v-else-if="activeCase.mode==='notice'" ref="caseEditor" :url="activeCase.url" :scope="activeCase.scope" :scopes="authorizedScopes"
               :user="user" :active="true" record-only @record-close="closeCase" />
@@ -643,10 +691,14 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .task-desk.wb-home { display:block; width:100%; min-width:0; max-width:none; margin:0; padding:0 }
 .task-desk :is(button,select,input) { font:inherit }
 .task-desk button,.task-dialog button { cursor:pointer }
+.task-dialog[data-case=pre_shift] { max-width:min(760px,calc(100vw - 16px)) }
+.task-dialog[data-case=pre_shift] :deep(.v2-shift-check.has-pending-checks)::before {display:none}
+.task-dialog[data-case=pre_shift] :deep(.v2-check-form>footer) {bottom:0}
+.task-dialog[data-case=pre_shift] :deep(.v2-check-items) {padding-block-end:8px;scroll-padding-block-end:8px}
 .task-desk button:disabled { cursor:default }
 .business-strip,.business-key,.queue-title,.queue-switches,.queue-filters label,.expand-key { display:flex; align-items:center; gap:7px }
 .scope-choice { min-width:0 }
-.scope-choice select { max-width:100%;min-height:34px;padding:4px 8px;border:1px solid var(--desk-line);border-radius:999px;background:var(--desk-paper);color:var(--desk-ink);font-size:12px }
+.scope-choice select { max-width:100%;min-height:36px;padding:4px 8px;border:1px solid var(--desk-line);border-radius:9px;background:var(--desk-paper);color:var(--desk-ink);font-size:12px }
 .quiet-message { color:var(--desk-muted); font-size:12px }
 .task-desk button:focus-visible,.task-dialog button:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
 .task-desk .role-context { font-size:12px; color:var(--desk-muted); background:transparent; padding:0; margin:0 }

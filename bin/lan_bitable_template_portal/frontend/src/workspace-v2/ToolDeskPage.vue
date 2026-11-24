@@ -3,9 +3,9 @@ import { NPopconfirm } from 'naive-ui';
 import { ArrowLeft, RefreshCw } from 'lucide-vue-next';
 import ToolWorkspace from '../components/ToolWorkspace.vue';
 import ToolAssetHistory from '../components/ToolAssetHistory.vue';
+import ToolManagementSettings from '../components/ToolManagementSettings.vue';
 import ToolDeskSurface from './ToolDeskSurface.vue';
 import ToolDeskDialog from './ToolDeskDialog.vue';
-import ToolDeskLibrary from './ToolDeskLibrary.vue';
 import ToolDeskOrder from './ToolDeskOrder.vue';
 const props=defineProps<{r:Record<string,any>}>();
 function goBack() {
@@ -20,18 +20,17 @@ function goBack() {
       <nav v-if="!r.order" class="td-tabs td-section-nav" aria-label="工具管理分区">
         <button :aria-current="r.view==='workspace'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy" @click="r.selectView('workspace')">工作台</button>
         <button :aria-current="r.view==='followups'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy" @click="r.selectView('followups')">办理记录</button>
-        <button v-if="r.board?.can_manage_templates" :aria-current="r.view==='settings'?'page':undefined" :disabled="r.busy || !!r.workspace?.busy"
-          @click="r.selectView('settings')">工具与模板</button>
       </nav>
       <div class="td-actions">
         <button v-if="r.order || !r.props.embedded" class="td-link" @click="goBack"><ArrowLeft :size="15"/>{{ r.order?'返回列表':'返回' }}</button>
-        <button v-if="r.order || r.view!=='settings'" :disabled="r.busy || r.loading || !!r.workspace?.busy" @click="r.refresh()"><RefreshCw :size="15"/>刷新</button>
+        <button :disabled="r.busy || r.loading || !!r.workspace?.busy" @click="r.refresh()"><RefreshCw :size="15"/>刷新</button>
+        <button v-if="r.board?.can_manage_templates && !r.order && r.view==='workspace'" :disabled="r.busy || !!r.workspace?.busy"
+          @click="r.responsibilityOpen=true">责任人配置</button>
         <button v-if="r.board?.can_create_orders && !r.order && r.view==='workspace'" :disabled="r.busy" @click="r.openNewTool()">新增工具</button>
       </div>
     </header>
     <p v-if="r.error" class="td-notice td-error" role="alert">{{ r.error }}</p><p v-if="r.message" class="td-notice" role="status">{{ r.message }}</p>
     <ToolDeskOrder v-if="r.order" :r="r"/>
-    <ToolDeskLibrary v-else-if="r.view==='settings' && r.board?.can_manage_templates" :r="r"/>
     <template v-else-if="r.view==='workspace' || r.view==='followups'">
       <section v-if="r.view==='followups'" class="td-panel tool-worklist">
         <div class="td-heading">
@@ -40,11 +39,12 @@ function goBack() {
             <input v-model="r.search" type="search" aria-label="搜索检修与报废记录" placeholder="工具、楼栋或领取人"/>
             <input type="month" aria-label="办理月份" :value="r.month" :disabled="r.loading || r.busy" @change="r.loadBoard(($event.target as HTMLInputElement).value)"/>
             <select data-native-select v-model="r.stateFilter" aria-label="处置状态"><option v-for="s in r.stateOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select>
+            <select data-native-select v-model="r.followupProfession" aria-label="筛选检修与报废专业"><option v-for="p in r.followupProfessions" :key="p.value" :value="p.value">{{ p.label }}</option></select>
           </div>
         </div>
         <p v-if="!r.pagedOrders.length" class="td-muted" role="status">{{ r.loading?'正在读取处置记录…':r.emptyDescription }}</p>
         <div v-else class="td-list"><article v-for="o in r.pagedOrders" :key="o.id" class="followup-row"><div><strong>{{ o.tool_name }}</strong>
-          <p class="td-muted">{{ [o.scope+'楼',o.location,o.model,r.assignment(o)].filter(Boolean).join(' · ') }}</p>
+          <p class="td-muted">{{ [o.scope+'楼',o.profession || '专业未填写',o.location,o.model,r.assignment(o)].filter(Boolean).join(' · ') }}</p>
           </div><div><span class="td-chip">{{ o.tool_status_label || r.outcomeLabels[o.outcome] }}</span></div>
           <div class="td-actions"><button :disabled="r.busy" @click="r.workspace?.leave(()=>r.openOrder(o,o.can_claim))">{{ r.orderAction(o) }}</button>
             <NPopconfirm v-if="o.can_remove_followup && !o.deletion_pending" @positive-click="r.removeFollowup(o)">
@@ -62,6 +62,9 @@ function goBack() {
         @asset-history="r.historyAsset=$event" @records="r.selectView('followups')" @choose="r.selectView('workspace')"/>
     </template>
     <ToolAssetHistory v-if="r.historyAsset" :asset-id="r.historyAsset" @close="r.historyAsset=''" @open-workspace="r.openHistoryWorkspace" @open-order="r.openWorkspaceOrder"/>
+    <ToolDeskDialog v-if="r.responsibilityOpen" title="责任人配置" @close="r.responsibilityOpen=false">
+      <ToolManagementSettings :scope="r.props.scope" @changed="r.workspace?.reloadInventory()"/>
+    </ToolDeskDialog>
     <ToolDeskDialog v-if="r.afterDiscard" title="放弃未保存内容？" @close="r.afterDiscard=null"><p>离开后将丢失本次修改。</p><div class="td-actions">
       <button @click="r.afterDiscard=null">继续填写</button><button class="td-primary" @click="r.discard()">放弃修改并继续</button></div></ToolDeskDialog>
     <ToolDeskDialog v-if="r.addingTool" title="新增库存工具" :locked="r.busy" @close="r.addingTool=false">
@@ -79,13 +82,12 @@ function goBack() {
 <style scoped>
 .td-section-nav{flex:1 1 auto;min-width:0}
 .tool-desk .tool-worklist{gap:.65rem}
-.followup-filters{display:grid;grid-template-columns:minmax(0,1fr) 10.25rem minmax(7rem,auto);gap:.4rem;width:min(36rem,100%);align-items:center;min-width:0}
-.followup-filters input{width:100%}
+.followup-filters{display:flex;flex-wrap:wrap;gap:.4rem;width:min(40rem,100%);align-items:center;min-width:0}
+.followup-filters input[type=search]{flex:1 1 12rem;min-width:0}
 .followup-row{display:grid;grid-template-columns:minmax(0,1fr) minmax(6.5rem,.4fr) auto;align-items:center;gap:.5rem 1rem}
 .followup-row .td-notice{grid-column:1/-1}
 @container(max-width:650px){
-  .followup-filters{grid-template-columns:minmax(0,1fr) minmax(0,.85fr)}
-  .followup-filters input[type=search]{grid-column:1/-1}
+  .followup-filters input[type=search]{flex-basis:100%}
   .followup-row{grid-template-columns:minmax(0,1fr) auto}
   .followup-row .td-actions{grid-column:1/-1}
 }

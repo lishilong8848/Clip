@@ -4,11 +4,11 @@
       <VnetBackButton to="/" />
     </div>
     <MopPageHeader
-      v-if="!previewMode && deskView==='fill'"
+      v-if="!previewMode && deskView==='fill' && mopScopes.length"
       v-model:scope="scope"
       v-model:month="month"
       :month-options="monthOptions"
-      :scope-options="scopeOptions"
+      :scope-options="mopScopes"
       :loading="loading"
       :preview-loading="previewLoading"
       @refresh="loadPage(true)"
@@ -19,6 +19,7 @@
       请先登录飞书后再使用工程师 MOP 页面。
       <a class="btn blue" :href="loginUrl">飞书登录</a>
     </div>
+    <div v-else-if="!mopScopes.length" class="notice-box" role="status">维保单办理仅在 D、E 楼显示。</div>
 
     <template v-else>
       <MessageBanner
@@ -39,7 +40,7 @@
       </nav>
       <MopFlowSteps v-if="!previewMode && deskView==='fill'" :steps="mopFlowSteps" />
 
-      <MopHistory v-if="deskView==='history'" v-model:scope="scope" :scope-options="scopeOptions" />
+      <MopHistory v-if="deskView==='history'" v-model:scope="scope" :scope-options="mopScopes" />
       <section v-else-if="previewMode && preview" class="mop-preview-page" :class="`mobile-page-${mopMobileStep}`">
         <MopPreviewHeader
           :title="previewTitle"
@@ -385,6 +386,7 @@ import {
   mopNoticeNeedsAction,
   mopSpecialtyText,
   normalizeMopScope,
+  mopBuildingOptions,
   normalizeMopMonth,
   mopMonthOptions,
   noticeIsEnded,
@@ -450,7 +452,9 @@ const month = ref(normalizeMopMonth(routeParams.get('month')));
 const monthOptions = ref(mopMonthOptions());
 const initialSourceRecordId = String(routeParams.get("source_record_id") || "").trim();
 const initialNoticeKey = String(routeParams.get("notice_key") || "").trim();
-const scope = ref(normalizeMopScope(routeParams.get("scope") || props.scopeOptions[0]?.value || "ALL"));
+const mopScopes=computed(()=>mopBuildingOptions(props.scopeOptions));
+const initialScope=normalizeMopScope(routeParams.get("scope"));
+const scope = ref(mopScopes.value.find(option=>option.value===initialScope)?.value||mopScopes.value[0]?.value||'');
 const deskView=ref<'fill'|'history'>(routeParams.get('mop_view')==='history'?'history':'fill');
 const loading = ref(false);
 const saving = ref(false);
@@ -545,7 +549,7 @@ const temporarySignaturePolling = useGuardedPolling(() => loadTemporarySignature
 const formalSignaturePolling = useGuardedPolling(() => refreshSelectedFormalSignatures(), 8000);
 
 const scopeLabel = computed(() => {
-  const found = props.scopeOptions.find((item) => normalizeMopScope(item.value) === scope.value);
+  const found = mopScopes.value.find((item) => normalizeMopScope(item.value) === scope.value);
   return found?.label || scope.value || "全部";
 });
 
@@ -2540,7 +2544,7 @@ function preferredNoticeKeyFromRoute(): string {
 }
 
 async function loadPage(force = false): Promise<void> {
-  if (!props.loggedIn || deskView.value==='history') return;
+  if (!props.loggedIn || deskView.value==='history' || !mopScopes.value.some(option=>option.value===scope.value)) return;
   const loadVersion = ++mopPageLoadVersion;
   mopPageLoadAbortController?.abort();
   const abortController = new AbortController();
@@ -2899,11 +2903,10 @@ watch(() => props.loggedIn, (value) => {
   if (value) void loadPage();
 });
 
-watch(() => props.scopeOptions, (items) => {
-  if (!items.length) return;
+watch(mopScopes, (items) => {
   const allowed = items.map((item) => normalizeMopScope(item.value));
   if (!allowed.includes(scope.value)) {
-    scope.value = allowed[0] || "ALL";
+    scope.value = allowed[0] || "";
   }
 }, { immediate: true, deep: true });
 </script>

@@ -153,7 +153,8 @@ function adaptAdminAccounts(source) {
     </details>
   </div>`;
 
-  const bulkButtons = bulk.children.filter(node => node.type === 1 && node.tag === 'button');
+  const bulkButtons = bulk.children.filter(node => node.type === 1 && node.tag === 'button' &&
+    !node.props.some(prop => prop.type === 7 && prop.exp?.content === 'openGrantByModule'));
   const bulkLimit = bulk.children.find(node => has(node, 'account-bulk-limit'));
   const limitCondition = bulkLimit?.props.find(p => p.type === 7 && p.name === 'if')?.loc.source;
   const bulkCondition = bulk.props.find(p => p.type === 7 && p.name === 'if');

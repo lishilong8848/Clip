@@ -239,7 +239,7 @@ class ToolWorkspaceWorkbookTests(unittest.TestCase):
                 content = sample.read_bytes()
                 description = describe(content)
                 schema = description['schema']
-                expected = {'C5', 'G6', 'C8', 'D11', 'G11', 'C3', 'C4', 'G4', 'C10'} if schema.get('layout') == 'hvac' else {'C3', 'G4', 'C6', 'D8', 'G8'}
+                expected = {'C5', 'G5', 'G6', 'C8', 'D11', 'G11', 'C3', 'C4', 'G4', 'C10'} if schema.get('layout') == 'hvac' else {'C3', 'G3', 'G4', 'C6', 'D8', 'G8'}
                 expected.update(f'I{check["row"]}' for check in schema['checks'])
                 expected.update(address for entry in schema.get('calibration', ()) for address in entry['fields'])
                 book = load(content)

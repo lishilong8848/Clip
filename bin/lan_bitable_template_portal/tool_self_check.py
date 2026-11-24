@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.utils.exceptions import InvalidFileException
 
-from .risk_inspection import MODULE, RiskError, RiskInspections, can_scope, text
+from .risk_inspection import RiskError, RiskInspections, text
 
 
 BUILDINGS = tuple('ABCDEH')
@@ -22,6 +22,13 @@ TEMPLATES = Path(__file__).resolve().parents[1] / 'resources' / 'tool_self_check
 MAX_FILE = 2 * 1024 * 1024
 MAX_RECORDS = 20
 RESULTS = ('是', '否')
+
+
+def can_scope(actor, scope):
+    return ('tool_management' in actor.get('modules', ()) and scope in BUILDINGS
+            and bool({'ALL', scope}.intersection(actor.get('scope_rules', ()))))
+
+
 _CHECK_BOX = r'(?:\[\s*[√✓✔]?\s*\]|［\s*[√✓✔]?\s*］|【\s*[√✓✔]?\s*】|[□☐☑☒])'
 YES_NO = re.compile(rf'是\s*{_CHECK_BOX}\s*否\s*{_CHECK_BOX}')
 
@@ -235,8 +242,8 @@ class ToolSelfChecks:
     @staticmethod
     def access(actor):
         RiskInspections.check(actor)
-        if MODULE not in actor.get('modules', ()):
-            raise RiskError('当前账号没有工具自检权限。', 403)
+        if 'tool_management' not in actor.get('modules', ()):
+            raise RiskError('当前账号没有工具管理权限。', 403)
 
     @staticmethod
     def administrator(actor):

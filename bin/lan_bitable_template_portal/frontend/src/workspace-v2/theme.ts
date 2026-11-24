@@ -104,7 +104,7 @@ watchEffect(()=>{
 });
 
 const controls:GlobalThemeOverrides = {
-  common:{borderRadius:'10px',borderRadiusSmall:'6px',fontSize:'14px',fontFamily:'-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif',
+  common:{borderRadius:'10px',borderRadiusSmall:'6px',fontSize:'var(--cf-font-body)',fontFamily:'var(--cf-font-family)',
     cubicBezierEaseInOut:'cubic-bezier(.4,0,.2,1)',cubicBezierEaseOut:'cubic-bezier(.22,.61,.36,1)',cubicBezierEaseIn:'cubic-bezier(.55,0,1,.45)'},
   Switch:{railWidthMedium:'48px',railHeightMedium:'28px',buttonWidthMedium:'22px',buttonHeightMedium:'22px',buttonWidthPressedMedium:'30.8px',railWidthSmall:'36px',railHeightSmall:'20px',buttonWidthSmall:'14px',buttonHeightSmall:'14px',buttonWidthPressedSmall:'17px'},
 };

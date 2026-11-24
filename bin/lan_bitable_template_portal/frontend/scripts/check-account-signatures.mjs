@@ -105,7 +105,7 @@ try{
   shared=true;await page.goto(entry+'?view=my');panel=page.getByRole('region',{name:'签名信息',exact:true});
   await panel.getByText(/共享账号/).waitFor();assert.equal(await panel.getByRole('button',{name:'重新签名'}).count(),0);
   shared=false;failRead=true;await page.reload();await panel.getByRole('alert').filter({hasText:'隔离读取失败'}).waitFor();
-  failRead=false;await panel.getByRole('button',{name:'重试',exact:true}).click();await panel.getByText(/已有可用签名/).waitFor();
+  failRead=false;await panel.getByRole('button',{name:'刷新签名信息',exact:true}).click();await panel.getByText(/已有可用签名/).waitFor();
   assert.deepEqual(errors,[]);
   console.log('PASS: personal signature metadata/preview, full re-sign and save flow, scoped account detail request/confirmation/failure/success, shared account exclusion, error recovery, desktop/mobile. All external writes mocked.');
 }catch(error){await page.screenshot({path:path.join(output,'failure.png')});throw error;}

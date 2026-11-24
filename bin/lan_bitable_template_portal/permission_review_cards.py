@@ -48,11 +48,12 @@ def parse_event(payload, app_id):
 
 def card(data):
     from .feishu_card_lifetime import expired, expired_card
+    from .portal_auth import PortalAuthManager
     if data.get('status') == 'pending' and expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
         return expired_card()
     plain = lambda text: {"tag": "plain_text", "content": str(text)}
     elements = [{"tag": "div", "text": plain("申请人：" + str(data.get("name") or "用户"))},
-                {"tag": "div", "text": plain("申请范围：" + "、".join(data.get("requested_scopes") or []))},
+                {"tag": "div", "text": plain("申请范围：" + "、".join(map(PortalAuthManager.scope_label, data.get("requested_scopes") or [])))},
                 {"tag": "div", "text": plain("申请原因：" + str(data.get("reason") or "未填写"))},
                 {"tag": "div", "text": plain("提交时间：" + str(data.get("created_at") or ""))}]
     status = data.get("status")
@@ -67,7 +68,7 @@ def card(data):
         elements.append({'tag':'div','text':plain('通过后以上述完整权限生效，未选择的模块不授权。')})
     if status == "pending":
         buttons = []
-        for action, title, style in (("approve", "通过申请", "primary"), ("reject", "拒绝申请", "danger")):
+        for action, title, style in (("approve", "确认授权", "primary"), ("reject", "拒绝申请", "danger")):
             buttons.append({"tag": "button", "name": action, "text": plain(title), "type": style, "form_action_type": "submit",
                             "value": {"kind": "permission_review", "request_id": data["request_id"], "token": data["review_card_token"], "action": action},
                             "confirm": {"title": plain(title), "text": plain("请核对申请人及申请范围，确认后立即生效。" if action == "approve" else "确认拒绝本次申请？")}})
@@ -97,6 +98,22 @@ class PermissionCards:
             if data:
                 data.update(fields)
                 auth._state_store.put_permission_request(data)
+
+    def queue_retry(self, request_id, open_id):
+        auth = self.bot.runtime.auth_manager
+        with auth._lock:
+            data = self.request(request_id)
+            if not open_id or data.get("open_id") != open_id or data.get("status") != "pending" or not data.get("approver_open_id"):
+                raise AssistantError("只能重试本人待审批申请的通知。", 403)
+            if data.get("notification_status") == "sent":
+                return False
+            from .feishu_card_lifetime import expired, EXPIRED_CARD_MESSAGE
+            if expired(data.get('created_at_ts') or data.get('created_at'), deadline=data.get('expires_at_ts')):
+                raise AssistantError(EXPIRED_CARD_MESSAGE, 410)
+            if data.get("notification_status") != "queued":
+                data.update(notification_status="queued", notification_error="")
+                auth._state_store.put_permission_request(data)
+            return True
 
     def union_id(self, open_id):
         service = self.bot.runtime.service
@@ -258,31 +275,58 @@ def install(app, bot):
         def options():
             auth = bot.runtime.auth_manager
             from .account_policy import MODULE_OPTIONS, category_options_for, level_options_for
-            oid = (session.get('user') or {}).get('open_id')
-            ids = set(auth.permission_approver_ids(oid))
-            items = []
-            for row in auth.get_permissions_payload()['users']:
-                if row['open_id'] not in ids or not row['enabled']: continue
-                profile = auth.account_profile(row['open_id'])
-                items.append({'open_id':row['open_id'], 'name':row['name'] or '上级审批人', 'level':profile['level'],
-                    'scopes':profile['scope_rules'], 'modules':profile['modules'],
-                    'level_options':level_options_for(profile['level']), 'category_options':category_options_for(profile['level'])})
+            from .portal_auth import REQUIRED_ADMIN_USERS, SCOPE_OPTIONS
+            oid = str((session.get('user') or {}).get('open_id') or '')
+            provider = getattr(auth, '_account_directory_provider', None)
+            snapshot = provider() if provider else {}
+            def collect(snapshot):
+                items = []
+                with auth.account_listing_read(snapshot) as permissions:
+                    current = auth.account_profile(oid)
+                    if not oid:
+                        return items, current, '请使用个人账号登录后申请权限。'
+                    if oid in REQUIRED_ADMIN_USERS:
+                        return items, current, '固定管理员权限由系统管理，无需提交权限申请。'
+                    if auth._open_id_explicitly_disabled(oid):
+                        return items, current, '当前账号已停用或人员身份待核对，请联系管理员。'
+                    for candidate in auth.permission_approver_ids(oid):
+                        row = permissions['users'][candidate]
+                        profile = auth.account_profile(candidate)
+                        items.append({'open_id':candidate, 'name':REQUIRED_ADMIN_USERS.get(candidate) or row.get('name') or '上级审批人',
+                            'level':profile['level'], 'scopes':profile['scope_rules'], 'modules':profile['modules'],
+                            'level_options':level_options_for(profile['level']), 'category_options':category_options_for(profile['level'])})
+                return items, current, ''
+            items, current, empty_reason = collect(snapshot)
+            if not items and not empty_reason:
+                loader = getattr(auth, '_account_directory_loader', None)
+                if loader and (snapshot.get('schema') != 4 or snapshot.get('app_id') != auth.current_feishu_app_id()
+                               or time.time() - float(snapshot.get('loaded_at') or 0) >= 300):
+                    try:
+                        items, current, empty_reason = collect(loader())
+                    except Exception as exc:
+                        logging.warning("Permission approver directory unavailable: %s", type(exc).__name__)
+                        empty_reason = '人员目录暂未读到，请刷新审批人。'
+                if not items and not empty_reason:
+                    empty_reason = '当前没有可审批此账号的管理员。请联系管理员核对上级的账号管理权限和楼栋范围。'
             items.sort(key=lambda item:(-int(item['level'][1:]), item['name']))
-            return {'items':items, 'current':auth.account_profile(oid), 'module_options':list(MODULE_OPTIONS),
-                    'scope_options':auth.get_permissions_payload()['scope_options']}
-        return bot.controller._json_ok(request, session, await asyncio.to_thread(options))
+            return {'items':items, 'current':current, 'module_options':list(MODULE_OPTIONS),
+                    'scope_options':SCOPE_OPTIONS, 'empty_reason':empty_reason}
+        try:
+            return bot.controller._json_ok(request, session, await asyncio.to_thread(options))
+        except Exception as exc:
+            return bot.controller._portal_error_response(exc, default_status=503)
     @app.post("/api/auth/permission-requests/{request_id}/notify")
     async def retry_notify(request_id: str, request: Request):
         session = bot.controller._current_session(request)
         if session is None:
             return bot.controller._auth_required_response()
-        data = await asyncio.to_thread(service.request, request_id)
-        if data.get("open_id") != (session.get("user") or {}).get("open_id") or data.get("status") != "pending" or not data.get("approver_open_id"):
+        try:
+            queued = await asyncio.to_thread(service.queue_retry, request_id, (session.get("user") or {}).get("open_id"))
+        except AssistantError as exc:
             from fastapi.responses import JSONResponse
-            return JSONResponse({"ok": False, "error": "只能重试本人待审批申请的通知。"}, status_code=403)
-        if data.get("notification_status") != "sent":
-            await asyncio.to_thread(service.update, request_id, notification_status="queued", notification_error="")
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=exc.status)
+        if queued:
             service.enqueue(request_id)
-        return bot.controller._json_ok(request, session, {"queued": True})
+        return bot.controller._json_ok(request, session, {"queued": queued})
     app.add_event_handler("shutdown", service.close)
     return service

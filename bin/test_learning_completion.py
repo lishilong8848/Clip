@@ -76,6 +76,13 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(result['summary'], dict.fromkeys(completion.STATES, 0) | {'待答': 1, '答题中': 1})
         self.assertEqual(set(result), {'summary', 'scopes', 'from', 'to'})
         self.assertEqual([call.kwargs['scope'] for call in project.call_args_list], ['A', 'B'])
+        with patch.object(completion, 'project', side_effect=lambda _, date, *, scope, **kw: data[scope]):
+            details = completion.workbench_summary(self.service, ['A', 'B'], {'from': DATE, 'to': DATE, 'detail': '1'})
+        self.assertEqual(details['summary'], result['summary'])
+        self.assertEqual(set(details['by_scope']), {'A', 'B'})
+        self.assertEqual(details['by_scope']['A'][0]['summary']['已完成'], 1)
+        self.assertEqual(details['by_scope']['B'][0]['summary']['答题中'], 1)
+        self.assertEqual(set(details['by_scope']['A'][0]), {'date', 'summary'})
 
     def test_first_backfill_ignores_unanswered_attempt_empty_dates(self):
         paper = self.paper()

@@ -22,12 +22,12 @@ const bundle = await build({
     import {createApp,h,reactive} from 'vue';
     import {NMessageProvider,NModal,NAlert,NButton,useMessage} from 'naive-ui';
     import {installFeedbackMotion} from ${JSON.stringify(modulePath)};
-    const state=reactive({items:[],modal:false,hidden:false,retries:0});
+    const state=reactive({items:[],modal:false,hidden:false,retries:0,lastRetry:''});
     const Child={setup(){
       const message=useMessage();
       window.drive={state,message,stop:installFeedbackMotion()};
       const notices=()=>state.items.map(item=>h('p',{'data-test':item.id,class:item.tone,key:item.id,style:{display:item.hidden?'none':''}},
-        item.action?[item.text,h('button',{onClick:()=>state.retries++},'重试')]:item.text));
+        item.action?[item.text,h('button',{onClick:()=>{state.retries++;state.lastRetry=item.id;}},item.actionLabel||'重试')]:item.text));
       return ()=>h('main',[
         h('input',{id:'password',type:'password',value:'fixture-only'}),
         h('section',{class:'source',style:{display:state.hidden?'none':''}},notices()),
@@ -136,6 +136,25 @@ try {
   assert.equal(await visible().evaluateAll(nodes=>nodes.some(n=>n.getAnimations().length>0)),false,'reduced motion skips movement');
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
   await page.screenshot({path:path.join(output,'mobile-toasts.png')});
+  await set(['timeout-a','timeout-b'].map(id=>({id,tone:'error',text:'请求超时，请稍后重试。',action:true,actionLabel:'重新读取'})));
+  await assertStack(1);
+  for(const id of ['timeout-b','timeout-a']){
+    const button=page.locator('[data-test="'+id+'"]').getByRole('button',{name:'重新读取',exact:true});
+    await button.waitFor();
+    const dimensions=await button.evaluate(el=>{
+      const box=el.getBoundingClientRect(), parent=el.closest('[data-v2-feedback]').getBoundingClientRect();
+      const close=el.closest('[data-v2-feedback]').querySelector('[data-v2-feedback-close]').getBoundingClientRect();
+      return {height:box.height,contained:box.bottom<=parent.bottom&&box.right<=parent.right&&box.left>=parent.left,
+        separated:box.right<=close.left||box.top>=close.bottom};
+    });
+    assert(dimensions.height>=44&&dimensions.contained&&dimensions.separated);
+    await button.click();
+    assert.equal(await page.evaluate(()=>window.drive.state.lastRetry),id);
+    if(id==='timeout-b'){
+      await page.screenshot({path:path.join(output,'timeout-retry-mobile.png')});
+      await page.getByRole('button',{name:'查看其它 1 条提示',exact:true}).click();
+    }
+  }
   await set([{id:'mop-warning',tone:'warning',text:'请核对维护单填写内容'}]);
   await page.evaluate(()=>{
     const page=document.createElement('section');page.className='v2-mop-workspace preview-open';

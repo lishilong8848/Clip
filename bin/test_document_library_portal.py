@@ -27,7 +27,7 @@ from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex
 class DocumentLibraryPortalTests(LibraryFixture):
     def setUp(self):
         super().setUp()
-        self.profile = {'role': 'building', 'modules': ['knowledge'], 'scopes': ['A']}
+        self.profile = {'role': 'building', 'modules': ['documents'], 'scopes': ['A']}
         self.session = {'user': {'open_id': actor()['id'], 'name': 'Fixture reader'},
                         'is_admin': True, 'modules': ['assistant'], 'allowed_scopes': ['ALL']}
         auth = SimpleNamespace(
@@ -279,7 +279,7 @@ class DocumentLibraryPortalTests(LibraryFixture):
                 self.assertEqual(self.client.get(url).status_code, 401)
                 self.session = original
 
-    def test_knowledge_only_uses_same_database_and_live_profile(self):
+    def test_documents_only_uses_same_database_and_live_profile(self):
         tables = self.data('/api/document-library/tables')
         self.assertEqual([table['id'] for table in tables['items']], ['manuals'])
         self.assertFalse(tables['can_configure'])
@@ -300,12 +300,12 @@ class DocumentLibraryPortalTests(LibraryFixture):
                 self.assertFalse(response.json()['ok'])
         self.factory.assert_not_called()
 
-    def test_assistant_and_admin_do_not_replace_knowledge_grant(self):
+    def test_knowledge_assistant_and_admin_do_not_replace_documents_grant(self):
         for role in ('building', 'admin'):
-            self.profile.update(role=role, modules=['assistant', 'accounts'])
+            self.profile.update(role=role, modules=['assistant', 'accounts', 'knowledge'])
             response = self.client.get('/api/document-library/tables')
             self.assertEqual(response.status_code, 403)
-            self.assertEqual(response.json()['error'], '当前账号没有共享知识库权限。')
+            self.assertEqual(response.json()['error'], '当前账号没有南通文件权限。')
         self.factory.assert_not_called()
 
     def test_only_live_admin_can_configure_and_cannot_bypass_record_scope(self):
@@ -506,6 +506,7 @@ class DocumentLibraryPortalTests(LibraryFixture):
 
     def test_revoked_context_and_generated_answer_never_escape_assistant(self):
         from openclaw_service.assistant.lighthouse_knowledge_answer import answer_company
+        self.profile['modules'] = ['documents', 'knowledge']
         self.data('/api/document-library/tables')
         for stage in ('before_generation', 'after_generation'):
             with self.subTest(stage=stage):

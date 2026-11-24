@@ -19,7 +19,7 @@ import UiTransition from '/src/components/UiTransition.vue';
 const state=reactive({checking:false,loggedIn:true,userId:'A',loginUrl:'/login',isAdmin:true});
 window.signatureFixture=value=>Object.assign(state,value);
 createApp({render:()=>h(Page,state)}).component('UiTransition',UiTransition).mount('#app');</script>`;
-const server = dist ? await preview({ root, configFile: false, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } }) : await createServer({ root, configFile: false, cacheDir: path.join(output, 'vite-cache'), logLevel: 'error',
+const server = dist ? await preview({ root, configFile: false, build: { outDir: process.env.SIGNATURE_PREVIEW_DIST || 'dist' }, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } }) : await createServer({ root, configFile: false, cacheDir: path.join(output, 'vite-cache'), logLevel: 'error',
   plugins: [vue(), { name: 'signature-performance-fixture', configureServer(dev) {
     dev.middlewares.use('/__signature-performance', async (req, res) => {
       res.setHeader('Content-Type', 'text/html; charset=utf-8'); res.end(await dev.transformIndexHtml('/__signature-performance', html));

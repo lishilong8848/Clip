@@ -1,10 +1,11 @@
 <template>
   <NFormItem class="v2-repair-field" :label="label || String(field.field_name || '')" :label-props="{for:percentage&&disabled?undefined:inputId}" :required="required" :validation-status="error ? 'error' : undefined" :feedback="error || undefined" :show-feedback="Boolean(error)" :class="{ 'v2-repair-field-wide': wide, 'v2-repair-field-compact': compact, 'is-readonly': disabled }">
-    <div v-if="sourceControlled" v-bind="inputProps" class="v2-repair-source-value" role="textbox" aria-readonly="true" tabindex="0"><span>{{(date?modelValue?.replace('T',' '):modelValue) || '待关联资料'}}</span><small>来自关联资料</small></div>
+    <div v-if="sourceControlled" class="v2-repair-source-value"><RepairTextPreview :trigger-id="inputId" :value="(date?modelValue?.replace('T',' '):modelValue) || '待关联资料'" /><small>来自关联资料</small></div>
     <div v-else-if="percentage" class="v2-repair-progress-input">
       <span v-if="disabled&&!filled" class="v2-repair-muted">未填写</span><NProgress v-else-if="disabled" type="line" :percentage="percent" :height="7" :show-indicator="true" :status="percent===100?'success':'default'" />
       <template v-else><NSlider :value="percent" :min="0" :max="100" :step="1" :aria-label="label || String(field.field_name)" @update:value="percentageInput" /><NInputNumber :value="filled?percent:null" placeholder="0–100" :show-button="false" :min="0" :max="100" :precision="0" :input-props="inputProps" @update:value="percentageInput"><template #suffix>%</template></NInputNumber></template>
     </div>
+    <RepairTextPreview v-else-if="readOnlyText&&(textarea||!date&&!number&&modelValue.length>56)" :trigger-id="inputId" :value="modelValue" />
     <select v-else-if="mobile&&selectable&&!allowCustomSelect" v-bind="inputProps" class="v2-repair-native-control" :value="modelValue || ''" :disabled="disabled" :required="required" @change="update(($event.target as HTMLSelectElement).value)">
       <option value="">{{inputHint}}</option><option v-if="modelValue&&!options.some(option=>option.value===modelValue)" :value="modelValue">{{modelValue}}</option><option v-for="option in options" :key="option.value" :value="option.value">{{option.label}}</option>
     </select>
@@ -19,8 +20,9 @@
 import { computed, onBeforeUnmount, ref, type Directive } from 'vue';
 import { NDatePicker, NFormItem, NInput, NInputNumber, NProgress, NSelect, NSlider } from 'naive-ui';
 import { repairFieldUsesTextarea } from '../repairManagementUtils';
+import RepairTextPreview from './RepairTextPreview.vue';
 import type { LooseDict } from '../types';
-const props=withDefaults(defineProps<{field:LooseDict;modelValue?:string;inputId:string;label?:string;required?:boolean;error?:string;disabled?:boolean;sourceControlled?:boolean;wide?:boolean;percentage?:boolean;selectOptions?:string[]|null;allowCustomSelect?:boolean;placeholder?:string;numberMin?:number;numberMax?:number;numberStep?:number|string}>(),{modelValue:'',label:'',error:'',selectOptions:null});
+const props=withDefaults(defineProps<{field:LooseDict;modelValue?:string;inputId:string;label?:string;required?:boolean;error?:string;disabled?:boolean;readOnlyText?:boolean;sourceControlled?:boolean;wide?:boolean;percentage?:boolean;selectOptions?:string[]|null;allowCustomSelect?:boolean;placeholder?:string;numberMin?:number;numberMax?:number;numberStep?:number|string}>(),{modelValue:'',label:'',error:'',selectOptions:null});
 const emit=defineEmits<{'update:modelValue':[value:string];edited:[]}>();
 const media=matchMedia('(max-width:760px)'),mobile=ref(media.matches);
 const resize=()=>{mobile.value=media.matches;};

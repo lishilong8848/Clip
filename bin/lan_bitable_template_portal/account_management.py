@@ -6,6 +6,7 @@ import copy
 import datetime as dt
 import hashlib
 import json
+import time
 from urllib.parse import urlsplit
 
 from fastapi import Request
@@ -29,7 +30,7 @@ from .account_policy import (
 
 
 def revision(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([2, value], sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 class AccountManagement:
@@ -37,13 +38,17 @@ class AccountManagement:
         self.directory = directory
         self.auth, self.store = directory.auth, directory.store
 
-    def accounts(self, refresh=False, actor=None):
+    def accounts(self, refresh=False, actor=None, *, snapshot=None):
         warning = ""
-        try:
-            snapshot = self.directory.directory(force=refresh)
-        except Exception:
-            snapshot = self.directory.snapshot
-            warning = "人员目录同步失败，保留上次完整名单；请稍后重新同步。"
+        if snapshot is None:
+            try:
+                snapshot = self.directory.directory(force=refresh)
+            except Exception:
+                snapshot = self.directory.snapshot
+                warning = "人员目录同步失败，保留上次完整名单；请稍后重新同步。"
+                if snapshot.get("app_id") != self.auth.current_feishu_app_id():
+                    snapshot = {}
+                    warning = "人员目录暂未核验，仅显示当前应用已有账号。"
         with self.auth.account_listing_read(snapshot) as raw_permissions:
             return self._accounts(snapshot, warning, actor, raw_permissions)
 
@@ -178,7 +183,7 @@ class AccountManagement:
         accounts = {item["id"]: item for item in listing["items"]}
         actor_id = str(actor.get("open_id") or "")
         valid_scopes = {item["value"] for item in listing["scope_options"]}
-        allowed_keys = {"id", "revision", "role", "scopes", "enabled", "level", "category", "modules"}
+        allowed_keys = {"id", "revision", "role", "scopes", "enabled", "level", "category", "modules", "add_modules"}
         with self.auth._lock:
             # Re-fetch the actor profile inside the lock so policy grants never use a
             # cached profile captured before a concurrent permission change.
@@ -193,6 +198,10 @@ class AccountManagement:
                 keys = set(change)
                 if not {"id", "revision"}.issubset(keys) or not keys.issubset(allowed_keys):
                     raise PasswordLoginError("账号修改参数无效。")
+                adding = "add_modules" in change
+                if adding and (keys != {"id", "revision", "enabled", "add_modules"}
+                               or change["enabled"] is not True or not isinstance(change["add_modules"], list)):
+                    raise PasswordLoginError("批量授权只能给已启用的账号增加模块。")
                 item = accounts.get(str(change["id"]))
                 if not item or not item["open_id"] or item["blocked_reason"]:
                     raise PasswordLoginError("人员不存在或身份待核对，未修改权限。", 409)
@@ -210,10 +219,10 @@ class AccountManagement:
                 enabled = change["enabled"]
                 if oid == actor_id and not enabled:
                     raise PasswordLoginError("不能停用自己的登录权限。", 403)
-                if oid == actor_id and any(key in change for key in ("level", "category", "modules", "role", "scopes")):
+                if oid == actor_id and any(key in change for key in ("level", "category", "modules", "role", "scopes", "add_modules")):
                     raise PasswordLoginError("不能修改自己的管理权限，仅可调整启用状态。", 403)
                 before = copy.deepcopy(users.get(oid) or {})
-                new_format = any(key in change for key in ("level", "category", "modules"))
+                new_format = adding or any(key in change for key in ("level", "category", "modules"))
                 if not new_format and "role" not in change and "scopes" not in change:
                     # Legacy payload only toggling `enabled`: preserve any existing
                     # explicit grant and never overwrite level/category/modules/scopes.
@@ -246,11 +255,14 @@ class AccountManagement:
                     if "modules" in change and not isinstance(change["modules"], list):
                         raise PasswordLoginError("模块参数无效。")
                     target_profile = self.auth.account_profile(oid)
+                    if adding and (not item["enabled"] or not before or before.get("enabled") is False):
+                        raise PasswordLoginError("账号已停用或未授权，请刷新人员列表。", 409)
                     try:
                         resolved = resolve_access_change(
                             actor_profile, target_profile,
                             level=change.get("level"), category=change.get("category"),
-                            scopes=change.get("scopes"), modules=change.get("modules"))
+                            scopes=change.get("scopes"), modules=change.get("modules"),
+                            add_modules=change.get("add_modules"))
                     except PolicyViolation as exc:
                         raise PasswordLoginError(str(exc), exc.status)
                     if "role" in change and change["role"] != resolved["role"]:
@@ -273,7 +285,7 @@ class AccountManagement:
                     else:
                         effective = copy.deepcopy(effective)
                     own = item["own_scopes"] if len(item["own_scopes"]) == 1 else []
-                    next_cfg = {**effective,
+                    next_cfg = {**effective, "modules": final_modules} if adding else {**effective,
                                 "name": effective.get("name") or item["name"],
                                 "level": resolved["level"], "category": resolved["category"],
                                 "scopes": final_scopes, "modules": final_modules,
@@ -281,6 +293,8 @@ class AccountManagement:
                                 "directory_scopes": [scope for scope in effective.get("directory_scopes", []) if scope in final_scopes],
                                 "denied_scopes": [scope for scope in own if scope not in final_scopes],
                                 "locked": False}
+                    next_cfg["module_grants_version"] = 2
+                    next_cfg["inspection_home_only"] = target_profile["inspection_home_only"] and "daily_inspection" in final_modules
                 users[oid] = next_cfg
                 before_summary = {key: before.get(key) for key in ("role", "scopes", "enabled")}
                 after_summary = {key: users[oid].get(key) for key in ("role", "scopes", "enabled")}
@@ -397,6 +411,47 @@ class AccountManagement:
 def install_account_management(app, controller, runtime, get_directory):
     from .account_impersonation import install
     install(app, controller, runtime, get_directory)
+    directory_refresh = {}
+
+    async def sync_directory(manager, app_id):
+        try:
+            await asyncio.to_thread(manager.directory.directory)
+        except Exception:
+            return False
+        return manager.directory.snapshot.get("app_id") == app_id
+
+    async def read_accounts(manager, actor, refresh):
+        app_id = await asyncio.to_thread(manager.auth.current_feishu_app_id)
+        snapshot = manager.directory.snapshot
+        if refresh or not app_id:
+            return await asyncio.to_thread(manager.accounts, refresh, actor)
+        verified = snapshot.get("schema") == 4 and snapshot.get("app_id") == app_id and snapshot.get("loaded_at")
+        stale = not verified or time.time() - float(snapshot["loaded_at"]) >= 300
+        refreshing, started = directory_refresh.get(app_id, (None, 0))
+        if stale and (refreshing is None or refreshing.done() and time.monotonic() - started >= 30):
+            refreshing = asyncio.create_task(sync_directory(manager, app_id))
+            directory_refresh.clear()
+            directory_refresh[app_id] = (refreshing, time.monotonic())
+        if not verified:
+            try:
+                synchronized = await asyncio.wait_for(asyncio.shield(refreshing), timeout=3)
+            except TimeoutError:
+                return {"items": [], "directory_syncing": True, "warning": "正在同步人员目录。"}
+            snapshot = manager.directory.snapshot
+            if not synchronized or snapshot.get("app_id") != app_id or snapshot.get("schema") != 4 or not snapshot.get("loaded_at"):
+                raise PasswordLoginError("人员目录暂未核验，请重新同步。", 503)
+            stale = False
+        data = await asyncio.to_thread(manager.accounts, False, actor, snapshot=snapshot)
+        if stale and refreshing is not None:
+            if not refreshing.done():
+                data["directory_syncing"] = True
+            elif not refreshing.result():
+                data["warning"] = "人员目录同步失败，显示上次核验的名单。"
+            elif manager.directory.snapshot is not snapshot:
+                latest = manager.directory.snapshot
+                if latest.get("app_id") == app_id:
+                    data = await asyncio.to_thread(manager.accounts, False, actor, snapshot=latest)
+        return data
 
     def response(data=None, error=None, status=200):
         return JSONResponse({"ok": not error, **({"error": error} if error else {"data": data})},
@@ -416,7 +471,7 @@ def install_account_management(app, controller, runtime, get_directory):
                 if operation == "audit":
                     rows = await asyncio.to_thread(manager.audit, actor)
                     return response({"items": rows})
-                return response(await asyncio.to_thread(manager.accounts, request.query_params.get("refresh") == "true", actor))
+                return response(await read_accounts(manager, actor, request.query_params.get("refresh") == "true"))
             origin = urlsplit(request.headers.get("origin") or request.headers.get("referer") or "")
             base = urlsplit(controller._request_base_url(request))
             if (origin.scheme, origin.netloc) != (base.scheme, base.netloc) or request.headers.get("sec-fetch-site") == "cross-site":

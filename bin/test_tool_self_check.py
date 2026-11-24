@@ -17,14 +17,14 @@ from openpyxl import load_workbook
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from bin.lan_bitable_template_portal.risk_inspection import MODULE, RiskError, RiskInspections
+from bin.lan_bitable_template_portal.risk_inspection import RiskError, RiskInspections
 from bin.lan_bitable_template_portal.risk_inspection_routes import install_risk_inspection_routes, tool_management_enabled
 from bin.lan_bitable_template_portal.tool_self_check import BUILDINGS, TEMPLATES, ToolSelfChecks, fill_template
 
 
 def actor(scope='A', identity='leader', *, admin=False):
     return {'id': identity, 'open_id': 'ou_' + identity, 'name': '验收人员', 'home_scope': scope,
-            'level': 'L0' if admin else 'L3', 'scope_rules': ['ALL'] if admin else [scope], 'modules': [MODULE]}
+            'level': 'L0' if admin else 'L3', 'scope_rules': ['ALL'] if admin else [scope], 'modules': ['tool_management']}
 
 
 class ToolSelfCheckTest(TestCase):

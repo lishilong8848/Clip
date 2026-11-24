@@ -209,8 +209,6 @@ def apply(runtime, data, app_id):
         message = ''
         if count:
             message = f'{count} 项已批准报废。' if decision == 'approve' else f'已驳回 {count} 项报废申请。'
-        if count < len(entries):
-            message = f'{message} {len(entries) - count} 项已处理或已变更，已跳过。'.strip()
     elif value.get('review') == 'self':
         if not re.fullmatch(r'[a-f0-9]{32}', str(value.get('session') or '')) or any(
                 not re.fullmatch(r'rec[A-Za-z0-9]+', str(entry.get('asset') or '')) for entry in entries):
@@ -220,11 +218,13 @@ def apply(runtime, data, app_id):
             'items': [{'asset_id': entry['asset'], 'revision': entry['revision'], 'order_id': entry['order']} for entry in entries]},
             from_card=True)
         count = result['card_review_count']
-        message = f'{count} 项自检审核通过。' if decision == 'approve' else f'已驳回 {count} 项自检记录。'
-        if count < len(entries):
-            message += f' {len(entries) - count} 项已处理或已变更，已跳过。'
+        message = ''
+        if count:
+            message = f'{count} 项自检审核通过。' if decision == 'approve' else f'已驳回 {count} 项自检记录。'
     else:
         raise RiskError('审核类型无效。')
+    if count < len(entries):
+        message = f'{message} {len(entries) - count} 项已处理或已变更，已跳过。'.strip()
     if count:
         message += ' 结果通知的投递异常可在灯塔办理记录中查看。'
     return {'ok': True, 'toast': message, 'card': {'schema': '2.0', 'header': {'template': 'grey', 'title': plain('工具管理审核')},

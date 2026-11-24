@@ -29,6 +29,7 @@ const workbookControls=computed(()=>{
         <a v-if="['pending','archived'].includes(r.session.status) && r.session.report_available!==false" class="td-button" :href="r.sessionUrl+'/download'" download>下载批次归档</a>
       </div>
     </div>
+    <p v-if="r.item" class="td-muted">专业 {{ r.item.asset.profession || '未填写' }}<template v-if="r.item.asset.template_name"> · {{ r.item.asset.template_name }}</template></p>
     <p v-if="r.session.binding_pending" class="td-notice">正在核对工具与模板的关联。</p>
     <div v-if="r.item?.binding_error && r.session.status==='opening'" class="td-stack">
       <p class="td-notice">{{ r.item.binding_error }}</p><label class="td-field">更换模板<select data-native-select v-model="r.replacementTemplate"><option :value="null">选择可用模板</option><option v-for="t in r.templates" :value="t.id" :key="t.id">{{ r.templateName(t.id) }}</option></select></label>

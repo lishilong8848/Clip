@@ -7,6 +7,14 @@ const LIST_PATHS = new Set([
   '/api/drills', '/api/drills/bootstrap', '/api/critical-guard/bootstrap', '/api/critical-guard/tasks',
   '/api/daily-tasks', '/api/daily-tasks/bootstrap', '/api/learning/bootstrap', '/api/learning/papers',
   '/api/cabinet-power/buildings', '/api/cabinet-power/overview', '/api/cabinet-power/racks', '/api/cabinet-power/batches',
+  '/api/auth/accounts',
+]);
+const PEOPLE_PATHS = new Set([
+  '/api/repair-management/people', '/api/auth/permission-approvers',
+  '/api/risk-inspections/people', '/api/work-handovers/people', '/api/tool-self-check/inventory/people',
+  '/api/signatures/people', '/api/signatures/temporary/people', '/api/signatures/management/mop-people',
+  '/api/learning/people', '/api/learning/sharing/people', '/api/feishu-workpartner/people',
+  '/api/signatures/management/people',
 ]);
 let identity = '', generation = 0, bytes = 0;
 export const READ_CACHE_UPDATED = 'clipflow-read-cache-updated';
@@ -15,12 +23,15 @@ export function setReadCacheIdentity(next: string): void {
   if (next !== identity) { identity = next; invalidateReadCache(); }
 }
 export function readCacheGeneration(): number { return generation; }
-export function readCacheKey(path: string, origin: string): string {
+export function readCacheKey(path: string, origin: string, people = false): string {
   if (!identity) return '';
   const url = new URL(path, origin);
-  if (url.origin !== origin || !LIST_PATHS.has(url.pathname) || ['refresh', 'force', 'prefetch'].some(key => url.searchParams.has(key))) return '';
+  const allowed = people
+    ? PEOPLE_PATHS.has(url.pathname) || /^\/api\/tool-self-check\/workspace\/[a-zA-Z0-9_-]+\/people$/.test(url.pathname)
+    : LIST_PATHS.has(url.pathname);
+  if (url.origin !== origin || !allowed || ['refresh', 'force', 'prefetch', 'token'].some(key => url.searchParams.has(key))) return '';
   url.searchParams.sort();
-  return identity + ':' + url.pathname + url.search;
+  return identity + (people?':people:':':') + url.pathname + url.search;
 }
 export function cachedRead(key: string): { data: Record<string, any>; at: number } | null {
   const entry = entries.get(key);

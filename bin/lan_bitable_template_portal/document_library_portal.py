@@ -25,8 +25,8 @@ def install_document_library_portal(app, controller, runtime):
         if not identity or session.get('is_guest') or session.get('role') in {'guest', 'temporary'}:
             raise AssistantError('请使用正式账号查看资料。', 403)
         modules = allowed_modules(runtime.auth_manager, session)
-        if 'knowledge' not in modules:
-            raise AssistantError('当前账号没有共享知识库权限。', 403)
+        if 'documents' not in modules:
+            raise AssistantError('当前账号没有南通文件权限。', 403)
         scopes = set(runtime.auth_manager.session_scopes(session))
         if 'ALL' in scopes:
             scopes = set(SCOPES)

@@ -279,7 +279,7 @@ class ToolManagementLifecycle:
             db.execute('BEGIN')
             inventory = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (asset_id,)).fetchone()
             asset = self._workspace_inventory_asset(inventory) if inventory else None
-            if asset and not can_scope(actor, asset['scope']):
+            if asset and (not can_scope(actor, asset['scope']) or not self._tool_profession_visible(db, actor, asset)):
                 raise missing
             visible = [row for row in db.execute('''SELECT work.id,work.month,work.scope,work.kind,work.due,work.asset,
                 work.supervisor,work.manager,work.actual,work.submitted_at,work.outcome,work.owner_name,work.owner,work.workspace_direct,work.records,
@@ -306,7 +306,7 @@ class ToolManagementLifecycle:
             legacy = _legacy_workspace_history(self, db, actor, asset_id)
             orders.extend(legacy)
             orders.sort(key=lambda row: (row['month'], row['submitted_at'] or row['due'], row['id']), reverse=True)
-            return {'asset': {key: asset.get(key) for key in ('id', 'scope', 'name', 'location', 'model', 'quantity')},
+            return {'asset': {key: asset.get(key) for key in ('id', 'scope', 'name', 'location', 'model', 'profession', 'quantity')},
                     'orders': orders[:HISTORY_LIMIT], 'has_more': len(visible) + len(legacy) > HISTORY_LIMIT, **lifecycle}
 
     def _building_reminder_cards(self, db, today):

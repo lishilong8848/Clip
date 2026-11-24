@@ -157,10 +157,13 @@ def install_event_notice_web(app,controller,runtime):
                 'robots':[{key:r[key] for key in ('id','name','remark','scopes','types')} for r in manager.ding.config()['robots'] if r['enabled'] and (not r['types'] or '事件通告' in r['types']) and (not r['scopes'] or set(allowed)&set(r['scopes']))]}
 
     def authorized(session,row,*,write=False):
+        from .module_access import professional_record_visible, session_engineer_professions
+
         actor=str((session.get('user') or {}).get('open_id') or '')
         if row.get('created_by') and not row.get('operations') and not row.get('target_record_id') and row['created_by']!=actor:return False
         scopes=row.get('access_scopes') or []
-        return bool(scopes) and all(runtime.auth_manager.scope_allowed(session,code) for code in scopes)
+        return (bool(scopes) and all(runtime.auth_manager.scope_allowed(session,code) for code in scopes)
+                and professional_record_visible(session_engineer_professions(runtime.auth_manager, session), row))
 
     def listing(session,scope,refresh=False,local=False):
         result=options(session,scope);warning=''

@@ -125,7 +125,7 @@
     <p v-else class="hint">{{ emptyText || "当前没有可继续申请的楼栋权限。" }}</p>
     <div class="permission-approver">
       <strong id="permission-approver-label">选择审批人</strong>
-      <NSelect :value="request.approverOpenId || null" :options="approvers" label-field="name" value-field="open_id" filterable :loading="approversLoading" :disabled="busy" aria-labelledby="permission-approver-label" placeholder="选择接收飞书申请的管理员" @update:value="value=>$emit('update-request',{approverOpenId:value})" />
+      <NSelect :value="request.approverOpenId || null" :options="approvers" label-field="name" value-field="open_id" filterable :loading="approversLoading" :disabled="busy || approversLoading || !approvers.length" aria-labelledby="permission-approver-label" :placeholder="approversLoading ? '读取审批人…' : approvers.length ? '选择接收飞书审批卡片的人' : '暂无可选审批人'" @update:value="value=>$emit('update-request',{approverOpenId:value})" />
       <span v-if="approverError" class="hint" role="alert">{{ approverError }} <button type="button" class="btn" @click="loadApprovers">重试</button></span>
     </div>
     <textarea
@@ -153,7 +153,7 @@ import { NSelect } from "naive-ui";
 import { QrCode, UserRound, Eye, ShieldCheck } from "lucide-vue-next";
 import VnetBackButton from "./VnetBackButton.vue";
 import PersonnelPasswordLogin from "./PersonnelPasswordLogin.vue";
-import { rememberLoginMethod, requestJson } from "../api/client";
+import { rememberLoginMethod, requestJson, requestPeople } from "../api/client";
 
 type Dict = Record<string, any>;
 
@@ -364,8 +364,8 @@ const approvers=ref<Array<{open_id:string;name:string}>>([]),approversLoading=re
 let requestAbort:AbortController|undefined,pollTimer:ReturnType<typeof setTimeout>|undefined,disposed=false;
 async function loadApprovers(){
   requestAbort?.abort();const abort=new AbortController();requestAbort=abort;approversLoading.value=true;approverError.value='';
-  try{const data=await requestJson('/api/auth/permission-approvers',{signal:abort.signal,timeoutMs:12000});if(abort.signal.aborted)return;approvers.value=Array.isArray(data.items)?data.items:[];if(!approvers.value.length)approverError.value='暂无可用审批人，请联系管理员。';}
-  catch(e:any){if(!abort.signal.aborted)approverError.value=e.message||'审批人读取失败';}finally{if(requestAbort===abort)approversLoading.value=false;}
+  try{const data=await requestPeople('/api/auth/permission-approvers',{signal:abort.signal,timeoutMs:12000});if(abort.signal.aborted)return;approvers.value=Array.isArray(data.items)?data.items:[];if(!approvers.value.length)approverError.value=data.empty_reason||'暂无可用审批人，请联系管理员。';}
+  catch(e:any){if(!abort.signal.aborted){approvers.value=[];approverError.value=e.message||'审批人读取失败';}}finally{if(requestAbort===abort)approversLoading.value=false;}
 }
 async function pollRequest(){
   if(disposed||!props.loggedIn||props.passwordSettings||!props.request.requestId||props.request.status!=='pending')return;

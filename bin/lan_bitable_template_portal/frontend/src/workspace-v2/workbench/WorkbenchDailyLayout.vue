@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 import { NModal, NPopover } from 'naive-ui';
-import { ArrowRight, Bell, CalendarDays, ChevronLeft, ChevronRight, Search, ShieldCheck, UserRound, X } from 'lucide-vue-next';
+import { ArrowRight, Bell, CalendarDays, ChevronLeft, ChevronRight, ShieldCheck, UserRound, X } from 'lucide-vue-next';
 import { todoTimestamp } from '../businessTodos';
-import { requestJson } from '../client';
+import { waitWithSignal } from '../client';
+import { readWorkbenchRequest } from './useWorkbenchReads';
 import type { WorkItem } from './sources';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 import WorkbenchAgendaList from './WorkbenchAgendaList.vue';
@@ -12,17 +13,16 @@ import WorkbenchWeather from './WorkbenchWeather.vue';
 import NavThemePicker from '../NavThemePicker.vue';
 import './workbench.css';
 
-type Link = {label:string; url:string};
 type AgendaEntry = {key:string; item:WorkItem; type:'plan'|'change'|'due'; label:string; time:string; stamp:number};
 export type CalendarItem={kind:string;title:string;scopes?:string[];notes?:string[];start?:string;end?:string;source_id?:string;source?:string};
-export type SealStatus='ready'|'failed'|'unconfigured';
+export type SealStatus='ready'|'stale'|'failed'|'unconfigured';
 type CalendarDay={items:CalendarItem[];staff:{scope:string;shift:string;names:string[]}[]};
 type CalendarResponse={month:string;days:Record<string,CalendarDay>;unavailable:string[];roster_dates?:string[];
-  handover?:Handover;seal_status?:SealStatus;seal_windows?:CalendarItem[]};
+  handover?:Handover;roster_pending?:boolean;seal_status?:SealStatus;seal_windows?:CalendarItem[]};
 type RosterSnapshot={key:string;state:'ready'|'failed';handover?:Handover};
 type CalendarWeather={warning_ready:boolean;
   alerts:{id?:string;title:string;guard_level?:string}[];guard_level?:string;guard_actions:string[];guard_note?:string};
-const props = defineProps<{name:string; avatar?:string; clock:number; links:Link[]; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
+const props = defineProps<{name:string; avatar?:string; clock:number; tasks:WorkItem[]; unread:WorkItem[]; guest?:boolean;
   impersonating?:boolean;
   calendarScope?:string; calendarIdentity?:string; queueNote?:string; userId?:string}>();
 const emit = defineEmits<{open:[url:string]; unread:[]; task:[item:WorkItem]; 'guest-account':[]}>();
@@ -32,46 +32,16 @@ const avatarFailed=ref(false);
 watch(avatar,()=>{avatarFailed.value=false;});
 const surface = ref<HTMLElement>();
 const mobileNavigation=inject('workspace-mobile-navigation',ref(false));
-const noticeButton = ref<HTMLButtonElement>(), searchInput = ref<HTMLInputElement>();
-const panel = ref<''|'search'|'notices'>('');
-const query = ref(''), searchIndex = ref(0);
-function toggleNotices() {
-  panel.value = panel.value === 'notices' ? '' : 'notices';
-}
+const noticeButton = ref<HTMLButtonElement>();
+const noticesOpen = ref(false);
 function dismiss() {
-  const trigger = panel.value === 'notices' ? noticeButton : searchInput;
-  if (panel.value) { trigger.value?.focus(); panel.value = ''; }
+  if (noticesOpen.value) { noticeButton.value?.focus(); noticesOpen.value=false; }
 }
 function escapePanel(event:KeyboardEvent) {
-  if(panel.value){event.stopPropagation();dismiss();}
+  if(noticesOpen.value){event.stopPropagation();dismiss();}
 }
 function outside(event:PointerEvent) {
-  if (panel.value && !(event.target instanceof Element && surface.value?.contains(event.target) && event.target.closest('.desk-anchor'))) panel.value = '';
-}
-function leaveSearch(event:FocusEvent){
-  if(panel.value==='search' && event.currentTarget instanceof Element && !(event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)))panel.value='';
-}
-function rank(label:string, term:string) {
-  if (label.includes(term)) return label === term ? 0 : 1;
-  let index = 0;
-  for (const character of label) if (character === term[index]) index++;
-  return index === term.length ? 2 : Infinity;
-}
-const matches = computed(() => {
-  const terms = query.value.toLowerCase().split(/\s+/).filter(Boolean);
-  return props.links.map(entry=>({entry,score:terms.reduce((sum,term)=>sum+rank(entry.label.toLowerCase(),term),0)}))
-    .filter(row=>Number.isFinite(row.score)).sort((a,b)=>a.score-b.score).slice(0,8).map(row=>row.entry);
-});
-watch(matches,()=>{searchIndex.value=0;});
-function moveSearch(delta:number) {
-  panel.value = 'search';
-  if (matches.value.length) searchIndex.value = (searchIndex.value+delta+matches.value.length)%matches.value.length;
-}
-function openSearch(entry?:Link) {
-  if (!entry) return;
-  panel.value = '';
-  query.value = '';
-  emit('open',entry.url);
+  if (noticesOpen.value && !(event.target instanceof Element && surface.value?.contains(event.target) && event.target.closest('.desk-anchor'))) noticesOpen.value=false;
 }
 
 const zone = 'Asia/Shanghai';
@@ -160,6 +130,7 @@ function separateTasks(day:string){
 }
 const calendarNotice=ref(''), calendarBusy=ref(false);
 const calendarRevision=ref(0), calendarFailed=ref(false);
+let calendarReadAt=0;
 const calendarDay=computed(()=>calendarDays.value[selected.value]);
 const calendarScope=computed(()=>props.calendarScope||'');
 const sealStatus=ref<SealStatus>();
@@ -176,7 +147,7 @@ const visibleRoster=computed(()=>roster.value?.key===rosterKey.value?roster.valu
 const rosterMessage=computed(()=>{
   if(!calendarScope.value)return '暂无排班';
   if(!visibleRoster.value)return '正在读取排班…';
-  return visibleRoster.value.state==='failed'?'排班读取失败':'暂无排班';
+  return visibleRoster.value.state==='failed'?(visibleRoster.value.handover?'排班待核验':'暂未读到排班'):'暂无排班';
 });
 const dayCount=(day:string)=>separateTasks(day).length+(calendarDays.value[day]?.items.length||0);
 function scheduleTime(value?:string){
@@ -187,7 +158,7 @@ function scheduleTime(value?:string){
 async function readCalendar(month:string,scope:string,signal:AbortSignal,rosterOnly=false):Promise<CalendarResponse>{
   const query=new URLSearchParams({month,scope});
   if(rosterOnly)query.set('view','roster');
-  const data=await requestJson('/api/personal-calendar?'+query,{signal,timeoutMs:18000,background:!rosterOnly,queueTimeoutMs:45000});
+  const data=await readWorkbenchRequest('/api/personal-calendar?'+query,signal);
   if(data.month!==month||!data.days||!Array.isArray(data.unavailable))throw new Error('日程未完整返回');
   return data as CalendarResponse;
 }
@@ -204,21 +175,22 @@ watch([month,calendarScope,()=>props.calendarIdentity,calendarRevision],async([a
   try {
     const data=await readCalendar(activeMonth,scope,controller.signal);
     if(controller.signal.aborted)return;
-    calendarDays.value=data.days;
     const other=data.unavailable.filter(label=>label!=='封网');
+    const hasPrevious=Object.keys(calendarDays.value).length>0;
+    if(!other.length||!hasPrevious)calendarDays.value=data.days;
     sealStatus.value=data.seal_status ?? (data.unavailable.includes('封网')?'failed':'ready');
     seals.value=data.seal_windows||[];
     calendarFailed.value=other.length>0;
-    calendarNotice.value=calendarFailed.value?other.join('、')+'尚未读全':'';
-  } catch {
+    calendarNotice.value=calendarFailed.value?other.join('、')+(hasPrevious?'待更新 · 显示上次核验结果':'尚未读全'):'';
+  } catch (error) {
     if(!controller.signal.aborted){
-      calendarNotice.value='日程读取失败';
+      const denied=[401,403].includes((error as {status?:number})?.status||0);
+      if(denied){calendarDays.value={};sealStatus.value=undefined;seals.value=[];}
+      calendarNotice.value=Object.keys(calendarDays.value).length?'日程待更新 · 显示上次核验结果':'日程暂未读全';
       calendarFailed.value=true;
-      sealStatus.value=undefined;
-      seals.value=[];
     }
   } finally {
-    if(!controller.signal.aborted) calendarBusy.value=false;
+    if(!controller.signal.aborted){calendarBusy.value=false;calendarReadAt=Date.now();}
   }
 },{immediate:true});
 let rosterReadAt=0;
@@ -230,9 +202,18 @@ watch([rosterKey,rosterRevision],async([key],_old,onCleanup)=>{
   rosterReading.value=true;
   onCleanup(()=>{controller.abort();rosterReading.value=false;});
   try {
-    const data=await readCalendar(date.slice(0,7),scope,controller.signal,true);
+    let data=await readCalendar(date.slice(0,7),scope,controller.signal,true);
+    if(data.roster_pending){
+      await waitWithSignal(1500,controller.signal);
+      data=await readCalendar(date.slice(0,7),scope,controller.signal,true);
+    }
     if(controller.signal.aborted)return;
     const handover=data.handover;
+    for(const side of ['current','incoming'] as const){
+      const incoming=handover?.[side], previous=visibleRoster.value?.handover?.[side];
+      if(handover&&incoming&&!incoming.verified&&previous?.verified&&incoming.date===previous.date&&incoming.shift===previous.shift)
+        handover[side]=previous;
+    }
     if(handover && (handover.current?.verified||handover.incoming?.verified)) roster.value={key,state:'ready',handover};
     else if(visibleRoster.value?.state!=='ready')roster.value={key,state:'failed',handover};
   } catch(error){
@@ -243,7 +224,10 @@ watch([rosterKey,rosterRevision],async([key],_old,onCleanup)=>{
   }
 },{immediate:true});
 watch(()=>props.clock,()=>{
-  const shiftEnd=todoTimestamp(visibleRoster.value?.handover?.current.end);
+  if(!props.guest&&!document.hidden&&calendarScope.value&&!calendarBusy.value&&
+    (calendarFailed.value||sealStatus.value==='stale'||sealStatus.value==='failed')&&Date.now()-calendarReadAt>=30000)
+    calendarRevision.value++;
+  const shiftEnd=todoTimestamp(visibleRoster.value?.handover?.current?.end);
   if(!props.guest&&!document.hidden&&!rosterReading.value&&(Date.now()-rosterReadAt>(visibleRoster.value?.state==='ready'?120000:45000)
     ||shiftEnd!==undefined&&rosterReadAt<shiftEnd&&props.clock>=shiftEnd))
     rosterRevision.value++;
@@ -258,13 +242,16 @@ async function loadCalendarWeather(force=false){
   calendarWeatherBusy.value=true;
   const request=calendarWeatherRequest=new AbortController();
   try{
-    const data=await requestJson('/api/personal-calendar/weather',{signal:request.signal,timeoutMs:16000,background:true});
+    const data=await readWorkbenchRequest('/api/personal-calendar/weather',request.signal);
     if(!request.signal.aborted){
-      calendarWeather.value=data as CalendarWeather;
+      if(!data.guard_read_failed||!calendarWeather.value)calendarWeather.value=data as CalendarWeather;
       guardFailed.value=data.guard_read_failed===true;
     }
-  } catch {
-    if(!request.signal.aborted){calendarWeather.value=undefined;guardFailed.value=true;}
+  } catch(error) {
+    if(!request.signal.aborted){
+      if([401,403].includes((error as {status?:number})?.status||0))calendarWeather.value=undefined;
+      guardFailed.value=true;
+    }
   } finally {
     if(calendarWeatherRequest===request){calendarWeatherBusy.value=false;calendarWeatherAt=Date.now();}
   }
@@ -295,7 +282,7 @@ const noticesByDay = computed(()=>{
 
 const selectedWeekday = computed(()=>new Intl.DateTimeFormat('zh-CN',{timeZone:zone,weekday:'long'}).format(new Date(selected.value+'T12:00:00+08:00')));
 onMounted(()=>{document.addEventListener('pointerdown',outside);if(!props.guest)void loadCalendarWeather();});
-onDeactivated(()=>{panel.value='';pendingAgendaTask.value=undefined;agendaExpanded.value=false;});
+onDeactivated(()=>{noticesOpen.value=false;pendingAgendaTask.value=undefined;agendaExpanded.value=false;});
 onBeforeUnmount(()=>{document.removeEventListener('pointerdown',outside);calendarWeatherRequest?.abort();});
 
 
@@ -309,7 +296,7 @@ function selectDay(key:string){
   month.value=key.slice(0,7);
 }
 function showUnreadQueue(){
-  panel.value='';
+  noticesOpen.value=false;
   emit('unread');
 }
 function openNotification(item:WorkItem){
@@ -358,25 +345,16 @@ function afterAgendaClose() {
           </div>
         </div>
       </div>
-      <div class="mast-actions"><div class="desk-tools">
-        <button v-if="!guest" class="small-key agenda-jump" aria-label="跳到日历" title="日历" @click="showAgenda"><CalendarDays :size="16" aria-hidden="true" /></button>
-        <div class="desk-anchor search-anchor" @focusout="leaveSearch">
-          <label class="search-field"><Search :size="16" />
-            <input ref="searchInput" v-model="query" type="search" aria-label="全局搜索" placeholder="搜索功能"
-              :aria-expanded="panel==='search'" @focus="panel='search'" @input="panel='search'"
-              @keydown.down.prevent="moveSearch(1)" @keydown.up.prevent="moveSearch(-1)" @keydown.enter.prevent="openSearch(matches[searchIndex])">
-          </label>
-          <section v-if="panel==='search'" class="floating search-results" aria-label="搜索结果">
-            <button v-for="(link,i) in matches" :key="link.url" :class="{pointed:i===searchIndex}" @click="openSearch(link)">{{ link.label }}<ArrowRight :size="14" /></button>
-            <p v-if="!matches.length">未找到入口</p>
-          </section>
-        </div>
+      <div class="mast-actions">
+      <div v-if="!guest && $slots.focus" class="command-line"><slot name="focus" /></div>
+      <div v-if="!guest" class="desk-tools">
+        <button class="small-key agenda-jump" aria-label="跳到日历" title="日历" @click="showAgenda"><CalendarDays :size="16" aria-hidden="true" /></button>
         <template v-if="!guest">
           <div class="desk-anchor">
-            <button ref="noticeButton" class="tool-key" :aria-label="'消息通知，'+(!unread.length && queueNote?queueNote:unread.length+' 项未读')" :aria-expanded="panel==='notices'" @click="toggleNotices">
+            <button ref="noticeButton" class="tool-key" :aria-label="'消息通知，'+(!unread.length && queueNote?queueNote:unread.length+' 项未读')" :aria-expanded="noticesOpen" @click="noticesOpen=!noticesOpen">
               <Bell :size="18" aria-hidden="true" /><span v-if="unread.length" class="notice-count" aria-hidden="true">{{ unread.length>99?'99+':unread.length }}</span>
             </button>
-            <section v-if="panel==='notices'" class="floating notification" aria-label="未读消息">
+            <section v-if="noticesOpen" class="floating notification" aria-label="未读消息">
               <div class="line-head">
                 <h3>未读</h3><div class="notification-actions">
                   <button v-if="unread.length" class="icon-key" aria-label="打开未读清单" title="打开未读清单" @click="showUnreadQueue"><ArrowRight :size="16" aria-hidden="true" /></button>
@@ -390,7 +368,6 @@ function afterAgendaClose() {
           <NavThemePicker v-if="mobileNavigation" :user-id="userId||''" palette-only />
         </template>
       </div>
-      <div v-if="!guest && $slots.focus" class="command-line"><slot name="focus" /></div>
       </div>
     </header>
 
@@ -419,21 +396,20 @@ function afterAgendaClose() {
           <div class="line-head"><h3>{{ selected.slice(5).replace('-',' / ') }} <small>{{ selectedWeekday }}</small></h3>
             <RecordViewSwitch v-if="itinerary.length" v-model="agendaView"/>
           </div>
-          <WorkbenchAgendaList v-if="itinerary.length" :entries="itinerary.slice(0,3)" :view="agendaView" @task="emit('task',$event)" />
+          <WorkbenchAgendaList v-if="itinerary.length" :entries="itinerary.slice(0,2)" :view="agendaView" @task="emit('task',$event)" />
           <p v-else-if="!calendarNotice" class="muted">{{ calendarBusy?'读取中…':calendarFailed?'日程读取失败':!calendarScope?'暂无授权日程':queueNote?'暂无已读取日程':'当日无安排' }}</p>
-          <button v-if="itinerary.length>3" class="text-key" aria-haspopup="dialog" @click="agendaExpanded=true">展开全部 {{ itinerary.length }} 项日程</button>
+          <button v-if="itinerary.length>2" class="text-key" aria-haspopup="dialog" @click="agendaExpanded=true">展开全部 {{ itinerary.length }} 项日程</button>
           <NModal v-model:show="agendaExpanded" preset="card" class="wb-agenda-dialog" style="width:min(92vw,560px)" :title="selected+' 日程'"
             aria-label="当天全部日程" transform-origin="center" @after-leave="afterAgendaClose">
             <div class="agenda-scroll"><WorkbenchAgendaList :entries="itinerary" :view="agendaView" @task="openAgendaTask" /></div>
           </NModal>
           <div v-if="calendarNotice" class="retry-note" role="status">{{ calendarNotice }} <button class="text-key" @click="calendarRevision++">重试日程</button></div>
           <div v-if="sealStatus==='unconfigured'" class="retry-note muted" role="status">封网表未接入</div>
+          <div v-else-if="sealStatus==='stale'" class="retry-note" role="status">封网待更新 · 显示最近核验结果 <button class="text-key" @click="calendarRevision++">重试封网</button></div>
           <div v-else-if="sealStatus==='failed'" class="retry-note" role="status">封网读取失败 <button class="text-key" @click="calendarRevision++">重试封网</button></div>
           <p v-else-if="sealStatus==='ready'&&!calendarDay?.items.some(item=>item.kind==='封网')" class="retry-note muted">当日无封网</p>
         </section>
         </div>
-        <WorkbenchRoster class="rail-module roster-module" :handover="visibleRoster?.handover" :message="rosterMessage"
-          :can-retry="visibleRoster?.state==='failed'&&!rosterReading" :impersonating="impersonating" @retry="rosterRevision++" />
         <section class="weather-guard rail-module" aria-label="天气预警与戒备" data-v2-inline-feedback>
           <div class="line-head"><h3><ShieldCheck :size="16" /> 今日预警与戒备</h3><button class="text-key" :disabled="calendarWeatherBusy" @click="loadCalendarWeather(true)">刷新</button></div>
           <div class="guard-summary" role="status">
@@ -442,16 +418,21 @@ function afterAgendaClose() {
             <template v-else>
               <span v-if="!calendarWeather?.warning_ready">预警待更新</span>
               <span v-else-if="!calendarWeather.alerts?.length">无天气预警</span>
-              <b v-if="calendarWeather?.guard_level && !guardFailed">戒备等级 {{ calendarWeather.guard_level }}</b>
-              <span v-else>{{ guardFailed?'戒备读取失败':'戒备待更新' }}</span>
+              <b v-if="calendarWeather?.guard_level">戒备等级 {{ calendarWeather.guard_level }}</b>
+              <span v-else-if="!guardFailed">{{ calendarWeather?.warning_ready?'当前无戒备':'戒备待更新' }}</span>
+              <span v-if="guardFailed">{{ calendarWeather?.warning_ready?'显示上次识别结果':'戒备暂未读到' }}</span>
             </template>
           </div>
           <div v-for="alert in calendarWeather?.alerts" :key="alert.id || alert.title" class="warning"><b>{{ alert.title }}</b><span v-if="alert.guard_level">{{ alert.guard_level }}</span></div>
           <ul v-if="calendarWeather?.guard_actions?.length"><li v-for="action in calendarWeather.guard_actions" :key="action">{{ action }}</li></ul><p v-if="calendarWeather?.guard_note">{{ calendarWeather.guard_note }}</p>
         </section>
+        <WorkbenchRoster class="rail-module roster-module" :handover="visibleRoster?.handover" :message="rosterMessage"
+          :can-retry="visibleRoster?.state==='failed'&&!rosterReading" :impersonating="impersonating" @retry="rosterRevision++" />
       </aside>
-      <div v-if="$slots.shortcuts || $slots.overview" class="desk-supplement">
+      <div v-if="$slots.overview" class="desk-supplement">
         <slot name="overview" :seals="seals" :seal-status="sealStatus" />
+      </div>
+      <div v-if="!guest&&$slots.shortcuts" class="desk-shortcuts">
         <slot v-if="!guest" name="shortcuts" />
       </div>
     </div>
@@ -479,7 +460,7 @@ function afterAgendaClose() {
 .daily-desk button { cursor:pointer }
 .daily-desk button:disabled { cursor:wait; opacity:.65 }
 .daily-desk :is(button,select,input):focus-visible,.day-planner:focus-visible { outline:2px solid var(--v2-blue,#24799f); outline-offset:2px }
-.desk-head,.desk-title,.desk-tools,.identity-line,.search-field,.line-head,.month-tools,.month-tools>div,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
+.desk-head,.desk-title,.desk-tools,.identity-line,.line-head,.month-tools,.month-tools>div,.notification-actions,.weather-guard h3 { display:flex; align-items:center; gap:8px }
 .desk-head,.line-head,.month-tools { justify-content:space-between }
 .desk-head { flex-wrap:wrap; gap:10px 16px }
 .desk-title { gap:12px; min-width:0 }
@@ -489,37 +470,35 @@ function afterAgendaClose() {
 .name-control,.text-key { border:0; padding:0; background:transparent; color:var(--desk-green); font-weight:650 }
 .desk-tools { position:relative; flex-wrap:nowrap; max-width:100% }
 .desk-anchor { position:relative; min-width:0 }
-.search-field,.tool-key,.small-key,.day-planner select,.today-key { background:var(--desk-paper); border:1px solid var(--desk-line); border-radius:10px }
-.search-field { height:40px; width:clamp(145px,17vw,230px); padding:0 11px; background:var(--desk-well); color:var(--desk-muted) }
-.search-field input { width:100%; min-width:0; padding:0; background:transparent; border:0; font-size:13px }
-.search-field svg { flex:none }
+.tool-key,.small-key,.day-planner select,.today-key { background:var(--desk-paper); border:1px solid var(--desk-line); border-radius:10px }
 .tool-key,.small-key,.text-key,.icon-key { display:inline-flex; align-items:center; justify-content:center; gap:5px }
 .tool-key,.small-key { min-height:40px; padding:5px 10px; font-size:13px; position:relative }
 .icon-key { background:transparent; border:1px solid transparent; width:32px; height:32px; border-radius:8px }
 .notice-count { position:absolute; right:0; top:0; min-width:16px; padding:1px 3px; border-radius:999px; background:var(--desk-blue); color:var(--desk-paper); font-size:10px; line-height:1.35; font-weight:700; text-align:center }
 .notification-actions { gap:3px }
 .floating { position:absolute; z-index:25; top:calc(100% + 6px); right:0; width:min(310px,85vw); padding:14px; border:1px solid var(--desk-line); border-radius:14px; background:var(--desk-paper); box-shadow:0 12px 30px #122e3a2b; overflow:auto; max-height:60vh; font-size:13px }
-.search-results,.notification { display:grid; gap:4px }
-.search-results button,.notice-row { background:transparent; border:0; border-radius:8px; padding:9px; text-align:left }
-.search-results button { display:flex; justify-content:space-between; align-items:center }
-.search-results button:hover,.pointed,.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
+.notification { display:grid; gap:4px }
+.notice-row { background:transparent; border:0; border-radius:8px; padding:9px; text-align:left }
+.notice-row:hover,.icon-key:hover { background:var(--desk-blue-wash)!important }
 .notice-row { display:grid; gap:2px }
 .notice-row span,.muted,.itinerary h3 small { color:var(--desk-muted); font-size:12px; font-weight:normal }
-.masthead { justify-content:flex-start;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
+.desk-head.masthead { display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:8px 16px;min-width:0;padding:4px 0 }
+.mast-actions:empty { display:none }
 .mast-actions { display:flex;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:5px;min-width:0;margin-inline-start:auto }
 .title-line { display:flex;align-items:center;gap:4px 9px;flex-wrap:wrap }
 .title-line h1 { font-size:21px;letter-spacing:-.03em;line-height:1.25 }
 .folio-date { color:var(--desk-muted);white-space:nowrap;font-size:12px;font-variant-numeric:tabular-nums }
-.masthead .search-field { width:clamp(115px,10vw,155px);height:35px;border-radius:20px }
-.masthead .tool-key,.masthead .small-key { min-height:35px;border-radius:20px;white-space:nowrap }
+.masthead .tool-key,.masthead .small-key { width:36px;min-height:36px;padding:0;border-radius:9px;white-space:nowrap;color:var(--desk-ink) }
+.masthead :is(.tool-key,.small-key):hover,.masthead :is(.tool-key,.small-key)[aria-expanded=true] { background:var(--desk-green-wash);border-color:var(--desk-green);color:var(--desk-green) }
 .masthead .desk-tools { gap:5px; margin-inline-start:auto }
 .command-line { display:flex;align-items:center;flex-wrap:wrap;min-width:0;max-width:100% }
 .command-line :slotted(*) { max-width:100%;flex-wrap:wrap }
 .month-mode { display:inline-flex;align-items:center;gap:4px;border:0;background:transparent;padding:4px 0;color:var(--desk-ink);font-weight:650!important }
 .month-mode span { color:var(--desk-blue);font-size:11px }
-.working-grid { display:grid;align-items:start;gap:12px;min-width:0;grid-template-columns:minmax(0,1fr);grid-template-areas:"tasks" "agenda" "supplement" }
+.working-grid { display:grid;align-items:start;gap:12px;min-width:0;grid-template-columns:minmax(0,1fr);grid-template-areas:"tasks" "agenda" "supplement" "shortcuts" }
 .desk-content { grid-area:tasks;min-width:0 }
 .desk-supplement { grid-area:supplement;display:grid;gap:10px;min-width:0 }
+.desk-shortcuts { grid-area:shortcuts;min-width:0 }
 .day-planner { grid-area:agenda;display:grid;align-items:start;gap:9px;min-width:0;scroll-margin-top:72px }
 .rail-module { min-width:0;padding:11px 13px;border:1px solid var(--desk-line);border-radius:15px;background:var(--desk-paper);box-shadow:var(--desk-shadow) }
 .day-planner .roster-module { padding:0 }
@@ -532,7 +511,7 @@ function afterAgendaClose() {
 .month-tools { flex-wrap:wrap; gap:3px 5px; font-size:13px }
 .month-tools>div { gap:2px; margin-inline-start:auto }
 .month-tools .icon-key { width:26px }
-.today-key { min-height:28px; padding:1px 6px; font-size:12px }
+.today-key { min-height:30px; padding:3px 8px; font-size:12px;border-radius:7px }
 .month-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:2px; margin-top:5px }
 .weekday { text-align:center; color:var(--desk-muted); font-size:11px; padding:3px }
 .day-cell { position:relative; min-width:0; min-height:31px; border:1px solid transparent; border-radius:8px; background:transparent; font-size:13px!important; font-variant-numeric:tabular-nums }
@@ -551,7 +530,11 @@ function afterAgendaClose() {
 .warning { display:flex; justify-content:space-between; padding:6px 9px; background:var(--desk-blue-wash); border-radius:8px }
 .agenda-jump { display:inline-flex }
 @container daily-desk (min-width:980px) {
-  .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda";grid-template-rows:auto 1fr }
+  .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda" "shortcuts shortcuts";grid-template-rows:auto 1fr auto }
+  .desk-supplement,.day-planner { align-self:stretch }
+  .desk-supplement :deep(.wb-period) { display:flex;flex-direction:column }
+  .day-planner { grid-template-rows:auto auto 1fr }
+  .roster-module { align-self:end }
   .agenda-jump { display:none }
 }
 @container daily-desk (min-width:700px) and (max-width:979px){
@@ -560,20 +543,21 @@ function afterAgendaClose() {
 }
 @media(max-width:700px) {
   .daily-desk { gap:9px }
-  .masthead { gap:6px 10px;padding:0 }
+  .desk-head.masthead { grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;padding:0;position:relative }
+  .masthead .desk-title { grid-column:1/-1 }
+  .masthead:has(.name-control) .desk-title { grid-column:auto }
   .masthead .desk-tools { flex:1 1 auto;flex-wrap:wrap;margin-inline-start:0 }
   .day-cell,.today-key,.masthead .small-key,.masthead .tool-key { min-height:40px }
+  .masthead .small-key,.masthead .tool-key{width:40px}
 }
 @media(max-width:540px) {
   .desk-title { width:100% }
-  .mast-actions { width:100%;margin-inline-start:0 }
+  .mast-actions { margin-inline-start:0;flex-wrap:nowrap }
   .mast-identity { display:flex;align-items:center;flex-wrap:wrap;gap:2px 10px }
   .identity-line { margin-top:0 }
-  .masthead .desk-tools { width:100%;flex-wrap:nowrap }
+  .masthead .desk-tools { flex-wrap:nowrap }
   .desk-anchor { position:static }
-  .search-anchor { flex:1 }
-  .masthead .search-field { width:100%;height:40px }
-  .floating { left:0;width:100% }
+  .masthead .floating { left:0;width:100%;box-sizing:border-box;top:100% }
 }
 .month-mode,.today-key { white-space:nowrap }
 </style>

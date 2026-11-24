@@ -130,17 +130,17 @@
           </span>
           <b>{{ tool.badge }}</b>
         </button>
-        <button v-if="activeMode === 'special' && currentUser?.tool_management_enabled === true" type="button"
+        <button v-if="activeMode === 'special' && hasModule('tool_management') && currentUser?.tool_management_enabled === true" type="button"
           class="tool-card blue" aria-label="选择工具管理" @click="emit('tool-management')">
           <span class="risk-tool-icon" aria-hidden="true"><Wrench :size="24" /></span>
           <span><strong>工具管理</strong></span><b>自检与送检</b>
         </button>
-        <button v-if="activeMode === 'special' && hasModule('drills')" type="button"
+        <button v-if="activeMode === 'special' && hasModule('eop_scenarios')" type="button"
           class="tool-card blue" aria-label="选择 EOP 场景维护" @click="emit('eop-scenarios')">
           <span class="risk-tool-icon" aria-hidden="true"><ClipboardCheck :size="24" /></span>
           <span><strong>EOP 场景维护</strong></span><b>步骤与图片</b>
         </button>
-        <button v-if="activeMode === 'tools' && (hasModule('daily') || canViewInspectionHistory(currentUser)) && scopeOptions.some(option=>['ALL','D','E'].includes(option.value))"
+        <button v-if="activeMode === 'tools' && hasModule('daily_inspection') && scopeOptions.some(option=>['ALL','D','E'].includes(option.value))"
           type="button" class="tool-card blue" aria-label="选择日常巡检" @click="emit('daily-inspection')">
           <span class="risk-tool-icon" aria-hidden="true"><ClipboardCheck :size="24" /></span>
           <span><strong>日常巡检</strong></span><b>D、E 楼</b>
@@ -279,8 +279,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ClipboardCheck, FolderOpen, Library, ShieldCheck, Wrench } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
-import { canViewInspectionHistory } from '../inspectionAccess';
 import { preShiftHomeAccount, preShiftHomeVisible, preShiftScopes, preShiftSummary } from '../preShiftUtils';
+import { mopBuildingOptions } from '../mopSelectionUtils';
 import {
   SCOPE_HOME_ENTRY_CONFIGS as entryConfigs,
   SCOPE_HOME_CAPACITY_ENTRIES as capacityEntries,
@@ -391,7 +391,8 @@ const userModules = computed(() => {
   const raw = props.modules;
   return Array.isArray(raw) ? raw : [];
 });
-const hasModule = (moduleId: string): boolean => !moduleId || userModules.value.includes(moduleId);
+const hasModule = (moduleId: string): boolean => !moduleId || userModules.value.includes(moduleId)
+  && (moduleId!=='engineer_mop'||mopBuildingOptions(props.scopeOptions).length>0);
 function entryModule(entry: string): string {
   switch (entry) {
     case "event": return "event";
@@ -405,8 +406,8 @@ function entryModule(entry: string): string {
     case "risk_inspection": return "risk_inspection";
     case "drill": return "drills";
     case "learning": return "learning";
-    case "knowledge":
-    case "documents": return "knowledge";
+    case "knowledge": return "knowledge";
+    case "documents": return "documents";
     case "cabinet_power": return "cabinet";
     case "daily": return "daily";
     case "power": return "power";
@@ -419,7 +420,7 @@ function entryModule(entry: string): string {
   }
 }
 const toolsModule: Record<string, string> = {
-  knowledge: "knowledge", documents: "knowledge",
+  knowledge: "knowledge", documents: "documents",
   daily: "daily", power: "power", polling: "polling",
   adjust: "adjust", handover: "handover",
 };
@@ -431,8 +432,8 @@ const cardModules: Record<string, string[]> = {
   repair_management: ["repair_management", "repair"],
   risk: ["critical_guard"],
   capacity: ["water", "cabinet"],
-  tools: ["daily", "power", "polling", "adjust", "handover", "knowledge"],
-  special: ["risk_inspection", "work_handover", "learning", "plan_convergence", "drills"],
+  tools: ["daily", "daily_inspection", "power", "polling", "adjust", "handover", "knowledge", "documents"],
+  special: ["risk_inspection", "tool_management", "work_handover", "learning", "plan_convergence", "drills", "eop_scenarios"],
   drill: ["drills"],
 };
 const filteredModuleCards = computed(() =>
@@ -473,7 +474,7 @@ const activeMetricWorkType = computed(() => {
   return activeConfig.value.workType || "maintenance";
 });
 const displayScopeOptions = computed(() => {
-  const source = activeMode.value === "water"
+  const source = activeMode.value === 'maintenance_mop' ? mopBuildingOptions(props.scopeOptions) : activeMode.value === "water"
     ? waterBuildings.value
     : activeMode.value === 'risk_inspection' ? props.scopeOptions.filter(option => ['110','A','B','C','D','E','H','ALL'].includes(normalizeScopeValue(option.value,''))) : props.scopeOptions;
   return [...source].sort((left, right) => {
@@ -486,7 +487,8 @@ const displayScopeOptions = computed(() => {
 const activeAggregate = computed(() => {
   const allCounts = scopeCounts("ALL");
   const all = props.overview.ALL;
-  if (activeMode.value === "event" ? all?.event_total != null : all?.[`${activeMetricWorkType.value}_pending`] != null) return allCounts;
+  if (activeMode.value !== 'maintenance_mop'
+      && (activeMode.value === "event" ? all?.event_total != null : all?.[`${activeMetricWorkType.value}_pending`] != null)) return allCounts;
   return displayScopeOptions.value.reduce(
     (total, scope) => {
       const code = normalizeScopeValue(scope.value, "");

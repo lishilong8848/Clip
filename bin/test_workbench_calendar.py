@@ -1,8 +1,10 @@
 """Workbench calendar projection tests using isolated Lighthouse data."""
+import asyncio
 import datetime as dt
 import os
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -12,7 +14,7 @@ from fastapi import FastAPI
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from lan_bitable_template_portal.workbench_calendar import (
-    handover_roster, install_workbench_calendar, public_schedule, read_roster, read_zhihang_schedule, TZ,
+    CalendarReads, handover_roster, install_workbench_calendar, public_schedule, read_changes, read_roster, read_zhihang_schedule, TZ,
 )
 
 
@@ -28,6 +30,41 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
                          'endDate': '2026-11-18T14:00:00+08:00'},
                         {'title': 'B楼窗口', 'buildings': ['B楼'], 'startDate': '2026-11-18T10:00:00+08:00',
                          'endDate': '2026-11-18T14:00:00+08:00'}]
+
+    async def test_calendar_keeps_verified_data_while_remote_refresh_is_slow(self):
+        reads = CalendarReads()
+        key = ('seals', 'app-1', 'table-1')
+        reads.cache[key] = (0, self.seals, True)
+        ready = threading.Event()
+
+        def refresh():
+            ready.wait(3)
+            return []
+
+        try:
+            self.assertEqual(await asyncio.wait_for(reads.read(key, refresh), timeout=1), (self.seals, False))
+            task = reads.pending[key]
+            ready.set()
+            self.assertEqual(await task, [])
+            self.assertEqual(await reads.read(key, refresh), ([], True))
+        finally:
+            ready.set()
+            await reads.close()
+
+    async def test_cached_seal_stays_visible_and_is_marked_stale_when_refresh_fails(self):
+        reads = CalendarReads()
+        key = ('seals', 'app-1', 'table-1')
+        reads.cache[key] = (0, self.seals, True)
+        for index in range(35):
+            reads.cache[('other', index)] = (0, [], True)
+
+        def unavailable():
+            raise RuntimeError('isolated outage')
+
+        self.assertEqual(await reads.read(key, unavailable), (self.seals, False))
+        await reads.pending[key]
+        self.assertEqual(await reads.read(key, unavailable), (self.seals, False))
+        self.assertFalse(reads.pending)
 
     def test_calendar_distinguishes_future_conflict_and_unstarted_reminder(self):
         def projected(today):
@@ -53,6 +90,19 @@ class WorkbenchCalendarTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows[0]['dutyStaffActual'], ['甲'])
             snapshot['observed_at'] -= 86400
             self.assertEqual(read_roster(service, day[:7], now.date()), ([], []))
+
+    def test_change_calendar_uses_saved_combined_snapshot_until_independent_table_is_ready(self):
+        new = {'exists': True, 'meta': {'snapshot_mode': 'per_source'}, 'source_versions': {'maintenance': 1}}
+        old = {'exists': True, 'records': [{'record_id': 'rec-change', 'display_fields': {}}]}
+        lookup = lambda _, prefer_independent=True: new if prefer_independent else old
+        service = SimpleNamespace(_state_store=SimpleNamespace(get_source_scope_snapshot=lookup),
+                                  _record_work_type=lambda _: 'change', _change_progress_value=lambda _: '',
+                                  _change_time_range=lambda _: ('2026-11-18 09:00', '2026-11-18 10:00', None),
+                                  _change_title=lambda _: '测试变更', _change_record_building_codes=lambda _: ['D'],
+                                  _repair_management_plain_text=lambda value: value or '')
+        self.assertEqual([row['source_id'] for row in read_changes(service)], ['rec-change'])
+        new.update(source_versions={'change': 1}, records=[])
+        self.assertEqual(read_changes(service), [])
 
     def test_handover_uses_previous_night_and_never_reuses_day_staff_for_tomorrow(self):
         staff = [

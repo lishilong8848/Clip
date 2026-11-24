@@ -31,7 +31,7 @@
       <NButton v-if="canGroup" size="small" @click="openGroups">专业分工<template v-if="Object.keys(currentGroups).length"> · {{ Object.keys(currentGroups).length }} 已调整</template></NButton>
     </div>
     <div class="book-tools" aria-label="工作表导航">
-      <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部</option><option value="电气">电气</option><option value="暖通">暖通</option></select></label>
+      <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部</option><option v-for="name in visibleProfessions ?? professions" :key="name" :value="name">{{ name }}</option></select></label>
       <div v-if="!mobileSheet && report" class="sheet-picker">
         <NSelect size="small" :value="pageKey || null" :options="sheetOptions" filterable placeholder="搜索或切换工作表" :input-props="{'aria-label':'搜索或切换工作表'}" @update:value="selectPage" />
       </div>
@@ -242,9 +242,9 @@ type Active=InspectionVisibilityActive & Progress & {
  id:string;pending:boolean;duty:{scope:string;date:string;shift:string};round:number;review_version:number;professions?:string[]|null;
  started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;available_professions?:string[];sheet_groups?:Record<string,string>;worksheet_mode?:boolean;
  profession_confirmations?:Record<string,{actor?:string;confirmed?:number;version?:string}>;
- profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;
+ profession_versions?:Record<string,string>;confirmation_invalidations?:Record<string,string>;other_professions_pending?:boolean;
 };
-const props=defineProps<{immersive?:boolean;scopes:string[];sourceTime?:number;templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:Active;plannedGroups?:Record<string,string>;readOnly:boolean;parentBusy:boolean}>();
+const props=defineProps<{immersive?:boolean;scopes:string[];sourceTime?:number;templateVersion?:string;archiveRevision?:string;defaultScope?:string;defaultDate?:string;defaultShift?:string;nextRound?:number;active?:Active;plannedGroups?:Record<string,string>;visibleProfessions?:string[];readOnly:boolean;parentBusy:boolean}>();
 const emit=defineEmits<{changed:[];scope:[scope:string];exit:[];'round-state':[state:any]}>();
 const compactMenu=ref(false);
 const phoneMedia=window.matchMedia('(max-width:760px), (max-height:500px) and (pointer:coarse)');
@@ -312,7 +312,8 @@ const historicalGroupRound=computed(()=>roundsBySlot.value.get(
  || (!currentActive.value ? report.value?.rounds.slice(-1)[0] : undefined));
 const displayedGroups=computed(()=>historicalGroupRound.value && historicalGroupRound.value.round_id!==currentActive.value?.id
  ? historicalGroupRound.value.sheet_groups || {} : currentGroups.value);
-const basePages=computed<Page[]>(()=>report.value?.original_templates.flatMap(t=>t.sheets.filter(s=>s.name.trim()!=='封面').map(s=>{const key=JSON.stringify([t.name,s.name]);return {...s,template:t.name,profession:displayedGroups.value[key]||t.profession,homeProfession:t.profession,key,baseKey:key};}))||[]);
+const basePages=computed<Page[]>(()=>report.value?.original_templates.flatMap(t=>t.sheets.filter(s=>s.name.trim()!=='封面').map(s=>{const key=JSON.stringify([t.name,s.name]);return {...s,template:t.name,profession:displayedGroups.value[key]||t.profession,homeProfession:t.profession,key,baseKey:key};}))
+ .filter(page=>!props.visibleProfessions || props.visibleProfessions.includes(page.profession))||[]);
 const orderedBase=computed(()=>{
  const order=orders.value[professionView.value]||[];
  return basePages.value.filter(p=>professionView.value==='ALL'||p.profession===professionView.value).slice().sort((a,b)=>{
@@ -375,9 +376,9 @@ function progressLabel(name:string){
  const pages=pagesFor(name),count=pages.filter(page=>visited.value.has(page.key)).length;
  return hasViewed(name) ? '可确认' : count===pages.length ? '进度待同步' : `已查看 ${count}/${pages.length}`;
 }
-const canSubmit=computed(()=>!!currentActive.value && !awaitingStart.value && (currentActive.value.pending ||
+const canSubmit=computed(()=>!!currentActive.value && !awaitingStart.value && (currentActive.value.pending || !currentActive.value.other_professions_pending &&
  (selectedProfessions.value.length ? selectedProfessions.value.every(name=>confirmedProfessions.value.includes(name)) : allVisited.value)));
-const submitReason=computed(()=>canSubmit.value ? lockReason.value : selectedProfessions.value.length
+const submitReason=computed(()=>canSubmit.value ? lockReason.value : currentActive.value?.other_professions_pending ? '其他专业尚待确认' : selectedProfessions.value.length
  ? '请逐页查看并完成所选专业确认' : '还需查看 '+unvisitedNames.value);
 const joinableProfessions=computed(()=>selectedProfessions.value.length && !confirmedProfessions.value.length
  ? (currentActive.value?.available_professions || professions).filter(name=>!selectedProfessions.value.includes(name)) : []);
@@ -804,7 +805,7 @@ function moveEdit(direction:number){
 function cancelEdit(){const cell=cellElement(editing.value);editing.value='';editor=undefined;if(dirty.value&&!error.value)scheduleSave();void nextTick(()=>cell?.focus({preventScroll:true}));}
 function saveAbnormal(){if(!abnormal.value||!abnormalNote.value.trim())return false;queue(abnormal.value.round,{...abnormal.value.edit,note:abnormalNote.value.trim()});abnormal.value=undefined;return true;}
 function cacheTemplates(templates:Report['original_templates'],version:string){cachedTemplates.value=templates;layoutVersion.value=version;try{localStorage.setItem('inspection-layout:'+scope.value,JSON.stringify({version,templates}));}catch{/* Layout caching is optional. */}}
-function attachTemplates(value:Report){if(value.original_templates?.length){cacheTemplates(value.original_templates,value.template_version||'');return;}if(value.template_version!==layoutVersion.value)throw new Error('巡检模板已更新，请刷新后核对。');value.original_templates=cachedTemplates.value;}
+function attachTemplates(value:Report){if(Array.isArray(value.original_templates)){cacheTemplates(value.original_templates,value.template_version||'');return;}if(value.template_version!==layoutVersion.value)throw new Error('巡检模板已更新，请刷新后核对。');value.original_templates=cachedTemplates.value;}
 function showTemplate(){if(!report.value?.draft_key&&cachedTemplates.value.length)report.value={scope:scope.value,date:day.value,draft_key:'',can_edit_history:false,rounds:[],original_templates:cachedTemplates.value};}
 async function loadTemplates(){const key=context();try{const cached=JSON.parse(localStorage.getItem('inspection-layout:'+scope.value)||'null');if(cached?.version&&cached.version===props.templateVersion&&Array.isArray(cached.templates)&&cached.templates.every((t:{scope?:string})=>t.scope===scope.value)){cachedTemplates.value=cached.templates;layoutVersion.value=cached.version;showTemplate();return;}}catch{}
  try{const data=await requestJson('/api/daily-inspection/templates?scope='+scope.value+'&v='+encodeURIComponent(props.templateVersion||''),{cache:'no-store'}) as {scope:string;version:string;templates:Report['original_templates']};if(disposed||key!==context()||data.scope!==scope.value||(props.templateVersion&&data.version!==props.templateVersion)||!Array.isArray(data.templates))return;cacheTemplates(data.templates,data.version);showTemplate();await nextTick();measureHeight();}catch{/* The data response can still provide the template; its error remains visible. */}}

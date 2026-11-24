@@ -61,7 +61,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
 
                 if request.method == 'GET':
                     if path == 'workspace':
-                        return response(await asyncio.to_thread(svc.workspace_list, actor))
+                        return response(await asyncio.to_thread(svc.workspace_list, actor,
+                            legacy_templates=request.query_params.get('legacy_templates') == '1'))
                     if path == 'workspace/history':
                         query = request.query_params
                         return response(await asyncio.to_thread(svc.workspace_history, actor, query.get('before', ''),
@@ -126,6 +127,8 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                     result = await asyncio.to_thread(svc.inventory, actor)
                 elif path == 'inventory/fields':
                     result = await asyncio.to_thread(svc.new_inventory_fields, actor)
+                elif path == 'inventory/people':
+                    result = await asyncio.to_thread(svc.configuration_people, actor)
                 elif path == 'templates':
                     result = await asyncio.to_thread(svc.template_library, actor)
                 elif path.startswith('inventory/') and path.endswith('/history'):
@@ -205,7 +208,7 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
             return response(error=RiskError('操作结果暂未确认，请刷新工单核对已保存内容。', 503))
 
     for path, methods in (('', ['GET']), ('/archive/{month}', ['GET']), ('/inventory', ['GET']),
-                          ('/inventory/fields', ['GET']),
+                          ('/inventory/fields', ['GET']), ('/inventory/people', ['GET']),
                           # Must precede the /inventory/{identity} catch-all below.
                           ('/inventory/refresh', ['POST']), ('/inventory/{identity}', ['POST']), ('/order-candidates', ['GET']),
                           ('/orders', ['POST']), ('/orders/batch-create', ['GET', 'POST']), ('/orders/batch-delete', ['POST']),

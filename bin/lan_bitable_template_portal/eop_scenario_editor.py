@@ -474,17 +474,25 @@ def install_eop_scenario_routes(app, controller, runtime):
     app.add_event_handler('shutdown', shutdown)
 
     async def endpoint(request: Request):
+        from .module_access import professional_record_visible, session_engineer_professions
+
         try:
             session = await asyncio.to_thread(controller._current_session, request)
             if not session:
                 return controller._auth_required_response()
             user = (session.get('user') or {}).get('open_id') or session.get('open_id')
             granted = await asyncio.to_thread(allowed_modules, runtime.auth_manager, session)
-            if not user or 'drills' not in granted:
-                raise RiskError('需要演练管理权限。', 403)
+            if not user or 'eop_scenarios' not in granted:
+                raise RiskError('需要 EOP 场景维护权限。', 403)
             editor = await asyncio.to_thread(runtime.auth_manager.is_admin, session)
             svc = await asyncio.to_thread(manager)
             rid, ticket = (request.path_params.get(key, '') for key in ('rid', 'ticket'))
+            professions = await asyncio.to_thread(session_engineer_professions, runtime.auth_manager, session)
+            if rid and professions is not None:
+                cache = await asyncio.to_thread(svc.cache)
+                fields = cache['records'].get(rid)
+                if not fields or not professional_record_visible(professions, fields):
+                    raise RiskError('该场景不存在或不在当前专业范围。', 404)
             if request.method == 'GET' and ticket:
                 token, extra = svc.check_ticket(ticket, rid, user, 'preview')
                 if request.query_params.get('original') == '1':
@@ -497,6 +505,8 @@ def install_eop_scenario_routes(app, controller, runtime):
                 if not rid and request.query_params.get('refresh') == '1':
                     await asyncio.to_thread(svc.refresh_cache)
                 data = await asyncio.to_thread(svc.cached_detail, rid, user, editor) if rid else await asyncio.to_thread(svc.cached_list, request.query_params.get('priority_scope','p0'))
+                if not rid and professions is not None:
+                    data = data | {'items': [item for item in data['items'] if professional_record_visible(professions, item)]}
             else:
                 source = urlsplit(request.headers.get('origin') or request.headers.get('referer') or '')
                 expected = urlsplit(controller._request_base_url(request))

@@ -238,6 +238,41 @@ export async function requestJson(
 }
 
 const readRevalidations = new Map<string, Promise<Dict>>();
+
+export async function requestPeople(path: string, options: ApiRequestOptions = {}): Promise<Dict> {
+  const {signal, fresh, ...request} = options;
+  const key = readCacheKey(path, window.location.origin, true);
+  if (!key || fresh || request.cache === 'reload' || request.credentials === 'omit' || request.headers) {
+    if (fresh || request.cache === 'reload') invalidateReadCache();
+    return requestJson(path, { ...request, signal, cache: 'no-store' });
+  }
+  signal?.throwIfAborted();
+  const hit = cachedRead(key);
+  if (hit && Date.now() - hit.at < 30_000) return hit.data;
+  const stamp = readCacheGeneration(), flightKey = key + ':' + stamp;
+  let flight = readRevalidations.get(flightKey);
+  if (!flight) {
+    flight = requestJson(path, { ...request, cache: 'no-store' }).then(data => {
+      if (!data.warning && !data.warnings?.length && data.ready !== false && !data.directory_syncing
+          && !data.empty_reason && !Object.values(data.sources||{}).some(source=>source && (source as Dict).ok===false))
+        saveRead(key, data, stamp);
+      return data;
+    }).catch(error => {
+      if (error.status === 403 && stamp === readCacheGeneration()) invalidateReadCache();
+      throw error;
+    }).finally(() => { if (readRevalidations.get(flightKey) === flight) readRevalidations.delete(flightKey); });
+    readRevalidations.set(flightKey, flight);
+  }
+  return new Promise<Dict>((resolve, reject) => {
+    const cancel = () => reject(new DOMException('请求已取消。', 'AbortError'));
+    signal?.addEventListener('abort', cancel, {once:true});
+    void flight.then(data => {
+      if (signal?.aborted || stamp !== readCacheGeneration()) cancel();
+      else resolve(structuredClone(data));
+    },reject).finally(() => signal?.removeEventListener('abort',cancel));
+  });
+}
+
 window.addEventListener(AUTH_EXPIRED_EVENT, () => { setImpersonationContext(''); setReadCacheIdentity(''); readRevalidations.clear(); });
 window.addEventListener('clipflow-business-changed', () => { invalidateReadCache(); readRevalidations.clear(); });
 

@@ -20,8 +20,8 @@ const clone = value => structuredClone(value);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 const templates = [{ id: 'electrical', name: '电气原表模板' }, { id: 'hvac', name: '暖通原表模板' }];
 const initialAssets = [
-  { id: 'e', name: '电能质量分析仪', scope: 'A', model: 'E-100', brand: '电气品牌', self_cycle: '月度', template_id: 'electrical' },
-  { id: 'h', name: '温湿度仪', scope: 'B', model: 'H-200', brand: '暖通品牌', self_cycle: '年度', template_id: 'hvac' },
+  { id: 'e', name: '电能质量分析仪', scope: 'A', model: 'E-100', brand: '电气品牌', profession: '电气', self_cycle: '月度', template_id: 'electrical', template_name: '电气原表模板.xlsx' },
+  { id: 'h', name: '温湿度仪', scope: 'B', model: 'H-200', brand: '暖通品牌', profession: '暖通', self_cycle: '年度', template_id: 'hvac', template_name: '暖通原表模板.xlsx' },
   { id: 'u', name: '未关联工具', scope: 'A', model: 'U-1', brand: '测试品牌', self_cycle: '月度' },
   { id: 'x', name: '周期冲突工具', scope: 'A', self_cycle: '月度', external_cycle: '年度', eligible_kinds: [], disabled_reason: '同时配置了维护和送检周期，请核对。' },
   { id: 'r1', name: '送检压力表', scope: 'A', model: 'P-100', brand: '计量品牌', external_cycle: '年度' },
@@ -37,9 +37,10 @@ function reset() {
 reset();
 function board() {
   return { assets: state.assets, templates, warning: state.warning, inventory_error: state.inventoryError,
+    monthly_reset_at: state.monthlyReset,
     sessions: [...state.sessions.values()].map(({ items, ...rest }) => ({
       ...rest, item_count: items.length, history_items: items.map(item => ({
-        id: item.id, order_id: item.order_id, asset_name: item.asset.name, scope: item.asset.scope, archive_status: item.archive_status,
+        id: item.id, order_id: item.order_id, asset_name: item.asset.name, scope: item.asset.scope, profession: item.asset.profession, archive_status: item.archive_status,
       })).filter(item => !state.removedOrder || item.order_id !== state.removedOrder),
     })) };
 }
@@ -91,10 +92,23 @@ const server = createServer(async (request, response) => {
       const body = raw.length && !pathname.endsWith('/report') ? JSON.parse(raw.toString()) : null;
       state.calls.push({ method: request.method, path: pathname, body, bytes: raw.length });
       if (pathname === '/api/auth/status') return ok({ logged_in: true,
-        user: { open_id: 'fixture-tools', name: '本地测试人员', role: 'admin', level: 'L0', category: 'engineer', tool_management_enabled: true, modules: ['risk_inspection'] },
+        user: { open_id: 'fixture-tools', name: '本地测试人员', role: 'admin', level: 'L0', category: 'engineer', tool_management_enabled: true, modules: ['tool_management'] },
         allowed_scopes: ['A', 'B'], scope_options: [{ value: 'A', label: 'A楼' }, { value: 'B', label: 'B楼' }], default_scope: 'A' });
       if (pathname === '/api/health') { response.setHeader('Content-Type', 'application/json'); return response.end(JSON.stringify({ ok: true, service: 'clipflow_backend', instance_id: 'tool-workspace-fixture' })); }
       if (pathname === '/api/tool-self-check') return ok({ month: '2026-11', orders: [], followups: state.followups, templates: [], can_manage_templates: true, can_create_orders: true, can_download_month: true, actor_name: '测试人员', inventory_error: state.inventoryError });
+      if (pathname === '/api/tool-self-check/inventory') return ok({ items: state.assets.map(asset => ({
+        ...asset, revision: asset.revision || 0, source_self_cycle: asset.self_cycle, source_external_cycle: asset.external_cycle,
+      })), scrap_approvers: [] });
+      if (pathname === '/api/tool-self-check/inventory/people') return ok({items:[
+        {id:'custodian-a',name:'A楼工具员',category:'operator',final_scopes:['A']},
+        {id:'custodian-b',name:'B楼工具员',category:'operator',final_scopes:['B']},
+      ]});
+      if (pathname === '/api/tool-self-check/inventory/e' && request.method === 'POST') {
+        const asset = state.assets.find(row => row.id === 'e');
+        assert.deepEqual(body, {responsible_id:'custodian-a',revision:asset.revision || 0});
+        Object.assign(asset, {responsible_id:body.responsible_id,responsible_name:'A楼工具员',revision:body.revision+1});
+        return ok({saved:true});
+      }
       if (pathname.endsWith('/remove-followup')) {
         const order = state.followups.find(row => pathname.includes(row.id));
         assert(order?.can_remove_followup && body.revision === order.revision);
@@ -110,9 +124,13 @@ const server = createServer(async (request, response) => {
         state.assets[0].brand = '刷新后的品牌';
         return ok(board());
       }
-      if (pathname === api + '/history') return ok({ sessions: board().sessions, history_cursor: null });
+      if (pathname === api + '/history') {
+        if (state.historyDelay) await delay(state.historyDelay);
+        return ok({ sessions: board().sessions, history_cursor: null });
+      }
       if (pathname === api + '/open') {
         assert.equal(request.method, 'POST'); assert(body.operation_id); assert(body.asset_ids.length);
+        assert(!('template_id' in body) && !('template_ids' in body));
         await delay(180);
         const session = state.sessions.get(state.operations.get(body.operation_id)) || createSession(body);
         if (state.failOpen) { state.failOpen = false; session.status = 'opening'; session.can_edit = false; return fail('模板关联中断，请继续打开。', 503); }
@@ -282,25 +300,66 @@ async function noOverflow(panelSelector = '.tool-workspace') {
   return metrics;
 }
 async function submit(label = '提交审核') { await button(label).click(); await clickTwice(button('确认提交')); }
-async function openWorkspace(label = '打开填写', replaceTemplate = false) {
-  if (replaceTemplate) {
-    await button(label).click();
-    await clickTwice(button('确认'));
-  } else {
-    await clickTwice(button(label));
-  }
-}
-try {
-  await mkdir(output, { recursive: true });
-  browser = await chromium.launch();
-  page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
-  page.setDefaultTimeout(15000);
-  page.on('pageerror', error => errors.push(error.message));
-  await page.route('**/*', route => {
-    const url = new URL(route.request().url());
-    if (url.origin === origin || ['data:', 'blob:'].includes(url.protocol)) return route.continue();
-    blocked.push(url.origin); return route.abort();
+async function openWorkspace(label = '打开填写') { await clickTwice(button(label)); }
+async function checkConfigurations() {
+  await check('profession filters and editable custodians on desktop and mobile', async () => {
+    reset();
+    await page.setViewportSize({width:1366,height:850});
+    await page.goto(legacy);
+    await page.locator('.assets tr').filter({hasText:'电能质量分析仪'}).waitFor();
+    assert.equal(await button('工具与模板').count(),0);
+    await page.locator('[aria-label="筛选工具专业"]').click();
+    await page.getByText('暖通',{exact:true}).click();
+    await page.locator('.assets tr').filter({hasText:'温湿度仪'}).waitFor();
+    assert.equal(await page.locator('.assets tr').filter({hasText:'电能质量分析仪'}).count(),0);
+
+    await page.goto(v2);
+    const filter = page.getByRole('combobox', {name:'筛选工具专业'});
+    const inventory = page.getByRole('region', {name:'筛选后的工具'});
+    await inventory.getByText('电能质量分析仪', {exact:true}).waitFor();
+    assert.equal(await button('工具与模板').count(),0);
+    await filter.selectOption('暖通');
+    assert.equal(await inventory.getByText('电能质量分析仪', {exact:true}).count(),0);
+    await inventory.getByText('温湿度仪', {exact:true}).waitFor();
+    await filter.selectOption('未填写');
+    await inventory.getByText('未关联工具', {exact:true}).waitFor();
+    await filter.selectOption('电气');
+    await inventory.getByText('电能质量分析仪', {exact:true}).waitFor();
+
+    await page.setViewportSize({width:390,height:850});
+    await button('责任人配置').click();
+    const modal = page.getByRole('dialog', {name:'责任人配置'});
+    await modal.getByRole('button', {name:/电能质量分析仪/}).click();
+    await modal.locator('.td-field').filter({hasText:'工具负责人'}).locator('input').click();
+    await page.getByText('A楼工具员', {exact:true}).waitFor();
+    assert.equal(await page.getByText('B楼工具员', {exact:true}).count(),0);
+    await page.getByText('A楼工具员', {exact:true}).click();
+    await modal.getByRole('button', {name:'保存配置',exact:true}).click();
+    await modal.getByText('配置已保存。', {exact:true}).waitFor();
+    const save = modal.getByRole('button', {name:'保存配置', exact:true});
+    await save.waitFor();
+    assert.equal((await save.textContent()).trim(), '保存配置');
+    await noOverflow('.td-dialog');
+    await page.screenshot({path:path.join(output,'tool-responsibility-390.png'),fullPage:true,animations:'disabled'});
+    await modal.getByRole('button',{name:'关闭弹窗',exact:true}).click();
+    await inventory.getByText('负责人 A楼工具员',{exact:true}).waitFor();
+    assert.equal(state.calls.filter(call=>call.path==='/api/tool-self-check/inventory/e').length,1);
+
+    createSession({kind:'self',asset_ids:['e','h'],operation_id:'history-profession'});
+    state.followups = [{id:'followup-h',scope:'B',kind:'self',profession:'暖通',tool_name:'暖通检修工具',outcome:'repair'},
+      {id:'followup-e',scope:'A',kind:'self',profession:'电气',tool_name:'电气检修工具',outcome:'repair'}];
+    await page.getByRole('navigation',{name:'工具管理分区'}).getByRole('button',{name:'办理记录',exact:true}).click();
+    await page.getByRole('combobox',{name:'筛选检修与报废专业'}).selectOption('电气');
+    await page.getByText('电气检修工具',{exact:true}).waitFor();
+    assert.equal(await page.getByText('暖通检修工具',{exact:true}).count(),0);
+    await page.getByRole('combobox',{name:'筛选记录专业'}).selectOption('暖通');
+    await page.getByText('温湿度仪',{exact:true}).waitFor();
+    assert.equal(await page.getByText('电能质量分析仪',{exact:true}).count(),0);
   });
+}
+async function checkExistingWorkspace() {
+  reset();
+  await page.setViewportSize({width:1440,height:1000});
   await page.goto(legacy);
   await page.getByRole('heading', { name: '工具台账' }).waitFor();
   await check('initial GET, explicit POST refresh, visible warning and refreshed inventory', async () => {
@@ -311,28 +370,27 @@ try {
     assert.equal(count('/refresh'), 1);
     assert.equal(state.calls.find(call => call.path === api + '/refresh').bytes, 0);
   });
-  await check('multiple selection groups keep independent template assignments', async () => {
+  await check('legacy selects tools directly and displays the attached workbook and profession', async () => {
     const unavailable = page.getByRole('checkbox', { name: '选择工具 周期冲突工具', exact: true });
     assert.equal(await unavailable.getAttribute('aria-checked'), 'false');
     assert.equal(await button('月度工单').count(), 0);
     await page.getByText('电能质量分析仪', { exact: true }).click();
     assert(await page.getByRole('checkbox', { name: '选择工具 电能质量分析仪', exact: true }).isChecked());
-    await chooseRadio('选用模板 电气原表模板');
     await chooseAssets('温湿度仪');
-    await chooseRadio('选用模板 暖通原表模板');
     await page.getByText('本次 2 台', { exact: true }).waitFor();
     const review = page.getByRole('list', { name: '本次工具和模板', exact: true });
-    assert(await review.getByRole('listitem').filter({ hasText: '电能质量分析仪' }).getByText('电气原表模板').isVisible());
-    assert(await review.getByRole('listitem').filter({ hasText: '温湿度仪' }).getByText('暖通原表模板').isVisible());
-    for (const name of ['电能质量分析仪', '温湿度仪']) {
-      const checkbox = page.getByRole('checkbox', { name: '选择工具 ' + name, exact: true });
-      assert.match(await checkbox.getAttribute('class') || '', /checkbox--disabled/);
-      await page.locator('.assets tr').filter({ hasText: name }).getByText(name, { exact: true }).click();
-      assert.equal(await checkbox.getAttribute('aria-checked'), 'true');
-    }
+    assert(await review.getByRole('listitem').filter({ hasText: '电能质量分析仪' }).getByText('电气原表模板.xlsx').isVisible());
+    assert(await review.getByRole('listitem').filter({ hasText: '温湿度仪' }).getByText('暖通原表模板.xlsx').isVisible());
+    assert.match(await page.locator('.assets tr').filter({ hasText: '温湿度仪' }).innerText(), /专业 暖通/);
+    assert.equal(await page.getByRole('heading', { name: '自检模板库', exact: true }).count(), 0);
     assert.equal(await review.getByRole('listitem').count(), 2);
     await noOverflow();
     await page.screenshot({ path: path.join(output, 'desktop-selection.png'), fullPage: true });
+    await button('取消全部').click();
+    assert.equal(await review.count(), 0);
+    assert(await button('打开填写').isDisabled());
+    await chooseAssets('电能质量分析仪');
+    await chooseAssets('温湿度仪');
   });
   await check('repeat open is guarded; partial opening survives reload; resume is bodyless and retryable', async () => {
     state.failOpen = true;
@@ -340,7 +398,8 @@ try {
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
     assert.equal(count('/open'), 1); assert.equal(state.sessions.size, 1);
     const operation = actions('open')[0].body.operation_id;
-    assert.deepEqual(actions('open')[0].body.template_ids,{ e:'electrical', h:'hvac' });
+    assert.deepEqual(actions('open')[0].body.asset_ids, ['e', 'h']);
+    assert.deepEqual([...state.sessions.values()][0].items.map(item => item.template_id), ['electrical', 'hvac']);
     state.failOpen = true;
     await openWorkspace();
     await page.getByText('模板关联中断，请继续打开。', { exact: true }).waitFor();
@@ -364,8 +423,9 @@ try {
     await button('编辑表格标题').click();
     await page.getByRole('textbox',{name:'填写表格标题'}).fill('逐台复核标题');
     const professional = layouts.electrical.schema.sheet + '!G3';
-    await page.getByRole('button',{name:'编辑 ' + professional + ' 电气', exact:true}).click();
-    await page.getByRole('textbox',{name:'填写 ' + professional, exact:true}).fill('电气检修');
+    const professionInput = page.getByRole('textbox',{name:'填写 ' + professional, exact:true});
+    assert.equal(await professionInput.inputValue(),'电气');
+    await professionInput.fill('电气检修');
     await page.getByLabel('填写 ' + layouts.electrical.schema.sheet + '!C6', { exact: true }).fill('草稿保留内容');
     const select = page.locator('.sheet-table select').first();
     await select.selectOption('是'); await select.selectOption('');
@@ -529,18 +589,12 @@ try {
     assert.deepEqual(actions('submit').at(-1).body.inspection.tools.r2, {result:'unqualified', expires_on:''});
     await page.setViewportSize({ width: 1440, height: 1000 });
   });
-  await check('explicit single template replacement requires confirmation and applies to both selected tools', async () => {
+  await check('tools without a workbook remain visible and cannot be newly filled', async () => {
     reset(); await page.goto(legacy);
-    await chooseAssets('电能质量分析仪', '温湿度仪');
-    await chooseRadio('选用模板 暖通原表模板');
-    await button('打开填写').click();
-    await page.getByText('更换已关联模板？', { exact: true }).waitFor();
-    await button('取消').click(); assert.equal(count('/open'), 0);
-    await openWorkspace('打开填写', true);
-    await page.getByRole('heading', { name: '自检记录', exact: true }).waitFor();
-    assert.equal(count('/open'), 1);
-    assert.deepEqual(actions('open')[0].body.template_ids, { e:'hvac', h:'hvac' });
-    assert([...state.sessions.values()][0].items.every(entry => entry.template.schema.layout === 'hvac'));
+    const tool = page.locator('.assets tr').filter({ hasText: '未关联工具' });
+    await tool.getByText('工具台账缺少模板文件', { exact: true }).waitFor();
+    assert.match(await tool.getByRole('checkbox').getAttribute('class') || '', /checkbox--disabled/);
+    assert(await button('打开填写').isDisabled());
   });
   await check('V2 desktop and mobile selection/editor; multiple templates remain separate', async () => {
     reset(); await page.setViewportSize({ width: 1920, height: 1000 }); await page.goto(v2);
@@ -554,17 +608,35 @@ try {
     await page.setViewportSize({ width: 390, height: 844 });
     await noOverflow('.td-page');
     await page.screenshot({ path: path.join(output, 'mobile-selection.png'), fullPage: true });
-    for (const [kind, tool, template] of [['electrical', '电能质量分析仪', '电气原表模板'], ['hvac', '温湿度仪', '暖通原表模板']]) {
-      const choice = page.getByRole('checkbox', { name: '选择' + tool, exact: true });
-      await choice.check();
-      await button('配对至' + template).click();
-      assert.equal(await choice.isDisabled(), true);
-      await page.locator('.pair-group[data-group="' + kind + '"]').getByRole('button', { name: '移除' + tool, exact: true }).waitFor();
+    const row = page.locator('.pair-asset').filter({ hasText: '电能质量分析仪' });
+    state.historyDelay = 5000;
+    await row.getByRole('button', { name: '记录', exact: true }).click();
+    await page.getByRole('heading', { name: '电能质量分析仪的办理记录' }).waitFor();
+    await button('返回选取工具').click({ timeout: 1500 });
+    await page.getByRole('heading', { name: /^工具清单/ }).waitFor();
+    state.historyDelay = 0;
+    for (const tool of ['电能质量分析仪', '温湿度仪']) {
+      await page.getByRole('checkbox', { name: '选择' + tool, exact: true }).check();
     }
+    assert(await page.getByRole('checkbox', { name: '选择未关联工具', exact: true }).isDisabled());
+    await button('取消全部').click();
+    assert.equal(await page.getByRole('list', { name: '本批工具' }).count(), 0);
+    assert(await button('开始填写自检').isDisabled());
+    for (const name of ['电能质量分析仪', '温湿度仪']) {
+      const choice = page.getByRole('checkbox', { name: '选择' + name, exact: true });
+      assert(!(await choice.isChecked()) && !(await choice.isDisabled()));
+    }
+    for (const [tool, template] of [['电能质量分析仪', '电气原表模板.xlsx'], ['温湿度仪', '暖通原表模板.xlsx']]) {
+      await page.getByRole('checkbox', { name: '选择' + tool, exact: true }).check();
+      const member = page.getByRole('list', { name: '本批工具' }).getByRole('listitem').filter({ hasText: tool });
+      await member.getByText(template, {exact: false}).waitFor();
+    }
+    assert.equal(await page.getByRole('heading', { name: '配对模板', exact: true }).count(), 0);
     await clickTwice(button('开始填写自检'));
     await page.getByRole('heading', { name: '维护自检 · 2 台', exact: true }).waitFor();
     assert.equal(count('/open'), 1);
-    assert.deepEqual(actions('open')[0].body.template_ids, {e: 'electrical', h: 'hvac'});
+    assert.deepEqual(actions('open')[0].body.asset_ids, ['e', 'h']);
+    await page.getByText('专业 电气 · 电气原表模板.xlsx', { exact: true }).waitFor();
     const currentTool = page.getByRole('combobox', { name: '当前工具', exact: true });
     const sheet = page.getByRole('combobox', { name: '工作表', exact: true });
     assert.equal(await sheet.inputValue(), layouts.electrical.schema.sheet);
@@ -657,7 +729,6 @@ try {
     state.assets = Array.from({ length: 200 }, (_, index) => ({ ...clone(initialAssets[0]), id: 'bulk-' + index, name: '批量工具' + (index + 1) }));
     await page.goto(v2);
     await page.getByRole('checkbox', { name: '全选可办', exact: true }).check();
-    await button('沿用各工具已关联模板').click();
     await clickTwice(button('开始填写自检'));
     await page.getByRole('heading', { name: '维护自检 · 200 台', exact: true }).waitFor({ timeout: 30000 });
     const tool = page.getByRole('combobox', { name: '当前工具', exact: true });
@@ -760,6 +831,38 @@ try {
       assert.equal(session.items[0].can_edit, true);
     }
   });
+  await check('V2 refreshes monthly tool selection at the Beijing month boundary', async () => {
+    reset();
+    const original = state.assets.shift();
+    state.assets.push({ ...original, self_cycle: '每月', eligible_kinds: [], monthly_locked: true, disabled_reason: '本月已填写' });
+    state.monthlyReset = '2026-12-01T00:00:00+08:00';
+    await page.clock.install({ time: new Date('2026-11-30T23:59:55+08:00') });
+    await page.goto(v2);
+    await page.getByText('本月已填写', { exact: true }).waitFor();
+    const tool = page.getByRole('checkbox', { name: '选择电能质量分析仪', exact: true });
+    assert(await tool.isDisabled());
+    assert.equal(await page.locator('.pair-asset').last().locator('strong').textContent(), original.name);
+    state.assets.pop();
+    state.assets.unshift(original);
+    state.monthlyReset = '2027-01-01T00:00:00+08:00';
+    await page.clock.fastForward(21_000);
+    await tool.check({timeout: 5000});
+    assert(await tool.isChecked());
+  });
+}
+try {
+  await mkdir(output, { recursive: true });
+  browser = await chromium.launch();
+  page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true });
+  page.setDefaultTimeout(15000);
+  page.on('pageerror', error => errors.push(error.message));
+  await page.route('**/*', route => {
+    const url = new URL(route.request().url());
+    if (url.origin === origin || ['data:', 'blob:'].includes(url.protocol)) return route.continue();
+    blocked.push(url.origin); return route.abort();
+  });
+  await checkConfigurations();
+  if (!process.argv.includes('--configuration-only')) await checkExistingWorkspace();
   assert.deepEqual(errors, []); assert.deepEqual(serverErrors, []); assert.deepEqual(blocked, []);
   verified = true;
   console.log('PASS all tool workspace browser checks');

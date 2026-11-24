@@ -415,6 +415,29 @@ class NoticeUndoTests(unittest.TestCase):
             finally:
                 service._state_store.shutdown_write_worker(timeout=1.0)
 
+    def test_undo_profession_filters_legacy_snapshots_and_direct_actions(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            service = self._service(tmpdir)
+            try:
+                scope = "A"
+                ids = {}
+                for name, specialty in (("electrical", "电气"), ("hvac", "暖通"), ("shared", "")):
+                    ids[name] = service.create_notice_undo_checkpoint(
+                        "update", {"scope": scope, "work_type": WORK_TYPE_MAINTENANCE,
+                                   "target_record_id": "rec-" + name, "building_codes": [scope]},
+                        remote_fields={"名称": "同名维保", "专业": specialty}, scope=scope)
+                visible = service.list_available_notice_undos(scope=scope, professions=("电气",))
+                self.assertEqual({row["undo_id"] for row in visible}, {ids["electrical"], ids["shared"]})
+                with self.assertRaisesRegex(PortalError, "当前专业无权"):
+                    service.create_notice_undo_job(ids["hvac"], scope=scope, professions=("电气",))
+                available = service._available_undo_map(scope, professions=("电气",))
+                self.assertNotIn(ids["hvac"], {row["undo_id"] for row in available.values()})
+                self.assertEqual(len(service.list_available_notice_undos(scope=scope)), 3)
+                job_id = service.create_notice_undo_job(ids["electrical"], scope=scope, professions=("电气",))
+                self.assertEqual(service.get_job(job_id)["request"]["specialty"], "电气")
+            finally:
+                service._state_store.shutdown_write_worker(timeout=1.0)
+
     def test_expired_undo_is_rejected_before_job_creation(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             service = self._service(tmpdir)

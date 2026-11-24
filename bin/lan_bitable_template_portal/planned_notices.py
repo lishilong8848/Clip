@@ -52,7 +52,7 @@ def _ready(service, scope, types):
     return snapshot
 
 
-def candidate_page(service, *, scope, month, work_type="", ongoing_items=(), page=1, page_size=200):
+def candidate_page(service, *, scope, month, work_type="", ongoing_items=(), page=1, page_size=200, professions=None):
     from .identity_utils import canonical_source_record_id, canonical_target_record_id
     types = (work_type,) if work_type else TYPES
     if any(kind not in TYPES for kind in types):
@@ -67,7 +67,8 @@ def candidate_page(service, *, scope, month, work_type="", ongoing_items=(), pag
     rows, seen = [], set()
     for kind in types:
         candidates = service.list_bindable_source_items(scope=scope, month=month,
-            work_type=kind, ongoing_items=list(ongoing_items), limit=None, include_linked=True, strict_month=True)
+            work_type=kind, ongoing_items=list(ongoing_items), limit=None, include_linked=True, strict_month=True,
+            **({'professions': professions} if professions is not None else {}))
         linked_ids = service._state_store.notice_sources_with_targets(kind, [item["source_record_id"] for item in candidates])
         for item in candidates:
             key = (kind, item["source_record_id"])
@@ -85,15 +86,15 @@ def candidate_page(service, *, scope, month, work_type="", ongoing_items=(), pag
             "scope": scope, "month": month}
 
 
-def prefill(service, *, scope, month, work_type, source_record_id, ongoing_items=()):
+def prefill(service, *, scope, month, work_type, source_record_id, ongoing_items=(), professions=None):
     from .workbench_lite import _draft_from_record, _datetime_local, REQUIRED_UPLOAD_FIELDS_BY_WORK_TYPE
     from .portal_service import NOTICE_TYPE_BY_WORK_TYPE, WORK_TYPE_BY_NOTICE_TYPE
     page = candidate_page(service, scope=scope, month=month, work_type=work_type,
-                          ongoing_items=ongoing_items, page_size=500)
+                          ongoing_items=ongoing_items, page_size=500, professions=professions)
     items = page["items"]
     for number in range(2, (page["total"] + 499) // 500 + 1):
         items += candidate_page(service, scope=scope, month=month, work_type=work_type,
-                                ongoing_items=ongoing_items, page=number, page_size=500)["items"]
+                                ongoing_items=ongoing_items, page=number, page_size=500, professions=professions)["items"]
     selected = next((row for row in items if row["source_record_id"] == source_record_id), None)
     if selected is None:
         _error("计划已不在当前可发送列表中，请重新选择；本次未新增。")

@@ -1,6 +1,7 @@
 import { parse } from '@vue/compiler-sfc';
 
 export function adaptAccounts(source) {
+  source = source.replace(/\r\n/g, '\n');
   const { descriptor } = parse(source), edits = [];
   function visit(node) {
     const classes = node.props?.find(p=>p.type===6&&p.name==='class')?.value?.content.split(' ') || [];
@@ -39,7 +40,6 @@ import { navigate as v2Navigate, registerNavigationGuard } from '../workspace-v2
   patch("function closeEditor() { if (saving.value) return;", "function closeEditor(force: unknown = false) { if (saving.value && force !== true) return; if(force !== true && v2Dirty.value){v2Discard(()=>closeEditor(true));return;} v2Baseline.value=''; v2Stale.value=false;");
   patch("saving.value = false; closeEditor(); await load();", "saving.value = false; closeEditor(true); await load();");
   patch('if (!fresh || !canEdit(fresh)) closeEditor();', 'if (!fresh || !canEdit(fresh)) closeEditor(true);');
-  patch("} catch (e: any) { if (!abort.signal.aborted) error.value = e.message || '账号加载失败'; }", "} catch (e: any) { if (!abort.signal.aborted) {error.value = e.message || '账号加载失败'; if([401,403].includes(e.status)){items.value=[];audits.value=[];closeEditor(true);}} }");
   const restoreStart=source.indexOf('    // A rejected save must keep'), restoreEnd=source.indexOf('\n  }\n  finally { saving.value = false; }',restoreStart);
   if(restoreStart<0||restoreEnd<0)throw new Error('Account save failure contract changed');
   source=source.slice(0,restoreStart)+`    if([401,403,409].includes(e.status)||!e.status||e.status>=500){v2Stale.value=true;editorError.value+=' 请重新读取账号状态后再处理。';}

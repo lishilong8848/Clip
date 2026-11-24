@@ -12,10 +12,10 @@ import time
 import uuid
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
-from .risk_inspection import RiskError, RiskInspections, can_scope as risk_can_scope, digest, text
+from .risk_inspection import RiskError, digest, text
 from .tool_management_lifecycle import ToolManagementLifecycle
 from . import tool_result_notices
-from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, dumps, fill_template, month_key
+from .tool_self_check import BUILDINGS, TZ, ToolSelfChecks, can_scope as tool_can_scope, dumps, fill_template, month_key
 from .tool_template_library import ToolTemplateLibrary
 from .tool_workspace import ToolWorkspaceMixin
 
@@ -130,7 +130,7 @@ def trusted_full_access(auth, open_id, person):
 
 
 def can_scope(actor, scope):
-    return scope in BUILDINGS and full_access(actor) or risk_can_scope(actor,scope)
+    return scope in BUILDINGS and ('tool_management' in actor.get('modules', ()) and full_access(actor) or tool_can_scope(actor, scope))
 
 
 def clock():
@@ -179,19 +179,18 @@ def report_file(name, data):
 class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspaceMixin, ToolSelfChecks):
     @staticmethod
     def access(actor):
-        RiskInspections.check(actor)
-        if not full_access(actor) and not ToolManagement.scrap_approver(actor):
-            ToolSelfChecks.access(actor)
+        ToolSelfChecks.access(actor)
 
     @staticmethod
     def administrator(actor):
         return full_access(actor) or ToolSelfChecks.administrator(actor)
 
-    def __init__(self, inspection, cloud, *, people=None, signature=None):
+    def __init__(self, inspection, cloud, *, people=None, signature=None, directory_actor=None):
         super().__init__(inspection)
         self.cloud = cloud
         self.person_for = inspection.person_for
         self.workspace_directory = people
+        self.directory_actor = directory_actor or (lambda row: self.person_for(row['record_id']))
         self.workspace_signature = signature
         self.archive_dir = inspection.db_path.parent / 'tool_management_archives'
         with self.connect(True) as db:
@@ -318,6 +317,9 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             assets = []
             for row in db.execute('SELECT * FROM tool_inventory WHERE active=1'):
                 source, config = json.loads(row['source']), json.loads(row['config'])
+                attachment = source.pop('template_attachment', None)
+                if attachment:
+                    source['template_name'] = attachment['name']
                 assets.append(source | config | {'revision': row['version'],
                     **{f'source_{kind}_cycle': source.get(f'{kind}_cycle', '') for kind in KINDS},
                     **{f'override_{kind}_cycle': config.get(f'{kind}_cycle', '') for kind in KINDS}})
@@ -334,6 +336,23 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         except RiskError:
             return False
         return bool(self.scrap_approver(actor)) or any(can_scope(actor, scope) for scope in BUILDINGS)
+
+    def configuration_people(self, actor):
+        self.access(actor)
+        if not self.administrator(actor):
+            raise RiskError('仅管理员可维护工具配置。', 403)
+        scopes = [scope for scope in BUILDINGS if can_scope(actor, scope)]
+        result = []
+        for row in self.workspace_directory() if self.workspace_directory else []:
+            if not row.get('selectable') or row.get('departed') or not row.get('open_id'):
+                continue
+            try:
+                person = self.directory_actor(row)
+            except RiskError:
+                continue
+            result.append({key: person.get(key, '') for key in ('id', 'name', 'category', 'position')} |
+                          {'final_scopes': [scope for scope in scopes if tool_can_scope(person, scope)]})
+        return {'items': result}
 
     def configure(self, actor, identity, body):
         self.access(actor)
@@ -360,9 +379,11 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             if body.get('revision') != row['version']:
                 raise RiskError('配置已更新，请刷新后重试。', 409)
         updates_cycle = any(kind + suffix in body for kind in KINDS for suffix in ('_cycle', '_first'))
-        config = {} if updates_cycle else json.loads(row['config'])
+        config = json.loads(row['config'])
         if updates_cycle:
             for kind in KINDS:
+                config.pop(kind + '_cycle', None)
+                config.pop(kind + '_first', None)
                 cycle = text(body.get(kind + '_cycle', ''), 10)
                 if cycle and cycle not in CYCLES and cycle != '停用':
                     raise RiskError('请选择有效周期。')
@@ -372,12 +393,26 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
                 if first:
                     config[kind + '_first'] = first
         supervisor = text(body.get('supervisor', ''), 120)
-        if supervisor:
-            if not self.supervisor(self.person_for(supervisor), scope):
-                raise RiskError('请选择对该楼栋有权限的在岗专业主管。')
-            config['supervisor'] = supervisor
-        else:
-            config.pop('supervisor', None)
+        updates_supervisor = 'supervisor' in body or 'responsible_id' not in body
+        if updates_supervisor:
+            if supervisor:
+                if not self.supervisor(self.person_for(supervisor), scope):
+                    raise RiskError('请选择对该楼栋有权限的在岗专业主管。')
+                config['supervisor'] = supervisor
+            else:
+                config.pop('supervisor', None)
+        if 'responsible_id' in body:
+            responsible_id = text(body['responsible_id'], 120)
+            if responsible_id:
+                if responsible_id.startswith('account:'):
+                    raise RiskError('请从人员目录选择工具负责人。')
+                person = self.person_for(responsible_id)
+                if not person.get('name') or not tool_can_scope(person, scope):
+                    raise RiskError('请选择有该楼栋权限的在岗负责人。')
+                config.update(responsible_id=person['id'], responsible_name=person['name'])
+            else:
+                config.pop('responsible_id', None)
+                config.pop('responsible_name', None)
         with self.connect(True) as db:
             row = db.execute('SELECT * FROM tool_inventory WHERE id=? AND active=1', (identity,)).fetchone()
             if not row or row['version'] != body['revision'] or self.effective(row)['scope'] != scope:
@@ -386,9 +421,10 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
             if updates_cycle and cycle_problem.startswith('同时'):
                 raise RiskError(cycle_problem, 409)
             db.execute('UPDATE tool_inventory SET config=?,version=version+1 WHERE id=?', (dumps(config), identity))
-            db.execute("""UPDATE tool_work_orders SET supervisor=?,revision=revision+1
-                WHERE asset_id=? AND scope=? AND kind='external' AND submitted_at IS NULL
-                AND outcome='' AND supervisor<>?""", (supervisor, identity, scope, supervisor))
+            if updates_supervisor:
+                db.execute("""UPDATE tool_work_orders SET supervisor=?,revision=revision+1
+                    WHERE asset_id=? AND scope=? AND kind='external' AND submitted_at IS NULL
+                    AND outcome='' AND supervisor<>?""", (supervisor, identity, scope, supervisor))
         return {'saved': True}
 
     def order_candidates(self, actor):
@@ -775,7 +811,26 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         return full_access(actor) or self.is_building_leader(db, actor, row['scope'], leaders=leaders) or (
             row['kind'] == 'external' and actor['id'] == row['supervisor'] and self.supervisor(actor, row['scope']))
 
+    @staticmethod
+    def _tool_profession(db, asset):
+        if 'profession' not in asset:
+            current = db.execute('SELECT source FROM tool_inventory WHERE id=?', (asset.get('id'),)).fetchone()
+            if current:
+                asset = json.loads(current['source'])
+        return asset.get('profession', '')
+
+    @classmethod
+    def _tool_profession_visible(cls, db, actor, asset):
+        from .module_access import engineer_professions, profession_visible
+
+        professions = engineer_professions(actor)
+        if professions is None:
+            return True
+        return profession_visible(professions, cls._tool_profession(db, json.loads(asset) if isinstance(asset, str) else asset))
+
     def visible(self, db, actor, row, *, leaders=None):
+        if not self._tool_profession_visible(db, actor, row['asset']):
+            return False
         if self.scrap_approver(actor) and row['outcome'] in {'scrap','scrapped','rejected'} and self._scrap_votes(db, row['id']):
             return True
         return can_scope(actor, row['scope']) and (self.administrator(actor) or self.eligible(db, actor, row, leaders=leaders)
@@ -839,6 +894,7 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
         workspace = db.execute('SELECT session_id FROM tool_workspace_items WHERE order_id=?', (row['id'],)).fetchone()
         deletion = self._tool_delete_job(db, row['id'])
         return result | {'tool_name': asset['name'], 'location': asset['location'], 'model': asset['model'],
+                         'profession': self._tool_profession(db, asset),
                          'result_label': result_label, 'tool_status_label': tool_status_label,
                          'from_repair': bool(row['repair_started_at']),
                          'scrap_approvals': [{'name': SCRAP_APPROVERS[vote['employee_no']], 'decision': vote['decision'],

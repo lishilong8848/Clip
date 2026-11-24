@@ -2,6 +2,7 @@
 import asyncio
 import copy
 import json
+import threading
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
@@ -395,6 +396,31 @@ class AccountManagementTests(_TempDirTestCase):
                 self.assertEqual((await client.get('/api/auth/accounts', cookies={'lan_portal_session': building_sid})).status_code, 403)
                 # a manager can list accounts
                 self.assertEqual((await client.get('/api/auth/accounts', cookies={'lan_portal_session': admin_sid})).status_code, 200)
+                # A verified stale directory is available while the replacement is still loading.
+                ready = threading.Event()
+                finished = threading.Event()
+                cached = self.h.login.snapshot
+                cached['loaded_at'] -= 360
+
+                def slow_directory(force=False):
+                    try:
+                        ready.wait(3)
+                        self.h.login.snapshot = {**cached, 'loaded_at': cached['loaded_at'] + 360}
+                        return self.h.login.snapshot
+                    finally:
+                        finished.set()
+
+                with patch.object(self.h.login, 'directory', side_effect=slow_directory):
+                    try:
+                        response = await asyncio.wait_for(
+                            client.get('/api/auth/accounts', cookies={'lan_portal_session': admin_sid}), timeout=2)
+                        self.assertEqual(response.status_code, 200)
+                        data = response.json()['data']
+                        self.assertTrue(data['directory_syncing'])
+                        self.assertIn('recAccount', {item['id'] for item in data['items']})
+                    finally:
+                        ready.set()
+                        await asyncio.to_thread(finished.wait, 3)
                 # cross-origin write rejected even for a manager
                 self.assertEqual((await client.post('/api/auth/accounts/permissions', json={'changes': []}, headers={'Origin': 'https://other'}, cookies={'lan_portal_session': admin_sid})).status_code, 403)
                 # unknown password field rejected

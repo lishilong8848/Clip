@@ -83,22 +83,25 @@ def install_risk_inspection_routes(app, controller, runtime):
                  'position': person.get('position') or '', 'employee_no': person.get('employee_no') or ''}
         RiskInspections.check(actor)
         from .tool_management import trusted_full_access
-        actor['_tool_management_full_access']=trusted_full_access(auth,open_id,person)
+        actor['_tool_management_full_access']='tool_management' in profile['modules'] and trusted_full_access(auth,open_id,person)
         return actor
 
     def directory():
         return runtime.service.get_permission_directory_people().get('items', [])
 
+    def directory_actor(row):
+        if not row or not row.get('selectable') or row.get('departed') or not row.get('open_id'):
+            raise RiskError('人员已不在可用目录中，请管理员核对。', 409)
+        actor = actor_for(row['open_id'], row['name'])
+        if actor['id'] != row['record_id']:
+            raise RiskError('人员身份关系已变化，已停止操作以避免串人。', 409)
+        return actor
+
     def person_for(identity):
         if identity.startswith('account:'):
             return actor_for(identity.removeprefix('account:'))
-        row = next((r for r in directory() if r.get('record_id') == identity and r.get('selectable') and not r.get('departed')), None)
-        if not row or not row.get('open_id'):
-            raise RiskError('人员已不在可用目录中，请管理员核对。', 409)
-        actor = actor_for(row['open_id'], row['name'])
-        if actor['id'] != identity:
-            raise RiskError('人员身份关系已变化，已停止操作以避免串人。', 409)
-        return actor
+        return directory_actor(next((row for row in directory()
+                                     if row.get('record_id') == identity and row.get('selectable') and not row.get('departed')), None))
 
     def recipient(actor):
         from .permission_review_cards import PermissionCards
@@ -146,7 +149,7 @@ def install_risk_inspection_routes(app, controller, runtime):
         inspection, remote = get_services()
         with lock:
             if tool_checks is None:
-                tool_checks = ToolManagement(inspection, ToolCloud(remote), people=directory,
+                tool_checks = ToolManagement(inspection, ToolCloud(remote), people=directory, directory_actor=directory_actor,
                     signature=lambda identity: runtime.service.signature_image_bytes(record_id=identity)[0])
         return tool_checks
 
@@ -232,7 +235,7 @@ def install_risk_inspection_routes(app, controller, runtime):
                         if not row.get('selectable') or row.get('departed') or not row.get('open_id'):
                             continue
                         try:
-                            person = person_for(row['record_id'])
+                            person = directory_actor(row)
                         except RiskError:
                             continue
                         scopes = actor_scopes

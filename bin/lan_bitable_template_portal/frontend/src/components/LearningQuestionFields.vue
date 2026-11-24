@@ -4,15 +4,15 @@
     <label>题干<textarea v-model="question.stem" rows="3" maxlength="12000" required /></label>
     <label v-if="question.type==='interview'">参考答案<textarea v-model="question.answer_text" rows="3" maxlength="12000" /></label>
     <template v-else>
-      <header><strong>选项与正确答案</strong><button type="button" :disabled="question.options.length>=26" @click="add">添加选项</button></header>
+      <header><strong>选项与正确答案</strong><button type="button" :disabled="question.options.length>=26" @click="add"><Plus :size="15" aria-hidden="true"/>添加选项</button></header>
       <div v-for="(option,n) in question.options" :key="option.id" class="learning-option">
         <label><input :type="question.type==='single'?'radio':'checkbox'" :name="group" :checked="question.correct_option_ids.includes(option.id)"
           :aria-label="'选项 '+letter(n)+' 为正确答案'" @change="choose(option.id)">{{ letter(n) }}</label>
         <textarea v-model="option.text" rows="1" maxlength="5000" :aria-label="'选项 '+letter(n)+' 内容'" />
         <div class="learning-option-tools">
-          <button type="button" :disabled="!Number(n)" aria-label="上移选项" @click="move(Number(n),-1)">↑</button>
-          <button type="button" :disabled="Number(n)+1===question.options.length" aria-label="下移选项" @click="move(Number(n),1)">↓</button>
-          <button type="button" aria-label="删除选项" @click="remove(Number(n))">删除</button>
+          <button type="button" :disabled="!Number(n)" aria-label="上移选项" title="上移选项" @click="move(Number(n),-1)"><ChevronUp :size="16" aria-hidden="true"/></button>
+          <button type="button" :disabled="Number(n)+1===question.options.length" aria-label="下移选项" title="下移选项" @click="move(Number(n),1)"><ChevronDown :size="16" aria-hidden="true"/></button>
+          <button type="button" class="option-delete" aria-label="删除选项" title="删除选项" @click="remove(Number(n))"><Trash2 :size="15" aria-hidden="true"/></button>
         </div>
       </div>
     </template>
@@ -22,6 +22,7 @@
 
 <script setup lang="ts">
 import {useId} from 'vue';
+import {ChevronDown,ChevronUp,Plus,Trash2} from 'lucide-vue-next';
 import type {Dict} from '../api/client';
 const props=defineProps<{question:Dict;disabled:boolean;reason?:string}>();
 const group=useId();
@@ -47,10 +48,18 @@ function move(index:number,delta:number){
 .learning-question-fields {display:grid;gap:9px;min-width:0;margin:0;padding:0;border:0}
 .review-reason {margin:0;white-space:pre-wrap;overflow-wrap:anywhere}
 .learning-question-fields>label {display:grid;gap:4px}
-.learning-question-fields textarea {box-sizing:border-box;width:100%;min-width:0;font:inherit;resize:vertical}
+.learning-question-fields textarea {box-sizing:border-box;width:100%;min-width:0;min-height:34px;padding:6px 8px;border:1px solid var(--v2-border,var(--cf-border,#cdd5da));
+  border-radius:7px;background:var(--soft-field,var(--cf-surface,#fff));color:inherit;font:inherit;resize:vertical}
 .learning-question-fields header,.learning-option-tools,.learning-option label {display:flex;align-items:center;gap:6px}
 .learning-question-fields header {justify-content:space-between}
 .learning-option {display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:start;gap:6px}
-.learning-option-tools button {padding-inline:6px}
-@media(max-width:520px){.learning-option {grid-template-columns:auto minmax(0,1fr)}.learning-option-tools {grid-column:2;justify-content:flex-end}}
+.learning-question-fields button{display:inline-flex;align-items:center;justify-content:center;gap:4px;min-height:34px;padding:4px 8px;
+  border:1px solid var(--v2-border,var(--cf-border,#cdd5da));border-radius:7px;background:var(--soft-face,var(--cf-surface,#fff));color:inherit;font:inherit;cursor:pointer}
+.learning-question-fields button:hover:not(:disabled){background:var(--v2-palette-selection,var(--cf-surface-soft,#eef4fa))}
+.learning-question-fields button:disabled,.learning-question-fields:disabled button{opacity:.45;cursor:default}
+.learning-option-tools button{min-width:34px;padding-inline:4px}
+.learning-option-tools .option-delete{color:var(--cf-danger,#a43c31)}
+.learning-option label{min-height:34px;justify-content:center}
+@media(max-width:520px){.learning-option{grid-template-columns:auto minmax(0,1fr)}.learning-option-tools{grid-column:2;justify-content:flex-end}
+  .learning-question-fields button,.learning-option label{min-width:44px;min-height:44px}.learning-question-fields textarea{font-size:16px}}
 </style>

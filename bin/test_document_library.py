@@ -19,7 +19,7 @@ from bin.test_lighthouse_knowledge import FakeEmbedder, FakeMemoryIndex
 
 def actor(scopes=('A',), *, admin=False):
     return {'id': 'ouFixtureAdmin' if admin else 'ouFixturePerson', 'name': 'Fixture',
-        'modules': ['knowledge'], 'scopes': list(scopes), 'is_admin': admin}
+        'modules': ['documents', 'knowledge'], 'scopes': list(scopes), 'is_admin': admin}
 
 
 def configuration(**changes):

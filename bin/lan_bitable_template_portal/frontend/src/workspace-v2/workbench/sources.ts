@@ -5,11 +5,11 @@ import { plannedNoticeTodo, todoOptions, todoSources, sortTodos, todoTimestamp, 
 import { NOTICE_IDS } from '../modules';
 import type { Dict } from '../client';
 import type { Role, Section } from './recipes';
-import { mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
+import { isMopBuilding, mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
-export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection' | 'notice_plans';
+export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection' | 'notice_plans' | 'pre_shift';
 export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; readOnly?:boolean; urgentEvent?:string };
-export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string };
+export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string; snapshot?: Dict };
 type Publish = (partial:SourceResult)=>void;
 export type Source = {
   id: SourceId;
@@ -25,12 +25,12 @@ const labels = {
   critical_guard:'待填写重保', risk_inspection:'专项排查待办',
   water:'水耗待补', learning:'个人学练', signatures:'个人签名',
   event_notices:'事件', drills:'待完成演练', engineer_mop:'待处理维保单', cabinet:'待确认机柜批次',notice_plans:'计划通告',
-  tool_management:'待办工具记录', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',
+  tool_management:'待办工具记录', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',pre_shift:'班前检查',
 };
 const sections: Record<SourceId,Source['section']> = {
   events:'operations', notices:'business', repair_management:'business',
   critical_guard:'operations', risk_inspection:'business', water:'operations', learning:'people', signatures:'people',
-  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',
+  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',pre_shift:'operations',
 };
 const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
 type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string; inspectionOnDuty?:boolean};
@@ -171,13 +171,14 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
           {time:String(item.started_at||item.start_time||'')})]:[]),delayed:!!data.warning};
     });
   }
-  if(!ctx.user.impersonation&&(ctx.accessLevel==='duty'||ctx.inspectionOnDuty)&&['D','E'].includes(ctx.scope)
-    &&ctx.user.modules?.includes('daily')){
+  if(!ctx.user.impersonation&&['operator','shift_leader','duty'].includes(ctx.user.category)&&['D','E'].includes(ctx.scope)
+    &&ctx.user.modules?.includes('daily_inspection')){
     const url=link('/daily-inspection');
     add('inspection',url,[ctx.scope],async(scope,signal)=>{
       const data=await get(scopedUrl('/api/daily-inspection/status',{view_scope:scope}),signal);
-      if(ctx.accessLevel!=='duty'&&(!data.duty||data.can_edit===false))return {rows:[]};
-      if(data.view_scope!==scope||data.duty?.scope!==scope||!Number.isSafeInteger(data.next_round)||!Number.isSafeInteger(data.round_limit))
+      if(data.duty_warning)return {rows:[],delayed:true};
+      if(ctx.user.category!=='duty'&&(!(data.viewer_on_duty??ctx.inspectionOnDuty)||data.can_edit===false))return {rows:[]};
+      if((data.view_scope||data.duty?.scope)!==scope||data.duty?.scope!==scope||!Number.isSafeInteger(data.next_round)||!Number.isSafeInteger(data.round_limit))
         return {rows:[],delayed:true};
       const sameShift=data.active?.duty?.date===data.duty.date&&data.active?.duty?.shift===data.duty.shift;
       const active=sameShift&&data.active?.pending===false;
@@ -199,7 +200,7 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
         {detail:'演练',scheduledAt:item.scheduled_at||item.start_time||item.plan_date,dueAt:todoTimestamp(item.deadline)})];
     })};
   });
-  if (enabled('engineer_mop')) add('engineer_mop',link('/engineer/mop'),buildings,async(scope,signal)=>{
+  if (enabled('engineer_mop')) add('engineer_mop',link('/engineer/mop'),buildings.filter(isMopBuilding),async(scope,signal)=>{
     const data=await get(link('/api/engineer/mop/bootstrap',{scope,month,view:'todos'}),signal);
     return {delayed:data.snapshot_pending===true,rows:array(data.notices).flatMap(item=>{
       if (!item.notice_key||noticeIsEnded(item)||!mopNoticeNeedsAction(item)) return [];
@@ -263,19 +264,27 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
 }
 
 async function readParts(reads:(()=>Promise<SourceResult>)[], signal:AbortSignal, publish?:Publish):Promise<SourceResult> {
-  const results:SourceResult[]=[], errors:unknown[]=[];
-  const combine=(pending=false):SourceResult=>({
+  const finished = new Map<number, SourceResult>(), errors:unknown[]=[];
+  const combine=(pending=false):SourceResult=>{
+    const results = [...finished].sort(([a],[b])=>a-b).map(([,result])=>result);
+    return {
     rows:[...new Map(results.flatMap(result=>result.rows).map(row=>[row.key,row])).values()],
     more:results.some(result=>result.more),
     delayed:pending||errors.some(error=>!accessDenied(error))||results.some(result=>result.delayed),
     restricted:errors.some(accessDenied)||results.some(result=>result.restricted),
     note:results.length===1?results[0]?.note:undefined,
-  });
-  for(const [index,read] of reads.entries()){
-    signal.throwIfAborted();
-    try {results.push(await read());} catch(error){errors.push(error);}
-    if(publish&&index<reads.length-1)publish(combine(true));
+    };
+  };
+  const queue = reads.entries();
+  async function worker(){
+    for(const [index,read] of queue){
+      signal.throwIfAborted();
+      try {finished.set(index,await read());} catch(error){errors.push(error);}
+      signal.throwIfAborted();
+      if(publish&&finished.size+errors.length<reads.length)publish(combine(true));
+    }
   }
-  if(!results.length)throw errors.find(error=>!accessDenied(error))??errors[0];
+  await Promise.all(reads.length>1?[worker(),worker()]:[worker()]);
+  if(!finished.size)throw errors.find(error=>!accessDenied(error))??errors[0];
   return combine();
 }

@@ -17,7 +17,8 @@
   .v2-topnav button {border:0;background:transparent;font:inherit;color:var(--v2-ink);cursor:pointer}
   .topnav-start,.v2-topnav .topnav-brand {display:flex;align-items:center;gap:8px;min-width:0}
   .topnav-start {gap:clamp(8px,1.2vw,18px)}
-  .topnav-brand strong {font-size:22px;letter-spacing:.065em;color:var(--v2-ink)}
+  .topnav-brand strong {font-size:clamp(15px,1.2vw,19px);letter-spacing:.015em;color:var(--v2-ink);white-space:nowrap}
+  .v2-header .v2-brand > span {font-size:clamp(13px,1.6vw,19px)}
   .topnav-mark {width:38px;height:38px;display:grid;place-items:center;color:#16573c;border-radius:50% 50% 50% 12px;background:linear-gradient(135deg,#a3dcf2,#a1efb7);box-shadow:var(--soft-key)}
   .v2-topnav .topnav-home {display:inline-flex;align-items:center;gap:7px;min-height:40px;padding:0 12px;
     border:1px solid var(--v2-palette-accent-text);border-radius:10px;background:var(--v2-palette-selection);

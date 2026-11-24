@@ -19,7 +19,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { NButton, NSelect } from 'naive-ui';
-import { requestJson, type Dict } from '../api/client';
+import { requestJson, requestPeople, type Dict } from '../api/client';
 import { randomHexId } from '../browserStorage';
 const props=defineProps<{scope:string;noticeKey:string;role:'implementer'|'auditor';resume?:Dict|null}>();
 const emit=defineEmits<{close:[];busy:[value:boolean];changed:[value:{scope:string;noticeKey:string;person?:Dict}]}>();
@@ -32,7 +32,7 @@ const operationId=String(props.resume?.operation_id||randomHexId());
 let sendId=String(props.resume?.send_operation_id||randomHexId()),expectedRequest=String(props.resume?.request_id||''),disposed=false,read:AbortController|undefined;
 async function load(){
   read?.abort();const controller=new AbortController();read=controller;loading.value=true;loadError.value=false;error.value=String(props.resume?.signature_reason||'');
-  try{const data=await requestJson('/api/signatures/management/mop-people?'+new URLSearchParams({scope:props.scope,notice_key:props.noticeKey}),{signal:controller.signal,cache:'no-store'});
+  try{const data=await requestPeople('/api/signatures/management/mop-people?'+new URLSearchParams({scope:props.scope,notice_key:props.noticeKey}),{signal:controller.signal,cache:'no-store'});
     if(disposed||controller.signal.aborted)return;
     if(!Array.isArray(data.scope_options)||!Array.isArray(data.recipients))throw new Error('接收人信息不完整，请重新读取。');
     scopes.value=data.scope_options;recipients.value=data.recipients;

@@ -2,7 +2,7 @@
 import {computed,nextTick,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {NAlert,NButton,NCheckbox,NCheckboxGroup,NEmpty,NForm,NFormItem,NInput,NSelect,NSpin,NTag,useDialog,useMessage} from 'naive-ui';
 import {ArrowLeft,RefreshCw,Send,ShieldCheck} from 'lucide-vue-next';
-import {ApiError,requestJson,type Dict} from './client';
+import {ApiError,requestJson,requestPeople,type Dict} from './client';
 import {registerNavigationGuard} from './navigation';
 const props=defineProps<{user:Dict}>();
 const emit=defineEmits<{back:[];changed:[]}>();
@@ -17,10 +17,12 @@ function matchesRequest(){
 }
 const approver=computed<Dict|undefined>(()=>data.value.items?.find((row:Dict)=>row.open_id===form.approver));
 const people=computed(()=> (data.value.items||[]).map((row:Dict)=>({value:row.open_id,label:row.name+' · '+row.level})));
+const emptyApprovers=computed(()=>data.value.empty_reason || (error.value ? '审批人读取失败，请刷新。' : '暂无可选审批人'));
+const notificationLabel=computed(()=>({queued:'飞书审批卡片待发送',sent:'飞书审批卡片已发送',failed:'飞书审批卡片发送失败',expired:'飞书审批卡片已过期'} as Record<string,string>)[request.value.notification_status] || '');
 const scopeOptions=computed(()=> (data.value.scope_options||[]).filter((row:Dict)=>approver.value?.scopes?.includes(row.value)&&(row.value!=='ALL'||['L0','L1'].includes(form.level))));
-const moduleOptions=computed(()=> (data.value.module_options||[]).filter((row:Dict)=>approver.value?.modules?.includes(row.value)&&!(row.value==='accounts'&&form.level==='L4')));
+const moduleOptions=computed(()=> (data.value.module_options||[]).filter((row:Dict)=>approver.value?.modules?.includes(row.value)&&!(row.value==='accounts'&&form.level==='L4')&&(!row.admin_only||['L0','L1'].includes(form.level))));
 const groups=computed(()=>[...new Set(moduleOptions.value.map((row:Dict)=>row.group||'功能模块'))].map(group=>({label:String(group),items:moduleOptions.value.filter((row:Dict)=>(row.group||'功能模块')===group)})));
-let timer=0,disposed=false;
+let timer=0,disposed=false,statusSequence=0;
 const abort=new AbortController();
 const stop=registerNavigationGuard((_url,proceed)=>{if(busy.value){message.warning('正在提交申请，请等待结果');return false;}if(dirty.value){dialog.warning({title:'放弃未提交的权限申请？',positiveText:'放弃修改',negativeText:'继续填写',onPositiveClick:proceed});return false;}return true;});
 watch(()=>form.approver,()=>{
@@ -31,9 +33,14 @@ watch(()=>form.approver,()=>{
   form.modules=(own.modules||[]).filter((value:string)=>moduleOptions.value.some((row:Dict)=>row.value===value));
 });
 watch(()=>form.level,()=>{form.modules=form.modules.filter(value=>moduleOptions.value.some((row:Dict)=>row.value===value));form.scopes=['L0','L1'].includes(form.level)?scopeOptions.value.map((row:Dict)=>row.value):form.scopes.filter(value=>scopeOptions.value.some((row:Dict)=>row.value===value));});
-async function load(){
+async function load(fresh=false){
   if(busy.value||loading.value)return;loading.value=true;error.value='';
-  try{data.value=await requestJson('/api/auth/permission-approvers',{signal:abort.signal,cache:'no-store'});await status();
+  try{
+    const receipt=status(false).then(()=>{uncertain.value=false;},e=>{
+      uncertain.value=true;error.value=(e as Error).message;
+    });
+    const [,directory]=await Promise.allSettled([receipt,refreshApprovers(fresh)]);
+    if(directory.status==='rejected')throw directory.reason;
     if(!form.approver&&request.value.approver_open_id&&people.value.some((item:Dict)=>item.value===request.value.approver_open_id)){
       form.approver=request.value.approver_open_id;await nextTick();
       if(request.value.requested_access){form.level=request.value.requested_access.level;await nextTick();for(const key of ['category','scopes','modules'] as const)(form as Dict)[key]=request.value.requested_access[key];form.reason=request.value.reason||'';}
@@ -41,23 +48,35 @@ async function load(){
       await nextTick();baseline.value=JSON.stringify(form);
     }
     if(matchesRequest())baseline.value=JSON.stringify(form);
-    uncertain.value=false;
   }
   catch(e){if(!disposed)error.value=(e as Error).message;}finally{loading.value=false;}
 }
-async function status(){
-  const id=request.value.request_id;
+async function refreshApprovers(fresh=false){
+  const sequence=statusSequence;
+  try{
+    const options=await requestPeople('/api/auth/permission-approvers',{signal:abort.signal,fresh});
+    if(disposed||sequence!==statusSequence)return;
+    data.value=options;
+    if(form.approver&&!approver.value)form.approver='';
+  }catch(e){
+    if(disposed||sequence!==statusSequence)return;
+    data.value={...data.value,items:[],empty_reason:''};
+    throw e;
+  }
+}
+async function status(refreshOptions=true){
+  const id=request.value.request_id,sequence=++statusSequence;
   const result=await requestJson('/api/auth/permission-requests/current'+(id?'?request_id='+encodeURIComponent(id):''),{signal:abort.signal,cache:'no-store'});
-  if(disposed||id!==request.value.request_id)return;
+  if(disposed||sequence!==statusSequence||id!==request.value.request_id)return;
   const previous=request.value.status;request.value=result.request||{};
   if(previous==='pending'&&request.value.status!=='pending'){
     emit('changed');
-    if(request.value.status==='approved')data.value=await requestJson('/api/auth/permission-approvers',{signal:abort.signal,cache:'no-store'});
+    if(refreshOptions&&request.value.status==='approved')await refreshApprovers(true);
   }
   window.clearTimeout(timer);
   if(request.value.status==='pending')timer=window.setTimeout(poll,10000);
 }
-async function poll(){if(disposed)return;try{if(!document.hidden&&!busy.value)await status();}catch(e){if(!disposed)error.value=(e as Error).message;}finally{if(!disposed&&request.value.status==='pending'){window.clearTimeout(timer);timer=window.setTimeout(poll,10000);}}}
+async function poll(){if(disposed)return;try{if(!document.hidden&&!busy.value&&!loading.value)await status();}catch(e){if(!disposed)error.value=(e as Error).message;}finally{if(!disposed&&request.value.status==='pending'){window.clearTimeout(timer);timer=window.setTimeout(poll,10000);}}}
 async function submit(){
   if(busy.value||uncertain.value||!approver.value||!form.level||!form.category||!form.scopes.length||!form.reason.trim()||(!dirty.value&&request.value.status==='pending'))return;
   busy.value=true;error.value='';
@@ -71,26 +90,28 @@ onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onB
 <template>
   <section class="serenity-desk access-desk v2-access-request">
     <header class="serenity-heading"><div><h1>申请权限</h1><p>{{ user.name }} · {{ data.current?.level || user.level }}</p></div>
-      <div class="serenity-actions"><NButton :loading="loading" :disabled="busy" aria-label="刷新申请结果" @click="load"><RefreshCw :size="15" />刷新</NButton><NButton @click="emit('back')">返回个人信息</NButton></div></header>
+      <div class="serenity-actions"><NButton :loading="loading" :disabled="busy" aria-label="刷新申请结果" @click="load(true)"><RefreshCw :size="15" />刷新</NButton><NButton @click="emit('back')">返回个人信息</NButton></div></header>
     <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
     <article v-if="request.request_id" class="serenity-panel access-receipt"><div><small>最近一次申请</small>
       <h2>{{ ({pending:'等待审批',approved:'权限已生效',rejected:'申请已驳回',superseded:'已提交新申请'} as Record<string,string>)[request.status] || '申请状态待核验' }}</h2></div>
-      <div><strong>{{ request.approver_name }}</strong><p>{{ request.reject_reason || request.reason }}</p></div>
-      <NButton v-if="request.notification_status==='failed'" :disabled="busy" @click="retry">重试审批提醒</NButton></article>
+      <div><strong>{{ request.approver_name }}</strong><p>{{ request.reject_reason || request.reason }}</p>
+        <p v-if="notificationLabel" role="status">{{ notificationLabel }}<template v-if="request.notification_error"> · {{ request.notification_error }}</template></p></div>
+      <NButton v-if="request.status==='pending' && request.notification_status==='failed'" :disabled="busy||loading" @click="retry">重试审批提醒</NButton></article>
     <form class="access-grid" @submit.prevent="submit">
       <section class="serenity-panel access-settings"><h2>审批与岗位</h2>
-        <label>审批人<NSelect v-model:value="form.approver" :options="people" filterable :disabled="busy" aria-label="审批人"/></label>
+        <label>审批人<NSelect v-model:value="form.approver" :options="people" filterable :loading="loading" :disabled="busy || loading || !people.length" :placeholder="loading ? '读取审批人…' : people.length ? '选择接收飞书审批卡片的人' : '暂无可选审批人'" aria-label="审批人"/></label>
+        <p v-if="!loading && !people.length" role="status">{{ emptyApprovers }}</p>
         <div class="access-pair"><label>权限等级<NSelect v-model:value="form.level" :options="approver?.level_options||[]" :disabled="!approver||busy" aria-label="权限等级"/></label>
         <label>岗位<NSelect v-model:value="form.category" :options="approver?.category_options||[]" :disabled="!approver||busy" aria-label="岗位"/></label></div>
         <label>申请原因<NInput v-model:value="form.reason" type="textarea" :disabled="busy" aria-label="申请原因"/></label>
       </section>
       <section class="serenity-panel access-grants"><header class="serenity-heading"><h2>授权范围</h2>
         <NButton type="primary" attr-type="submit" :loading="busy" :disabled="loading||uncertain||!approver||!form.level||!form.category||!form.scopes.length||!form.reason.trim()||(!dirty && request.status==='pending')"><Send :size="15" />提交申请</NButton></header>
-        <p v-if="!approver">选择审批人后可查看申请范围。</p>
-        <template v-else><h3>楼栋</h3><NCheckboxGroup v-model:value="form.scopes" :disabled="busy || ['L0','L1'].includes(form.level)">
+        <p v-if="!approver && people.length">选择审批人后可查看申请范围。</p>
+        <template v-else-if="approver"><h3>楼栋</h3><NCheckboxGroup v-model:value="form.scopes" :disabled="busy || ['L0','L1'].includes(form.level)">
           <NCheckbox v-for="option in scopeOptions" :key="option.value" :value="option.value">{{ option.label }}</NCheckbox></NCheckboxGroup>
           <h3>功能模块</h3><NCheckboxGroup v-model:value="form.modules" :disabled="busy"><div v-for="group in groups" :key="group.label" class="access-block">
-            <strong>{{ group.label }}</strong><div><NCheckbox v-for="module in group.items" :key="module.value" :value="module.value">{{ module.label }}</NCheckbox></div></div></NCheckboxGroup></template>
+            <strong>{{ group.label }}</strong><div><NCheckbox v-for="module in group.items" :key="module.value" :value="module.value">{{ module.label }}<small v-if="module.includes">含 {{ module.includes }}</small></NCheckbox></div></div></NCheckboxGroup></template>
       </section>
     </form>
   </section>
@@ -99,5 +120,6 @@ onMounted(()=>{void load();window.addEventListener('beforeunload',unload);});onB
 .access-grid{display:grid;grid-template-columns:minmax(235px,.85fr) minmax(0,1.6fr);gap:12px;align-items:start}.access-settings{display:grid;gap:9px}.access-settings label{display:grid;gap:4px}.access-pair{display:grid;grid-template-columns:1fr 1fr;gap:8px}
 .access-desk h2{margin:0;font-size:17px}.access-desk h3{font-size:14px;margin:10px 0 5px}.access-block{display:grid;grid-template-columns:minmax(5em,.24fr) 1fr;align-items:baseline;gap:10px;padding:6px 0;border-top:1px solid var(--soft-edge)}.access-block .n-checkbox,.access-grants>.n-checkbox-group>.n-checkbox{margin:3px 8px 3px 0}
 .access-receipt{display:flex;align-items:center;flex-wrap:wrap;gap:8px 18px}.access-receipt small,.access-receipt p{color:var(--v2-muted);margin:0}
+.access-block small{display:block;color:var(--v2-muted);line-height:1.4;white-space:normal}.access-settings p{margin:0;color:var(--v2-muted)}
 @media(max-width:700px){.access-grid{grid-template-columns:1fr}.access-block{grid-template-columns:1fr;gap:3px}}
 </style>

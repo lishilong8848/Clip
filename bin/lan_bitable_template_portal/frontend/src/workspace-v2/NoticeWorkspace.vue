@@ -167,7 +167,7 @@ import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCard,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,useDialog,useMessage } from 'naive-ui';
 import { CalendarDays,ClipboardList,Inbox,Link2,Radio,RadioTower,Ellipsis,History,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
-import { ApiError,requestJson,refreshRemoteSourceAndWait,type Dict } from './client';
+import { ApiError,requestJson,requestPeople,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
 import { workspaceUrl } from './version';
@@ -190,7 +190,7 @@ import {rememberNoticeTask} from './noticeTasks';
 import LighthouseNoticeSop from '../components/LighthouseNoticeSop.vue';
 import NoticeAlertTags from '../components/NoticeAlertTags.vue';
 import { createRepairOperationId } from '../repairManagementUtils';
-import { noticeIsEnded } from '../mopSelectionUtils';
+import { isMopBuilding, mopBuildingOptions, noticeIsEnded } from '../mopSelectionUtils';
 import {readNoticeBuildings} from './noticeBuildingPages';
 import WidgetScopePicker from './dashboard/WidgetScopePicker.vue';
 const props=defineProps<{url:string;scope:string;scopes:{value:string;label:string}[];selectedScopes?:string[];user:Dict;active:boolean;recordOnly?:boolean}>();
@@ -224,14 +224,15 @@ const scopeLabel=computed(()=>selectedBuildings.value?selectedBuildings.value.ma
 const buildingOptions=computed(()=>props.scopes.filter(s=>['110',...'ABCDEH'].includes(s.value)));
 const sopTypes=computed(()=>types.value.filter(t=>['maintenance','polling','adjust'].includes(t.id)).map(t=>({value:t.id,label:t.label})));
 const newOptions=computed(()=>[...types.value.filter(t=>t.id!=='all'&&(kind.value==='all'||t.id===kind.value)).map(t=>({key:t.id,label:'手动填写'+t.label})),{type:'divider',key:'divider'},{key:'paste',label:'粘贴原文解析'}]);
-const moreOptions=computed(()=>[{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...(sopTypes.value.length?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...((props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维护单管理'}]:[]),...((props.user.modules||[]).includes('accounts')?[{key:'memory',label:'历史记忆管理'}]:[])]);
+const mopScope=computed(()=>isMopBuilding(props.scope)?props.scope:['ALL','CAMPUS'].includes(props.scope)?mopBuildingOptions(props.scopes)[0]?.value||'':'');
+const moreOptions=computed(()=>[{key:'records',label:'本机办理记录'},{key:'undo',label:'近三天回退'},...((props.user.modules||[]).includes('sops')?[{key:'sop',label:'SOP与工单模板'}]:[]),...((props.user.role==='admin'||props.user.is_admin===true)&&types.value.some(t=>t.id==='change')?[{key:'change',label:'变更确认'}]:[]),...(mopScope.value&&(props.user.modules||[]).includes('engineer_mop')?[{key:'mop',label:'维保单办理'}]:[]),...((props.user.modules||[]).includes('notice_history')?[{key:'memory',label:'历史记忆管理'}]:[])]);
 const refreshOptions=computed(()=>[{key:'page',label:'刷新本页'},...types.value.filter(t=>['maintenance','change','repair'].includes(t.id)).map(t=>({key:t.id,label:'同步'+t.label+'源表'}))]);
 const changeOpen=ref(false),pasteOpen=ref(false),pasteText=ref(''),pasteError=ref(''),parsing=ref(false),syncing=ref(false);
 const recordsOpen=ref(false),historyOpen=ref(false);
 const historyDialog=ref<InstanceType<typeof NoticeHistory>|null>(null);
 function openRecords(){recordsOpen.value=true;}
 let syncAbort:AbortController|undefined;
-function more(key:string){if(key==='paste')newNotice('paste');else if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(props.scope));}
+function more(key:string){if(key==='paste')newNotice('paste');else if(key==='undo')void openUndo();else if(key==='sop')navigate('/?'+new URLSearchParams({view:'sops',scope:props.scope,work_type:kind.value}));else if(key==='change')changeOpen.value=true;else if(key==='records')void openRecords();else navigate((key==='mop'?'/engineer/mop':'/admin/history-memory')+'?scope='+encodeURIComponent(key==='mop'?mopScope.value:props.scope));}
 function newNotice(key:string){if(key==='event'){setKind('event');return;}if(key==='paste'){pasteError.value='';pasteOpen.value=true;}else void openRecord(null,false,'start','',key);}
 async function refreshSource(key:string){if(key==='page'){void load(true);return;}if(syncing.value||!refreshOptions.value.some(t=>t.key===key))return;syncing.value=true;error.value='';syncAbort=new AbortController();try{await refreshRemoteSourceAndWait(key as 'maintenance'|'change'|'repair','/api/'+key+'-refresh?scope='+encodeURIComponent(props.scope),{scope:props.scope,signal:syncAbort.signal});await load(true);}catch(e){if(!syncAbort.signal.aborted)error.value=(e as Error).message;}finally{syncing.value=false;}}
 function pasteNoticeText(event:ClipboardEvent){
@@ -572,7 +573,7 @@ async function loadSops(q=''){
   sopField.value={...sopField.value,directory_loading:true,notice_scope:s,work_type:current.values.work_type};
   try{
     const sops=await requestJson('/api/polling-sops?'+new URLSearchParams({scope:s,work_type:current.values.work_type}));
-    const people=await requestJson('/api/signatures/people?'+new URLSearchParams({limit:'200',q}));
+    const people=await requestPeople('/api/signatures/people?'+new URLSearchParams({limit:'200',q}));
     if(form.value!==current||sopScope.value!==s)return;
     const combined=new Map<string,Dict>((sopField.value.people||[]).map((p:Dict)=>[p.record_id,p]));
     for(const p of people.people||[])combined.set(p.record_id,p);

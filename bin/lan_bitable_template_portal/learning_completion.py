@@ -484,20 +484,26 @@ def workbench_summary(service, scopes, query):
     current = core.now()
     dates = _report_dates(query, current.date().isoformat())
     data, directory = _data(service), directory_for_learning(service)
-    filters = [''] if set(scopes) == set(core.SCOPES) else scopes
+    include_detail = query.get('detail') == '1'
+    filters = [''] if not include_detail and set(scopes) == set(core.SCOPES) else scopes
     priority = {state: rank for rank, state in enumerate(
         ('未安排', '已完成', '未到时', '待答', '答题中', '逾期', '待核对'))}
     counts = Counter()
+    detail = defaultdict(list)
     for date in dates:
         people = {}
         for scope in filters:
-            for row in project(service, date, scope=scope, current=current, data=data, entry_directory=directory):
+            rows = project(service, date, scope=scope, current=current, data=data, entry_directory=directory)
+            if include_detail:
+                daily = Counter(row['status'] for row in rows)
+                detail[scope].append({'date': date, 'summary': {state: daily[state] for state in STATES}})
+            for row in rows:
                 person, status = row['person_id'], row['status']
                 if priority[status] > priority.get(people.get(person), -1):
                     people[person] = status
         counts.update(people.values())
     return {'summary': {state: counts[state] for state in STATES}, 'scopes': list(scopes),
-            'from': dates[0], 'to': dates[-1]}
+            'from': dates[0], 'to': dates[-1], **({'by_scope': dict(detail)} if include_detail else {})}
 
 
 def report(service, actor, query):

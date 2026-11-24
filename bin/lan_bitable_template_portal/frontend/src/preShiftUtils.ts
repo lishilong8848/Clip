@@ -3,7 +3,7 @@ import type { Dict } from './api/client';
 const scopes = ['110', 'A', 'B', 'C', 'D', 'E', 'H'];
 
 export function preShiftHomeAccount(user: Dict): boolean {
-  return !['guest', 'temporary'].includes(user.role) && Array.isArray(user.modules) && user.modules.length > 0
+  return !['guest', 'temporary'].includes(user.role) && Array.isArray(user.modules) && user.modules.includes('pre_shift')
     && ['operator', 'shift_leader', 'duty'].includes(user.category);
 }
 
@@ -12,7 +12,7 @@ export function preShiftHomeVisible(user: Dict, state?: Dict): boolean {
 }
 
 export function preShiftScopes(user: Dict): string[] {
-  if (user.role === 'guest' || !Array.isArray(user.modules) || !user.modules.length) return [];
+  if (user.role === 'guest' || !Array.isArray(user.modules) || !user.modules.includes('pre_shift')) return [];
   if (['L0', 'L1'].includes(user.level) || ['supervisor', 'manager'].includes(user.category)) {
     const allowed = Array.isArray(user.scope_rules) ? user.scope_rules : [];
     return scopes.filter(scope => allowed.includes('ALL') || allowed.includes(scope));

@@ -39,7 +39,7 @@ def _scopes(values, *, empty=False):
 def _member(actor):
     if not isinstance(actor, dict) or not actor.get('id') or actor.get('is_guest') or actor.get('role') == 'guest':
         raise AssistantError('请先登录。', 401)
-    if 'knowledge' not in actor.get('modules', []):
+    if 'documents' not in actor.get('modules', []):
         raise AssistantError('当前账号没有共享知识库权限。', 403)
 
 

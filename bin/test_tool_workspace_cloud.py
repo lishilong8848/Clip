@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 
 from bin.lan_bitable_template_portal.risk_inspection import RiskError
 from bin.lan_bitable_template_portal.tool_management_cloud import (
-    BASE, DETAIL, INVENTORY, KEY, LEDGER_FIELDS, LEDGER_SELECTS, ORGANIZATION, STATE, TABLES, TEMPLATE_FILE, TEMPLATE_HASH,
+    BASE, DETAIL, INVENTORY, INVENTORY_TEMPLATE, KEY, LEDGER_FIELDS, LEDGER_SELECTS, ORGANIZATION, STATE, TABLES, TEMPLATE_FILE, TEMPLATE_HASH,
     TEMPLATE_LINK, TEMPLATE_NAME, TEMPLATE_TABLE, WORKSPACE_CREATE_RETRY_SECONDS, ToolCloud,
 )
 from upload_event_module.services.http_client import FeishuHTTPError
@@ -65,6 +65,8 @@ class FakeFeishu:
             return self.rows(table)
         if table == TEMPLATE_TABLE:
             return [{'field_name': TEMPLATE_FILE, 'field_id': 'fldTemplate', 'type': 17}]
+        if table == INVENTORY:
+            return [{'field_name': INVENTORY_TEMPLATE, 'field_id': 'fldAssetTemplate', 'type': 17}]
         common = [(KEY, 1, {}), (STATE, 1, {}), (DETAIL, 1, {}), ('楼栋', 3, {})]
         if table == TABLES['maintenance']:
             fields = common + [
@@ -267,6 +269,27 @@ class ToolWorkspaceCloudTests(unittest.TestCase):
         with self.assertRaises(RiskError) as large:
             self.tool.download_template(self.tool.templates()[0])
         self.assertEqual(large.exception.status, 413)
+
+    def test_inventory_template_and_profession_use_the_tool_record(self):
+        fields = self.transport.records[INVENTORY, 'recAsset']
+        fields['专业'] = {'text': '暖通'}
+        fields[INVENTORY_TEMPLATE] = [{'file_token': 'tool-file', 'name': '暖通自检.xlsx', 'size': len(WORKBOOK)}]
+        assets, _ = self.tool.inventory()
+        asset, = assets
+        self.assertEqual(asset['profession'], '暖通')
+        self.assertEqual(asset['template_attachment']['name'], '暖通自检.xlsx')
+        descriptor = asset['template_attachment'] | {'id': asset['id']}
+        self.assertEqual(self.tool.download_template(descriptor, inventory=True), WORKBOOK)
+        url, _, _ = self.transport.downloads[-1]
+        self.assertEqual(json.loads(parse_qs(urlsplit(url).query)['extra'][0])['bitablePerm'],
+                         {'tableId': INVENTORY, 'attachments': {'fldAssetTemplate': {'recAsset': ['tool-file']}}})
+        fields[INVENTORY_TEMPLATE][0]['file_token'] = 'replacement'
+        with self.assertRaisesRegex(RiskError, '附件已变化'):
+            self.tool.download_template(descriptor, inventory=True)
+        fields[INVENTORY_TEMPLATE].append(fields[INVENTORY_TEMPLATE][0].copy())
+        assets, _ = self.tool.inventory()
+        self.assertIsNone(assets[0]['template_attachment'])
+        self.assertIn('一份 XLSX', assets[0]['template_error'])
 
     def test_bind_compare_and_verify_with_lost_receipt(self):
         fields = self.transport.records[(INVENTORY, 'recAsset')]

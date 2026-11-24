@@ -65,7 +65,7 @@ class ToolManagementTest(TestCase):
 
     def full_actor(self,name):
         return actor(scope='H',identity=name) | {'name':name,'level':'L4','category':'engineer',
-             'modules':[],'scope_rules':['H'],'_tool_management_full_access':True}
+             'modules':['tool_management'],'scope_rules':['H'],'_tool_management_full_access':True}
 
     def test_designated_people_can_manage_all_buildings_without_expanding_risk_permissions(self):
         from bin.lan_bitable_template_portal.risk_inspection import can_scope
@@ -79,7 +79,7 @@ class ToolManagementTest(TestCase):
             self.assertEqual(len(self.svc.inventory(who)['items']),4)
             self.assertTrue(all(row['can_claim'] for row in board['orders']))
             self.assertFalse(can_scope(who,'A'),'工具专用授权不能改变专项排查权限')
-        ordinary=self.full_actor('李世龙') | {'_tool_management_full_access':False}
+        ordinary=self.full_actor('李世龙') | {'modules':[], '_tool_management_full_access':False}
         with self.assertRaises(RiskError):self.svc.list(ordinary)
 
     def test_designated_people_can_handle_claimed_report_and_either_manager_can_approve_scrap(self):
@@ -186,10 +186,11 @@ class ToolManagementTest(TestCase):
         def check(path,method='GET'):
             return asyncio.run(module_denial(Request({'type':'http','path':path,'query_string':b'','headers':[],
                         'method':method,'scheme':'http','server':('testserver',80)}),controller,runtime))
-        with patch('bin.lan_bitable_template_portal.module_access.allowed_modules',return_value=set()):
+        with patch('bin.lan_bitable_template_portal.module_access.allowed_modules',return_value={'tool_management'}):
             self.assertIsNone(check('/api/tool-self-check'))
             self.assertIsNone(check('/api/tool-self-check/orders/fixture/submit','POST'))
-            self.assertIsNone(check('/api/risk-inspections/people'))
+            self.assertIsNone(check('/api/tool-self-check/inventory/people'))
+            self.assertEqual(check('/api/risk-inspections/people').status_code,403)
             self.assertEqual(check('/api/risk-inspections/template','POST').status_code,403)
 
     def setUp(self):
@@ -215,6 +216,31 @@ class ToolManagementTest(TestCase):
         self.date = clock().date().isoformat()
         self.orders = self.svc.list(self.leader)['orders']
         self.template = self.svc.list(self.admin)['templates'][0]
+
+    def test_assigning_responsible_person_keeps_order_and_supervisor(self):
+        external = next(row for row in self.orders if row['kind'] == 'external')
+        person = actor(identity='custodian') | {'name': '工具负责人'}
+        other_building = actor(identity='other') | {'scope_rules': ['B']}
+        self.people.update(custodian=person, other=other_building)
+        asset = lambda: next(row for row in self.svc.inventory(self.admin)['items'] if row['id'] == 'recTool0')
+
+        revision = asset()['revision']
+        with self.assertRaises(RiskError):
+            self.svc.configure(self.admin, 'recTool0', {'revision': revision, 'responsible_id': 'other'})
+        with self.assertRaises(RiskError):
+            self.svc.configure(person, 'recTool0', {'revision': revision, 'responsible_id': 'custodian'})
+        self.svc.configure(self.admin, 'recTool0', {'revision': revision, 'responsible_id': 'custodian'})
+        self.assertEqual(asset()['responsible_name'], '工具负责人')
+        self.assertEqual(asset()['supervisor'], 'professional')
+        routed = self.svc.list(self.supervisor)['orders']
+        self.assertEqual([(row['id'], row['revision'], row['can_claim']) for row in routed],
+                         [(external['id'], external['revision'], True)])
+        self.assertFalse(self.svc.list(person)['orders'])
+        with self.assertRaises(RiskError):
+            self.svc.configure(self.admin, 'recTool0', {'revision': revision, 'responsible_id': ''})
+        self.svc.configure(self.admin, 'recTool0', {'revision': asset()['revision'], 'responsible_id': ''})
+        self.assertNotIn('responsible_id', asset())
+        self.assertEqual(asset()['supervisor'], 'professional')
 
     def submit_self(self, order, outcome):
         claimed = self.svc.action(self.leader, order['id'], 'claim', {'revision': order['revision']})

@@ -25,20 +25,29 @@ export function inDeskScope(item:WorkItem,scope:string) {
 }
 export function deskTaskVisible(role:DeskRole|undefined,user:Dict,item:WorkItem,ownScope:string) {
   if ((role==='L3'||role==='L4'||role==='duty')&&(!ownScope||!inDeskScope(item,ownScope))) return false;
+  const engineer = role!=='L0'&&role!=='L1'&&role!=='duty'&&(user.category==='engineer'||!user.category&&role==='L2');
+  if (engineer && !deskProfessionVisible(user, item.specialty)) return false;
   if (['notices','events','repair_management'].includes(item.kind)) {
     if (role==='L0'||role==='L1'||['operator','shift_leader','duty','supervisor','manager','administrator'].includes(user.category)) return true;
-    if (user.category==='engineer'||role==='L2') {
-      return Array.isArray(user.specialties)&&user.specialties.some(specialty=>
-        typeof specialty==='string'&&specialty&&item.specialty?.includes(specialty));
-    }
+    if (engineer) return true;
     if (item.kind==='repair_management') return true;
   }
-  if (item.kind==='water'||item.kind==='inspection') return true;
+  if (item.kind==='water'||item.kind==='inspection'||item.kind==='pre_shift') return true;
   if (role==='L4') return !!ownScope&&inDeskScope(item,ownScope)&&owned(user,item);
   if (role==='L3') return !!ownScope&&inDeskScope(item,ownScope)
     && (['events','critical_guard','risk_inspection'].includes(item.kind)||item.ownerLevel==='L4');
   if (role==='L2'&&!inDeskScope(item,ownScope)) return item.ownerLevel==='L4';
   return true;
+}
+
+function deskProfessionVisible(user:Dict, specialty?:string) {
+  const shared = new Set(['','-','—','无','未填写','未分类','未设置','不限','通用','全部','全部专业']);
+  const aliases:Record<string,string> = {'强电':'电气','供配电':'电气','空调':'暖通','暖通空调':'暖通'};
+  const codes = (value:string) => value.split(/[,，、;；/／|＋+&\n]+/).map(value=>value.trim())
+    .filter(value=>!shared.has(value)).map(value=>value.replace(/专业$/,'').trim()).map(value=>aliases[value]||value);
+  const record = codes(specialty||'');
+  const own = Array.isArray(user.specialties) ? user.specialties.flatMap(value=>codes(String(value||''))) : [];
+  return !record.length || record.some(value=>own.includes(value));
 }
 
 export function deskActionOrder(role:DeskRole|undefined,item:WorkItem) {

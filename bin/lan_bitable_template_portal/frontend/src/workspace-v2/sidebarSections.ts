@@ -43,7 +43,7 @@ const sections = {
     { key: 'permissions', label: '人员与权限', entries: ['settings:permissions', 'signatures'] },
     { key: 'configuration', label: '业务配置', entries: ['settings:handover', 'settings:mop'] },
     { key: 'channels', label: '消息渠道', entries: ['settings:feishu', 'settings:dingtalk'] },
-    { key: 'system', label: '系统运维', entries: ['settings:status', 'zhihang_data', 'settings:development', 'settings:pressure'] },
+    { key: 'system', label: '系统运维', entries: ['settings:status', 'zhihang_data', 'notice_history', 'settings:development', 'settings:pressure'] },
   ] },
 } satisfies Record<string, Section>;
 

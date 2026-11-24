@@ -149,6 +149,22 @@ def authorized(auth, oid, app_id):
     profile = auth.account_profile(oid)
     return profile.get('enabled') and 'learning' in profile.get('modules', [])
 
+def workbench_review_scopes(service, auth, session, actor):
+    user = auth.public_user(session)
+    if (not actor.get('id') or actor.get('shared_account') or user.get('impersonation')
+            or user.get('role') in {'guest', 'temporary'} or 'learning' not in user.get('modules', [])):
+        return ()
+    scopes = set(auth.session_scopes(session))
+    allowed = core.SCOPES if 'ALL' in scopes else scopes.intersection(core.SCOPES)
+    if not allowed:
+        return ()
+    if not actor.get('is_admin'):
+        directory, ready, app_id = current_directory(service)
+        if (not ready or not app_id or not authorized(auth, actor['id'], app_id)
+                or not any(reviewer_open_id(directory, name, app_id) == actor['id'] for name in REVIEWERS)):
+            return ()
+    return tuple(sorted(allowed))
+
 
 def deliver(service, current, name, oid, app_id, qid, issues):
     from .learning_reminders import send_reminder
@@ -209,11 +225,15 @@ def save_revision(service, conn, question, issues, actor, edits, version, issues
     return updated
 
 
-def review_question(service, auth, actor, issue_id, ticket_id, edits=None, *, group=False):
+def review_question(service, auth, actor, issue_id, ticket_id, edits=None, *, group=False, workbench_scopes=None):
     """Read/save the same bank revision from the web list or a private review link."""
-    if actor.get('shared_account') or not actor.get('id') or not (actor.get('is_admin') or ticket_id):
+    if workbench_scopes is not None:
+        if not workbench_scopes or ticket_id:
+            raise core.LearningError('当前账号无权从工作台修改此题。', 403)
+        group = True
+    if actor.get('shared_account') or not actor.get('id') or not (actor.get('is_admin') or ticket_id or workbench_scopes):
         raise core.LearningError('当前账号无权修改此题。', 403)
-    if group and (ticket_id or not actor.get('is_admin')):
+    if group and workbench_scopes is None and (ticket_id or not actor.get('is_admin')):
         raise core.LearningError('仅管理员可处理同题的全部反馈。', 403)
     if not service.settings()['enabled']:
         raise core.LearningError('画像学练暂未启用。', 503)
@@ -233,6 +253,8 @@ def review_question(service, auth, actor, issue_id, ticket_id, edits=None, *, gr
                 raise core.LearningError('只能打开本人收到的质疑题目。', 403)
             if expired(ticket.get('sent_at') or ticket['created_at']):
                 raise core.LearningError(EXPIRED_CARD_MESSAGE, 403)
+        elif workbench_scopes is not None and (not item or item.get('scope') not in workbench_scopes):
+            raise core.LearningError('当前账号无权处理此楼栋质疑。', 403)
         elif not item:
             raise core.LearningError('质疑记录不存在。', 404)
         question = service._question(item['question_id'], conn)
@@ -241,11 +263,18 @@ def review_question(service, auth, actor, issue_id, ticket_id, edits=None, *, gr
         pending = service.open_question_issues(conn, question['id'])
         if ticket_id:
             pending = [i for i in pending if i['id'] in ticket['issue_ids']]
+        elif workbench_scopes is not None:
+            pending = [i for i in pending if i.get('scope') in workbench_scopes]
         elif not group:
             pending = [i for i in pending if i['id'] == issue_id]
         editable = bool(pending) or (actor.get('is_admin') and not ticket_id and not group)
         if edits is not None:
-            receipt_id = 'issue-revision:' + core.digest([issue_id, actor['id'], ticket_id, 'group'] if group else [issue_id, actor['id'], ticket_id])
+            identity = [issue_id, actor['id'], ticket_id]
+            if workbench_scopes is not None:
+                identity.extend(['workbench', workbench_scopes])
+            elif group:
+                identity.append('group')
+            receipt_id = 'issue-revision:' + core.digest(identity)
             fingerprint = core.digest(edits)
             receipt = service._get('local', receipt_id, conn) or {}
             replay = receipt.get('request') == fingerprint and receipt.get('saved_version') == question['version']

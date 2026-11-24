@@ -34,6 +34,7 @@
     <p v-if="!state && busy" role="status">正在读取巡检状态…</p>
     <p v-if="pollError" class="warning" role="status">{{ pollError }}</p>
     <DailyInspectionWorkbook :immersive="immersive" ref="workbookPage" v-if="state?.history_scopes?.length" :scopes="state.history_scopes"
+      :visible-professions="state.visible_professions"
       :template-version="state.template_version" :archive-revision="state.archive_revision" :default-scope="state.view_scope || duty?.scope" :default-date="duty?.date"
       :default-shift="duty?.shift" :next-round="state.next_round" :active="active || undefined" :source-time="batch?.source_time"
       :read-only="readOnly" :planned-groups="state.planned_sheet_groups" :parent-busy="!!busy || autoSaving || hasDrafts"
@@ -91,9 +92,9 @@ type DraftReview = Review & {base?:Review;pending?:Review;label?:string;paramete
 type Recovery = {key:string;duty:Duty;round:number;drafts:Record<string,DraftReview>};
 type ProfessionConfirmation = {actor:string;confirmed:number;version:string};
 type State = {collection?:{state:string;error?:string};template_version?:string;archive_revision?:string;duty:Duty|null; completed_rounds:number; archived_rounds?:number; round_limit:number; next_round?:number; scheduled?:boolean; opens_at?:number|null; history_scopes?:string[]; duty_warning?:string;
-  view_scopes?:string[]; view_scope?:string; can_edit?:boolean;
+  view_scopes?:string[]; view_scope?:string; can_edit?:boolean; visible_professions?:string[];
   planned_sheet_groups?:Record<string,string>;
-  active:null|{id:string;started_by?:string;started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;visited_sheets?:string[];presence?:{actor:string;sheet:string;seen_at:number}[];sheet_groups?:Record<string,string>;confirmation_invalidations?:Record<string,string>;worksheet_mode?:boolean;available_professions?:string[]; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
+  active:null|{id:string;started_by?:string;started?:number;source_locked?:boolean;cell_exemptions?:Record<string,string[]>;visited_sheets?:string[];presence?:{actor:string;sheet:string;seen_at:number}[];sheet_groups?:Record<string,string>;confirmation_invalidations?:Record<string,string>;worksheet_mode?:boolean;available_professions?:string[];other_professions_pending?:boolean; duty:Duty; round:number; pending:boolean; draft_key:string; reviews:Reviews; review_version:number; batch:Batch;
     professions?:string[]|null;profession_confirmations?:Record<string,ProfessionConfirmation>;profession_versions?:Record<string,string>;
     orders?:Record<string,string[]>};
   history:{id:string; duty:Duty; round:number; actor:string; completed:number; url:string;draft_key?:string}[]};
@@ -140,7 +141,8 @@ const professionName = (device:Device)=>device.profession?.trim() || '未分类'
 const availableProfessions = computed(()=>{
   const counts=new Map<string,number>();
   for (const device of preview.value?.devices || []) {if(!hasVisibleDevice(device))continue;const name=professionName(device);counts.set(name,(counts.get(name) || 0)+1);}
-  return inspectionProfessions.map(name=>({name,count:counts.get(name) ?? 0}));
+  return inspectionProfessions.filter(name=>!state.value?.visible_professions || state.value.visible_professions.includes(name))
+    .map(name=>({name,count:counts.get(name) ?? 0}));
 });
 const formatter = new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',dateStyle:'short',timeStyle:'medium',hour12:false});
 const time = (value?:number|null)=>value ? formatter.format(value) : '—';
@@ -319,7 +321,7 @@ function useState(next:State,discardPrevious=false) {
     autoStatus.value='idle';
     autoError.value='';
     previewChoiceScope='';
-    selectedProfessions.value=[...inspectionProfessions];
+    selectedProfessions.value=inspectionProfessions.filter(name=>!next.visible_professions || next.visible_professions.includes(name));
   }
   state.value=next;
   for (const [id,review] of Object.entries(drafts.value)) {
@@ -458,7 +460,7 @@ async function refreshPreview() {
       {cache:'no-store',fresh:true,signal:request.signal,timeoutMs:120000}) as Batch & {scope:string;orders?:Record<string,string[]>};
     if (!disposed && !request.signal.aborted && (state.value?.view_scope || duty.value?.scope)===scope && !active.value) {
       preview.value=data;
-      if(previewChoiceScope!==scope) selectedProfessions.value=[...inspectionProfessions];
+      if(previewChoiceScope!==scope) selectedProfessions.value=availableProfessions.value.map(item=>item.name);
       previewChoiceScope=scope;
       window.clearTimeout(previewTimer);
       if (data.cache_stale) previewTimer=window.setTimeout(()=>void refreshPreview(),30000);
@@ -476,7 +478,8 @@ const load = async()=>{
 function switchView(scope:string) {
   if (scope!==state.value?.view_scope) void fetchState('load',undefined,scope);
 }
-const start = ()=>fetchState('start',{duty:duty.value,professions:selectedProfessions.value,worksheet_mode:true});
+const start = ()=>fetchState('start',{duty:duty.value,professions:selectedProfessions.value.filter(name=>
+  !state.value?.visible_professions || state.value.visible_professions.includes(name)),worksheet_mode:true});
 function back() {
   if (workbookPage.value?.allowNavigation()!==false) emit('close');
 }

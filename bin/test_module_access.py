@@ -10,10 +10,22 @@ import httpx
 from fastapi import FastAPI, Request
 from lan_bitable_template_portal.module_access import (
     MODULE_IDS, MODULE_OPTIONS, NOTICE_MODULES, filter_overview, filter_workbench, module_denial, required_modules,
+    engineer_professions, professional_record_visible,
 )
 
 
 class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
+    def test_engineer_professions_include_shared_and_mixed_records(self):
+        records = [
+            {'profession': '强电'}, {'specialty': '暖通'}, {'fields': {'专业': [{'text': '电气'}, {'text': '消防'}]}},
+            {'display_fields': {'所属专业': '未分类'}}, {}, {'profession': '机械'},
+        ]
+        engineer = {'category': 'engineer', 'level': 'L4', 'specialties': ['电气']}
+        self.assertEqual([i for i, row in enumerate(records) if professional_record_visible(engineer_professions(engineer), row)], [0, 2, 3, 4])
+        self.assertEqual([i for i, row in enumerate(records) if professional_record_visible(engineer_professions(engineer | {'specialties': []}), row)], [3, 4])
+        for role in ('operator', 'shift_leader', 'duty', 'supervisor', 'manager'):
+            self.assertIsNone(engineer_professions(engineer | {'category': role}))
+        self.assertIsNone(engineer_professions(engineer | {'level': 'L1'}))
     def test_inspection_entry_label_keeps_existing_module_and_route(self):
         self.assertEqual(next(item['label'] for item in MODULE_OPTIONS if item['value'] == 'risk_inspection'), '专项排查')
         for path in ('/risk-inspections', '/api/risk-inspections', '/api/risk-inspections/people'):
@@ -77,7 +89,7 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
 
     def test_all_public_module_pages_are_mapped(self):
         self.assertEqual({item["value"] for item in MODULE_OPTIONS if item["group"] == "通告办理"}, NOTICE_MODULES)
-        self.assertEqual(required_modules('/signature-management'), frozenset())
+        self.assertEqual(required_modules('/signature-management'), {'signatures'})
         paths = {"/api/signatures/management/preview": "signatures", "/knowledge-base": "knowledge",
                  "/admin/settings": "accounts", "/repair-status": "repair_management",
                  "/drill-management/print": "drills", "/cabinet-power/batches": "cabinet",
@@ -86,6 +98,36 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
         for path, module in paths.items():
             self.assertEqual(required_modules(path), {module})
         self.assertTrue(set(paths.values()) <= MODULE_IDS)
+
+    async def test_independent_modules_require_own_grant_for_pages_and_apis(self):
+        paths = [
+            ('risk_inspection', 'tool_management', '/risk-inspections?view=tool-self-check', 'GET'),
+            ('risk_inspection', 'tool_management', '/api/tool-self-check/workspace/open', 'POST'),
+            ('tool_management', 'risk_inspection', '/api/risk-inspections/people', 'GET'),
+            ('daily', 'daily_inspection', '/api/daily-inspection/status', 'GET'),
+            ('daily', 'cold_source', '/api/cold-source-monitor', 'GET'),
+            ('daily_inspection', 'daily', '/api/daily-tasks', 'GET'),
+            ('drills', 'eop_scenarios', '/eop-scenarios', 'GET'),
+            ('knowledge', 'documents', '/api/document-library/search', 'GET'),
+            ('maintenance', 'sops', '/api/polling-sops?work_type=maintenance', 'POST'),
+            ('accounts', 'zhihang_data', '/api/zhihang-data', 'GET'),
+            ('accounts', 'dingtalk_settings', '/admin/settings?tab=dingtalk', 'GET'),
+            ('accounts', 'mop_settings', '/api/admin/mop-settings', 'GET'),
+            ('assistant', 'feishu_settings', '/api/assistant/feishu-settings', 'GET'),
+            ('accounts', 'backend_diagnostics', '/api/backend/mock-pressure', 'POST'),
+            ('accounts', 'backend_status', '/api/backend/stats', 'GET'),
+            ('accounts', 'release_journal', '/api/release-journal', 'GET'),
+            ('accounts', 'handover_settings', '/api/handover-links', 'POST'),
+            ('daily', 'pre_shift', '/api/pre-shift-checks/submit', 'POST'),
+        ]
+        for parent, specific, path, method in paths:
+            with self.subTest(path=path):
+                self.modules = {parent}
+                self.assertEqual((await self.client.request(method, path, json={})).status_code, 403)
+                self.modules = {specific}
+                self.assertEqual((await self.client.request(method, path, json={})).status_code, 200)
+        self.modules = {'maintenance'}
+        self.assertEqual((await self.client.get('/api/polling-sops?work_type=maintenance')).status_code, 200)
 
     def test_aggregate_filter_does_not_mutate_shared_cache_or_leak_titles(self):
         payload = {"scopes": {"E": {"maintenance_pending": 2, "change_pending": 7, "event_total": 19,

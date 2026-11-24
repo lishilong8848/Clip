@@ -194,6 +194,9 @@ from lan_bitable_template_portal.portal_service import (
     external_real_write_guard,
 )
 from lan_bitable_template_portal.portal_service import MaintenancePortalService
+from lan_bitable_template_portal.module_access import (
+    professional_record_visible, profession_query, session_engineer_professions,
+)
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from lan_bitable_template_portal.drill_management import (
@@ -975,6 +978,7 @@ class FastAPIPortalController:
                 work_type = str(request.query_params.get("work_type") or "all").strip()
                 if work_type != "all" and work_type not in NOTICE_TYPE_BY_WORK_TYPE:
                     work_type = "all"
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 month = str(
                     request.query_params.get("month")
                     or _current_month_label()
@@ -990,6 +994,9 @@ class FastAPIPortalController:
                         repair_management_record_id,
                         scope=scope,
                     )
+                    source_record = repair_notice_prefill.get('source_record') or repair_notice_prefill
+                    if not professional_record_visible(professional_scope.get('professions'), source_record):
+                        raise PortalError('当前专业无权查看该维修项目。')
                 search = str(request.query_params.get("search") or "")
                 specialty = str(request.query_params.get("specialty") or "")
                 record_id = str(request.query_params.get("record_id") or "").strip()
@@ -1012,6 +1019,13 @@ class FastAPIPortalController:
                 ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 ongoing_ms = (time.perf_counter() - stage_started_at) * 1000.0
                 self._reconcile_orphan_started_items(scope, ongoing)
+                if active_item_id and any(
+                    str(item.get('active_item_id') or item.get('target_record_id') or item.get('record_id') or '') == active_item_id
+                    and not professional_record_visible(professional_scope.get('professions'), item)
+                    for item in ongoing
+                ):
+                    raise PortalError('当前专业无权查看该通告。')
+                ongoing = [item for item in ongoing if professional_record_visible(professional_scope.get('professions'), item)]
                 sections = (
                     ("records", "ongoing", "stats", "zhihang")
                     if work_type in {"all", "change"}
@@ -1025,6 +1039,7 @@ class FastAPIPortalController:
                         "workbench",
                         open_id,
                         tuple(sorted(PortalRuntime.auth_manager.account_profile(open_id).get("modules", []))),
+                        professional_scope.get('professions'),
                         scope,
                         month,
                         specialty,
@@ -1051,6 +1066,7 @@ class FastAPIPortalController:
                         ongoing_page_size=ONGOING_PAGE_SIZE,
                         ongoing_items_authoritative=True,
                         allowed_work_types=set(PortalRuntime.auth_manager.account_profile(open_id).get("modules", [])),
+                        **professional_scope,
                     ),
                 )
                 stage_started_at = time.perf_counter()
@@ -2315,16 +2331,18 @@ class FastAPIPortalController:
                 ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 self._reconcile_orphan_started_items(scope, ongoing)
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 data = await asyncio.to_thread(
                     self._cached_service_payload,
                     (
                         "bootstrap",
                         open_id,
+                        professional_scope.get('professions'),
                         scope,
                         PortalRuntime._ongoing_items_marker(ongoing),
                     ),
                     lambda: PortalRuntime.service.get_bootstrap(
-                        scope=scope, ongoing_items=ongoing
+                        scope=scope, ongoing_items=ongoing, **professional_scope
                     ),
                 )
                 return self._json_ok(request, session, data)
@@ -2360,11 +2378,13 @@ class FastAPIPortalController:
                 ongoing = await asyncio.to_thread(self._get_ongoing, scope)
                 await asyncio.to_thread(self._reconcile_orphan_started_items, scope, ongoing)
                 open_id = str((session.get("user") or {}).get("open_id") or "")
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 data = await asyncio.to_thread(
                     self._cached_service_payload,
                     (
                         "scope-overview",
                         open_id,
+                        professional_scope.get('professions'),
                         tuple(sorted(allowed_scopes)),
                         PortalRuntime._ongoing_items_marker(ongoing),
                     ),
@@ -2372,6 +2392,7 @@ class FastAPIPortalController:
                         ongoing_items=ongoing,
                         scopes=allowed_scopes,
                         include_prepared=False,
+                        **professional_scope,
                     ),
                 )
                 data = {**data, "scope_options": allowed_options}
@@ -2395,6 +2416,7 @@ class FastAPIPortalController:
                     PortalRuntime.service.get_daily_task_checklist,
                     scope=scope,
                     date=str(request.query_params.get("date") or "").strip(),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -2583,6 +2605,7 @@ class FastAPIPortalController:
                 payload_key = "records" if request.url.path == "/api/records" else "workbench"
                 from lan_bitable_template_portal.module_access import allowed_modules, NOTICE_MODULES
                 granted_work_types = allowed_modules(PortalRuntime.auth_manager, session) & NOTICE_MODULES
+                professional_scope = profession_query(PortalRuntime.auth_manager, session)
                 if payload_key == "records":
                     work_type = ""
                     sections = ()
@@ -2594,6 +2617,7 @@ class FastAPIPortalController:
                         payload_key,
                         open_id,
                         tuple(sorted(granted_work_types)),
+                        professional_scope.get('professions'),
                         scope,
                         month,
                         specialty,
@@ -2620,6 +2644,7 @@ class FastAPIPortalController:
                         ongoing_page_size=ongoing_page_size,
                         ongoing_items_authoritative=True,
                         **({"allowed_work_types": granted_work_types} if granted_work_types != NOTICE_MODULES else {}),
+                        **professional_scope,
                     ),
                 )
                 if payload_key == "workbench" and prefetch_only:
@@ -2654,6 +2679,8 @@ class FastAPIPortalController:
                             records_page_size=0,
                             ongoing_page=1,
                             ongoing_page_size=0,
+                            allowed_work_types=granted_work_types,
+                            **professional_scope,
                         )
                         if isinstance(broad_payload, dict):
                             filtered_payload["records"] = [
@@ -2688,6 +2715,7 @@ class FastAPIPortalController:
                     scope=scope,
                     work_type=str(request.query_params.get("work_type") or ""),
                     ongoing_items=ongoing,
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, payload)
             except Exception as exc:
@@ -2707,6 +2735,7 @@ class FastAPIPortalController:
                     scope=scope,
                     month=str(request.query_params.get("month") or ""),
                     work_type=str(request.query_params.get("work_type") or "all"),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, payload)
             except Exception as exc:
@@ -2729,6 +2758,7 @@ class FastAPIPortalController:
                     ongoing_items=ongoing,
                     month=str(request.query_params.get("month") or ""),
                     todo_only=request.query_params.get("view") == "todos",
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -2748,8 +2778,10 @@ class FastAPIPortalController:
                     lambda: service.engineer_mop_history(scope=scope),
                     fresh=request.query_params.get('refresh') == '1',
                 )
+                professions = session_engineer_professions(PortalRuntime.auth_manager, session)
+                records = [item for item in data['records'] if professional_record_visible(professions, item)]
                 page = service.engineer_mop_history_page(
-                    data["records"], scope=scope, search=request.query_params.get("search", ""),
+                    records, scope=scope, search=request.query_params.get("search", ""),
                     specialty=request.query_params.get("specialty", ""), page=request.query_params.get("page", "1"),
                 )
                 return self._json_ok(request, session, page)
@@ -2766,6 +2798,7 @@ class FastAPIPortalController:
                 content, content_type, name = await asyncio.to_thread(
                     PortalRuntime.service.download_engineer_mop_history,
                     scope=scope, record_id=record_id, attachment_id=attachment_id,
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return Response(content, media_type=content_type or "application/octet-stream", headers={
                     "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
@@ -2854,6 +2887,7 @@ class FastAPIPortalController:
                     file_token=str(request.query_params.get("file_token") or ""),
                     file_name=str(request.query_params.get("file_name") or ""),
                     upload_id=str(request.query_params.get("upload_id") or ""),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -3974,6 +4008,8 @@ class FastAPIPortalController:
                         if str(item.get("status") or "") == "published"
                         and scope in drill_assigned_scopes(item)
                     ]
+                professions = session_engineer_professions(PortalRuntime.auth_manager, session)
+                definitions = [item for item in definitions if professional_record_visible(professions, item)]
                 items: list[dict[str, Any]] = []
                 for definition in definitions:
                     item = dict(definition)
@@ -4887,6 +4923,7 @@ class FastAPIPortalController:
                     scope=scope,
                     month=month,
                     date_field=str(request.query_params.get("date_field") or "").strip(),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -4902,6 +4939,7 @@ class FastAPIPortalController:
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_event_monthly_overview,
                     month=month,
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -4959,6 +4997,7 @@ class FastAPIPortalController:
                     limit = 50
                 data = await asyncio.to_thread(
                     PortalRuntime.service.list_repair_management_event_candidates,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     scope=scope,
                     month=month,
                     query=query,
@@ -4979,6 +5018,7 @@ class FastAPIPortalController:
                 )
                 data = await asyncio.to_thread(
                     PortalRuntime.service.repair_management_event_prefill,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     scope=scope,
                     record_id=str(request.query_params.get("record_id") or ""),
                     month=str(request.query_params.get("month") or ""),
@@ -5002,6 +5042,7 @@ class FastAPIPortalController:
                     limit = 100
                 data = await asyncio.to_thread(
                     PortalRuntime.service.list_repair_notice_event_candidates,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     scope=scope,
                     query=str(request.query_params.get("q") or ""),
                     limit=limit,
@@ -5027,6 +5068,9 @@ class FastAPIPortalController:
                     ),
                     scope=scope,
                 )
+                professions = session_engineer_professions(PortalRuntime.auth_manager, session)
+                if not professional_record_visible(professions, data.get('source_record') or data):
+                    raise PortalError('当前专业无权查看该维修项目。')
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -5078,6 +5122,7 @@ class FastAPIPortalController:
                     limit = 80
                 data = await asyncio.to_thread(
                     PortalRuntime.service.list_repair_management_repair_candidates,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     scope=scope,
                     event_record_id=str(request.query_params.get("event_record_id") or ""),
                     month=str(request.query_params.get("month") or ""),
@@ -5234,6 +5279,7 @@ class FastAPIPortalController:
                     offset = 0
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_repair_followup_records,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     summary_record_id=str(
                         request.query_params.get("summary_record_id") or ""
                     ),
@@ -5268,6 +5314,7 @@ class FastAPIPortalController:
                     limit = 200
                 data = await asyncio.to_thread(
                     PortalRuntime.service.list_repair_followup_bind_candidates,
+                    **profession_query(PortalRuntime.auth_manager, session),
                     summary_record_id=str(
                         request.query_params.get("summary_record_id") or ""
                     ),
@@ -5468,6 +5515,7 @@ class FastAPIPortalController:
                     event_record_id=str(payload.get("source_event_id") or ""),
                     repair_record_ids=payload.get("source_repair_ids") or [],
                     month=str(payload.get("source_month") or ""),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5491,6 +5539,7 @@ class FastAPIPortalController:
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_repair_management_scope_overview,
                     scopes=allowed_scopes,
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5525,6 +5574,7 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5567,6 +5617,7 @@ class FastAPIPortalController:
                         request.query_params.get("summary_only") or ""
                     ).lower()
                     in {"1", "true", "yes"},
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5801,6 +5852,7 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -6950,7 +7002,8 @@ class FastAPIPortalController:
                     data = await asyncio.to_thread(candidate_page, PortalRuntime.service,
                         scope=scope, month=month, work_type=str(request.query_params.get("work_type") or ""),
                         ongoing_items=ongoing, page=int(request.query_params.get("page") or 1),
-                        page_size=int(request.query_params.get("page_size") or 200))
+                        page_size=int(request.query_params.get("page_size") or 200),
+                        **profession_query(PortalRuntime.auth_manager, session))
                     return self._json_ok(request, session, data)
                 items = await asyncio.to_thread(
                     PortalRuntime.service.list_bindable_source_items,
@@ -6960,6 +7013,7 @@ class FastAPIPortalController:
                     search=search,
                     ongoing_items=ongoing,
                     limit=200,
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, {"items": items})
             except Exception as exc:
@@ -6978,7 +7032,7 @@ class FastAPIPortalController:
                     month=request.query_params.get("month") or _current_month_label(),
                     work_type=request.query_params.get("work_type") or "maintenance",
                     source_record_id=request.query_params.get("source_record_id") or "",
-                    ongoing_items=ongoing)
+                    ongoing_items=ongoing, **profession_query(PortalRuntime.auth_manager, session))
                 return self._json_ok(request, session, data)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=409)
@@ -7744,8 +7798,12 @@ class FastAPIPortalController:
                     scope=scope,
                     action_type=str(request.query_params.get("action_type") or ""),
                     since_seconds=float(request.query_params.get("since_seconds") or 0),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 profile = PortalRuntime.auth_manager.account_profile((session.get("user") or {}).get("open_id"))
+                work_type = str(request.query_params.get("work_type") or "").strip()
+                items = [item for item in items if item.get("work_type") in request.state.allowed_modules
+                         and (work_type in {"", "all"} or item.get("work_type") == work_type)]
                 if not profile["can_delete_business"]:
                     items = [item for item in items if item.get("undo_action_type") != "start"]
                 return self._json_ok(request, session, {"items": items})
@@ -7770,6 +7828,7 @@ class FastAPIPortalController:
                     scope=scope,
                     auth_open_id=str(user.get("open_id") or ""),
                     auth_user_name=str(user.get("name") or user.get("en_name") or ""),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 self._submit_notice_undo_job(job_id, name=f"NoticeUndo-{job_id[:8]}")
                 job = PortalRuntime.service.get_job(job_id) or {}
@@ -7825,6 +7884,7 @@ class FastAPIPortalController:
                     text=payload.get("text") or "",
                     all_active=lookup_context != "ongoing_list",
                     all_ongoing=lookup_context == "ongoing_list",
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -7872,6 +7932,7 @@ class FastAPIPortalController:
                     allow_unscoped_target=PortalRuntime.auth_manager.is_admin(
                         session
                     ),
+                    **profession_query(PortalRuntime.auth_manager, session),
                 )
                 return self._json_ok(request, session, result)
             except Exception as exc:
@@ -11298,6 +11359,8 @@ class FastAPIPortalController:
         self, session: dict, drill_id: str, scope: str = ""
     ) -> dict[str, Any]:
         definition = self._drills.get_definition(drill_id)
+        if not professional_record_visible(session_engineer_professions(PortalRuntime.auth_manager, session), definition):
+            raise DrillForbiddenError('该演练不在当前专业范围。')
         if (
             not PortalRuntime.auth_manager.is_admin(session)
             and str(definition.get("status") or "") != "published"
@@ -12383,6 +12446,9 @@ class FastAPIPortalController:
             return False
         if any(retry.get(key) != original.get(key) for key in ("_auth_open_id", "work_type", "scope", "action")):
             return False
+        professions = session_engineer_professions(auth, session)
+        if not all(professional_record_visible(professions, payload) for payload in (original, retry)):
+            return False
         return bool((retry.get("_web_action_request") or original.get("_web_action_request")) and original.get("_auth_open_id") == owner
                     and original.get("action") in {"start", "update", "end"}
                     and not any(p.get("_admin_impersonation_id") or p.get("_topic_delegation_id") for p in (original, retry))
@@ -12415,10 +12481,11 @@ class FastAPIPortalController:
         request_payload = job.get("request") if isinstance(job.get("request"), dict) else {}
         if str(request_payload.get("work_type") or "maintenance") not in allowed_modules(PortalRuntime.auth_manager, session):
             return False
+        if not professional_record_visible(session_engineer_professions(PortalRuntime.auth_manager, session), request_payload):
+            return False
         if PortalRuntime.auth_manager.is_admin(session):
             return True
         open_id = str((session.get("user") or {}).get("open_id") or "")
-        request_payload = job.get("request") if isinstance(job.get("request"), dict) else {}
         return bool(open_id and str(request_payload.get("_auth_open_id") or "") == open_id)
 
     def _write_runtime_heartbeat(self) -> None:

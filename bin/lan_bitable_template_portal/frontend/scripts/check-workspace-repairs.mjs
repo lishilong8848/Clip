@@ -60,7 +60,7 @@ async function handleFixture(route,layouts){
     if(await layouts.handle(route,'isolated-person-A'))return;
     fixture.reads.push({path:url.pathname,method:request.method(),params:Object.fromEntries(url.searchParams)});
     const ok=data=>route.fulfill({json:{ok:true,data}});
-    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-person-A',name:'隔离验收人员',role:'admin',level:'L1',category:'engineer',can_delete_business:fixture.canDelete,modules:fixture.modules},scope_options:fixture.scopes});
+    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-person-A',name:'隔离验收人员',role:'admin',level:'L1',category:'engineer',specialties:['电气'],can_delete_business:fixture.canDelete,modules:fixture.modules},scope_options:fixture.scopes});
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'isolated-repairs'}});
     if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
     if(url.pathname==='/api/repair-management/changes')return ok({changes:[],cursor:0});
@@ -122,12 +122,12 @@ async function newPage(width=1440,height=950,night=false){
   if(night)await ctx.addInitScript(()=>localStorage.setItem('clipflow:workspace-night-mode:isolated-person-A','dark'));
   await ctx.route('**/*',route=>handleFixture(route,layouts));
   const page=await ctx.newPage();page.on('pageerror',error=>fixture.errors.push(error.message));
-  await page.goto(origin+entry);await page.locator('.record-row').first().waitFor();
+  await page.goto(origin+entry);await page.locator('.repair-desk-record').first().waitFor();
   return page;
 }
 const detail=page=>page.locator('.v2-repair-detail');
 async function openFirst(page,followups=true){
-  await page.locator('.record-row').first().click();
+  await page.locator('.repair-desk-record').first().click();
   await detail(page).locator('.v2-repair-project-form:visible').waitFor();
   assert.equal(await detail(page).getAttribute('role'),'dialog','record opens above the list');
   assert.equal(await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).count(),0,'opening a record starts with its editable repair sheet');
@@ -185,6 +185,29 @@ async function checkWorkflowActions(page){
 }
 if(previewOnly){console.log('Isolated repair preview: '+origin+entry);await new Promise(()=>{});}
 try{
+  if(process.argv.includes('--people-only')){
+    const page=await newPage(390,850);
+    await openFirst(page);
+    const picker=detail(page).getByLabel('随工人员（我方维修人员）',{exact:true});
+    await picker.click();
+    const person=page.getByRole('option',{name:/验收人员/});
+    await person.waitFor();
+    const reads=()=>fixture.reads.filter(row=>row.path==='/api/repair-management/people').length;
+    assert.equal(reads(),1);
+    await picker.press('Escape');
+    await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).click();
+    await picker.click();
+    await person.click();
+    assert.equal(reads(),1,'the same picker reopens from the existing directory');
+    assert.equal(await detail(page).locator('.repair-person-chip').innerText(),'验收人员');
+    await noOverflow(page);
+    assert.deepEqual(fixture.errors,[]);
+    await page.screenshot({path:path.join(output,'repair-people-picker-mobile.png'),animations:'disabled'});
+    console.log('Repair people picker: mobile selection and reopening reuse a single authorized read.');
+    await browser.close();
+    await new Promise(resolve=>server.close(resolve));
+    process.exit(0);
+  }
   if(process.argv.includes('--reminder-links')){
     const page=await newPage(390,844);
     for(const [version,base] of [
@@ -212,7 +235,7 @@ try{
   }else{
   for(const width of [1440,402,440]){
     const page=await newPage(width,900);
-    const last=page.locator('.record-row').last();
+    const last=page.locator('.repair-desk-record').last();
     await last.scrollIntoViewIfNeeded();
     const scroll=await page.evaluate(()=>scrollY);
     await last.click();await detail(page).locator('.v2-repair-project-form:visible').waitFor();
@@ -238,7 +261,7 @@ try{
   assert.equal(await page.locator('.v2-repair-overview[aria-label="维修项目状态"]').count(),1,'one status filter group serves the full list');
   assert.equal(await page.locator('.v2-repair-workspace>.v2-repair-state-row').count(),0,'no duplicate state toolbar above the list');
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
-  assert.equal(await page.locator('.record-row').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
+  assert.equal(await page.locator('.repair-desk-record').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
   await openFirst(page,false);await noOverflow(page);await checkWorkflowActions(page);
   assert.equal(await detail(page).locator('.v2-repair-detail-tabs .n-radio-button').count(),2,'only sheet and followups are primary destinations');
   assert.equal(await detail(page).getByText('办理流程',{exact:true}).count(),0);
@@ -275,7 +298,7 @@ try{
   const write=fixture.writes.find(item=>item.path==='/api/repair-management/followups');assert.ok(write);assert.deepEqual(write.body.ledger_device_ids,['device-1','device-2']);assert.equal(write.body.fields['维修进展描述'],'已检查模块，安排更换。');assert.equal(write.body.fields['设备生产日期'],undefined);assert.equal(write.body.fields['设备使用年限'],undefined);assert.ok(write.body.operation_id);
   assert.equal(await detail(page).getByRole('button',{name:'编辑这条',exact:true}).count(),1,'saved followup returns to read mode');
   fixture.delaySave=0;
-  await detail(page).getByRole('button',{name:'关闭维修项目',exact:true}).click();fixture.delayDetail=700;await page.locator('.record-row').nth(1).click();await detail(page).getByRole('button',{name:'关闭维修项目',exact:true}).click();await page.waitForTimeout(900);assert.equal(await detail(page).count(),0,'late detail must not reopen');fixture.delayDetail=0;
+  await detail(page).getByRole('button',{name:'关闭维修项目',exact:true}).click();fixture.delayDetail=700;await page.locator('.repair-desk-record').nth(1).click();await detail(page).getByRole('button',{name:'关闭维修项目',exact:true}).click();await page.waitForTimeout(900);assert.equal(await detail(page).count(),0,'late detail must not reopen');fixture.delayDetail=0;
   const refreshBefore=fixture.reads.filter(item=>item.path==='/api/repair-refresh').length;await page.getByRole('button',{name:'刷新显示',exact:true}).click();await page.waitForTimeout(250);assert.equal(fixture.reads.filter(item=>item.path==='/api/repair-refresh').length,refreshBefore,'display refresh does not trigger remote sync');
   fixture.failRecords=true;await page.getByRole('button',{name:'刷新显示',exact:true}).click();await page.getByText(/暂显示上次读取的/).waitFor();fixture.failRecords=false;
   fixture.canDelete=true;page=await newPage(1366);await openFirst(page);await detail(page).getByText('维修单信息',{exact:true}).click();await detail(page).getByRole('button',{name:'维修单更多操作'}).click();await page.getByText('删除维修项目',{exact:true}).waitFor();await detail(page).getByRole('button',{name:'维修单更多操作'}).click();await page.screenshot({path:path.join(output,'pc-project.png'),fullPage:true});
@@ -372,7 +395,7 @@ try{
   assert(await detail(page).getByRole('button',{name:/完成现场检查，待更换模块/}).isVisible(),'saved history remains available on demand');
   await detail(page).getByText('维修单信息',{exact:true}).click();
   await detail(page).getByRole('region',{name:'关联资料自动填写'}).waitFor();fixture.unlinked=false;
-  fixture.locked=true;page=await newPage();await page.locator('.record-row').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'关联已有跟进',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
+  fixture.locked=true;page=await newPage();await page.locator('.repair-desk-record').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'关联已有跟进',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
   fixture.failSave=true;page=await newPage();await openFirst(page);await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).fill('等待核验原任务');await detail(page).getByRole('button',{name:'选择台账设备',exact:true}).click();await page.locator('.record-picker-dialog').getByRole('checkbox').first().check();await page.locator('.record-picker-dialog').getByRole('button',{name:'确认',exact:true}).click();await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).click();await detail(page).getByRole('button',{name:'核验原任务',exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).isDisabled(),true,'uncertain write cannot be resubmitted as new');fixture.failSave=false;
   page=await newPage(1440,900,true);await openFirst(page,false);await checkWorkflowActions(page);
   await detail(page).locator('.v2-repair-detail-footer').screenshot({path:path.join(output,'workflow-actions-dark.png')});
@@ -386,11 +409,11 @@ try{
   const filters=page.getByRole('navigation',{name:'维修项目状态'});
   await filters.getByRole('button',{name:/^暂无跟进/}).click();
   await page.waitForFunction(()=>document.querySelector('.v2-repair-list-caption')?.textContent.includes('65'));
-  assert.equal(await page.locator('.record-row').count(),30);
+  assert.equal(await page.locator('.repair-desk-record').count(),30);
   await page.locator('.v2-repair-pager').getByText('2',{exact:true}).click();
   await page.getByRole('button',{name:'打开维修项目：A-31 配电设备通信异常检修',exact:true}).waitFor();
   assert(fixture.reads.some(item=>item.path==='/api/repair-management/status'&&item.params.state==='no_followup'&&item.params.offset==='30'));
-  await page.locator('.record-row').first().click();await detail(page).locator('.v2-repair-project-form:visible').waitFor();
+  await page.locator('.repair-desk-record').first().click();await detail(page).locator('.v2-repair-project-form:visible').waitFor();
   assert.equal(await detail(page).locator('h2').innerText(),'A-31 配电设备通信异常检修','detail keeps the list title');
   assert.equal(await detail(page).locator('.v2-repair-source-flow details').getAttribute('open'),null);
   await detail(page).locator('.v2-repair-source-flow summary').click();
@@ -399,7 +422,7 @@ try{
   fixture.statusDelay=600;await filters.getByRole('button',{name:/^未开始/}).click();await filters.getByRole('button',{name:/^维修中/}).click();
   await page.waitForFunction(()=>document.querySelector('.v2-repair-list-caption')?.textContent.includes('维修中'));
   await page.waitForTimeout(700);
-  assert.equal(await page.locator('.record-row').count(),28,'late filter responses cannot replace the current filter');
+  assert.equal(await page.locator('.repair-desk-record').count(),28,'late filter responses cannot replace the current filter');
   assert((await page.locator('.v2-repair-row-state').allTextContents()).every(value=>value.includes('维修中')));
   fixture.statusDelay=0;fixture.largeFilter=false;
   await page.getByRole('button',{name:'自定义检修办理布局',exact:true}).click();
@@ -410,22 +433,22 @@ try{
   // Click a state before the first list/schema response: subsequent editing must still work.
   fixture.delayRecords=500;const loadingPage=ctx.newPage();page=await loadingPage;
   await page.goto(origin+entry);await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^未开始/}).click();
-  await page.locator('.record-row').first().waitFor();await page.locator('.record-row').first().click();
+  await page.locator('.repair-desk-record').first().waitFor();await page.locator('.repair-desk-record').first().click();
   await detail(page).getByLabel('维修名称',{exact:true}).waitFor();fixture.delayRecords=0;
   // A remote change invalidates cached filters/counts, without overwriting a draft.
   fixture.noFollowupCount=3;page=await newPage();
   await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^暂无跟进/}).click();
-  await page.waitForFunction(()=>document.querySelectorAll('.record-row').length===3);
+  await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===3);
   fixture.noFollowupCount=2;
   const recordsBeforeRemote=fixture.reads.filter(item=>item.path==='/api/repair-management/records').length;
   await page.evaluate(()=>window.__repairTestStream.dispatchEvent(new MessageEvent('repair_change',{data:JSON.stringify({cursor:1,changes:[{entity_type:'followup',action:'update',payload:{record_patch:{record_id:'project-1',followup_count:1,workflow:'维修中'}}}]})})));
-  await page.waitForFunction(()=>document.querySelectorAll('.record-row').length===2);
+  await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===2);
   await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-repair-overview button')).some(el=>/暂无跟进\s*2/.test(el.textContent)));
   await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^未完成/}).click();
-  await page.locator('.record-row').nth(10).waitFor();
+  await page.locator('.repair-desk-record').nth(10).waitFor();
   assert(fixture.reads.filter(item=>item.path==='/api/repair-management/records').length>recordsBeforeRemote,'remote updates invalidate both list caches');
   await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^暂无跟进/}).click();
-  await page.waitForFunction(()=>document.querySelectorAll('.record-row').length===2);
+  await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===2);
   await openFirst(page,false);await detail(page).getByLabel('备注',{exact:true}).fill('正在填写，不可覆盖');
   fixture.noFollowupCount=1;
   await page.evaluate(()=>window.__repairTestStream.dispatchEvent(new MessageEvent('repair_change',{data:JSON.stringify({cursor:2,changes:[{entity_type:'project',action:'update',payload:{record_patch:{record_id:'project-1',followup_count:2,workflow:'维修中',display_fields:{'备注':'另一人保存'}}}}]})})));
@@ -434,14 +457,14 @@ try{
   // Saving the first followup removes the record from the zero-followup list.
   fixture.trackFilteredSave=true;fixture.noFollowupCount=1;fixture.followups=[];page=await newPage();
   await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^暂无跟进/}).click();
-  await page.waitForFunction(()=>document.querySelectorAll('.record-row').length===1);
+  await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===1);
   await openFirst(page);await detail(page).getByLabel('维修进展描述',{exact:true}).fill('新增首次跟进');
   await detail(page).getByRole('button',{name:'选择台账设备',exact:true}).click();
   await page.locator('.record-picker-dialog').getByRole('checkbox').first().check();
   await page.locator('.record-picker-dialog').getByRole('button',{name:'确认',exact:true}).click();
   await detail(page).getByRole('button',{name:'保存本次跟进',exact:true}).click();
   await detail(page).getByText('维修跟进记录已新增。',{exact:false}).waitFor();
-  await page.waitForFunction(()=>document.querySelectorAll('.record-row').length===0);
+  await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===0);
   assert.equal(await detail(page).count(),1,'the saved detail stays open after leaving the list filter');
   await detail(page).getByRole('button',{name:'返回列表',exact:true}).click();
   await page.getByText('当前没有“暂无跟进”的维修项目',{exact:true}).waitFor();

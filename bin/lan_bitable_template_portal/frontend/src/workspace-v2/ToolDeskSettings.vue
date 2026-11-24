@@ -2,25 +2,26 @@
 import { computed, nextTick, ref, watch } from 'vue';
 import { NSelect } from 'naive-ui';
 import { Search, UserRound } from 'lucide-vue-next';
+import { toolProfession, toolProfessionOptions } from '../components/tool-profession';
 
-type Asset = { id: string; name: string; scope: string; model?: string; location?: string; supervisor?: string };
+type Asset = { id: string; name: string; scope: string; model?: string; location?: string; profession?: string; responsible_name?: string };
 const props=defineProps<{r:Record<string,any>}>();
-const query=ref(''), building=ref(''), page=ref(1);
+const query=ref(''), building=ref(''), profession=ref(''), page=ref(1);
 const editor=ref<HTMLElement>();
 const pageSize=8;
 const scopeLabel=(scope:string)=>scope==='110'?'110站':scope ? scope+'楼' : '';
-const assets=computed<Asset[]>(()=>props.r.data?.items || []);
-const peopleNames=computed(()=>new Map<string,string>(props.r.people.map((person:{id:string;name:string})=>[person.id,person.name])));
+const assets=computed<Asset[]>(()=>props.r.scopedAssets);
 const buildings=computed(()=>[...new Set(assets.value.map(asset=>asset.scope).filter(Boolean))].sort());
+const professions=computed(()=>toolProfessionOptions(assets.value));
 const filtered=computed(()=>{
   const terms=query.value.toLocaleLowerCase().trim().split(/\s+/).filter(Boolean);
-  return assets.value.filter(asset=>(!building.value || asset.scope===building.value) && terms.every(term=>
+  return assets.value.filter(asset=>(!building.value || asset.scope===building.value)
+    && (!profession.value || toolProfession(asset.profession)===profession.value) && terms.every(term=>
     [asset.name,scopeLabel(asset.scope),asset.model,asset.location].filter(Boolean).join(' ').toLocaleLowerCase().includes(term)));
 });
 const pageCount=computed(()=>Math.max(1,Math.ceil(filtered.value.length/pageSize)));
 const visible=computed(()=>filtered.value.slice((page.value-1)*pageSize,page.value*pageSize));
-const dirty=computed(()=>props.r.form && props.r.form.supervisor!==(props.r.asset?.supervisor || null));
-watch([query,building],()=>{page.value=1;});
+watch([query,building,profession],()=>{page.value=1;});
 watch(pageCount,total=>{page.value=Math.min(page.value,total);});
 
 async function choose(id:string) {
@@ -38,17 +39,18 @@ async function choose(id:string) {
     <div class="responsibility-layout">
       <section class="td-stack responsibility-picker" aria-labelledby="tool-responsibility-list">
         <div class="td-heading"><div><h3 id="tool-responsibility-list">工具台账</h3><small v-if="r.data">{{ filtered.length }} 条记录</small></div>
-          <button type="button" :disabled="r.loading || r.saving" @click="r.load()">{{ r.loading?'正在读取…':'刷新责任配置' }}</button>
+          <button type="button" :disabled="r.loading || r.saving" @click="r.load(true)">{{ r.loading?'正在读取…':'刷新责任配置' }}</button>
         </div>
         <label class="responsibility-search"><Search :size="16" aria-hidden="true"/><input v-model="query" type="search" aria-label="搜索库存工具" placeholder="名称、型号或存放位置"/></label>
+        <select data-native-select v-model="profession" aria-label="筛选责任配置专业"><option v-for="option in professions" :key="option.value" :value="option.value">{{ option.label }}</option></select>
         <div v-if="buildings.length>1" class="td-tabs responsibility-scopes" role="group" aria-label="工具楼栋">
           <button type="button" :aria-pressed="!building" @click="building=''">全部楼栋</button>
           <button v-for="scope in buildings" :key="scope" type="button" :aria-pressed="building===scope" @click="building=scope">{{ scopeLabel(scope) }}</button>
         </div>
         <div v-if="visible.length" class="responsibility-assets" :aria-busy="r.loading">
           <button v-for="asset in visible" :key="asset.id" type="button" class="responsibility-asset" :aria-pressed="r.selection===asset.id" :disabled="r.saving" @click="choose(asset.id)">
-            <span><strong>{{ asset.name }}</strong><small>{{ [scopeLabel(asset.scope),asset.model,asset.location].filter(Boolean).join(' · ') }}</small></span>
-            <span class="td-chip" :data-assigned="!!asset.supervisor">{{ asset.supervisor ? peopleNames.get(asset.supervisor) || '已指定' : '待指定' }}</span>
+            <span><strong>{{ asset.name }}</strong><small>{{ [scopeLabel(asset.scope),asset.profession || '专业未填写',asset.model,asset.location].filter(Boolean).join(' · ') }}</small></span>
+            <span class="td-chip" :data-assigned="!!asset.responsible_name">{{ asset.responsible_name || '待指定' }}</span>
           </button>
         </div>
         <p v-else-if="!r.error" class="td-empty">{{ r.loading?'正在读取工具…':'没有匹配的工具' }}</p>
@@ -61,15 +63,18 @@ async function choose(id:string) {
           <small v-if="r.asset">{{ [scopeLabel(r.asset.scope),r.asset.model,r.asset.location].filter(Boolean).join(' · ') }}</small></div>
           <UserRound :size="18" aria-hidden="true"/>
         </div>
-        <form v-if="r.asset && r.form" class="td-stack" @submit.prevent="dirty && r.saveTool()">
+        <form v-if="r.asset && r.form" class="td-stack" @submit.prevent="r.saveTool()">
           <div class="td-actions"><span v-if="r.asset.source_self_cycle" class="td-chip">维护 {{ r.asset.source_self_cycle }}</span>
             <span v-if="r.asset.source_external_cycle" class="td-chip">送检 {{ r.asset.source_external_cycle }}</span></div>
-          <label class="td-field">专业主管
+          <label class="td-field">工具负责人
+            <NSelect v-model:value="r.form.responsible_id" aria-label="工具负责人" :options="r.responsibleOptions" :disabled="r.saving || r.loading" filterable clearable placeholder="选择有本楼权限的人员"/>
+          </label>
+          <label v-if="r.asset.source_external_cycle && r.asset.source_external_cycle!=='停用'" class="td-field">送检专业主管
             <NSelect v-model:value="r.form.supervisor" :options="r.supervisorOptions" :disabled="r.saving || r.loading" filterable clearable placeholder="选择本楼主管"/>
           </label>
-          <div class="td-actions"><button type="submit" class="td-primary" :disabled="!dirty || r.saving || r.loading">{{ r.saving?'保存中…':'保存负责人' }}</button></div>
+          <div class="td-actions"><button type="submit" class="td-primary" :disabled="!r.dirty || r.saving || r.loading">{{ r.saving?'保存中…':'保存配置' }}</button></div>
         </form>
-        <p v-else class="td-muted">选择工具后可以查看和调整主管。</p>
+        <p v-else class="td-muted">先选择工具。</p>
         <div v-if="r.data?.scrap_approvers?.length" class="responsibility-approvers">
           <small>报废审批人</small><div class="td-actions"><span v-for="name in r.data.scrap_approvers" :key="name" class="td-chip">{{ name }}</span><small>任一位同意即可</small></div>
         </div>
@@ -83,15 +88,19 @@ async function choose(id:string) {
 .responsibility-editor{padding:1rem;border:1px solid var(--td-line);border-radius:14px;background:var(--td-field)}
 .responsibility-editor .td-heading{align-items:start;overflow-wrap:anywhere}
 .responsibility-editor h3:focus{outline:none}
+.tool-desk .responsibility-editor button.td-primary:disabled{background:var(--td-face);border-color:var(--td-line);color:var(--td-muted);opacity:1}
 .responsibility-search{display:flex;align-items:center;gap:.4rem;min-width:0;color:var(--td-muted)}
 .responsibility-search input{flex:1;width:100%}
-.responsibility-assets{display:grid;gap:.25rem;min-width:0}
+.responsibility-assets{display:grid;grid-auto-rows:max-content;gap:.25rem;min-width:0}
 .tool-desk button.responsibility-asset{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:.25rem .6rem;justify-items:start;padding:.48rem .65rem;text-align:left}
 .responsibility-asset>span:first-child{display:grid;gap:.12rem;min-width:0;overflow-wrap:anywhere}
 .responsibility-asset>.td-chip{max-width:8rem;overflow-wrap:anywhere}
 .responsibility-asset[aria-pressed=true]{border-color:var(--td-blue);background:var(--td-sky)}
 .responsibility-asset [data-assigned=false]{background:var(--td-field);color:var(--td-muted)}
 .responsibility-approvers{display:grid;gap:.25rem;border-top:1px solid var(--td-line);padding-top:.7rem}
-@container(max-width:680px){.responsibility-layout{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:680px){
+  .responsibility-layout{grid-template-columns:minmax(0,1fr)}
+  .responsibility-assets{max-height:min(24dvh,240px);overflow:auto;overscroll-behavior:contain}
+}
 @media(pointer:coarse){.tool-desk .responsibility-layout button{min-height:44px}}
 </style>

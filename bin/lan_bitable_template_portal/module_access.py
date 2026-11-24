@@ -7,27 +7,115 @@ from urllib.parse import parse_qs, urlsplit
 MODULE_OPTIONS = [{"value": key, "label": label} for key, label in (
     ("maintenance", "维保通告"), ("change", "变更通告"), ("repair", "检修通告"),
     ("polling", "设备轮巡"), ("adjust", "设备调整"), ("power", "上下电通告"),
-    ("event", "事件管理"), ("engineer_mop", "维护单管理"), ("repair_management", "检修管理（维修单）"),
+    ("event", "事件"), ("engineer_mop", "维保单办理"), ("repair_management", "维修项目"),
     ("cabinet", "机柜管理"), ("daily", "每日任务"), ("water", "水耗管理"),
     ("critical_guard", "重保管理"), ("risk_inspection", "专项排查"), ("drills", "演练管理"), ("learning", "画像学练"),
     ("plan_convergence", "计划收敛审查"), ("signatures", "签名管理"),
     ("knowledge", "共享知识库"), ("links", "多维表导航"), ("life_guide", "参考人生指南"),
-    ("handover", "交接班审核"), ("work_handover", "人员工作交接"), ("assistant", "灯塔助手与飞书智能体"), ("accounts", "账号与设置"),
+    ("handover", "交接班审核"), ("work_handover", "人员工作交接"), ("assistant", "灯塔助手与飞书智能体"), ("accounts", "账号与权限"),
+    ("tool_management", "工具管理"), ("daily_inspection", "日常巡检"), ("cold_source", "冷源运行状态"),
+    ("eop_scenarios", "EOP 场景维护"), ("documents", "南通文件"), ("sops", "SOP 步骤编辑"),
+    ("pre_shift", "班前检查"), ("zhihang_data", "智航数据拉取"), ("dingtalk_settings", "钉钉推送"),
+    ("handover_settings", "交接班链接配置"), ("mop_settings", "MOP 配置"), ("feishu_settings", "飞书智能体配置"),
+    ("release_journal", "开发问题与更新记录"), ("notice_history", "通告历史记忆"),
+    ("backend_status", "后台状态"), ("backend_diagnostics", "高级诊断"),
 )]
+SETTINGS_MODULES = {
+    "permissions": "accounts", "handover": "handover_settings", "mop": "mop_settings",
+    "feishu": "feishu_settings", "dingtalk": "dingtalk_settings", "development": "release_journal",
+    "status": "backend_status", "pressure": "backend_diagnostics",
+}
+SYSTEM_MODULES = frozenset(SETTINGS_MODULES.values()) - {"accounts"} | {"zhihang_data", "notice_history"}
+LEGACY_MODULES = {
+    "maintenance": ("sops",), "polling": ("sops",), "adjust": ("sops",),
+    "daily": ("daily_inspection", "cold_source"), "risk_inspection": ("tool_management",),
+    "drills": ("eop_scenarios",), "knowledge": ("documents",), "accounts": tuple(sorted(SYSTEM_MODULES)),
+}
+SOP_WORK_TYPES = frozenset({"maintenance", "polling", "adjust"})
+
+_SHARED_PROFESSIONS = {'', '-', '—', '无', '未填写', '未分类', '未设置', '不限', '通用', '全部', '全部专业'}
+_PROFESSION_ALIASES = {'强电': '电气', '供配电': '电气', '空调': '暖通', '暖通空调': '暖通'}
+_PROFESSION_KEYS = ('specialty', 'profession', 'major', '专业', '所属专业', '专业类别', '专业（推送消息用）')
+
+
+def profession_codes(value):
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset().union(*(profession_codes(item) for item in value))
+    if isinstance(value, dict):
+        return profession_codes(value.get('text') or value.get('name') or value.get('value'))
+    parts = (part.strip().removesuffix('专业').strip() if part.strip() not in _SHARED_PROFESSIONS else ''
+             for part in re.split(r'[,，、;；/／|＋+&\n]+', str(value or '')))
+    return frozenset(_PROFESSION_ALIASES.get(part, part) for part in parts if part not in _SHARED_PROFESSIONS)
+
+
+def engineer_professions(profile):
+    """None grants the existing view. An empty tuple grants unclassified records only."""
+    category = profile.get('category')
+    if profile.get('level') in {'L0', 'L1'} or profile.get('role') == 'admin':
+        return None
+    if category == 'engineer' or (not category and profile.get('level') == 'L2'):
+        return tuple(sorted(profession_codes(profile.get('specialties'))))
+    return None
+
+
+def session_engineer_professions(auth, session):
+    identity = (session.get('user') or {}).get('open_id') or session.get('open_id')
+    profile = getattr(auth, 'account_profile', None)
+    return engineer_professions(profile(identity)) if identity and callable(profile) else None
+
+
+def profession_query(auth, session):
+    professions = session_engineer_professions(auth, session)
+    return {'professions': professions} if professions is not None else {}
+
+
+def record_profession(record):
+    for fields in (record, record.get('display_fields'), record.get('fields'), record.get('raw_fields'),
+                   record.get('form_fields'), record.get('metadata'), record.get('draft')):
+        if isinstance(fields, dict):
+            for key in _PROFESSION_KEYS:
+                value = fields.get(key)
+                if profession_codes(value):
+                    return value
+    return ''
+
+
+def profession_visible(professions, value):
+    if professions is None:
+        return True
+    codes = profession_codes(value)
+    return not codes or any(code in codes for code in professions)
+
+
+def professional_record_visible(professions, record):
+    return professions is None or isinstance(record, dict) and profession_visible(professions, record_profession(record))
+
+
+def expand_legacy_modules(modules, level):
+    enabled = dict.fromkeys([*modules, *(child for key in modules for child in LEGACY_MODULES.get(key, ())), *(["pre_shift"] if modules else [])])
+    return [module for module in enabled if module not in SYSTEM_MODULES or level in {"L0", "L1"}]
+
+
 for option in MODULE_OPTIONS:
+    if option["value"] in SYSTEM_MODULES:
+        option["admin_only"] = True
     option["group"] = ("通告办理" if option["value"] in {"maintenance", "change", "power", "polling", "adjust", "repair"}
                        else "协作与资料" if option["value"] in {"assistant", "knowledge", "links", "signatures", "life_guide", "handover", "work_handover"}
-                       else "系统管理" if option["value"] == "accounts" else "业务管理")
+                       else "系统管理" if option["value"] in SYSTEM_MODULES | {"accounts"} else "业务管理")
 MODULE_IDS = frozenset(item["value"] for item in MODULE_OPTIONS)
 NOTICE_MODULES = frozenset({"maintenance", "change", "repair", "polling", "adjust", "power"})
 PREFIXES = (
-    ("/api/dingtalk-notices", "accounts"),
+    ("/api/dingtalk-notices", "dingtalk_settings"),
     ("/api/risk-inspections", "risk_inspection"), ("/risk-inspections", "risk_inspection"),
-    ("/api/tool-self-check", "risk_inspection"),
+    ("/api/tool-self-check", "tool_management"),
     ("/api/work-handovers", "work_handover"), ("/work-handover", "work_handover"),
     ("/api/assistant/knowledge", "knowledge"), ("/knowledge-base", "knowledge"),
-    ("/api/document-library", "knowledge"), ("/document-library", "knowledge"),
-    ("/api/release-journal", "accounts"),
+    ("/api/document-library", "documents"), ("/document-library", "documents"),
+    ("/api/release-journal", "release_journal"),
+    ("/api/assistant/feishu-settings", "feishu_settings"),
+    ("/api/handover-links-auth", "handover_settings"),
+    ("/api/handover-links", "handover_settings"),
+    ("/api/admin/mop-settings", "mop_settings"),
     ("/api/assistant", "assistant"), ("/assistant", "assistant"),
     ("/api/message-delivery", "assistant"),
     ("/api/feishu-workpartner", "assistant"),
@@ -40,25 +128,39 @@ PREFIXES = (
     ("/api/capacity", "water"), ("/water-management", "water"),
     ("/api/critical-guard", "critical_guard"), ("/critical-guard", "critical_guard"),
     ("/api/drills", "drills"), ("/drill-management", "drills"),
-    ("/api/eop-scenarios", "drills"), ("/eop-scenarios", "drills"),
+    ("/api/eop-scenarios", "eop_scenarios"), ("/eop-scenarios", "eop_scenarios"),
     ("/api/daily-tasks", "daily"), ("/daily-tasks", "daily"),
-    ("/api/daily-inspection", "daily"), ("/daily-inspection", "daily"),
-    ("/api/cold-source-monitor", "daily"), ("/cold-source-monitor", "daily"),
+    ("/api/daily-inspection", "daily_inspection"), ("/daily-inspection", "daily_inspection"),
+    ("/api/cold-source-monitor", "cold_source"), ("/cold-source-monitor", "cold_source"),
+    ("/api/pre-shift-checks", "pre_shift"),
     ("/api/learning", "learning"), ("/learning", "learning"),
     ("/api/plan-convergence", "plan_convergence"), ("/plan-convergence", "plan_convergence"),
-    ("/api/zhihang-data", "accounts"), ("/zhihang-data", "accounts"),
+    ("/api/zhihang-data", "zhihang_data"), ("/zhihang-data", "zhihang_data"),
     ("/api/link-directory", "links"), ("/link-directory", "links"), ("/life-guide", "life_guide"),
     ("/api/handover", "handover"), ("/api/change-", "change"), ("/api/repair-refresh", "repair"),
 )
 
 
-def required_modules(path, work_type=""):
-    # Collection is open to signed-in accounts; signature images/history keep their grants.
-    if path.rstrip('/') == '/signature-management' or path in {
-            '/api/signatures/management/people', '/api/signatures/management/refresh',
-            '/api/signatures/management/requests', '/api/signatures/management/temporary',
-            '/api/signatures/management/recipients'}:
-        return frozenset()
+def required_modules(path, work_type="", *, view="", tab="", method="GET"):
+    path = path.rstrip("/") or "/"
+    if path == "/risk-inspections" and view == "tool-self-check":
+        return frozenset({"tool_management"})
+    if path == "/admin/settings":
+        return frozenset({SETTINGS_MODULES.get(tab or "permissions", "accounts")})
+    if path == "/api/handover-links" and method in {"GET", "HEAD"}:
+        return frozenset({"handover", "handover_settings"})
+    if path.startswith("/api/backend/"):
+        return frozenset({"backend_diagnostics" if path == "/api/backend/mock-pressure" else "backend_status"})
+    if path == "/api/jobs/recent":
+        return frozenset({"backend_status", *NOTICE_MODULES, "event"})
+    if path == "/admin/history-memory" or path.startswith("/api/admin/notice-memory/"):
+        return frozenset({"notice_history"})
+    if path == "/signature-management":
+        return frozenset({"signatures"})
+    if path == "/api/signatures/management/refresh":
+        return frozenset({"signatures", "engineer_mop"})
+    if path == "/" and view in {"assistant", "handover", "sops"}:
+        return frozenset({view})
     if path in {"/api/signatures/management/mop-people", "/api/signatures/management/mop-invite", "/api/signatures/management/mop-list"}:
         return frozenset({"engineer_mop"})
     if path.startswith("/api/qt/") or path in {"/api/assistant/feishu-event", "/api/health"}:
@@ -67,7 +169,11 @@ def required_modules(path, work_type=""):
         return frozenset({"accounts"})
     if path == "/api/signatures/people":
         return frozenset({"signatures", "engineer_mop", "drills", "maintenance", "polling", "adjust"})
-    if path.startswith(("/api/polling-sops", "/api/polling-work-orders")):
+    if path.startswith("/api/polling-sops"):
+        if method in {"GET", "HEAD"} and (not work_type or work_type in SOP_WORK_TYPES):
+            return frozenset({"sops", work_type or "polling"})
+        return frozenset({"sops"})
+    if path.startswith("/api/polling-work-orders"):
         return frozenset({work_type}) if work_type in NOTICE_MODULES else frozenset({"maintenance", "polling", "adjust"})
     if path.startswith(("/api/workbench", "/workbench-lite", "/api/maintenance-", "/api/notice-", "/api/ongoing-items", "/api/jobs")) or path in {"/api/bootstrap", "/api/records", "/api/refresh", "/api/generate", "/api/send-generated", "/api/history-summary", "/api/source-refresh-status", "/api/qt-active-items"}:
         return frozenset({work_type}) if work_type in NOTICE_MODULES | {"event"} else NOTICE_MODULES
@@ -97,7 +203,9 @@ def require_module(auth, session, module):
 
 def visible_url(modules, url):
     parsed = urlsplit(url)
-    needed = required_modules(parsed.path, parse_qs(parsed.query).get("work_type", [""])[0])
+    query = parse_qs(parsed.query)
+    needed = required_modules(parsed.path, query.get("work_type", [""])[0],
+                              view=query.get("view", [""])[0], tab=query.get("tab", [""])[0])
     return not needed or bool(needed & set(modules))
 
 
@@ -150,15 +258,14 @@ def filter_overview(payload, modules):
 async def module_denial(request, controller, runtime):
     from fastapi.responses import JSONResponse
     path = request.url.path
-    needed = required_modules(path, request.query_params.get("work_type", ""))
+    needed = required_modules(path, request.query_params.get("work_type", ""),
+                              view=request.query_params.get("view", ""), tab=request.query_params.get("tab", ""),
+                              method=request.method)
     if not needed:
         return None
     session = await asyncio.to_thread(controller._current_session, request)
     if not session:
         return None  # Original login or signed-link validation still applies.
-    if (needed == frozenset({'assistant'}) and path.startswith(('/api/assistant/', '/assistant'))
-            and not session.get('is_guest') and str(session.get('role') or (session.get('user') or {}).get('role') or '').lower() != 'guest'):
-        return None  # Shared chat access is not a grant to native business write APIs.
     values = dict(request.query_params)
     if needed == NOTICE_MODULES and request.method in {"POST", "PUT", "PATCH", "DELETE"} and "application/json" in request.headers.get("content-type", ""):
         try:
@@ -171,6 +278,7 @@ async def module_denial(request, controller, runtime):
     if path.startswith("/api/jobs/") and path.split("/")[3] not in {"recent", "stream", "batch"}:
         job = await asyncio.to_thread(runtime.service.get_job, path.split("/")[3]) or {}
         needed = required_modules(path, (job.get("request") or {}).get("work_type", ""))
+        needed = needed | {"backend_status"}
     match = re.match(r"^/api/notice-undo/([^/]+)", path)
     if match:
         undo = await asyncio.to_thread(runtime.state_store.get_notice_undo_action, match[1]) or {}
@@ -179,27 +287,6 @@ async def module_denial(request, controller, runtime):
     request.state.allowed_modules = allowed
     if needed & allowed:
         return None
-    tool_path=(path=='/api/tool-self-check' or path.startswith('/api/tool-self-check/') or
-               path=='/risk-inspections' and request.query_params.get('view')=='tool-self-check')
-    tool_people=path=='/api/risk-inspections/people' and request.method=='GET'
-    if tool_path or tool_people:
-        from .risk_inspection_routes import tool_management_access
-        user=await asyncio.to_thread(runtime.auth_manager.public_user,session)
-        if await asyncio.to_thread(tool_management_access,runtime,session,user):
-            if tool_path or user.get('tool_management_full_access'):
-                return None
-    if ((request.method == 'GET' and path in {
-            '/daily-inspection', '/api/daily-inspection', '/api/daily-inspection/status',
-            '/api/daily-inspection/history', '/api/daily-inspection/history-record',
-            '/api/daily-inspection/source', '/api/daily-inspection/xlsx', '/api/daily-inspection/templates'})
-            or (request.method == 'POST' and path in {
-                '/api/daily-inspection/day-sheet', '/api/daily-inspection/day-export',
-                '/api/daily-inspection/start', '/api/daily-inspection/order', '/api/daily-inspection/draft',
-                '/api/daily-inspection/cancel', '/api/daily-inspection/finish', '/api/daily-inspection/confirm-profession',
-                '/api/daily-inspection/history-edit', '/api/daily-inspection/sheet-group'})):
-        from .daily_inspection import inspection_history_scopes
-        if await asyncio.to_thread(inspection_history_scopes, runtime.auth_manager, session):
-            return None
     if needed == frozenset({'risk_inspection'}):
         from .risk_inspection_routes import risk_task_access
         rid = request.query_params.get('id', '') if path.startswith('/risk-inspections') else ''

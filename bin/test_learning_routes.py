@@ -166,6 +166,20 @@ class LearningRouteTests(unittest.TestCase):
             self.assertEqual(self.client.put(url,json={},headers={"Origin":"https://elsewhere.invalid"}).status_code,403)
             self.assertEqual(review.call_count,2)
 
+    def test_workbench_question_routes_use_resolved_scopes_not_client_scope(self):
+        from lan_bitable_template_portal import learning_issue_cards as cards
+
+        with patch.object(cards, "workbench_review_scopes", return_value=("A",)) as allowed, \
+                patch.object(cards, "review_question", return_value={"editable": True}) as review:
+            url = "/api/learning/issues/issue-one/question?workbench=1&scope=E"
+            self.assertEqual(self.client.get(url).status_code, 200)
+            self.assertEqual(review.call_args.kwargs["workbench_scopes"], ("A",))
+            self.assertEqual(self.client.put(url, json={"scope": "E", "version": 1}).status_code, 200)
+            self.assertEqual(review.call_args.kwargs["workbench_scopes"], ("A",))
+            self.assertEqual(allowed.call_args.args[-1]["id"], "building-H")
+            self.assertEqual(self.client.put(url, json={}, headers={"Origin": "https://elsewhere.invalid"}).status_code, 403)
+            self.assertEqual(review.call_count, 2)
+
     def test_workbench_summary_respects_role_module_and_authorized_buildings(self):
         profile = {"category": "supervisor", "home_scope": "A", "role": "building", "modules": ["learning"]}
         self.auth.public_user = lambda session: profile
@@ -558,7 +572,8 @@ class LearningSourceContractTests(unittest.TestCase):
             dispatch("publish")
             dispatch("paper.delete", {"id": "paper-H"})
             self.assertEqual(actions, {action for methods in routes.ROUTES.values() for action in methods.values()} -
-                             {"bootstrap", "attachments", "attachment", "export", "workbench_summary", "issue.question.get", "issue.question.save"})
+                             {"bootstrap", "attachments", "attachment", "export", "workbench_summary", "issues.workbench_questions",
+                              "issue.question.get", "issue.question.save"})
             self.assertEqual(cloud.mock_calls, [])
 
     def test_real_disabled_service_start_waits_without_cloud_io(self):

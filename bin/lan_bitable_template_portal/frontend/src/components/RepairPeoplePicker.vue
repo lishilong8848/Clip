@@ -91,7 +91,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Check, LoaderCircle, Search, UserRound, X } from "lucide-vue-next";
-import { requestJson } from "../api/client";
+import { requestPeople } from "../api/client";
 import type { LooseDict } from "../types";
 
 const props = withDefaults(defineProps<{
@@ -122,15 +122,8 @@ const results = shallowRef<LooseDict[]>([]);
 let queryTimer: ReturnType<typeof setTimeout> | undefined;
 let requestVersion = 0;
 let peopleAbortController: AbortController | null = null;
-const peopleCache = new Map<string, {
-  expiresAt: number;
-  people: LooseDict[];
-  hasMore: boolean;
-  resultNote: string;
-}>();
-const PEOPLE_CACHE_TTL_MS = 45_000;
 const PEOPLE_BATCH_SIZE = 80;
-const PEOPLE_MAX_LIMIT = 640;
+const PEOPLE_MAX_LIMIT = 200;
 const SELECTED_COLLAPSE_LIMIT = 3;
 const peopleLimit = ref(PEOPLE_BATCH_SIZE);
 const peopleHaveMore = ref(false);
@@ -244,7 +237,7 @@ function removePerson(person: LooseDict): void {
 
 function candidateHasMore(payload: LooseDict, recordCount: number, requestedLimit: number): boolean {
   const totalCount = Number(payload.total ?? payload.total_count);
-  if (Number.isFinite(totalCount) && totalCount > recordCount) return true;
+  if (Number.isFinite(totalCount)) return totalCount > recordCount;
   return payload.has_more === true
     || payload.truncated === true
     || recordCount >= requestedLimit;
@@ -265,19 +258,7 @@ async function loadPeople(resetLimit = true): Promise<void> {
   const currentVersion = ++requestVersion;
   const scope = props.scope || "ALL";
   const normalizedQuery = query.value.trim();
-  const cacheKey = `${scope}\n${normalizedQuery.toLowerCase()}\n${requestedLimit}`;
   peopleAbortController?.abort();
-  peopleAbortController = null;
-  const cached = peopleCache.get(cacheKey);
-  if (cached && cached.expiresAt > Date.now()) {
-    results.value = cached.people;
-    peopleHaveMore.value = cached.hasMore;
-    peopleResultNote.value = cached.resultNote;
-    activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
-    errorText.value = "";
-    loading.value = false;
-    return;
-  }
   const abortController = new AbortController();
   peopleAbortController = abortController;
   loading.value = true;
@@ -288,7 +269,7 @@ async function loadPeople(resetLimit = true): Promise<void> {
       q: normalizedQuery,
       limit: String(requestedLimit),
     });
-    const payload = await requestJson(
+    const payload = await requestPeople(
       `/api/repair-management/people?${params.toString()}`,
       { signal: abortController.signal },
     );
@@ -307,15 +288,6 @@ async function loadPeople(resetLimit = true): Promise<void> {
       ? "人员较多，请输入更精确的姓名。"
       : "";
     activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
-    peopleCache.set(cacheKey, {
-      expiresAt: Date.now() + PEOPLE_CACHE_TTL_MS,
-      people: results.value,
-      hasMore: peopleHaveMore.value,
-      resultNote: peopleResultNote.value,
-    });
-    if (peopleCache.size > 24) {
-      peopleCache.delete(peopleCache.keys().next().value || "");
-    }
   } catch (error: unknown) {
     if (abortController.signal.aborted) return;
     if (currentVersion !== requestVersion) return;
@@ -329,10 +301,10 @@ async function loadPeople(resetLimit = true): Promise<void> {
 }
 
 function openPicker(): void {
-  if (props.disabled) return;
+  if (props.disabled || open.value) return;
   open.value = true;
   activeResultIndex.value = results.value.findIndex((person) => Boolean(person.selectable));
-  void loadPeople(true);
+  if (!loading.value) void loadPeople(true);
 }
 
 function handleDocumentPointerDown(event: PointerEvent): void {
@@ -344,17 +316,24 @@ function handleDocumentPointerDown(event: PointerEvent): void {
 
 watch(query, () => {
   if (!open.value) return;
+  peopleAbortController?.abort();
+  requestVersion++;
+  loading.value = true;
+  results.value = [];
+  activeResultIndex.value = -1;
+  errorText.value = "";
   if (queryTimer) clearTimeout(queryTimer);
   queryTimer = setTimeout(() => void loadPeople(true), 250);
 });
 
 watch(() => props.scope, () => {
+  clearTimeout(queryTimer);
   peopleAbortController?.abort();
   peopleAbortController = null;
   requestVersion += 1;
   results.value = [];
   activeResultIndex.value = -1;
-  if (open.value) void loadPeople(true);
+  if (open.value || !props.disabled) void loadPeople(true);
 });
 
 watch(
@@ -364,7 +343,10 @@ watch(
   },
 );
 
-onMounted(() => document.addEventListener("pointerdown", handleDocumentPointerDown));
+onMounted(() => {
+  document.addEventListener("pointerdown", handleDocumentPointerDown);
+  if (!props.disabled) void loadPeople();
+});
 onBeforeUnmount(() => {
   document.removeEventListener("pointerdown", handleDocumentPointerDown);
   if (queryTimer) clearTimeout(queryTimer);

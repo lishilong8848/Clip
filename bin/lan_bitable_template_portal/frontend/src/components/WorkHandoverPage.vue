@@ -95,7 +95,7 @@
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {NAlert,NButton,NCheckbox,NConfigProvider,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NTag,dateZhCN,zhCN,type SelectOption} from 'naive-ui';
 import {ArrowLeft,ArrowRight,ExternalLink,ListPlus,Paperclip,Pencil,Plus,RefreshCw,RotateCcw,Trash2,Upload,X} from 'lucide-vue-next';
-import {requestJson,requestBinaryJson,type Dict} from '../api/client';
+import {requestJson,requestPeople,requestBinaryJson,type Dict} from '../api/client';
 import {navigate,registerNavigationGuard} from '../navigation';
 import {randomHexId} from '../browserStorage';
 
@@ -141,7 +141,7 @@ function canCheck(item:Dict){return detail.value?.status==='accepted'&&detail.va
 function apply(data:Dict){if(detail.value&&detail.value.id===data.id&&detail.value.version>data.version)return;detail.value=data;form.value={title:data.title,recipient_id:data.recipient_id||null,notes:data.notes,items:data.items.map((i:Dict)=>({...i}))};saved.value=snapshot();}
 let disposed=false,readId=0,listReadId=0,createId='',readAbort:AbortController|undefined,sourceAbort:AbortController|undefined,defaultAbort:AbortController|undefined;
 async function loadList(){const serial=++listReadId;loading.value=true;try{const data=await requestJson(base+'?'+new URLSearchParams({view:view.value,page:String(page.value)}),{cache:'no-store'});if(!disposed&&serial===listReadId){list.value=data.items;total.value=data.total;}}catch(e:any){if(!disposed&&serial===listReadId)error.value=e.message;}finally{if(serial===listReadId)loading.value=false;}}
-async function directory(force=false){peopleLoading.value=true;peopleError.value='';try{const data=await requestJson(base+'/people'+(force?'?refresh=1':''),{cache:'no-store'});if(disposed)return;people.value=data.items;modules.value=data.modules;scopes.value=data.scopes;peopleWarnings.value=data.warnings||[];defaultModules.value=data.default_modules||[];defaultScope.value=[data.self?.home_scope,props.scope,...scopes.value].find(s=>scopes.value.includes(s))||'';sourceScope.value=defaultScope.value;sourceModule.value=defaultModules.value[0]||modules.value[0]?.value||'';}catch(e:any){if(!disposed)peopleError.value=e.message;throw e;}finally{peopleLoading.value=false;}}
+async function directory(force=false){peopleLoading.value=true;peopleError.value='';try{const data=await requestPeople(base+'/people'+(force?'?refresh=1':''),{fresh:force});if(disposed)return;people.value=data.items;modules.value=data.modules;scopes.value=data.scopes;peopleWarnings.value=data.warnings||[];defaultModules.value=data.default_modules||[];defaultScope.value=[data.self?.home_scope,props.scope,...scopes.value].find(s=>scopes.value.includes(s))||'';sourceScope.value=defaultScope.value;sourceModule.value=defaultModules.value[0]||modules.value[0]?.value||'';}catch(e:any){if(!disposed)peopleError.value=e.message;throw e;}finally{peopleLoading.value=false;}}
 async function reloadPeople(){try{await directory(true);}catch{/* The recipient field retains the retryable error. */}}
 function leaveAllowed(){return !busy.value&&(!dirty.value||window.confirm('有未保存的交接内容，确认放弃本次修改？'));}
 function cancelDetailRead(){readId++;readAbort?.abort();readAbort=undefined;detailLoading.value=false;defaultAbort?.abort();defaultsLoading.value=false;defaultsLoaded.value=false;defaultWarnings.value=[];defaultError.value='';}

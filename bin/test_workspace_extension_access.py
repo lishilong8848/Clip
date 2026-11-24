@@ -18,7 +18,7 @@ from lan_bitable_template_portal.account_policy import default_modules
 from lan_bitable_template_portal.document_library import DocumentLibraryService
 from lan_bitable_template_portal.document_library_routes import install_document_library_routes
 from lan_bitable_template_portal.module_access import (
-    MODULE_IDS, PREFIXES, allowed_modules, module_denial, required_modules,
+    MODULE_IDS, PREFIXES, SYSTEM_MODULES, allowed_modules, module_denial, required_modules,
 )
 from lan_bitable_template_portal.portal_auth import PortalAuthManager
 from lan_bitable_template_portal.release_journal import ReleaseJournalStore
@@ -38,10 +38,10 @@ JOURNAL_PATHS = ("/api/release-journal", "/api/release-journal/" + ENTRY_ID)
 
 
 class WorkspaceExtensionPolicyTests(unittest.TestCase):
-    def test_new_prefixes_require_only_the_existing_module(self):
-        for prefix, module in (("/api/document-library", "knowledge"),
-                               ("/document-library", "knowledge"),
-                               ("/api/release-journal", "accounts")):
+    def test_new_prefixes_require_each_independent_module(self):
+        for prefix, module in (("/api/document-library", "documents"),
+                               ("/document-library", "documents"),
+                               ("/api/release-journal", "release_journal")):
             for suffix in ("", "/", "/fixture/nested"):
                 with self.subTest(path=prefix + suffix):
                     self.assertEqual(required_modules(prefix + suffix), {module})
@@ -62,11 +62,11 @@ class WorkspaceExtensionPolicyTests(unittest.TestCase):
                 with self.subTest(method=method, path=path):
                     self.assertNotIn((method, path), ANONYMOUS | SIGNED)
 
-    def test_extensions_do_not_add_modules_or_accounts_to_base_defaults(self):
-        self.assertTrue({"knowledge", "accounts"} <= MODULE_IDS)
-        self.assertTrue({"document_library", "release_journal",
+    def test_base_defaults_exclude_account_and_system_admin_permissions(self):
+        self.assertTrue({"knowledge", "accounts", "documents", "release_journal"} <= MODULE_IDS)
+        self.assertTrue({"document_library",
                          "document-library", "release-journal"}.isdisjoint(MODULE_IDS))
-        self.assertEqual(set(default_modules("L4")), MODULE_IDS - {"accounts"})
+        self.assertEqual(set(default_modules("L4")), MODULE_IDS - SYSTEM_MODULES - {"accounts"})
 
 
 class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
@@ -150,13 +150,16 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(ingress=name, path=path):
                     response = await client.get(path)
                     self.assertEqual(response.status_code, 403, response.text)
-                    self.assertEqual(response.json()["error_code"], "module_access_denied")
+                    if path.startswith("/api/"):
+                        self.assertEqual(response.json()["error_code"], "module_access_denied")
+                    else:
+                        self.assertIn("text/html", response.headers["content-type"])
         self.assertEqual(allowed_modules(self.auth, self.session), {"assistant"})
         self.assertEqual(self.profile, original)
         self.assert_no_extension_reads()
 
-    async def test_knowledge_grant_opens_documents_but_not_release_journal(self):
-        self.profile["modules"] = ["knowledge"]
+    async def test_documents_grant_opens_documents_but_not_release_journal(self):
+        self.profile["modules"] = ["documents"]
         for name, client in self.clients.items():
             for path in DOCUMENT_PATHS:
                 with self.subTest(ingress=name, path=path):
@@ -168,9 +171,9 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await client.get(path)).status_code, 403)
         self.assertEqual(self.library.tables.call_count, 2)
         self.journal.entries.assert_not_called()
-        self.assertEqual(allowed_modules(self.auth, self.session), {"knowledge"})
+        self.assertEqual(allowed_modules(self.auth, self.session), {"documents"})
 
-    async def test_accounts_grant_is_not_knowledge_or_administrator_authority(self):
+    async def test_accounts_grant_does_not_authorize_documents_or_release_journal(self):
         self.profile["modules"] = ["accounts"]
         for name, client in self.clients.items():
             for path in DOCUMENT_PATHS:
@@ -179,9 +182,8 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(ingress=name, path=path):
                     response = await client.get(path)
                     self.assertEqual(response.status_code, 403, response.text)
-                    self.assertNotIn("error_code", response.json())
-                    self.assertIn("no-store", response.headers["cache-control"])
-        self.assertEqual(self.auth.is_admin.call_count, 4)
+                    self.assertEqual(response.json()["error_code"], "module_access_denied")
+        self.auth.is_admin.assert_not_called()
         self.assert_no_extension_reads()
 
     async def test_admin_profile_still_requires_the_assigned_module(self):
@@ -190,12 +192,15 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
             for path in (*DOCUMENT_PATHS, *JOURNAL_PATHS):
                 response = await client.get(path)
                 self.assertEqual(response.status_code, 403)
-                self.assertEqual(response.json()["error_code"], "module_access_denied")
+                if path.startswith("/api/"):
+                    self.assertEqual(response.json()["error_code"], "module_access_denied")
+                else:
+                    self.assertIn("text/html", response.headers["content-type"])
         self.auth.is_admin.assert_not_called()
         self.assert_no_extension_reads()
 
-    async def test_admin_with_accounts_reads_real_journal_without_knowledge_access(self):
-        self.profile.update(role="admin", modules=["accounts"])
+    async def test_admin_with_release_grant_reads_real_journal_without_documents_access(self):
+        self.profile.update(role="admin", modules=["release_journal"])
         for name, client in self.clients.items():
             for path in JOURNAL_PATHS:
                 with self.subTest(ingress=name, path=path):
@@ -229,7 +234,7 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assert_no_extension_reads()
 
     async def test_guest_cannot_borrow_staff_modules_or_admin_flags(self):
-        self.profile.update(role="admin", modules=["knowledge", "accounts"])
+        self.profile.update(role="admin", modules=["documents", "release_journal"])
         self.session["role"] = "guest"
         for name, client in self.clients.items():
             for path in (*DOCUMENT_PATHS, *JOURNAL_PATHS):
@@ -241,7 +246,7 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
         self.assert_no_extension_reads()
 
     async def test_release_route_rejects_guest_flag_and_temporary_admin_sessions(self):
-        self.profile.update(role="admin", modules=["accounts"])
+        self.profile.update(role="admin", modules=["release_journal"])
         for flags in ({"role": "admin", "is_guest": True}, {"role": "temporary"}):
             self.session = {"user": {"open_id": self.identity}, "is_admin": True, **flags}
             for name, client in self.clients.items():
@@ -249,12 +254,11 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
                     with self.subTest(flags=flags, ingress=name, path=path):
                         response = await client.get(path)
                         self.assertEqual(response.status_code, 403, response.text)
-                        self.assertNotIn("error_code", response.json())
         self.assert_no_extension_reads()
 
     async def test_existing_public_session_immediately_loses_revoked_grants(self):
         client = self.clients["public"]
-        self.profile["modules"] = ["knowledge"]
+        self.profile["modules"] = ["documents"]
         self.assertEqual((await client.get("/api/document-library/tables")).status_code, 200)
         self.library.tables.reset_mock()
         self.get_library.reset_mock()
@@ -264,7 +268,7 @@ class WorkspaceExtensionAccessTests(unittest.IsolatedAsyncioTestCase):
         self.get_library.assert_not_called()
         self.library.tables.assert_not_called()
 
-        self.profile.update(role="admin", modules=["accounts"])
+        self.profile.update(role="admin", modules=["release_journal"])
         self.assertEqual((await client.get(JOURNAL_PATHS[0])).status_code, 200)
         self.journal.entries.reset_mock()
         self.profile["role"] = "building"

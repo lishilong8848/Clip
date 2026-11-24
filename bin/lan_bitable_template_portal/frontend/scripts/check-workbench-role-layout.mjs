@@ -16,18 +16,21 @@ const styles = [...main.matchAll(/import '([^']+\.css)';/g)]
 const fixture = `<template><NConfigProvider><NDialogProvider><NMessageProvider>
   <div class="v2-shell"><main class="v2-main">
     <WorkbenchHome :user="user" :scope="scope" :scopes="scopes" @open="url=>opened(url)" />
+    <div v-if="repairText" class="preview-fixture" style="width:min(100%,420px)"><RepairTextPreview :value="repairText" /></div>
   </main></div></NMessageProvider></NDialogProvider></NConfigProvider></template>
   <script setup>
   import {ref,nextTick} from 'vue';
   import {NConfigProvider,NDialogProvider,NMessageProvider} from 'naive-ui';
   import WorkbenchHome from '/src/workspace-v2/workbench/WorkbenchHome.vue';
+  import RepairTextPreview from '/src/workspace-v2/RepairTextPreview.vue';
   import {applyNightMode} from '/src/workspace-v2/theme';
   ${styles}
   document.documentElement.classList.add('workspace-v2');
-  const user=ref({}),scope=ref('A'),scopes=ref([]);
+  const user=ref({}),scope=ref('A'),scopes=ref([]),repairText=ref('');
   window.setAccount=async account=>{user.value=account;scopes.value=(account.testScopes||['A']).map(value=>({value,label:value+'楼'}));scope.value='A';await nextTick();};
   window.setScope=async value=>{scope.value=value;await nextTick();};
   window.setNightMode=async value=>{applyNightMode(value);await nextTick();};
+  window.setRepairText=value=>{repairText.value=value;};
   const opened=url=>{window.opened=url;};
   </script>`;
 const entry = `import {createApp} from 'vue';import Fixture from '/@role-layout.vue';createApp(Fixture).mount('#app');`;
@@ -49,16 +52,41 @@ try {
   const requests=[], unexpected=[], errors=[], checks=[];
   page.on('pageerror', error=>errors.push(error.stack||error.message));
   let empty=false, failure=0, partial=false, permissionVersion=1, repairSize=1, riskSize=1, noticeSize=1;
-  let truncatedRepairPage=false,liveGuard=false;
+  let truncatedRepairPage=false,liveGuard=false,mixedProfessions=false;
+  let checkFixture=false, checkSubmitted=false, calendarFailure=false, planFixture=false, inspectionOnDuty=false, ownRepair='';
+  let personalAssigned=30, pendingLearning=false, learningSaved=false, failLearningSave=false, denseRoster=false;
+  const checkItems=[{id:'valves',text:'核查机房阀门编号、位置和现场状态'},{id:'keys',text:'核对值班钥匙'}];
   await page.route('**/*', async route=>{
     const request=route.request(), url=new URL(request.url()), scope=url.searchParams.get('scope')||'A';
     if (url.origin!==origin) { unexpected.push('external '+url.origin); return route.abort(); }
     if (url.pathname==='/fixture') return route.fulfill({contentType:'text/html',body:
       '<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><div id="page-back-slot"></div><div id="app"></div><script type="module" src="/@role-layout.js"></script>'});
     if (!url.pathname.startsWith('/api/')) return route.continue();
-    requests.push([request.method(),url.pathname]);
-    if (request.method()!=='GET') {unexpected.push(request.method()+' '+url.pathname); return route.abort();}
+    requests.push([request.method(),url.pathname,scope]);
     const ok=data=>route.fulfill({json:{ok:true,data}});
+    if(checkFixture&&url.pathname==='/api/pre-shift-checks/submit'&&request.method()==='POST'){
+      const body=request.postDataJSON();
+      assert.equal(body.task_id,'fixture-check');
+      assert.equal(body.answers.length,checkItems.length);
+      assert(body.answers.every(answer=>answer.status==='normal'));
+      checkSubmitted=true;
+      return ok({});
+    }
+    if(url.pathname==='/api/learning/issues/issue-review-fixture/question'&&url.searchParams.get('workbench')==='1'){
+      const question={id:'review-question',type:'single',status:'published',version:4,stem:'隔离原题',
+        options:[{id:'first',text:'原答案'},{id:'second',text:'待修改答案'}],correct_option_ids:['first'],analysis:'原解析'};
+      if(request.method()==='GET')return ok({editable:true,question,issues_version:'fixture-v1',reason:'核对正确答案'});
+      if(request.method()==='PUT'){
+        const edits=request.postDataJSON();
+        assert.equal(edits.issues_version,'fixture-v1');
+        assert.equal(edits.stem,'隔离修订后的题干');
+        assert.deepEqual(edits.correct_option_ids,['second']);
+        if(failLearningSave)return route.fulfill({status:503,json:{ok:false,error:'隔离保存失败'}});
+        learningSaved=true;
+        return ok({question:{...question,...edits,version:5},resolved:true});
+      }
+    }
+    if (request.method()!=='GET') {unexpected.push(request.method()+' '+url.pathname); return route.abort();}
     if(url.pathname==='/api/repair-management/health')return ok({clean:true});
     if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
     if(url.pathname==='/api/repair-management/sync-status')return ok({status:'completed'});
@@ -69,8 +97,14 @@ try {
     }
     if(url.pathname==='/api/repair-management/followups')return ok({fields:[],records:[],total:0,shared_fields:{}});
     if (url.pathname==='/api/assistant/icon-weather') return ok({available:false});
-    if (url.pathname==='/api/personal-calendar/weather') return ok({warning_ready:true,alerts:[],guard_actions:[]});
-    if (url.pathname==='/api/personal-calendar') return ok({month:url.searchParams.get('month'),days:{},roster_dates:['2026-11-18'],unavailable:[]});
+    if (url.pathname==='/api/personal-calendar/weather') return calendarFailure?route.fulfill({status:503,json:{ok:false,error:'fixture unavailable'}}):
+      ok({warning_ready:true,alerts:[],guard_level:'一级',guard_actions:[]});
+    if (url.pathname==='/api/personal-calendar') return calendarFailure?route.fulfill({status:503,json:{ok:false,error:'fixture unavailable'}}):
+      ok({month:url.searchParams.get('month'),days:{'2026-11-18':{items:[],staff:[]}},
+        roster_dates:['2026-11-18'],unavailable:[],
+        handover:{current:{date:'2026-11-18',shift:'白',end:'2026-11-18T17:50:00+08:00',verified:true,staff:denseRoster?['H','A','B','C','D','E','110'].map(building=>({scope:building,people:[{name:building+'人员甲'},{name:building+'人员乙'},{name:building+'人员丙'}]})):[{scope,people:[
+          {name:scope+'楼排班测试'},{name:'刘冉'},{name:'薛小明',position:'运维实习生',duty_kind:'长白'},
+        ]}]}}});
     if (url.pathname.startsWith('/api/workspace-layouts/')) return ok({revision:1,value:{version:1,widgets:[
       {kind:'shortcuts',links:['accounts','learning','event','learning','cabinet']},
     ]}});
@@ -81,23 +115,37 @@ try {
       }]});
     }
     if (url.pathname==='/api/events/overview') return ok({scope,records:[],stats:{},items:[]});
+    if (url.pathname==='/api/daily-inspection/status') {
+      const viewScope=url.searchParams.get('view_scope');
+      return ok({view_scope:viewScope, viewer_on_duty:inspectionOnDuty, can_edit:true,
+        duty:{scope:viewScope,date:'2026-11-18',shift:'白'},next_round:1,round_limit:2});
+    }
     if (url.pathname==='/api/repair-management/status') {
       const limit=Number(url.searchParams.get('limit')), offset=Number(url.searchParams.get('offset')||0);
       assert.ok(limit>0);
+      if (mixedProfessions) {
+        const records=[['电气','强电'],['暖通','暖通'],['通用','']].map(([label,specialty],index)=>({
+          record_id:'repair-'+scope+'-profession-'+index,title:scope+'楼'+label+'维修',building:scope,
+          specialty,workflow:'维修中',is_completed:false,
+        }));
+        return ok({total:records.length,records:records.slice(offset,offset+limit)});
+      }
       const total=empty?0:partial?2*limit+1:repairSize;
       const records=Array.from({length:Math.max(0,Math.min(limit,total-offset))},(_,i)=>{
         // A non-final API page must be full. Completed records occupy slots but are not todos.
         const completed=partial && (i>0 || offset===2*limit);
         return {record_id:'repair-'+scope+(offset+i?'-'+(offset+i):''),
           title:offset===limit&&i===0?'隔离维修下一页':'隔离维修待办'+(i?' '+(i+1):''),
+          ...(ownRepair&&i===0?{assignee_open_id:ownRepair}:{}),
           building:scope,specialty:'电气',workflow:completed?'已完成':'维修中',is_completed:completed};
       });
       return ok({total,records:truncatedRepairPage?records.slice(0,1):records});
     }
-    if (url.pathname==='/api/workbench') return ok({ongoing:empty?[]:Array.from({length:noticeSize},(_,i)=>
+    if (url.pathname==='/api/workbench') return ok({scope,ongoing:empty?[]:Array.from({length:noticeSize},(_,i)=>
       noticeSize===1?{active_item_id:'change-live',work_type:'change',title:'隔离变更只读项',scope,status:'开始'}
       :{active_item_id:'notice-live-'+i,source_record_id:i?'source-'+i:'maintenance-plan',work_type:'maintenance',title:i?'隔离进行中通告 '+i:'隔离维保计划',scope,status:'开始'}),
-      records:empty?[]:Array.from({length:noticeSize},(_,i)=>({record_id:i?'plan-'+i:'maintenance-plan',work_type:'maintenance',title:'隔离维保计划'+(i?' '+i:''),source_progress:'未开始'})),
+      records:empty?[]:Array.from({length:planFixture?23:noticeSize},(_,i)=>({record_id:i?'plan-'+i:'maintenance-plan',work_type:'maintenance',title:'隔离维保计划'+(i?' '+i:''),source_progress:'未开始',
+        ...(planFixture?{building_codes:[scope],plan_start_time:'2026-11-18',plan_end_time:i===20?'2026-11-23':i===21?'2026-11-17':i===22?'':'2026-11-19'}:{})})),
       ongoing_pagination:{total_pages:1},records_pagination:{total_pages:1}});
     if (url.pathname==='/api/workbench-events') return ok({items:empty?[]:[{event_id:'notice-live',state:'active',metadata:{summary:'隔离事件通告'}}]});
     if (url.pathname==='/api/risk-inspections') return ok({total:empty?0:riskSize,items:empty?[]:Array.from({length:riskSize},(_,i)=>({id:'risk-'+i,name:'隔离专项排查'+(i?' '+(i+1):''),total:2,approved:1,submitted:1,status:'active'}))});
@@ -106,11 +154,27 @@ try {
     if (url.pathname==='/api/drills') return ok({items:[{drill_id:'drill-done',name:'隔离已完成演练',status:'published',execution:{status:'synced'}}]});
     if (url.pathname==='/api/engineer/mop/bootstrap') return ok({notices:[]});
     if (url.pathname==='/api/capacity/water/records') return ok({total:0,records:[]});
-    if (url.pathname==='/api/pre-shift-checks') return ok({scope,scopes:['A'],can_manage:false,roster_ready:false,server_time:'2026-11-18T11:00:00+08:00',definition:{items:[],version:1},tasks:[]});
+    if (url.pathname==='/api/pre-shift-checks') return ok({scope,scopes:[scope],can_manage:false,roster_ready:checkFixture,
+      viewer_on_roster:checkFixture,viewer_active_shift:'白',server_time:'2026-11-18T11:00:00+08:00',
+      definition:{items:checkFixture?checkItems:[],version:1},tasks:checkFixture?[{
+        id:'fixture-check',scope,shift:'白',day:'2026-11-18',items:checkItems,definition_version:1,
+        due:Date.parse('2026-11-18T08:50:00+08:00')/1000,deadline:Date.parse('2026-11-18T12:00:00+08:00')/1000,
+        can_submit:!checkSubmitted,submitted:checkSubmitted?'2026-11-18T11:00:00+08:00':null,
+        answers:checkItems.map(item=>({id:item.id,status:'normal',note:''})),files:[],
+      }]:[]});
     if (url.pathname==='/api/learning/bootstrap') return ok({self_scope:'A',self_person:{id:'self'},can_answer:true,today:'2026-11-18'});
     if (url.pathname==='/api/learning/papers') return ok({total:0,page_size:20,items:[]});
-    if (url.pathname==='/api/learning/profile') return ok({today_summary:{assigned:15,task_answered:4},summary:{assigned:30,task_answered:9}});
-    if (url.pathname==='/api/learning/workbench-summary') return ok({scopes:scope==='ALL'?['A','B']:[scope],summary:{已完成:4,待答:2,答题中:1,逾期:0,待核对:0,未到时:0}});
+    if (url.pathname==='/api/learning/profile') return ok({today_summary:{assigned:personalAssigned,task_answered:0},summary:{assigned:personalAssigned,task_answered:0}});
+    if (url.pathname==='/api/learning/issues/workbench-questions') {
+      const items=pendingLearning&&!learningSaved?[{question_id:'review-question',issue_id:'issue-review-fixture',stem:'隔离原题',feedback_count:1}]:[];
+      return ok({items,total:items.length,page:1,page_size:20});
+    }
+    if (url.pathname==='/api/learning/workbench-summary') {
+      const scopes=['ALL','CAMPUS'].includes(scope)?['A','B']:[scope];
+      const summary={已完成:4,待答:2,答题中:1,逾期:0,待核对:0,未到时:0};
+      return ok({scopes,summary,by_scope:url.searchParams.get('detail')==='1'?
+        Object.fromEntries(scopes.map((building,i)=>[building,[{date:'2026-11-18',summary:{...summary,已完成:4+i}}]])):undefined});
+    }
     if (url.pathname==='/api/signatures/management/account') return ok({person:{is_self:true,building:'A楼',signature_status:'signed'}});
     if (url.pathname==='/api/auth/permission-requests/admin') return ok({items:[{request_id:'permission',name:'隔离权限申请 '+permissionVersion,status:'pending'}]});
     if (url.pathname==='/api/tool-self-check/workspace/history') return ok({sessions:[]});
@@ -159,9 +223,13 @@ try {
         && url.searchParams.get('focus_record_id')==='repair-'+scope;
     };
     await Promise.all([
-      page.waitForRequest(focused),
+      page.waitForRequest(focused,{timeout:60000}),
       dialog.getByRole('button',{name:'办理 隔离维修待办',exact:true}).click(),
-    ]);
+    ]).catch(async error=>{
+      await page.screenshot({path:path.join(output,'repair-opening-failure.png'),fullPage:true});
+      console.error(await page.locator('.task-dialog').innerText({timeout:1000}).catch(()=>'(no dialog)'),errors,requests.slice(-12));
+      throw error;
+    });
     const panel=page.getByRole('region',{name:'办理 隔离维修待办',exact:true});
     await panel.locator('[data-module-widget="repair_management"]').waitFor();
     assert.equal(page.url(),before,'opening an exact record keeps the current workbench');
@@ -202,6 +270,7 @@ try {
   await settle();
   assert.equal(await page.getByText(/画像|个人学练/).count(),0);
   assert.ok(!requests.slice(dutyStart).some(([,url])=>url.startsWith('/api/learning/')));
+  assert.equal(await page.getByRole('article',{name:'个人卡片',exact:true}).count(),1);
   assert.equal(await page.getByText('隔离已完成演练',{exact:true}).count(),0);
   assert.equal(await rowsOf('drills').count(),0);
   await open('notices:变更');
@@ -217,7 +286,7 @@ try {
     ['supervisor',['A'],['事件管理','维修项目','机柜管理','画像学练','重保管理','专项排查']],
     ['engineer',['A'],['维修项目','专项排查','通告办理','事件管理']],
     ['engineer',['A','B'],['维修项目','专项排查','事件管理','通告办理']],
-    ['duty',['A'],['通告办理','演练管理','维保单办理','水耗管理']],
+    ['duty',['A'],['通告办理','演练管理','水耗管理']],
     ['administrator',['A'],['账号与权限','签名管理']],
   ]) {
     await set(actor('layout-'+category+'-'+scopes.length,category,full,{testScopes:scopes,can_manage_accounts:category==='administrator'}));
@@ -247,13 +316,77 @@ try {
     }
   }
   checks.push('six role/scope combinations at five widths: one tile grid, no overlaps or horizontal overflow, compact controls');
+  await set(actor('learning-detail','manager',['learning'],{testScopes:['A','B']}));
+  await page.evaluate(()=>window.setScope('CAMPUS'));
+  const team=page.getByRole('button',{name:'画像学练情况汇总',exact:true});
+  await team.click();
+  const detail=page.locator('.learning-detail');
+  await detail.getByRole('combobox',{name:'学练明细楼栋'}).selectOption('B');
+  assert.deepEqual(await detail.locator('tbody td').allTextContents(),['2026-11-18','5','3','0','0']);
+  await page.screenshot({path:path.join(output,'learning-detail-mobile.png'),animations:'disabled'});
+  await page.keyboard.press('Escape');
+  await detail.waitFor({state:'hidden'});
+  await page.evaluate(()=>window.setScope('A'));
+  await team.click();
+  await detail.getByText('A楼',{exact:true}).waitFor();
+  assert.equal(await detail.getByRole('combobox').count(),0);
+  await page.keyboard.press('Escape');
+  await detail.waitFor({state:'hidden'});
+  checks.push('learning summary opens authorized date and building details, with no previous-building rows displayed');
+  personalAssigned=0;
+  await set(actor('learning-no-personal-content','manager',['learning']));
+  await page.getByRole('button',{name:'画像学练情况汇总',exact:true}).waitFor();
+  assert.equal(await page.getByRole('article',{name:'个人卡片'}).getByRole('button',{name:'打开画像学练'}).count(),0);
+  pendingLearning=true;
+  await set(actor('learning-review-only','manager',['learning']));
+  const personalReview=page.getByRole('article',{name:'个人卡片'});
+  await personalReview.getByRole('button',{name:/待处理题目.*1 题/}).click();
+  const reviewDialog=page.locator('.desk-review-dialog');
+  await reviewDialog.getByRole('button',{name:/隔离原题/}).click();
+  await reviewDialog.getByRole('textbox',{name:'题干'}).fill('隔离修订后的题干');
+  await reviewDialog.getByRole('radio',{name:'选项 B 为正确答案'}).check();
+  await page.screenshot({path:path.join(output,'learning-review-mobile.png'),animations:'disabled'});
+  failLearningSave=true;
+  await reviewDialog.getByRole('button',{name:'保存并处理反馈'}).click();
+  await reviewDialog.getByText('隔离保存失败',{exact:true}).waitFor();
+  assert.equal(await reviewDialog.getByRole('textbox',{name:'题干'}).inputValue(),'隔离修订后的题干');
+  failLearningSave=false;
+  await reviewDialog.getByRole('button',{name:'保存并处理反馈'}).click();
+  await reviewDialog.getByText('题目已保存，反馈已处理。',{exact:true}).waitFor();
+  await reviewDialog.getByText('暂无待处理题目',{exact:true}).waitFor();
+  await reviewDialog.locator('.n-card-header__close').click();
+  await reviewDialog.waitFor({state:'hidden'});
+  assert.equal(await personalReview.getByRole('button',{name:/待处理题目/}).count(),0);
+  personalAssigned=30;pendingLearning=false;
+  checks.push('personal card stays visible; successful question edits remove only the resolved item');
 
   await set(actor('engineer-restricted','engineer',['learning','cabinet','accounts']));
   assert.equal(await page.locator('.wb-shortcut').count(),0,'job recommendations cannot create module grants');
-  assert.equal(await todo.count(),0);
+  await todo.getByText('暂无待办',{exact:true}).waitFor();
   await set(actor('engineer-action','engineer',['repair_management','risk_inspection']));
   await checkInlineRepair('A');
   checks.push('recommendations require real module grants; exact-record action and return scope preserved');
+
+  mixedProfessions=true;
+  const engineer=actor('engineer-professions','engineer',['repair_management'],{level:'L2',testScopes:['A','B']});
+  await set(engineer);
+  await open('repair_management');
+  await dialog.getByText('A楼电气维修',{exact:true}).waitFor();
+  await dialog.getByText('A楼通用维修',{exact:true}).waitFor();
+  assert.equal(await dialog.getByText('A楼暖通维修',{exact:true}).count(),0);
+  await set({...engineer,specialties:['暖通']});
+  await open('repair_management');
+  await dialog.getByText('A楼暖通维修',{exact:true}).waitFor();
+  await dialog.getByText('A楼通用维修',{exact:true}).waitFor();
+  assert.equal(await dialog.getByText('A楼电气维修',{exact:true}).count(),0);
+  await page.evaluate(()=>window.setScope('B')); await settle();
+  assert.equal(await dialog.count(),0);
+  await open('repair_management');
+  await dialog.getByText('B楼暖通维修',{exact:true}).waitFor();
+  assert.equal(await dialog.getByText(/A楼.+维修|B楼电气维修/).count(),0);
+  mixedProfessions=false;
+  await set(actor('engineer-action','engineer',['repair_management','risk_inspection']));
+  checks.push('same-account professional changes reset cached tasks, keep shared work, and isolate building switches');
 
   repairSize=12; riskSize=7;
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle();
@@ -286,7 +419,7 @@ try {
   assert.equal(await rowsOf('repair_management').count(),12);
   for (const width of [1440,1800,390]){
     await page.setViewportSize({width,height:1000});await settle();
-    const rect=await dialog.boundingBox();assert(rect.x>=0 && rect.x+rect.width<=width+1);
+    const rect=await dialog.boundingBox();assert(rect.x>=0 && rect.x+rect.width<=width+1, JSON.stringify({width,rect}));
     await page.screenshot({path:path.join(output,'dense-modules-'+width+'.png'),animations:'disabled'});
   }
   await set(actor('multi-scope-counts','engineer',['repair_management','risk_inspection'],{testScopes:['A','B']}));
@@ -381,9 +514,158 @@ try {
   assert.notEqual(light,dark,'workbench follows existing dark theme');
   await page.screenshot({path:path.join(output,'dark-1440.png'),fullPage:true,animations:'disabled'});
   checks.push('existing light/dark theme surface is inherited');
-  assert.ok(requests.every(([method])=>method==='GET'));
+  await page.evaluate(()=>window.setNightMode(false));
+
+  const mopStart=requests.length;
+  await set(actor('mop-d','duty',['engineer_mop'],{home_scope:'D',testScopes:['D']}));
+  await page.locator('.wb-shortcut').filter({hasText:'维保单办理'}).waitFor();
+  assert.deepEqual(requests.slice(mopStart).filter(([,url])=>url==='/api/engineer/mop/bootstrap').map(([, , scope])=>scope),['D']);
+  await set(actor('mop-a','duty',['engineer_mop']));
+  assert.equal(await page.locator('.wb-shortcut').filter({hasText:'维保单办理'}).count(),0);
+  checks.push('maintenance-sheet access is displayed in D/E only');
+
+  checkFixture=true;
+  await page.setViewportSize({width:390,height:860});
+  await set(actor('fixture-check-duty','duty',['pre_shift']));
+  const personalCard=page.getByRole('article',{name:'个人卡片',exact:true});
+  await personalCard.getByRole('button',{name:/白班班前检查/}).waitFor();
+  assert.equal(await page.getByRole('searchbox',{name:'全局搜索'}).count(),0);
+  assert.equal(await page.getByRole('region',{name:'班前检查',exact:true}).count(),0);
+  assert.equal(await page.getByRole('region',{name:'紧急事项',exact:true}).count(),0);
+  await open('pre_shift');
+  await dialog.getByRole('button',{name:'办理 白班班前检查'}).click();
+  const checkCase=page.getByRole('region',{name:'办理 白班班前检查'});
+  await checkCase.locator('legend').filter({hasText:checkItems[0].text}).waitFor().catch(async error=>{
+    await page.screenshot({path:path.join(output,'pre-shift-failure.png'),fullPage:true});
+    console.error(await checkCase.innerText({timeout:1000}).catch(()=>'(no dialog)'),errors,requests.slice(-12));
+    throw error;
+  });
+  assert.equal(await checkCase.locator('legend').first().evaluate(el=>getComputedStyle(el).fontSize),'14px');
+  await page.screenshot({path:path.join(output,'pre-shift-mobile.png'),animations:'disabled'});
+  for(const button of await checkCase.getByText('无异常',{exact:true}).all())await button.click();
+  await checkCase.getByRole('button',{name:'提交检查',exact:true}).click();
+  await tile('pre_shift').waitFor({state:'detached'});
+  await personalCard.getByRole('button',{name:/白班班前检查/}).waitFor({state:'detached'});
+  assert(checkSubmitted);
+  await checkCase.getByRole('button',{name:'关闭待办办理'}).click();
+  await checkCase.waitFor({state:'hidden'});
+  checks.push('mobile pre-shift work opens in a dialog, uses the body text size, submits once and leaves the queue');
+  checkFixture=false;
+
+  inspectionOnDuty=true;
+  const operator=actor('independent-inspection','operator',['daily_inspection'],{level:'L4',home_scope:'D',testScopes:['D']});
+  await set(operator);
+  await personalCard.getByRole('button',{name:/D楼白班第 1 轮巡检/}).waitFor();
+  assert.equal(await page.getByRole('article',{name:'楼栋卡片'}).getByText(/第 1 轮巡检/).count(),0);
+  inspectionOnDuty=false;
+  await set({...operator,open_id:'inspection-off-duty'});
+  assert.equal(await personalCard.getByRole('button',{name:/第 1 轮巡检/}).count(),0);
+  checks.push('inspection authorization works independently of pre-shift access and unassigned shifts show no inspection');
+
+  ownRepair='personal-repair-assignment';
+  await set(actor(ownRepair,'operator',['repair_management'],{level:'L4'}));
+  await personalCard.getByText('隔离维修待办',{exact:true}).waitFor();
+  assert.equal(await page.getByRole('article',{name:'楼栋卡片'}).getByText('隔离维修待办',{exact:true}).count(),0);
+  ownRepair='';
+  checks.push('a personally assigned repair is shown once in the personal card');
+
+  planFixture=true;
+  await page.setViewportSize({width:1440,height:1000});
+  await set(actor('period-panels','manager',['maintenance','learning','event','repair_management'],{level:'L1'}));
+  const fold=page.getByRole('button',{name:/未开始通告/}).first();
+  await fold.waitFor();
+  assert.equal(await fold.getAttribute('aria-expanded'),'false');
+  const overview=page.getByRole('region',{name:'工作状态'});
+  assert.equal(await overview.getByText('隔离维保计划 19',{exact:true}).count(),0);
+  await fold.click();
+  await overview.getByText('隔离维保计划',{exact:true}).first().waitFor();
+  await overview.getByRole('button',{name:/展开其余 16 项/}).first().click();
+  for(const index of [20,21,22]) assert.equal(await overview.getByText('隔离维保计划 '+index,{exact:true}).count(),0);
+  const panels=await overview.locator('.period-card').evaluateAll(cards=>cards.map(card=>card.getBoundingClientRect().height));
+  assert(panels.length>1&&Math.max(...panels)-Math.min(...panels)<2,'desktop work-state cards align without growing indefinitely');
+  const panelBody=overview.locator('[data-card=building] .period-card-body');
+  assert(await panelBody.evaluate(el=>el.scrollHeight>el.clientHeight),'long period lists scroll inside the card');
+  await page.screenshot({path:path.join(output,'period-cards-desktop.png'),animations:'disabled'});
+  checks.push('planned notices start folded, only deadlines today or tomorrow qualify, and long work-state lists align');
+
+  const roster=page.getByRole('region',{name:'交接班人员'});
+  await roster.getByText('A楼排班测试',{exact:true}).waitFor();
+  assert.equal(await roster.getByRole('button',{name:/查看A楼排班测试/}).getAttribute('title'),'值班长');
+  assert.equal(await roster.getByRole('button',{name:/查看薛小明/}).getAttribute('title'),'长白实习生');
+  assert.equal(await roster.getByText(/长白实习|11\/18|白班|夜班/).count(),0);
+  const guard=page.getByRole('region',{name:'天气预警与戒备'});
+  await guard.getByText('戒备等级 一级',{exact:true}).waitFor();
+  calendarFailure=true;
+  await guard.getByRole('button',{name:'刷新',exact:true}).click();
+  await guard.getByText('显示上次识别结果',{exact:true}).waitFor();
+  await guard.getByText('戒备等级 一级',{exact:true}).waitFor();
+  checks.push('weather guard retains its verified result during a transient outage');
+
+  await set(actor('calendar-recovery','operator',['event']));
+  await tile('events').waitFor();
+  await page.getByRole('button',{name:'重试排班',exact:true}).waitFor();
+  await page.getByRole('button',{name:'重试日程',exact:true}).waitFor();
+  calendarFailure=false;
+  await page.getByRole('button',{name:'重试排班',exact:true}).click();
+  await page.getByRole('button',{name:'重试日程',exact:true}).click();
+  await page.getByRole('region',{name:'交接班人员'}).getByText('A楼排班测试',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'重试日程',exact:true}).waitFor({state:'detached'});
+  checks.push('calendar and roster outages leave usable todos and can each recover independently');
+
+  const longText='检查机柜供电和设备状态，确认过程记录完整。'.repeat(12)+'全文结束。';
+  await page.evaluate(text=>window.setRepairText(text),longText);
+  const repairPreview=page.locator('.preview-fixture .repair-preview-text');
+  await page.locator('.preview-fixture [aria-expanded=false]').waitFor();
+  assert(await repairPreview.locator('span').evaluate(el=>el.scrollHeight>el.clientHeight));
+  await repairPreview.hover();
+  const previewPopover=page.locator('.repair-preview-popover');
+  await previewPopover.waitFor();
+  assert.equal(await previewPopover.innerText(),longText);
+  await page.setViewportSize({width:390,height:850});
+  await repairPreview.click();
+  assert.equal(await repairPreview.getAttribute('aria-expanded'),'true');
+  assert(await repairPreview.locator('span').evaluate(el=>el.scrollHeight<=el.clientHeight+1));
+  checks.push('long repair text is clamped, hover reveals full text and touch can expand it');
+
+  denseRoster=true;calendarFailure=false;
+  await page.setViewportSize({width:1366,height:768});
+  await page.evaluate(()=>{window.setRepairText('');document.querySelector('.v2-shell').classList.add('has-topnav');});
+  await set(actor('full-screen-desk','manager',full,{testScopes:['H','A','B','C','D','E']}));
+  await page.evaluate(()=>window.setScope('CAMPUS'));
+  const compactRoster=page.getByRole('region',{name:'交接班人员',exact:true});
+  for (const building of ['H楼','A楼','B楼','C楼','D楼','E楼','110站'])
+    await compactRoster.getByRole('rowheader',{name:building,exact:true}).waitFor();
+  assert.equal(await compactRoster.locator('.roster-row:not(.roster-columns)').count(),7);
+  const columnGeometry=()=>page.evaluate(()=>{
+    const status=document.querySelector('.period-grid');
+    return {left:status.getBoundingClientRect().bottom,
+      right:document.querySelector('.roster-module').getBoundingClientRect().bottom,
+      guardBottom:document.querySelector('.weather-guard').getBoundingClientRect().bottom,
+      rosterTop:document.querySelector('.roster-module').getBoundingClientRect().top,
+      footer:document.querySelector('.desk-shortcuts').getBoundingClientRect().top};
+  });
+  const assertAligned=async()=>{
+    const geometry=await columnGeometry();
+    assert(Math.abs(geometry.left-geometry.right)<2&&geometry.footer>=geometry.left&&geometry.guardBottom<=geometry.rosterTop,JSON.stringify(geometry));
+  };
+  await assertAligned();
+  await page.screenshot({path:path.join(output,'workbench-balanced-1366.png'),fullPage:true,animations:'disabled',style:'.n-message-container{visibility:hidden}'});
+  await compactRoster.getByRole('button',{name:'排班详情',exact:true}).click();
+  const fullRoster=page.locator('.wb-roster-dialog');
+  await fullRoster.getByText('E人员甲',{exact:true}).waitFor();
+  assert.equal(await fullRoster.locator('.roster-row:not(.roster-columns)').count(),7);
+  await fullRoster.locator('.n-card-header__close').click();
+  await fullRoster.waitFor({state:'hidden'});
+  await page.setViewportSize({width:1366,height:650});
+  await assertAligned();
+  checks.push('seven sites are visible inline below the warning panel and desktop columns stay aligned');
+  assert.deepEqual(requests.filter(([method])=>method!=='GET').map(([method,url])=>[method,url]),[
+    ['PUT','/api/learning/issues/issue-review-fixture/question'],
+    ['PUT','/api/learning/issues/issue-review-fixture/question'],
+    ['POST','/api/pre-shift-checks/submit'],
+  ]);
   assert.deepEqual(unexpected,[]); assert.deepEqual(errors,[]);
   await writeFile(path.join(output,'results.json'),JSON.stringify({checks,apiReads:requests.length,unexpected,errors},null,2));
   console.log(checks.join('\n'));
-  console.log('PASS: isolated GET-only fixtures; no real service or message requests. Screenshots and results: '+output);
+  console.log('PASS: isolated fixtures; no real service or message requests. Screenshots and results: '+output);
 } finally {await browser?.close(); await server.close();}

@@ -1715,11 +1715,22 @@ class LearningService:
             raise LearningError("登录身份不完整。", 401)
         self._access(actor)
         item = self._get("issue", issue_id, conn)
-        if not item:
+        if not item or not self._issue_profession_visible(item, actor, conn):
             raise LearningError("质疑记录不存在", 404)
         if write and not self._can_update_issue(item, actor):
             raise LearningError("只能补充本人提交的质疑，其他质疑由管理员处理。", 403)
         return item
+
+    def _issue_profession_visible(self, item, actor, conn=None):
+        from .module_access import professional_record_visible, record_profession
+
+        professions = actor.get('professions')
+        if professions is None:
+            return True
+        question = item.get('question') or {}
+        if not record_profession(question):
+            question = self._get('question', item.get('question_id'), conn) or question
+        return professional_record_visible(professions, question)
 
     def public_issue(self, item, actor, conn=None):
         can_update = self._can_update_issue(item, actor)
@@ -1827,10 +1838,15 @@ class LearningService:
         return [json.loads(row[0]) for row in conn.execute(sql + " ORDER BY key",
                 () if question_id is None else (question_id,))]
 
-    def pending_questions(self, actor, query):
-        self._admin(actor)
+    def pending_questions(self, actor, query, *, workbench_scopes=None):
+        if workbench_scopes is None:
+            self._admin(actor)
+        elif not workbench_scopes or not self.settings()['enabled']:
+            return self._page([], query)
+        scope_filter = ("AND json_extract(i.payload,'$.scope') IN (" +
+                        ','.join('?' for _ in workbench_scopes) + ')') if workbench_scopes else ''
         with closing(self._connect()) as conn:
-            rows = conn.execute("""
+            rows = conn.execute(f"""
                 SELECT q.key AS question_id, MIN(i.key) AS issue_id, COUNT(*) AS feedback_count,
                        json_extract(q.payload,'$.stem') AS stem, json_extract(q.payload,'$.type') AS type,
                        json_extract(q.payload,'$.type_label') AS type_label
@@ -1838,8 +1854,9 @@ class LearningService:
                   ON q.kind='question' AND q.key=json_extract(i.payload,'$.question_id')
                 WHERE i.kind='issue' AND json_extract(i.payload,'$.status') IN ('pending','processing','needs_info')
                   AND json_extract(q.payload,'$.status')<>'deleted'
+                  {scope_filter}
                 GROUP BY q.key ORDER BY MAX(i.updated) DESC, q.key
-            """).fetchall()
+            """, workbench_scopes or ()).fetchall()
         result = self._page(rows, query)
         result["items"] = [dict(row) for row in result["items"]]
         return result
@@ -1868,6 +1885,8 @@ class LearningService:
             raise LearningError("楼栋须为 A、B、C、D、E 或 H。", 400)
         identity = str(query.get("person_id") or "") if actor.get("is_admin") else ""
         items = self._documents("issue", scope=scope, person_id=identity)
+        if actor.get('professions') is not None:
+            items = [item for item in items if self._issue_profession_visible(item, actor)]
         if query.get("status"):
             items = [i for i in items if i["status"] == query["status"]]
         if query.get("search"):

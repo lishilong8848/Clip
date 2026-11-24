@@ -5,7 +5,7 @@
       <NAlert v-if="error" type="error" role="alert">{{ error }}</NAlert>
       <template v-else-if="history">
         <h3>{{ history.asset.name }}</h3>
-        <p>{{ history.asset.scope }}楼<span v-if="history.asset.model"> · {{ history.asset.model }}</span></p>
+        <p>{{ history.asset.scope }}楼 · {{ history.asset.profession || '专业未填写' }}<span v-if="history.asset.model"> · {{ history.asset.model }}</span></p>
         <div v-if="history.certificate || history.next_external_due" class="history-facts">
           <span v-if="history.certificate">最近检测 {{ history.certificate.actual }} · {{ validity(history.certificate.validity) }}</span>
           <span v-if="history.certificate?.valid_until">有效至 {{ history.certificate.valid_until }}</span>
@@ -45,7 +45,7 @@ import { requestJson } from '../api/client';
 import type { InspectionReport } from './ToolInspectionReportFields.vue';
 
 type History = {
-  asset: { name: string; scope: string; model: string };
+  asset: { name: string; scope: string; model: string; profession?: string };
   certificate?: { actual: string; validity: string; valid_until: string };
   next_external_due?: string; has_more?: boolean;
   orders: { id: string; workspace_id?: string; month: string; kind: string; status: string; outcome?: string; actual: string; due: string; owner_name: string;

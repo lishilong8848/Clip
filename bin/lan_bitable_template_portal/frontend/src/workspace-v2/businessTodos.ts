@@ -84,7 +84,7 @@ export function todoSources(kind:TodoKind,ctx:TodoContext,get:TodoRead):TodoSour
     const month=Number(beijingDate().slice(5,7))+'月';
     const data=await read('/api/workbench',{scope:ctx.scope,work_type:workType,month,sections:'ongoing',ongoing_page:page,ongoing_page_size:ctx.home?0:30},signal);
     const result:TodoRow[]=[];
-    let partial=false;
+    let partial=data.source_snapshot_ready===false;
     for(const row of rows(data.ongoing)){
       const type=String(row.work_type||'');if(!allowedNotice(type)||(workType!=='all'&&type!==workType))continue;
       const targetStatus=text(row.status||row.status_label||row.work_summary?.status||row.workflow).trim();

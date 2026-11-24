@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 
 # module_access.py is the authoritative option list and is guaranteed to exist.
-from .module_access import MODULE_OPTIONS, MODULE_IDS
+from .module_access import MODULE_OPTIONS, MODULE_IDS, SYSTEM_MODULES
 
 CATEGORY_OPTIONS = [
     {"value": "shift_leader", "label": "值班长"},
@@ -59,10 +59,11 @@ def default_modules(level):
     """
     ordered = module_order()
     level = str(level or "").strip()
+    allowed = set(ordered)
+    if level not in {"L0", "L1"}:
+        allowed -= SYSTEM_MODULES
     if level == "L4":
-        allowed = set(ordered) - {"accounts"}
-    else:  # L0/L1 are admins, L2/L3 managers keep all originally usable modules.
-        allowed = set(ordered)
+        allowed.discard("accounts")
     return tuple(option for option in ordered if option in allowed)
 
 
@@ -136,7 +137,7 @@ def account_details_allowed(profile, target):
         profile.get('can_manage_accounts') and profile.get('level') == target.get('level') == 'L1')
 
 
-def resolve_access_change(actor, target, *, level=None, category=None, scopes=None, modules=None):
+def resolve_access_change(actor, target, *, level=None, category=None, scopes=None, modules=None, add_modules=None):
     """Validate a desired access override against the actor's grantable authority.
 
     ``actor``/``target`` are ``account_profile`` dicts. Returns a dict with the
@@ -201,7 +202,7 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
                 resolved_scopes = [target_home] if target_home else []
         else:
             resolved_scopes = list(target.get("scope_rules") or [])
-            if not resolved_scopes and target_home:
+            if not resolved_scopes and target_home and add_modules is None:
                 resolved_scopes = [target_home]
     else:
         if not isinstance(scopes, list) or not scopes:
@@ -217,7 +218,7 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
             if not incoming.issubset(actor_scopes):
                 raise PolicyViolation("只能授予本人管理范围内的楼栋。", 403)
         resolved_scopes = [str(scope).strip() for scope in scopes]
-    if resolved_level in {'L0', 'L1'}:
+    if resolved_level in {'L0', 'L1'} and add_modules is None:
         resolved_scopes = sorted(actor_scopes)
     if not set(resolved_scopes).issubset(actor_scopes):
         raise PolicyViolation("目标账号现有楼栋超出本人管理范围，请由更高权限人员处理。", 403)
@@ -225,7 +226,16 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
     # Desired modules. When omitted, keep the current explicit modules unless the
     # level is changing. ``modules == []`` is a deliberate full revocation and is
     # never silently replaced with the level defaults.
-    if modules is None:
+    if add_modules is not None:
+        if not isinstance(add_modules, list) or not add_modules or any(
+                not isinstance(module, str) or module not in MODULE_IDS for module in add_modules):
+            raise PolicyViolation("包含无效模块。", 400)
+        if not set(add_modules).issubset(actor_modules):
+            raise PolicyViolation("不能授予自己没有的模块权限。", 403)
+        if "accounts" in add_modules and resolved_level == "L4":
+            raise PolicyViolation("L4 基础账号不能授予账号管理模块。", 403)
+        resolved_modules = list(dict.fromkeys([*target["modules"], *add_modules]))
+    elif modules is None:
         if level_changed:
             resolved_modules = list(default_modules(resolved_level))
         else:
@@ -247,8 +257,10 @@ def resolve_access_change(actor, target, *, level=None, category=None, scopes=No
             raise PolicyViolation("L4 基础账号不能授予账号管理模块。", 403)
         resolved_modules = [str(module).strip() for module in modules]
 
-    if not set(resolved_modules).issubset(actor_modules):
+    if add_modules is None and not set(resolved_modules).issubset(actor_modules):
         raise PolicyViolation("不能授予自己没有的模块权限。", 403)
+    if resolved_level not in {"L0", "L1"} and SYSTEM_MODULES.intersection(resolved_modules):
+        raise PolicyViolation("系统运维权限只能授予 L0 或 L1 管理员。", 403)
     resolved_role = "admin" if resolved_level in {"L0", "L1"} else "building"
     return {
         "level": resolved_level,

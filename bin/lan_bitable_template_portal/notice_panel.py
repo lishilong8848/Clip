@@ -326,14 +326,24 @@ class NoticePanel:
             return set()
         return self._allowed_modules({"user": {"open_id": owner}})
 
+    def _owner_professions(self, doc):
+        from .module_access import session_engineer_professions
+
+        return session_engineer_professions(self.runtime.auth_manager, {'user': {'open_id': doc.get('owner')}})
+
     def _reject_unauthorized_selected(self, doc, allowed):
         """Never preview/confirm a persisted selected item the owner can no longer operate."""
+        from .module_access import professional_record_visible
+
+        professions = self._owner_professions(doc)
         for item in doc.get("items") or []:
             if not item.get("selected"):
                 continue
             work_type = str((item.get("draft") or {}).get("work_type") or "")
             if work_type and allowed is not None and work_type not in allowed:
                 raise PortalError("无权修改该工作类型的通告。")
+            if not professional_record_visible(professions, item.get('draft') or {}):
+                raise PortalError('待办包含当前专业无权办理的通告，请刷新后重新选择。')
 
     def _assert_current_date(self, doc):
         current = _edition_now()
@@ -344,7 +354,9 @@ class NoticePanel:
     def public_items(self, doc):
         from .notice_panel_data import _normalize_item_notice_sop
         from upload_event_module.services.notice_cycle_warnings import maintenance_cycle_rules
+        from .module_access import professional_record_visible
         allowed = self._owner_modules(doc)
+        professions = self._owner_professions(doc)
         result = []
         for item in doc.get("items") or []:
             _normalize_item_notice_sop(item)
@@ -352,7 +364,7 @@ class NoticePanel:
             work_type = str(item_draft.get("work_type") or "")
             # Unauthorized persisted items must never surface, even when they
             # exist from a time when the owner had broader module grants.
-            if work_type and work_type not in allowed:
+            if (work_type and work_type not in allowed) or not professional_record_visible(professions, item_draft):
                 continue
             notice_type = str(item_draft.get("notice_type") or "")
             # Refresh display metadata for saved runs without rewriting their drafts or field choices.
@@ -463,6 +475,7 @@ class NoticePanel:
 
     def _build_items(self, doc):
         from .notice_panel_data import build_items
+        from .module_access import professional_record_visible
         allowed = self._owner_modules(doc)
         doc["source_errors"] = {}
         if not allowed:
@@ -484,7 +497,9 @@ class NoticePanel:
                     doc["source_errors"][work] = str(exc)
             if not rows and doc["source_errors"]:
                 raise PortalError("部分计划未能读取，尚不能确认没有待办。" + next(iter(doc["source_errors"].values())))
-        rows = [row for row in rows if (row.get("draft") or {}).get("work_type") in allowed]
+        professions = self._owner_professions(doc)
+        rows = [row for row in rows if (row.get("draft") or {}).get("work_type") in allowed
+                and professional_record_visible(professions, row.get('draft') or {})]
         preferred = "update" if doc.get("slot") == "evening" else "start"
         return sorted(rows, key=lambda item: (bool(item.get("blocked")),
                                               item.get("action") != preferred,
@@ -502,6 +517,7 @@ class NoticePanel:
     def sop_options(self, session, identity, item_key, q=""):
         """Lazy owner-authorized directory endpoint for a single persisted item."""
         from .notice_panel_data import SOP_WORK_TYPES, build_sop_options_field
+        from .module_access import professional_record_visible
         session, open_id = self._require_user(session)
         doc = self._get(identity)
         self._check_owner(doc, open_id)
@@ -515,6 +531,8 @@ class NoticePanel:
         if not item:
             raise PortalError("变更对象不存在。")
         draft = item.get("draft") or {}
+        if not professional_record_visible(self._owner_professions(doc), draft):
+            raise PortalError('当前专业无权查看该通告。')
         work_type = str(draft.get("work_type") or "").strip()
         action = str(item.get("action") or draft.get("action") or "").strip()
         if work_type not in SOP_WORK_TYPES or action != "start":

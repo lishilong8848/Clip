@@ -1,4 +1,10 @@
 :root {
+  --cf-font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --cf-font-page: clamp(21px, 1.8vw, 28px);
+  --cf-font-section: 16px;
+  --cf-font-body: 14px;
+  --cf-font-meta: 12px;
+  --cf-font-input: var(--cf-font-body);
   --cf-brand-blue: #1e63ff;
   --cf-brand-blue-hover: #1554df;
   --cf-brand-blue-dark: #012a7d;
@@ -43,6 +49,12 @@ body,
 
 body {
   min-width: 320px;
+  font-family: var(--cf-font-family);
+  font-size: var(--cf-font-body);
+}
+
+@media (max-width:760px),(hover:none) and (max-width:1024px) {
+  :root { --cf-font-input: 16px; }
 }
 
 .app-shell :is(.btn, a.btn, .primary, .secondary) {

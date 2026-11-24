@@ -261,7 +261,9 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
         workflow.path = self.client / 'bin/data/state.sqlite3'
         workflow.service = workflow.restart()
         workflow.service.refresh()
-        old = workflow.complete(workflow.open(operation='original-archive'))
+        old = workflow.complete(workflow.service.workspace_open(workflow.filler, {
+            'kind': 'self', 'asset_ids': ['recTool0'], 'template_id': 'recTemplate', 'operation_id': 'original-archive',
+        }))
         workflow.approve(workflow.service.workspace_submit(workflow.filler, old['id'], {'revision': old['revision']}))
         while workflow.service.sync_one():
             pass
@@ -270,7 +272,9 @@ class RiskUpdateCompatibilityTests(unittest.TestCase):
         archive_rel = original_archive.relative_to(self.client)
         archive_bytes = original_archive.read_bytes()
         original_report = workflow.service.workspace_download(workflow.filler, old['id'])
-        draft = workflow.complete(workflow.open(operation='original-draft'))
+        draft = workflow.complete(workflow.service.workspace_open(workflow.filler, {
+            'kind': 'self', 'asset_ids': ['recTool1'], 'template_id': 'recTemplate', 'operation_id': 'original-draft',
+        }))
         self.assertEqual(draft['status'], 'draft')
         draft_values = {item['id']: item['values'] for item in draft['items']}
         old_write_count = len(workflow.cloud.writes)

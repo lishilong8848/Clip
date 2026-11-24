@@ -7036,7 +7036,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         month: str | None = None,
         query: str = "",
         limit: int = 80,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         event_id = str(event_record_id or "").strip()
         if not event_id:
             raise PortalError("请先选择关联事件单，再选择设备检修关联。")
@@ -7056,13 +7059,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                     "来源事件已不在当前事件表中，候选列表仍可手动选择。"
                 )
             resolution_warning = str(event.get("resolution_warning") or "").strip()
+            if not professional_record_visible(professions, event):
+                raise PortalError('当前专业无权查看该关联事件。')
             if resolution_warning and not bool(event.get("historical_fallback")):
                 warnings.append(resolution_warning)
         _metas, _meta_by_name, records = self._load_repair_management_target_records()
         query_text = str(query or "").strip().lower()
         candidates: list[dict[str, Any]] = []
         for record in records:
-            if not self._repair_management_target_record_in_scope(record, scope):
+            if not self._repair_management_target_record_in_scope(record, scope) or not professional_record_visible(professions, record):
                 continue
             fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
             raw_fields = (
@@ -8077,14 +8082,31 @@ class MaintenancePortalService(RepairOperationsMixin):
     ) -> dict[str, Any]:
         normalized_scope = self._normalize_scope(scope)
         query_text = re.sub(r"\s+", "", str(query or "")).casefold()
-        people = self._load_signature_people(force=bool(refresh))
+        picker_snapshot = getattr(self, "_account_picker_snapshot", None)
+        snapshot = picker_snapshot() if picker_snapshot and not refresh else None
+        if snapshot is None:
+            people = self._load_signature_people(force=bool(refresh))
+        else:
+            aliases = {current: previous for previous, current in personnel_source.signature_aliases().items()}
+            day = dt.datetime.now(personnel_source.TZ).date().isoformat()
+            roster = self._state_store.get_document(personnel_source.ROSTER_NAMESPACE, day) or {}
+            shifts = {}
+            if (roster.get("app_id") == snapshot["app_id"] and roster.get("source") == personnel_source.TABLE_ID
+                    and roster.get("complete") is True and personnel_source.observed_on_day(roster.get("observed_at"), day)):
+                shifts = {row["record_id"]: row.get("shift") for row in roster.get("people", [])}
+            people = [
+                {**person, "record_id": aliases.get(person["id"], person["id"]), "shift": shifts.get(person["id"]),
+                 "open_id": person["login_ids"][0] if person.get("selectable") and len(person.get("login_ids", ())) == 1 else ""}
+                for person in snapshot["people"].values() if not person.get("inactive")
+            ]
         matched: list[dict[str, Any]] = []
         for person in people:
             name = str(person.get("name") or "").strip()
             user_id = str(person.get("open_id") or "").strip()
             if not name:
                 continue
-            if query_text and query_text not in re.sub(r"\s+", "", name).casefold():
+            if query_text and not any(query_text in re.sub(r"\s+", "", str(value or "")).casefold()
+                                      for value in (name, person.get("employee_no"), person.get("building"))):
                 continue
             matched.append(
                 {
@@ -8174,11 +8196,16 @@ class MaintenancePortalService(RepairOperationsMixin):
         offset: int = 0,
         focus_record_id: str = "",
         force_refresh: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         summary_id = str(summary_record_id or "").strip()
         if not summary_id:
             raise PortalError("读取维修跟进记录缺少维修项目记录。")
         summary_record = self._ensure_repair_management_record_in_scope(summary_id, scope)
+        if not professional_record_visible(professions, summary_record):
+            raise PortalError('当前专业无权查看该维修项目。')
         metas, meta_by_name, records = self._load_repair_followups_for_summary(
             summary_id,
             limit=None,
@@ -8187,7 +8214,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         query_text = str(query or "").strip().lower()
         selected: list[dict[str, Any]] = []
         for record in records:
-            if summary_id not in self._repair_followup_parent_ids(record):
+            if summary_id not in self._repair_followup_parent_ids(record) or not professional_record_visible(professions, record):
                 continue
             fields = record.get("display_fields") or {}
             if query_text and query_text not in "\n".join(
@@ -8342,12 +8369,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         query: str = "",
         limit: int = 200,
         force_refresh: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         summary_id = str(summary_record_id or "").strip()
         if not summary_id:
             raise PortalError("选择待绑定跟进记录前，请先选择维修项目。")
         normalized_scope = self._normalize_scope(scope)
-        self._ensure_repair_management_record_in_scope(summary_id, normalized_scope)
+        summary_record = self._ensure_repair_management_record_in_scope(summary_id, normalized_scope)
+        if not professional_record_visible(professions, summary_record):
+            raise PortalError('当前专业无权查看该维修项目。')
         _metas, _meta_by_name, records = self._load_repair_followup_snapshot(
             force_refresh=force_refresh
         )
@@ -8355,7 +8387,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         candidates: list[dict[str, Any]] = []
         for record in records:
             record_id = str(record.get("record_id") or "").strip()
-            if not record_id or self._repair_followup_parent_ids(record):
+            if not record_id or self._repair_followup_parent_ids(record) or not professional_record_visible(professions, record):
                 continue
             display_fields = (
                 record.get("display_fields")
@@ -12188,7 +12220,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         meta_by_name: dict[str, FieldMeta],
         allow_multiple_followups: bool = False,
         event_override: dict[str, Any] | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         event_id = str(event_record_id or "").strip()
         event: dict[str, Any] = (
             dict(event_override)
@@ -12209,6 +12244,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 warnings.append(
                     "来源事件已不在当前事件表中，已保留现有维修单内容；可重新选择事件。"
                 )
+        if event and not professional_record_visible(professions, event):
+            raise PortalError("当前专业无权关联该事件。")
         resolution_warning = str(event.get("resolution_warning") or "").strip()
         if resolution_warning and not bool(event.get("historical_fallback")):
             warnings.append(resolution_warning)
@@ -12246,6 +12283,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             for record in selected_repairs:
                 if not self._repair_management_target_record_in_scope(record, scope):
                     raise PortalError("当前账号无权关联该楼栋设备检修记录。")
+                if not professional_record_visible(professions, record):
+                    raise PortalError("当前专业无权关联该设备检修记录。")
 
         requested_followup_ids = list(
             dict.fromkeys(
@@ -12807,6 +12846,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         event_record_id: str = "",
         repair_record_ids: list[str] | tuple[str, ...] | None = None,
         month: str | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         repair_ids = self._repair_management_record_ids(repair_record_ids)
         if len(repair_ids) > 1:
@@ -12823,6 +12863,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             followup_record_ids=[],
             month=month,
             meta_by_name=meta_by_name,
+            professions=professions,
         )
 
     def _repair_management_record_in_scope(
@@ -14839,7 +14880,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         limit: int = 100,
         offset: int = 0,
         force_refresh: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         projects, followups = self._load_repair_management_status_sources(
             force_refresh=force_refresh,
         )
@@ -14853,7 +14897,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         local_week_start = local_today - dt.timedelta(days=local_today.weekday())
         all_status_records: list[dict[str, Any]] = []
         for project in projects:
-            if not self._repair_management_record_in_scope(project, normalized_scope):
+            if not self._repair_management_record_in_scope(project, normalized_scope) or not professional_record_visible(professions, project):
                 continue
             project_id = str(project.get("record_id") or "").strip()
             if not project_id:
@@ -15557,7 +15601,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         *,
         scope: str = "ALL",
         force_refresh: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         record_id = str(record_id or "").strip()
         if not record_id:
             raise PortalError("缺少维修项目 ID。")
@@ -15615,6 +15662,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError("维修项目已不存在，请刷新列表。")
         if not self._repair_management_record_in_scope(record, scope):
             raise PortalError("当前账号无权查看该楼栋维修项目。")
+        if not professional_record_visible(professions, record):
+            raise PortalError('当前专业无权查看该维修项目。')
         authoritative_followup_count: int | None = None
         authoritative_followups: list[dict[str, Any]] | None = None
         followup_state_verified = True
@@ -15685,7 +15734,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         focus_record_id: str = "",
         force_refresh: bool = False,
         summary_only: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         normalized_state = str(state or "all").strip().lower()
         if normalized_state in {"active", "open", "unfinished"}:
             normalized_state = "active"
@@ -15712,6 +15764,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     limit=limit,
                     offset=max(0, int(offset or 0)),
                     focus_record_id=focus_record_id,
+                    **({'professions': professions} if professions is not None else {}),
                 )
             )
             page_records = [
@@ -15838,6 +15891,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         metas, meta_by_name, records = self._load_repair_management_project_records(
             force_refresh=force_refresh
         )
+        if professions is not None:
+            records = [record for record in records if professional_record_visible(professions, record)]
         followups_by_record: dict[str, list[dict[str, Any]]] | None = None
         followup_state_verified = True
         followup_state_warning = ""
@@ -18601,13 +18656,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str,
         month: str | None = None,
         date_field: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         month = self._normalize_event_month(month)
         snapshot = self._state_store.get_event_month_snapshot(month)
         records = [
             dict(item)
             for item in snapshot.get("records", [])
             if isinstance(item, dict) and self._scope_matches_item(scope, item)
+            and professional_record_visible(professions, item)
         ]
         records, unknown_time_count = self._event_records_in_month(records, month, date_field)
         stats = self._event_stats_for_records(records)
@@ -20582,8 +20641,11 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         query: str = "",
         limit: int = 100,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """List incomplete event-to-repair projects for notice form prefill."""
+        from .module_access import professional_record_visible
+
         _project_metas, project_meta_by_name, project_records = (
             self._load_repair_management_project_records()
         )
@@ -20614,7 +20676,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         for project_record in project_records:
             if not isinstance(project_record, dict):
                 continue
-            if not self._repair_management_record_in_scope(project_record, scope):
+            if not self._repair_management_record_in_scope(project_record, scope) or not professional_record_visible(professions, project_record):
                 continue
             project = self._repair_management_record_payload(
                 project_record,
@@ -21177,7 +21239,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         month: str | None = None,
         query: str = "",
         limit: int = 50,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         month_key = self._normalize_event_month(month)
         _metas, _meta_by_name, source_records = (
             self._load_repair_management_event_records()
@@ -21187,7 +21252,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         linked_projects_by_event: dict[str, dict[str, str]] = {}
         for project in project_records:
-            if not isinstance(project, dict):
+            if not isinstance(project, dict) or not professional_record_visible(professions, project):
                 continue
             raw_fields = (
                 project.get("raw_fields")
@@ -21216,6 +21281,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if not isinstance(source_record, dict):
                 continue
             item = self._repair_management_event_item(source_record)
+            if not professional_record_visible(professions, item):
+                continue
             transfer_text = self._repair_management_plain_text(
                 item.get("transfer_to_overhaul")
             )
@@ -21390,7 +21457,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         record_id: str = "",
         month: str | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         _metas, meta_by_name, _records = (
             self._load_repair_management_project_records()
         )
@@ -21403,6 +21473,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             meta_by_name=meta_by_name,
         )
         event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+        if not professional_record_visible(professions, event):
+            raise PortalError('当前专业无权查看该关联事件。')
         return {
             "event": {
                 "record_id": str(event.get("source_record_id") or event.get("record_id") or ""),
@@ -21503,13 +21575,16 @@ class MaintenancePortalService(RepairOperationsMixin):
             "specialties": specialties,
         }
 
-    def get_event_monthly_overview(self, *, month: str | None = None) -> dict[str, Any]:
+    def get_event_monthly_overview(self, *, month: str | None = None,
+                                   professions: tuple[str, ...] | None = None) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         month = self._normalize_event_month(month)
         snapshot = self._state_store.get_event_month_snapshot(month)
         records = [
             dict(item)
             for item in snapshot.get("records", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and professional_record_visible(professions, item)
         ]
         records, unknown_time_count = self._event_records_in_month(records, month, "occurrence_time")
         by_code: dict[str, list[dict[str, Any]]] = {code: [] for code in BUILDING_SCOPE_CODES}
@@ -25166,7 +25241,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         ongoing_items: list[dict[str, Any]] | None = None,
         date: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         scope = self._normalize_scope(scope)
         with self._summary_lock:
             payload = self._load_day_summary_locked(date or None)
@@ -25174,9 +25252,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         items = [
             copy.deepcopy(item)
             for item in raw_items
-            if self._scope_matches_item(scope, item)
+            if self._scope_matches_item(scope, item) and professional_record_visible(professions, item)
         ]
-        ongoing_count = len(ongoing_items or [])
+        ongoing_count = sum(professional_record_visible(professions, item) for item in ongoing_items or [])
         completed_count = sum(1 for item in items if item.get("status") == "已结束")
         started_count = sum(1 for item in items if item.get("started_at"))
         updated_count = sum(
@@ -26123,7 +26201,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         *,
         scope: str = "ALL",
         date: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         normalized_scope = self._normalize_scope(scope)
         normalized_date = self._daily_task_date(date)
         category_specs = (
@@ -26142,6 +26223,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             except Exception as exc:
                 tasks = []
                 warnings.append(f"{label}数据暂未读取：{exc}")
+            if professions is not None:
+                tasks = [item for item in tasks if professional_record_visible(professions, item)]
             tasks.sort(
                 key=lambda item: (
                     float(item.get("sort_time") or 0),
@@ -28341,7 +28424,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         self,
         *,
         scopes: list[str] | tuple[str, ...] | set[str] | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         """Return repair-project counts for the scope selection page.
 
         The source tables are loaded once and every project is counted at most
@@ -28411,7 +28497,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
         for project in projects:
             project_id = str(project.get("record_id") or "").strip()
-            if not project_id:
+            if not project_id or not professional_record_visible(professions, project):
                 continue
             linked = followups_by_project.get(project_id, [])
             has_followup, progress_percent = self._repair_management_latest_followup_progress(linked)
@@ -28452,14 +28538,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         ongoing_items: list[dict[str, Any]] | None = None,
         scopes: list[str] | tuple[str, ...] | set[str] | None = None,
         include_prepared: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         self.ensure_snapshot_loaded()
         default_month = self._current_month_label()
         event_snapshot = self._state_store.get_event_month_snapshot(default_month)
         event_records = [
             dict(item)
             for item in event_snapshot.get("records", [])
-            if isinstance(item, dict)
+            if isinstance(item, dict) and professional_record_visible(professions, item)
         ]
         event_records, _unknown_time_count = self._event_records_in_month(
             event_records, self._normalize_event_month(default_month), "occurrence_time"
@@ -28478,8 +28567,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 continue
             records = self._workbench_records(month=default_month, scope=scope)
             merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
+            if professions is not None:
+                records = [item for item in records if professional_record_visible(professions, item)]
+                merged_ongoing = [item for item in merged_ongoing if professional_record_visible(professions, item)]
             daily_summary = self.get_daily_summary(
-                scope=scope, ongoing_items=merged_ongoing
+                scope=scope, ongoing_items=merged_ongoing, **({'professions': professions} if professions is not None else {})
             )
             pending_counts = self._pending_work_type_counts(
                 records,
@@ -28534,7 +28626,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             }
             if include_prepared:
                 prepared_workbenches[scope] = self.get_bootstrap(
-                    scope=scope, ongoing_items=ongoing_items or []
+                    scope=scope, ongoing_items=ongoing_items or [], **({'professions': professions} if professions is not None else {})
                 )
         payload = {
             "scope_options": SCOPE_OPTIONS,
@@ -28755,7 +28847,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         month: str = "",
         work_type: str = "all",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         scope = self._normalize_scope(scope)
         month = str(month or dt.datetime.now().strftime("%Y-%m")).strip()
         if not re.fullmatch(r"\d{4}-\d{2}", month):
@@ -28775,7 +28870,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 day = str(payload.get("date") or "")
                 items = []
                 for raw_item in payload.get("items") or []:
-                    if not isinstance(raw_item, dict):
+                    if not isinstance(raw_item, dict) or not professional_record_visible(professions, raw_item):
                         continue
                     item = copy.deepcopy(raw_item)
                     item_work_type = self._summary_item_work_type(item)
@@ -31885,7 +31980,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         identity = self._undo_identity_from_context(item, action_type="delete")
         return set(identity.get("identity_keys") or [])
 
-    def _available_undo_map(self, scope: str = "ALL") -> dict[str, dict[str, Any]]:
+    def _available_undo_map(self, scope: str = "ALL", *, professions=None) -> dict[str, dict[str, Any]]:
         scope = self._normalize_scope(scope)
         result: dict[str, dict[str, Any]] = {}
         undo_items = self._state_store.list_notice_undo_actions(scope="", limit=1000)
@@ -31913,6 +32008,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 continue
             if not self._scope_matches_item(scope, enriched_undo):
                 continue
+            if not self._notice_undo_visible(enriched_undo, professions, undo_items):
+                continue
             keys = set(enriched_undo.get("identity_keys") or undo.get("identity_keys") or [])
             for key in keys:
                 if key and key not in result:
@@ -31933,9 +32030,9 @@ class MaintenancePortalService(RepairOperationsMixin):
         }
 
     def _annotate_undo_items(
-        self, items: list[dict[str, Any]], *, scope: str = "ALL"
+        self, items: list[dict[str, Any]], *, scope: str = "ALL", professions=None
     ) -> list[dict[str, Any]]:
-        undo_map = self._available_undo_map(scope)
+        undo_map = self._available_undo_map(scope, professions=professions)
         annotated: list[dict[str, Any]] = []
         for item in items or []:
             row = copy.deepcopy(item)
@@ -31991,6 +32088,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         action_type: str = "",
         since_seconds: float = 0,
+        professions: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
         scope = self._normalize_scope(scope)
         action_type = str(action_type or "").strip().lower()
@@ -32031,6 +32129,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 continue
             if not self._scope_matches_item(scope, enriched_undo):
                 continue
+            if not self._notice_undo_visible(enriched_undo, professions, undo_items):
+                continue
             items.append(
                 {
                     **self._public_undo_fields(enriched_undo),
@@ -32044,6 +32144,32 @@ class MaintenancePortalService(RepairOperationsMixin):
         items.sort(key=lambda row: float(row.get("undo_created_at") or 0), reverse=True)
         return items
 
+    @staticmethod
+    def _notice_undo_profession(undo: dict[str, Any]):
+        from .module_access import record_profession
+
+        local = undo.get("local") or {}
+        for row in (undo, undo.get("context"), (undo.get("remote") or {}).get("fields"),
+                    (local.get("qt_active") or {}).get("payload"), local.get("daily_item"),
+                    *(entry.get("item") for entry in local.get("work_items", []) if isinstance(entry, dict))):
+            if isinstance(row, dict) and (profession := record_profession(row)):
+                return profession
+        return ""
+
+    def _notice_undo_visible(self, undo, professions, candidates):
+        from .module_access import profession_visible
+
+        if professions is None:
+            return True
+        if not profession_visible(professions, self._notice_undo_profession(undo)):
+            return False
+        try:
+            main, paired = self.paired_notice_undo(undo, candidates=candidates)
+        except PortalError:
+            return True  # Existing incomplete checkpoints still explain why they cannot be applied.
+        return not paired or all(profession_visible(professions, self._notice_undo_profession(row))
+                                 for row in (main, paired))
+
     def create_notice_undo_job(
         self,
         undo_id: str,
@@ -32051,6 +32177,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         auth_open_id: str = "",
         auth_user_name: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> str:
         undo = self._state_store.get_notice_undo_action(undo_id)
         if not undo or str(undo.get("status") or "") != "available":
@@ -32065,11 +32192,20 @@ class MaintenancePortalService(RepairOperationsMixin):
         undo = self._enrich_ongoing_identity_item(undo, scope=scope)
         if not self._scope_matches_item(scope, undo) or (paired_undo and not self._scope_matches_item(scope, paired_undo)):
             raise PortalError("当前账号无权回退该通告。")
+        specialty = self._notice_undo_profession(undo)
+        if professions is not None:
+            from .module_access import profession_visible
+
+            if not profession_visible(professions, specialty) or (
+                paired_undo and not profession_visible(professions, self._notice_undo_profession(paired_undo))
+            ):
+                raise PortalError("当前专业无权回退该通告。")
         request_payload = {
             "action": "undo",
             "undo_id": str(undo.get("undo_id") or ""),
             "scope": scope,
             "work_type": str(undo.get("work_type") or WORK_TYPE_MAINTENANCE),
+            "specialty": specialty,
             "notice_type": str(undo.get("notice_type") or ""),
             "active_item_id": str(undo.get("active_item_id") or ""),
             "source_record_id": str(undo.get("source_record_id") or ""),
@@ -34947,7 +35083,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         action: str = "update",
         include_current_month_finished: bool = False,
         allow_unscoped_target: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         scope = self._normalize_scope(scope)
         work_type = self._normalize_notice_work_type_alias(work_type)
         notice_type = self._notice_type_for_work_type(work_type)
@@ -34977,6 +35116,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         today = dt.date.today()
         month_start = today.replace(day=1)
         for target in target_records:
+            if not professional_record_visible(professions, target):
+                continue
             fields = target.get("display_fields") or {}
             lifecycle = self._target_record_lifecycle(
                 work_type=work_type,
@@ -35107,7 +35248,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         work_type: str,
         scope: str,
         action: str = "update",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         scope = self._normalize_scope(scope)
         work_type = self._normalize_notice_work_type_alias(work_type)
         notice_type = self._notice_type_for_work_type(work_type)
@@ -35116,7 +35260,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             scope,
             self._state_store.list_visible_qt_active_items(),
         ):
-            if self._item_work_type(item) != work_type:
+            if self._item_work_type(item) != work_type or not professional_record_visible(professions, item):
                 continue
             target_record_id = canonical_target_record_id(item)
             if not target_record_id or self._target_status_is_finished(
@@ -35207,18 +35351,23 @@ class MaintenancePortalService(RepairOperationsMixin):
         limit: int = 30,
         all_active: bool = False,
         all_ongoing: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         if all_ongoing:
             return self._lookup_active_ongoing_candidates(
                 work_type=WORK_TYPE_CHANGE,
                 scope=scope,
                 action=action,
+                professions=professions,
             )
         if all_active:
             return self._lookup_active_target_candidates(
                 work_type=WORK_TYPE_CHANGE,
                 scope=scope,
                 action=action,
+                professions=professions,
             )
         scope = self._normalize_scope(scope)
         title = str(title or "").strip()
@@ -35246,6 +35395,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError(f"查询变更通告目标表失败：{exc}") from exc
         candidates: list[dict[str, Any]] = []
         for target in target_records:
+            if not professional_record_visible(professions, target):
+                continue
             fields = target.get("display_fields") or {}
             target_title = str(fields.get(title_field) or "").strip()
             title_matched = self._source_candidate_title_matches(title, target_title, WORK_TYPE_CHANGE)
@@ -35338,6 +35489,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
+                professions=professions,
             ),
         }
 
@@ -35360,7 +35512,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         all_ongoing: bool = False,
         include_current_month_finished: bool = False,
         allow_unscoped_target: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
         aliases = {
             "maintenance": WORK_TYPE_MAINTENANCE,
@@ -35394,6 +35549,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 work_type=work_type,
                 scope=scope,
                 action=action,
+                professions=professions,
             )
         if all_active and work_type in BINDABLE_NOTICE_TARGET_WORK_TYPES:
             return self._lookup_active_target_candidates(
@@ -35402,6 +35558,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 action=action,
                 include_current_month_finished=include_current_month_finished,
                 allow_unscoped_target=allow_unscoped_target,
+                professions=professions,
             )
         if work_type == WORK_TYPE_CHANGE:
             return self.lookup_change_target_candidates(
@@ -35416,6 +35573,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 progress=progress,
                 text=text,
                 limit=limit,
+                professions=professions,
             )
         notice_type = (
             NOTICE_TYPE_REPAIR
@@ -35464,6 +35622,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             raise PortalError(f"查询{notice_type}目标表失败：{exc}") from exc
         candidates: list[dict[str, Any]] = []
         for target in target_records:
+            if not professional_record_visible(professions, target):
+                continue
             fields = target.get("display_fields") or {}
             target_title = str(
                 fields.get(title_field)
@@ -35587,6 +35747,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
+                professions=professions,
             ),
         }
 
@@ -35728,14 +35889,17 @@ class MaintenancePortalService(RepairOperationsMixin):
         start_time: str = "",
         end_time: str = "",
         limit: int = 30,
+        professions: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
+        from .module_access import professional_record_visible
+
         title_key = self._match_text(title)
         if not title_key:
             return []
         query_dates = self._date_keys_from_values(start_time, end_time)
         candidates: list[dict[str, Any]] = []
         for record in list(self._change_records or []):
-            if not isinstance(record, dict):
+            if not isinstance(record, dict) or not professional_record_visible(professions, record):
                 continue
             source_title = self._change_title(record)
             if not self._source_candidate_title_matches(title, source_title, WORK_TYPE_CHANGE):
@@ -35847,7 +36011,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         start_time: str = "",
         end_time: str = "",
         limit: int = 30,
+        professions: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
+        from .module_access import professional_record_visible
+
         if work_type == WORK_TYPE_CHANGE:
             return self._lookup_change_source_candidates(
                 scope=scope,
@@ -35855,6 +36022,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 start_time=start_time,
                 end_time=end_time,
                 limit=limit,
+                professions=professions,
             )
         if work_type not in {WORK_TYPE_MAINTENANCE, WORK_TYPE_REPAIR}:
             return []
@@ -35866,6 +36034,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         source_table_id = self.table_id if work_type == WORK_TYPE_MAINTENANCE else REPAIR_SOURCE_TABLE_ID
         candidates: list[dict[str, Any]] = []
         for record in self._source_records_for_notice_lookup(work_type):
+            if not professional_record_visible(professions, record):
+                continue
             source_title = self._source_candidate_title(record, work_type)
             if not self._source_candidate_title_matches(title, source_title, work_type):
                 continue
@@ -36666,22 +36836,30 @@ class MaintenancePortalService(RepairOperationsMixin):
         *,
         scope: str = "ALL",
         ongoing_items: list[dict[str, Any]] | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import profession_visible, professional_record_visible
+
         self.ensure_snapshot_loaded()
         default_month = self._current_month_label()
         scope = self._normalize_scope(scope)
         merged_ongoing = self._project_ongoing_items(scope, ongoing_items or [])
         filtered_records = self._workbench_records(month=default_month, scope=scope)
+        if professions is not None:
+            filtered_records = [item for item in filtered_records if professional_record_visible(professions, item)]
+            merged_ongoing = [item for item in merged_ongoing if professional_record_visible(professions, item)]
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
             month=default_month, scope=scope, exclude_record_ids=linked_zhihang_ids
         )
+        if professions is not None:
+            zhihang_records = [item for item in zhihang_records if professional_record_visible(professions, item)]
         daily_summary = self.get_daily_summary(
-            scope=scope, ongoing_items=merged_ongoing
+            scope=scope, ongoing_items=merged_ongoing, **({'professions': professions} if professions is not None else {})
         )
-        merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
+        merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope, professions=professions)
         daily_summary["items"] = self._annotate_undo_items(
-            daily_summary.get("items") or [], scope=scope
+            daily_summary.get("items") or [], scope=scope, professions=professions
         )
         summary_by_record = self._work_status_by_records(
             filtered_records,
@@ -36728,7 +36906,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "filters": {
                 "default_month": default_month,
                 "months": self._sorted_unique_option_names("计划维护月份"),
-                "specialties": self._sorted_unique_work_specialties(),
+                "specialties": [label for label in self._sorted_unique_work_specialties()
+                                if profession_visible(professions, label)],
                 "buildings": self._sorted_unique_option_names("楼栋"),
             },
             "records": [
@@ -36767,7 +36946,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         ongoing_page_size: int | str = 0,
         ongoing_items_authoritative: bool = False,
         allowed_work_types: set[str] | frozenset[str] | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import profession_visible, professional_record_visible
+
         scope = self._normalize_scope(scope)
         selected_month = str(month or self._current_month_label()).strip()
         requested_sections = {
@@ -36800,6 +36982,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         if allowed_work_types is not None:
             merged_ongoing = [item for item in merged_ongoing if self._item_work_type(item) in allowed_work_types]
+        if professions is not None:
+            merged_ongoing = [item for item in merged_ongoing if professional_record_visible(professions, item)]
         include_records = "records" in requested_sections
         include_record_counts = include_records or "stats" in requested_sections
         include_ongoing = "ongoing" in requested_sections
@@ -36827,6 +37011,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         if allowed_work_types is not None:
             scoped_records = [record for record in scoped_records if self._record_work_type(record) in allowed_work_types]
             include_zhihang = include_zhihang and WORK_TYPE_CHANGE in allowed_work_types
+        if professions is not None:
+            scoped_records = [record for record in scoped_records if professional_record_visible(professions, record)]
         linked_zhihang_ids = self._linked_zhihang_record_ids(merged_ongoing)
         zhihang_records = self._filter_zhihang_change_records(
             month=selected_month,
@@ -36834,6 +37020,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             exclude_record_ids=linked_zhihang_ids,
             source_snapshot=scope_snapshot,
         ) if include_zhihang else []
+        if professions is not None:
+            zhihang_records = [record for record in zhihang_records if professional_record_visible(professions, record)]
         if building:
             scoped_records = [
                 record
@@ -36857,16 +37045,16 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if self._source_record_matches_search(record, search_text)
             ]
         daily_summary = self.get_daily_summary(
-            scope=scope, ongoing_items=merged_ongoing
+            scope=scope, ongoing_items=merged_ongoing, **({'professions': professions} if professions is not None else {})
         ) if requested_sections & {"stats", "daily", "closed"} else {"stats": {}, "items": []}
         if allowed_work_types is not None:
             from .module_access import filter_workbench
             daily_summary = filter_workbench({"daily_summary": daily_summary, "ongoing_type_counts": self._work_type_counts(merged_ongoing)}, allowed_work_types)["daily_summary"]
         if requested_sections & {"records", "stats", "daily", "closed"}:
-            merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope)
+            merged_ongoing = self._annotate_undo_items(merged_ongoing, scope=scope, professions=professions)
         if "closed" in requested_sections or "daily" in requested_sections:
             daily_summary["items"] = self._annotate_undo_items(
-                daily_summary.get("items") or [], scope=scope
+                daily_summary.get("items") or [], scope=scope, professions=professions
             )
         else:
             daily_summary["items"] = []
@@ -36984,7 +37172,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "filters": {
                 "default_month": selected_month,
                 "months": self._recent_month_labels(),
-                "specialties": self._sorted_unique_work_specialties(all_snapshot),
+                "specialties": [label for label in self._sorted_unique_work_specialties(all_snapshot)
+                                if profession_visible(professions, label)],
             },
             "count": len(filtered_records),
         }
@@ -37000,7 +37189,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         limit: int | None = 200,
         include_linked: bool = False,
         strict_month: bool = False,
+        professions: tuple[str, ...] | None = None,
     ) -> list[dict[str, Any]]:
+        from .module_access import professional_record_visible
+
         self.ensure_snapshot_loaded()
         scope = self._normalize_scope(scope)
         work_type = str(work_type or WORK_TYPE_MAINTENANCE).strip()
@@ -37012,7 +37204,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 month=month or self._current_month_label(),
                 scope=scope,
             )
-            if self._record_work_type(record) == work_type
+            if self._record_work_type(record) == work_type and professional_record_visible(professions, record)
         ]
         summary_by_record = self._work_status_by_records(records, scope=scope)
         ongoing_source_ids = {
@@ -37139,11 +37331,13 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         work_type: str = "",
         ongoing_items: list[dict[str, Any]] | None = None,
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         scope = self._normalize_scope(scope)
         requested_work_type = str(work_type or "").strip()
-        daily_summary = self.get_daily_summary(scope=scope, ongoing_items=ongoing_items or [])
-        items = self._annotate_undo_items(daily_summary.get("items") or [], scope=scope)
+        daily_summary = self.get_daily_summary(scope=scope, ongoing_items=ongoing_items or [],
+                                              **({'professions': professions} if professions is not None else {}))
+        items = self._annotate_undo_items(daily_summary.get("items") or [], scope=scope, professions=professions)
         if requested_work_type:
             items = [
                 item
@@ -37903,7 +38097,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         return {"scope": scope, "records": matches[start:start + page_size], "specialties": specialties,
                 "page": number, "page_size": page_size, "total": len(matches)}
 
-    def download_engineer_mop_history(self, *, scope: str, record_id: str, attachment_id: str) -> tuple[bytes, str, str]:
+    def download_engineer_mop_history(self, *, scope: str, record_id: str, attachment_id: str,
+                                      professions: tuple[str, ...] | None = None) -> tuple[bytes, str, str]:
+        from .module_access import professional_record_visible
+
         if not re.fullmatch(r"rec[A-Za-z0-9]+", record_id) or not re.fullmatch(r"[a-f0-9]{24}", attachment_id):
             raise PortalError("填写记录或附件无效。")
         fields = self._request_json(
@@ -37911,6 +38108,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         ).get("data", {}).get("record", {}).get("fields") or {}
         if not self._scope_matches_building(scope, self._repair_management_plain_text(fields.get("楼栋"))):
             raise PortalError("当前楼栋无权下载该文件。")
+        if not professional_record_visible(professions, fields):
+            raise PortalError('当前专业无权下载该文件。')
         attachment = self._signed_mop_attachments(fields).get(attachment_id)
         if not attachment:
             raise PortalError("这份维保单附件已移除，请刷新填写记录。")
@@ -37922,8 +38121,10 @@ class MaintenancePortalService(RepairOperationsMixin):
 
     def engineer_mop_bootstrap(
         self, *, scope: str = "ALL", ongoing_items: list[dict[str, Any]] | None = None, month: str = "",
-        todo_only: bool = False,
+        todo_only: bool = False, professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         scope = self._normalize_scope(scope)
         selected_month = self._engineer_mop_month(month)
         notices = self._engineer_month_maintenance_notices(
@@ -37931,6 +38132,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             ongoing_items=ongoing_items,
             month=selected_month if month else "",
         )
+        if professions is not None:
+            notices = [notice for notice in notices if professional_record_visible(professions, notice)]
         bindings = self._state_store.list_mop_notice_bindings(
             scope=scope,
             notice_keys=[item["notice_key"] for item in notices],
@@ -37955,7 +38158,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if self._engineer_notice_is_ended_status(notice.get("status")) or (binding and notice.get("mop_uploaded")):
                     continue
                 rows.append({
-                    **{key: notice.get(key) for key in ("notice_key", "title", "building", "status", "mop_uploaded", "mop_attachment_count")},
+                    **{key: notice.get(key) for key in ("notice_key", "title", "building", "specialty", "status", "mop_uploaded", "mop_attachment_count")},
                     "mop_binding": bool(binding),
                 })
             return {"scope": scope, "month": selected_month, "notices": rows,
@@ -37985,6 +38188,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 *[item for item in local_candidate_by_id.values() if str(item.get("record_id") or "") not in existing_ids],
                 *mop_candidates,
             ]
+        if professions is not None:
+            mop_candidates = [item for item in mop_candidates if professional_record_visible(professions, item)]
         for notice in notices:
             binding = bindings_by_notice.get(notice["notice_key"])
             template_key = str(notice.get("mop_template_key") or "").strip()
@@ -42313,7 +42518,10 @@ class MaintenancePortalService(RepairOperationsMixin):
         file_token: str = "",
         file_name: str = "",
         upload_id: str = "",
+        professions: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        from .module_access import professional_record_visible
+
         local_upload_id = self._upload_id_from_local_mop_ref(
             upload_id,
             allow_plain=True,
@@ -42337,6 +42545,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 display_fields = record.get("display_fields") if isinstance(record.get("display_fields"), dict) else {}
                 if not self._scope_matches_buildings(request_scope, self._building_codes_from_value(display_fields.get("楼栋"))):
                     raise PortalError("当前账号无权预览该本地 MOP 文件。")
+                if not professional_record_visible(professions, record):
+                    raise PortalError("当前专业无权预览该维保单。")
             source_path = Path(str(stored.get("local_file_path") or "")).resolve()
             data_root = Path(get_data_file_path("")).resolve()
             try:
@@ -42394,6 +42604,8 @@ class MaintenancePortalService(RepairOperationsMixin):
         )
         if not record:
             raise PortalError("未找到选择的 MOP 表格记录。")
+        if not professional_record_visible(professions, record):
+            raise PortalError("当前专业无权预览该维保单。")
         attachments = record.get("attachments") if isinstance(record.get("attachments"), list) else []
         attachment = None
         for item in attachments:

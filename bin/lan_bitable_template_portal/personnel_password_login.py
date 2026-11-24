@@ -229,6 +229,14 @@ class PersonnelPasswordLogin:
             items.append(item)
         return {"items": sorted(items, key=lambda item: (item["name"], item["employee_no"], item["id"])), "loaded_at": snapshot.get("loaded_at")}
 
+    def picker_snapshot(self):
+        snapshot = self.snapshot
+        app_id = self.auth.current_feishu_app_id()
+        if (app_id and snapshot.get("schema") == 4 and snapshot.get("app_id") == app_id
+                and time.time() - float(snapshot.get("loaded_at") or 0) < 300):
+            return snapshot
+        return None
+
     def permission_people(self, *, force_refresh=False, query=""):
         snapshot = self.directory(force=force_refresh)
         items = []
@@ -453,6 +461,7 @@ def install_personnel_password_login(app, controller, runtime):
             if service is None:
                 service = PersonnelPasswordLogin(lambda: runtime.service, runtime.state_store, runtime.auth_manager)
                 runtime.service._unified_account_directory = service.permission_people
+                runtime.service._account_picker_snapshot = service.picker_snapshot
         return service
 
     runtime.auth_manager._account_directory_provider = lambda: get_service().snapshot

@@ -445,7 +445,7 @@ class PreviewRouteTests(LibraryFixture):
 
     def setUp(self):
         super().setUp()
-        self.profile = {'role': 'admin', 'modules': ['knowledge'], 'scopes': ['A']}
+        self.profile = {'role': 'admin', 'modules': ['documents'], 'scopes': ['A']}
         self.session = {'user': {'open_id': 'ouFixtureAdmin', 'name': 'Fixture admin'}, 'is_admin': True}
         auth = SimpleNamespace(
             account_profile=lambda identity: copy.deepcopy(self.profile),

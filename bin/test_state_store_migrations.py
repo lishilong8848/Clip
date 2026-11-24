@@ -380,7 +380,9 @@ class StateStoreMigrationTests(unittest.TestCase):
                         "scope_codes": ["A"],
                         "title": title,
                         "sort_time": sort_time,
-                        "payload": {"record_id": record_id},
+                        "payload": {"record_id": record_id, "specialty": {
+                            'rec_not_started': '暖通', 'rec_in_progress_old': '电气',
+                        }.get(record_id, '')},
                     }
                     for record_id, title, sort_time in project_rows
                 ],
@@ -420,6 +422,12 @@ class StateStoreMigrationTests(unittest.TestCase):
                 state="all",
                 limit=2,
             )
+            electrical = store.query_repair_project_status_page(
+                'repair_projects', scope='A', state='all', limit=1, professions=('电气',),
+                focus_record_id='rec_not_started',
+            )
+            self.assertEqual(electrical['total'], 3)
+            self.assertEqual([row['record_id'] for row in electrical['records']], ['rec_in_progress_new'])
             second_page = store.query_repair_project_status_page(
                 "repair_projects",
                 scope="A",

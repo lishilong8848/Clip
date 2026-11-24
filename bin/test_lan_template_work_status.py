@@ -15459,6 +15459,16 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 title="EA118机房A楼过滤网维护",
                 action="update",
             )
+            target_records.append({
+                "record_id": "maint-common",
+                "display_fields": {**target_records[0]["display_fields"], "专业": ""},
+            })
+            scoped = service.lookup_notice_target_candidates(
+                work_type="maintenance", scope="A", title="EA118机房A楼过滤网维护",
+                action="update", limit=1, professions=("电气",),
+            )
+        self.assertEqual(scoped["total_matched"], 1)
+        self.assertEqual([row["target_record_id"] for row in scoped["candidates"]], ["maint-common"])
         self.assertEqual(result["candidates"][0]["target_record_id"], "maint-target")
         self.assertEqual(result["candidates"][0]["notice_type"], "维保通告")
         self.assertEqual(
@@ -21485,6 +21495,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(day["stats"]["updated"], 1)
             self.assertEqual(day["stats"]["ended"], 1)
             self.assertEqual(day["items"][0]["title"], "园区变更")
+            scoped = service.get_history_summary(scope="ALL", month="2026-04", professions=("暖通",))
+            self.assertEqual([item["title"] for item in scoped["days"][0]["items"]], ["D楼维保"])
+            self.assertEqual(scoped["days"][0]["stats"]["ended"], 1)
 
     def test_handover_links_are_shared_and_validate_http_urls(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -22749,6 +22762,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         self.assertEqual(payload["people"][0]["name"], "张宇航")
         self.assertEqual(payload["people"][0]["user_id"], "ou_zhang")
         self.assertNotIn("open_id", payload["people"][0])
+
+    def test_repair_picker_reuses_verified_directory_without_loading_signatures(self):
+        service = _TestMaintenancePortalService()
+        service._account_picker_snapshot = lambda: {"app_id": "fixture", "people": {
+            "rec_active": {"id": "rec_active", "name": "验收人员", "employee_no": "0088", "building": "D楼",
+                           "selectable": True, "login_ids": ["ou_test"]},
+            "rec_departed": {"id": "rec_departed", "name": "已离职人员", "employee_no": "0088", "inactive": True},
+        }}
+        with patch.object(service, "_load_signature_people", side_effect=AssertionError("signature directory must not load")):
+            result = service.list_repair_followup_people(scope="D", query="0088")
+        self.assertEqual([(row["record_id"], row["user_id"]) for row in result["people"]], [("rec_active", "ou_test")])
 
     def test_repair_followup_coerces_selected_people_to_user_field(self):
         meta = FieldMeta(

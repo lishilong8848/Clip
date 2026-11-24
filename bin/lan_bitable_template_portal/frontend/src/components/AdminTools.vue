@@ -163,6 +163,7 @@ type MopSettingsKey = "mop_app_token" | "mop_table_id" | "mop_view_id" | "mop_ti
 const props = defineProps<{
   open: boolean;
   systemAdmin?: boolean;
+  allowedTabs?: string[];
   initialTab?: AdminTabKey;
   focusPermissionRequestId?: string;
   scopeOptions: Array<{ value: string; label: string }>;
@@ -310,7 +311,7 @@ const adminTabs = computed(() => {
       badge: "",
     });
   }
-  return tabs;
+  return props.allowedTabs ? tabs.filter(item=>props.allowedTabs!.includes(item.key)) : tabs;
 });
 const selectedPendingRequestIds = computed(() => (
   Array.from(selectedRequestIds).filter((id) => {
@@ -331,6 +332,7 @@ watch([() => props.open, () => props.initialTab], ([open]) => {
 
 function selectAdminTab(next: AdminTabKey): void {
   if (props.systemAdmin === false) { tab.value = 'permissions'; return; }
+  if (props.allowedTabs && !props.allowedTabs.includes(next)) return;
   if (initializedTab && tab.value === next) return;
   const proceed = () => applyAdminTab(next);
   if (dingTalkSettings.value?.canLeave(proceed) !== false) proceed();

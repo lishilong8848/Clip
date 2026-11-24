@@ -7,7 +7,9 @@ type State = { status:'loading'|'ok'|'stale'|'down'|'deny'; result?:SourceResult
 const statusOf = (error: unknown) => (error as {status?:number})?.status;
 
 export async function readWorkbenchRequest(path: string, signal: AbortSignal) {
-  const background=!path.startsWith('/api/workbench?')||path.includes('sections=records');
+  const priority=/^\/api\/(?:personal-calendar\?|pre-shift-checks\?|daily-inspection\/status\?)/.test(path)
+    ||path.startsWith('/api/workbench?')&&path.includes('sections=ongoing');
+  const background=!priority;
   const read=()=>requestJson(path,{signal,cache:'no-store',timeoutMs:18000,queueTimeoutMs:JSON_REQUEST_TIMEOUT_MS,background});
   try {
     return await read();
@@ -84,7 +86,11 @@ export function useWorkbenchReads(context: Ref<string>, sources: Ref<Source[]>) 
   }
   watch(context,reset,{flush:'sync'});
   onActivated(()=>{visible=true;refreshExpired();});
-  onDeactivated(()=>{visible=false;});
+  onDeactivated(()=>{
+    visible=false;
+    for(const [id,controller] of active){dirty.add(id);controller.abort();}
+    active.clear();
+  });
   window.addEventListener('clipflow-business-changed',refreshAll);
   document.addEventListener('visibilitychange',refreshExpired);
   onBeforeUnmount(()=>{

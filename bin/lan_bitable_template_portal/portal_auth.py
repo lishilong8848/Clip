@@ -78,7 +78,9 @@ def topic_capability(operation, fallback_scopes=()):
     work_type = body.get('work_type') or params.get('work_type') or ''
     modules = required_modules(path, work_type)
     # Personal records, account grants and free-form cloud messages are never delegated.
-    forbidden = {'accounts', 'assistant', 'signatures', 'knowledge', 'handover', 'work_handover', 'links', 'life_guide'}
+    from .module_access import SYSTEM_MODULES
+    forbidden = SYSTEM_MODULES | {'accounts', 'assistant', 'signatures', 'knowledge', 'documents',
+                                 'handover', 'work_handover', 'links', 'life_guide'}
     if len(modules) != 1 or modules & forbidden or '{' in path:
         raise PortalError('该操作不支持话题权限委派，请由有权限的本人办理。')
     if 'learning' in modules and (method != 'GET' or path != '/api/learning/profile'
@@ -693,6 +695,17 @@ class PortalAuthManager:
             # Unknown identity: never grant default modules.
             modules = []
 
+        inspection_home_only = bool(cfg.get('inspection_home_only'))
+        if enabled and cfg.get('module_grants_version') != 2 and not fixed_superuser:
+            from .module_access import expand_legacy_modules
+            modules = expand_legacy_modules(modules, level)
+            if 'daily_inspection' not in modules and home in {'D', 'E'} and (home in scope_rules or 'ALL' in scope_rules):
+                modules.append('daily_inspection')
+                inspection_home_only = True
+            if 'tool_management' not in modules:
+                from .tool_management import ToolManagement, trusted_full_access
+                if trusted_full_access(self, open_id, person) or ToolManagement.scrap_approver(person):
+                    modules.append('tool_management')
         # 账号管理能力同时取决于账号管理模块是否仍然可用。
         can_manage = enabled and level != "L4" and "accounts" in modules
         role = "admin" if enabled and level in {"L0", "L1"} else "building"
@@ -709,6 +722,7 @@ class PortalAuthManager:
             "home_scope": home,
             "role": role,
             "modules": modules,
+            "inspection_home_only": inspection_home_only,
             "scope_rules": scope_rules,
             "can_manage_accounts": can_manage,
             "can_view_accounts": can_manage and level != "L2",
@@ -1242,8 +1256,13 @@ class PortalAuthManager:
             'blocked_reason': self.directory_block_reason(applicant_id)}, 'edit')
 
     def permission_approver_ids(self, applicant_id):
-        return [row['open_id'] for row in self.get_permissions_payload()['users']
-                if row['enabled'] and self.can_review_permission_request(applicant_id, row['open_id'])]
+        with self._lock:
+            read = self._account_read_state()
+            permissions = read['permissions'] if read is not None else self._load_permissions_locked()
+        return [oid for oid, row in permissions.get('users', {}).items()
+                if isinstance(row, dict) and row.get('enabled') is not False
+                and self.account_profile(oid)['can_manage_accounts']
+                and self.can_review_permission_request(applicant_id, oid)]
 
     @staticmethod
     def _access_snapshot(profile):
@@ -1297,6 +1316,7 @@ class PortalAuthManager:
             "requested_scopes": requested_scopes,
             "requested_access": access,
             "access_baseline": self._access_snapshot(self.account_profile(open_id)) if access else None,
+            "module_grants_version": 2,
             "reason": reason,
             "approver_open_id": approver_open_id,
             "approver_name": str(self._permission_user(approver_open_id).get("name") or "管理员") if approver_open_id else "",
@@ -1394,12 +1414,24 @@ class PortalAuthManager:
                 current = self.account_profile(open_id)
                 existing = self._permission_user(open_id)
                 if existing.get('access_request_id') != request_id:
-                    if self._access_snapshot(current) != payload.get('access_baseline'):
+                    baseline = payload.get('access_baseline')
+                    if payload.get('module_grants_version') != 2 and isinstance(baseline, dict):
+                        from .module_access import expand_legacy_modules
+                        baseline = {**baseline, 'modules': expand_legacy_modules(baseline['modules'], baseline['level'])}
+                        desired = {**desired, 'modules': expand_legacy_modules(desired['modules'], desired['level'])}
+                        if current['inspection_home_only'] and 'daily_inspection' not in baseline['modules']:
+                            baseline['modules'].append('daily_inspection')
+                            if 'daily_inspection' not in desired['modules']:
+                                desired['modules'].append('daily_inspection')
+                        if set(baseline['modules']) == set(current['modules']):
+                            baseline['modules'] = current['modules']
+                    if self._access_snapshot(current) != baseline:
                         raise PortalError('申请人的权限已变化，请重新提交申请，避免覆盖新的授权。')
                     resolved = resolve_access_change(actor_profile, current, **{key:desired[key] for key in ('level','category','scopes','modules')})
                     permissions = copy.deepcopy(self._load_permissions_locked())
                     permissions.setdefault('users', {})[open_id] = {**existing, 'name':existing.get('name') or payload['name'],
                         **resolved, 'enabled':existing.get('enabled', True), 'access_version':1, 'access_request_id':request_id,
+                        'module_grants_version': 2, 'inspection_home_only': current['inspection_home_only'] and 'daily_inspection' in resolved['modules'],
                         'denied_scopes':[]}
                     permissions.update(updated_at=now, updated_by=updated_by)
                     self._save_permissions_locked(permissions)
@@ -1416,6 +1448,7 @@ class PortalAuthManager:
                 users[open_id] = {**existing, "name": existing.get("name") or payload.get("name") or open_id,
                     "level": resolved["level"], "category": resolved["category"], "role": resolved["role"],
                     "scopes": list(resolved["scopes"]), "modules": list(resolved["modules"]), "access_version": 1,
+                    "module_grants_version": 2, "inspection_home_only": target_profile["inspection_home_only"] and "daily_inspection" in resolved["modules"],
                     "enabled": existing.get("enabled", True),
                     "denied_scopes": [scope for scope in existing.get("denied_scopes", []) if scope not in resolved["scopes"]]}
                 permissions.update(updated_at=now, updated_by=updated_by)

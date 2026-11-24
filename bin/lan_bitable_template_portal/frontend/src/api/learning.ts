@@ -1,4 +1,4 @@
-import { requestJson, type Dict } from "./client";
+import { requestJson, requestPeople, type Dict } from "./client";
 import { completionDateError } from "../learningDates";
 
 export type LearningApiOptions = {
@@ -17,6 +17,8 @@ export async function requestLearning(
   method = "GET",
   body?: unknown,
 ): Promise<Dict> {
+  if (method === "GET" && /^\/(?:sharing\/)?people(?:\?|$)/.test(path))
+    return requestPeople(`/api/learning${path}`, { signal: options.signal });
   const result = await requestJson(`/api/learning${path}`, {
     method,
     signal: options.signal || undefined,
