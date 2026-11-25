@@ -1,7 +1,7 @@
 """Zhihang Feishu card formatting and post-verification standalone delivery."""
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 import os
@@ -10,13 +10,15 @@ import time
 import uuid
 from urllib.parse import urlencode
 
-from .zhihang_data_sources import _date, _drill_month, _plan_range, _text
+from .zhihang_data_sources import _date, _plan_range, _text
+
+from .zhihang_data_sync import PANORAMA_PROGRESS_TASKS
 
 NAMESPACE = "zhihang_data"
 BEIJING = timezone(timedelta(hours=8))
 DEFAULT_CHAT_ID = "oc_3bc648b9b761f24a65366a9b04b32eb2"
-PREFIXES = {"risk": "", "drill": "DRILL_", "change": "CHANGE_", "event": "EVENT_", "inspection": "INSPECT_"}
-TITLES = {"risk": "风险排查同步", "drill": "演练推进同步", "change": "变更工单同步", "event": "事件追踪同步"}
+PREFIXES = {"change": "CHANGE_", "event": "EVENT_", "inspection": "INSPECT_"}
+TITLES = {"change": "变更工单同步", "event": "事件追踪同步"}
 _INSPECTION_LIMIT = 20
 
 
@@ -43,16 +45,12 @@ def _chat_id(*keys):
 
 
 def _combined_enabled(kind):
-    if kind in {"risk", "drill"}:
-        return _enabled("MONTH_END_PROGRESS_NOTIFY_ENABLED")
     return kind in {"change", "event"} and _enabled("DAILY_COMBINED_NOTIFY_ENABLED")
 
 
 def _standalone_enabled(kind):
     if _combined_enabled(kind):
         return False
-    if kind in {"risk", "drill"}:
-        return True
     return _enabled(PREFIXES[kind] + "AUTO_SYNC_NOTIFY_ENABLED")
 
 
@@ -173,53 +171,6 @@ def _inspection_card(rows, scheduled, observed):
     return card, len(lines), invalid
 
 
-def _risk_summary(rows):
-    groups = defaultdict(list)
-    for row in rows:
-        groups[_text(row.get("楼栋")) or "未识别楼栋"].append(row)
-    complete = True
-    lines = []
-    for building, items in sorted(groups.items()):
-        def count(column):
-            return sum(_text(row.get(column)).lower() not in {"", "-", "null", "undefined"} for row in items)
-
-        checked, reviewed = count("排查时间"), count("审核时间")
-        total = len(items)
-        complete = complete and checked == reviewed == total
-        lines.append(f"{_plain(building)}：排查 {checked}/{total}，审核 {reviewed}/{total}")
-    active = sum(_text(row.get("当前风险状态")) not in {"", "无", "否", "无风险", "暂无", "正常", "0"} for row in rows)
-    return [("楼栋进度", "\n".join(lines))], bool(active), complete and bool(rows)
-
-
-def _drill_summary(rows, observed):
-    statuses = Counter()
-    buildings = defaultdict(Counter)
-    overdue = 0
-    for row in rows:
-        status = _text(row.get("演练状态")) or "待演练"
-        if status == "终止":
-            continue
-        year, month = _text(row.get("演练年份")), _drill_month(_text(row.get("演练月份")))
-        if not year.isdecimal() or not month:
-            date = next((date for key in ("计划演练时间", "计划结束时间", "实际演练时间", "触发时间", "创建时间")
-                         if (date := _date(row.get(key)))), None)
-            if not date:
-                continue
-            year, month = str(date.year), date.month
-        period = int(year), month
-        if period > (observed.year, observed.month) or period < (observed.year, observed.month) and status == "完成":
-            continue
-        overdue += status != "完成" and _text(row.get("是否逾期")) == "是"
-        if period == (observed.year, observed.month):
-            statuses[status] += 1
-        buildings[_text(row.get("实施区域")) or "未识别楼栋"][status] += 1
-    sections = [("本月状态", "、".join(f"{_plain(status)} {count}" for status, count in statuses.items())),
-                ("楼栋进展", "\n".join(f"{_plain(building)}：完成 {counts['完成']}/{counts.total()}"
-                                       for building, counts in sorted(buildings.items()))),
-                ("提示", f"逾期未完成 {overdue} 项" if overdue else "")]
-    return sections, bool(overdue)
-
-
 def _change_focus(rows, observed):
     statuses = Counter()
     important, tips = [], []
@@ -286,19 +237,6 @@ def _scheduled_policy(kind, scheduled, catchup, summary, state, store):
         return True
     label = scheduled.strftime("%H:%M")
     day = scheduled.date().isoformat()
-    if kind in {"risk", "drill"}:
-        if catchup or not _enabled("AUTO_SYNC_MESSAGE_ENABLED", False):
-            return False
-        if label not in _times("AUTO_SYNC_MESSAGE_SCHEDULES", ("08:30",)):
-            return False
-        if kind == "risk" and summary:
-            month = day[:7]
-            last_day = (scheduled + timedelta(days=1)).month != scheduled.month
-            return state.get("complete_month") != month or (last_day and state.get("last_complete_month") != month)
-        weekday, after = _setting("AUTO_SYNC_MESSAGE_WEEKDAY"), _setting("AUTO_SYNC_MESSAGE_MONTH_END_AFTER_DAY")
-        weekday = int(weekday) if weekday.isdecimal() and int(weekday) <= 6 else 4
-        after = int(after) if after.isdecimal() and 1 <= int(after) <= 30 else 25
-        return (scheduled.weekday() + 1) % 7 == weekday or scheduled.day > after
     if kind == "event" and catchup:
         return False
     if summary:
@@ -336,19 +274,12 @@ def _plan(kind, rows, slot, run_id, scheduled, targets, store):
     catchup = bool(scheduled and created_at and created_at.replace(second=0, microsecond=0) > scheduled)
     state = store.get_document(NAMESPACE, "cadence:" + kind) or {}
     count, invalid = 0, 0
-    complete = False
     next_snapshot = None
     if kind == "inspection":
         card, count, invalid = _inspection_card(rows.values(), scheduled, observed)
         important = bool(count)
     else:
-        if kind == "risk":
-            sections, important, complete = _risk_summary(rows.values())
-            policy_summary = complete
-        elif kind == "drill":
-            sections, important = _drill_summary(rows.values(), observed)
-            policy_summary = False
-        elif kind == "change":
+        if kind == "change":
             sections, important, policy_summary = _change_summary(rows.values(), observed)
         else:
             sections, important = _event_summary(rows.values())
@@ -363,7 +294,7 @@ def _plan(kind, rows, slot, run_id, scheduled, targets, store):
             ], sections)
     eligible = [target for target in targets if _eligible_target(target, important, scheduled, catchup)] if card else []
     planned = {"kind": kind, "slot": slot, "card": card, "targets": eligible, "results": {},
-               "complete": complete, "abnormal_count": count, "invalid_plan_range_count": invalid}
+               "abnormal_count": count, "invalid_plan_range_count": invalid}
     documents = {"card:" + run_id: planned}
     if next_snapshot is not None:
         documents["event:snapshot"] = next_snapshot
@@ -405,6 +336,8 @@ def notify(kind, rows, slot, run_id, *, store=None):
     Returns ``status``, ``message``/``error`` and per-target receipts. Retry with the
     same run ID and slot. Neither this hook nor its state writes change source rows.
     """
+    if kind in PANORAMA_PROGRESS_TASKS:
+        return {"status": "skipped", "message": "进度由全景平台每日运维巡视卡片发送。", "targets": []}
     if kind not in PREFIXES or not isinstance(rows, Mapping) or not run_id:
         raise ValueError("智航通知缺少有效的类型、数据或执行编号。")
     targets = notification_targets(kind)
@@ -459,13 +392,9 @@ def notify(kind, rows, slot, run_id, *, store=None):
         if role == "primary":
             primary_sent = receipt["status"] == "sent"
         documents = {key: planned}
-        if primary_sent and scheduled and kind in {"risk", "change", "event"}:
+        if primary_sent and scheduled and kind in {"change", "event"}:
             state = store.get_document(NAMESPACE, "cadence:" + kind) or {}
             state["notified_day"] = scheduled.date().isoformat()
-            if kind == "risk" and planned["complete"]:
-                state["complete_month"] = scheduled.strftime("%Y-%m")
-                if (scheduled + timedelta(days=1)).month != scheduled.month:
-                    state["last_complete_month"] = state["complete_month"]
             documents["cadence:" + kind] = state
         store.put_documents(NAMESPACE, documents)
     sent = sum(item["status"] == "sent" for item in receipts)

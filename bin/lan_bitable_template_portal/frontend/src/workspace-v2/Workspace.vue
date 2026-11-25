@@ -4,7 +4,9 @@
       <div :key="impersonationSession" class="v2-shell" :class="{ 'has-topnav':desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-mobile-workspace':!desktopNavigation&&loggedIn&&!publicLink&&user.role!=='guest', 'is-inspection-immersive':immersiveInspection, 'has-impersonation':!!user.impersonation, 'is-print': printMode, 'is-public': publicLink, 'is-guest': user.role === 'guest', 'is-auth':!loggedIn&&!publicLink }" @dragstart.capture="preventSignatureDrag">
         <div v-if="loggedIn && !printMode && activeModule !== 'life_guide' && route.pathname !== '/workbench-lite'" class="v2-watermark" aria-hidden="true"><span v-for="n in 24" :key="n">内部资料 · {{ user.name }} · {{ watermarkDay }}</span></div>
         <header v-if="!printMode && !impersonationBlocked && (!loggedIn || publicLink)" class="v2-header">
-          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand"><img :src="vnetLogo" alt="世纪互联 VNET" /><span>南通灯塔运维平台</span></a>
+          <a :href="workspaceUrl(user.role === 'guest' ? '/cabinet-power' : '/')" class="v2-brand">
+            <img :src="vnetLogo" alt="世纪互联 VNET" /><span>南通灯塔运维平台<small>园区运维协作工作台</small></span>
+          </a>
           <div class="v2-header-actions">
             <NavThemePicker v-if="!publicLink" :user-id="String(user.open_id||'')" />
             <NButton v-if="loggedIn || !checking && !publicLink" data-v2-navigation size="small" secondary :disabled="versionBusy" :title="versionBusy?'正在提交，请等待结果':undefined" :style="!loggedIn ? {minHeight:'44px'} : undefined" @click="requestVersion(switchLegacy)">切换旧版</NButton>
@@ -17,10 +19,20 @@
         <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
         <TopNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" :groups="menuGroups" :selected="selectedMenu" @select="selectMenu">
           <template #account>
-            <button v-if="menuGroups.length>1" type="button" class="topnav-apps" aria-label="全部应用" title="全部应用"
-              :aria-current="view==='functions'?'page':undefined" @click="selectMobileTab('functions')">
-              <Grid2X2 :size="16" aria-hidden="true"/><span>全部应用</span>
-            </button>
+            <NPopover v-if="menuGroups.length>1" :show="appsOpen" trigger="click" placement="bottom-end" raw
+              :show-arrow="false" :animated="false" @update:show="showApps">
+              <template #trigger>
+                <button ref="appsTrigger" type="button" class="topnav-apps" aria-label="全部应用" title="全部应用"
+                  aria-haspopup="dialog" :aria-expanded="appsOpen" :aria-controls="appsOpen?'topnav-all-apps':undefined"
+                  @keydown.down.prevent="showApps(true)">
+                  <Grid2X2 :size="16" aria-hidden="true"/><span>全部应用</span>
+                </button>
+              </template>
+              <section id="topnav-all-apps" ref="appsPanel" class="topnav-all-apps" role="dialog" aria-label="全部应用"
+                @keydown.esc.stop.prevent="closeApps">
+                <FeatureDirectory :groups="menuGroups" @select="selectApp" />
+              </section>
+            </NPopover>
             <WorkbenchWeather v-if="workbenchActive&&!user.impersonation" :identity="identityKey" />
             <NDropdown trigger="click" placement="bottom-end" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
               <NButton data-v2-navigation quaternary class="topnav-account" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="topnav-username">{{ user.name }}</span><ChevronDown aria-hidden="true" :size="14" /></NButton>
@@ -91,7 +103,7 @@
 </template>
 <script setup lang="ts">
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
-import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, NEmpty, NMenu, NMessageProvider, NModal, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
+import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, NEmpty, NMenu, NMessageProvider, NModal, NPopover, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
 import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, MessageCircle, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
 import { AUTH_EXPIRED_EVENT, requestJson, setReadCacheIdentity, setImpersonationContext, invalidateReadCache, type Dict } from './client';
 import { setModulePermissions } from '../api/modulePermissions';
@@ -107,6 +119,7 @@ import vnetLogo from '../assets/vnet-logo-transparent.png?inline';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import TopNavigation from './TopNavigation.vue';
+import FeatureDirectory from './FeatureDirectory.vue';
 import {useAuthVersionGuard} from './authVersionGuard';
 import { pageContext } from './pageLayout';
 import {moduleScope,scopeFamily,scopeOwner,readScopeMemory,saveScopeMemory} from './scopeMemory';
@@ -290,6 +303,22 @@ const breadcrumb=computed(()=>{
   return null;
 });
 const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false);
+const appsOpen=ref(false), appsTrigger=ref<HTMLButtonElement>(), appsPanel=ref<HTMLElement>();
+async function showApps(open:boolean){
+  appsOpen.value=open;
+  if(!open)return;
+  await nextTick();
+  if(appsOpen.value)appsPanel.value?.querySelector<HTMLInputElement>('input')?.focus({preventScroll:true});
+}
+function closeApps(){
+  appsOpen.value=false;
+  appsTrigger.value?.focus({preventScroll:true});
+}
+function selectApp(key:string){
+  closeApps();
+  selectMenu(key);
+}
+watch([route,identityKey,desktopNavigation],()=>{appsOpen.value=false;});
 
 const accountOptions=computed(()=>[
  ...(desktopNavigation.value?[{key:'profile',label:'个人信息',icon:()=>h(UserRound,{size:17})}]:[]),
@@ -456,6 +485,16 @@ onMounted(()=>{void loadAuth();window.addEventListener('focus',visibility);windo
 onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('focus',visibility);window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>
 <style scoped>
+.topnav-all-apps {
+  width:min(670px,calc(100vw - 24px));max-height:min(68dvh,530px);overflow:auto;overscroll-behavior:contain;
+  padding:12px;border:1px solid var(--soft-edge);border-radius:12px;
+  color:var(--v2-ink);background:var(--soft-face);box-shadow:0 10px 26px rgb(30 40 55 / .18);
+}
+.topnav-all-apps :deep(.v2-functions) {margin:0;padding:0;border:0;animation:none}
+.topnav-all-apps :deep(.serenity-heading h1) {font-size:17px}
+.topnav-all-apps :deep(.directory-results) {grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.topnav-all-apps :deep(.directory-section) {padding:9px;box-shadow:none;border:1px solid var(--soft-edge)}
+.topnav-all-apps :deep(.directory-section h2) {font-size:14px}
 .v2-shell.has-impersonation>.impersonation-banner{margin:0 10px}
 .v2-my-signatures { margin-top: 28px; }
 @media (max-width: 760px) { .v2-my-signatures { margin-top: 20px; } }

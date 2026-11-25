@@ -114,6 +114,30 @@ class ZhihangSyncTests(unittest.TestCase):
             future.result(5)
         return self.worker.detail(run["id"])
 
+    def test_panorama_tasks_still_sync_after_upgrade_without_sending_cards(self):
+        for kind, fields in (("risk", {"楼栋": "A楼", "风险编号": "R1"}),
+                             ("drill", {"计划ID": "D1", "演练月份": "11月"})):
+            with self.subTest(kind=kind):
+                original = {"confirmed": True, "enabled": True, "notify": True, "times": ["08:30"]}
+                self.store.put_document(NS, "settings:" + kind, original)
+                self.assertEqual(self.worker.settings(kind), {**original, "notify": False})
+                self.assertFalse(self.worker.configure(kind, {"notify": True})["notify"])
+                cloud = Cloud()
+                cloud.rows.clear()
+                list_all = cloud.list_all
+                cloud.list_all = lambda path="records": (
+                    [{"field_name": name, "type": 1} for name in fields] if path == "fields" else list_all(path)
+                )
+                self.worker.cloud = lambda table: cloud
+                self.worker.pull = lambda selected, now: {selected: {identity(selected, fields): fields}}
+                with self.worker.lock:
+                    run = self.worker.enqueue(kind, "scheduled", slot=TODAY + "T08:30:00+08:00")
+                    _, future = self.worker.active[self.worker.tasks[kind][2][0]]
+                self.assertEqual(future.result(5)["status"], "success")
+                self.assertEqual(list(cloud.rows.values()), [fields])
+                self.assertIsNone(self.worker.detail(run["id"]).get("notification"))
+        self.assertFalse(self.notifications)
+
     def test_five_previews_start_together_and_duplicate_reuses_running_batch(self):
         arrived = {kind: Event() for kind in self.worker.tasks}
         release = Event()
@@ -181,7 +205,7 @@ class ZhihangSyncTests(unittest.TestCase):
         )
         with patch.object(routes, "ZhihangSync", return_value=self.worker), patch.object(
             routes, "BrowserLogin", return_value=Mock()
-        ), patch.object(routes, "allowed_modules", return_value={"accounts"}), patch.object(routes.auth, "bind_store"):
+        ), patch.object(routes, "allowed_modules", return_value={"zhihang_data"}), patch.object(routes.auth, "bind_store"):
             routes.install_zhihang_data(app, controller, runtime, Mock())
             with TestClient(app) as client:
                 response = client.post("/api/zhihang-data/event/preview")
@@ -276,7 +300,7 @@ class ZhihangSyncTests(unittest.TestCase):
         for kind, key_field, status_field in (("risk", "风险ID", "排查状态"), ("drill", "计划ID", "执行状态")):
             with self.subTest(kind=kind):
                 cloud = Cloud()
-                before = {key_field: "fixture", status_field: "待处理"}
+                before = {key_field: "fixture", status_field: "待处理\n"}
                 target = before | {status_field: "已完成"}
                 cloud.rows = {"recKnown": before | {"公式编码": ["编码"], "备注": "人工数据"}}
                 worker = ZhihangSync(Store(), cloud=lambda _: cloud,
@@ -291,7 +315,8 @@ class ZhihangSyncTests(unittest.TestCase):
 
                 def read_batch(keys):
                     return [{"record_id": key, "fields": cloud.rows[key] | {
-                        status_field: [{"text": cloud.rows[key][status_field], "type": "text"}],
+                        status_field: [{"text": cloud.rows[key][status_field][:1], "type": "text"},
+                                       {"text": cloud.rows[key][status_field][1:], "type": "text"}],
                         "公式编码": {"value": ["编码"]},
                     }} for key in keys]
 
@@ -304,6 +329,21 @@ class ZhihangSyncTests(unittest.TestCase):
                     self.assertEqual(future.result(5)["status"], "success", worker.detail(run["id"]))
                     write.assert_called_once_with([{"record_id": "recKnown", "fields": {status_field: "已完成"}}])
                 self.assertEqual(cloud.rows["recKnown"]["备注"], "人工数据")
+
+    def test_plain_text_runs_preserve_internal_newlines_order_and_non_text_changes(self):
+        from lan_bitable_template_portal.zhihang_data_sync import matches
+
+        def compare(value, other):
+            return matches({"检查项目": value}, {"检查项目": other})
+
+        runs = [{"type": "text", "text": "温度\n"}, {"type": "text", "text": "湿度\n"}]
+        self.assertTrue(compare("温度\n湿度", runs))
+        self.assertTrue(compare(runs, "温度\n湿度"))
+        self.assertFalse(compare("温度湿度", runs))
+        self.assertFalse(compare(runs, list(reversed(runs))))
+        self.assertFalse(compare("温度", [{"type": "url", "text": "温度", "link": "https://fixture.invalid"}]))
+        self.assertTrue(compare(["B", "A"], ["A", "B"]))
+        self.assertFalse(compare(["A", "B"], "AB"))
 
     def test_concurrent_edit_waits_without_writing_and_retries_original_batch(self):
         record_id = "recExisting"

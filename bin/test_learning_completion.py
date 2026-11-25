@@ -78,9 +78,24 @@ class CompletionTests(unittest.TestCase):
         with patch.object(completion, 'project', side_effect=lambda _, date, *, scope, **kw: data[scope]):
             result = completion.workbench_summary(self.service, ['A', 'B'], {'date': DATE, 'people': '1'})
         self.assertEqual(result['people'], [
-            {'name': '隔离已答', 'scope': 'A', 'status': '答题中', 'shift': '白', 'answered': 2, 'assigned': 4},
-            {'name': '隔离未答', 'scope': 'B', 'status': '待答', 'shift': '夜', 'answered': 0, 'assigned': 4},
+            {'date': DATE, 'name': '隔离已答', 'scope': 'A', 'scopes': ['A'], 'status': '答题中', 'shift': '白', 'answered': 2, 'assigned': 4},
+            {'date': DATE, 'name': '隔离未答', 'scope': 'B', 'scopes': ['B'], 'status': '待答', 'shift': '夜', 'answered': 0, 'assigned': 4},
         ])
+
+    def test_period_people_reconcile_with_summary_and_exclude_ungranted_scopes(self):
+        yesterday = (dt.date.fromisoformat(DATE) - dt.timedelta(days=1)).isoformat()
+        def project(_, date, *, scope, **kw):
+            state = '已完成' if date == yesterday else '未到时'
+            return [{'person_id': 'p', 'person': {'name': '同一人'}, 'tasks': [{'shift': '白', 'scope': scope}],
+                     'status': state, 'assigned': 2, 'answered': 2 if state == '已完成' else 0}]
+        with patch.object(completion, 'project', side_effect=project):
+            query = {'from': yesterday, 'to': DATE}
+            result = completion.workbench_summary(self.service, ['A','B'], query | {'people':'1'})
+            self.assertEqual(result['summary'], completion.workbench_summary(self.service, ['A','B'], query)['summary'])
+            self.assertEqual([(r['date'],r['status'],r['answered'],r['assigned']) for r in result['people']],
+                             [(yesterday,'已完成',4,4),(DATE,'未到时',0,4)])
+            one = completion.workbench_summary(self.service, ['A'], query | {'people':'1'})
+            self.assertTrue(all(r['scopes']==['A'] and r['assigned']==2 for r in one['people']))
 
     def test_workbench_summary_deduplicates_person_days_and_returns_only_counts(self):
         data = {'A': [{'person_id': 'shared', 'status': '已完成'}, {'person_id': 'local', 'status': '待答'}],
@@ -98,6 +113,23 @@ class CompletionTests(unittest.TestCase):
         self.assertEqual(details['by_scope']['A'][0]['summary']['已完成'], 1)
         self.assertEqual(details['by_scope']['B'][0]['summary']['答题中'], 1)
         self.assertEqual(set(details['by_scope']['A'][0]), {'date', 'summary'})
+
+    def test_all_buildings_completed_paper_and_next_days_unopened_shift(self):
+        yesterday = (dt.date.fromisoformat(DATE) - dt.timedelta(days=1)).isoformat()
+        person = self.person()
+        duty = {'person_id': person['id'], 'scope': 'A', 'shift': '白'}
+        self.roster([duty], date=yesterday)
+        self.roster([{**duty, 'shift':'夜'}])
+        paper = self.paper(date=yesterday)
+        self.record(paper, submitted=yesterday + 'T14:00:00+08:00')
+        with patch.object(learning, 'now', return_value=AFTERNOON):
+            query = {'from': yesterday, 'to': DATE}
+            scopes = sorted(learning.SCOPES)
+            totals = completion.workbench_summary(self.service, scopes, query)
+            details = completion.workbench_summary(self.service, scopes, query | {'people':'1'})
+        self.assertEqual(details['summary'], totals['summary'])
+        self.assertEqual([(r['date'],r['status'],r['answered'],r['scopes']) for r in details['people']],
+                         [(yesterday,'已完成',2,['A']), (DATE,'未到时',0,['A'])])
 
     def test_first_backfill_ignores_unanswered_attempt_empty_dates(self):
         paper = self.paper()

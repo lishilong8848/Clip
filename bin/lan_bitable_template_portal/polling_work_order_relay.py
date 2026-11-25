@@ -697,7 +697,11 @@ class PollingWorkOrderRelayConnector:
         self.state_store.put_document(
             POLLING_RELAY_GROUP_NAMESPACE, target_record_id, normalized
         )
-        self._write_group_relay_metadata(target_record_id, normalized)
+        manager_lock = getattr(self.work_orders, "_lock", None)
+        with manager_lock if manager_lock is not None else nullcontext():
+            group = self.state_store.get_document("polling_work_order", target_record_id) or {}
+            if str(group.get("binding_id") or "") == str(normalized.get("binding_id") or ""):
+                self._write_group_relay_metadata(target_record_id, normalized)
         return copy.deepcopy(normalized)
 
     def _write_group_relay_metadata(
@@ -809,6 +813,15 @@ class PollingWorkOrderRelayConnector:
                 force=force,
             )
         document = self._group_document(target_record_id)
+        if group.get("state") == "binding_pending":
+            return document
+        binding_id = str(group.get("binding_id") or "")
+        if binding_id != str(document.get("binding_id") or ""):
+            if document.get("public_group_id"):
+                document = self.cancel_registration(target_record_id, reason="work_order_replaced", force=force)
+                if document.get("registration_state") != "cancelled":
+                    return document
+            document = self._put_group_document(target_record_id, {"binding_id": binding_id})
         if (
             not force
             and str(document.get("registration_state") or "") == "registered"
@@ -1178,7 +1191,9 @@ class PollingWorkOrderRelayConnector:
             try:
                 group = self.work_orders.get_group(target_record_id)
                 reason = str(group.get("cancel_reason") or "local_terminal")
-                terminal = str(group.get("state") or "") in {"cancelled", "stopped"}
+                terminal = str(group.get("state") or "") in {"cancelled", "stopped"} or (
+                    group.get("state") == "binding_pending"
+                    and str(group.get("binding_id") or "") != str(document.get("binding_id") or ""))
             except Exception:
                 reason, terminal = "local_missing", True
             if terminal:
@@ -1195,7 +1210,11 @@ class PollingWorkOrderRelayConnector:
             if isinstance(payload, dict) and hmac.compare_digest(
                 str(payload.get("public_group_id") or ""), public_group_id
             ):
-                return str(payload.get("target_record_id") or "")
+                target_id = str(payload.get("target_record_id") or "")
+                group = self.work_orders.get_group(target_id)
+                if str(payload.get("binding_id") or "") != str(group.get("binding_id") or ""):
+                    break
+                return target_id
         raise PollingRelayProtocolError("命令引用了未知公网工单。")
 
     @staticmethod

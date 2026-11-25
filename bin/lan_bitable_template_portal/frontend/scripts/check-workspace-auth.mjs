@@ -95,15 +95,37 @@ try{
   await menu.waitFor({state:'hidden'});
   for(const width of [800,1024,1280,1440]){
     await page.setViewportSize({width,height:900});
-    assert(await topNav.evaluate(nav=>{
-      const box=nav.getBoundingClientRect(), categories=[...nav.querySelectorAll('.topnav-tab')].map(el=>el.getBoundingClientRect().top);
-      return box.x===0&&box.width===innerWidth&&box.height<=66&&new Set(categories).size===1&&document.documentElement.scrollWidth<=innerWidth;
-    }));
+    await page.waitForFunction(()=>{
+      const nav=document.querySelector('.v2-topnav'), strip=nav.querySelector('.topnav-tabs');
+      const box=nav.getBoundingClientRect(), stripBox=strip.getBoundingClientRect();
+      const shown=[...strip.querySelectorAll('.topnav-tab:not([data-overflow])')].map(el=>el.getBoundingClientRect());
+      return box.x===0&&box.width===innerWidth&&box.height<=66&&new Set(shown.map(el=>el.top)).size<=1
+        && getComputedStyle(strip).overflowX==='clip'&&shown.every(el=>el.right<=stripBox.right+1)
+        && document.documentElement.scrollWidth<=innerWidth;
+    });
   }
-  await topNav.getByRole('button',{name:'全部应用',exact:true}).click();
-  await page.getByRole('heading',{name:'全部功能',exact:true}).waitFor();
-  assert.equal(await page.getByRole('button',{name:'账号与权限',exact:true}).count(),0);
+  const apps=topNav.getByRole('button',{name:'全部应用',exact:true});
+  const appsPanel=page.getByRole('dialog',{name:'全部应用',exact:true});
+  const beforeApps=page.url();
+  await apps.click();
+  await appsPanel.getByRole('heading',{name:'全部功能',exact:true}).waitFor();
+  assert.equal(page.url(),beforeApps,'opening the directory leaves the current page in place');
+  assert.equal(await appsPanel.getByRole('button',{name:'账号与权限',exact:true}).count(),0);
+  const appSearch=appsPanel.getByRole('searchbox',{name:'搜索已授权功能'});
+  await appSearch.fill('画像学练');
+  await appsPanel.getByRole('button',{name:'画像学练',exact:true}).waitFor();
   await page.screenshot({path:path.join(output,'platform-navigation-desktop.png')});
+  await page.keyboard.press('Escape');
+  await appsPanel.waitFor({state:'hidden'});
+  assert.equal(await apps.evaluate(el=>el===document.activeElement),true);
+  await apps.click();
+  await page.locator('.v2-main').click({position:{x:10,y:300}});
+  await appsPanel.waitFor({state:'hidden'});
+  assert.equal(page.url(),beforeApps);
+  await apps.click();
+  await appsPanel.getByRole('button',{name:'画像学练',exact:true}).click();
+  await appsPanel.waitFor({state:'hidden'});
+  await page.waitForURL(url=>url.href!==beforeApps);
   await page.goto(origin+entry+'?account=password');await page.locator('#personnel-current-password').fill('oldFixture');await page.locator('#personnel-change-new-password').fill('newFixture123');await page.locator('#personnel-change-confirm-password').fill('newFixture123');
   await selectWorkspaceAccount(page,'切换旧版');await page.getByRole('button',{name:'继续填写',exact:true}).click();
   await page.mouse.move(800,300);await page.waitForTimeout(250);await submit().click();await openWorkspaceRail(page);await page.getByRole('button',{name:/^账户菜单：/}).click();assert.equal(await page.locator('.n-dropdown-menu').getByRole('menuitem',{name:'切换旧版',exact:true}).getAttribute('aria-disabled'),'true');await page.keyboard.press('Escape');assert(writes.includes('/api/auth/password/change'));

@@ -2,15 +2,17 @@
   <nav ref="nav" class="v2-topnav" aria-label="功能导航" @keydown.esc="escape" @focusout="onFocusOut">
     <div class="topnav-start">
       <button type="button" class="topnav-brand" aria-label="南通灯塔运维平台 · 返回个人工作台" @click="choose('home')">
-        <img :src="vnetLogo" alt="世纪互联 VNET"/><strong>南通灯塔运维平台</strong>
+        <img :src="vnetLogo" alt="世纪互联 VNET"/>
+        <span class="topnav-brand-copy"><strong>南通灯塔运维平台</strong><small>园区运维协作工作台</small></span>
       </button>
       <button v-if="hasHome" type="button" class="topnav-home" data-nav-entry="home" data-group="home"
         :aria-current="selected==='home'?'page':undefined" @click="choose('home')">
         <LayoutDashboard :size="17" aria-hidden="true" />个人工作台
       </button>
     </div>
-    <div class="topnav-tabs" @scroll.passive="alignPanel">
-      <button v-for="group in sections" :key="group.key" type="button" class="topnav-tab" :data-group="group.key" :data-nav-entry="group.direct?.key" :aria-label="tabLabel(group)"
+    <div ref="tabs" class="topnav-tabs">
+      <button v-for="(group,index) in sections" :key="group.key" type="button" class="topnav-tab" :data-group="group.key" :data-nav-entry="group.direct?.key" :aria-label="tabLabel(group)"
+        :data-overflow="index>=visibleCount?true:undefined" :aria-hidden="index>=visibleCount?true:undefined" :tabindex="index>=visibleCount?-1:undefined"
         :title="group.direct?.label || group.label" :aria-description="group.direct?.label"
         :aria-current="group.direct?.key===selected?'page':undefined"
         :data-current="currentGroup===group.key" :aria-expanded="group.branches?opened===group.key:undefined"
@@ -41,7 +43,8 @@ import vnetLogo from '../assets/vnet-logo-transparent.png?inline';
 import type {SidebarGroup} from './sidebarSections';
 const props=defineProps<{groups:SidebarGroup[];selected:string}>();
 const emit=defineEmits<{select:[key:string]}>();
-const nav=ref<HTMLElement>(), opened=ref(''), anchor=ref(0);
+const nav=ref<HTMLElement>(), tabs=ref<HTMLElement>(), opened=ref(''), anchor=ref(0),visibleCount=ref(Infinity);
+let observer:ResizeObserver|undefined;
 const sections=computed(()=>props.groups.filter(group=>group.key!=='home'));
 const sectionPanels=computed(()=>sections.value.filter(group=>group.branches));
 const hasHome=computed(()=>props.groups.some(group=>group.key==='home'));
@@ -57,6 +60,20 @@ function currentPanel(){
 function alignPanel(){
   const button=groupButton(opened.value);
   if(nav.value && button)anchor.value=button.getBoundingClientRect().left-nav.value.getBoundingClientRect().left;
+}
+function fitTabs(){
+  if(!tabs.value)return;
+  const gap=parseFloat(getComputedStyle(tabs.value).columnGap)||0;
+  const available=tabs.value.clientWidth;
+  let width=0,count=0;
+  for(const button of tabs.value.querySelectorAll<HTMLElement>('.topnav-tab')){
+    width+=button.getBoundingClientRect().width+(count?gap:0);
+    if(width>available)break;
+    count++;
+  }
+  visibleCount.value=count;
+  if(opened.value && !sections.value.slice(0,count).some(group=>group.key===opened.value))closePanel();
+  alignPanel();
 }
 function openPanel(group:SidebarGroup){
   opened.value=group.key;
@@ -96,13 +113,19 @@ function onFocusOut(event:FocusEvent){
   if(opened.value && next instanceof Node && next!==groupButton(opened.value) && !currentPanel()?.contains(next))closePanel();
 }
 watch(()=>props.selected,closePanel);
-watch(sections,groups=>{if(!groups.some(group=>group.key===opened.value&&group.branches))closePanel();});
+watch(sections,groups=>{if(!groups.some(group=>group.key===opened.value&&group.branches))closePanel();fitTabs();},{flush:'post'});
 onMounted(()=>{
   document.addEventListener('pointerdown',outside);
-  window.addEventListener('resize',alignPanel);
+  window.addEventListener('resize',fitTabs);
+  if(tabs.value&&typeof ResizeObserver!=='undefined'){
+    observer=new ResizeObserver(fitTabs);
+    observer.observe(tabs.value);
+  }
+  fitTabs();
 });
 onBeforeUnmount(()=>{
   document.removeEventListener('pointerdown',outside);
-  window.removeEventListener('resize',alignPanel);
+  window.removeEventListener('resize',fitTabs);
+  observer?.disconnect();
 });
 </script>

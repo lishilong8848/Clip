@@ -1,1 +1,0 @@
-import{cu as t,ba as s,b9 as u,bG as c}from"./app-v2-DWPuzWwt.js";function a(){const o=t(s,null);return u(()=>{if(o===null)return c;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||c;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{a as u};

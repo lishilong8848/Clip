@@ -130,6 +130,53 @@ class DeadlineTests(unittest.TestCase):
         self.plan('bad', 计划结束维护时间=True)
         self.assertEqual({item['source_record_id'] for item in self.worker.due(self.current).values()}, {'eligible', 'ongoing'})
 
+    def test_group_card_only_lists_unannounced_maintenance_and_reuses_exact_payload(self):
+        self.plan('已过截止的维保', 计划结束维护时间='2026-10-22 08:30')
+        self.plan('晚上截止的维保', scopes=['E'])
+        self.plan('已经进行中的维保', status='进行中')
+        self.plan('已经结束的维保', status='正常结束')
+        self.plan('次日到期的维保', 计划结束维护时间='2026-10-23')
+        self.plan('非维保变更', kind='change')
+        self.plan('目标通告已开始')
+        self.plan('源表已有实际开始', 实际开始时间='2026-10-22 08:40')
+        self.service._work_status_by_records.return_value = {
+            '目标通告已开始': {'status': '开始', 'started_at': '2026-10-22 08:45'},
+        }
+        group = Mock(side_effect=[TimeoutError(), (True, 'ok')])
+        self.worker.send_group = group
+        self.worker.tick()
+        first = group.call_args
+        card, chat_id = first.args
+        self.assertEqual(chat_id, deadlines.MAINTENANCE_GROUP_CHAT_ID)
+        self.assertIn('2 项', card['header']['title']['content'])
+        rows = card['elements'][-1]['content']
+        self.assertIn('<font color="red">**已过截止 · 08:30**', rows)
+        self.assertIn('<font color="orange">**今日到期 · 18:30**', rows)
+        self.assertIn('已过截止的维保', rows)
+        self.assertIn('晚上截止的维保', rows)
+        for item in self.records[2:]:
+            self.assertNotIn(item['record_id'], rows)
+        individual_sends = self.sender.call_count
+        self.assertTrue(self.state()['complete'])
+        restarted = deadlines.PlannedNoticeDeadlines(self.service, self.store, self.auth, self.sender,
+            send_group=group, clock=lambda: self.current)
+        self.advance()
+        restarted.tick()
+        self.assertEqual(group.call_args, first)
+        self.assertTrue(self.state()['group_complete'])
+        self.advance()
+        restarted.tick()
+        self.assertEqual(group.call_count, 2)
+        self.assertEqual(self.sender.call_count, individual_sends)
+
+    def test_group_stays_silent_when_all_today_plans_have_started(self):
+        self.plan(status='进行中')
+        self.worker.send_group = Mock()
+        self.worker.tick()
+        self.sender.assert_called_once()
+        self.worker.send_group.assert_not_called()
+        self.assertTrue(self.state()['group_complete'])
+
     def test_cross_month_and_millisecond_timezone_deadlines(self):
         self.plan('crossmonth', 计划开始维护时间='2026-09-20')
         self.plan('milliseconds', 计划结束维护时间=int(dt.datetime(2026, 10, 21, 16, tzinfo=dt.timezone.utc).timestamp() * 1000))

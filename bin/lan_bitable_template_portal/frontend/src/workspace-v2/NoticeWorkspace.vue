@@ -128,7 +128,21 @@
             <section v-if="form.values.source_record_id&&!form.values.target_record_id" class="v2-notice-field-section" data-notice-section="memory"><NoticeMemorySuggestions :key="formKey" :form="form" :month="applied.month" :action="action" :locked="locked" @applied="persist" /></section>
             <section v-if="form.sop" class="v2-notice-field-section" data-notice-section="sop"><h2>本次工单</h2><LighthouseNoticeSop id="v2-notice-sop" :field="sopField" v-model="sop" :disabled="locked" @load-options="loadSops($event.q)" /></section>
           </template>
-          <section v-if="form.groupId" class="v2-notice-field-section" data-notice-section="workorder"><h2>已关联工单</h2><NAlert v-if="sopStatus" :type="sopStatus.state==='completed'?'success':'info'" :bordered="false">{{ sopStatus.error || (sopStatus.state==='completed'?'工单已完成':sopStatus.state==='upload_pending'?'步骤已全部完成，工单表格正在上传':'工单执行中') }}<span v-if="sopStatus.enabled&&!sopStatus.ready"> · 延时核验尚未满足，剩余 {{ sopStatus.remaining_seconds }} 秒</span></NAlert><div class="v2-notice-tools"><NButton v-for="link in form.sopLinks" :key="link.url" tag="a" :href="workspaceUrl(link.url)" target="_blank" rel="noopener noreferrer">{{ link.label }}</NButton><NButton :loading="busy" :disabled="locked" @click="refreshSopStatus">刷新工单状态</NButton><NButton :loading="busy" :disabled="locked" @click="resendSopLinks">重发操作人及审核人链接</NButton><NButton v-if="sopStatus?.state==='upload_pending'" :loading="busy" :disabled="locked" @click="retrySopUpload">重试上传工单表格</NButton></div></section>
+          <section v-if="form.groupId" class="v2-notice-field-section" data-notice-section="workorder">
+            <h2>已关联工单 <span v-if="sopStatus?.sop_name">{{ sopStatus.sop_name }}</span></h2>
+            <NAlert v-if="sopStatus" :type="sopStatus.state==='completed'?'success':'info'" :bordered="false">
+              {{ sopStatus.error || workOrderStatusLabel }}
+              <span v-if="sopStatus.binding_error"> · {{ sopStatus.binding_error }}</span>
+              <span v-if="sopStatus.enabled&&!sopStatus.ready"> · 延时核验尚未满足，剩余 {{ sopStatus.remaining_seconds }} 秒</span>
+            </NAlert>
+            <div class="v2-notice-tools">
+              <NButton v-for="link in sopStatus?.state==='binding_pending'?[]:form.sopLinks" :key="link.url" tag="a" :href="workspaceUrl(link.url)" target="_blank" rel="noopener noreferrer">{{ link.label }}</NButton>
+              <NButton :disabled="locked" @click="refreshSopStatus">刷新工单状态</NButton>
+              <NButton v-if="canRebindSop" :disabled="locked" @click="openRebind">更换工单</NButton>
+              <NButton v-if="sopStatus?.state!=='binding_pending'" :disabled="locked" @click="resendSopLinks">重发操作人及审核人链接</NButton>
+              <NButton v-if="sopStatus?.state==='upload_pending'" :disabled="locked" @click="retrySopUpload">重试上传工单表格</NButton>
+            </div>
+          </section>
           <div v-if="form.photoRequired||form.values.work_type==='change'" class="v2-notice-photo-columns">
           <section v-if="form.photoRequired" class="v2-notice-field-section" data-notice-section="photos"><h2>现场照片<span>{{ Number(form.values.site_photo_count||0) }} 张已上传</span></h2><NoticePhotoUpload ref="siteUpload" :form="form" v-model="photos" :locked="locked" @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.photos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" :alt="photo.file_name||'已上传现场照片'" width="108" /><span>{{ photo.file_name || '已有现场照片' }}</span><small>已保存到通告</small></figure></NoticePhotoUpload></section>
           <section v-if="form.values.work_type==='change'" class="v2-notice-field-section" data-notice-section="ali"><h2>阿里确认截图</h2><NoticePhotoUpload ref="aliUpload" :form="form" v-model="aliPhotos" :locked="locked" ali @busy="uploadBusy" @update:model-value="persistAfterUpload"><figure v-for="photo in form.aliPhotos" :key="photo.local_image_id||photo.file_token"><NImage v-if="safePhoto(photo)" :src="safePhoto(photo)" width="108" :alt="photo.file_name||'已上传确认截图'" /><span>{{ photo.file_name || '已上传' }}</span><small>已保存到通告</small><NButton quaternary circle :disabled="locked" aria-label="删除已上传确认截图" @click="removeAliPhoto(photo)"><Trash2 :size="15" /></NButton></figure></NoticePhotoUpload><NButton v-if="form.values.target_record_id&&aliPhotos.length" :disabled="locked" :loading="busy" @click="uploadAliNow">仅上传确认截图</NButton></section>
@@ -152,6 +166,18 @@
         </div>
       </template>
     </component>
+    <NModal v-model:show="rebindOpen" preset="card" class="v2-notice-confirm desk-dialog" title="更换关联工单"
+      :mask-closable="false" :close-on-esc="!busy" :closable="!busy">
+      <NAlert type="warning" :bordered="false" data-v2-inline-feedback>确认后，旧工单链接和办理进度将作废。新链接会发送给操作人及现场审核人。</NAlert>
+      <NAlert v-if="rebindError" type="error" role="alert" data-v2-inline-feedback>{{ rebindError }}</NAlert>
+      <LighthouseNoticeSop id="v2-notice-rebind" :field="sopField" v-model="rebindSop" require-work-order
+        :disabled="busy" @load-options="loadSops($event.q)" />
+      <template #footer><div class="v2-dialog-actions">
+        <NButton :disabled="busy" @click="rebindOpen=false">取消</NButton>
+        <NButton type="primary" :loading="busy" :disabled="!rebindSop.sop_id||!rebindSop.operator_record_ids?.length||!rebindSop.reviewer_record_id"
+          @click="replaceSop">确认更换并通知</NButton>
+      </div></template>
+    </NModal>
     <NModal :show="pasteOpen" preset="card" class="v2-notice-confirm desk-dialog" title="粘贴通告原文" :mask-closable="false" :closable="!parsing" :close-on-esc="!parsing" @update:show="value=>pasteOpen=value"><NAlert v-if="pasteError" role="alert" type="error" :bordered="false">{{ pasteError }}</NAlert><NInput v-model:value="pasteText" type="textarea" :autosize="{minRows:8,maxRows:16}" maxlength="30000" :input-props="{'aria-label':'通告原文'}" :disabled="parsing" placeholder="粘贴完整通告，解析后核对字段再发送" @paste="pasteNoticeText" /><template #footer><div class="v2-dialog-actions"><NButton :disabled="parsing" @click="pasteOpen=false">取消</NButton><NButton type="primary" :loading="parsing" :disabled="!pasteText.trim()" @click="parsePasted">解析并填写</NButton></div></template></NModal>
     <NoticeChangeConfirmations v-if="changeOpen" :scope="scope" :focus-id="params.get('change_confirmation')||''" @close="changeOpen=false" @changed="load(true)" />
     <NoticeHistory workspace ref="historyDialog" :scope="scope" :work-type="kind" :show="historyOpen" @close="historyOpen=false" @changed="load(true)" />
@@ -291,6 +317,12 @@ const sourceChoice=ref<string|null>(null),sourceOptions=ref<{label:string;value:
 function toggleSource(){sourceExpanded.value=!sourceExpanded.value;if(sourceExpanded.value)void loadSources();}
 function chooseSourceMode(value:string){if(!form.value||locked.value||!['bind','unbound'].includes(value))return;form.value.values.manual_binding_choice=value;sourceChoice.value=null;if(value==='bind')void loadSources();persist();}
 const sopStatus=ref<Dict|null>(null);
+const rebindOpen=ref(false),rebindError=ref(''),rebindSop=ref<Dict>({});
+let rebindAttempt:{key:string;id:string}|undefined;
+const canRebindSop=computed(()=>!props.user.impersonation&&!!form.value?.values?.target_record_id
+  && !!form.value?.actions.includes('update') && ['active','upload_pending','completed'].includes(sopStatus.value?.state));
+const workOrderStatusLabel=computed(()=>({binding_pending:'新工单待同步，旧链接已作废',completed:'工单已完成',
+  upload_pending:'步骤已全部完成，工单表格正在上传',cancelled:'工单已停止',stopped:'工单已停止'} as Dict)[sopStatus.value?.state]||'工单执行中');
 const sopScope=computed(()=>form.value?.values.building_codes?.length===1?String(form.value.values.building_codes[0]):'');
 const selectedBuildingLabel=computed(()=>(form.value?.values.building_codes||[]).map((v:string)=>v==='110'?'110站':v+'楼').join('、')||'未选择楼栋');
 const selectedSopLabel=computed(()=>sopField.value.sops?.find((s:Dict)=>s.sop_id===sop.value.sop_id)?.name||'已选择工单');
@@ -659,7 +691,48 @@ function bindSource(){
   }});
 }
 async function resendSopLinks(){if(!form.value?.groupId)return;busy.value=true;try{await requestJson('/api/polling-work-orders/'+encodeURIComponent(form.value.groupId)+'/resend-links',{method:'POST',body:'{}'});message.success('工单链接已提交发送');}catch(e){detailError.value=(e as Error).message;}finally{busy.value=false;}}
-async function refreshSopStatus(){const current=form.value;if(!current?.groupId||busy.value)return;busy.value=true;try{const result=await requestJson('/api/workbench/polling-delay-status?group_id='+encodeURIComponent(current.groupId),{cache:'no-store'});if(form.value===current)sopStatus.value=result;}catch(e){detailError.value=(e as Error).message;}finally{busy.value=false;}}
+async function refreshSopStatus(){
+  const current=form.value;
+  if(!current?.groupId||busy.value)return;
+  busy.value=true;
+  try{
+    const result=await requestJson('/api/workbench/polling-delay-status?group_id='+encodeURIComponent(current.groupId),{cache:'no-store'});
+    if(form.value!==current)return;
+    if(result.state==='binding_pending'||result.binding_id!==sopStatus.value?.binding_id)current.sopLinks=[];
+    sopStatus.value=result;
+    if(result.binding_id&&result.state!=='binding_pending'){
+      const v=current.values;
+      const params=new URLSearchParams({scope:v.scope,work_type:v.work_type,month:applied.value.month,
+        ...(v.active_item_id?{active_item_id:v.active_item_id}:{record_id:v.target_record_id})});
+      const detail=await requestJson('/api/workbench/lite-detail?'+params,{cache:'no-store'});
+      const next=parseNoticeForm(detail.fragments?.detail||'');
+      if(form.value===current&&next.groupId===current.groupId)current.sopLinks=next.sopLinks;
+    }
+  }catch(e){detailError.value=(e as Error).message;}finally{busy.value=false;}
+}
+function openRebind(){
+  if(!canRebindSop.value||locked.value)return;
+  rebindSop.value={};rebindError.value='';rebindAttempt=undefined;rebindOpen.value=true;
+}
+async function replaceSop(){
+  const current=form.value, selected=rebindSop.value;
+  if(!current?.groupId||!canRebindSop.value||busy.value||!selected.sop_id||!selected.operator_record_ids?.length||!selected.reviewer_record_id)return;
+  const payload={binding_id:sopStatus.value?.binding_id||'',polling_sop_id:selected.sop_id,polling_sop_version:selected.sop_version,
+    polling_operator_record_ids:selected.operator_record_ids,polling_reviewer_record_id:selected.reviewer_record_id,
+    polling_runs:selected.runs||[],polling_run_count:selected.runs?.length||1};
+  const key=JSON.stringify(payload);
+  if(rebindAttempt?.key!==key)rebindAttempt={key,id:createRepairOperationId('rebind-sop')};
+  busy.value=true;rebindError.value='';
+  try{
+    const result=await requestJson('/api/polling-work-orders/'+encodeURIComponent(current.groupId)+'/rebind',{
+      method:'POST',body:JSON.stringify({...payload,operation_id:rebindAttempt.id})});
+    if(form.value!==current)return;
+    current.sopLinks=[];
+    sopStatus.value=result;
+    rebindOpen.value=false;
+    message.success('工单更换已受理，核验完成后发送新链接。');
+  }catch(e){rebindError.value=(e as Error).message;}finally{busy.value=false;}
+}
 async function retrySopUpload(){if(!form.value?.groupId||busy.value)return;busy.value=true;try{await requestJson('/api/polling-work-orders/'+encodeURIComponent(form.value.groupId)+'/retry-upload',{method:'POST',body:'{}'});busy.value=false;await refreshSopStatus();}catch(e){detailError.value=(e as Error).message;}finally{busy.value=false;}}
 function deleteNotice(){
   if(!form.value?.canDelete||locked.value)return;

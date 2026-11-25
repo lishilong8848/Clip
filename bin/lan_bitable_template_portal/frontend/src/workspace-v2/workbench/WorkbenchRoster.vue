@@ -13,10 +13,14 @@ defineEmits<{retry:[]}>();
 const view=ref<'cards'|'table'>('table');
 const showAll=ref(false), heading=useId();
 const order=['H','A','B','C','D','E','110'];
-const isLeader=(person:RosterPerson)=>!!person.system_position?.includes('值班长');
 const isLongDayIntern=(person:RosterPerson)=>person.position==='运维实习生'&&(person.duty_kind==='长白'||person.group==='长白');
+function rosterPosition(person:RosterPerson){
+  const position=person.position?.trim()||'';
+  return /值班|站长|主管|实习|工程师|经理/.test(position)?position:person.system_position?.trim()||position;
+}
+const isLeader=(person:RosterPerson)=>rosterPosition(person).includes('值班长');
 function dayOrder(person:RosterPerson){
-  const position=person.system_position||'';
+  const position=rosterPosition(person);
   if(isLeader(person))return 0;
   if(/站长|主管/.test(position))return 1;
   if(position.includes('值班员'))return 2;
@@ -35,7 +39,7 @@ const rows=computed(()=>order.flatMap(scope=>{
 const label=(scope:string)=>scope==='110'?'110站':scope+'楼';
 const columns=[{id:'current',label:'当班人员'},{id:'incoming',label:'接班人员'}] as const;
 function personRole(person:RosterPerson){
-  return isLongDayIntern(person)?'长白实习生':person.system_position||'';
+  return isLongDayIntern(person)?'长白实习生':rosterPosition(person).replace(/^运维(?=值班[长员]$)/,'');
 }
 function chatLink(person:RosterPerson) {
   return !props.impersonating&&/^ou_[A-Za-z0-9]+$/.test(person.open_id||'')
@@ -81,9 +85,8 @@ function chatLink(person:RosterPerson) {
               </template>
               <section class="roster-person" role="dialog" :aria-label="person.name+'的基本信息'">
                 <strong>{{ person.name }}</strong>
-                <dl><template v-if="person.system_position"><dt>体系岗位</dt><dd>{{ person.system_position }}</dd></template>
+                <dl><template v-if="personRole(person)"><dt>排班角色</dt><dd>{{ personRole(person) }}</dd></template>
                   <template v-if="person.group"><dt>班组</dt><dd>{{ person.group }}</dd></template>
-                  <template v-if="person.position&&person.position!==personRole(person)"><dt>岗位</dt><dd>{{ person.position }}</dd></template>
                 </dl>
                 <a v-if="chatLink(person)" :href="chatLink(person)" target="_blank" rel="noopener noreferrer">
                   <MessageCircle :size="16" aria-hidden="true"/>飞书对话</a>

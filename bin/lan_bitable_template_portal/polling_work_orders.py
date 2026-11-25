@@ -38,6 +38,7 @@ POLLING_SOP_NAMESPACE = "polling_sop"
 POLLING_SOP_META_NAMESPACE = "polling_sop_meta"
 POLLING_SOP_CLOUD_CACHE_KEY = "cloud_initialized_v2"
 POLLING_WORK_ORDER_NAMESPACE = "polling_work_order"
+POLLING_WORK_ORDER_SUPERSEDED = "polling_work_order_superseded"
 POLLING_WORK_ORDER_SECRET_NAMESPACE = "polling_work_order_secret"
 POLLING_WORK_ORDER_SECRET_KEY = "hmac"
 POLLING_UNITS = tuple(f"{index}#" for index in range(1, 7))
@@ -1709,10 +1710,14 @@ class PollingWorkOrderService:
                 )
             return encoded.encode("utf-8")
 
-    def role_token(self, target_record_id: str, role: str) -> str:
+    def role_token(self, target_record_id: str, role: str, *, binding_id: str | None = None) -> str:
         payload = f"{target_record_id}.{role}"
+        if binding_id is None:
+            group = self.state_store.get_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id) or {}
+            binding_id = str(group.get("binding_id") or "")
+        signed = f"{payload}.{binding_id}" if binding_id else payload
         signature = base64.urlsafe_b64encode(
-            hmac.new(self._secret(), payload.encode("utf-8"), hashlib.sha256).digest()
+            hmac.new(self._secret(), signed.encode("utf-8"), hashlib.sha256).digest()
         ).decode("ascii").rstrip("=")
         return f"{payload}.{signature}"
 
@@ -1725,7 +1730,7 @@ class PollingWorkOrderService:
         if not hmac.compare_digest(expected, str(token or "").strip()):
             raise PollingWorkOrderTokenError("工单链接无效或已失效。")
         group = self.get_group(target_record_id)
-        if str(group.get("state") or "") in {"cancelled", "stopped"}:
+        if str(group.get("state") or "") in {"cancelled", "stopped", "binding_pending"}:
             raise PollingWorkOrderTokenError("该工单链接已失效。")
         token_hash = hashlib.sha256(str(token).encode("utf-8")).hexdigest()
         if not hmac.compare_digest(
@@ -1901,6 +1906,9 @@ class PollingWorkOrderService:
             raise PortalError("工单附件路径无效。")
         return directory
 
+    def _group_storage_directory(self, group: dict) -> Path:
+        return self._group_directory(str(group.get("storage_key") or group.get("target_record_id") or ""))
+
     def create_group(
         self,
         prepared: dict,
@@ -1909,6 +1917,9 @@ class PollingWorkOrderService:
         title: str,
         public_base_url: str,
         public_relay: bool = False,
+        replace_binding: str | None = None,
+        binding_id: str = "",
+        binding_request: str = "",
     ) -> dict:
         target_record_id = str(target_record_id or "").strip()
         spec = prepared.get("polling_work_order_spec")
@@ -1919,9 +1930,16 @@ class PollingWorkOrderService:
             existing = self.state_store.get_document(
                 POLLING_WORK_ORDER_NAMESPACE, target_record_id
             )
-            if isinstance(existing, dict):
+            if isinstance(existing, dict) and replace_binding is None:
                 return self.group_with_links(existing, public_base_url)
-            directory = self._group_directory(target_record_id)
+            if replace_binding is not None:
+                if not binding_id or not isinstance(existing, dict) or str(existing.get("binding_id") or "") != replace_binding:
+                    raise PortalConflictError("工单关联已变化，请刷新核对。")
+                if self.state_store.get_document(POLLING_WORK_ORDER_SUPERSEDED, binding_id):
+                    raise PortalConflictError("该重新绑定请求已处理，请刷新核对。")
+                if existing.get("state") not in {"active", "upload_pending", "completed"}:
+                    raise PortalConflictError("当前工单暂不能重新绑定，请先刷新办理状态。")
+            directory = self._group_directory(target_record_id + (":" + binding_id if binding_id else ""))
             directory.mkdir(parents=True, exist_ok=True)
             attachments: list[dict] = []
             seen_hashes: set[str] = set()
@@ -1989,8 +2007,8 @@ class PollingWorkOrderService:
                             "reviewer_confirmation": {},
                         }
                     )
-            operator_token = self.role_token(target_record_id, "operator")
-            reviewer_token = self.role_token(target_record_id, "reviewer")
+            operator_token = self.role_token(target_record_id, "operator", binding_id=binding_id)
+            reviewer_token = self.role_token(target_record_id, "reviewer", binding_id=binding_id)
             now = self._now_text()
             group = {
                 "group_id": target_record_id,
@@ -2044,9 +2062,19 @@ class PollingWorkOrderService:
             }
             if public_relay:
                 group["relay"]["registration_state"] = "registration_pending"
-            self.state_store.put_document(
-                POLLING_WORK_ORDER_NAMESPACE, target_record_id, group
-            )
+            if replace_binding is None:
+                self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
+            else:
+                generated = set(existing.get("uploaded_file_tokens") or [])
+                for key in ("uploaded_by_sha256", "uploaded_step_attachment_by_sha256"):
+                    generated.update((existing.get(key) or {}).values())
+                group.update(binding_id=binding_id, binding_request=binding_request, storage_key=target_record_id + ":" + binding_id,
+                             version=int(existing.get("version") or 0) + 1, state="binding_pending",
+                             binding_cleanup_tokens=sorted(generated))
+                self.state_store.put_documents_atomic({
+                    (POLLING_WORK_ORDER_NAMESPACE, target_record_id): group,
+                    (POLLING_WORK_ORDER_SUPERSEDED, binding_id): existing,
+                })
             for staging in staging_directories:
                 if staging.parent == pending_root and staging.is_dir():
                     shutil.rmtree(staging)
@@ -2058,6 +2086,8 @@ class PollingWorkOrderService:
         relay.pop("management_token", None)
         relay.pop("link_credentials", None)
         result["relay"] = relay
+        if group.get("state") in {"cancelled", "stopped", "binding_pending"}:
+            return {**result, "operator_link": "", "reviewer_link": ""}
         if str(relay.get("mode") or "") in {"public_service", "public_relay"}:
             if str(relay.get("registration_state") or "") == "registered":
                 for key in ('operator_link','reviewer_link'):
@@ -2068,12 +2098,10 @@ class PollingWorkOrderService:
             return result
         base = str(public_base_url or "").rstrip("/")
         if base:
-            result["operator_link"] = (
-                f"{base}/polling-work-order?token={quote(self.role_token(str(group.get('target_record_id') or ''), 'operator'), safe='')}"
-            )
-            result["reviewer_link"] = (
-                f"{base}/polling-work-order?token={quote(self.role_token(str(group.get('target_record_id') or ''), 'reviewer'), safe='')}"
-            )
+            target_id, binding_id = str(group.get("target_record_id") or ""), str(group.get("binding_id") or "")
+            for role in ("operator", "reviewer"):
+                token = self.role_token(target_id, role, binding_id=binding_id)
+                result[f"{role}_link"] = f"{base}/polling-work-order?token={quote(token, safe='')}"
         return result
 
     @staticmethod
@@ -2128,7 +2156,7 @@ class PollingWorkOrderService:
 
     def _step_has_local_photo(self, group: dict, step: dict) -> bool:
         photo_root = (
-            self._group_directory(str(group.get("target_record_id") or ""))
+            self._group_storage_directory(group)
             / "photos"
         ).resolve()
         return any(
@@ -2571,7 +2599,7 @@ class PollingWorkOrderService:
             if not self._step_done(previous):
                 raise PortalConflictError("上一步尚未完成，无需回退。")
             photo_root = (
-                self._group_directory(str(group.get("target_record_id") or ""))
+                self._group_storage_directory(group)
                 / "photos"
             ).resolve()
             discarded_paths: list[Path] = []
@@ -2691,10 +2719,8 @@ class PollingWorkOrderService:
             )
             if total_photo_bytes + len(content) > POLLING_WORK_ORDER_MAX_PHOTO_BYTES:
                 raise PortalError("整个工单组的照片和附件总大小不能超过 200MB。")
-            directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
-            group_directory = self._group_directory(
-                str(group.get("target_record_id") or "")
-            )
+            group_directory = self._group_storage_directory(group)
+            directory = (group_directory / "photos").resolve()
             if not directory.is_relative_to(group_directory):
                 raise PortalError("操作照片路径无效。")
             directory.mkdir(parents=True, exist_ok=True)
@@ -2757,7 +2783,7 @@ class PollingWorkOrderService:
         )
         if not photo:
             raise PortalNotFoundError("操作照片不存在。")
-        directory = (self._group_directory(str(group.get("target_record_id") or "")) / "photos").resolve()
+        directory = (self._group_storage_directory(group) / "photos").resolve()
         path = Path(str(photo.get("path") or "")).resolve()
         if not path.is_file() or not path.is_relative_to(directory):
             raise PortalNotFoundError("操作照片文件不存在。")
@@ -2788,7 +2814,7 @@ class PollingWorkOrderService:
                 logo_bytes = archive.read("xl/media/image1.png")
         except Exception as exc:
             raise PortalError("工单模板中的Logo无法读取。") from exc
-        directory = self._group_directory(target_record_id)
+        directory = self._group_storage_directory(group)
         directory.mkdir(parents=True, exist_ok=True)
         photo_root = (directory / "photos").resolve()
         steps = [item for item in group.get("steps") or [] if isinstance(item, dict)]
@@ -3034,6 +3060,53 @@ class PollingWorkOrderService:
             and str((document.get("payload") or {}).get("state") or "") == "upload_pending"
         ]
 
+    def pending_bindings(self) -> list[dict]:
+        return [row["payload"] for row in self.state_store.list_documents(POLLING_WORK_ORDER_NAMESPACE)
+                if isinstance(row.get("payload"), dict) and row["payload"].get("state") == "binding_pending"]
+
+    def finish_binding(self, target_record_id: str, binding_id: str, error: str = "") -> None:
+        with self._lock:
+            group = self.get_group(target_record_id)
+            if group.get("binding_id") != binding_id or group.get("state") != "binding_pending":
+                return
+            if not error:
+                group["state"] = "active"
+                group.pop("binding_cleanup_tokens", None)
+                group["version"] += 1
+            group.update(last_error=error, updated_at=self._now_text())
+            self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
+
+    def restore_deleted_group(self, original_id: str, target_id: str, *, work_type: str, undo_id: str) -> None:
+        if not original_id or not target_id or not undo_id:
+            return
+        with self._lock:
+            try:
+                group = self.get_group(original_id)
+            except PortalNotFoundError:
+                return
+            if (group.get("work_type", "polling") != work_type or group.get("state") != "cancelled"
+                    or group.get("cancel_reason") not in {"target_deleted", "target_not_found"}):
+                return
+            existing = self.state_store.get_document(POLLING_WORK_ORDER_NAMESPACE, target_id) if original_id != target_id else None
+            if existing:
+                if existing.get("binding_id") == undo_id:
+                    return
+                raise PortalConflictError("恢复后的通告已关联其他工单，请核对后继续回退。")
+            phase = group.get("state_before_cancel")
+            relay = group.get("relay") or {}
+            group.update(
+                group_id=target_id, target_record_id=target_id, binding_id=undo_id, notifications={},
+                storage_key=group.get("storage_key") or original_id,
+                state=phase if phase in {"active", "upload_pending", "completed", "binding_pending"} else "active",
+                version=int(group.get("version") or 0) + 1, updated_at=self._now_text(), last_error="",
+                relay={key: relay[key] for key in ("mode", "relay_url", "fallback_reason") if key in relay},
+                token_hashes={role: hashlib.sha256(self.role_token(target_id, role, binding_id=undo_id).encode()).hexdigest()
+                              for role in ("operator", "reviewer")},
+            )
+            group.pop("cancel_reason", None)
+            group.pop("state_before_cancel", None)
+            self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_id, group)
+
     def open_groups(self) -> list[dict]:
         return [
             copy.deepcopy(document.get("payload") or {})
@@ -3054,7 +3127,7 @@ class PollingWorkOrderService:
     def mark_public_artifact_ready(self, target_record_id: str) -> dict:
         with self._lock:
             group = self.get_group(target_record_id)
-            if str(group.get("state") or "") not in {"completed", "cancelled", "stopped"}:
+            if str(group.get("state") or "") not in {"completed", "cancelled", "stopped", "binding_pending"}:
                 group["state"] = "upload_pending"
                 group["last_error"] = ""
                 group["updated_at"] = self._now_text()
@@ -3078,7 +3151,7 @@ class PollingWorkOrderService:
         safe_name = _safe_file_name(name)
         if not safe_name.lower().endswith(".xlsx"):
             safe_name += ".xlsx"
-        directory = self._group_directory(target_record_id)
+        directory = self._group_storage_directory(self.get_group(target_record_id))
         directory.mkdir(parents=True, exist_ok=True)
         path = (directory / safe_name).resolve()
         if not path.is_relative_to(directory):
@@ -3204,7 +3277,7 @@ class PollingWorkOrderService:
                     or group.get('state') != 'cancelled' or group.get('cancel_reason') != 'target_terminal'):
                 return
             state = group.get('state_before_cancel')
-            if state not in {'active', 'upload_pending', 'completed'}:
+            if state not in {'active', 'upload_pending', 'completed', 'binding_pending'}:
                 # Older cancellations did not retain state; attachments alone cannot prove execution.
                 steps = group.get('steps') or []
                 finished = bool(steps) and group.get('current_index') == len(steps) and all(
@@ -3212,6 +3285,13 @@ class PollingWorkOrderService:
                 state = ('completed' if group.get('uploaded_file_tokens') and group.get('upload_completed_at')
                          else 'upload_pending') if finished else 'active'
             group.update(state=state, updated_at=self._now_text(), version=int(group.get('version') or 0) + 1)
+            relay = group.get("relay") or {}
+            if relay.get("mode") in {"public_service", "public_relay"}:
+                binding = "restore-" + uuid.uuid4().hex
+                group.update(binding_id=binding, notifications={},
+                             relay={key: relay[key] for key in ("mode", "relay_url", "fallback_reason") if key in relay},
+                             token_hashes={role: hashlib.sha256(self.role_token(target_record_id, role, binding_id=binding).encode()).hexdigest()
+                                           for role in ("operator", "reviewer")})
             group.pop('cancel_reason', None)
             group.pop('state_before_cancel', None)
             self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)

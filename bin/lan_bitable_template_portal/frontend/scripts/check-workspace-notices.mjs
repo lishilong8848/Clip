@@ -13,6 +13,7 @@ import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repo = path.resolve(root, '../../..');
 const output = path.join(repo, 'output/playwright/workspace-notices');
+const rebindOnly=process.argv.includes('--rebind');
 await mkdir(output, { recursive: true });
 const generated = spawnSync(path.join(repo, 'bin/.venv/Scripts/python.exe'), ['-c', `
 import json,sys
@@ -30,6 +31,9 @@ try:
             'work_type':kind,'scope':'A','building_codes':['A'],'status':'开始','site_photo_count':1} for i in range(6)]
         rows[0]['title']='EA118机房A楼制冷单元及二次泵控制系统年度'+label+'（第三阶段设备状态核验与恢复）'
         ongoing[0]['title']='EA118机房A楼配电系统与电池组'+label+'（多设备联合处理及运行状态核验）'
+        if ${rebindOnly?'True':'False'} and kind=='maintenance':
+            ongoing[0].update(polling_work_order_group_id=ongoing[0]['target_record_id'],
+                              polling_work_order_operator_link='https://fixture.invalid/old-link')
         args=dict(payload={'records':rows,'ongoing':ongoing},session={'role':'building','can_delete_business':False,'allowed_modules':list(VALID_STARTS),'user':{'name':'隔离测试'}},scope='A',work_type=kind,month='10月',scope_options=[{'value':'A','label':'A楼'}])
         html=render_workbench_lite(**args)
         detail=extract_workbench_lite_fragments(render_workbench_lite(**args,active_item_id=ongoing[0]['active_item_id']))['detail']
@@ -48,8 +52,9 @@ const errors = [], writes = [], oldPages = [], detailRequests = [], entry = '/as
 const pixel = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl6oDQAAAAASUVORK5CYII=','base64');
 const layouts=layoutApiFixture();
 let failLogout = true;
+const rebindRequests=[];
 try {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+  const context = await browser.newContext({ viewport: rebindOnly?{width:402,height:874}:{width:1440,height:1000} });
   await context.route('**/*', async route => {
     const req = route.request(), url = new URL(req.url());
     if (url.origin !== origin) return route.abort();
@@ -66,6 +71,13 @@ try {
     if (url.pathname === '/api/workbench-events'||url.pathname === '/api/workbench-events/options') return ok({user_id:'ou_notice_fixture',scopes:['A'],levels:['I3'],sources:['巡检发现'],specialties:['电气'],can_delete:false,defaults:{robot_ids:[],revision:0},robots:[],items:[]});
     if (url.pathname === '/api/workbench/dingtalk-options') return ok({robots:[{id:'fixture-robot',name:'隔离测试机器人',types:[],scopes:[]}],selected_robot_ids:[]});
     if (url.pathname === '/api/workbench') return ok(data.payload);
+    if(rebindOnly&&url.pathname==='/api/workbench/polling-delay-status')return ok({state:'active',sop_name:'旧模板'});
+    if(rebindOnly&&url.pathname==='/api/polling-sops')return ok({items:[{sop_id:'sop-new',name:'隔离新模板',version:2,scope:'A',steps:[]}]});
+    if(rebindOnly&&url.pathname==='/api/signatures/people')return ok({people:[{record_id:'opA',name:'隔离操作人'},{record_id:'reviewA',name:'隔离审核人'}]});
+    if(rebindOnly&&url.pathname==='/api/polling-work-orders/rec-maintenance-0/rebind'){
+      rebindRequests.push(req.postDataJSON());
+      return rebindRequests.length===1?route.fulfill({status:503,json:{ok:false,error:'结果待核验'}}):ok({state:'binding_pending',sop_name:'隔离新模板'});
+    }
     if (url.pathname === '/api/workbench/lite-fragment') return ok({ canonical_url: '/workbench-lite?' + url.searchParams, fragments: data.fragments });
     if (url.pathname === '/api/workbench/lite-detail') {
       detailRequests.push(Object.fromEntries(url.searchParams));
@@ -100,6 +112,33 @@ try {
   };
   page.on('pageerror', error => errors.push(error.message));
   await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=maintenance');
+  if(rebindOnly){
+    await page.locator('.desk-switch').getByRole('button',{name:/进行中/}).click();
+    await ongoingLane.locator('.desk-record').first().click();
+    const replace=editor.getByRole('button',{name:'更换工单',exact:true});
+    await replace.click();
+    const modal=page.locator('.v2-notice-confirm').filter({hasText:'更换关联工单'});
+    await modal.locator('.lhs-sop .n-select').click();
+    await page.locator('.n-base-select-option').getByText('隔离新模板',{exact:true}).click();
+    for(const [index,label] of ['隔离操作人','隔离审核人'].entries()){
+      await modal.locator('.lhs-people-cols .n-select').nth(index).click();
+      await page.locator('.n-base-select-option:visible').getByText(label,{exact:true}).last().click();
+    }
+    const submit=modal.getByRole('button',{name:'确认更换并通知',exact:true});
+    assert(!(await submit.isDisabled()));
+    await page.screenshot({path:path.join(output,'rebind-mobile.png'),animations:'disabled'});
+    await submit.click();
+    await modal.getByText('结果待核验',{exact:true}).waitFor();
+    await submit.click();
+    await editor.getByText('新工单待同步，旧链接已作废',{exact:true}).waitFor();
+    assert.equal(await editor.locator('[href*="old-link"]').count(),0);
+    assert.equal(rebindRequests.length,2);
+    assert.deepEqual(rebindRequests[0],rebindRequests[1]);
+    assert.equal(rebindRequests[0].polling_sop_id,'sop-new');
+    assert.deepEqual(errors,[]);
+    console.log('PASS: replace a sent notice work order from its existing editor, retry the same request and hide the old link.');
+    await browser.close();await server.close();process.exit(0);
+  }
   await page.addScriptTag({content:helper.outputFiles[0].text});
   const contracts=await page.evaluate(fixtures=>{
     const result=[];

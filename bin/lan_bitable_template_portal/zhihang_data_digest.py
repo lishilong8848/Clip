@@ -1,12 +1,10 @@
-"""Read-only preparation and durable delivery for the two legacy Zhihang summaries."""
+"""Read-only preparation and durable delivery for the daily Zhihang summary."""
 from __future__ import annotations
 
-import calendar
 import logging
 import re
 import threading
 import uuid
-from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time, timedelta
 
@@ -15,27 +13,17 @@ from . import zhihang_data_sources as sources
 from .zhihang_data_sync import NS, TASKS, SyncError, describe_error
 
 DAILY = "daily"
-MONTH_END = "month_end"
 DIGESTS = {
     DAILY: ("智航数据同步", "DAILY_COMBINED_NOTIFY", ("inspection", "change", "event")),
-    MONTH_END: ("风险排查与演练推进同步", "MONTH_END_PROGRESS_NOTIFY", ("risk", "drill")),
 }
-BUILDINGS = tuple(f"{letter}楼" for letter in "ABCDE")
 RETRY_DELAY = timedelta(minutes=10)
 DELIVERY_WINDOW = timedelta(hours=1)
 TERMINAL = {"sent", "delivery_unknown", "cancelled"}
 log = logging.getLogger(__name__)
 
 
-def _times(kind):
-    if kind == DAILY:
-        return cards._times("DAILY_COMBINED_NOTIFY_TIME", ("08:00",))
-    return cards._times("MONTH_END_PROGRESS_NOTIFY_SCHEDULES", ("09:00", "15:00"))
-
-
-def _start_day():
-    value = cards._setting("MONTH_END_PROGRESS_NOTIFY_START_DAY")
-    return int(value) if re.fullmatch(r"(?:[1-9]|1[0-9]|2[0-8])", value) else 25
+def _times():
+    return cards._times("DAILY_COMBINED_NOTIFY_TIME", ("08:00",))
 
 
 def _prepare_time():
@@ -44,10 +32,6 @@ def _prepare_time():
 
 def _at(now, label):
     return datetime.combine(now.date(), time.fromisoformat(label), cards.BEIJING)
-
-
-def _last_day(now):
-    return calendar.monthrange(now.year, now.month)[1]
 
 
 def _target(kind):
@@ -97,69 +81,17 @@ def _daily_section(kind, rows, reference):
             "warning": bool(groups["已恢复待解决"] or groups["非真实"])}
 
 
-def _month_section(kind, rows, reference):
-    total, complete = Counter(), Counter()
-    current_count = 0
-    for row in rows:
-        if kind == "drill":
-            year = sources._text(row.get("演练年份"))
-            month = sources._drill_month(sources._text(row.get("演练月份")))
-            if not year.isdecimal() or not month:
-                date = next((value for key in ("计划演练时间", "实际演练时间", "创建时间")
-                             if (value := sources._date(row.get(key)))), None)
-                if not date:
-                    raise SyncError("演练记录的月份无法核验。")
-                year, month = str(date.year), date.month
-            if (int(year), month) != (reference.year, reference.month):
-                continue
-            current_count += 1
-            status = sources._text(row.get("演练状态"))
-            if status == "终止":
-                continue
-            areas = {part.strip() for part in sources._text(row.get("实施区域")).split("、")}
-            done = status == "完成"
-        else:
-            current_count += 1
-            areas = {sources._text(row.get("楼栋"))}
-            done = all(sources._text(row.get(key)).lower() not in {"", "-", "null", "undefined"}
-                       for key in ("排查时间", "审核时间"))
-        if not areas or not areas.issubset(BUILDINGS):
-            raise SyncError(f"{TASKS[kind][0]}含楼栋归属待核对的记录。")
-        total.update(areas)
-        if done:
-            complete.update(areas)
-    if not current_count or (kind == "risk" and set(total) != set(BUILDINGS)):
-        raise SyncError(f"{TASKS[kind][0]}当月数据不完整。")
-    return {"progress": {building: [complete[building], total[building]] for building in BUILDINGS},
-            "complete": total == complete}
-
-
-def _build_card(kind, members, data, slot, reference):
+def _build_card(kind, members, data, reference):
     title = DIGESTS[kind][0]
-    if kind == DAILY:
-        important = any(item.get("important") for item in data.values())
-        warning = any(item.get("warning") or item.get("error") for item in data.values())
-        sections = []
-        for member in members:
-            item = data[member]
-            lines = item.get("lines") or [f"数据待核对 · {cards._plain(item.get('error'))}"]
-            sections.append((TASKS[member][0], "\n".join(filter(None, [*lines, f"[查看原表]({cards._table_url(member)})"]))))
-        return cards._report_card(title, "red" if important else "yellow" if warning else "green",
-                                  [f"**报告日期：{reference:%Y-%m-%d}**"], sections)
-    deadline = slot.replace(day=_last_day(slot))
-    left = (deadline.date() - slot.date()).days
+    important = any(item.get("important") for item in data.values())
+    warning = any(item.get("warning") or item.get("error") for item in data.values())
     sections = []
-    for building in BUILDINGS:
-        lines = []
-        for member in members:
-            done, total = data[member]["progress"][building]
-            text = f"完成 {done}/{total}｜完成率 {done / total:.0%}｜未完成 {total - done}" if total else "0/0（无任务）"
-            lines.append(f"{TASKS[member][0]}：{text}")
-        sections.append((building, "\n".join(lines)))
-    links = " ｜ ".join(f"[{TASKS[member][0]}原表]({cards._table_url(member)})" for member in members)
-    return cards._report_card(title, "green" if all(item["complete"] for item in data.values()) else "yellow",
-                              [f"**截止日期：{deadline:%Y-%m-%d}**", f"距截止还有 {left} 天" if left else "今日截止", links],
-                              sections)
+    for member in members:
+        item = data[member]
+        lines = item.get("lines") or [f"数据待核对 · {cards._plain(item.get('error'))}"]
+        sections.append((TASKS[member][0], "\n".join(filter(None, [*lines, f"[查看原表]({cards._table_url(member)})"]))))
+    return cards._report_card(title, "red" if important else "yellow" if warning else "green",
+                              [f"**报告日期：{reference:%Y-%m-%d}**"], sections)
 
 
 def _pull(kind, reference):
@@ -215,9 +147,9 @@ class ZhihangDigests:
             if not cards._enabled(key + "_ENABLED"):
                 continue
             latest = self.store.get_document(NS, "digest-latest:" + kind) or {}
-            result.append({"kind": kind, "label": title, "times": _times(kind),
-                           "prepare_at": _prepare_time() if kind == DAILY else "",
-                           "start_day": _start_day() if kind == MONTH_END else None,
+            result.append({"kind": kind, "label": title, "times": _times(),
+                           "prepare_at": _prepare_time(),
+                           "start_day": None,
                            "modules": list(names), "enabled_modules": self.members(kind), "target": _target(kind),
                            "latest": {key: latest[key] for key in ("slot", "status", "message") if key in latest}})
         return result
@@ -226,10 +158,6 @@ class ZhihangDigests:
         documents = {key: state, "digest-latest:" + state["kind"]: {
             label: state.get(label, "") for label in ("slot", "status", "message")
         }}
-        if state.get("complete"):
-            documents["digest-complete:month_end"] = {
-                "month": state["slot"][:7], "slot": state["slot"], "modules": state["members"], "status": state["status"],
-            }
         self.store.put_documents(NS, documents)
 
     def run(self):
@@ -243,28 +171,12 @@ class ZhihangDigests:
                 log.exception("智航汇总任务异常 kind=%s", kind)
 
     def _run(self, kind, members, now):
-        times = _times(kind)
+        times = _times()
         slot = _at(now, times[0])
-        if kind == DAILY:
-            if now < _at(now, _prepare_time()) and now < slot:
-                return
-            reference = _at(slot, "00:00") - timedelta(microseconds=1)
-            identity = reference.date().isoformat()
-        else:
-            if now.day < _start_day():
-                return
-            if now.day == _last_day(now) and len(times) > 1 and now >= _at(now, times[1]):
-                slot = _at(now, times[1])
-            if not slot <= now < slot + timedelta(hours=6):
-                return
-            reference = now
-            identity = slot.isoformat()
-            completed = self.store.get_document(NS, "digest-complete:month_end") or {}
-            if (completed.get("month") == slot.strftime("%Y-%m")
-                    and set(members).issubset(completed.get("modules", []))
-                    and (completed.get("status") in {"sent", "delivery_unknown"}
-                         or completed.get("status") == "sending" and completed.get("slot") != slot.isoformat())):
-                return
+        if now < _at(now, _prepare_time()) and now < slot:
+            return
+        reference = _at(slot, "00:00") - timedelta(microseconds=1)
+        identity = reference.date().isoformat()
         key = f"digest:{kind}:{identity}"
         state = self.store.get_document(NS, key) or {"kind": kind, "slot": slot.isoformat(), "data": {}}
         if state.get("status") in TERMINAL:
@@ -280,26 +192,24 @@ class ZhihangDigests:
             due = now >= slot
             if not due and all(state["data"].get(member) and not state["data"][member].get("error") for member in members):
                 return
-            if kind == DAILY and not due and state.get("prepare_attempts", 0) >= 3:
+            if not due and state.get("prepare_attempts", 0) >= 3:
                 return
-            if kind == MONTH_END and state.get("prepare_attempts", 0) >= 6:
-                return
-            self._prepare(kind, members, reference, state)
+            self._prepare(members, reference, state)
             if self.closing.is_set():
                 return
             data = {member: state["data"][member] for member in members}
             errors = [f"{TASKS[member][0]} · {data[member]['error']}" for member in members if data[member].get("error")]
             state["prepare_attempts"] = state.get("prepare_attempts", 0) + 1
-            if not due or (kind == MONTH_END and errors):
+            if not due:
                 state.update(status="failed" if errors else "prepared", message="；".join(errors) or "已准备，等候发送。",
                              next_attempt=(now + RETRY_DELAY).isoformat())
                 self._save(key, state)
                 return
-            state.update(card=_build_card(kind, members, data, slot, reference), target=_target(kind), members=members,
-                         complete=kind == MONTH_END and all(item["complete"] for item in data.values()), data_errors=errors)
+            state.update(card=_build_card(kind, members, data, reference), target=_target(kind), members=members,
+                         data_errors=errors)
         self._send(key, state, members, slot, identity)
 
-    def _prepare(self, kind, members, reference, state):
+    def _prepare(self, members, reference, state):
         for member in members:
             if self.closing.is_set():
                 return
@@ -309,8 +219,7 @@ class ZhihangDigests:
                 rows = self.pull(member, reference)
                 if not rows and member != "event":
                     raise SyncError("源数据为空，无法核对。")
-                formatter = _daily_section if kind == DAILY else _month_section
-                state["data"][member] = formatter(member, rows.values(), reference)
+                state["data"][member] = _daily_section(member, rows.values(), reference)
             except Exception as exc:
                 state["data"][member] = {"error": describe_error(exc)}
 
@@ -319,11 +228,9 @@ class ZhihangDigests:
         now = self.clock()
         if self.closing.is_set() or self.members(kind) != members or now.date() != slot.date():
             return
-        if kind == MONTH_END and now >= slot + timedelta(hours=6):
-            return
         uncertain = sources._date(state.get("uncertain_at"))
         attempts = state.get("attempts", 0)
-        if uncertain and (kind == MONTH_END or not timedelta(0) <= now - uncertain < DELIVERY_WINDOW or attempts >= 6):
+        if uncertain and (not timedelta(0) <= now - uncertain < DELIVERY_WINDOW or attempts >= 6):
             state.update(status="delivery_unknown", message="飞书投递结果待人工核对。")
             self._save(key, state)
             return
@@ -355,8 +262,6 @@ class ZhihangDigests:
             state.update(status="sent", message=message, message_id=result["message_id"], uncertain_at="")
         elif not uncertain and result.get("failure_kind") in {"not_sent", "blocked", "bot_unavailable", "agent_required"}:
             state.update(status="failed", message="飞书未接受卡片，请核对当前应用及目标群。", uncertain_at="")
-        elif kind == MONTH_END:
-            state.update(status="delivery_unknown", message="飞书投递结果待人工核对。")
         else:
             state.update(status="pending", message="飞书投递待确认，稍后核验。")
         self._save(key, state)

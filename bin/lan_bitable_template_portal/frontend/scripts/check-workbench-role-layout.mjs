@@ -127,7 +127,7 @@ try {
       }]:[],staff:[]}},
         roster_dates:['2026-11-18'],unavailable:[],
         handover:{current:{date:'2026-11-18',shift:'白',end:'2026-11-18T17:50:00+08:00',verified:true,staff:denseRoster?['H','A','B','C','D','E','110'].map(building=>({scope:building,people:[{name:building+'人员甲'},{name:building+'人员乙'},{name:building+'人员丙'}]})):[{scope,people:[
-          {name:scope+'楼排班测试',system_position:'值班员'},{name:'刘冉',system_position:'值班长'},{name:'薛小明',position:'运维实习生',duty_kind:'长白'},
+          {name:scope+'楼排班测试',position:'运维值班员',system_position:'值班长'},{name:'刘冉',system_position:'值班长'},{name:'薛小明',position:'运维实习生',duty_kind:'长白'},
         ]}]}}});
     if (url.pathname.startsWith('/api/workspace-layouts/')) return ok({revision:1,value:{version:1,widgets:[
       {kind:'shortcuts',links:['accounts','learning','event','learning','cabinet']},
@@ -199,13 +199,17 @@ try {
     }
     if (url.pathname==='/api/learning/workbench-summary') {
       const scopes=['ALL','CAMPUS'].includes(scope)?(fixtureAccount?.testScopes||['A']):[scope];
-      const summary={已完成:4,待答:2,答题中:1,逾期:0,待核对:0,未到时:0};
-      const date=url.searchParams.get('date');
-      return ok({scopes,summary,from:date,to:date,people:date?[
-        {name:'隔离已作答',scope:'A',shift:'白',answered:8,assigned:15,status:'答题中'},
-        {name:'隔离未作答',scope:'B',shift:'白',answered:0,assigned:15,status:'待答'},
-        {name:'隔离已完成',scope:'B',shift:'夜',answered:15,assigned:15,status:'已完成'},
-      ].filter(person=>scopes.includes(person.scope)):undefined});
+      const from=url.searchParams.get('from'),to=url.searchParams.get('to');
+      const people=[];
+      for (const day of ['2026-11-16','2026-11-17']) {
+        for(let i=0;i<26;i++) people.push({name:'隔离学员'+String(i+1).padStart(2,'0'),date:day,scopes:[i%2?'B':'A'],shift:'白',answered:15,assigned:15,status:'已完成'});
+      }
+      people.push({name:'隔离逾期人员',date:'2026-11-17',scopes:['B'],shift:'夜',answered:3,assigned:15,status:'逾期'});
+      for(let i=0;i<28;i++) people.push({name:'隔离待开始'+i,date:'2026-11-18',scopes:['A'],shift:'夜',answered:0,assigned:15,status:'未到时'});
+      const list=people.filter(r=>scopes.includes(r.scopes[0]) && r.date>=from && r.date<=to);
+      const summary={已完成:0,待答:0,答题中:0,逾期:0,待核对:0,未到时:0};
+      for(const row of list) summary[row.status]++;
+      return ok({scopes,summary,from,to,people:url.searchParams.get('people')==='1'?list:undefined});
     }
     if (url.pathname==='/api/signatures/management/account') return ok({person:{is_self:true,building:'A楼',signature_status:'signed'}});
     if (url.pathname==='/api/auth/permission-requests/admin') return ok({items:[{request_id:'permission',name:'隔离权限申请 '+permissionVersion,status:'pending'}]});
@@ -352,21 +356,35 @@ try {
   const team=page.getByRole('button',{name:'画像学练情况汇总',exact:true});
   await team.click();
   const detail=page.locator('.learning-detail');
-  await detail.getByText('隔离已作答',{exact:true}).waitFor();
-  assert.equal(await detail.locator('tbody tr').count(),3);
-  await detail.getByRole('combobox',{name:'学练明细状态'}).selectOption('unanswered');
+  await detail.getByRole('button',{name:'全部应答 53',exact:true}).waitFor();
+  assert.match(await detail.locator('tbody tr').first().innerText(),/隔离逾期人员[\s\S]*3\s*\/\s*15[\s\S]*逾期/);
+  await detail.getByRole('button',{name:'未完成 1',exact:true}).click();
   assert.equal(await detail.locator('tbody tr').count(),1);
-  assert.match(await detail.locator('tbody tr').innerText(),/隔离未作答[\s\S]*0\s*\/\s*15[\s\S]*未作答/);
-  await detail.getByRole('combobox',{name:'学练明细状态'}).selectOption('all');
+  await detail.getByRole('checkbox',{name:'只看未作答'}).check();
+  await detail.getByText('暂无符合条件的未完成人员').waitFor();
+  await detail.getByRole('checkbox',{name:'只看未作答'}).uncheck();
+  await detail.getByRole('button',{name:'已完成 52',exact:true}).click();
+  assert.equal(await detail.locator('tbody tr').count(),15);
+  assert.match(await detail.locator('tbody tr').first().innerText(),/15\s*\/\s*15/);
+  await detail.getByRole('button',{name:'下一页人员'}).click();
+  await detail.getByText('2 / 4',{exact:true}).waitFor();
+  await detail.getByRole('combobox',{name:'学练明细日期'}).selectOption('2026-11-18');
+  await detail.getByRole('button',{name:'未到时 28',exact:true}).click();
+  assert.match(await detail.locator('tbody tr').first().innerText(),/0\s*\/\s*15/);
+  await detail.getByRole('combobox',{name:'学练明细日期'}).selectOption('');
   await detail.getByRole('combobox',{name:'学练明细楼栋'}).selectOption('B');
-  assert.equal(await detail.locator('tbody tr').count(),2);
-  await page.screenshot({path:path.join(output,'learning-detail-mobile.png'),animations:'disabled'});
+  await detail.getByRole('button',{name:'全部应答 27',exact:true}).click();
+  for(const width of [1440,390]){
+    await page.setViewportSize({width,height:width===390?844:900});
+    assert.equal(await detail.evaluate(el=>el.scrollWidth>el.clientWidth+1),false);
+    await page.screenshot({path:path.join(output,'learning-detail-'+width+'.png'),animations:'disabled'});
+  }
   await page.keyboard.press('Escape');
   await detail.waitFor({state:'hidden'});
   await set(actor('learning-supervisor','supervisor',['learning'],{level:'L3'}));
   await team.click();
-  await detail.getByText('隔离已作答',{exact:true}).waitFor();
-  assert.equal(await detail.locator('tbody tr').count(),1);
+  await detail.getByRole('button',{name:'已完成 26',exact:true}).waitFor();
+  assert.equal(await detail.getByText('隔离逾期人员').count(),0);
   await page.keyboard.press('Escape');
   await detail.waitFor({state:'hidden'});
   checks.push('learning details show all authorized buildings by default and filter to unanswered people, with no old account data');
@@ -709,7 +727,7 @@ try {
   await guard.getByRole('button',{name:'刷新',exact:true}).click();
   await guard.getByText('显示上次识别结果',{exact:true}).waitFor();
   await guard.getByText('戒备等级 一级',{exact:true}).waitFor();
-  checks.push('roster titles follow system positions, and weather guard retains its verified result during a transient outage');
+  checks.push('roster titles use the explicit duty position before system position, and weather guard retains its verified result during a transient outage');
 
   await set(actor('calendar-recovery','operator',['event']));
   await tile('events').waitFor();

@@ -1,6 +1,6 @@
 <template>
   <div class="lhs" :class="{ disabled }" :aria-busy="!!field.directory_loading">
-    <label class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>
+    <label v-if="!requireWorkOrder" class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>
     <p v-if="!local.exempt && !validScope" class="lhs-error" role="alert">请在上方通告中仅选择一栋楼</p>
     <template v-if="!local.exempt && validScope">
       <p v-if="field.directory_loading" class="lhs-loading" role="status"><Loader2 :size="15" class="lhs-spin" />正在读取工单和人员…</p>
@@ -88,7 +88,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { ChevronDown, ChevronUp, Clock3, Info, Loader2, RefreshCw, Search } from "lucide-vue-next";
 import VnetSelect from "./VnetSelect.vue";
 
-const props = defineProps<{ field: Record<string, any>; modelValue?: any; disabled?: boolean; id: string }>();
+const props = defineProps<{ field: Record<string, any>; modelValue?: any; disabled?: boolean; id: string; requireWorkOrder?: boolean }>();
 const emit = defineEmits<{ (e: "update:modelValue", value: any): void; (e: "load-options", payload: { scope: string; q?: string }): void }>();
 
 const POLL_GROUPS: string[][] = [["1#", "2#", "3#"], ["4#", "5#", "6#"]];

@@ -478,17 +478,15 @@ def _report_dates(query, today):
 
 
 def workbench_summary(service, scopes, query):
-    """Summarize authorized buildings and optionally return one day's progress by person."""
+    """Count distinct person-days and optionally return their progress for the same period."""
     from .learning_onboarding import directory_for_learning
 
     current = core.now()
     dates = _report_dates(query, current.date().isoformat())
     include_detail = query.get('detail') == '1'
     include_people = query.get('people') == '1'
-    if include_people and len(dates) != 1:
-        raise core.LearningError('逐人明细请按单日查询。')
     data, directory = _data(service), directory_for_learning(service)
-    filters = [''] if not (include_detail or include_people) and set(scopes) == set(core.SCOPES) else scopes
+    filters = [''] if not include_detail and set(scopes) == set(core.SCOPES) else scopes
     priority = {state: rank for rank, state in enumerate(
         ('未安排', '已完成', '未到时', '待答', '答题中', '逾期', '待核对'))}
     counts = Counter()
@@ -496,22 +494,32 @@ def workbench_summary(service, scopes, query):
     progress = []
     for date in dates:
         people = {}
+        rows_by_person = {}
         for scope in filters:
             rows = project(service, date, scope=scope, current=current, data=data, entry_directory=directory)
             if include_detail:
                 daily = Counter(row['status'] for row in rows)
                 detail[scope].append({'date': date, 'summary': {state: daily[state] for state in STATES}})
-            if include_people:
-                for row in rows:
-                    if not row['tasks'] and row['status'] == '未安排':
-                        continue
-                    progress.append({'name': row['person']['name'], 'scope': scope,
-                                     'shift': '、'.join(sorted({task['shift'] for task in row['tasks'] if task['shift']})),
-                                     'status': row['status'], 'answered': row['answered'], 'assigned': row['assigned']})
             for row in rows:
                 person, status = row['person_id'], row['status']
                 if priority[status] > priority.get(people.get(person), -1):
                     people[person] = status
+                if include_people and status != '未安排':
+                    item = rows_by_person.setdefault(person, {
+                        'date': date, 'name': row['person']['name'], 'buildings': set(), 'shifts': set(),
+                        'answered': 0, 'assigned': 0,
+                    })
+                    tasks = row['tasks']
+                    buildings = {scope} if scope else {task['scope'] for task in tasks if task.get('scope')}
+                    item['buildings'].update(set(scopes).intersection(buildings or row.get('scopes', [])))
+                    item['shifts'].update(task['shift'] for task in tasks if task.get('shift'))
+                    item['answered'] += row['answered']
+                    item['assigned'] += row['assigned']
+        for person, item in rows_by_person.items():
+            buildings = sorted(item.pop('buildings'))
+            shift = '、'.join(sorted(item.pop('shifts')))
+            progress.append({**item, 'scope': buildings[0] if buildings else '', 'scopes': buildings,
+                             'shift': shift, 'status': people[person]})
         counts.update(people.values())
     return {'summary': {state: counts[state] for state in STATES}, 'scopes': list(scopes),
             'from': dates[0], 'to': dates[-1], **({'by_scope': dict(detail)} if include_detail else {}),

@@ -20,6 +20,7 @@ HISTORY_PAGE_SIZE = 10
 UPLOAD_BATCH_SIZE = 100
 ACTIVE_STATUSES = {"queued", "running", "pending_verify", "retry_wait"}
 BASE = "IrIibPkUOa6udGsMhu2cbOqhnWg"
+PANORAMA_PROGRESS_TASKS = frozenset({"risk", "drill"})
 TASKS = {
     "risk": ("风险排查", ["08:30"], ("tblNddknaoXp2ASG", "vewG4XuaPu")),
     "change": ("变更", ["08:07", "13:08", "15:38"], ("tblqMJvYW5dxFFfU", "vew0UNl8ZR")),
@@ -107,14 +108,29 @@ def coerce(fields, schema):
     return result
 
 
+def _plain_field_value(value):
+    # Feishu lists plain text as a string but batch_get can return ordered text runs.
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list) and value and all(
+        isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        and not part.keys() - {"type", "text"} for part in value
+    ):
+        return "".join(part["text"] for part in value).strip()
+    return value
+
+
 def matches(expected, actual):
     for name, value in expected.items():
-        other = actual.get(name)
+        value = _plain_field_value(value)
+        other = _plain_field_value(actual.get(name))
         if value == other or value is None and other in ("", [], {}):
             continue
         if isinstance(value, list):
-            if sorted(map(str, value)) == sorted(map(str, other or [])):
+            if isinstance(other, list) and all(isinstance(v, str) for v in [*value, *other]) and sorted(value) == sorted(other):
                 continue
+            return False
+        if isinstance(other, list) and any(isinstance(part, dict) for part in other):
             return False
         if isinstance(value, dict) or isinstance(value, bool):
             return False
@@ -192,8 +208,11 @@ class ZhihangSync:
     def settings(self, kind):
         if kind not in self.tasks:
             raise SyncError("未知智航数据类型。")
-        return {"enabled": False, "confirmed": False, "notify": False, "times": self.tasks[kind][1],
-                **self.read("settings:" + kind)}
+        settings = {"enabled": False, "confirmed": False, "notify": False, "times": self.tasks[kind][1],
+                    **self.read("settings:" + kind)}
+        if kind in PANORAMA_PROGRESS_TASKS:
+            settings["notify"] = False
+        return settings
 
     def configure(self, kind, payload):
         with self.lock:
@@ -210,6 +229,8 @@ class ZhihangSync:
                     if type(payload[key]) is not bool:
                         raise SyncError("开关必须为布尔值。")
                     value[key] = payload[key]
+            if kind in PANORAMA_PROGRESS_TASKS:
+                value["notify"] = False
             if value["enabled"] and not value["confirmed"]:
                 raise SyncError("请确认旧工具已停用后再启用灯塔定时同步。")
             if any(value[key] != before[key] for key in ("enabled", "confirmed", "times")):
@@ -252,6 +273,7 @@ class ZhihangSync:
             tasks.append({"kind": kind, "label": label, **cfg,
                           "pull_scope": PULL_SCOPE.get(kind, ""),
                           "targets": [{"label": f"智航{label}原表", "url": f"https://vnet.feishu.cn/base/{BASE}?table={table}&view={view}"}],
+                          "notification_owner": "panorama" if kind in PANORAMA_PROGRESS_TASKS else "lighthouse",
                           "notification_targets": notification_targets(kind),
                           "latest": self.public(runs[0]) if runs else None,
                           "last_preview": next((self.public(r) for r in runs if r["mode"] == "preview" and r["status"] == "success"), None),

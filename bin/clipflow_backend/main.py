@@ -6435,6 +6435,9 @@ class FastAPIPortalController:
                 return self._json_ok(request, session, {
                     **PortalRuntime.polling_work_orders().end_delay_status(group),
                     "state": str(group.get("state") or ""),
+                    "sop_name": group.get("sop_name", ""),
+                    "binding_id": group.get("binding_id", ""),
+                    "binding_error": group.get("last_error", "") if group.get("state") == "binding_pending" else "",
                 })
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
@@ -6826,6 +6829,34 @@ class FastAPIPortalController:
                         "roles": safe_roles,
                     },
                 )
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.post("/api/polling-work-orders/{group_id}/rebind")
+        async def polling_work_order_rebind(group_id: str, request: Request):
+            from lan_bitable_template_portal.module_access import allowed_modules
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            if session.get("impersonation") or session.get("source") == "admin_impersonation":
+                return self._portal_error_response(PortalError("代登录期间不能重新绑定工单。"), default_status=403)
+            if not external_real_write_guard().get("real_write_allowed") and not _mock_external_enabled():
+                return self._portal_error_response(PortalError("当前运行模式未开启外部写入。"), default_status=403)
+            try:
+                group = await asyncio.to_thread(PortalRuntime.polling_work_orders().get_group, group_id)
+                self._authorized_scope_or_error(session, str(group.get("scope") or ""))
+                if (group.get("work_type") or "polling") not in allowed_modules(PortalRuntime.auth_manager, session):
+                    raise PortalError("当前账号没有对应通告的办理权限。")
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=403)
+            try:
+                payload = await self._read_json_request(request, max_bytes=16000)
+                if not isinstance(payload, dict):
+                    raise PortalError("工单选择格式不正确。")
+                result = await asyncio.to_thread(PortalRuntime.replace_polling_work_order, group_id, payload,
+                    user=PortalRuntime.auth_manager.public_user(session),
+                    professions=session_engineer_professions(PortalRuntime.auth_manager, session))
+                return self._json_ok(request, session, result)
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
@@ -13558,11 +13589,13 @@ class FastAPIPortalController:
             return
         from lan_bitable_template_portal.planned_notice_deadlines import PlannedNoticeDeadlines
         from lan_bitable_template_portal.server import _send_text_to_open_ids_guarded
+        from upload_event_module.services.robot_webhook import send_interactive_to_chat_id
         reminders = getattr(self, '_plan_deadlines', None)
         if reminders is None:
             reminders = self._plan_deadlines = PlannedNoticeDeadlines(
                 PortalRuntime.service, PortalRuntime.state_store, PortalRuntime.auth_manager,
-                _send_text_to_open_ids_guarded)
+                _send_text_to_open_ids_guarded,
+                send_group=send_interactive_to_chat_id if external_real_write_guard().get("real_write_allowed") else None)
         reminders.tick()
 
     def _run_scheduled_daily_report_recipient_refresh(self) -> None:

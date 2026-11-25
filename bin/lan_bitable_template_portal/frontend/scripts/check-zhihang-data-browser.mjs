@@ -22,7 +22,7 @@ const task = { kind: 'inspection', label: '巡检', times: ['07:00', '11:00'], e
   latest: null, next_at: null };
 const auth = { has_token: false, expired: false };
 const tasks = [['risk', '风险排查'], ['change', '变更'], ['drill', '演练'], ['event', '事件']].map(([kind, label]) => ({
-  kind, label, times: [], enabled: false, confirmed: false, targets: [{ label: label + '原表' }], latest: null,
+  kind, label, notification_owner: ['risk','drill'].includes(kind) ? 'panorama' : 'lighthouse', times: [], enabled: false, confirmed: false, targets: [{ label: label + '原表' }], latest: null,
 })).concat([task]);
 const inspectionCardSetting = '参与日报并发送独立巡检异常提醒';
 const calls = [];
@@ -62,8 +62,6 @@ async function install(context, user) {
           { kind: 'daily', label: '智航数据同步', times: ['08:00'], prepare_at: '00:10',
             modules: ['inspection', 'change', 'event'], enabled_modules: task.notify ? ['inspection'] : [],
             target: { label: '汇总通知群' }, latest: {} },
-          { kind: 'month_end', label: '风险排查与演练推进同步', times: ['09:00', '15:00'], start_day: 25,
-            modules: ['risk', 'drill'], enabled_modules: [], target: { label: '汇总通知群' }, latest: {} },
         ],
         history_pagination: { page, page_size: pageSize, total: history.length } });
     }
@@ -153,6 +151,16 @@ try {
   const detail = page.locator('#zh-task-detail');
   await detail.getByRole('heading', { name: '风险排查', exact: true }).waitFor();
   assert.equal(await picker.getByRole('button').count(), 5);
+  for (const label of ['风险排查','演练']) {
+    await picker.getByRole('button', { name: new RegExp('^' + label) }).click();
+    await detail.getByText('由全景平台「南通每日运维巡视同步」发送', { exact: true }).waitFor();
+    await detail.getByRole('button', { name: '定时设置' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByText('由全景平台「南通每日运维巡视同步」发送', { exact: true }).waitFor();
+    assert.equal(await dialog.getByRole('checkbox', { name: /卡片|通知|汇总/ }).count(), 0);
+    await page.keyboard.press('Escape');
+    await dialog.waitFor({ state: 'hidden' });
+  }
   const inspection = picker.getByRole('button', { name: /^巡检/ });
   await inspection.click();
   await detail.getByRole('heading', { name: '巡检', exact: true }).waitFor();

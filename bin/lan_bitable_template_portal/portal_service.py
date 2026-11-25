@@ -32676,6 +32676,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if target_record_id:
                     restored_daily["target_record_id"] = target_record_id
                     restored_daily["record_id"] = target_record_id
+                    if original_target and restored_daily.get("polling_work_order_group_id") == original_target:
+                        restored_daily["polling_work_order_group_id"] = target_record_id
                 if action_type == "end":
                     restored_daily["status"] = "进行中"
                     restored_daily.pop("ended_at", None)
@@ -32718,6 +32720,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 if target_record_id:
                     item["target_record_id"] = target_record_id
                     item["record_id"] = target_record_id
+                    if original_target and item.get("polling_work_order_group_id") == original_target:
+                        item["polling_work_order_group_id"] = target_record_id
                 if action_type == "end":
                     item["status"] = "进行中"
                     item.pop("ended_at", None)
@@ -32788,6 +32792,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             if resolved_target_record_id:
                 qt_payload["record_id"] = resolved_target_record_id
                 qt_payload["target_record_id"] = resolved_target_record_id
+                if qt_payload.get("polling_work_order_group_id") == original_target and original_target:
+                    qt_payload["polling_work_order_group_id"] = resolved_target_record_id
             if resolved_source_record_id:
                 qt_payload["source_record_id"] = resolved_source_record_id
             if resolved_active_item_id:

@@ -225,7 +225,7 @@ class PollingWorkOrderTests(unittest.TestCase):
                 client.close()
 
     @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={
-        'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
+        'role': 'user', 'scopes': ['A'], 'modules': ['sops', 'maintenance', 'polling', 'adjust']})
     def test_sop_api_streams_attachment_over_old_limit_and_preserves_access_checks(self, _profile):
         controller = FastAPIPortalController(host='127.0.0.1', port=18766)
         client = TestClient(controller._build_app())
@@ -909,7 +909,7 @@ class PollingWorkOrderTests(unittest.TestCase):
             self.assertEqual(service.get_sop(sop["sop_id"]), before)
             self.assertIsNone(service.state_store.get_document("polling_sop", "next_sop_12345"))
 
-    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['A'], 'modules': ['maintenance', 'polling', 'adjust']})
+    @patch.object(PortalRuntime.auth_manager, 'account_profile', return_value={'role': 'user', 'scopes': ['A'], 'modules': ['sops', 'maintenance', 'polling', 'adjust']})
     def test_manual_refresh_requires_login_and_scope_permission(self, _profile):
         controller = FastAPIPortalController(host="127.0.0.1", port=18766)
         client = TestClient(controller._build_app())

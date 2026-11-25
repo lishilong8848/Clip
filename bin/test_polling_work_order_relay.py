@@ -518,6 +518,30 @@ class PollingWorkOrderRelayTests(unittest.TestCase):
             self.assertNotEqual(first.connector_id, second.connector_id)
             self.assertTrue(first.connector_id.startswith("connector_test_001_"))
 
+    def test_new_work_order_binding_revokes_old_public_links_before_registration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = LanPortalStateStore(Path(temporary) / "state.sqlite3")
+            self.addCleanup(store.shutdown_write_worker, timeout=2)
+            manager = FakeWorkOrders(store)
+            clock = FakeClock()
+            transport = FakeRelayTransport(_config(), clock)
+            connector = PollingWorkOrderRelayConnector(store, manager, config=_config(), transport=transport, clock=clock)
+            target = manager.target_record_id
+            first = connector.register_group(target)
+            group = manager.get_group(target)
+            group.update(binding_id="replacement-instance", version=group["version"] + 1, relay={"mode": "public_relay"})
+            store.put_document("polling_work_order", target, group)
+            with self.assertRaisesRegex(Exception, "未知公网工单"):
+                connector._target_for_public_group(first["public_group_id"])
+            second = connector.register_group(target)
+            self.assertEqual(second["registration_state"], "registered")
+            self.assertNotEqual(second["public_group_id"], first["public_group_id"])
+            self.assertNotEqual(second["operator_link"], first["operator_link"])
+            paths = [call["path"] for call in transport.calls]
+            self.assertLess(paths.index(f"/api/v1/internal/groups/{first['public_group_id']}/cancel"),
+                            paths.index(f"/api/v1/internal/groups/{second['public_group_id']}"))
+            self.assertEqual(connector.register_group(target)["operator_link"], second["operator_link"])
+
     def test_authority_registration_projection_and_group_metadata_are_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             store = LanPortalStateStore(Path(temporary) / "state.sqlite3")

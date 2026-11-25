@@ -114,44 +114,21 @@ class ZhihangDigestTests(unittest.TestCase):
         self.run_at("2026-11-13T08:12:00")
         self.assertEqual(self.deliveries, [first, first])
 
-    def test_month_end_final_slot_and_completion_stop(self):
+    def test_retired_month_end_delivery_is_not_resumed(self):
         self.enable("risk", "drill")
-        self.batches["risk"] = {b: {"楼栋": b, "排查时间": "已填写", "审核时间": ""} for b in digest.BUILDINGS}
-        self.batches["drill"] = {"plan": {"演练年份": "2026", "演练月份": "11", "实施区域": "A楼、B楼", "演练状态": "完成"}}
-        self.run_at("2026-11-24T09:00:00")
+        slot = "2026-11-30T15:00:00+08:00"
+        key = "digest:month_end:" + slot
+        pending = {"kind": "month_end", "slot": slot, "status": "failed",
+                   "members": ["risk", "drill"], "card": {"header": {}}}
+        self.store.put_documents(digest.NS, {key: pending})
+        with patch.dict(os.environ, {"MONTH_END_PROGRESS_NOTIFY_ENABLED": "true"}):
+            self.run_at("2026-11-25T09:00:00")
+            self.service = self.new_service()
+            self.run_at("2026-11-30T15:00:00")
         self.assertFalse(self.pulls)
-        self.run_at("2026-11-25T09:00:00")
-        self.run_at("2026-11-25T15:00:00")
-        self.assertEqual(len(self.deliveries), 1)
-        card = json.dumps(self.deliveries[0][0], ensure_ascii=False)
-        self.assertIn("2026-11-30", card)
-        self.assertIn("风险排查：完成 0/1", card)
-        self.assertIn("演练：完成 1/1", card)
-        self.run_at("2026-11-30T09:00:00")
-        for row in self.batches["risk"].values():
-            row["审核时间"] = "已填写"
-        self.run_at("2026-11-30T15:00:00")
-        self.assertEqual(len(self.deliveries), 3)
-        self.assertEqual(self.deliveries[-1][0]["header"]["template"], "green")
-        self.service = self.new_service()
-        self.run_at("2026-11-30T15:10:00")
-        self.assertEqual(len(self.deliveries), 3)
-
-    def test_month_end_waits_when_selected_data_is_incomplete(self):
-        self.enable("risk", "drill")
-        self.batches["risk"] = {b: {"楼栋": b} for b in digest.BUILDINGS}
-        self.batches["drill"] = {}
-        self.run_at("2026-11-25T09:00:00")
         self.assertFalse(self.deliveries)
-        self.assertEqual(self.service.status()[1]["latest"]["status"], "failed")
-        self.batches["drill"] = {"plan": {"演练年份": "2026", "演练月份": "11", "实施区域": "C楼", "演练状态": "待演练"}}
-        self.result = {"ok": False, "failure_kind": "uncertain"}
-        self.run_at("2026-11-25T09:10:00")
-        self.service = self.new_service()
-        self.run_at("2026-11-25T09:20:00")
-        self.assertEqual(len(self.deliveries), 1)
-        self.assertEqual(self.service.status()[1]["latest"]["status"], "delivery_unknown")
-        self.assertEqual([kind for kind, _ in self.pulls], ["risk", "drill", "drill"])
+        self.assertEqual(self.store.get_document(digest.NS, key), pending)
+        self.assertEqual([item["kind"] for item in self.service.status()], ["daily"])
 
     def test_combined_defaults_suppress_standalone_except_inspection(self):
         for kind in ("risk", "drill", "event", "change"):
@@ -286,16 +263,19 @@ class ZhihangDataCardsTests(unittest.TestCase):
                                      created="2026-11-13T09:00:00+08:00")["status"], "skipped")
         self.assertEqual(self.notify("event", rows, "2026-11-13T16:08:00+08:00", "final")["status"], "sent")
 
-    def test_risk_and_drill_original_calendar_rules(self):
-        os.environ.update(AUTO_SYNC_MESSAGE_ENABLED="true", AUTO_SYNC_MESSAGE_SCHEDULES="08:30,08:33")
-        risk = {"risk:1": {"楼栋": "A楼", "排查时间": "2026-11-12", "审核时间": "2026-11-12"}}
-        drill = {"drill:1": {"实施区域": "A楼", "演练年份": "2026", "演练月份": "11", "演练状态": "待评估"}}
-        self.assertEqual(self.notify("risk", risk, "2026-11-12T08:30:00+08:00")["status"], "sent")
-        self.assertEqual(self.notify("risk", risk, "2026-11-19T08:30:00+08:00", "repeat")["status"], "skipped")
-        self.assertEqual(self.notify("risk", risk, "2026-11-30T08:30:00+08:00", "month-end")["status"], "sent")
-        self.assertEqual(self.notify("drill", drill, "2026-11-12T08:33:00+08:00", "thursday")["status"], "sent")
-        self.assertEqual(self.notify("drill", drill, "2026-11-13T08:33:00+08:00", "friday")["status"], "skipped")
-        self.assertEqual(self.notify("drill", drill, "2026-11-26T08:33:00+08:00", "after-25")["status"], "sent")
+    def test_panorama_owns_risk_and_drill_even_with_old_notification_settings(self):
+        for flag in ("true", "false"):
+            with patch.dict(os.environ, {"MONTH_END_PROGRESS_NOTIFY_ENABLED": flag,
+                                         "AUTO_SYNC_MESSAGE_ENABLED": "true"}):
+                for kind in ("risk", "drill"):
+                    self.store.put_documents(cards.NAMESPACE, {
+                        "settings:" + kind: {"notify": True},
+                        "card:run1": {"kind": kind, "results": {}, "targets": [{"role": "primary"}]},
+                    })
+                    self.assertEqual(cards.notification_targets(kind), [])
+                    for slot in ("", "2026-11-30T08:30:00+08:00"):
+                        self.assertEqual(self.notify(kind, {"item": {}}, slot)["status"], "skipped")
+        self.send.assert_not_called()
 
 
 if __name__ == "__main__":

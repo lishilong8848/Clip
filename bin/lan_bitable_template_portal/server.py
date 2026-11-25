@@ -74,7 +74,7 @@ from .identity_utils import (
     normalize_notice_identity_payload,
 )
 from .state_store import LanPortalStateStore
-from .polling_work_orders import PollingSopCloudStore, PollingWorkOrderService
+from .polling_work_orders import POLLING_WORK_ORDER_NAMESPACE, PollingSopCloudStore, PollingWorkOrderService
 from .polling_work_order_relay import probe_polling_relay_health
 from .local_notice_images import LocalNoticeImageStore
 from upload_event_module.config import (
@@ -1637,6 +1637,8 @@ class PortalRuntime:
         *,
         force: bool = False,
     ) -> dict:
+        if group.get("state") in {"binding_pending", "cancelled", "stopped"}:
+            raise PortalConflictError("当前工单链接不可用，请刷新最新工单。")
         relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
         if str(relay_state.get("mode") or "") in {"public_service", "public_relay"}:
             connector = cls.polling_work_order_relay()
@@ -1647,6 +1649,7 @@ class PortalRuntime:
         notifications = dict(group.get("notifications") or {})
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
         work_order_label = cls._work_order_label(group)
+        binding_id = str(group.get("binding_id") or "")
         changed = False
         recipients = [('operator', '操作人', person, 'operator' if i == 0 else 'operator:' + person['record_id'])
                       for i, person in enumerate(PollingWorkOrderService.operators(group))]
@@ -1675,7 +1678,7 @@ class PortalRuntime:
                 continue
             text = "\n".join(
                 (
-                    f"【{work_order_label}工单待确认】",
+                    f"【{work_order_label}工单{'已重新绑定' if binding_id else '待确认'}】",
                     f"通告：{group.get('title') or group.get('target_record_id') or '-'}",
                     f"SOP：{group.get('sop_name') or '-'}",
                     f"角色：{label} {person.get('name') or ''}",
@@ -1684,9 +1687,11 @@ class PortalRuntime:
                 )
             ).strip()
             recipient = assigned_open_id or initiator_open_id
-            ok_send, message, _results = _send_text_to_open_ids_guarded(
+            identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"polling-binding:{binding_id}:{delivery_key}:{recipient}:{link_fingerprint}")) if binding_id and not force else ""
+            ok_send, message, results = _send_text_to_open_ids_guarded(
                 text,
                 [recipient] if recipient and link else [],
+                **({"message_uuid": identity} if identity else {}),
             )
             fallback = False
             if (
@@ -1694,11 +1699,13 @@ class PortalRuntime:
                 and initiator_open_id
                 and initiator_open_id != recipient
                 and link
+                and (not identity or results and results[0].get("failure_kind") in {"not_sent", "bot_unavailable", "recipient_unavailable"})
             ):
                 fallback = True
                 ok_send, message, _results = _send_text_to_open_ids_guarded(
                     text,
                     [initiator_open_id],
+                    **({"message_uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, identity + ":fallback"))} if identity else {}),
                 )
                 if ok_send:
                     recipient = initiator_open_id
@@ -1780,6 +1787,115 @@ class PortalRuntime:
             # projection lock; a slow network must not hold up the whole notice.
             prepared["polling_work_order_group_id"] = target_record_id
         return group
+
+    @classmethod
+    def replace_polling_work_order(cls, group_id: str, payload: dict, *, user: dict, professions=None) -> dict:
+        from .module_access import professional_record_visible
+
+        operation = str(payload.get("operation_id") or "")
+        if not re.fullmatch(r"[A-Za-z0-9_-]{12,120}", operation):
+            raise PortalError("重新绑定请求编号无效。")
+        manager = cls.polling_work_orders()
+        base = manager.get_group(group_id)
+        kind, scope = str(base.get("work_type") or WORK_TYPE_POLLING), str(base.get("scope") or "")
+        notice_type = cls._work_order_notice_type(base)
+        lock_key, owner, error = cls._acquire_event_operation_lock(
+            {"work_type": kind, "notice_type": notice_type}, action_type="work_order_rebind", target_record_id=group_id)
+        if error:
+            raise PortalConflictError(error)
+        try:
+            current = manager.get_group(group_id)
+            ok, record = query_record_by_id(group_id, notice_type)
+            if not ok:
+                raise PortalExternalError("目标通告暂未读到，请刷新后再试。")
+            fields = cls._change_confirmation_fields(record)
+            field_config = cls._work_order_field_config(current)
+            scopes = cls.service._building_codes_from_value(fields.get(field_config.get("building", "")))
+            professional_row = {"specialty": fields.get(field_config.get("specialty", "")), "fields": fields}
+            if scope not in scopes or not professional_record_visible(professions, professional_row):
+                raise PortalConflictError("该通告已不在当前楼栋或专业办理范围。")
+            slot = {key: payload[key] for key in ("polling_sop_id", "polling_sop_version", "polling_run_count",
+                "polling_runs", "polling_operator_record_ids", "polling_reviewer_record_id") if key in payload}
+            fingerprint = hashlib.sha256(json.dumps([group_id, user.get("open_id"), slot], sort_keys=True).encode()).hexdigest()
+            if current.get("binding_id") == operation:
+                if current.get("binding_request") != fingerprint:
+                    raise PortalConflictError("重新绑定内容已变化，请刷新后再办理。")
+                return {"state": current["state"], "sop_name": current["sop_name"]}
+            lifecycle = cls.service._target_record_lifecycle(work_type=kind, notice_type=notice_type,
+                target_record={"record_id": group_id, "display_fields": fields})
+            expected = str(payload.get("binding_id") or "")
+            if not lifecycle.get("active") or lifecycle.get("finished"):
+                raise PortalConflictError("只有进行中的通告可重新绑定工单。")
+            if expected != str(current.get("binding_id") or "") or current.get("state") not in {"active", "upload_pending", "completed"}:
+                raise PortalConflictError("工单状态已变化，请刷新核对。")
+            prepared = manager.prepare_start({**slot, "scope": scope, "work_type": kind, "action": "start",
+                "_web_action_request": True, "_auth_open_id": user.get("open_id"), "_auth_user_name": user.get("name")},
+                job_id=operation, people=cls.service._load_signature_people())
+            relay = current.get("relay") or {}
+            mode = str(relay.get("mode") or "local")
+            prepared.update(polling_work_order_mode="public_relay" if mode == "public_service" else mode,
+                            polling_work_order_relay_url=relay.get("relay_url") or "")
+            with cls._local_upload_lock_for_key(f"polling-work-order-links:{group_id}"):
+                next_group = manager.create_group(prepared, target_record_id=group_id, title=current.get("title") or group_id, public_base_url="",
+                    public_relay=mode in {"public_service", "public_relay"}, replace_binding=expected,
+                    binding_id=operation, binding_request=fingerprint)
+            return {"state": next_group["state"], "sop_name": next_group["sop_name"]}
+        finally:
+            cls._release_event_operation_lock(lock_key, owner)
+
+    @classmethod
+    def _sync_polling_work_order_binding(cls, group: dict) -> None:
+        target_id = group["target_record_id"]
+        kind = group["work_type"]
+        notice_type = cls._work_order_notice_type(group)
+        lock_key, owner, error = cls._acquire_event_operation_lock(
+            {"work_type": kind, "notice_type": notice_type}, action_type="work_order_rebind_sync", target_record_id=target_id)
+        if error:
+            return
+        manager = cls.polling_work_orders()
+        try:
+            current = manager.get_group(target_id)
+            if current.get("state") != "binding_pending" or current.get("binding_id") != group.get("binding_id"):
+                return
+            ok, record = query_record_by_id(target_id, notice_type)
+            if not ok:
+                if cls._remote_record_not_found(record):
+                    manager.cancel_group(target_id, reason="target_not_found")
+                    return
+                raise PortalExternalError("目标通告暂未读到。")
+            fields = cls._change_confirmation_fields(record)
+            lifecycle = cls.service._target_record_lifecycle(work_type=kind, notice_type=notice_type,
+                target_record={"record_id": target_id, "display_fields": fields})
+            if not lifecycle.get("active") or lifecycle.get("finished"):
+                manager.cancel_group(target_id, reason="target_terminal")
+                return
+            config_fields = cls._work_order_field_config(current)
+            if current["scope"] not in cls.service._building_codes_from_value(fields.get(config_fields["building"])):
+                raise PortalConflictError("目标通告楼栋已变化，等待核对工单。")
+            attachment_field = config_fields["work_order_attachments"]
+            old_tokens = set(current.get("binding_cleanup_tokens") or [])
+            tokens = cls._change_confirmation_attachment_tokens(fields.get(attachment_field))
+            patch = {config_fields["work_order_required"]: True,
+                     config_fields["work_order_operator"]: manager.operator_names(current),
+                     config_fields["work_order_reviewer"]: current["reviewer"]["name"]}
+            if old_tokens.intersection(tokens):
+                patch[attachment_field] = [{"file_token": token} for token in tokens if token not in old_tokens]
+            if any(not cls._notice_undo_field_equal(fields.get(name), value) for name, value in patch.items()):
+                ok, _ = update_bitable_record_fields(target_id, notice_type, patch)
+                if not ok:
+                    raise PortalExternalError("目标表更新未确认。")
+                ok, row = query_record_by_id(target_id, notice_type)
+                verified = cls._change_confirmation_fields(row)
+                if not ok or any(
+                        (set(cls._change_confirmation_attachment_tokens(verified.get(name))) != {item["file_token"] for item in value})
+                        if name == attachment_field else not cls._notice_undo_field_equal(verified.get(name), value)
+                        for name, value in patch.items()):
+                    raise PortalExternalError("目标表尚未读回新工单资料。")
+            manager.finish_binding(target_id, current["binding_id"])
+        except PortalError as exc:
+            manager.finish_binding(target_id, group["binding_id"], str(exc))
+        finally:
+            cls._release_event_operation_lock(lock_key, owner)
 
     @classmethod
     def finalize_polling_work_order_group(cls, target_record_id: str) -> dict:
@@ -1957,6 +2073,8 @@ class PortalRuntime:
         failed = 0
         errors: list[str] = []
         manager = cls.polling_work_orders()
+        for group in manager.pending_bindings():
+            cls._sync_polling_work_order_binding(group)
         for group in manager.open_groups():
             target_record_id = str(group.get("target_record_id") or "").strip()
             work_type = str(group.get("work_type") or WORK_TYPE_POLLING).strip()
@@ -8493,7 +8611,7 @@ class PortalRuntime:
         local_required = bool(
             isinstance(group, dict)
             and str(group.get("state") or "")
-            in {"active", "upload_pending", "completed"}
+            in {"active", "upload_pending", "completed", "binding_pending"}
             and str(group.get("work_type") or WORK_TYPE_POLLING).strip()
             == context["work_type"]
         )
@@ -8503,6 +8621,8 @@ class PortalRuntime:
             group.get("work_type") or WORK_TYPE_POLLING
         ).strip() != context["work_type"]:
             return f"无法核验{label}工单完成状态，不能发送结束。"
+        if group.get("state") == "binding_pending":
+            return f"{label}工单正在更换，核验并完成新工单后可发送结束。"
         # upload_pending is entered only after execution finishes; attachment sync is separate.
         if str(group.get("state") or "") not in {"upload_pending", "completed"}:
             return f"{label}工单尚未全部完成，不能发送结束。"
@@ -11532,6 +11652,16 @@ class PortalRuntime:
             notice_type,
             remote.get("fields") if isinstance(remote.get("fields"), dict) else {},
         )
+        undo_kind = str(undo.get("work_type") or "").strip()
+        if action_type in {"update", "end"} and undo_kind in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+            bound = cls.state_store.get_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id) or {}
+            if bound.get("binding_id"):
+                config_fields = cls._work_order_field_config({"work_type": undo_kind})
+                binding_fields = {config_fields[name] for name in (
+                    "work_order_required", "work_order_operator", "work_order_reviewer", "work_order_attachments")}
+                remote_fields = {name: value for name, value in remote_fields.items() if name not in binding_fields}
+                undo = {**undo, "target_written_fields": {name: value for name, value in
+                    (undo.get("target_written_fields") or {}).items() if name not in binding_fields}}
         paired_target_id = str((paired_undo or {}).get("target_record_id") or "")
         paired_remote = (paired_undo or {}).get("remote") or {}
         paired_fields = cls._undo_restore_fields(NOTICE_TYPE_MAINTENANCE, paired_remote.get("fields") or {})
@@ -11810,6 +11940,11 @@ class PortalRuntime:
                 cls.state_store.mark_notice_identity_deleted(
                     work_type=WORK_TYPE_MAINTENANCE, active_item_id=str(paired_undo.get("active_item_id") or ""),
                     source_record_id=str(paired_undo.get("source_record_id") or ""), target_record_id=paired_target_id)
+            if work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+                cls.polling_work_orders().cancel_group(target_record_id, reason="target_deleted")
+        if action_type == "delete" and work_type in {WORK_TYPE_MAINTENANCE, WORK_TYPE_POLLING, WORK_TYPE_ADJUST}:
+            cls.polling_work_orders().restore_deleted_group(
+                str(undo.get("target_record_id") or ""), restored_record_id, work_type=work_type, undo_id=undo_id)
         local_result = cls.service.restore_notice_undo_local(
             undo,
             target_record_id=restored_record_id,

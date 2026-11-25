@@ -26,7 +26,7 @@ type Run = RunSummary & {
 type Task = {
   pull_scope?: string;
   kind: string; label: string; times: string[]; enabled: boolean; confirmed: boolean;
-  notify?: boolean; targets: Target[]; latest?: RunSummary | null; next_at?: Stamp; notification_targets?: NotificationTarget[];
+  notification_owner?: string; notify?: boolean; targets: Target[]; latest?: RunSummary | null; next_at?: Stamp; notification_targets?: NotificationTarget[];
   last_preview?: RunSummary | null; last_sync?: RunSummary | null;
 };
 type Auth = { has_token?: boolean; expired?: boolean; expires_at?: Stamp; display_name?: string; login_name?: string; token_owner?: string };
@@ -76,6 +76,7 @@ let previewSequence = 0;
 const previews = reactive<Record<string, string>>({});
 const taskErrors = reactive<Record<string, string>>({});
 const settings = ref<Settings>();
+const panoramaNotice = '由全景平台「南通每日运维巡视同步」发送';
 const settingsDigest = computed(() => dashboard.value?.notification_digests?.find(
   (digest) => !!settings.value && digest.modules.includes(settings.value.kind),
 ));
@@ -497,7 +498,7 @@ onBeforeUnmount(() => {
               </dd>
               <dt>运行时刻</dt><dd>{{ selectedTask.times.join(' / ') || '未设置' }} <small>北京时间</small></dd>
               <dt>下次定时</dt><dd>{{ selectedTask.enabled ? dateText(selectedTask.next_at) : '定时未启用' }}</dd>
-              <dt>卡片通知</dt><dd>{{ selectedTask.notify ? '已启用' : '已关闭' }}<span v-if="selectedTask.notification_targets?.length"> · {{ targetText(selectedTask.notification_targets) }}</span><span v-if="activeDigest"> · {{ activeDigest.label }}</span></dd>
+              <dt>卡片通知</dt><dd>{{ selectedTask.notification_owner === 'panorama' ? panoramaNotice : selectedTask.notify ? '已启用' : '已关闭' }}<span v-if="selectedTask.notification_targets?.length"> · {{ targetText(selectedTask.notification_targets) }}</span><span v-if="activeDigest"> · {{ activeDigest.label }}</span></dd>
             </dl>
             <div class="zh-actions zh-task-actions">
               <button class="zh-btn primary" :disabled="!!operations[selectedTask.kind]" @click="preview(selectedTask)">
@@ -589,7 +590,8 @@ onBeforeUnmount(() => {
         </fieldset>
         <fieldset :disabled="saving">
           <legend><Bell :size="16" aria-hidden="true" />通知投递</legend>
-          <NCheckbox v-model:checked="settings.notify" :disabled="saving">{{ cardSettingLabel(settings.kind) }}</NCheckbox>
+          <span v-if="selectedTask?.notification_owner === 'panorama'">{{ panoramaNotice }}</span>
+          <NCheckbox v-else v-model:checked="settings.notify" :disabled="saving">{{ cardSettingLabel(settings.kind) }}</NCheckbox>
           <dl v-if="settingsDigest || settings.targets.length" class="zh-facts">
             <template v-if="settingsDigest">
               <dt>汇总卡片</dt><dd>{{ settingsDigest.label }}</dd>

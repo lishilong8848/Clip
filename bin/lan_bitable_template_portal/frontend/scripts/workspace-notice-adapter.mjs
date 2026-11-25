@@ -13,11 +13,11 @@ export function adaptNoticeSopControls(code) {
   let result=code.replaceAll('<select ', '<NoticeSopSelect ').replaceAll('</select>', '</NoticeSopSelect>')
     .replaceAll('<VnetSelect ', '<NoticeSopSelect ').replaceAll('class="lhs-input"', '')
     .replace('import VnetSelect from "./VnetSelect.vue";', 'import NoticeSopSelect from "../workspace-v2/NoticeSopSelect.vue";\nimport "../workspace-v2/noticeSop.css";');
-  const exempt='<label class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>';
+  const exempt='<label v-if="!requireWorkOrder" class="lhs-exempt"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>';
   if(!result.includes(exempt))throw new Error('Notice SOP exemption control changed');
   // Keep the browser's native label/checkbox behaviour and the original change
   // handler. In particular, do not manufacture a DOM Event for a component event.
-  return result.replace(exempt,`<div class="v2-sop-choice">
+  return result.replace(exempt,`<div v-if="!requireWorkOrder" class="v2-sop-choice">
     <label class="lhs-exempt" :class="{'is-selected':local.exempt}"><input type="checkbox" :checked="local.exempt" :disabled="disabled" :aria-label="exemptLabel" @change="onExempt" /><span>{{ exemptLabel }}</span></label>
     <span v-if="local.exempt" class="v2-sop-exempt-status" role="status">已选择 · 本次不创建工单</span>
   </div>`)

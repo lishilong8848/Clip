@@ -11,7 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from test_lan_template_work_status import _TestMaintenancePortalService
 from bin import test_polling_work_orders as fixtures
-from lan_bitable_template_portal.polling_work_orders import PollingWorkOrderService, POLLING_WORK_ORDER_NAMESPACE
+from lan_bitable_template_portal.polling_work_orders import PollingWorkOrderService, PollingWorkOrderTokenError, POLLING_WORK_ORDER_NAMESPACE
 from lan_bitable_template_portal.server import PortalRuntime
 
 
@@ -115,6 +115,65 @@ class WorkOrderUndoTests(unittest.TestCase):
                                 'reviewer', 'uploaded_file_tokens', 'uploaded_photo_file_tokens', 'token_hashes'):
                         self.assertEqual(restored[key], before[key], key)
                     self.assertEqual({str(path): hashlib.sha256(path.read_bytes()).hexdigest() for path in files}, hashes)
+
+    def test_rebind_retries_readback_and_delete_restore_keeps_only_the_new_group(self):
+        target = 'rec-work-order-rebind'
+        before = self.group('maintenance', target)
+        old_token = self.orders.role_token(target, 'operator')
+        staged = self.orders.work_order_root / 'pending' / 'new-binding' / 'new.txt'
+        staged.parent.mkdir(parents=True)
+        staged.write_bytes(b'new SOP')
+        spec = {'work_type': 'maintenance', 'scope': 'A', 'sop_id': 'new-sop', 'sop_version': 2, 'sop_name': '新模板',
+                'runs': [{'run_index': 1}], 'operator': {'name': '新操作人', 'record_id': 'op'},
+                'reviewer': {'name': '新审核人', 'record_id': 'rv'}, 'steps': [{'step_id': 'new', 'content': '新步骤'}],
+                'attachments': [{'attachment_id': 'new', 'name': 'new.txt', 'staged_path': str(staged),
+                                 'sha256': hashlib.sha256(staged.read_bytes()).hexdigest()}]}
+        upload = {'polling_work_order_required': True, 'polling_work_order_spec': spec}
+        user = {'open_id': 'ou_fixture', 'name': '隔离账号'}
+        request = {'operation_id': 'isolated-sop-rebind-0001', 'polling_sop_id': 'new-sop', 'polling_sop_version': 2}
+        remote = {'楼栋': 'A楼', '维保状态': '开始', '是否涉及重要操作': True, '操作人': '旧人员',
+                  '工单附件': [{'file_token': 'fixture-workbook'}, {'file_token': 'keep-other'}]}
+        def read(*_):
+            return True, {'record_id': target, 'fields': copy.deepcopy(remote)}
+        def write(_, __, fields):
+            remote.update(fields)
+            return True, target
+        with patch('lan_bitable_template_portal.server.query_record_by_id', side_effect=read), \
+             patch.object(self.orders, 'prepare_start', return_value=upload) as prepare, \
+             patch.object(self.service, '_load_signature_people', return_value=[]):
+            result = PortalRuntime.replace_polling_work_order(target, request, user=user)
+            self.assertEqual(result['state'], 'binding_pending')
+            self.assertEqual(PortalRuntime.replace_polling_work_order(target, request, user=user), result)
+            prepare.assert_called_once()
+            with self.assertRaises(PollingWorkOrderTokenError):
+                self.orders.validate_group_token(old_token, target)
+            self.assertTrue(PortalRuntime._work_order_end_error(target_record_id=target, work_type='maintenance', fields=remote))
+            self.orders = PollingWorkOrderService(self.store)
+            with patch('lan_bitable_template_portal.server.update_bitable_record_fields', return_value=(False, 'not yet')):
+                PortalRuntime._sync_polling_work_order_binding(self.orders.get_group(target))
+            self.assertEqual(self.orders.get_group(target)['state'], 'binding_pending')
+            with patch('lan_bitable_template_portal.server.update_bitable_record_fields', side_effect=write) as update:
+                PortalRuntime._sync_polling_work_order_binding(self.orders.get_group(target))
+                PortalRuntime._sync_polling_work_order_binding(self.orders.get_group(target))
+                update.assert_called_once()
+            self.assertEqual(self.orders.get_group(target)['state'], 'active')
+            self.assertEqual(remote['操作人'], '新操作人')
+            self.assertEqual(remote['工单附件'], [{'file_token': 'keep-other'}])
+            self.assertTrue(Path(before['attachments'][0]['path']).is_file())
+            replacement_token = self.orders.role_token(target, 'operator')
+            self.orders.validate_group_token(replacement_token, target)
+            self.stop_notice(target, 'maintenance')
+            self.orders.restore_ended_group(target, work_type='maintenance')
+            self.assertEqual(self.orders.get_group(target)['sop_id'], 'new-sop')
+            self.orders.cancel_group(target, reason='target_deleted')
+            for _ in range(2):
+                self.orders.restore_deleted_group(target, 'rec-recreated', work_type='maintenance', undo_id='fixture-undo')
+            restored = self.orders.get_group('rec-recreated')
+            self.assertEqual(restored['sop_id'], 'new-sop')
+            self.assertEqual(restored['storage_key'], self.orders.get_group(target)['storage_key'])
+            with self.assertRaises(PollingWorkOrderTokenError):
+                self.orders.validate_group_token(replacement_token, target)
+            self.orders.validate_group_token(self.orders.role_token('rec-recreated', 'operator'), 'rec-recreated')
 
     def test_local_restore_failure_retries_without_repeating_remote_undo(self):
         for work_type in ('polling', 'maintenance', 'adjust'):

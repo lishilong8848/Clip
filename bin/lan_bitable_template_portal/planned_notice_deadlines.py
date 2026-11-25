@@ -1,6 +1,7 @@
 """09:00 plan-deadline reminders; no notice submissions or source-table writes."""
 import datetime as dt
 import hashlib
+import html
 import json
 import logging
 import math
@@ -19,6 +20,7 @@ ZONE = dt.timezone(dt.timedelta(hours=8))
 NS = 'planned_notice_deadlines'
 RETRY_SECONDS = 300
 DELIVERY_WINDOW = 3500
+MAINTENANCE_GROUP_CHAT_ID = 'oc_3bc648b9b761f24a65366a9b04b32eb2'
 LOG = logging.getLogger(__name__)
 
 
@@ -61,14 +63,40 @@ def plan_times(service, record):
                  for keys in (starts, ends))
 
 
+def maintenance_deadline_card(items, current, *, preview=False):
+    def inline(value):
+        clean = html.escape(' '.join(str(value or '').split()))
+        return re.sub(r'([\\`*_[\]~])', r'\\\1', clean)
+
+    lines = []
+    ordered = sorted(items, key=lambda item: (item['end'], item['scopes'], item['title']))
+    for item in ordered[:25]:
+        end = date_time(item['end'])
+        has_time = end.time() != dt.time.min
+        late = has_time and end <= current
+        label, color = ('已过截止', 'red') if late else ('今日到期', 'orange')
+        deadline = end.strftime('%H:%M') if has_time else end.strftime('%m月%d日')
+        buildings = '、'.join('110站' if scope == '110' else scope + '楼' for scope in item['scopes'])
+        context = ' · '.join(filter(None, (buildings, inline(item['specialty'][:40]))))
+        lines.append(f'**{context}**　{inline(item["title"][:100])}\n'
+                     f'<font color="{color}">**{label} · {deadline}**</font>')
+    if len(ordered) > 25:
+        lines.append(f'另有 {len(ordered) - 25} 项，请在灯塔通告办理查看。')
+    return {'header': {'template': 'orange', 'title': {'tag': 'plain_text',
+                'content': f'维保通告到期未发 · {len(ordered)} 项' + ('（预览）' if preview else '')}},
+            'elements': [{'tag': 'markdown', 'content': f'{current:%Y-%m-%d}（北京时间）'},
+                         {'tag': 'markdown', 'content': '\n\n'.join(lines)}]}
+
+
 class PlannedNoticeDeadlines:
-    def __init__(self, service, store, auth, send, *, clock=now):
+    def __init__(self, service, store, auth, send, *, send_group=None, clock=now):
         self.service, self.store, self.auth, self.send = service, store, auth, send
+        self.send_group = send_group
         self.clock = clock
         self.lock = threading.Lock()
         self.closed = False
 
-    def due(self, current, *, refresh=False):
+    def due(self, current, *, refresh=False, unannounced_maintenance_only=False):
         service = self.service
         if refresh:
             service.refresh_if_interval_elapsed(min_interval_seconds=RETRY_SECONDS)
@@ -93,6 +121,8 @@ class PlannedNoticeDeadlines:
             if any(word in status for word in ('取消', '撤销', '作废')) or not (
                     service._source_progress_allows_start(status) or service._source_progress_is_ongoing(status)):
                 continue
+            if unannounced_maintenance_only and (kind != 'maintenance' or '未开始' not in status):
+                continue
             candidates.append((record, kind, start, end, status))
         summaries = {}
         for kind in TYPES:
@@ -106,6 +136,15 @@ class PlannedNoticeDeadlines:
             if ended and start and start <= ended <= current and service._is_completed_work_status_item(summary):
                 continue
             fields = record.get('display_fields') or {}
+            if unannounced_maintenance_only:
+                started = date_time(summary.get('started_at'))
+                actual = date_time((record.get('raw_fields') or {}).get('实际开始时间') or fields.get('实际开始时间'))
+                evidence = (started, actual, ended)
+                if any(value and (start is None or start <= value) and value <= current for value in evidence):
+                    continue
+                if not started and not ended and (service._source_progress_is_ongoing(summary.get('status'))
+                        or service._is_completed_work_status_item(summary)):
+                    continue
             if kind == 'change':
                 scopes, specialty, title = service._change_record_building_codes(record), service._change_specialty(record), service._change_title(record)
             elif kind == 'repair':
@@ -188,6 +227,37 @@ class PlannedNoticeDeadlines:
         lines.append('本消息仅作提醒，不自动开始、更新或结束通告。')
         return '\n'.join(lines)
 
+    def deliver_group(self, state, current, *, refresh=False):
+        if self.send_group is None or state.get('group_complete'):
+            return True
+        day = state['date']
+        if self.closed or current.date().isoformat() != day:
+            return False
+        receipt = state.get('group_delivery')
+        if receipt and receipt.get('sent'):
+            return True
+        items = self.due(current, refresh=refresh, unannounced_maintenance_only=True)
+        if not items:
+            return True
+        if receipt is None:
+            card = maintenance_deadline_card(items.values(), current)
+            identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f'{NS}:group:{day}:{MAINTENANCE_GROUP_CHAT_ID}'))
+            receipt = state['group_delivery'] = {'uuid': identity, 'snapshot': items, 'card': card,
+                                                   'attempted_at': current.timestamp()}
+        elif (current.timestamp() - receipt['attempted_at'] > DELIVERY_WINDOW
+                or any(items.get(key) != row for key, row in receipt['snapshot'].items())):
+            return False
+        self.store.put_document(NS, day, state)
+        try:
+            ok, _ = self.send_group(receipt['card'], MAINTENANCE_GROUP_CHAT_ID, message_uuid=receipt['uuid'])
+        except Exception as exc:
+            LOG.warning('维保到期群卡片回执未确认: %s', type(exc).__name__)
+            return False
+        if ok:
+            receipt['sent'] = True
+            self.store.put_document(NS, day, state)
+        return bool(ok)
+
     def tick(self):
         current = self.clock().astimezone(ZONE)
         if self.closed or current.hour < 9 or not self.lock.acquire(blocking=False):
@@ -195,10 +265,15 @@ class PlannedNoticeDeadlines:
         day = current.date().isoformat()
         try:
             state = self.store.get_document(NS, day) or {'date': day, 'deliveries': {}}
-            if state.get('complete') or state.get('retry_at', 0) > current.timestamp():
+            if (state.get('complete') and (self.send_group is None or state.get('group_complete'))
+                    or state.get('retry_at', 0) > current.timestamp()):
                 return
             state['retry_at'] = current.timestamp() + RETRY_SECONDS
             self.store.put_document(NS, day, state)
+            if state.get('complete'):
+                state['group_complete'] = self.deliver_group(state, current, refresh=True)
+                self.store.put_document(NS, day, state)
+                return
             items = self.due(current, refresh=True)
             app_id, audience, waiting = self.audience(items) if items else ('', {}, False)
             deliveries = state['deliveries']
@@ -266,6 +341,10 @@ class PlannedNoticeDeadlines:
             _, audience, waiting = self.audience(final_items) if final_items else ('', {}, False)
             state.update(complete=not waiting and all(keys <= sent[person] for person, keys in audience.items()),
                          checked_at=current.isoformat(), warning='工程师或值班账号待核验' if waiting else '')
+            self.store.put_document(NS, day, state)
+            if self.send_group is None:
+                return
+            state['group_complete'] = self.deliver_group(state, self.clock().astimezone(ZONE))
             self.store.put_document(NS, day, state)
         except Exception as exc:
             LOG.warning('计划通告到期提醒等待重试，不影响通告业务: %s', type(exc).__name__)
