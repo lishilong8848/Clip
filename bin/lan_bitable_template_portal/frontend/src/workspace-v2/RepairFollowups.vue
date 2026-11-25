@@ -37,7 +37,7 @@ import RecordPickerDialog from '../components/RecordPickerDialog.vue';
 import ConfirmDialog from './RepairConfirmation.vue';
 import RepairField from './RepairField.vue';
 import RepairHistoryPicker from './RepairHistoryPicker.vue';
-const props=defineProps<{scope:string;summaryRecordId:string;summaryTitle:string;embedded?:boolean;readOnly?:boolean;canDelete?:boolean;refreshVersion?:number;userId?:string}>();
+const props=defineProps<{scope:string;summaryRecordId:string;summaryTitle:string;embedded?:boolean;readOnly?:boolean;browseOtherProfession?:boolean;canDelete?:boolean;refreshVersion?:number;userId?:string}>();
 defineOptions({inheritAttrs:false});
 const emit=defineEmits<{changed:[];'source-refreshed':[];'dirty-changed':[value:boolean];'count-changed':[value:number];busy:[value:boolean]}>();
 const tone=(value:string)=>value==='failed'?'error':value==='warning'?'warning':'success';

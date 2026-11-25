@@ -22,10 +22,11 @@ const shadowed=adaptBrowserReferences(`const history=ref([]); const location={na
 assert.match(shadowed,/history.value/);assert.match(shadowed,/location.name/);assert.match(shadowed,/window.location.name/);assert.match(shadowed,/__v2History.back/);
 const chatAdapter=adaptBrowserReferences('function isNearBottom(){return thread.value.scrollTop<80;} function scrollBottom(){target.scrollTop=target.scrollHeight;} const path=location.pathname;','/components/LighthouseAssistant.vue?vue&type=script&setup=true&lang.ts','/browser.ts');assert.match(chatAdapter,/__v2ShouldFollow/);assert.match(chatAdapter,/__v2FollowBottom/);
 const eventAdapter=adaptBrowserReferences('function returnToOverview(){ loadEvents(); } const title="事件态势与楼栋入口";','/components/EventManagementPage.vue','/browser.ts');assert.doesNotMatch(eventAdapter,/__v2ReturnHome/);assert.match(eventAdapter,/"事件管理"/);assert.match(eventAdapter,/loadEvents\(\)/);
-const manifest = JSON.parse(await readFile(path.join(root, 'dist/assets/workspace-v2/entry.json'), 'utf8'));
+const outDir=process.env.CLIPFLOW_PORTAL_PREVIEW_DIR||path.join(root,'dist');
+const manifest = JSON.parse(await readFile(path.join(outDir, 'assets/workspace-v2/entry.json'), 'utf8'));
 assert.match(manifest.entry, /^app-.*\.js$/);
-for (const name of [manifest.entry, ...manifest.css]) await readFile(path.join(root, 'dist/assets/workspace-v2', name));
-const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0 } });
+for (const name of [manifest.entry, ...manifest.css]) await readFile(path.join(outDir, 'assets/workspace-v2', name));
+const server = await preview({ root, logLevel: 'error', build:{outDir}, preview: { host: '127.0.0.1', port: 0 } });
 const origin = `http://127.0.0.1:${server.httpServer.address().port}`;
 const entry = '/assets/workspace-v2/index.html';
 const browser = await chromium.launch({ headless: true });
@@ -56,6 +57,11 @@ async function context() {
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(url.pathname==='/api/auth/status')return ok({logged_in:loggedIn,user:loggedIn?user:{},scope_options:loggedIn?scopes:[],login_url:'/api/auth/login?next='+encodeURIComponent(url.searchParams.get('next')||'/')});
     if(url.pathname==='/api/pre-shift-checks')return ok({scopes:['A'],scope:'A',can_manage:['L0','L1','L3'].includes(user.level),definition:{version:0,items:[]},tasks:[],roster_ready:false,roster_error:''});
+    if(['/api/daily-inspection','/api/daily-inspection/status'].includes(url.pathname)){
+      const scope=url.searchParams.get('view_scope')||'D';
+      return ok({duty:{scope,date:'2026-11-24',shift:'白'},can_edit:true,view_scope:scope,history_scopes:['D','E'],
+        history:[],template_version:'v1',completed_rounds:0,round_limit:2,scheduled:false,active:null});
+    }
     if(url.pathname==='/api/auth/logout'){loggedIn=false;return ok({});}
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'v2-isolated'}});
     if(url.pathname==='/api/workbench/lite-detail')return ok({fragments:{detail:noticeFields}});
@@ -87,6 +93,7 @@ async function context() {
     if(url.pathname==='/api/learning/papers')return ok({items:[],today:null});
     if(url.pathname==='/api/learning/profile')return ok({summary:{answered:12,wrong:2,accuracy:80},today_summary:{assigned:15,task_answered:6,answered_people:4,completed_people:2,not_started_people:1},people:[],published:true});
     if(url.pathname==='/api/drills')return ok({items:[]});
+    if(url.pathname==='/api/zhihang-data')return ok({auth:{has_token:false,expired:false},tasks:[],history:[]});
     if(url.pathname==='/api/critical-guard/tasks')return ok({tasks:[]});
     if(url.pathname==='/api/cabinet-power/batches')return ok({items:[],total:0});
     if(url.pathname==='/api/cabinet-power/buildings')return ok({buildings:'ABCDE'.split('').map(scope=>({scope,bootstrap_status:'succeeded',counts:{total:100,formal:70,test:10,off:20,unknown:0},record_count:8,inventory_only:0}))});
@@ -117,6 +124,47 @@ async function context() {
   return context;
 }
 try {
+  if(process.argv.includes('--theme')){
+    user={...user,tool_management_enabled:true,modules:[...fullModules,'tool_management','daily_inspection',
+      'risk_inspection','cold_source','documents','eop_scenarios','work_handover','notice_history','zhihang_data']};
+    const ctx=await context(),page=await ctx.newPage();
+    const routes=[
+      '/', '/?view=functions', '/?mode=events&scope=A', '/workbench-lite?work_type=all&scope=A',
+      '/repair-management?scope=A','/repair-status?scope=A','/engineer/mop?scope=D',
+      '/cabinet-power?scope=A','/water-management?scope=A','/daily-tasks?scope=A','/daily-inspection?scope=D',
+      '/critical-guard?scope=A','/risk-inspections?scope=A','/risk-inspections?view=tool-self-check&scope=A',
+      '/drill-management?scope=A','/eop-scenarios?scope=A','/cold-source-monitor?scope=A','/learning?view=overview',
+      '/plan-convergence','/knowledge-base','/document-library','/link-directory','/signature-management',
+      '/work-handover','/admin/settings?tab=permissions','/admin/history-memory','/zhihang-data',
+    ];
+    for(const target of routes){
+      const url=new URL(target,origin),params=new URLSearchParams(url.search);params.set('__page',url.pathname);
+      await page.setViewportSize({width:1366,height:960});
+      await page.goto(origin+entry+'?'+params,{waitUntil:'domcontentloaded'});
+      await page.locator('.v2-main > :not(.v2-breadcrumb,.v2-loading,.async-page-state,.v2-alert)').first().waitFor();
+      for(const width of [1366,390]){
+        await page.setViewportSize({width,height:width<700?844:960});
+        await page.locator(width<700?'.v2-mobile-nav,.v2-shell.is-inspection-immersive':'.v2-topnav').first().waitFor();
+        const layout=await page.evaluate(()=>{
+          const style=getComputedStyle(document.documentElement);
+          const token=name=>style.getPropertyValue('--v2-'+name).trim();
+          return {
+            palette:document.documentElement.dataset.v2Palette,
+            typeface:getComputedStyle(document.body).fontFamily,
+            overflow:document.documentElement.scrollWidth>innerWidth+1,
+            denied:/没有该功能权限|没有找到此页面|页面加载失败/.test(document.querySelector('.v2-main').innerText),
+            usesPalette:token('bg')===token('palette-bg')&&token('blue')===token('palette-accent-text'),
+          };
+        });
+        assert.deepEqual([layout.palette,layout.typeface.includes('Inter'),layout.overflow,layout.denied,layout.usesPalette],
+          ['panorama',true,false,false,true],target+' at '+width);
+      }
+      console.log('Theme checked '+target);
+    }
+    await ctx.close();
+    assert.deepEqual(errors,[]);
+    console.log('PASS: panorama typography and palette inherited across '+routes.length+' desktop and mobile entries.');
+  } else {
   if(!process.argv.includes('--duty')){
   const ctx=await context(),page=await ctx.newPage();
   await page.goto(origin+'/?frontend=legacy');
@@ -362,7 +410,7 @@ try {
   loggedIn=false;
   const anonymous=await context(),login=await anonymous.newPage();
   await login.goto(origin+entry+'?login=password');
-  await login.getByRole('tab',{name:'账号密码登录'}).waitFor();
+  await login.getByRole('tab',{name:'姓名登录',exact:true}).waitFor();
   await login.setViewportSize({width:390,height:844});
   await login.screenshot({path:path.join(output,'login-mobile.png'),fullPage:true});
   assert.equal(await login.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
@@ -372,4 +420,5 @@ try {
   await anonymous.close();
   assert.deepEqual(errors,[]);
   console.log('PASS: task-focused home without dashboards or unused reads, single refresh, active/pending dedup, retry, role shortcuts, flat module menu/mobile directory, direct event and building pages, scope retention+account isolation, 6 role variants, 14 business pages on PC/mobile, 6 home viewports, revoked scope/module, native submit+dirty guard, current-person password, guest, login cancellation and assistant. No real business requests.');
+  }
 } finally { await browser.close(); await new Promise(resolve=>server.httpServer.close(resolve)); }

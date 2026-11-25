@@ -50,8 +50,7 @@ try {
   await page.goto(entry + '?__page=/workbench-lite&work_type=maintenance');
   await page.locator('.desk-record').first().waitFor();
   assert.equal(queries.at(-1), 'E', 'single-building account defaults to its authorized building');
-  // The shell brand is now an inline SVG mark (TopNavigation.vue .topnav-brand), not a raster <img>.
-  const brand = page.getByRole('navigation', { name: '功能导航' }).locator('.topnav-brand .topnav-mark svg');
+  const brand = page.getByRole('navigation', { name: '功能导航' }).getByRole('img', { name: '世纪互联 VNET' });
   const brandBox = await brand.boundingBox();
   assert(brandBox && brandBox.width > 0 && brandBox.height > 0, 'the navigation brand mark renders with real size');
 

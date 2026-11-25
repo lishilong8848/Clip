@@ -52,7 +52,7 @@ function focusPanel(panel?:HTMLElement){panel?.focus({preventScroll:true});panel
 .pair-search{position:relative;flex:1 1 160px;max-width:34rem}.pair-search svg{position:absolute;left:.65rem;top:.72rem;pointer-events:none}.tool-desk .pair-search input{width:100%;padding-left:2rem}
 .pair-columns{display:grid;grid-template-columns:minmax(0,2fr) minmax(215px,1fr);gap:.65rem;align-items:start}
 .pair-columns>section{padding:.65rem;min-width:0;border:1px solid var(--td-line);border-radius:12px;background:var(--td-face)}
-.pair-columns>.pair-batch{background:color-mix(in srgb,var(--td-mint) 60%,var(--td-face));display:flex;flex-direction:column;align-items:stretch;gap:.65rem}
+.pair-columns>.pair-batch{background:var(--td-field);display:flex;flex-direction:column;align-items:stretch;gap:.65rem}
 .pair-head{min-height:32px}.pair-head h2[tabindex]{scroll-margin-block-start:1rem}
 .pair-asset{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,.85fr) auto;align-items:center;gap:.35rem;padding:.35rem .3rem;border-top:1px solid var(--td-line);overflow-wrap:anywhere}.pair-assets{container:inventory / inline-size}
 .pair-asset .td-check{flex-wrap:nowrap;cursor:pointer}.pair-asset input{flex:none}.pair-asset small{display:block}

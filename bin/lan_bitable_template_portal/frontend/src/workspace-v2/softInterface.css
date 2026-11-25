@@ -1,22 +1,34 @@
 /* V2 screen surfaces. Workbook cells, documents and print layouts keep their own formatting. */
 @media screen {
   html.workspace-v2[data-v2-theme] {
+    --cf-font-family: Inter, system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    --cf-font-page:clamp(20px,1.75vw,24px);
+    --cf-radius-panel:8px;--cf-radius-card:8px;--cf-radius-control:6px;
+    --cf-shadow-card:0 1px 3px rgb(15 23 42 / .10);
+    --cf-shadow-popover:0 8px 22px rgb(15 23 42 / .14);
     --soft-face: var(--v2-palette-surface);
     --soft-field: var(--v2-palette-soft);
     --soft-edge: var(--v2-palette-border);
-    --soft-glint: rgb(255 255 255 / .96);
-    --soft-shade: rgb(135 143 160 / .25);
-    --soft-raised: -3px -3px 8px var(--soft-glint), 4px 4px 10px var(--soft-shade);
-    --soft-key: inset 0 1px 0 var(--soft-glint), 0 2px 3px var(--soft-shade);
-    --soft-inset: inset 2px 2px 4px var(--soft-shade), inset -2px -2px 3px var(--soft-glint);
-    --soft-radius: 12px;
+    --soft-glint: transparent;
+    --soft-shade: rgb(15 23 42 / .08);
+    --soft-raised: 0 1px 3px var(--soft-shade);
+    --soft-key: 0 1px 2px var(--soft-shade);
+    --soft-inset: inset 0 0 0 1px var(--soft-edge);
+    --soft-radius: 8px;
     --v2-surface-shadow: var(--soft-raised);
     --v2-record-shadow: inset 0 1px 0 var(--soft-glint);
     --v2-record-hover-shadow: var(--soft-key);
   }
   html.workspace-v2[data-v2-theme=dark] {
-    --soft-glint: rgb(180 222 214 / .09);
-    --soft-shade: rgb(4 12 15 / .53);
+    --soft-shade: rgb(2 6 23 / .35);
+  }
+  html.workspace-v2 body{font-family:var(--cf-font-family)}
+  html.workspace-v2 :is(.wb-task-tile,.tile-popover,.workbench-module){
+    --tile-accent:hsl(var(--tile-hue) 57% 35%);
+    --tile-tint:color-mix(in srgb,var(--tile-accent) 10%,var(--desk-paper));
+  }
+  html.workspace-v2[data-v2-theme=dark] :is(.wb-task-tile,.tile-popover,.workbench-module){
+    --tile-accent:hsl(var(--tile-hue) 65% 73%);
   }
   html.workspace-v2[data-v2-theme] .v2-shell:not(.is-print) {
     background: var(--v2-bg);
@@ -59,6 +71,10 @@
     .v2-main .wb-panel,.v2-profile-identity,.v2-profile-access,.v2-main .eop-panel,.v2-main .tool-edit-panel,
     .v2-main .zhihang-panel,.v2-main .login-panel,.v2-main .request-panel,.v2-main .v2-task-section) {
     background:var(--soft-face);border:1px solid var(--soft-edge);border-radius:var(--soft-radius);box-shadow:var(--soft-raised);
+  }
+  html.workspace-v2[data-v2-theme][data-v2-palette] .confirm-modal {
+    background:var(--soft-face);color:var(--v2-ink);border-color:var(--soft-edge);
+    border-radius:var(--cf-radius-panel);box-shadow:var(--cf-shadow-popover);
   }
   html.workspace-v2[data-v2-theme] .v2-main .v2-widget-head {
     min-height:34px;padding-inline:12px;background:var(--soft-face);border-bottom:1px solid var(--soft-edge);

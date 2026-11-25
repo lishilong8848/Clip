@@ -168,7 +168,7 @@ try {
     if (url.pathname==='/api/workbench') return ok({scope,ongoing:empty?[]:Array.from({length:noticeSize},(_,i)=>
       noticeSize===1?{active_item_id:'change-live',work_type:'change',title:'隔离变更只读项',scope,status:'开始'}
       :{active_item_id:'notice-live-'+i,source_record_id:i?'source-'+i:'maintenance-plan',work_type:'maintenance',title:i?'隔离进行中通告 '+i:'隔离维保计划',scope,status:'开始'}),
-      records:empty?[]:Array.from({length:planFixture?23:noticeSize},(_,i)=>({record_id:i?'plan-'+i:'maintenance-plan',work_type:'maintenance',title:'隔离维保计划'+(i?' '+i:''),source_progress:'未开始',
+      records:empty?[]:Array.from({length:planFixture?23:noticeSize},(_,i)=>({record_id:i?'plan-'+i:'maintenance-plan',work_type:'maintenance',title:'隔离维保计划'+(i?' '+i:'')+(planFixture&&i===19?' · '+'长通告名称用于核对单行省略效果'.repeat(12):''),source_progress:'未开始',
         ...(planFixture?{building_codes:[scope],plan_start_time:'2026-11-18',plan_end_time:i===20?'2026-11-23':i===21?'2026-11-17':i===22?'':'2026-11-19'}:{})})),
       ongoing_pagination:{total_pages:1},records_pagination:{total_pages:1}});
     if (url.pathname==='/api/workbench-events') return ok({items:empty?[]:[{event_id:'notice-live',state:'active',metadata:{summary:'隔离事件通告'}}]});
@@ -302,7 +302,7 @@ try {
   await settle();
   assert.equal(await page.getByText(/画像|个人学练/).count(),0);
   assert.ok(!requests.slice(dutyStart).some(([,url])=>url.startsWith('/api/learning/')));
-  assert.equal(await page.getByRole('article',{name:'个人卡片',exact:true}).count(),1);
+  assert.equal(await page.locator('.period-card[data-card=personal]').count(),0,'shared duty has no empty personal modules');
   assert.equal(await page.getByText('隔离已完成演练',{exact:true}).count(),0);
   assert.equal(await rowsOf('drills').count(),0);
   await open('notices:变更');
@@ -373,10 +373,10 @@ try {
   personalAssigned=0;
   await set(actor('learning-no-personal-content','manager',['learning']));
   await page.getByRole('button',{name:'画像学练情况汇总',exact:true}).waitFor();
-  assert.equal(await page.getByRole('article',{name:'个人卡片'}).getByRole('button',{name:'打开画像学练'}).count(),0);
+  assert.equal(await page.locator('.period-card[data-card=personal]').getByRole('button',{name:'打开画像学练'}).count(),0);
   pendingLearning=true;
   await set(actor('learning-review-only','manager',['learning']));
-  const personalReview=page.getByRole('article',{name:'个人卡片'});
+  const personalReview=page.getByRole('article',{name:'个人 · 待处理题目'});
   await personalReview.getByRole('button',{name:/待处理题目.*1 题/}).click();
   const reviewDialog=page.locator('.desk-review-dialog');
   await reviewDialog.getByRole('button',{name:/隔离原题/}).click();
@@ -441,9 +441,9 @@ try {
   await lastCase.locator('[data-module-widget=repair_management]').waitFor();
   await lastCase.getByRole('navigation',{name:'维修办理内容'}).getByText(/跟进记录/).waitFor();
   await lastCase.getByRole('button',{name:'关闭待办办理',exact:true}).click();await settle();
-  await todo.getByLabel('搜索待办').fill('维修 7');await counts(1,true);
-  await open('repair_management');assert.equal(await rowsOf('repair_management').count(),1);await close();
-  await todo.getByLabel('搜索待办').fill('');await counts(19);
+  assert.equal(await todo.getByLabel('搜索待办').count(),0);
+  assert.equal(await todo.locator('.queue-toolbar').getByRole('button',{name:/^(卡片显示|表单显示)$/}).count(),0);
+  await counts(19);
   assert.equal(await more.count(),0);
   await open('repair_management');
   repairSize=11;
@@ -464,7 +464,7 @@ try {
   await page.evaluate(()=>window.setScope('B')); await settle(); await counts(19);
   assert.equal(await dialog.count(),0,'changing scope closes the previous group');
   await checkInlineRepair('B');
-  checks.push('all loaded rows accessible beyond eight, short titles first, search, refresh, no overflow, and scope reset');
+  checks.push('all loaded rows accessible beyond eight, short titles first, refresh, no overflow, and scope reset');
 
   noticeSize=7;
   const beforeDuty=requests.length;
@@ -480,9 +480,8 @@ try {
   assert.equal(await more.count(),0);
   assert.ok(!requests.slice(beforeDuty).some(([,url])=>url.startsWith('/api/learning/')));
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed'))); await settle(); await counts(21,true);
-  await todo.getByLabel('搜索待办').fill('事件通告'); await counts(1,true);
   await open('events');assert.equal(await rowsOf('event_notices').count(),1);
-  checks.push('both event sources appear under one tile, linked notices deduplicate, duty grants and module keyword search preserved');
+  checks.push('both event sources appear under one tile, linked notices deduplicate, and duty grants are preserved');
   noticeSize=1; repairSize=1; partial=true;
   await set(actor('mixed-pagination','engineer',['repair_management','risk_inspection']));
   await counts(8);
@@ -511,7 +510,8 @@ try {
   await page.evaluate(()=>window.dispatchEvent(new Event('clipflow-business-changed')));
   await todo.getByRole('status').filter({hasText:'暂无待办'}).waitFor();
   assert.equal(await queue.count(),0);
-  checks.push('truncated pages cannot create tasks and are retryable; empty queue is compact');
+  await page.getByRole('region',{name:'工作状态'}).locator('.period-card').waitFor({state:'detached'});
+  checks.push('truncated pages are retryable; empty work-state cards are hidden');
 
   empty=false; failure=500;
   await set(actor('failed-source','manager',['event']));
@@ -564,7 +564,7 @@ try {
   checkFixture=true;
   await page.setViewportSize({width:390,height:860});
   await set(actor('fixture-check-duty','operator',['pre_shift'],{level:'L4'}));
-  const personalCard=page.getByRole('article',{name:'个人卡片',exact:true});
+  const personalCard=page.locator('.period-card[data-card=personal]');
   await personalCard.getByRole('button',{name:/白班班前检查/}).waitFor();
   assert.equal(await page.getByRole('searchbox',{name:'全局搜索'}).count(),0);
   assert.equal(await page.getByRole('region',{name:'班前检查',exact:true}).count(),0);
@@ -615,7 +615,7 @@ try {
   const operator=actor('independent-inspection','operator',['daily_inspection'],{level:'L4',home_scope:'D',testScopes:['D']});
   await set(operator);
   await personalCard.getByRole('button',{name:/D楼白班第 1 轮巡检/}).waitFor();
-  assert.equal(await page.getByRole('article',{name:'楼栋卡片'}).getByText(/第 1 轮巡检/).count(),0);
+  assert.equal(await page.locator('.period-card[data-card=building]').getByText(/第 1 轮巡检/).count(),0);
   inspectionOnDuty=false;
   await set({...operator,open_id:'inspection-off-duty'});
   assert.equal(await personalCard.getByRole('button',{name:/第 1 轮巡检/}).count(),0);
@@ -624,7 +624,7 @@ try {
   ownRepair='personal-repair-assignment';
   await set(actor(ownRepair,'operator',['repair_management'],{level:'L4'}));
   await personalCard.getByText('隔离维修待办',{exact:true}).waitFor();
-  assert.equal(await page.getByRole('article',{name:'楼栋卡片'}).getByText('隔离维修待办',{exact:true}).count(),0);
+  assert.equal(await page.locator('.period-card[data-card=building]').getByText('隔离维修待办',{exact:true}).count(),0);
   ownRepair='';
   checks.push('a personally assigned repair is shown once in the personal card');
 
@@ -656,28 +656,39 @@ try {
 
   planFixture=true;
   await page.setViewportSize({width:1440,height:1000});
-  await set(actor('period-panels','manager',['maintenance','learning','event','repair_management'],{level:'L1'}));
+  await set(actor('period-panels','manager',['maintenance','change','learning','event','repair_management'],{level:'L1'}));
   const fold=page.getByRole('button',{name:/未开始通告/}).first();
   await fold.waitFor();
   assert.equal(await fold.getAttribute('aria-expanded'),'false');
   const overview=page.getByRole('region',{name:'工作状态'});
-  assert.equal(await overview.getByText('隔离维保计划 19',{exact:true}).count(),0);
+  assert.equal(await overview.getByText(/^隔离维保计划 19/).count(),0);
   await fold.click();
   await overview.getByText('隔离维保计划',{exact:true}).first().waitFor();
-  await overview.getByRole('button',{name:/展开其余 16 项/}).first().click();
+  await overview.getByRole('button',{name:/展开其余 18 项/}).first().click();
   for(const index of [20,21,22]) assert.equal(await overview.getByText('隔离维保计划 '+index,{exact:true}).count(),0);
-  const panels=await overview.locator('.period-card').evaluateAll(cards=>cards.map(card=>card.getBoundingClientRect().height));
-  assert(panels.length>1&&Math.max(...panels)-Math.min(...panels)<2,'desktop work-state cards align without growing indefinitely');
-  const panelBody=overview.locator('[data-card=building] .period-card-body');
-  assert(await panelBody.evaluate(el=>el.scrollHeight>el.clientHeight),'long period lists scroll inside the card');
+  const campusCard=overview.getByRole('article',{name:'园区 · 事件',exact:true});
+  const plannedCard=overview.getByRole('article',{name:'楼栋 · 未开始通告',exact:true});
+  const buildingRepairCard=overview.getByRole('article',{name:'楼栋 · 维修跟进',exact:true});
+  await buildingRepairCard.waitFor();
+  assert.equal(await overview.locator('.period-card').first().getAttribute('data-module'),'events','the event module is first');
+  const hue=element=>getComputedStyle(element).getPropertyValue('--tile-hue').trim();
+  assert.equal(await campusCard.evaluate(hue),await tile('events').evaluate(hue),'the larger event module shares the tile color');
+  const activeNotice=overview.locator('[data-state=ongoing]');
+  await activeNotice.first().locator('.scope-tag').getByText(/进行中/).waitFor();
+  const [campusBox,plannedBox]=await Promise.all([campusCard.boundingBox(),plannedCard.boundingBox()]);
+  assert(campusBox&&plannedBox&&campusBox.height<plannedBox.height-40,'the short module keeps its own height');
+  assert(await plannedCard.locator('.period-entries').evaluate(el=>el.scrollHeight>el.clientHeight),'long modules scroll inside their list');
+  const longTitle=plannedCard.locator('.period-title').filter({hasText:/^隔离维保计划 19/});
+  assert(await longTitle.evaluate(el=>el.scrollWidth>el.clientWidth&&getComputedStyle(el).whiteSpace==='nowrap'
+    &&getComputedStyle(el).textOverflow==='ellipsis'&&el.closest('button').title.includes(el.textContent)));
   await page.screenshot({path:path.join(output,'period-cards-desktop.png'),animations:'disabled'});
-  checks.push('planned notices start folded, only deadlines today or tomorrow qualify, and long work-state lists align');
+  checks.push('planned notices start folded, only near deadlines qualify, and work-state cards fit their contents');
   const periodUrl=page.url();
-  await overview.getByRole('article',{name:'园区卡片'}).getByRole('button',{name:/隔离处理中事件/}).click();
+  await campusCard.getByRole('button',{name:/隔离处理中事件/}).click();
   await eventPanel.locator('[data-module-widget="event"]').waitFor();
   await eventPanel.getByRole('button',{name:'关闭待办办理',exact:true}).click();
   await eventPanel.waitFor({state:'hidden'});
-  await overview.getByRole('article',{name:'楼栋卡片'}).getByRole('button',{name:/隔离维修待办/}).click();
+  await buildingRepairCard.getByRole('button',{name:/隔离维修待办/}).click();
   const buildingRepair=page.getByRole('region',{name:'办理 隔离维修待办',exact:true});
   await buildingRepair.getByRole('navigation',{name:'维修办理内容'}).getByText(/跟进记录/).waitFor();
   await buildingRepair.getByRole('button',{name:'关闭待办办理',exact:true}).click();
@@ -689,6 +700,7 @@ try {
   await roster.getByText('A楼排班测试',{exact:true}).waitFor();
   assert.equal(await roster.getByRole('button',{name:/查看A楼排班测试/}).getAttribute('title'),'值班员');
   assert.equal(await roster.getByRole('button',{name:/查看刘冉/}).getAttribute('title'),'值班长');
+  assert.match(await roster.locator('.roster-shift.current-shift .person-key').first().getAttribute('aria-label'),/^查看刘冉/);
   assert.equal(await roster.getByRole('button',{name:/查看薛小明/}).getAttribute('title'),'长白实习生');
   assert.equal(await roster.getByText(/长白实习|11\/18|白班|夜班/).count(),0);
   const guard=page.getByRole('region',{name:'天气预警与戒备'});
@@ -735,16 +747,17 @@ try {
     await compactRoster.getByRole('rowheader',{name:building,exact:true}).waitFor();
   assert.equal(await compactRoster.locator('.roster-row:not(.roster-columns)').count(),7);
   const columnGeometry=()=>page.evaluate(()=>{
-    const status=document.querySelector('.period-grid');
+    const status=document.querySelector('.desk-supplement');
     return {left:status.getBoundingClientRect().bottom,
-      right:document.querySelector('.roster-module').getBoundingClientRect().bottom,
+      right:document.querySelector('.day-planner').getBoundingClientRect().bottom,
       guardBottom:document.querySelector('.weather-guard').getBoundingClientRect().bottom,
       rosterTop:document.querySelector('.roster-module').getBoundingClientRect().top,
       footer:document.querySelector('.desk-shortcuts').getBoundingClientRect().top};
   });
   const assertAligned=async()=>{
     const geometry=await columnGeometry();
-    assert(Math.abs(geometry.left-geometry.right)<2&&geometry.footer>=geometry.left&&geometry.guardBottom<=geometry.rosterTop,JSON.stringify(geometry));
+    const rosterGap=geometry.rosterTop-geometry.guardBottom;
+    assert(Math.abs(geometry.left-geometry.right)<2&&geometry.footer>=geometry.left&&rosterGap>=0&&rosterGap<=16,JSON.stringify(geometry));
   };
   await assertAligned();
   await page.screenshot({path:path.join(output,'workbench-balanced-1366.png'),fullPage:true,animations:'disabled',style:'.n-message-container{visibility:hidden}'});

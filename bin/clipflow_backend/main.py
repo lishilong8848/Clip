@@ -2605,7 +2605,8 @@ class FastAPIPortalController:
                 payload_key = "records" if request.url.path == "/api/records" else "workbench"
                 from lan_bitable_template_portal.module_access import allowed_modules, NOTICE_MODULES
                 granted_work_types = allowed_modules(PortalRuntime.auth_manager, session) & NOTICE_MODULES
-                professional_scope = profession_query(PortalRuntime.auth_manager, session)
+                professional_scope = profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view"))
                 if payload_key == "records":
                     work_type = ""
                     sections = ()
@@ -2778,7 +2779,8 @@ class FastAPIPortalController:
                     lambda: service.engineer_mop_history(scope=scope),
                     fresh=request.query_params.get('refresh') == '1',
                 )
-                professions = session_engineer_professions(PortalRuntime.auth_manager, session)
+                professions = profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")).get("professions")
                 records = [item for item in data['records'] if professional_record_visible(professions, item)]
                 page = service.engineer_mop_history_page(
                     records, scope=scope, search=request.query_params.get("search", ""),
@@ -2798,7 +2800,8 @@ class FastAPIPortalController:
                 content, content_type, name = await asyncio.to_thread(
                     PortalRuntime.service.download_engineer_mop_history,
                     scope=scope, record_id=record_id, attachment_id=attachment_id,
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                                       view=request.query_params.get("profession_view")),
                 )
                 return Response(content, media_type=content_type or "application/octet-stream", headers={
                     "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff",
@@ -4923,7 +4926,8 @@ class FastAPIPortalController:
                     scope=scope,
                     month=month,
                     date_field=str(request.query_params.get("date_field") or "").strip(),
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5279,7 +5283,8 @@ class FastAPIPortalController:
                     offset = 0
                 data = await asyncio.to_thread(
                     PortalRuntime.service.get_repair_followup_records,
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")),
                     summary_record_id=str(
                         request.query_params.get("summary_record_id") or ""
                     ),
@@ -5574,7 +5579,8 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5617,7 +5623,8 @@ class FastAPIPortalController:
                         request.query_params.get("summary_only") or ""
                     ).lower()
                     in {"1", "true", "yes"},
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -5852,7 +5859,8 @@ class FastAPIPortalController:
                         request.query_params.get("refresh") or ""
                     ).lower()
                     in {"1", "true", "yes"},
-                    **profession_query(PortalRuntime.auth_manager, session),
+                    **profession_query(PortalRuntime.auth_manager, session,
+                    view=request.query_params.get("profession_view")),
                 )
                 return self._json_ok(request, session, data)
             except Exception as exc:
@@ -14185,8 +14193,8 @@ class FastAPIPortalController:
             yield f"event: error\ndata: {payload}\n\n".encode("utf-8")
             return
         raw_cursor = str(
-            request.query_params.get("cursor")
-            or request.headers.get("last-event-id")
+            request.headers.get("last-event-id")
+            or request.query_params.get("cursor")
             or ""
         ).strip()
         try:
@@ -14196,6 +14204,8 @@ class FastAPIPortalController:
         latest_cursor = await asyncio.to_thread(
             PortalRuntime.state_store.latest_repair_management_change_id
         )
+        if cursor > latest_cursor:
+            yield f"id: {latest_cursor}\nevent: repair_reset\ndata: {latest_cursor}\n\n".encode("utf-8")
         if cursor <= 0 or cursor > latest_cursor:
             cursor = latest_cursor
         heartbeat_seconds = _env_float(

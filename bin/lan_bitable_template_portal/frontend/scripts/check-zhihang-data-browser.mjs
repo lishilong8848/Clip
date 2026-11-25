@@ -138,7 +138,7 @@ async function install(context, user) {
 
 try {
   browser = await chromium.launch();
-  const admin = { open_id: 'admin', name: '管理员', role: 'admin', level: 'L0', modules: ['accounts'] };
+  const admin = { open_id: 'admin', name: '管理员', role: 'admin', level: 'L0', modules: ['accounts', 'zhihang_data'] };
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, reducedMotion: 'reduce' });
   await install(context, admin);
   const page = await context.newPage();

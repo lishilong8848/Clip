@@ -21,7 +21,28 @@ const v2FollowupApi = ref<any>(null);
 const v2AppliedState = ref('未完成'), v2Stats = ref<LooseDict | null>(null), v2StatsError = ref('');
 const v2StatsLoading = ref(false), v2StatsAt = ref('');
 let v2StatsAbort: AbortController | undefined;
+let v2StatsPending = false;
 let v2StatsTimer: ReturnType<typeof setTimeout> | undefined;
+const v2ProfessionUser = useProfessionUser();
+const v2ProfessionView = ref(defaultProfessionView(v2ProfessionUser?.value));
+const v2ProfessionOptions = computed(()=>professionChoices(v2ProfessionUser?.value));
+const v2ForeignRecord = computed(()=>v2IsForeign(selectedRecord.value));
+function v2IsForeign(record: LooseDict | null): boolean {
+  return Boolean(record && isProfessionEngineer(v2ProfessionUser?.value) &&
+    professionCodes(v2SpecialtyLabel(record)).length &&
+    !professionMatches('own',v2SpecialtyLabel(record),v2ProfessionUser?.value));
+}
+function v2ChangeProfession(value: string): void {
+  if(v2Writing.value||v2ProfessionView.value===value)return;
+  runWithUnsavedGuard(()=>{
+    closeProjectDrawerNow();
+    selectedRecord.value=null;
+    editingRecordId.value='';
+    recordPage.value=1;
+    v2ProfessionView.value=value;
+    void loadRecords(false);
+  });
+}
 const v2Writing = computed(() => saving.value || v2FollowupBusy.value || v2FollowupApi.value?.action.busy || reconcilingRemote.value || integrityRepairSubmitting.value);
 const v2StatusFilters = new Set(['without_followup','in_progress','no_followup']);
 const v2StateLabel = computed(() => ({active:'未完成',all:'全部',completed:'已完成',without_followup:'未开始',in_progress:'维修中',no_followup:'暂无跟进'}[recordState.value]));
@@ -44,16 +65,24 @@ function v2Count(key: string): number | null {
   return value === null || value === undefined || value === '' || !Number.isFinite(Number(value)) ? null : Math.max(0, Number(value));
 }
 async function v2LoadStats(): Promise<void> {
-  v2StatsAbort?.abort(); const controller = new AbortController(); v2StatsAbort = controller;
+  if(props.recordOnly)return;
+  if(v2StatsAbort){v2StatsPending=true;return;}
+  const controller = new AbortController(); v2StatsAbort = controller;
   v2StatsLoading.value = true; v2StatsError.value = '';
   try {
-    const data = await requestJson('/api/repair-management/status?' + new URLSearchParams({scope:props.scope || 'ALL',state:'all',period:'all',limit:'1',offset:'0'}), {signal:controller.signal});
+    const data = await requestJson('/api/repair-management/status?' + new URLSearchParams({scope:props.scope || 'ALL',state:'all',period:'all',limit:'1',offset:'0',profession_view:v2ProfessionView.value||'all'}), {signal:controller.signal});
     if (controller.signal.aborted) return;
     v2Stats.value = data.stats && typeof data.stats === 'object' ? data.stats : null;
     v2StatsAt.value = new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit'}).format(new Date());
   } catch(error) {
     if (!controller.signal.aborted) v2StatsError.value = error instanceof Error ? error.message : '状态数量暂未读取';
-  } finally { if (v2StatsAbort === controller) v2StatsLoading.value = false; }
+  } finally {
+    if(v2StatsAbort===controller){
+      v2StatsAbort=undefined;
+      v2StatsLoading.value=false;
+      if(v2StatsPending){v2StatsPending=false;v2ScheduleStats();}
+    }
+  }
 }
 function v2ScheduleStats(): void {
   if(v2StatsTimer)clearTimeout(v2StatsTimer);
@@ -78,7 +107,12 @@ function v2BeforeUnload(event: BeforeUnloadEvent): void {
 }
 watch(v2FollowupBusy, value => { if(!value && serverUpdatePending.value && !hasAnyUnsavedChanges.value)scheduleRepairStreamRefresh(); });
 onMounted(()=>{if(!props.recordOnly)void v2LoadStats();window.addEventListener('beforeunload',v2BeforeUnload);});
-watch(()=>props.scope,()=>{v2Stats.value=null;v2StatsAt.value='';if(!props.recordOnly)void v2LoadStats();});
+watch([()=>props.scope,v2ProfessionView],()=>{
+  v2StatsAbort?.abort();v2StatsAbort=undefined;v2StatsPending=false;
+  if(v2StatsTimer){clearTimeout(v2StatsTimer);v2StatsTimer=undefined;}
+  v2Stats.value=null;v2StatsAt.value='';
+  if(!props.recordOnly)void v2LoadStats();
+});
 onBeforeUnmount(()=>{v2StopGuard();v2StatsAbort?.abort();if(v2StatsTimer)clearTimeout(v2StatsTimer);window.removeEventListener('beforeunload',v2BeforeUnload);});
 `;
 
@@ -125,7 +159,12 @@ export function adaptRepairController(source, kind, exposedNames) {
   if (kind === 'management') {
     script = changeOnce(script,'import { ApiError, refreshRemoteSourceAndWait, requestJson }','import { ApiError, refreshRemoteSourceAndWait, requestJson, invalidateReadCache }');
     script = changeOnce(script,'type RecordStateFilter = "all" | "active" | "completed" | "in_progress";','type RecordStateFilter = "all" | "active" | "completed" | "without_followup" | "in_progress" | "no_followup";');
-    script = `import { useDialog, useMessage } from 'naive-ui';\nimport { registerNavigationGuard } from '../workspace-v2/navigation';\n` + script;
+    script = `import { useDialog, useMessage } from 'naive-ui';\nimport { registerNavigationGuard } from '../workspace-v2/navigation';\nimport { defaultProfessionView,isProfessionEngineer,professionChoices,professionCodes,professionMatches,useProfessionUser } from '../workspace-v2/professionBrowse';\n` + script;
+    script = changeOnce(script,'repairRecordIsReadOnly(selectedRecord.value || {})','repairRecordIsReadOnly(selectedRecord.value || {}) || v2ForeignRecord.value');
+    script = editFunction(script,'scopedQuery',body=>changeOnce(body,'  return params.toString();',`  if(!props.recordOnly)params.set('profession_view',v2ProfessionView.value||'all');
+  return params.toString();`));
+    script = editFunction(script,'loadRecordDetailAndOpen',body=>changeOnce(body,'    const params = new URLSearchParams({ scope: props.scope || "ALL" });',`    const params = new URLSearchParams({ scope: props.scope || "ALL" });
+    if(v2IsForeign(record)&&!props.recordOnly)params.set('profession_view','all');`));
     script = changeOnce(script, 'const recordState = ref<RecordStateFilter>(props.initialInProgress && !props.focusRecordId ? "in_progress" : "all");', 'const recordState = ref<RecordStateFilter>(props.focusRecordId ? "all" : props.initialInProgress ? "in_progress" : "active");');
     script = changeOnce(script, '`project:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`', '`project:${props.userId}:${props.scope}:${editingRecordId.value ? \'direct-update\' : \'new\'}`');
     script = changeOnce(script, '}, () => `project:${props.scope}`);', '});');
@@ -151,6 +190,7 @@ export function adaptRepairController(source, kind, exposedNames) {
     script = editFunction(script,'handleProjectDrawerKeydown',body=>prepend(body,'  if(confirmDialog.open)return;'));
     script = editFunction(script,'openWorkspaceTab',body=>body.replace('  activeWorkspaceTab.value = tab;','  activeWorkspaceTab.value = tab;\n  void nextTick(()=>{projectDrawerRef.value?.querySelector(".v2-repair-detail-body")?.scrollTo({top:0});});'));
     script = editFunction(script,'repairRecordMatchesCurrentView',body=>prepend(body,`
+  if(!props.recordOnly&&!professionMatches(v2ProfessionView.value,v2SpecialtyLabel(record),v2ProfessionUser?.value))return false;
   if(v2StatusFilters.has(recordState.value)){
     if(repairRecordIsCompleted(record)||repairRecordStateLocked(record))return false;
     if(recordState.value==='without_followup'&&record.workflow!=='未开始')return false;
@@ -165,9 +205,13 @@ export function adaptRepairController(source, kind, exposedNames) {
       value=changeOnce(value,'    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));','    records.value = incomingRecords.filter(item => !deletedProjectIds.has(String(item.record_id || "")));\n    v2RecordsReady.value=true;v2AppliedState.value=v2StateLabel.value;');
       return changeOnce(value,'    if (!silent) {',"    v2RecordError.value=error instanceof Error?error.message:'维修项目读取失败';\n    if (!silent) {");
     });
-    script = editFunction(script,'applyRepairChanges',body=>changeOnce(body,
+    script = editFunction(script,'applyRepairChanges',body=>changeOnce(changeOnce(body,
       '  let needsFullRefresh = false;',
-      '  clearRecordResponseCache();invalidateReadCache();v2ScheduleStats();\n  let needsFullRefresh = false;'));
+      '  clearRecordResponseCache();invalidateReadCache();\n  let needsFullRefresh = false;'),
+      '  return needsFullRefresh;', '  if(!needsFullRefresh)v2ScheduleStats();\n  return needsFullRefresh;'));
+    script = editFunction(script,'scheduleRepairStreamRefresh',body=>changeOnce(body,
+      '    invalidateRepairStatus();\n    await loadRecords(false, true);',
+      '    invalidateRepairStatus();v2ScheduleStats();\n    await loadRecords(false, true);'));
     script = editFunction(script,'handleFollowupChanged',body=>{
       let value=prepend(body,'  v2ScheduleStats();');
       return changeOnce(value,'      records.value = nextRecords;',`      if(repairRecordMatchesCurrentView(current))records.value=nextRecords;
@@ -182,6 +226,7 @@ export function adaptRepairController(source, kind, exposedNames) {
   } else if (kind === 'followup') {
     script = `import { useRepairSubmission } from '../composables/useRepairSubmission';\n` + script;
     script = changeOnce(script,'  "count-changed": [value: number];','  "count-changed": [value: number];\n  busy: [value: boolean];');
+    script = changeOnce(script,'  scope: string;','  scope: string;\n  browseOtherProfession?: boolean;');
     script = changeOnce(script,`const DEFAULT_FOLLOWUP_FIELD_VALUES: Record<string, string> = {
   [DEVICE_PRODUCTION_DATE_FIELD_NAME]: "2021-03-31T00:00",
   [DEVICE_USAGE_YEARS_FIELD_NAME]: "4",
@@ -196,6 +241,7 @@ export function adaptRepairController(source, kind, exposedNames) {
     });
     script = editFunction(script,'loadRecords',body=>{
       let value=changeOnce(body,'  loading.value = true;',"  loading.value = true;v2ReadError.value='';");
+      value=changeOnce(value,'    const requestUrl =', "    if(props.browseOtherProfession&&props.readOnly)params.set('profession_view','all');\n    const requestUrl =");
       value=changeOnce(value,'    records.value = Array.isArray(payload.records) ? payload.records : [];','    records.value = Array.isArray(payload.records) ? payload.records : [];v2Ready.value=true;');
       value=changeOnce(value,`    } else if (!creatingNewFollowup.value && records.value.length) {
       selectRecord(records.value[0]);`, `    } else if (!creatingNewFollowup.value && records.value.length) {

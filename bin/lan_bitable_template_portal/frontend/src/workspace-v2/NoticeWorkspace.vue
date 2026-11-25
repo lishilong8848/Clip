@@ -41,14 +41,14 @@
               <header class="lane-head">
                 <div class="lane-caption">
                   <span class="lane-icon" aria-hidden="true"><CalendarDays v-if="lane.id==='planned'" :size="21" /><Radio v-else :size="21" /></span>
-                  <div><h2>{{ lane.label }}</h2><small>{{ lane.id==='planned' ? applied.month + (applied.specialty?' · '+applied.specialty:' · 全部专业') : scopeLabel }}</small></div>
+                  <div><h2>{{ lane.label }}</h2><small>{{ lane.id==='planned' ? applied.month + ' · '+(specialties.find(option=>option.value===applied.specialty)?.label||'全部专业') : scopeLabel }}</small></div>
                 </div>
                 <span class="lane-count"><NSpin v-if="loading" :size="14" /><b>{{ total(lane.id) }}</b> 条</span>
               </header>
               <form v-if="lane.id==='planned'" class="desk-filters" aria-label="仅筛选计划通告" @submit.prevent="filter">
                 <NInput v-model:value="search" clearable placeholder="搜索计划名称" :input-props="{'aria-label':'搜索计划通告'}" @clear="search='';filter()"><template #prefix><Search :size="16" /></template></NInput>
                 <NSelect v-model:value="month" :options="months" aria-label="计划月份" />
-                <NSelect v-model:value="specialty" clearable :options="specialties" placeholder="全部专业" aria-label="计划专业" />
+                <NSelect v-model:value="specialty" :options="specialties" placeholder="全部专业" aria-label="计划专业" />
                 <NButton attr-type="submit" :loading="loading" aria-label="筛选计划通告">筛选</NButton>
                 <small v-if="filtersDirty" role="status">点击“筛选”应用修改</small>
               </form>
@@ -57,7 +57,7 @@
                 <li v-for="row in lane.rows" :key="row.work_type+':'+rowKey(row)">
                   <NoticeDeskRecord :row="row" :lane="lane.id" :title="rowTitle(row)" :type="typeLabel(row.work_type)"
                     :building="rowBuildingLabel(row)" :attention="rowAttention(row,lane.id)"
-                    :started="rowStarted(row)" :ended="rowEnded(row)" :unknown="rowUnknown(row)"
+                    :started="rowStarted(row)" :ended="rowEnded(row)" :unknown="rowUnknown(row)" :read-only="foreignNotice(row)"
                     @open="value=>openRecord(row,false,value)" @bind="openRecord(row,false,'','','',true)" />
                 </li>
               </ul>
@@ -167,6 +167,8 @@ import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCard,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,useDialog,useMessage } from 'naive-ui';
 import { CalendarDays,ClipboardList,Inbox,Link2,Radio,RadioTower,Ellipsis,History,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
+import { defaultProfessionView,isProfessionEngineer,professionChoices,professionCodes,professionMatches } from './professionBrowse';
+import {noticeListSpecialty} from './noticeListMeta';
 import { ApiError,requestJson,requestPeople,refreshRemoteSourceAndWait,type Dict } from './client';
 import { modules,NOTICE_IDS,beijingDate } from './modules';
 import { navigate,registerNavigationGuard } from './navigation';
@@ -205,7 +207,7 @@ const types=computed(()=>{
     ...(allowedNotices.length ? [{id:'all',label:'全部'}, ...allowedNotices] : []),
   ];
 });
-const kind=ref(params.value.get('work_type')||'all'),list=ref('planned'),month=ref(params.value.get('month')||Number(beijingDate().slice(5,7))+'月'),search=ref(params.value.get('search')||''),specialty=ref(params.value.get('specialty')||null);
+const kind=ref(params.value.get('work_type')||'all'),list=ref('planned'),month=ref(params.value.get('month')||Number(beijingDate().slice(5,7))+'月'),search=ref(params.value.get('search')||''),specialty=ref(params.value.get('profession_view')??params.value.get('specialty')??(defaultProfessionView(props.user)||'all'));
 const typeNavigation=ref<HTMLElement|null>(null);
 function revealActiveType(){
   const nav=typeNavigation.value,button=nav?.querySelector<HTMLElement>('[aria-pressed="true"]');
@@ -217,7 +219,12 @@ function revealActiveType(){
 watch([kind,typeNavigation,()=>props.active],()=>{void nextTick(revealActiveType);},{flush:'post'});
 const applied=ref({month:month.value,search:search.value,specialty:specialty.value});
 const filtersDirty=computed(()=>month.value!==applied.value.month||search.value!==applied.value.search||specialty.value!==applied.value.specialty);
-const months=Array.from({length:12},(_,i)=>({label:(i+1)+'月',value:(i+1)+'月'})),specialties=['电气','暖通','弱电','消防'].map(value=>({label:value,value}));
+const months=Array.from({length:12},(_,i)=>({label:(i+1)+'月',value:(i+1)+'月'}));
+const specialties=computed(()=>professionChoices(props.user).map(option=>({...option,value:option.value||'all'})));
+function foreignNotice(row:Dict){
+  const value=noticeListSpecialty(row);
+  return isProfessionEngineer(props.user)&&professionCodes(value).length>0&&!professionMatches('own',value,props.user);
+}
 const scopeOptions=computed(()=>props.scopes.map(s=>({...s,label:s.value==='ALL'?'全部楼栋':s.label})));
 const selectedBuildings=computed(()=>{const requested=props.selectedScopes||params.value.get('buildings')?.split(',');return requested?[...new Set(requested.filter(value=>buildingOptions.value.some(option=>option.value===value)))]:null;});
 const scopeLabel=computed(()=>selectedBuildings.value?selectedBuildings.value.map(value=>scopeOptions.value.find(option=>option.value===value)?.label||value).join('、'):scopeOptions.value.find(s=>s.value===props.scope)?.label||props.scope);
@@ -326,7 +333,7 @@ const saved=ref('');
 let draftVersion=0,operationId='',frozen:Dict|null=null,formKey='',originalProgress='',progressBeforeEnd='';
 const snapshot=()=>JSON.stringify({values:form.value?.values,sop:sop.value,photos:photos.value,aliPhotos:aliPhotos.value,action:action.value});
 const dirty=computed(()=>!!form.value&&(snapshot()!==saved.value||pendingPhotos.value>0));
-function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,specialty:applied.value.specialty||'',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20',...(selectedBuildings.value?{buildings:selectedBuildings.value.join(',')}:{})});}
+function query(){return new URLSearchParams({scope:props.scope,work_type:kind.value,month:applied.value.month,search:applied.value.search,profession_view:applied.value.specialty||'all',sections:'records,ongoing',records_page:String(pages.value.planned),records_page_size:'20',ongoing_page:String(pages.value.ongoing),ongoing_page_size:'20',...(selectedBuildings.value?{buildings:selectedBuildings.value.join(',')}:{})});}
 async function load(fresh=false){
   if(props.recordOnly)return;
   if(kind.value==='event'){listAbort?.abort();loading.value=false;return;}
@@ -356,11 +363,12 @@ function changeBuildings(values:string[]){
   q.set('records_page','1');q.set('ongoing_page','1');q.delete('sections');navigate('/workbench-lite?'+q);
 }
 function changePage(lane:string,page:number){pages.value[lane]=page;const q=query();q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(before===location.href)void load();}
-function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('specialty',specialty.value||'');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
+function filter(){pages.value={planned:1,ongoing:1};const q=query();q.set('month',month.value);q.set('search',search.value);q.set('profession_view',specialty.value||'all');q.delete('sections');const before=location.href;navigate('/workbench-lite?'+q,{replace:true});if(location.href===before)void load(true);}
 function cacheKey(values:Dict){return noticeCacheKey(values,props.user.open_id);}
 function persist():boolean{if(!form.value||!formKey||job.value?.phase==='success')return true;try{sessionStorage.setItem(formKey,JSON.stringify({schema:2,context:noticeDraftContext({...form.value,values:originalFields.value}),baseValues:originalFields.value,snapshot:JSON.parse(snapshot()),draftVersion,job:job.value,operationId,frozen,at:Date.now()}));return true;}catch{detailError.value='浏览器暂时不能保存恢复信息，请保持页面打开，核对后提交。';return false;}}
 function resetRejected(){if(job.value?.phase!=='failed'||job.value.error_category!=='field_or_payload'||busy.value)return;job.value=null;frozen=null;operationId='';ambiguous.value=false;persist();}
 async function openRecord(row:Dict|null,initial=false,desiredAction='',parsedHtml='',manualType='',focusBinding=false){
+  if(row&&foreignNotice(row))return;
   if(row&&lanes.value[0].rows.includes(row)&&rowUnknown(row)){message.warning('源表状态未取得，请重新读取后办理。');return;}
   if(busy.value||uploading.value||saving.value)return;
   if(editing.value&&dirty.value&&!job.value){askLeave(()=>openRecord(row,initial,desiredAction,parsedHtml,manualType,focusBinding));return;}
@@ -718,7 +726,7 @@ watch(()=>JSON.stringify([props.url,props.active,props.scope,props.selectedScope
   if(!props.active){listAbort?.abort();return;}
   kind.value=params.value.get('work_type')||'all';month.value=params.value.get('month')||month.value;
   search.value=params.value.get('search')||'';
-  specialty.value=params.value.get('specialty')||null;
+  specialty.value=params.value.get('profession_view')??params.value.get('specialty')??(defaultProfessionView(props.user)||'all');
   applied.value={month:month.value,search:search.value,specialty:specialty.value};
   const nextContext=contextKey();
   if(nextContext!==listContext){pages.value={planned:1,ongoing:1};data.value={};listContext=nextContext;}
@@ -734,9 +742,9 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 </script>
 <style>
 .notice-desk,.desk-editor,.desk-dialog {
-  --desk-green:#247456;
-  --desk-mint:color-mix(in srgb,#84d6ae 15%,var(--soft-face));
-  --desk-sky:color-mix(in srgb,#88cfea 27%,var(--soft-face));
+  --desk-green:var(--cf-success);
+  --desk-mint:var(--soft-mint);
+  --desk-sky:var(--soft-sky);
   color:var(--v2-ink);
 }
 .notice-desk {min-width:0;display:grid;gap:12px;container:notice-desk / inline-size}
@@ -745,7 +753,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 }
 .notice-desk .notice-desk-head {
   justify-content:space-between;flex-wrap:wrap;padding:14px 18px;
-  border-radius:15px;background:linear-gradient(112deg,var(--desk-sky),var(--desk-mint) 80%);box-shadow:var(--soft-key);
+  border:1px solid var(--soft-edge);border-radius:var(--cf-radius-panel);background:var(--desk-sky);box-shadow:var(--soft-key);
 }
 .desk-mark,.lane-icon {display:grid;place-items:center;flex:none;width:42px;height:42px;border-radius:13px;background:var(--soft-face);box-shadow:var(--soft-key);color:var(--v2-blue)}
 .notice-desk .notice-desk-identity h1 {display:block;margin:0;font-size:22px;line-height:1.25}
@@ -758,7 +766,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .desk-types {display:flex;gap:3px;max-width:100%;min-width:0;overflow:auto;padding:4px;box-sizing:border-box;border-radius:12px;background:var(--soft-field);box-shadow:var(--soft-inset);scrollbar-width:thin}
 .desk-types button,.desk-switch button {flex:none;min-height:34px;border:1px solid transparent;border-radius:8px;padding:5px 12px;font:inherit;font-size:13px;color:var(--v2-ink);background:transparent;cursor:pointer}
 .desk-types button:hover,.desk-switch button:hover {background:var(--v2-palette-selection)}
-.desk-types button[aria-pressed=true],.desk-switch button[aria-pressed=true] {font-weight:650;background:var(--soft-face);box-shadow:var(--soft-key);border-color:var(--soft-edge)}
+.desk-types button[aria-pressed=true],.desk-switch button[aria-pressed=true] {font-weight:650;background:var(--v2-palette-selection);color:var(--v2-blue);box-shadow:var(--soft-key);border-color:var(--soft-edge)}
 .desk-types button:focus-visible,.desk-switch button:focus-visible {outline:2px solid var(--v2-blue);outline-offset:-2px}
 .desk-scope {flex-wrap:wrap;margin-inline-start:auto}
 .desk-switch {display:none}
@@ -820,7 +828,7 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .v2-notice-upload {display:inline-flex;align-items:center;position:relative;cursor:pointer}
 .v2-notice-upload input {position:absolute;inset:0;width:100%;opacity:0;cursor:pointer}
 .desk-editor.v2-notice-editor {width:min(1560px,calc(100vw - 32px));max-height:calc(100dvh - 32px);border-radius:18px;overflow:hidden;background:var(--soft-face)}
-.desk-editor>.n-card-header,.desk-dialog>.n-card-header {padding:14px 20px;background:linear-gradient(110deg,var(--desk-sky),var(--desk-mint));align-items:center}
+.desk-editor>.n-card-header,.desk-dialog>.n-card-header {padding:14px 20px;background:var(--desk-sky);align-items:center}
 .desk-editor .n-card-header__main {min-width:0}
 .desk-editor>.n-card-header .n-card-header__close {min-width:44px;min-height:44px}
 .notice-editor-title {display:grid;gap:2px;min-width:0}
@@ -839,6 +847,13 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .editor-routing .v2-plan-picker,.editor-routing .v2-plan-picker.has-recommendation {grid-template-columns:minmax(0,1fr) auto;width:100%}
 .editor-routing .v2-plan-recommendation {grid-column:1/-1}
 .editor-routing .notice-dingtalk {border-color:var(--soft-edge);background:var(--soft-face)}
+.editor-routing .notice-dingtalk p {display:flex;align-items:baseline;flex-wrap:wrap;gap:6px 8px}
+.editor-routing .notice-dingtalk button {
+  min-height:32px;padding:4px 9px;border:1px solid var(--soft-edge);border-radius:var(--cf-radius-control);
+  background:var(--v2-palette-selection);color:var(--v2-blue);font:inherit;cursor:pointer;
+}
+.editor-routing .notice-dingtalk button:hover:enabled {border-color:var(--v2-blue)}
+@media(max-width:760px){.editor-routing .notice-dingtalk button{min-height:44px}}
 .editor-routing .v2-plan-options {margin-top:8px}
 .editor-section-title {display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px;color:var(--v2-ink)}
 .editor-section-title>svg {color:var(--v2-blue)}

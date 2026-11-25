@@ -64,8 +64,15 @@ def session_engineer_professions(auth, session):
     return engineer_professions(profile(identity)) if identity and callable(profile) else None
 
 
-def profession_query(auth, session):
+def profession_query(auth, session, *, view=None):
+    """Optional profession selection for authorized list and detail reads."""
+    if view == 'all':
+        return {}
     professions = session_engineer_professions(auth, session)
+    if view == 'own':
+        return {'professions': frozenset(professions)} if professions is not None else {}
+    if view:
+        return {'professions': profession_codes(view[:64])}
     return {'professions': professions} if professions is not None else {}
 
 
@@ -84,6 +91,8 @@ def profession_visible(professions, value):
     if professions is None:
         return True
     codes = profession_codes(value)
+    if isinstance(professions, frozenset):
+        return bool(codes & professions)
     return not codes or any(code in codes for code in professions)
 
 

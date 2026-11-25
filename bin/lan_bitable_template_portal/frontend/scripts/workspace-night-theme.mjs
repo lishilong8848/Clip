@@ -71,6 +71,7 @@ export default function workspaceNightTheme() {
     for(const rule of rules) {
       const selectors=postcss.list.comma(rule.selector).filter(selector=>!/data-v2-theme|weather-lighthouse|\.wl-|\.lighthouse|\.assistant-|\.bot-|signature-pad|signature-canvas|print-sheet|\.sheet-(?:table-wrap|preview-table|signers|image-warning)\b/.test(selector));
       if(!selectors.length)continue;
+      const rootFallback=selectors.every(selector=>/^(?:html|:root|\.workspace-v2)$/.test(selector));
       let excluded=false;
       for(let parent=rule.parent;parent;parent=parent.parent)if(parent.type==='atrule'&&(/keyframes/.test(parent.name)||/print|forced-colors/.test(parent.params)))excluded=true;
       if(excluded)continue;
@@ -81,6 +82,8 @@ export default function workspaceNightTheme() {
       const variant=/:active/.test(rule.selector)?'pressed':/:hover|:focus/.test(rule.selector)?'hover':'accent';
       rule.each(decl=>{
         if(decl.type!=='decl')return;
+        // Keep root fallbacks below the live palette aliases in night.css.
+        if(rootFallback&&/^--v2-(?:bg|ink|muted|border|blue)$/.test(decl.prop))return;
         const role=decl.prop==='fill'&&/(?:\btext\b|label)/.test(rule.selector)?'text':roleFor(decl.prop);
         if(!role)return;
         const value=(accentFill||literalAccent)&&decl.prop==='color'&&/^(?:white|#fff|#ffffff)$/i.test(decl.value)?literalAccent?'var(--v2-palette-on-accent)':'var(--v2-on-accent, #14202a)':/url\(|light-dark\(|var\(--(?:lh-|bot-)/.test(decl.value)?decl.value:decl.value.replace(colorToken,color=>paletteColor(color,role,dark,variant));

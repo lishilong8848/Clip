@@ -17,6 +17,10 @@
         <ImpersonationBanner v-if="user.impersonation" :info="user.impersonation" @expired="impersonationExpired=$event" @leaving="impersonationLeaving=true" />
         <TopNavigation v-if="desktopNavigation && !impersonationBlocked && loggedIn && !publicLink && !printMode && user.role !== 'guest'" :key="identityKey" :groups="menuGroups" :selected="selectedMenu" @select="selectMenu">
           <template #account>
+            <button v-if="menuGroups.length>1" type="button" class="topnav-apps" aria-label="全部应用" title="全部应用"
+              :aria-current="view==='functions'?'page':undefined" @click="selectMobileTab('functions')">
+              <Grid2X2 :size="16" aria-hidden="true"/><span>全部应用</span>
+            </button>
             <WorkbenchWeather v-if="workbenchActive&&!user.impersonation" :identity="identityKey" />
             <NDropdown trigger="click" placement="bottom-end" :show="accountMenuOpen" :options="accountOptions" :node-props="accountNodeProps" @update:show="accountMenuOpen=$event" @select="selectAccountAction">
               <NButton data-v2-navigation quaternary class="topnav-account" :aria-label="'账户菜单：'+user.name" :disabled="logoutBusy"><UserRound :size="22" /><span class="topnav-username">{{ user.name }}</span><ChevronDown aria-hidden="true" :size="14" /></NButton>
@@ -99,7 +103,7 @@ import { sidebarGroups, sidebarRole } from './sidebarSections';
 import { logicalUrl, saveVersion, workspaceUrl, loginVersionUrl } from './version';
 import { navigate, navigateBack, registerNavigationGuard, runNavigationAction } from './navigation';
 import { theme,nightTheme,nightMode,loadNightMode,loadPalette } from './theme';
-import vnetLogo from '../../public/assets/vnet-logo.png?inline';
+import vnetLogo from '../assets/vnet-logo-transparent.png?inline';
 import NavThemePicker from './NavThemePicker.vue';
 import MobileNavigation from './MobileNavigation.vue';
 import TopNavigation from './TopNavigation.vue';
@@ -448,8 +452,8 @@ watch([route,checking,loggedIn,denied],()=>{
   navigate(home,{replace:true});
   handoverOpen.value=true;
 },{immediate:true});
-onMounted(()=>{void loadAuth();window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
-onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
+onMounted(()=>{void loadAuth();window.addEventListener('focus',visibility);window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
+onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('focus',visibility);window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
 </script>
 <style scoped>
 .v2-shell.has-impersonation>.impersonation-banner{margin:0 10px}

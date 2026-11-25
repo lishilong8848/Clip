@@ -3898,6 +3898,8 @@ def install_daily_inspection(app, controller, runtime):
                 if submitted and not can_write_scope:
                     raise RiskError('只有本楼有权限的人员可以带入本机填写。', 403)
                 form_only = action == 'day-sheet' and payload.get('form_only') is True
+                browse_professions = form_only and payload.get('browse_professions') is True and not submitted
+                report_professions = None if browse_professions else professions
                 summary_only = form_only and payload.get('summary_only') is True
                 lookup = payload.get('lookup') if form_only and not summary_only else None
                 lookup_round = payload.get('lookup_round') if lookup else None
@@ -3919,14 +3921,14 @@ def install_daily_inspection(app, controller, runtime):
                     include_active=viewer or can_write_scope or scope in home_scopes,
                     drafts=submitted, active_id=payload.get('active_id'), summary_only=summary_only, view_sheet=sheet_filter,
                     lookup=lookup.strip().casefold() if lookup else None, lookup_round=lookup_round)
-                if professions is not None:
-                    report_args['professions'] = professions
+                if report_professions is not None:
+                    report_args['professions'] = report_professions
                 report = await asyncio.to_thread(inspection_report, svc, scope, payload.get('date'), owner,
                     user.get('name') or owner, archive_mode=archive_mode, **report_args)
                 if action == 'day-export' and report['archive_incomplete']:
                     report = await asyncio.to_thread(inspection_report, svc, scope, report['date'], owner,
                         user.get('name') or owner, archive_mode='refresh', **report_args)
-                if action == 'day-sheet' and archive_mode == 'refresh' and not lookup:
+                if action == 'day-sheet' and archive_mode == 'refresh' and not lookup and not browse_professions:
                     current_day, _ = duty_period(dt.datetime.now(CN))
                     if report['date'] == current_day and not any(item.get('source_locked') for item in report['rounds']):
                         source_wake[scope].set()
@@ -3936,7 +3938,7 @@ def install_daily_inspection(app, controller, runtime):
                 if form_only:
                     for item in report['rounds']:
                         item.pop('sheets', None)
-                if action=='day-sheet' and professions is not None:
+                if action=='day-sheet' and report_professions is not None:
                     allowed = {form_sheet_key(template['name'], sheet['name']) for template in report['original_templates']
                                for sheet in template['sheets']}
                     report['original_templates'] = inspection_templates_for_sheets(display_templates(scope), allowed)
@@ -3944,10 +3946,10 @@ def install_daily_inspection(app, controller, runtime):
                     report.pop('original_templates',None)
                 elif action=='day-sheet':
                     report['original_templates']=display_templates(scope)
-                report['template_version'] = template_version() if professions is None else digest([template_version(), professions])
-                report['can_edit_history'] = bool((viewer or can_manage or (local_write and scope in home_scopes)) and not session.get('impersonation') and session.get('source') != 'admin_impersonation')
+                report['template_version'] = template_version() if report_professions is None else digest([template_version(), report_professions])
+                report['can_edit_history'] = bool(not browse_professions and (viewer or can_manage or (local_write and scope in home_scopes)) and not impersonating)
                 if action == 'day-sheet':
-                    report['can_edit_exemptions'] = bool(can_manage and not impersonating
+                    report['can_edit_exemptions'] = bool(not browse_professions and can_manage and not impersonating
                         and await asyncio.to_thread(auth.is_admin, session))
                 report['draft_key'] = hashlib.sha256(f'{owner}:{scope}:{report["date"]}'.encode()).hexdigest()
                 if action == 'day-export':

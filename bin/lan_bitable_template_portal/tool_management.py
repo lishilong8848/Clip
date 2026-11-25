@@ -330,12 +330,13 @@ class ToolManagement(ToolManagementLifecycle, ToolTemplateLibrary, ToolWorkspace
     def supervisor(cls, actor, scope):
         return can_scope(actor, scope) and (actor.get('category') == 'supervisor' or '主管' in (actor.get('position') or ''))
 
-    def available_to(self, actor):
+    @classmethod
+    def available_to(cls, actor):
         try:
-            self.access(actor)
+            cls.access(actor)
         except RiskError:
             return False
-        return bool(self.scrap_approver(actor)) or any(can_scope(actor, scope) for scope in BUILDINGS)
+        return bool(cls.scrap_approver(actor)) or any(can_scope(actor, scope) for scope in BUILDINGS)
 
     def configuration_people(self, actor):
         self.access(actor)

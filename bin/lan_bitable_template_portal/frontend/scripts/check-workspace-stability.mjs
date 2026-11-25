@@ -72,7 +72,7 @@ try{
   await page.evaluate(()=>window.dispatchEvent(new Event('auth-account-changed')));
   await authStarted;
   await page.getByRole('button',{name:'退出登录',exact:true}).click();
-  await page.getByRole('tab',{name:'账号密码登录',exact:true}).waitFor();
+  await page.getByRole('tab',{name:'姓名登录',exact:true}).waitFor();
   assert(pendingAuth);
   holdAuth=false;
   await pendingAuth.route.fulfill({json:{ok:true,data:pendingAuth.data}}).catch(()=>{});

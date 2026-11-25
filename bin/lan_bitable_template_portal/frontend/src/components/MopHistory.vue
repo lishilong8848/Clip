@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, ref, watch } from 'vue';
 import { Download, RefreshCw, Search } from 'lucide-vue-next';
 import { downloadFile, requestJson } from '../api/client';
+import {defaultProfessionView,professionChoices,useProfessionUser} from '../workspace-v2/professionBrowse';
 import RecordViewSwitch from './RecordViewSwitch.vue';
 
 type Attachment = {id:string;name:string};
@@ -9,7 +10,10 @@ type Row = {record_id:string;title:string;building:string;specialty:string;cycle
 const props = defineProps<{scope:string; scopeOptions:{label:string;value:string}[]}>();
 defineEmits<{'update:scope':[scope:string]}>();
 const view = ref<'cards'|'table'>('cards');
-const search = ref(''), query = ref(''), specialty = ref(''), options = ref<string[]>([]);
+const professionUser = useProfessionUser();
+const search = ref(''), query = ref(''), specialty = ref(defaultProfessionView(professionUser?.value)), options = ref<string[]>([]);
+const specialties=computed(()=>professionChoices(professionUser?.value,
+  [...new Set(['电气','暖通','弱电','消防',...options.value])]));
 const page = ref(1), total = ref(0), pageSize = ref(20), revision = ref(0);
 const records = ref<Row[]>([]), busy = ref(false), error = ref(''), downloadError = ref(''), downloading = ref('');
 const pages = computed(()=>Math.max(1,Math.ceil(total.value/pageSize.value)));
@@ -20,7 +24,7 @@ function applySearch() {
 watch(()=>props.scope,()=>{
   downloadRequest?.abort();
   page.value=1;
-  specialty.value='';
+  specialty.value=defaultProfessionView(professionUser?.value);
   options.value=[];
 });
 const endpoint='/api/engineer/mop/history';
@@ -31,7 +35,7 @@ watch([()=>props.scope,query,specialty,page,revision],async ([scope,term,major,n
   records.value=[];
   error.value=downloadError.value='';
   try {
-    const params=new URLSearchParams({scope,search:term,specialty:major,page:String(number)});
+    const params=new URLSearchParams({scope,search:term,profession_view:major||'all',page:String(number)});
     if(old?.length && tick!==old[4])params.set('refresh','1');
     const data=await requestJson(endpoint+'?'+params,{signal:controller.signal,timeoutMs:30000,cache:'no-store'});
     if(controller.signal.aborted)return;
@@ -55,7 +59,7 @@ async function download(row:Row,file:Attachment) {
   downloadError.value='';
   try {
     await downloadFile(endpoint+'/'+encodeURIComponent(row.record_id)+'/'+encodeURIComponent(file.id)+'?'
-      +new URLSearchParams({scope:props.scope}),{signal:request.signal,timeoutMs:60000});
+      +new URLSearchParams({scope:props.scope,profession_view:specialty.value||'all'}),{signal:request.signal,timeoutMs:60000});
   } catch(cause) {
     if(!request.signal.aborted)downloadError.value=cause instanceof Error?cause.message:'附件下载失败，请重试。';
   } finally {
@@ -75,8 +79,7 @@ onBeforeUnmount(()=>downloadRequest?.abort());
           <option v-for="item in scopeOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
         </select>
         <select v-model="specialty" data-native-select aria-label="筛选专业" @change="page=1">
-          <option value="">全部专业</option>
-          <option v-for="option in options" :key="option" :value="option">{{ option }}</option>
+          <option v-for="option in specialties" :key="option.value" :value="option.value">{{ option.label }}</option>
         </select>
         <input v-model="search" type="search" aria-label="搜索填写记录" placeholder="通告、日期或附件">
         <button type="submit" aria-label="查询填写记录" title="查询"><Search :size="16" aria-hidden="true"/></button>

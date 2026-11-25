@@ -10,7 +10,7 @@
 .workspace-v2 .v2-sidebar-bottom{border-color:#ffffff15}.workspace-v2 .v2-sidebar button{color:#c6d3cc!important}
 .workspace-v2 .v2-header{height:62px;--head-height:62px;border-color:#dce4df}.workspace-v2 .v2-shell{--head-height:62px;--nav-width:212px}.workspace-v2 .v2-shell.is-collapsed{--nav-width:64px}
 .workspace-v2 .v2-context{min-height:42px;margin-bottom:12px;border-color:#d9e2dd}.workspace-v2 .v2-main{padding-inline:26px}
-.workspace-v2 .v2-main :focus-visible{outline-color:#087b69}
+.workspace-v2 .v2-main :focus-visible{outline-color:var(--v2-blue,#087b69)}
 .v2-dashboard{padding:0 0 24px}.v2-dashboard-heading{display:flex;align-items:center;justify-content:space-between;gap:20px;margin:12px 0 16px;min-height:40px}
 .v2-dashboard-heading h1{font-size:24px;line-height:1.4;margin:0;color:#1f332a;font-weight:650}
 .v2-dashboard-title{display:flex;align-items:center;gap:16px;min-width:0}.v2-dashboard-title time{padding-left:16px;border-left:1px solid #ccd8d0;font-size:12px;color:#617367;font-variant-numeric:tabular-nums;white-space:nowrap}

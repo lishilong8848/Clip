@@ -362,12 +362,13 @@
 </template>
 
 <script setup lang="ts">
-import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef } from 'vue';
+import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import ToolWorkbookInput from './ToolWorkbookInput.vue';
 import {boxParts,displayToolDate,type ToolDateKind} from './toolWorkbookFields';
 import { NAlert, NButton, NCheckbox, NEmpty, NInput, NModal, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { requestBinaryJson, requestJson, requestPeople } from '../api/client';
-import { toolProfession, toolProfessionOptions } from './tool-profession';
+import { toolProfessionOptions } from './tool-profession';
+import {defaultProfessionView,isProfessionEngineer,professionChoices,professionMatches,useProfessionUser} from '../workspace-v2/professionBrowse';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 
 type Kind = 'self' | 'external';
@@ -399,7 +400,7 @@ type Summary = { id: string; kind: Kind; status: string; revision?: number; item
 type Session = Summary & { revision: number; can_edit: boolean; items: Item[]; report_name?: string; actual?: string; legacy_draft?: boolean;
   inspection?: InspectionReport; inspection_expires_on?: string; layouts?: Record<string, Layout>; report_available?: boolean; binding_pending?: boolean };
 const emit = defineEmits<{ 'asset-history': [id: string]; 'inventory-status': [warning: string]; records: []; choose: []; 'records-refresh': [] }>();
-const props = defineProps<{ sessionId?: string; assetId?: string; scope?: string; recordsOnly?: boolean; followupOrderIds?: string[]; inventoryWarning?: string }>();
+const props = defineProps<{ sessionId?: string; assetId?: string; initialKind?: Kind; scope?: string; recordsOnly?: boolean; followupOrderIds?: string[]; inventoryWarning?: string }>();
 const reviewSignatures = reactive<Record<string, string>>({});
 const reviewDates = reactive<Record<string, string>>({});
 const reviewers = shallowRef<Record<string, { id: string; name: string }[]>>();
@@ -423,9 +424,11 @@ type Board = HistoryPage & { assets: Asset[]; templates: Template[]; warning?: s
 const api = '/api/tool-self-check/workspace';
 const board = shallowRef<Board>();
 const session = ref<Session>();
-const kind = ref<Kind>('self');
+const kind = ref<Kind>(props.initialKind || 'self');
+let pendingAssetId = !props.sessionId && kind.value==='external' ? props.assetId : undefined;
 const scope = ref(props.scope && props.scope !== 'ALL' ? props.scope : '');
-const profession = ref('');
+const professionUser=useProfessionUser();
+const profession = ref(defaultProfessionView(professionUser?.value));
 const search = ref('');
 const selectedIds = ref<string[]>([]);
 const selected = computed(() => new Set(selectedIds.value));
@@ -462,7 +465,7 @@ let openOperation: { key: string; id: string } | undefined;
 let strokeId: number | undefined;
 const recordsOpen = ref(!!props.recordsOnly);
 const recordAsset = ref<Asset>();
-const recordProfession = ref('');
+const recordProfession = ref(defaultProfessionView(professionUser?.value));
 const recordSessions = shallowRef<Summary[]>([]);
 const scopedRecordSessions = computed(() => {
   const followups = new Set(props.followupOrderIds || []);
@@ -472,10 +475,10 @@ const scopedRecordSessions = computed(() => {
     !followups.has(tool.order_id || '') && (!building || tool.scope === building)),
   })).filter(batch => batch.history_items.length);
 });
-const recordProfessionOptions = computed(() => toolProfessionOptions(scopedRecordSessions.value.flatMap(batch => batch.history_items || [])));
+const recordProfessionOptions = computed(() => professionChoices(professionUser?.value,toolProfessionOptions(scopedRecordSessions.value.flatMap(batch => batch.history_items || [])).slice(1).map(o=>o.value)));
 const visibleRecordSessions = computed(() => !recordProfession.value ? scopedRecordSessions.value :
   scopedRecordSessions.value.map(batch => ({ ...batch, history_items: (batch.history_items || []).filter(tool =>
-    toolProfession(tool.profession) === recordProfession.value) })).filter(batch => batch.history_items.length));
+    professionMatches(recordProfession.value,tool.profession,professionUser?.value)) })).filter(batch => batch.history_items.length));
 const recordCursor = shallowRef<HistoryPage['history_cursor']>();
 const scrapPhotoLimit = 3;
 const scrapPhotoMaxBytes = 1024 * 1024;
@@ -486,11 +489,13 @@ const assets = computed(() => board.value?.assets || []);
 const templates = computed(() => board.value?.templates || []);
 const scopeOptions = computed(() => [{ value: '', label: '全部楼栋' },
   ...[...new Set(assets.value.map(asset => asset.scope).filter(Boolean))].sort().map(value => ({ value, label: scopeLabel(value) }))]);
-const professionOptions = computed(() => toolProfessionOptions(assets.value));
+const professionOptions = computed(() => isProfessionEngineer(professionUser?.value)
+  ? professionChoices(professionUser?.value,[...new Set(['电气','暖通','弱电','消防',...toolProfessionOptions(assets.value).slice(1).map(o=>o.value)])])
+  : toolProfessionOptions(assets.value));
 const visibleAssets = computed(() => {
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return assets.value.filter(asset => (!scope.value || asset.scope === scope.value)
-    && (!profession.value || toolProfession(asset.profession) === profession.value)
+    && professionMatches(profession.value,asset.profession,professionUser?.value)
     && (!onlyCycle(asset) || onlyCycle(asset) === kind.value)
     && terms.every(term => [asset.name, asset.model, asset.brand, asset.location, asset.profession, scopeLabel(asset.scope)].join(' ').toLowerCase().includes(term)));
 });
@@ -578,6 +583,7 @@ function recordStatus(tool: HistoryItem) {
 function chooseKind(value: Kind) {
   if (value === kind.value) return;
   leave(() => {
+    pendingAssetId = undefined;
     kind.value = value;
     clearSelection();
     clearSession();
@@ -842,14 +848,23 @@ async function readBoard(refresh = false, legacyTemplates = false) {
   boardRead = controller;
   loading.value = true;
   try {
-    const data = await (refresh
-      ? requestJson(api + '/refresh', { method: 'POST', signal: controller.signal })
-      : read(api + (legacyTemplates ? '?legacy_templates=1' : ''), controller.signal)) as Board;
+    const broad = isProfessionEngineer(professionUser?.value) && profession.value!=='own';
+    const params = new URLSearchParams();
+    if (broad) params.set('profession_view','all');
+    if (legacyTemplates) params.set('legacy_templates','1');
+    const refreshed = refresh ? await requestJson(api+'/refresh',{method:'POST',signal:controller.signal}) as Board : undefined;
+    const data = refreshed&&!broad ? refreshed : await read(api+(params.size?'?'+params:''),controller.signal) as Board;
     if (!controller.signal.aborted) {
       board.value = data;
       if (typeof data.inventory_error === 'string') emit('inventory-status', data.inventory_error);
       const ids = new Set(data.assets.filter(eligible).map(asset => asset.id));
       selectedIds.value = selectedIds.value.filter(id => ids.has(id));
+      if (pendingAssetId) {
+        const asset = data.assets.find(row => row.id === pendingAssetId && (!scope.value||row.scope===scope.value));
+        if (asset && selectable(asset) && asset.plan?.mode !== 'blocked') toggleAsset(asset.id, true);
+        else error.value = '这台工具当前无法继续送检，请核对工具清单。';
+        pendingAssetId = undefined;
+      }
     }
   } catch (cause) {
     if (!controller.signal.aborted) error.value = message(cause);
@@ -857,6 +872,9 @@ async function readBoard(refresh = false, legacyTemplates = false) {
     if (boardRead === controller) loading.value = false;
   }
 }
+watch(profession,(value,previous)=>{
+  if (isProfessionEngineer(professionUser?.value) && (value==='own')!==(previous==='own'))void readBoard();
+});
 async function perform(action: string, operation: () => Promise<void>) {
   if (busy.value || lifetime.signal.aborted) return;
   busy.value = action;

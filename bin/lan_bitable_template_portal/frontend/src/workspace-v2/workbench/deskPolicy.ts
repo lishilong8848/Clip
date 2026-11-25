@@ -9,7 +9,7 @@ export function deskRole(user:Dict):DeskRole|undefined {
   if (['L0','L1','L2','L3','L4'].includes(user.level)) return user.level as DeskRole;
 }
 
-const common:SourceId[]=['notices','events','engineer_mop','repair_management','critical_guard','risk_inspection','drills','accounts','cabinet','water','tool_management'];
+const common:SourceId[]=['notices','events','engineer_mop','repair_management','critical_guard','risk_inspection','drills','accounts','cabinet','water','tool_management','tool_external'];
 export const deskSources:Record<DeskRole,SourceId[]> = {
   L0:[...common,'ali_confirmation'], L1:[...common,'ali_confirmation'],
   L2:['notices','repair_management','events','engineer_mop','water'],
@@ -27,6 +27,7 @@ export function deskTaskVisible(role:DeskRole|undefined,user:Dict,item:WorkItem,
   if ((role==='L3'||role==='L4'||role==='duty')&&(!ownScope||!inDeskScope(item,ownScope))) return false;
   const engineer = role!=='L0'&&role!=='L1'&&role!=='duty'&&(user.category==='engineer'||!user.category&&role==='L2');
   if (engineer && !deskProfessionVisible(user, item.specialty)) return false;
+  if (item.kind==='tool_management'||item.kind==='tool_external') return true;
   if (['notices','events','repair_management'].includes(item.kind)) {
     if (role==='L0'||role==='L1'||['operator','shift_leader','duty','supervisor','manager','administrator'].includes(user.category)) return true;
     if (engineer) return true;

@@ -143,6 +143,21 @@ class ToolManagementLifecycleTest(TestCase):
         self.assertEqual(failure['certificate']['valid_until'], '')
         self.assertEqual(failure['certificate']['validity'], 'unqualified')
 
+    def test_workbench_lists_due_inspections_in_scope_without_duplicate_open_items(self):
+        fields = {'self_cycle': '', 'external_cycle': '一年', 'external_last': '2025-11-21'}
+        self.asset('recDue', profession='电气', **fields)
+        self.asset('recBuildingB', scope='B', **fields)
+        self.asset('recLater', **(fields | {'external_last': '2025-11-23'}))
+        opened = self.asset('recOpened', **fields)
+        self.order(opened, 'already-open', '2026-11', '2026-11-21', kind='external', workspace=True)
+        page = self.service.workspace_history(self.a, kind='external', include_due=True)
+        self.assertEqual([(row['id'], row['due']) for row in page['due_inspections']], [('recDue', '2026-11-21')])
+        self.assertNotIn('due_inspections', self.service.workspace_history(self.a, kind='self', include_due=True))
+        weak_current = self.a | {'category': 'engineer', 'level': 'L2', 'specialties': ['弱电']}
+        self.assertEqual(self.service.workspace_history(weak_current, kind='external', include_due=True)['due_inspections'], [])
+        inventory = self.service.workspace_list(weak_current, browse_all_professions=True)['assets']
+        self.assertEqual(next(row['eligible_kinds'] for row in inventory if row['id']=='recDue'), [])
+
     def test_delivers_by_building_at_beijing_nine_and_only_with_actionable_items(self):
         carryover = self.asset('carryover-A')
         waiting = self.asset('waiting-B', 'B')

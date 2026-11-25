@@ -212,6 +212,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NSelect } from 'naive-ui';
 import { ArrowDown, ArrowLeft, ArrowUp, ChevronRight, ImagePlus, Pencil, Plus, RefreshCw, Search, Trash2, Upload } from 'lucide-vue-next';
 import { requestBinaryJson, requestJson } from '../api/client';
+import {defaultProfessionView,professionChoices,professionMatches,useProfessionUser} from '../workspace-v2/professionBrowse';
 import { registerNavigationGuard } from '../navigation';
 import EopDisposition from './EopDisposition.vue';
 import { groupEopDisposition } from './eopDisposition';
@@ -238,7 +239,8 @@ const dispositionGroups = computed(() => groupEopDisposition(record.value?.field
 const opening = shallowRef<Row>();
 const editing = ref(false);
 const search = ref('');
-const specialty = ref('');
+const professionUser=useProfessionUser();
+const specialty = ref(defaultProfessionView(professionUser?.value));
 const missing = ref('');
 const updatedAt = ref(0);
 const page = ref(1);
@@ -273,13 +275,16 @@ let pictureTarget: {record: Detail; stepKey: string} | undefined;
 let stepKey = 0;
 let activeRead: AbortController | undefined;
 let disposed = false;
-const specialties = computed(() => [{ label: '全部专业', value: '' }, ...Array.from(new Set(rows.value.map(row => row.fields['专业']).filter(Boolean))).sort().map(value => ({ label: value, value }))]);
-const specialtyCounts = computed(() => specialties.value.slice(1).map(item=>({name:item.value,count:rows.value.filter(row=>row.fields['专业']===item.value).length})));
+const specialties = computed(() => professionChoices(professionUser?.value,
+  [...new Set(['电气','暖通','弱电','消防',...rows.value.map(row=>row.fields['专业']).filter(Boolean)])]));
+const specialtyCounts = computed(() => specialties.value.filter(item=>item.value&&item.value!=='own')
+  .map(item=>({name:item.value,count:rows.value.filter(row=>professionMatches(item.value,row.fields['专业'])).length}))
+  .filter(item=>item.count));
 const missingOptions = [{label:'全部资料',value:''},{label:'缺少步骤',value:'has_steps'},{label:'缺少模板',value:'has_template'},{label:'缺少图片',value:'has_images'}];
 const missingCounts = computed(() => [{key:'has_steps',label:'步骤',count:rows.value.filter(row=>!row.has_steps).length},{key:'has_template',label:'模板',count:rows.value.filter(row=>!row.has_template).length},{key:'has_images',label:'图片',count:rows.value.filter(row=>!row.has_images).length}]);
 const filtered = computed(() => {
   const query = search.value.trim().toLowerCase();
-  return rows.value.filter(row => (!specialty.value || row.fields['专业'] === specialty.value) && (!priority.value || (row.fields['原优先级']||'等级未设置')===priority.value)
+  return rows.value.filter(row => professionMatches(specialty.value,row.fields['专业'],professionUser?.value) && (!priority.value || (row.fields['原优先级']||'等级未设置')===priority.value)
     && (!missing.value || !row[missing.value as 'has_steps'|'has_template'|'has_images'])
     && Object.values(row.fields).some(value => value.toLowerCase().includes(query)));
 });
@@ -356,8 +361,14 @@ async function read<T>(path: string, apply: (data:T) => void) {
     }
   }
 }
-function loadList(refresh=false) { return read<{items:Row[];updated_at?:number}>(api+'?priority_scope='+listMode.value+(refresh?'&refresh=1':''), data => { rows.value = data.items; updatedAt.value=data.updated_at || 0; }); }
-function changeListMode(mode:'p0'|'other'){if(busy.value||mode===listMode.value)return;listMode.value=mode;priority.value='';specialty.value='';missing.value='';search.value='';rows.value=[];page.value=1;void loadList();}
+function loadList(refresh=false) {
+  const params=new URLSearchParams({priority_scope:listMode.value});
+  if(professionUser)params.set('profession_view',specialty.value||'all');
+  if(refresh)params.set('refresh','1');
+  return read<{items:Row[];updated_at?:number}>(api+'?'+params, data => { rows.value = data.items; updatedAt.value=data.updated_at || 0; });
+}
+function changeListMode(mode:'p0'|'other'){if(busy.value||mode===listMode.value)return;listMode.value=mode;priority.value='';missing.value='';search.value='';rows.value=[];page.value=1;void loadList();}
+watch(specialty,()=>{if(professionUser)void loadList();});
 function applyRecord(data: Detail) {
   revokePictures();
   clearPictureDrag();
@@ -383,7 +394,8 @@ function openRecord(id: string) {
     opening.value = rows.value.find(row => row.id === id);
     void nextTick(focusRecordHeading);
   }
-  void read<Detail>(api+'/'+id, data => {
+  const view=professionUser?'?'+new URLSearchParams({profession_view:specialty.value||'all'}):'';
+  void read<Detail>(api+'/'+id+view, data => {
     applyRecord(data);
     void nextTick(focusRecordHeading);
   });

@@ -82,11 +82,11 @@
       <label class="ops-field">状态<select v-model="statusFilter" @change="stateFilter = ''"><option value="">全部状态</option><option v-for="s in statusOptions" :key="s" :value="s">{{ s }}</option></select></label>
       <label class="ops-field">等级<select v-model="levelFilter"><option value="">全部等级</option><option v-for="level in levelOptions" :key="level" :value="level">{{ level }}</option></select></label>
       <label class="ops-field">来源<select v-model="sourceFilter"><option value="">全部来源</option><option v-for="source in sourceOptions" :key="source" :value="source">{{ source }}</option></select></label>
-      <label class="ops-field">专业<select v-model="specialtyFilter"><option value="">全部专业</option><option v-for="s in specialtyOptions" :key="s" :value="s">{{ s }}</option></select></label>
+      <label class="ops-field">专业<select v-model="specialtyFilter"><option v-for="s in specialtyOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
     </div>
     <div class="ops-filter-summary">
       <span v-for="item in visibleFilterSummaryItems" :key="item.label" class="ops-chip">{{ item.label }} · {{ item.value }}</span>
-      <button type="button" class="ops-text-button" :disabled="!activeFilterCount" @click="clearFilters">清空筛选</button>
+      <button type="button" class="ops-text-button" :disabled="!activeFilterCount" @click="clearFilters(true)">清空筛选</button>
     </div>
     <p v-if="loading" class="ops-empty" role="status">正在读取事件明细…</p>
     <div v-else-if="filteredEvents.length && filteredEvents.length <= 50" class="ops-event-ledger">

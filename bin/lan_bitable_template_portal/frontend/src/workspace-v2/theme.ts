@@ -17,6 +17,16 @@ export const mineral={
 };
 export const nightMode=ref(false);
 export const palettes={
+  panorama:{
+    light:{...mineral.light,bg:'#f8fafc',surface:'#ffffff',soft:'#f1f5f9',text:'#0f172a',muted:'#475569',
+      border:'#e2e8f0',header:'#f8fafc',sidebar:'#f8fafc',sidebarEnd:'#f8fafc',navText:'#334155',navMuted:'#475569',
+      accent:'#2563eb',accentText:'#1d4ed8',hover:'#1d4ed8',pressed:'#1e40af',selection:'#eff6ff',
+      navSelected:'#eff6ff',navHover:'#f1f5f9'},
+    dark:{...mineral.dark,bg:'#111827',surface:'#1e293b',soft:'#182234',text:'#f1f5f9',muted:'#cbd5e1',
+      border:'#3b4b62',header:'#1e293b',sidebar:'#182234',sidebarEnd:'#111827',navText:'#f1f5f9',navMuted:'#cbd5e1',
+      accent:'#93c5fd',accentText:'#bfdbfe',hover:'#bfdbfe',pressed:'#7db3f7',onAccent:'#172554',onAccentText:'#172554',
+      selection:'#223961',navSelected:'#223961',navHover:'#27364c'},
+  },
   mineral,
   ocean:{
     light:{...mineral.light,bg:'#f1f5fb',surface:'#f9fbff',soft:'#eaf0f8',header:'#203c60',sidebar:'#f1f5fb',sidebarEnd:'#f1f5fb',
@@ -70,7 +80,7 @@ export const palettes={
   },
 };
 export type PaletteId=keyof typeof palettes;
-export const paletteId=ref<PaletteId>('mineral');
+export const paletteId=ref<PaletteId>('panorama');
 const activeColors=computed(()=>palettes[paletteId.value][nightMode.value?'dark':'light']);
 const modeKey=(id:string)=>'clipflow:workspace-night-mode:'+(id||'visitor');
 const paletteKey=(id:string)=>'clipflow:workspace-color-palette:'+(id||'visitor');
@@ -81,7 +91,7 @@ export function loadNightMode(userId:string) {
   applyNightMode(dark);
 }
 export function loadPalette(userId:string) {
-  paletteId.value='mineral';
+  paletteId.value='panorama';
   try {
     const value=localStorage.getItem(paletteKey(userId));
     if(value&&Object.prototype.hasOwnProperty.call(palettes,value))paletteId.value=value as PaletteId;
@@ -104,7 +114,7 @@ watchEffect(()=>{
 });
 
 const controls:GlobalThemeOverrides = {
-  common:{borderRadius:'10px',borderRadiusSmall:'6px',fontSize:'var(--cf-font-body)',fontFamily:'var(--cf-font-family)',
+  common:{borderRadius:'8px',borderRadiusSmall:'6px',fontSize:'var(--cf-font-body)',fontFamily:'var(--cf-font-family)',
     cubicBezierEaseInOut:'cubic-bezier(.4,0,.2,1)',cubicBezierEaseOut:'cubic-bezier(.22,.61,.36,1)',cubicBezierEaseIn:'cubic-bezier(.55,0,1,.45)'},
   Switch:{railWidthMedium:'48px',railHeightMedium:'28px',buttonWidthMedium:'22px',buttonHeightMedium:'22px',buttonWidthPressedMedium:'30.8px',railWidthSmall:'36px',railHeightSmall:'20px',buttonWidthSmall:'14px',buttonHeightSmall:'14px',buttonWidthPressedSmall:'17px'},
 };

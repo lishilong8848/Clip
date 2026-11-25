@@ -159,8 +159,8 @@ function deleteFolder(ok: boolean) {
 
 <style scoped>
 .sk-library { --sk-ink:var(--v2-ink,#203b43); --sk-muted:color-mix(in srgb,var(--sk-ink) 78%,var(--sk-face)); --sk-edge:color-mix(in srgb,var(--sk-ink) 16%,transparent); --sk-face:var(--soft-face,#f0f4f4); --sk-field:var(--soft-field,#eaf0f0); display:grid; align-content:start; gap:12px; min-width:0; padding:clamp(10px,2vw,24px); color:var(--sk-ink); }
-.sk-cover,.sk-shelf,.sk-library :deep(.sk-upload) { min-width:0; border:1px solid var(--sk-edge); border-radius:17px; background:var(--sk-face); box-shadow:var(--soft-raised,0 3px 9px #263d480e); }
-.sk-cover {display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:14px 18px; background:linear-gradient(108deg,color-mix(in srgb,var(--sk-face) 70%,#8dd4f5),color-mix(in srgb,var(--sk-face) 83%,#b8e8d1));}
+.sk-cover,.sk-shelf,.sk-library :deep(.sk-upload) { min-width:0; border:1px solid var(--sk-edge); border-radius:var(--cf-radius-panel); background:var(--sk-face); box-shadow:var(--soft-raised,0 3px 9px #263d480e); }
+.sk-cover {display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:14px 18px; background:var(--soft-sky);}
 .sk-heading,.sk-commands,.sk-switch,.sk-search,.sk-context,.sk-batch,.sk-pages,.sk-meta {display:flex; align-items:center; gap:8px;}
 .sk-heading {flex:1 1 180px;} h1 {font-size:clamp(20px,2vw,28px); margin:0; letter-spacing:.02em; line-height:1.2;}
 .sk-symbol {display:grid; place-items:center; width:42px; height:42px; border-radius:14px; background:var(--sk-face); color:var(--v2-blue,#25668b);}

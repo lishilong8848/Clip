@@ -62,11 +62,13 @@ def install_tool_self_check_routes(app, controller, service, read_actor, same_or
                 if request.method == 'GET':
                     if path == 'workspace':
                         return response(await asyncio.to_thread(svc.workspace_list, actor,
-                            legacy_templates=request.query_params.get('legacy_templates') == '1'))
+                            legacy_templates=request.query_params.get('legacy_templates') == '1',
+                            browse_all_professions=request.query_params.get('profession_view') == 'all'))
                     if path == 'workspace/history':
                         query = request.query_params
                         return response(await asyncio.to_thread(svc.workspace_history, actor, query.get('before', ''),
-                                                               query.get('id', ''), query.get('kind', ''), query.get('asset_id', '')))
+                                                               query.get('id', ''), query.get('kind', ''), query.get('asset_id', ''),
+                                                               include_due=query.get('include_due') == '1'))
                     if path.endswith('/report-file'):
                         return report_response(await asyncio.to_thread(svc.workspace_report_attachment, actor, identity))
                     if path.endswith('/people'):

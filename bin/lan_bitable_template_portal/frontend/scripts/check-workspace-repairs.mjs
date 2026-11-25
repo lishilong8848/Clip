@@ -60,14 +60,14 @@ async function handleFixture(route,layouts){
     if(await layouts.handle(route,'isolated-person-A'))return;
     fixture.reads.push({path:url.pathname,method:request.method(),params:Object.fromEntries(url.searchParams)});
     const ok=data=>route.fulfill({json:{ok:true,data}});
-    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-person-A',name:'隔离验收人员',role:'admin',level:'L1',category:'engineer',specialties:['电气'],can_delete_business:fixture.canDelete,modules:fixture.modules},scope_options:fixture.scopes});
+    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:{open_id:'isolated-person-A',name:'隔离验收人员',role:'admin',level:'L1',category:'engineer',specialties:['电气'],can_delete_business:fixture.canDelete,modules:fixture.modules,...fixture.user},scope_options:fixture.scopes});
     if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'isolated-repairs'}});
     if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
     if(url.pathname==='/api/repair-management/changes')return ok({changes:[],cursor:0});
     if(url.pathname==='/api/repair-management/status'){
       if(fixture.failStats)return route.fulfill({status:503,json:{ok:false,error:'隔离测试：状态暂不可用'}});
       const state=url.searchParams.get('state'),limit=Number(url.searchParams.get('limit')||30),offset=Number(url.searchParams.get('offset')||0);
-      if(state==='without_followup'&&fixture.statusDelay)await new Promise(resolve=>setTimeout(resolve,fixture.statusDelay));
+      if((state==='without_followup'||fixture.statusRegression&&limit===1)&&fixture.statusDelay)await new Promise(resolve=>setTimeout(resolve,fixture.statusDelay));
       const total=state==='no_followup'?(fixture.noFollowupCount??(fixture.largeFilter?65:3)):state==='without_followup'?2:28;
       const records=limit===1?[]:Array.from({length:Math.max(0,Math.min(limit,total-offset))},(_,i)=>project(offset+i+1,{state,workflow:state==='without_followup'?'未开始':'维修中',followup_count:state==='in_progress'?1:0}));
       return ok({stats:{total:30,without_followup:2,in_progress:28,no_followup:fixture.noFollowupCount??(fixture.largeFilter?65:3),completed_total:5},records,total,offset,has_more:offset+records.length<total});
@@ -75,6 +75,14 @@ async function handleFixture(route,layouts){
     if(url.pathname==='/api/repair-management/records'&&request.method()==='GET'){
       if(fixture.delayRecords)await new Promise(resolve=>setTimeout(resolve,fixture.delayRecords));
       if(fixture.failRecords)return route.fulfill({status:503,json:{ok:false,error:'隔离测试：列表读取失败'}});
+      if(fixture.statusRegression){
+        const profession=url.searchParams.get('profession_view');
+        const records=[
+          project(1,{specialty:'弱电',title:'弱电维修验收单'}),
+          project(2,{specialty:'电气',title:'电气维修验收单'}),
+        ].filter(item=>profession==='all'||item.specialty===(profession==='own'?'弱电':profession));
+        return ok({fields:projectFields,records,total:records.length,offset:0});
+      }
       const completed=url.searchParams.get('state')==='completed';
       return ok({fields:projectFields,records:completed?[project(90,{workflow:'维修完成',progress_percent:100,is_completed:true,read_only:true})]:Array.from({length:30},(_,i)=>project(i+1)),total:completed?1:30,offset:0});
     }
@@ -185,6 +193,56 @@ async function checkWorkflowActions(page){
 }
 if(previewOnly){console.log('Isolated repair preview: '+origin+entry);await new Promise(()=>{});}
 try{
+  if(process.argv.includes('--status-regression')){
+    fixture.user={role:'building',level:'L2',specialties:['弱电']};
+    fixture.statusRegression=true;
+    const page=await newPage(390,850);
+    const filters=page.getByRole('navigation',{name:'维修项目状态'});
+    const chip=filters.getByRole('button',{name:/未开始/});
+    await chip.getByText('2',{exact:true}).waitFor();
+    assert(fixture.reads.some(row=>row.path.endsWith('/status')&&row.params.profession_view==='own'));
+    const records=page.locator('.repair-desk-record');
+    assert.equal(await records.count(),1);
+    assert.match(await records.first().innerText(),/弱电维修验收单/);
+    const profession=page.getByLabel('维修专业',{exact:true});
+    await profession.click();
+    const electrical=page.waitForRequest(req=>req.url().includes('/repair-management/status?')&&new URL(req.url()).searchParams.get('profession_view')==='电气');
+    await page.getByText('电气',{exact:true}).last().click();
+    await electrical;
+    await records.getByText('电气维修验收单',{exact:true}).waitFor();
+    assert.equal(await records.count(),1);
+    await openFirst(page,false);
+    await detail(page).getByText('当前项目只读。',{exact:true}).waitFor();
+    assert.equal(await detail(page).getByRole('button',{name:'保存修改',exact:true}).count(),0);
+    await page.keyboard.press('Escape');
+    await detail(page).waitFor({state:'hidden'});
+    await chip.getByText('2',{exact:true}).waitFor();
+    await chip.click();
+    await page.waitForFunction(()=>Boolean(window.__repairTestStream));
+    const statusReads=()=>fixture.reads.filter(row=>row.path.endsWith('/status')&&row.params.limit==='1').length;
+    const emit=()=>page.evaluate(()=>window.__repairTestStream.dispatchEvent(new MessageEvent('repair_change',{
+      lastEventId:'4',data:JSON.stringify({cursor:4,changes:[{id:4,entity_type:'project',action:'update',payload:{record_patch:{record_id:'project-1',specialty:'电气',workflow:'未开始'}}}]}),
+    })));
+    fixture.statusDelay=500;
+    const before=statusReads();
+    const refresh=page.waitForRequest(req=>req.url().includes('/repair-management/status?')&&new URL(req.url()).searchParams.get('limit')==='1');
+    await emit();
+    await refresh;
+    assert.equal(await chip.locator('b').innerText(),'2','keep the confirmed count during background refresh');
+    assert.equal(await page.getByText('读取状态数量',{exact:true}).count(),0);
+    await emit();
+    await page.waitForTimeout(850);
+    assert.equal(statusReads(),before+1,'ignore duplicate stream events');
+    assert.equal(await page.getByText(/项关联可自动修复/).count(),0);
+    await noOverflow(page);
+    assert.deepEqual(fixture.errors,[]);
+    await page.screenshot({path:path.join(output,'repair-status-mobile.png'),animations:'disabled'});
+    console.log('Repair status: own profession by default, explicit profession switch, stable counts and duplicate stream replay suppressed.');
+    await ctx.close();
+    await browser.close();
+    await new Promise(resolve=>server.close(resolve));
+    process.exit(0);
+  }
   if(process.argv.includes('--people-only')){
     const page=await newPage(390,850);
     await openFirst(page);

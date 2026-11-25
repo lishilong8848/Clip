@@ -109,14 +109,14 @@ class AccountBulkModuleTests(_TempDirTestCase):
         from starlette.requests import Request
         from lan_bitable_template_portal.module_access import module_denial
         from lan_bitable_template_portal.risk_inspection_routes import tool_management_access
-        from lan_bitable_template_portal.tool_management import ToolManagement
         from types import SimpleNamespace
+        from unittest.mock import Mock
 
         def tools_for(open_id, _name):
             return {**self.h.auth.account_profile(open_id), "id": "recA"}
 
-        service = ToolManagement.__new__(ToolManagement)
-        runtime = SimpleNamespace(tool_management=lambda: service, risk_inspection_actor=tools_for)
+        service = Mock(side_effect=RuntimeError('tool storage unavailable'))
+        runtime = SimpleNamespace(tool_management=service, risk_inspection_actor=tools_for)
         user = {"open_id": "ou_bulkA", "name": "隔离A"}
         session = {"user": user, "role": "building"}
         runtime.auth_manager = self.h.auth
@@ -159,6 +159,7 @@ class AccountBulkModuleTests(_TempDirTestCase):
         self.assertEqual(self.item("A")["scopes"], ["A"])
         self.manager.update({"changes": [self.change("A", ["maintenance"])]}, self.actor)
         self.assertFalse(tool_management_access(runtime, session, user))
+        service.assert_not_called()
 
     def test_verified_legacy_tool_special_grant_can_also_be_revoked(self):
         snapshot = self.h.login.snapshot

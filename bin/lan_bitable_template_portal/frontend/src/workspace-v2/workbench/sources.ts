@@ -7,7 +7,7 @@ import type { Dict } from '../client';
 import type { Role, Section } from './recipes';
 import { isMopBuilding, mopNoticeNeedsAction, noticeIsEnded } from '../../mopSelectionUtils';
 
-export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'accounts' | 'ali_confirmation' | 'inspection' | 'notice_plans' | 'pre_shift';
+export type SourceId = TodoRow['kind'] | 'events' | 'event_notices' | 'drills' | 'engineer_mop' | 'cabinet' | 'tool_management' | 'tool_external' | 'accounts' | 'ali_confirmation' | 'inspection' | 'notice_plans' | 'pre_shift';
 export type WorkItem = Omit<TodoRow, 'kind'> & { kind: SourceId; readOnly?:boolean; urgentEvent?:string };
 export type SourceResult = { rows: WorkItem[]; more?: boolean; delayed?: boolean; restricted?: boolean; note?: string; snapshot?: Dict };
 type Publish = (partial:SourceResult)=>void;
@@ -25,12 +25,12 @@ const labels = {
   critical_guard:'待填写重保', risk_inspection:'专项排查待办',
   water:'水耗待补', learning:'个人学练', signatures:'个人签名',
   event_notices:'事件', drills:'待完成演练', engineer_mop:'待处理维保单', cabinet:'待确认机柜批次',notice_plans:'计划通告',
-  tool_management:'待办工具记录', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',pre_shift:'班前检查',
+  tool_management:'工具自检', tool_external:'工具送检', accounts:'待审权限申请', ali_confirmation:'阿里截图确认', inspection:'日常巡检',pre_shift:'班前检查',
 };
 const sections: Record<SourceId,Source['section']> = {
   events:'operations', notices:'business', repair_management:'business',
   critical_guard:'operations', risk_inspection:'business', water:'operations', learning:'people', signatures:'people',
-  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',pre_shift:'operations',
+  event_notices:'business', drills:'operations', engineer_mop:'operations', cabinet:'operations', tool_management:'operations', tool_external:'operations', accounts:'people', ali_confirmation:'business', inspection:'operations',notice_plans:'business',pre_shift:'operations',
 };
 const accessDenied = (error:unknown) => [401,403].includes((error as {status?:number})?.status||0);
 type HomeContext = TodoContext & {role:Role; pending?:SourceId[]; accessLevel?:string; inspectionOnDuty?:boolean};
@@ -236,29 +236,48 @@ export function workbenchSources(ctx: HomeContext, get: TodoRead): Source[] {
         more:!!data.has_more};
     }});
   }
-  if ((ctx.role==='administrator'||['L0','L1'].includes(ctx.accessLevel||''))&&ctx.pending?.includes('tool_management')&&ctx.user.tool_management_enabled===true) {
-    const url=link('/risk-inspections',{view:'tool-self-check',tool_view:'followups'});
-    sources.push({id:'tool_management',label:labels.tool_management,section:sections.tool_management,url,async load(signal,pages) {
-      const rows:WorkItem[]=[];
-      let cursor:Record<string,string>|null=null;
-      for (let page=1;page<=pages;page++) {
-        const data=await get(scopedUrl('/api/tool-self-check/workspace/history',cursor||{}),signal);
-        for (const session of array(data.sessions)) {
-          if (!session.id) continue;
-          for (const item of array(session.history_items)) {
-            if (!item.id||!buildings.includes(item.scope)||item.order_status==='cancelled') continue;
-            const state=item.order_status==='review_pending'?'待审核':item.order_status==='pending'?'待填写'
-              : item.archive_status==='retrying'?'归档待重试':item.archive_status==='verifying'?'归档待核验':'';
-            if (!state) continue;
-            rows.push(row('tool_management',session.id+':'+item.id,item.scope,item.asset_name||'工具办理记录',state,
-              link('/risk-inspections',{scope:item.scope,view:'tool-self-check',tool_session:session.id,tool_asset:item.id})));
+  if (buildings.length&&ctx.user.tool_management_enabled===true&&ctx.user.modules?.includes('tool_management')) {
+    for(const [id,kind] of [['tool_management','self'],['tool_external','external']] as const) {
+      const external=kind==='external';
+      const toolsUrl=(params:Record<string,string>)=>link('/risk-inspections',{view:'tool-self-check',...params});
+      sources.push({id,label:labels[id],section:sections[id],url:toolsUrl({tool_view:external?'external':''}),async load(signal,pages) {
+        const rows:WorkItem[]=[];
+        let inventoryDelayed=false;
+        let cursor:Record<string,string>|null=null;
+        for (let page=1;page<=pages;page++) {
+          const data=await get(scopedUrl('/api/tool-self-check/workspace/history',{kind,...(external&&page===1?{include_due:'1'}:{}),...cursor}),signal);
+          if(external&&page===1) {
+            inventoryDelayed=Boolean(data.inventory_error);
+            for(const asset of array(data.due_inspections)){
+              if(!asset.id||!buildings.includes(asset.scope))continue;
+              const due=todoTimestamp(asset.due);
+              if(due===undefined)continue;
+              const status=asset.retest?'待复检':asset.due<beijingDate()?'送检已逾期':'送检即将到期';
+              rows.push(row(id,asset.id,asset.scope,asset.name||'待送检工具',status,
+                toolsUrl({scope:asset.scope,tool_view:'external',tool_asset:asset.id}),{
+                  dueAt:due+86399999,scheduledAt:beijingDate(),specialty:asset.profession,detail:[asset.model,asset.location].filter(Boolean).join(' · '),
+                }));
+            }
           }
+          for (const session of array(data.sessions)) {
+            if (!session.id||session.kind!==kind) continue;
+            for (const item of array(session.history_items)) {
+              if (!item.id||!buildings.includes(item.scope)||item.order_status==='cancelled') continue;
+              const state=item.order_status==='review_pending'?'待审核':item.order_status==='pending'?(external?'待填写报告':'待填写')
+                : item.archive_status==='retrying'?'归档待重试':item.archive_status==='verifying'?'归档待核验':'';
+              if (!state) continue;
+              rows.push(row(id,session.id+':'+item.id,item.scope,item.asset_name||labels[id],state,
+                toolsUrl({scope:item.scope,tool_session:session.id,tool_asset:item.id}),{
+                  specialty:item.profession,detail:[item.model,item.location].filter(Boolean).join(' · '),
+                }));
+            }
+          }
+          cursor=data.history_cursor?.before&&data.history_cursor?.id?{before:data.history_cursor.before,id:data.history_cursor.id}:null;
+          if (!cursor) break;
         }
-        cursor=data.history_cursor?.before&&data.history_cursor?.id?{before:data.history_cursor.before,id:data.history_cursor.id}:null;
-        if (!cursor) break;
-      }
-      return {rows,more:!!cursor};
-    }});
+        return {rows,more:!!cursor,delayed:inventoryDelayed};
+      }});
+    }
   }
   return sources;
 }

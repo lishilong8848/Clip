@@ -42,7 +42,7 @@
           </NButton>
         </nav>
         <ToolWorkspace v-if="view === 'workspace'" :key="linkedSession + ':' + linkedAsset" ref="workspace"
-          :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" @asset-history="historyAsset = $event"
+          :session-id="linkedSession" :asset-id="linkedAsset" :scope="scope" :initial-kind="toolView==='external'?'external':'self'" @asset-history="historyAsset = $event"
           @inventory-status="updateInventoryStatus" @records="selectView('followups')" />
         <ToolWorkspace v-else key="records" ref="workspace" records-only :scope="scope"
           :followup-order-ids="followupOrderIds" :inventory-warning="board?.inventory_error"
@@ -276,7 +276,8 @@ import { navigateBack, registerNavigationGuard } from '../navigation';
 import ToolInspectionReportFields, { emptyInspectionReport, inspectionReady, type InspectionReport } from './ToolInspectionReportFields.vue';
 import ToolAssetHistory from './ToolAssetHistory.vue';
 import ToolWorkspace from './ToolWorkspace.vue';
-import { toolProfession, toolProfessionOptions } from './tool-profession';
+import { toolProfessionOptions } from './tool-profession';
+import {defaultProfessionView,professionChoices,professionMatches,useProfessionUser} from '../workspace-v2/professionBrowse';
 const ToolManagementSettings = defineAsyncComponent(() => import('./ToolManagementSettings.vue'));
 
 const props = defineProps<{ scope?: string; embedded?: boolean; toolView?: string; toolSession?: string; toolAsset?: string; toolOrder?: string }>();
@@ -323,9 +324,10 @@ const historyAsset = ref('');
 const workspace = ref<InstanceType<typeof ToolWorkspace>>();
 const linkedSession = ref(/^[a-f0-9]{32}$/.test(props.toolSession || '') && /^rec[A-Za-z0-9]{1,119}$/.test(props.toolAsset || '')
   ? props.toolSession! : '');
-const linkedAsset = ref(linkedSession.value ? props.toolAsset! : '');
+const linkedAsset = ref((linkedSession.value || props.toolView==='external') && /^rec[A-Za-z0-9]{1,119}$/.test(props.toolAsset || '') ? props.toolAsset! : '');
 const stateFilter = ref('all');
-const followupProfession = ref('');
+const professionUser=useProfessionUser();
+const followupProfession = ref(defaultProfessionView(professionUser?.value));
 const reportCheck = ref(emptyInspectionReport());
 const reportAssets = computed(() => order.value?.asset_id ? [order.value.asset_id] : []);
 const search = ref('');
@@ -362,7 +364,8 @@ let listPosition = 0;
 const active = computed(() => records.value.find(record => record.entry_id === selected.value));
 const scopedFollowups = computed(() => (board.value?.followups || []).filter(row =>
   !props.scope || ['ALL', 'CAMPUS'].includes(props.scope) || row.scope === props.scope));
-const followupProfessions = computed(() => toolProfessionOptions(scopedFollowups.value));
+const followupProfessions = computed(() => professionChoices(professionUser?.value,
+  toolProfessionOptions(scopedFollowups.value).slice(1).map(option=>option.value)));
 const repairCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'repair').length);
 const approvalCount = computed(() => scopedFollowups.value.filter(row => row.outcome === 'scrap').length);
 const completed = (row: Order) => ['repaired', 'scrapped', 'rejected'].includes(row.outcome);
@@ -378,7 +381,7 @@ const stateOptions = [{ value: 'pending', label: '待处理' }, { value: 'repair
 const visibleOrders = computed(() => {
   const terms = search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
   return scopedFollowups.value.filter(row =>
-    (!followupProfession.value || toolProfession(row.profession) === followupProfession.value) &&
+    professionMatches(followupProfession.value,row.profession,professionUser?.value) &&
     (stateFilter.value === 'all' || row.outcome === stateFilter.value
       || (stateFilter.value === 'done' ? completed(row) : stateFilter.value === 'pending' && !completed(row))) &&
     terms.every(term => [row.tool_name, row.model, row.location, row.scope + '楼', row.owner_name, row.profession]

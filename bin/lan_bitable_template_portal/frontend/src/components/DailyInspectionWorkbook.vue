@@ -31,7 +31,7 @@
       <NButton v-if="canGroup" size="small" @click="openGroups">专业分工<template v-if="Object.keys(currentGroups).length"> · {{ Object.keys(currentGroups).length }} 已调整</template></NButton>
     </div>
     <div class="book-tools" aria-label="工作表导航">
-      <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部</option><option v-for="name in visibleProfessions ?? professions" :key="name" :value="name">{{ name }}</option></select></label>
+      <label><span class="toolbar-label">专业</span><select aria-label="筛选工作表专业" data-native-select :value="professionView" @change="changeProfessionView"><option v-if="visibleProfessions" value="OWN">本专业</option><option value="ALL">全部</option><option v-for="name in professions" :key="name" :value="name">{{ name }}</option></select></label>
       <div v-if="!mobileSheet && report" class="sheet-picker">
         <NSelect size="small" :value="pageKey || null" :options="sheetOptions" filterable placeholder="搜索或切换工作表" :input-props="{'aria-label':'搜索或切换工作表'}" @update:value="selectPage" />
       </div>
@@ -44,7 +44,7 @@
       <button class="zoom-reset" aria-label="恢复紧凑显示" @click="resizeSheet(compactZoom-zoom)">{{ Math.round(scale*100) }}%</button>
       <button aria-label="放大巡检表" :disabled="zoom>=28" @click="resizeSheet(2)">＋</button>
     </div>
-    <slot name="start" v-if="(!mobileSheet || compactMenu) && isCurrentDate && (!active || awaitingStart)" />
+    <slot name="start" v-if="!browseProfessions && (!mobileSheet || compactMenu) && isCurrentDate && (!active || awaitingStart)" />
     <span v-if="preferencesError" class="book-error">{{ preferencesError }}<button @click="loadPreferences">重读排序</button></span>
     <div class="book-status">
       <span v-if="currentActive && !readOnly" class="status-review">
@@ -67,7 +67,7 @@
     </div>
     </div>
     <div v-if="mobileSheet && !compactMenu && dirty && !saving" class="mobile-save-recovery"><span>修改尚未保存</span><button @click="flush">重试保存</button><button @click="compareLatest">核对最新数据</button></div>
-    <div v-if="mobileSheet && !compactMenu && isCurrentDate && (!active || awaitingStart)" class="mobile-start"><slot name="start" /></div>
+    <div v-if="!browseProfessions && mobileSheet && !compactMenu && isCurrentDate && (!active || awaitingStart)" class="mobile-start"><slot name="start" /></div>
     <p v-if="report?.archive_warning" class="book-pending">{{ report.archive_warning }}</p>
     <p v-if="report?.rounds.some(r=>r.status==='自动确认·待上传')" class="book-pending">上轮数据已在本地保存并自动收尾，飞书上传待重试。</p>
     <p v-if="invalidationText" class="book-pending" role="status">{{ invalidationText }} <NButton v-if="sheetLoaded" size="tiny" @click="openComparison">对照上一轮</NButton></p>
@@ -272,11 +272,13 @@ const report=shallowRef<Report>();const comparison=shallowRef<Report>();const er
 const pageKey=ref(''),visited=ref(new Set<string>()),editing=ref(''),editValue=ref('');
 const rootElement=ref<HTMLElement>(),availableHeight=ref(600),rotatedWidth=ref(window.innerHeight);
 const dialogRoot=computed(()=>mobileSheet.value ? rootElement.value : undefined);
-const professionView=ref('ALL'),preferencesReady=ref(false),preferencesError=ref(''),preferencesRevision=ref(0);
+const professionView=ref(props.visibleProfessions?'OWN':'ALL'),preferencesReady=ref(false),preferencesError=ref(''),preferencesRevision=ref(0);
 const orders=ref<Record<string,string[]>>({ALL:[],电气:[],暖通:[]}),sortOpen=ref(false),settingsOpen=ref(false),sortDraft=ref<string[]>([]);
 const jobs=ref<Job[]>([]);const savingCells=ref(false);const dirty=computed(()=>jobs.value.length>0);const confirmSubmit=ref(false);
 const abnormal=ref<{round:RoundMeta;edit:CellEdit}>(),abnormalNote=ref('');
 const professions=['电气','暖通'];
+const browseProfessions=computed(()=>Boolean(props.visibleProfessions&&professionView.value!=='OWN'&&!props.visibleProfessions.includes(professionView.value)));
+const orderProfession=computed(()=>professionView.value==='OWN'?'ALL':professionView.value);
 // Disabled toolbar controls must say why; dirty/saving are already reported by the save status.
 const lockReason=computed(()=>abnormal.value?'填写异常说明后即可切换楼栋或日期'
  :editing.value?'完成当前单元格编辑后即可切换楼栋或日期'
@@ -313,10 +315,10 @@ const historicalGroupRound=computed(()=>roundsBySlot.value.get(
 const displayedGroups=computed(()=>historicalGroupRound.value && historicalGroupRound.value.round_id!==currentActive.value?.id
  ? historicalGroupRound.value.sheet_groups || {} : currentGroups.value);
 const basePages=computed<Page[]>(()=>report.value?.original_templates.flatMap(t=>t.sheets.filter(s=>s.name.trim()!=='封面').map(s=>{const key=JSON.stringify([t.name,s.name]);return {...s,template:t.name,profession:displayedGroups.value[key]||t.profession,homeProfession:t.profession,key,baseKey:key};}))
- .filter(page=>!props.visibleProfessions || props.visibleProfessions.includes(page.profession))||[]);
+ .filter(page=>browseProfessions.value||!props.visibleProfessions || props.visibleProfessions.includes(page.profession))||[]);
 const orderedBase=computed(()=>{
- const order=orders.value[professionView.value]||[];
- return basePages.value.filter(p=>professionView.value==='ALL'||p.profession===professionView.value).slice().sort((a,b)=>{
+ const order=orders.value[orderProfession.value]||[];
+ return basePages.value.filter(p=>orderProfession.value==='ALL'||p.profession===orderProfession.value).slice().sort((a,b)=>{
  const x=order.indexOf(a.baseKey),y=order.indexOf(b.baseKey);return (x<0?9999:x)-(y<0?9999:y);});
 });
 function preferredPage(){return orderedBase.value[0]?.key||'';}
@@ -510,7 +512,7 @@ const grid=computed(()=>{
   const excluded=!remark&&(policy ? policy.has(a) :
    defaultRanges.some(([r,c,rr,cc])=>cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc));
   const exempt=excluded&&(current||!round)&&!text(cell.raw).trim();
-  const editable=sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
+  const editable=!browseProfessions.value&&sheetLoaded.value&&!!round&&!collisions.has(a)&&!v?.readonly&&(current
    ? !awaitingStart.value&&!excluded&&!props.readOnly&&!currentActive.value?.pending&&round.status==='进行中'
      && (!currentActive.value?.worksheet_mode || requiredPages.value.some(page=>page.key===p.key))
    : report.value?.can_edit_history&&hasArchiveReceipt(round));
@@ -615,7 +617,7 @@ watch([lookupMode,lookupQuery,()=>viewedRound.value?.round_id],([mode,query,id],
  const timer=window.setTimeout(async()=>{
   try{
    const data=await requestJson('/api/daily-inspection/day-sheet',{method:'POST',body:JSON.stringify({
-    scope:scope.value,date:day.value,drafts:{},form_only:true,lookup:query,lookup_round:id,
+    scope:scope.value,date:day.value,drafts:{},form_only:true,lookup:query,lookup_round:id,browse_professions:browseProfessions.value,
    }),signal:ctl.signal,timeoutMs:15000}) as {matches?:Reading[]};
    if(!ctl.signal.aborted&&key===context())lookupMatches.value=data.matches || [];
   }catch{if(!ctl.signal.aborted)lookupError.value='设备和测点查询暂未完成，仍可查看原表匹配。';}
@@ -632,7 +634,7 @@ function applyLookupTarget(){
  const target=lookupTarget.value;
  if(!target)return;
  if(!basePages.value.some(page=>page.key===target.key)){lookupTarget.value=undefined;return;}
- if(!orderedBase.value.some(page=>page.key===target.key))professionView.value='ALL';
+ if(!orderedBase.value.some(page=>page.key===target.key))professionView.value=props.visibleProfessions&&!browseProfessions.value?'OWN':'ALL';
  selectPage(target.key);
  void nextTick(focusLookupTarget);
 }
@@ -714,10 +716,10 @@ function markViewed(){
  try{localStorage.setItem(key,JSON.stringify([...visited.value]));}catch{/* The user can still confirm after viewing again. */}
  void syncProgress();
 }
-const readOnly=computed(()=>props.readOnly);
+const readOnly=computed(()=>props.readOnly||browseProfessions.value);
 async function syncProgress(){
  const active=currentActive.value,page=currentPage.value;
- if(!active||!page||active.pending||awaitingStart.value||props.readOnly||!activeRound.value||!sheetLoaded.value||document.hidden
+ if(!active||!page||active.pending||awaitingStart.value||readOnly.value||!activeRound.value||!sheetLoaded.value||document.hidden
   ||(isChiller.value&&chillerSlot.value!==activeSlot.value)||progressRequest)return;
  const controller=progressRequest=new AbortController();
  const key=context(),id=active.id;
@@ -738,7 +740,7 @@ async function syncProgress(){
  }
 }
 function roundMeta(r:RoundMeta):RoundMeta{return {id:r.id,round_id:r.round_id,shift:r.shift,round:r.round,version:r.version,status:r.status};}
-function context(){return JSON.stringify([scope.value,day.value]);}
+function context(){return JSON.stringify([scope.value,day.value,browseProfessions.value]);}
 let mutation=0,inFlight:Job|undefined;
 let editor:{cell:GridCell;template:string;sheet:string;scope:string;date:string}|undefined;
 const editCell=computed(()=>editing.value?editor?.cell:undefined);
@@ -758,7 +760,7 @@ function selectPage(key:string){
  if(mobileSheet.value)compactMenu.value=false;
 }
 function openPage(key:string){
- if(!orderedBase.value.some(page=>page.key===key))professionView.value='ALL';
+ if(!orderedBase.value.some(page=>page.key===key))professionView.value=props.visibleProfessions&&!browseProfessions.value?'OWN':'ALL';
  selectPage(key);
 }
 function selectSlot(slot:string){
@@ -804,10 +806,10 @@ function moveEdit(direction:number){
 }
 function cancelEdit(){const cell=cellElement(editing.value);editing.value='';editor=undefined;if(dirty.value&&!error.value)scheduleSave();void nextTick(()=>cell?.focus({preventScroll:true}));}
 function saveAbnormal(){if(!abnormal.value||!abnormalNote.value.trim())return false;queue(abnormal.value.round,{...abnormal.value.edit,note:abnormalNote.value.trim()});abnormal.value=undefined;return true;}
-function cacheTemplates(templates:Report['original_templates'],version:string){cachedTemplates.value=templates;layoutVersion.value=version;try{localStorage.setItem('inspection-layout:'+scope.value,JSON.stringify({version,templates}));}catch{/* Layout caching is optional. */}}
+function cacheTemplates(templates:Report['original_templates'],version:string){cachedTemplates.value=templates;layoutVersion.value=version;if(browseProfessions.value)return;try{localStorage.setItem('inspection-layout:'+scope.value,JSON.stringify({version,templates}));}catch{/* Layout caching is optional. */}}
 function attachTemplates(value:Report){if(Array.isArray(value.original_templates)){cacheTemplates(value.original_templates,value.template_version||'');return;}if(value.template_version!==layoutVersion.value)throw new Error('巡检模板已更新，请刷新后核对。');value.original_templates=cachedTemplates.value;}
 function showTemplate(){if(!report.value?.draft_key&&cachedTemplates.value.length)report.value={scope:scope.value,date:day.value,draft_key:'',can_edit_history:false,rounds:[],original_templates:cachedTemplates.value};}
-async function loadTemplates(){const key=context();try{const cached=JSON.parse(localStorage.getItem('inspection-layout:'+scope.value)||'null');if(cached?.version&&cached.version===props.templateVersion&&Array.isArray(cached.templates)&&cached.templates.every((t:{scope?:string})=>t.scope===scope.value)){cachedTemplates.value=cached.templates;layoutVersion.value=cached.version;showTemplate();return;}}catch{}
+async function loadTemplates(){if(browseProfessions.value)return;const key=context();try{const cached=JSON.parse(localStorage.getItem('inspection-layout:'+scope.value)||'null');if(cached?.version&&cached.version===props.templateVersion&&Array.isArray(cached.templates)&&cached.templates.every((t:{scope?:string})=>t.scope===scope.value)){cachedTemplates.value=cached.templates;layoutVersion.value=cached.version;showTemplate();return;}}catch{}
  try{const data=await requestJson('/api/daily-inspection/templates?scope='+scope.value+'&v='+encodeURIComponent(props.templateVersion||''),{cache:'no-store'}) as {scope:string;version:string;templates:Report['original_templates']};if(disposed||key!==context()||data.scope!==scope.value||(props.templateVersion&&data.version!==props.templateVersion)||!Array.isArray(data.templates))return;cacheTemplates(data.templates,data.version);showTemplate();await nextTick();measureHeight();}catch{/* The data response can still provide the template; its error remains visible. */}}
 async function load(force=false){
  if(disposed||dirty.value||saving.value||editing.value||abnormal.value)return;
@@ -820,7 +822,7 @@ async function load(force=false){
  const cached=sheetCache.get(cacheKey);
  const valid=()=>!disposed&&!ctl.signal.aborted&&controller===ctl&&key===context()&&stamp===mutation&&!dirty.value&&!editing.value&&!abnormal.value;
  const request=(archive_mode:'local'|'refresh')=>requestJson('/api/daily-inspection/day-sheet',{method:'POST',
-  body:JSON.stringify({scope:scope.value,date:day.value,drafts:{},form_only:true,template_version:layoutVersion.value,archive_mode,...selection}),
+  body:JSON.stringify({scope:scope.value,date:day.value,drafts:{},form_only:true,template_version:layoutVersion.value,archive_mode,browse_professions:browseProfessions.value,...selection}),
   signal:ctl.signal,timeoutMs:180000}) as Promise<Report>;
  const accept=async(value:Report)=>{
   if(!valid())return;
@@ -828,7 +830,7 @@ async function load(force=false){
   if(value.sheet_filter && JSON.stringify(value.sheet_filter)!==selected?.baseKey)throw new Error('返回的巡检工作表不一致，请刷新。');
   attachTemplates(value);report.value=value;rememberSheet(cacheKey,value);
   const nextStorageKey='inspection-sheet-edits:'+value.draft_key;
-  if(nextStorageKey!==storageKey){
+  if(!browseProfessions.value&&nextStorageKey!==storageKey){
    storageUnverified=false;storageKey=nextStorageKey;
    try{const pending=JSON.parse(localStorage.getItem(storageKey)||'[]');
    if(!Array.isArray(pending))throw new Error();
@@ -846,7 +848,7 @@ async function load(force=false){
  };
  loading.value=!cached;error.value='';
  try{
-  if(cached && (!props.templateVersion || cached.template_version===props.templateVersion))await accept(cached);
+  if(cached && (browseProfessions.value || !props.templateVersion || cached.template_version===props.templateVersion))await accept(cached);
   const local=await request('local');
   await accept(local);
   if(valid()&&(!selected||currentPage.value?.baseKey===selected.baseKey)
@@ -923,11 +925,11 @@ function resolveJob(job:Job,keep:boolean){
  const unresolved=jobs.value.some(j=>j!==job&&(!comparison.value?.rounds.some(r=>r.round_id===j.round.round_id)||comparison.value?.rounds.some(r=>r.round_id===j.round.round_id&&r.version!==j.round.version)));
  if(!unresolved){report.value=comparison.value;comparison.value=undefined;error.value='';persist();if(dirty.value)void flush();}else persist();
 }
-async function submit(){if(!currentActive.value||actionLocked.value||!canSubmit.value)return;saving.value=true;error.value='';
+async function submit(){if(readOnly.value||!currentActive.value||actionLocked.value||!canSubmit.value)return;saving.value=true;error.value='';
  try{await requestJson('/api/daily-inspection/finish?view_scope='+scope.value,{method:'POST',body:JSON.stringify({id:currentActive.value.id,review_version:currentActive.value.review_version,sheet_workflow:true,visited_sheets:[...visited.value]}),timeoutMs:180000});emit('changed');}
  catch(e){error.value=e instanceof Error?e.message:'提交未确认，请重试原任务。';}finally{saving.value=false;await load();}}
 async function download(){
- if(exporting.value||dirty.value||saving.value||editing.value)return;
+ if(browseProfessions.value||exporting.value||dirty.value||saving.value||editing.value)return;
  exporting.value=true;error.value='';const key=context();
  try{await downloadFile('/api/daily-inspection/day-export',{method:'POST',body:JSON.stringify({scope:scope.value,date:day.value,drafts:{}}),timeoutMs:180000});}
  catch(e){if(context()===key)error.value=e instanceof Error?e.message:'导出失败';}
@@ -980,8 +982,11 @@ function movePinch(event:TouchEvent){const pair=touchPair(event),state=pinch;if(
 function endPinch(event:TouchEvent){if(event.touches.length<2)pinch=undefined;}
 function changeProfessionView(event:Event){
  const select=event.target as HTMLSelectElement;
- finishEdit();if(abnormal.value){select.value=professionView.value;return;}
- rememberScroll();professionView.value=select.value;void nextTick(restoreScroll);
+ finishEdit();if(actionLocked.value||storageUnverified){select.value=professionView.value;return;}
+ const previous=browseProfessions.value;
+ rememberScroll();professionView.value=select.value;
+ if(previous!==browseProfessions.value){reset();return;}
+ void nextTick(restoreScroll);
 }
 function measureHeight(){
  viewportPortrait.value=screenIsPortrait();
@@ -1056,7 +1061,7 @@ async function saveExemption(operation:'add'|'remove'){
 }
 function openGroups(){finishEdit();if(!abnormal.value){showGroups.value=true;settingsOpen.value=true;void nextTick(()=>groupPanel.value?.scrollIntoView({block:'nearest'}));}}
 let sortTarget:{scope:string;view:string;revision:number;orders:Record<string,string[]>}|undefined;
-function openSort(){finishEdit();if(abnormal.value||dirty.value)return;settingsOpen.value=false;sortTarget={scope:scope.value,view:professionView.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
+function openSort(){finishEdit();if(browseProfessions.value||abnormal.value||dirty.value)return;settingsOpen.value=false;sortTarget={scope:scope.value,view:orderProfession.value,revision:preferencesRevision.value,orders:JSON.parse(JSON.stringify(orders.value))};sortDraft.value=orderedBase.value.map(p=>p.baseKey);sortOpen.value=true;}
 function shiftSort(index:number,delta:number){const list=sortDraft.value.slice();[list[index],list[index+delta]]=[list[index+delta],list[index]];sortDraft.value=list;}
 async function saveSort(){if(!preferencesReady.value||saving.value||!sortTarget||sortTarget.scope!==scope.value)return;const target=sortTarget,key=context();saving.value=true;const value={version:1,orders:{...target.orders,[target.view]:sortDraft.value}};
  try{const result=await requestJson('/api/workspace-layouts/desktop/inspection-sheets-'+target.scope,{method:'PUT',body:JSON.stringify({revision:target.revision,value})}) as {revision:number};if(disposed||key!==context())return;preferencesRevision.value=result.revision;orders.value=value.orders;sortOpen.value=false;preferencesError.value='';}

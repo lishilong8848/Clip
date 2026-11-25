@@ -25,14 +25,16 @@ def tool_management_enabled():
 
 def tool_management_access(runtime, session, user):
     from .cabinet_guest import is_cabinet_guest
+    from .tool_management import ToolManagement, full_access
     user['tool_management_full_access']=False
     service = getattr(runtime, 'tool_management', None)
     if is_cabinet_guest(session) or not callable(service):
         return False
     try:
         actor = runtime.risk_inspection_actor(user.get('open_id'), user.get('name'))
-        allowed=service().available_to(actor)
-        from .tool_management import full_access
+        if session.get('impersonation') or session.get('source') == 'admin_impersonation':
+            actor['_tool_impersonation'] = True
+        allowed=ToolManagement.available_to(actor)
         user['tool_management_full_access']=bool(allowed and full_access(actor))
         return allowed
     except RiskError:

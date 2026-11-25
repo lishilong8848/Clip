@@ -5,6 +5,8 @@
       <header class="repair-desk-bar">
         <h1><Wrench :size="21" />检修办理</h1>
         <WorkspaceScopePicker />
+        <NSelect :value="r.v2ProfessionView" :options="r.v2ProfessionOptions" aria-label="维修专业"
+          :disabled="r.v2Writing" @update:value="r.v2ChangeProfession" class="repair-profession-filter" />
         <NInput :value="r.searchText" placeholder="搜索维修项目" clearable :input-props="{'aria-label':'搜索维修项目'}" @update:value="r.searchText=$event"><template #prefix><Search :size="16" /></template></NInput>
         <span class="repair-desk-layout" data-v2-layout-tools="repair"></span>
         <NButton data-v2-navigation type="primary" :disabled="r.v2Writing" @click="r.requestStartCreate"><Plus :size="17" />新建维修单</NButton>
@@ -19,14 +21,13 @@
         </button>
       </nav>
       <NAlert v-if="r.v2RecordError" type="error" :bordered="false" role="alert">{{r.v2RecordError}}<template v-if="r.v2RecordsReady">；暂显示上次读取的“{{r.v2AppliedState}}”列表。</template><NButton text data-v2-navigation @click="r.v2RefreshView">重新读取</NButton></NAlert>
-      <NAlert v-else-if="r.repairHealthVisible" :type="r.repairHealthFailedCount?'warning':'info'" :bordered="false">{{r.repairHealthText}}<NButton text data-v2-navigation @click="r.openFailureCenter">查看任务</NButton><NButton v-if="r.repairHealthRepairableCount&&r.repairHealth?.can_repair" text :loading="r.integrityRepairing" @click="r.repairIntegrity">修复关联</NButton></NAlert>
       <NAlert v-if="r.messageText && !r.projectDrawerOpen && !r.v2RecordError" :type="tone(r.messageTone)" :bordered="false" role="status">{{r.messageText}}</NAlert>
       <PageCanvas page="repair" label="检修办理" :blocks="[{id:'records',title:'维修项目',w:12,h:10,minW:4,minH:4}]">
         <template #records>
           <section ref="listElement" class="repair-desk-list" aria-label="维修项目列表">
             <header class="repair-desk-list-head">
         <span class="v2-repair-list-caption">{{r.v2StateLabel}}<template v-if="r.v2RecordsReady"> · {{r.total}} 项</template></span>
-        <span v-if="r.v2StatsLoading" role="status" class="v2-repair-muted"><NSpin :size="13" />读取状态数量</span><span v-else-if="r.v2StatsError" class="v2-repair-muted v2-repair-stats-error" role="status">数量暂不可用 <NButton text size="tiny" data-v2-navigation @click="r.v2LoadStats">重试</NButton></span><span v-else-if="r.v2StatsAt" class="v2-repair-muted">状态更新 {{r.v2StatsAt}}</span>
+        <span v-if="r.v2StatsLoading&&!r.v2StatsAt" role="status" class="v2-repair-muted"><NSpin :size="13" />读取状态数量</span><span v-else-if="r.v2StatsError" class="v2-repair-muted v2-repair-stats-error" role="status">{{r.v2StatsAt?'显示上次统计':'数量暂不可用'}} <NButton text size="tiny" data-v2-navigation @click="r.v2LoadStats">重试</NButton></span><span v-else-if="r.v2StatsAt" class="v2-repair-muted">状态更新 {{r.v2StatsAt}}</span>
         <NRadioGroup v-if="r.recordState==='completed'" :value="r.recordHistoryPeriod" aria-label="已完成时间范围" :disabled="r.loading||r.v2Writing" @update:value="r.changeRecordHistoryPeriod"><NRadioButton v-for="period in r.recordHistoryPeriodOptions" :key="period.value" :value="period.value">{{period.label}}</NRadioButton></NRadioGroup>
             </header>
           <div v-if="r.loading && r.records.length" class="v2-repair-refreshing" role="status"><NSpin :size="15" />正在读取“{{r.v2StateLabel}}”，暂显示原列表</div>
@@ -91,7 +92,7 @@
                 <NAlert v-if="r.submission.pending.value" :type="r.submission.status.value==='failed'?'error':'warning'" :bordered="false">{{r.submission.message.value}}<NButton text :disabled="r.submission.checking.value" @click="r.submission.check(true,true)">核验原任务</NButton></NAlert>
                 <NAlert v-if="r.projectConflict" type="warning" :bordered="false">{{r.projectConflict.message}}<div class="v2-repair-inline-actions"><NButton data-v2-navigation size="small" @click="r.copyCurrentProjectDraft">复制当前填写</NButton><NButton size="small" :loading="r.recordDetailLoading" @click="r.reloadLatestProject">读取最新内容</NButton></div></NAlert>
                 <NAlert v-else-if="r.messageText" :type="tone(r.messageTone)" :bordered="false">{{r.messageText}}</NAlert>
-                <div v-if="r.editingRecordId&&r.followupPanelMounted" v-show="r.activeWorkspaceTab==='followups'"><RepairFollowups :ref="value=>r.v2FollowupApi=value" embedded :scope="scope" :user-id="userId" :summary-record-id="r.editingRecordId" :summary-title="r.selectedRecordTitle" :read-only="r.selectedRecordReadOnly" :can-delete="canDelete" :refresh-version="r.repairSourceRefreshVersion" @changed="r.handleFollowupChanged" @source-refreshed="r.handleRepairSourceRefreshed" @dirty-changed="r.followupHasUnsavedChanges=$event" @count-changed="r.updateSelectedFollowupCount" @busy="r.v2FollowupBusy=$event" /></div>
+                <div v-if="r.editingRecordId&&r.followupPanelMounted" v-show="r.activeWorkspaceTab==='followups'"><RepairFollowups :ref="value=>r.v2FollowupApi=value" embedded :scope="scope" :user-id="userId" :summary-record-id="r.editingRecordId" :summary-title="r.selectedRecordTitle" :read-only="r.selectedRecordReadOnly" :browse-other-profession="r.v2ForeignRecord" :can-delete="canDelete" :refresh-version="r.repairSourceRefreshVersion" @changed="r.handleFollowupChanged" @source-refreshed="r.handleRepairSourceRefreshed" @dirty-changed="r.followupHasUnsavedChanges=$event" @count-changed="r.updateSelectedFollowupCount" @busy="r.v2FollowupBusy=$event" /></div>
                 <div v-show="r.activeWorkspaceTab==='project'" class="v2-repair-project-form">
                   <div class="repair-desk-project">
                   <section class="v2-repair-source-flow" aria-label="关联资料自动填写" :aria-busy="r.prefillLoading">
@@ -140,7 +141,7 @@ import PageCanvas from './PageCanvas.vue';
 import WorkspaceScopePicker from './ScopePicker.vue';
 import {activateCard} from './cardActivation';
 import { computed,ref } from 'vue';
-import { NAlert,NButton,NDropdown,NEmpty,NInput,NPagination,NProgress,NRadioButton,NRadioGroup,NSkeleton,NSpin,NTag } from 'naive-ui';
+import { NAlert,NButton,NDropdown,NEmpty,NInput,NPagination,NProgress,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,NTag } from 'naive-ui';
 import { Check,ChevronDown,Wrench,Ellipsis,FileText,MessageSquarePlus,Plus,RefreshCw,Save,Search,X } from 'lucide-vue-next';
 import RepairController from '../components/RepairManagementPage.vue';
 import RepairFollowups from './RepairFollowups.vue';
@@ -174,3 +175,7 @@ function recordOptions(r:any){return [{key:'reset',label:'放弃本次修改'},.
 function recordMore(key:string,r:any){if(key==='reset')r.requestResetDraft();if(key==='delete'&&props.canDelete)r.requestDeleteRecord();}
 
 </script>
+
+<style scoped>
+.repair-profession-filter { width:150px; max-width:100%; }
+</style>

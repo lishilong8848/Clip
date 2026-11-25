@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue';
 import { NModal } from 'naive-ui';
-import { BookOpenCheck, Building2, ChevronDown, ChevronRight, ListChecks, MapPinned, Pencil, ShieldCheck } from 'lucide-vue-next';
+import { BookOpenCheck, ChevronDown, ChevronRight, ListChecks, Pencil } from 'lucide-vue-next';
 import RecordViewSwitch from '../../components/RecordViewSwitch.vue';
 import type { Dict } from '../client';
 import { todoTimestamp } from '../businessTodos';
@@ -12,6 +12,7 @@ import WorkbenchQuestionReview from './WorkbenchQuestionReview.vue';
 import type { Role, ScopeOption } from './recipes';
 import type { WorkItem } from './sources';
 import type { CalendarItem, SealStatus } from './WorkbenchDailyLayout.vue';
+import { noticeTileLabel, taskTileKey, taskTilePriority, taskTileStyle } from './taskTiles';
 
 const props=defineProps<{user:Dict;scope:string;scopeLabel:string;scopes:ScopeOption[];role:Role;clock:number;tasks:WorkItem[];
   planState?:'loading'|'ok'|'stale'|'down'|'deny';sealStatus?:SealStatus;seals:CalendarItem[];partial:boolean;learningRevision:number;
@@ -42,10 +43,9 @@ const range=computed(()=>{
 });
 const labels:Partial<Record<WorkItem['kind'],string>>={
   notices:'通告',events:'事件',event_notices:'事件',repair_management:'维修跟进',engineer_mop:'维保单',critical_guard:'重保',
-  risk_inspection:'专项排查',water:'水耗',drills:'演练',inspection:'巡检',cabinet:'上下电',learning:'画像学练',accounts:'权限审批',tool_management:'工具',pre_shift:'班前检查',
+  risk_inspection:'专项排查',water:'水耗',drills:'演练',inspection:'巡检',cabinet:'上下电',learning:'画像学练',accounts:'权限审批',tool_management:'工具自检',tool_external:'工具送检',pre_shift:'班前检查',
 };
-const noticeLabel=(item:WorkItem)=>item.detail==='维保'?'维保通告':item.detail==='变更'?'变更通告':item.detail||'通告';
-const label=(item:WorkItem)=>item.kind==='notices'?noticeLabel(item):labels[item.kind]||'待办';
+const label=(item:WorkItem)=>item.kind==='notices'?noticeTileLabel(item):labels[item.kind]||'待办';
 const scopeName=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope==='110'?'110站':['ALL','CAMPUS'].includes(scope)?'园区':scope;
 const dateFormat=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric'});
 const timeFormat=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'numeric',day:'numeric',hour:'2-digit',minute:'2-digit',hourCycle:'h23'});
@@ -79,7 +79,7 @@ function sortRows(a:WorkItem,b:WorkItem){
 function timing(item:WorkItem){
   const due=deadline(item);
   if(due!==undefined){
-    const when=dateOnly(item.noticeWindow?.end)?dateFormat.format(due):timeText(due);
+    const when=item.kind==='tool_external'||dateOnly(item.noticeWindow?.end)?dateFormat.format(due):timeText(due);
     return ['已逾期','今日截止','明日截止','截止'][urgency(item)]+' '+when;
   }
   const raw=item.noticeWindow?.start||item.scheduledAt||item.time, start=startAt(item);
@@ -98,10 +98,11 @@ const personalRows=computed(()=>active.value.filter(row=>isPersonal(row)&&row.ki
   &&!(row.kind==='learning'&&(props.user.category==='duty'||hasPersonalLearning.value))));
 const hasPersonalLearning=computed(()=>Boolean(personal.value?.total));
 const hasQuestionReviews=computed(()=>reviewQueue.value.total>0);
+const hasTeamSummary=computed(()=>Boolean(team.value?.total||team.value?.checking||team.value?.upcoming||teamError.value));
 const cards=computed(()=>[
-  ...(canSeeCampus.value?[{id:'campus',title:'园区',icon:MapPinned,rows:campusRows.value}]:[]),
-  ...(canSeeBuilding.value?[{id:'building',title:'楼栋',icon:Building2,rows:buildingRows.value}]:[]),
-  ...(canSeePersonal.value?[{id:'personal',title:'个人',icon:BookOpenCheck,rows:personalRows.value}]:[]),
+  ...(canSeeCampus.value?[{id:'campus',title:'园区',rows:campusRows.value}]:[]),
+  ...(canSeeBuilding.value?[{id:'building',title:'楼栋',rows:buildingRows.value}]:[]),
+  ...(canSeePersonal.value?[{id:'personal',title:'个人',rows:personalRows.value}]:[]),
 ]);
 const sealRows=computed(()=>props.seals.filter(item=>{
   const start=todoTimestamp(item.start),end=todoTimestamp(item.end);
@@ -128,15 +129,37 @@ const sealCard=computed(()=>canSeeCampus.value?'campus':'building');
 const visibleCards=computed(()=>cards.value.map(card=>({...card,
   rows:filter.value==='all'?card.rows:card.rows.filter(item=>matchesFilter(item,filter.value)),
   seals:card.id===sealCard.value&&(filter.value==='all'||filter.value==='seal')?sealRows.value:[],
-})).filter(card=>filter.value==='all'||card.rows.length||card.seals.length));
-function cardGroups(card:typeof visibleCards.value[number]){
-  if(card.id!=='building')return [{id:card.id,label:'',rows:card.rows}];
-  return [
-    {id:'building-running',label:'进行中通告',rows:card.rows.filter(row=>row.kind==='notices'&&running(row))},
-    {id:'building-planned',label:'未开始通告',rows:card.rows.filter(planned)},
-    {id:'building-other',label:'其他待办',rows:card.rows.filter(row=>row.kind!=='notices')},
-  ].filter(group=>group.rows.length);
-}
+  teamSummary:filter.value==='all'&&canReadTeam.value&&card.id===sealCard.value&&hasTeamSummary.value,
+})).filter(card=>card.rows.length||card.seals.length||card.teamSummary||
+  (filter.value==='all'&&card.id==='personal'&&(hasPersonalLearning.value||hasQuestionReviews.value||hasPersonalDuty.value))));
+const businessPriority:Record<string,number>={
+  seal:5,repair_management:6,
+  pre_shift:7,inspection:8,cabinet:9,engineer_mop:10,water:11,drills:12,
+  question:13,learning:14,'my-learning':14,team:15,planned:90,
+};
+const periodModules=computed(()=>visibleCards.value.flatMap(card=>{
+  const groups=new Map<string,WorkItem[]>();
+  for(const item of card.rows){
+    const kind=planned(item)?'planned':taskTileKey(item);
+    if(!groups.has(kind))groups.set(kind,[]);
+    groups.get(kind)!.push(item);
+  }
+  const group=(kind:string,title:string,rows:WorkItem[]=[],seals:CalendarItem[]=[])=>{
+    const notice=kind.startsWith('notices:');
+    const [icon,hue]=taskTileStyle(['team','my-learning','question'].includes(kind)?'learning':kind);
+    return {key:card.id+'-'+kind,scope:card.id,scopeTitle:card.title,kind,title,rows,seals,notice,icon,hue,
+      priority:taskTilePriority[kind]??businessPriority[kind]??(notice?4:20)};
+  };
+  const modules=[...groups].map(([kind,rows])=>group(kind,kind==='planned'?'未开始通告':label(rows[0]),rows));
+  if(card.seals.length)modules.push(group('seal','封网',[],card.seals));
+  if(card.teamSummary)modules.push(group('team','画像学练情况汇总'));
+  if(filter.value==='all'&&card.id==='personal'){
+    if(hasQuestionReviews.value)modules.push(group('question','待处理题目'));
+    if(learningEntry.value)modules.push(group('my-learning','我的画像学练'));
+    if(hasPersonalDuty.value)modules.push(group('inspection','日常巡检'));
+  }
+  return modules;
+}).sort((a,b)=>a.priority-b.priority));
 const incomplete=computed(()=>props.partial||['loading','stale','down'].includes(props.planState||''));
 const rowMeta=(item:WorkItem)=>[
   (item.referencedScopes?.length?[...new Set(item.referencedScopes)].sort().map(scopeName).join('、'):scopeName(item.scope)),
@@ -261,54 +284,52 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
     </div>
     <p v-if="planState==='down'||planState==='stale'" class="period-muted" role="status">计划通告待更新 <button type="button" @click="$emit('retry')">重试</button></p>
     <p v-else-if="incomplete" class="period-muted" role="status">{{ planState==='loading'?'正在读取计划通告…':'部分数据待更新' }}</p>
-    <p v-if="!visibleCards.length&&!incomplete" class="period-empty" role="status">
+    <p v-if="!periodModules.length&&!incomplete" class="period-empty" role="status">
       {{ filter==='seal'&&sealStatus!=='ready'?'封网信息待更新':'本周期暂无此类事项' }}
     </p>
-    <div class="period-grid" :data-view="view">
-      <article v-for="card in visibleCards" :key="card.id" class="period-card" :data-card="card.id" :aria-label="card.title+'卡片'">
-        <header class="card-head">
-          <component :is="card.icon" :size="17" aria-hidden="true"/><h3>{{ card.title }}</h3>
-          <small v-if="card.id!=='personal'">{{ scopeLabel }}</small>
-          <span v-if="card.rows.length||card.seals.length" class="row-count"><b>{{ card.rows.length+card.seals.length }}</b> 项</span>
+    <div v-if="periodModules.length" class="period-grid" :data-view="view">
+      <article v-for="block in periodModules" :key="block.key" class="period-card workbench-module" :data-card="block.scope"
+        :data-module="block.kind" :data-state="block.notice?'ongoing':undefined"
+        :style="{'--tile-hue':block.hue}" :aria-label="block.scopeTitle+' · '+block.title">
+        <header v-if="block.rows.length||block.seals.length" class="card-head">
+          <component :is="block.icon" :size="21" aria-hidden="true"/>
+          <h3 v-if="block.kind!=='planned'" :title="block.title">{{ block.title }}</h3>
+          <button v-else type="button" class="period-fold" :aria-expanded="plannedOpen" :aria-controls="'period-'+block.key" @click="plannedOpen=!plannedOpen">
+            {{ block.title }} <ChevronDown :size="14" aria-hidden="true"/>
+          </button>
+          <small class="scope-tag">{{ block.scopeTitle }}<template v-if="block.notice"> · 进行中</template></small>
+          <span class="row-count">{{ block.rows.length+block.seals.length }}</span>
         </header>
 
-        <div class="period-card-body">
-        <section v-for="group in cardGroups(card)" v-show="group.rows.length" :key="group.id" class="period-group"
-          :data-group="group.id" :aria-label="group.label||undefined">
-          <h4 v-if="group.id==='building-planned'" class="period-group-title">
-            <button type="button" class="period-fold" :aria-expanded="plannedOpen" aria-controls="period-planned-notices" @click="plannedOpen=!plannedOpen">
-              <ChevronDown :size="15" aria-hidden="true"/>{{ group.label }} <small>{{ group.rows.length }}</small>
-            </button>
-          </h4>
-          <h4 v-else-if="group.label" class="period-group-title">{{ group.label }} <small>{{ group.rows.length }}</small></h4>
-          <ul v-show="group.id!=='building-planned'||plannedOpen" :id="group.id==='building-planned'?'period-planned-notices':undefined" class="period-entries">
-            <li v-for="item in (expanded[group.id]?group.rows:group.rows.slice(0,4))" :key="item.key">
-              <button type="button" class="period-entry" :data-tone="urgency(item)===0?'late':urgency(item)<3?'soon':undefined" @click="$emit('task',item)">
-                <span class="period-kind">{{ label(item) }}</span><strong class="period-title">{{ item.title }}</strong>
-                <span class="period-action">{{ action(item) }} <ChevronRight :size="13" aria-hidden="true"/></span>
+        <section v-if="block.rows.length" v-show="block.kind!=='planned'||plannedOpen" :id="'period-'+block.key" class="period-group">
+          <ul class="period-entries">
+            <li v-for="item in (expanded[block.key]?block.rows:block.rows.slice(0,2))" :key="item.key">
+              <button type="button" class="period-entry" :data-tone="urgency(item)===0?'late':urgency(item)<3?'soon':undefined"
+                :aria-label="action(item)+' '+item.title" :title="[item.title, rowMeta(item), timing(item)].filter(Boolean).join('\n')" @click="$emit('task',item)">
+                <strong class="period-title">{{ item.title }}</strong>
                 <small class="period-meta">{{ rowMeta(item) }}</small>
-                <small v-if="timing(item)" class="period-time">{{ timing(item) }}</small>
+                <small v-if="timing(item)" class="period-time">{{ timing(item) }}</small><ChevronRight :size="13" aria-hidden="true"/>
               </button>
             </li>
           </ul>
-          <button v-if="group.rows.length>4&&(group.id!=='building-planned'||plannedOpen)" type="button" class="period-expand" :aria-expanded="!!expanded[group.id]" @click="expanded[group.id]=!expanded[group.id]">
-            {{ expanded[group.id]?'收起':`展开其余 ${group.rows.length-4} 项` }}
+          <button v-if="block.rows.length>2" type="button" class="period-expand" :aria-expanded="!!expanded[block.key]" @click="expanded[block.key]=!expanded[block.key]">
+            {{ expanded[block.key]?'收起':`展开其余 ${block.rows.length-2} 项` }}
           </button>
         </section>
 
-        <div v-if="card.seals.length" class="seal-list" aria-label="周期内封网">
-          <details v-for="item in card.seals" :key="item.title+'-'+item.start">
+        <div v-else-if="block.seals.length" class="seal-list" aria-label="周期内封网">
+          <details v-for="item in block.seals" :key="item.title+'-'+item.start">
           <summary class="seal-row">
-            <ShieldCheck :size="15" aria-hidden="true"/>
-            <div><strong>{{ item.title }}</strong><small>{{ timeText(todoTimestamp(item.start)!) }} 至 {{ timeText(todoTimestamp(item.end)!) }}</small></div>
+            <strong class="period-title" :title="item.title">{{ item.title }}</strong>
             <small class="seal-state">{{ todoTimestamp(item.start)!<=clock?'封网中':'待生效' }}</small>
           </summary>
+          <small class="seal-details">{{ timeText(todoTimestamp(item.start)!) }} 至 {{ timeText(todoTimestamp(item.end)!) }}</small>
           <small class="seal-details">{{ [item.source,...(item.scopes||[]).map(scopeName),...(item.notes||[])].filter(Boolean).join(' · ') || '适用范围 '+scopeLabel }}</small>
           </details>
         </div>
 
-        <div v-if="filter==='all'&&canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building')" class="learning-summary">
-          <button type="button" class="learning-open" aria-haspopup="dialog" @click="openTeam">画像学练情况汇总 <ChevronRight :size="15" aria-hidden="true"/></button>
+        <div v-else-if="block.kind==='team'" class="learning-summary">
+          <button type="button" class="learning-open" aria-haspopup="dialog" @click="openTeam"><BookOpenCheck :size="16" aria-hidden="true"/><span>{{ block.title }}</span><small class="scope-tag" aria-hidden="true">{{ block.scopeTitle }}</small><ChevronRight :size="15" aria-hidden="true"/></button>
           <template v-if="team">
             <div class="learning-kpis"><span>已完成 <b>{{ team.done }} / {{ team.total }}</b> 人天</span>
               <span :data-warn="team.pending>0">未完成 <b>{{ team.pending }}</b></span><span v-if="team.late" data-warn="true">其中逾期 <b>{{ team.late }}</b></span></div>
@@ -321,23 +342,23 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
           </small>
         </div>
 
-        <div v-if="filter==='all'&&card.id==='personal'&&hasQuestionReviews" class="learning-summary">
+        <div v-else-if="block.kind==='question'" class="learning-summary">
           <button type="button" class="learning-open review-open" aria-haspopup="dialog" @click="reviewOpen=true">
             <Pencil :size="15" aria-hidden="true"/><span>待处理题目</span><small>{{ reviewQueue.total }} 题</small><ChevronRight :size="15" aria-hidden="true"/>
           </button>
         </div>
-        <div v-if="filter==='all'&&card.id==='personal'&&personal?.total&&learningEntry" class="learning-summary">
+        <div v-else-if="block.kind==='my-learning'&&personal&&learningEntry" class="learning-summary">
           <button type="button" class="learning-open" aria-label="打开画像学练" aria-haspopup="dialog" @click="$emit('task',learningEntry)">
-            我的画像学练 <ChevronRight :size="15" aria-hidden="true"/>
+            <BookOpenCheck :size="16" aria-hidden="true"/><span>{{ block.title }}</span><small class="scope-tag" aria-hidden="true">{{ block.scopeTitle }}</small><ChevronRight :size="15" aria-hidden="true"/>
           </button>
           <div class="learning-kpis"><span>已答 <b>{{ personal.done }} / {{ personal.total }}</b> 题</span>
             <span>{{ personal.total>Number(personal.done)?'待完成':'已完成' }}</span></div>
           <meter :value="Math.min(personal.done||0,personal.total)" :max="personal.total" aria-label="当班题单进度"/>
         </div>
 
-        <div v-if="filter==='all'&&card.id==='personal'&&hasPersonalDuty" class="personal-duty">
+        <div v-else-if="block.kind==='inspection'" class="personal-duty">
           <button v-if="inspectionTask" type="button" class="personal-duty-row" @click="$emit('task',inspectionTask)">
-            <ListChecks :size="16" aria-hidden="true"/><strong>{{ inspectionTask.title }}</strong><small>{{ inspectionTask.status }}</small><ChevronRight :size="13" aria-hidden="true"/>
+            <ListChecks :size="16" aria-hidden="true"/><strong class="period-title" :title="inspectionTask.title">{{ inspectionTask.title }}</strong><small class="scope-tag" aria-hidden="true">个人</small><ChevronRight :size="13" aria-hidden="true"/>
           </button>
           <div v-else-if="inspectionState&&inspectionState!=='deny'" class="personal-duty-row" role="status">
             <ListChecks :size="16" aria-hidden="true"/><strong>日常巡检</strong>
@@ -346,10 +367,6 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
           </div>
         </div>
 
-        <p v-if="!card.rows.length&&!card.seals.length&&!incomplete
-          &&!(canReadTeam&&(card.id==='campus'||!canSeeCampus&&card.id==='building'))
-          &&!(card.id==='personal'&&(hasPersonalLearning||hasQuestionReviews||hasPersonalDuty))" class="period-muted">本周期暂无待处理事项</p>
-        </div>
       </article>
     </div>
     <NModal v-model:show="teamOpen" preset="card" title="画像学练情况汇总" style="width:min(700px,calc(100vw - 20px))">
@@ -387,7 +404,7 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
 </template>
 
 <style scoped>
-.wb-period{display:grid;gap:8px;min-width:0;container:wb-period / inline-size}
+.wb-period{display:grid;gap:8px;min-width:0}
 .period-tools,.period-switch,.card-head,.learning-kpis{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
 .period-tools h2{margin-inline-end:auto}
 .period-switch button,.status-filters button,.period-expand,.period-muted button,.learning-summary small button,.learning-detail button{
@@ -401,31 +418,29 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
 .status-filters button b{margin-inline-start:3px;font-size:.82rem}
 .status-filters button[data-filter=late][data-has-items=true]{color:var(--cf-danger,#a43c31)}
 .status-filters button[data-filter=soon][data-has-items=true]{color:var(--cf-warning,#8a4d11)}
-.period-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,255px),1fr));gap:8px;align-items:stretch}
-.period-grid[data-view=table]{grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))}
-.period-card{min-width:0;display:flex;flex-direction:column;gap:7px;padding:9px;border:1px solid var(--desk-line);border-radius:12px;background:var(--desk-paper);overflow-wrap:anywhere;container:period-card / inline-size}
-.period-card-body{min-width:0;max-block-size:19rem;overflow:auto;overscroll-behavior-y:contain;scroll-padding:6px;display:grid;gap:7px;align-content:start}
-.period-fold{display:flex;align-items:center;gap:5px;width:100%;min-height:32px;padding:4px 6px;border:1px solid var(--desk-line);border-radius:6px;background:var(--desk-well);color:inherit;text-align:start;cursor:pointer}
+.period-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,248px),1fr));gap:8px;align-items:start}
+.period-grid[data-view=table]{grid-template-columns:minmax(0,1fr)}
+.period-card{min-width:0;display:grid;gap:6px;padding:9px;border:1px solid color-mix(in srgb,var(--tile-accent) 26%,var(--desk-line));border-radius:10px;
+  background:var(--tile-tint);box-shadow:var(--soft-raised);container:period-card / inline-size}
+.period-fold{display:flex;align-items:center;gap:5px;min-height:24px;padding:0;border:0;
+  background:transparent;color:inherit;text-align:start;cursor:pointer;font:inherit;font-weight:650}
 .period-fold[aria-expanded=false] svg{transform:rotate(-90deg)}
-.period-tools h2,.card-head h3{font-size:var(--cf-font-section)}
-.period-group-title,.period-title{font-size:var(--cf-font-body)}
-.card-head{min-height:24px}
-.card-head svg{color:var(--desk-green)}
-.card-head h3{margin:0}.card-head small,.period-muted,.learning-summary small{color:var(--desk-muted);font-size:.76rem}
-.row-count{margin-inline-start:auto;color:var(--desk-muted);font-size:.77rem}
-.row-count b{color:var(--desk-ink)}
-.learning-summary{min-width:0;display:grid;gap:6px;padding:8px;border:1px solid var(--desk-line);border-radius:9px;background:var(--desk-well);font-size:.83rem}
+.period-tools h2{font-size:var(--cf-font-section)}
+.card-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;gap:6px;min-height:30px;font-size:var(--cf-font-section);color:var(--tile-accent)}
+.card-head h3{margin:0;font-size:inherit;font-weight:650}
+.period-muted,.learning-summary small{color:var(--desk-muted);font-size:var(--cf-font-meta)}
+.scope-tag{display:inline-flex;align-items:center;padding:2px 5px;border-radius:4px;background:var(--desk-paper);
+  color:var(--desk-muted);font-size:var(--cf-font-meta);line-height:1.35;white-space:nowrap}
+.row-count{min-width:1em;text-align:end;font-size:20px;font-weight:700}
+.learning-summary{min-width:0;display:grid;gap:4px;font-size:var(--cf-font-body)}
 .learning-summary meter{width:100%;height:9px;accent-color:var(--desk-green)}
 .learning-summary meter::-webkit-meter-optimum-value{background:var(--desk-green)}
 .learning-kpis{color:var(--desk-muted);font-size:.76rem}
 .learning-kpis b{font-variant-numeric:tabular-nums;color:var(--desk-green)}
 .learning-kpis [data-warn=true],.learning-kpis [data-warn=true] b{color:var(--cf-warning,#8a4d11)}
-.learning-summary .learning-open{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;min-height:34px;
-  border:0;border-radius:6px;background:transparent;color:var(--desk-green);padding:4px;text-align:start;font:inherit;font-weight:650}
-.learning-summary .learning-open:hover{background:var(--desk-green-wash)}
-.learning-open svg{flex:none}
-.learning-open.review-open{justify-content:flex-start}
-.review-open span{flex:1;min-width:0}.review-open small{white-space:nowrap}
+.learning-summary .learning-open{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:6px;width:100%;min-height:27px;
+  border:0;border-radius:6px;background:transparent;color:var(--tile-accent);padding:0;text-align:start;font:inherit;font-weight:650}
+.learning-summary .learning-open:hover{background:var(--desk-paper)}
 .seal-row{cursor:pointer}
 .seal-details{display:block;padding:2px 8px 8px;overflow-wrap:anywhere}
 .learning-detail{font-size:13px;min-width:0}
@@ -442,50 +457,41 @@ watch([()=>props.scope,period,today,canReadTeam,canReadPersonalLearning,canSeePe
 @media(pointer:coarse){.learning-detail :is(select,input){min-height:44px;font-size:16px}}
 @media(max-width:600px){.learning-summary .learning-open{min-height:44px}}
 .personal-duty{display:grid;gap:4px}
-.personal-duty-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:5px;text-align:start;
-  min-width:0;min-height:34px;padding:5px 7px;border:1px solid var(--desk-line);border-radius:7px;background:var(--desk-well);color:var(--desk-ink);font:inherit;font-size:.79rem}
+.personal-duty-row{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:6px;text-align:start;
+  min-width:0;min-height:27px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--desk-ink);font:inherit;font-size:var(--cf-font-body)}
 button.personal-duty-row{cursor:pointer}
 .personal-duty-row :is(svg,small){color:var(--desk-green)}
 .personal-duty-row button{color:var(--desk-green)}
-.period-entries{display:grid;gap:4px;list-style:none;margin:0;padding:0}
+.period-entries,.seal-list{display:grid;gap:2px;list-style:none;margin:0;padding:0;min-width:0;
+  max-block-size:14rem;overflow:auto;overscroll-behavior-y:contain;scroll-padding:4px}
 .period-group{display:grid;gap:4px;min-width:0}
-.period-group-title{display:flex;align-items:center;gap:6px;margin:2px 0 0;color:var(--desk-muted);font-size:var(--cf-font-meta)}
-.period-group-title small{padding:0 .4em;border-radius:999px;background:var(--desk-well);font-variant-numeric:tabular-nums}
-.period-group[data-group=building-running] .period-group-title{color:var(--desk-green)}
-.period-group[data-group=building-planned] .period-group-title{position:sticky;inset-block-start:0;z-index:1;background:var(--desk-paper);color:var(--v2-amber,#99441d)}
 .period-entry,.seal-row{width:100%;min-width:0;display:grid;gap:3px 7px;align-items:center;text-align:left;
-  border:1px solid var(--desk-line);border-radius:8px;background:var(--desk-well);padding:6px 7px;color:var(--desk-ink);font:inherit;font-size:.8rem}
-.period-entry{grid-template-columns:minmax(0,1fr) auto;grid-template-areas:"kind action" "title title" "meta time"}
-.period-entry:hover,.period-entry:focus-visible{border-color:var(--desk-green)}
-.period-kind{grid-area:kind;justify-self:start;color:var(--desk-green);font-size:.74rem;font-weight:650}
-.period-title{grid-area:title;overflow-wrap:anywhere;line-height:1.32}
-.period-action{grid-area:action;justify-self:end;display:flex;align-items:center;gap:1px;color:var(--desk-green);font-size:.75rem;white-space:nowrap}
-.period-meta,.period-time,.seal-row small{font-size:.74rem;color:var(--desk-muted);line-height:1.35}
-.period-meta{grid-area:meta}.period-time{grid-area:time;justify-self:end;text-align:end}
+  border:0;border-radius:6px;background:var(--desk-paper);padding:5px 6px;min-height:32px;color:var(--desk-ink);font:inherit;font-size:var(--cf-font-body)}
+.period-entry{grid-template-columns:minmax(0,1fr) auto auto;cursor:pointer}
+.period-entry:hover,.period-entry:focus-visible{background:var(--desk-green-wash)}
+.period-entry:focus-visible{outline-offset:-2px}
+.period-title,.card-head h3,.learning-open span,.period-meta,.period-time{
+  min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.period-title{font-weight:550}
+.period-meta,.period-time,.seal-row small{font-size:var(--cf-font-meta);color:var(--desk-muted);line-height:1.35}
+.period-meta{max-width:6.5em}
+.period-time{display:none}
+.period-entry svg{grid-column:-2;color:var(--tile-accent)}
 .period-entry[data-tone=late]{border-inline-start:3px solid var(--cf-danger,#a43c31)}
 .period-entry[data-tone=soon]{border-inline-start:3px solid var(--cf-warning,#8a4d11)}
 .period-entry[data-tone=late] .period-time{color:var(--cf-danger,#a43c31);font-weight:700}
 .period-entry[data-tone=soon] .period-time{color:var(--cf-warning,#8a4d11);font-weight:700}
-.period-expand{justify-self:end}
-.seal-list{display:grid;gap:4px}
-.seal-row{grid-template-columns:auto minmax(0,1fr) auto}
-.seal-row>div{display:grid;gap:2px}
-.seal-row :is(svg,.seal-state){color:var(--desk-green)}
+.period-expand{justify-self:end;min-height:27px;padding:2px 6px;border:0;color:var(--v2-blue)}
+.seal-row{grid-template-columns:minmax(0,1fr) auto}
+.seal-row .seal-state{color:var(--v2-blue);white-space:nowrap}
 .period-empty{padding:10px 12px;border:1px solid var(--desk-line);border-radius:8px;color:var(--desk-muted);font-size:.8rem}
-@container wb-period (min-width:815px){
-  .period-grid[data-view=cards]:has(article:nth-child(3)){grid-template-columns:minmax(0,1fr) minmax(0,1fr) minmax(190px,.64fr)}
+@container period-card (min-width:400px){
+  .period-entry{grid-template-columns:minmax(0,1fr) auto auto auto}
+  .period-time{display:block;max-width:10em}
 }
-@container period-card (min-width:525px){
-  .period-grid[data-view=cards] .period-entries{grid-template-columns:repeat(2,minmax(0,1fr))}
-  .period-grid[data-view=table] .period-entry{
-    grid-template-columns:75px minmax(0,1fr) minmax(0,.55fr) minmax(0,.68fr) auto;
-    grid-template-areas:"kind title meta time action";min-height:38px
-  }
-}
-.period-grid[data-view=table] .period-group{max-inline-size:56rem}
-@container daily-desk (min-width:980px){
-  .period-grid{flex:1;min-height:0}
-  .period-card-body{flex:1;max-block-size:clamp(19rem,52dvh,34rem)}
+@container period-card (min-width:560px){
+  .period-grid[data-view=table] .period-entry{grid-template-columns:minmax(0,1fr) minmax(0,.38fr) minmax(0,.3fr) auto}
+  .period-grid[data-view=table] .period-meta{display:block}
 }
 @media(pointer:coarse){.period-tools button,.status-filters button,.period-entry,.period-expand,.period-fold,.personal-duty-row{min-height:44px}}
 </style>

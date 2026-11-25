@@ -533,8 +533,7 @@ function afterAgendaClose() {
   .working-grid { grid-template-columns:minmax(0,1fr) minmax(310px,25%);grid-template-areas:"tasks agenda" "supplement agenda" "shortcuts shortcuts";grid-template-rows:auto 1fr auto }
   .desk-supplement,.day-planner { align-self:stretch }
   .desk-supplement :deep(.wb-period) { display:flex;flex-direction:column }
-  .day-planner { grid-template-rows:auto auto 1fr }
-  .roster-module { align-self:end }
+  .day-planner { grid-template-rows:auto auto auto;align-content:start }
   .agenda-jump { display:none }
 }
 @container daily-desk (min-width:700px) and (max-width:979px){

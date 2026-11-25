@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type VNode } from 'vue';
 import { NModal, NPopover, useMessage } from 'naive-ui';
-import { Activity, ArrowLeftRight, Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Droplets, FileCheck2, KeyRound, Layers3, ListChecks, Package, PenLine, Route, ScanLine, Search, ShieldCheck, Siren, SlidersHorizontal, Wrench, X, Zap } from 'lucide-vue-next';
+import { Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Layers3, ListChecks, Search, ShieldCheck, Siren, Wrench, X } from 'lucide-vue-next';
 import type { Dict } from '../client';
 import { moduleForRoute, moduleIcons, moduleUrl, NOTICE_IDS } from '../modules';
 import { widget, type Widget } from '../dashboard/layout';
@@ -21,6 +21,7 @@ import { todoTimestamp } from '../businessTodos';
 import { eventLevelTone } from '../../eventManagementUtils';
 import { isMopBuilding } from '../../mopSelectionUtils';
 import { beijingDate, eventPeriodRange } from '../eventPeriod';
+import { noticeTileLabel, taskTileKey, taskTilePriority, taskTileStyle } from './taskTiles';
 
 const props=withDefaults(defineProps<{user:Dict;scopes:ScopeOption[];scope:string;explicitScope?:boolean}>(),{explicitScope:true});
 const emit=defineEmits<{open:[url:string]}>();
@@ -168,7 +169,7 @@ const orderedSources=computed(()=>sourceOrder.value.flatMap(id=>sources.value.fi
 const sourceLabels=computed(()=>new Map(sources.value.map(source=>[source.id,source.label])));
 watch([context,orderedSources],()=>{for(const source of orderedSources.value) void load(source.id);},{immediate:true,flush:'post'});
 type TaskView='all'|'today'|'previous-repairs'|'unread';
-const taskSearch=ref(''),taskView=ref<TaskView>('all');
+const taskView=ref<TaskView>('all');
 const allTasks=computed(()=>orderedSources.value
   .filter(source=>source.id!=='notice_plans')
   .flatMap(source=>(states.value[source.id]?.result?.rows||[]).map(item=>source.readOnly?{...item,readOnly:true}:item))
@@ -204,7 +205,6 @@ function markRead(item:WorkItem) {
   try { if(readStorageKey.value) localStorage.setItem(readStorageKey.value,JSON.stringify(keys)); } catch { /* Keep session state. */ }
 }
 const activeGroup=ref('');
-const queueView=ref<'cards'|'table'>('cards');
 const popoverView=ref<'cards'|'table'>('table');
 const priorityView=ref<'cards'|'table'>('cards');
 const groupPlacement=ref<'top-start'|'bottom-start'>('bottom-start');
@@ -246,29 +246,14 @@ const taskScopeLabel=(scope:string)=>/^[A-EH]$/.test(scope)?scope+'楼':scope===
 const taskModuleLabels:Partial<Record<SourceId,string>>={
   notices:'通告',events:'事件',event_notices:'事件',repair_management:'维修',critical_guard:'重保',risk_inspection:'专项排查',
   water:'水耗',engineer_mop:'维保单',cabinet:'机柜',drills:'演练',accounts:'权限',ali_confirmation:'阿里确认',
-  tool_management:'工具',inspection:'巡检',learning:'学练',signatures:'签名',pre_shift:'班前检查',
+  tool_management:'工具自检',tool_external:'工具送检',inspection:'巡检',learning:'学练',signatures:'签名',pre_shift:'班前检查',
 };
 const taskModuleLabel=(kind:SourceId)=>taskModuleLabels[kind]||sourceLabels.value.get(kind);
 const taskLabel=(item:WorkItem)=>item.kind==='notices'
-  ? item.detail==='维保'?'维保通告':item.detail||'通告'
+  ? noticeTileLabel(item)
   :taskModuleLabel(item.kind)||'待办';
-const matchedTasks=computed(()=>{
-  const terms=taskSearch.value.toLowerCase().split(/\s+/).filter(Boolean);
-  return queueTasks.value
-    .filter(row=>(taskView.value!=='today'||isTodayTask(row))&&(taskView.value!=='previous-repairs'||isPreviousRepair(row))
-      &&(taskView.value!=='unread'||!isRead(row))&&terms.every(term=>
-      [row.title,taskScopeLabel(row.scope),row.status,taskLabel(row),sourceLabels.value.get(row.kind)].join(' ').toLowerCase().includes(term)));
-});
-const groupPriority:Record<string,number>={events:0,critical_guard:1,'notices:变更':2,risk_inspection:3};
-const tileStyles:Record<string,[typeof Layers3,number]>={
-  events:[Siren,352],critical_guard:[ShieldCheck,32],'notices:变更':[ArrowLeftRight,218],risk_inspection:[ScanLine,278],
-  'notices:维保':[Wrench,165],'notices:检修':[FileCheck2,186],'notices:轮巡':[Route,240],
-  'notices:设备调整':[SlidersHorizontal,295],'notices:上下电':[Zap,46],
-  engineer_mop:[ClipboardList,220],repair_management:[Wrench,172],cabinet:[Layers3,252],drills:[Activity,205],
-  water:[Droplets,202],accounts:[KeyRound,38],tool_management:[Package,26],learning:[BookOpen,270],
-  inspection:[ListChecks,157],signatures:[PenLine,219],ali_confirmation:[FileCheck2,219],
-  pre_shift:[ClipboardList,157],
-};
+const matchedTasks=computed(()=>queueTasks.value.filter(row=>(taskView.value!=='today'||isTodayTask(row))
+  &&(taskView.value!=='previous-repairs'||isPreviousRepair(row))&&(taskView.value!=='unread'||!isRead(row))));
 function rowPriority(item:WorkItem){
   if(item.urgentEvent)return eventLevelTone(item.urgentEvent)==='critical'?0:1;
   if(isOverdue(item))return 2;
@@ -297,11 +282,11 @@ const switchableCases=computed(()=>{
     && [item.title,taskScopeLabel(item.scope),taskModuleLabel(item.kind),item.detail].join(' ').toLowerCase().includes(query)).sort(compareRows);
 });
 const taskGroups=computed(()=>{
-  const groups=new Map<string,{key:string;label:string;source:SourceId;icon:typeof Layers3;hue:number;rows:WorkItem[]}>();
+  const groups=new Map<string,{key:string;label:string;source:SourceId;icon:typeof ClipboardList;hue:number;rows:WorkItem[]}>();
   function groupFor(key:string,label:string,source:SourceId) {
     const existing=groups.get(key);
     if(existing)return existing;
-    const [icon,hue]=tileStyles[key]||[ClipboardList,205];
+    const [icon,hue]=taskTileStyle(key);
     const group={key,label,source,icon,hue,rows:[] as WorkItem[]};
     groups.set(key,group);
     return group;
@@ -309,8 +294,7 @@ const taskGroups=computed(()=>{
   for(const item of matchedTasks.value){
     const source=item.kind==='event_notices'?'events':item.kind;
     const label=taskLabel(item);
-    const key=source==='notices'?'notices:'+(item.detail||label):source;
-    groupFor(key,label,source).rows.push(item);
+    groupFor(taskTileKey(item),label,source).rows.push(item);
   }
   const represented=new Set([...groups.values()].map(group=>group.source));
   for(const source of sourcesForQueue.value){
@@ -320,7 +304,7 @@ const taskGroups=computed(()=>{
   const ordered=[...groups.values()];
   for(const group of ordered)group.rows.sort(compareRows);
   return ordered.sort((a,b)=>{
-    const rankA=groupPriority[a.key]??4, rankB=groupPriority[b.key]??4;
+    const rankA=taskTilePriority[a.key]??4, rankB=taskTilePriority[b.key]??4;
     if(rankA!==rankB)return rankA-rankB;
     if(rankA===4){
       const roleOrder=a.rows[0]&&b.rows[0]?deskActionOrder(accountLevel.value,a.rows[0])-deskActionOrder(accountLevel.value,b.rows[0]):0;
@@ -393,13 +377,12 @@ const queueStatus=computed(()=>{
   if (allLoading.value) return '正在读取…';
   if (queueIssues.value.length) return '暂无已读取的待办，请重试待更新数据';
   if (missingOwnership.value) return '待办归属待核对';
-  if (taskSearch.value.trim()) return '未找到待办';
   if (taskView.value==='today') return '今日暂无待办';
   if (taskView.value==='previous-repairs') return '暂无未完维修';
   if (taskView.value==='unread') return '暂无未读待办';
   return '暂无待办';
 });
-watch([taskSearch,taskView],()=>{activeGroup.value='';});
+watch(taskView,()=>{activeGroup.value='';});
 watch(queueSources,list=>{
   if(taskView.value==='previous-repairs'&&!list.some(source=>source.id==='repair_management'))taskView.value='all';
 });
@@ -410,7 +393,7 @@ function sourceStatus(id:SourceId) {
 }
 const deadline=(time:number)=>new Date(time).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
 function taskWhen(item:WorkItem){
-  if(item.dueAt)return '截止 '+deadline(item.dueAt);
+  if(item.dueAt)return '截止 '+(item.kind==='tool_external'?beijingDate(item.dueAt).slice(5):deadline(item.dueAt));
   const raw=item.time||item.noticeWindow?.start;
   const stamp=todoTimestamp(raw);
   return stamp&&raw&&!/^\d{4}-\d{2}-\d{2}$/.test(raw)?deadline(stamp):raw||'';
@@ -509,7 +492,7 @@ function restoreFocus(){
 }
 watch([context,selectedScope],()=>{
   activeCase.value=undefined;caseListOpen.value=false;caseSearch.value='';trigger=null;
-  taskSearch.value=''; taskView.value='all'; activeGroup.value='';tileTrigger=null; allShortcuts.value=false;
+  taskView.value='all'; activeGroup.value='';tileTrigger=null; allShortcuts.value=false;
 },{flush:'sync'});
 
 function readDuty(data:Dict){
@@ -544,7 +527,7 @@ const currentScopeLabel=computed(()=>scopeOptions.value.find(option=>option.valu
 const accountName=computed(()=>String(props.user.name||props.user.display_name||'').trim());
 const visibleShortcuts=computed(()=>allShortcuts.value?shortcuts.value:shortcuts.value.slice(0,6));
 const showQueueCount=computed(()=>matchedTasks.value.length>0 && (
-  taskView.value!=='all'||!!taskSearch.value.trim()||selectedScope.value!==dataScope.value
+  taskView.value!=='all'||selectedScope.value!==dataScope.value
   ||accountLevel.value==='L3'||accountLevel.value==='duty'
 ));
 const queueNote=computed(()=>{
@@ -557,7 +540,6 @@ const queueNote=computed(()=>{
 });
 function showQueue(view:TaskView){
   taskView.value=view;
-  taskSearch.value='';
   content.value?.scrollIntoView({block:'start'});
   content.value?.focus({preventScroll:true});
 }
@@ -612,19 +594,12 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
               {{ view.label }}<b v-if="view.count" class="queue-filter-count" aria-hidden="true">{{ view.count }}</b>
             </button>
           </div>
-          <div class="queue-filters">
-            <label><Search :size="15" aria-hidden="true" /><input v-model="taskSearch" type="search" aria-label="搜索待办" placeholder="搜索待办"></label>
-            <RecordViewSwitch v-model="queueView" @update:model-value="activeGroup=''"/>
-          </div>
         </header>
         <details v-if="queueIssues.length" class="desk-queue-health queue-health"><summary>{{ queueIssues.length }} 类待办待更新</summary>
           <div v-for="source in queueIssues" :key="source.id"><span>{{ source.label }} · {{ sourceStatus(source.id) }}</span><button :aria-label="'重试'+source.label" @click="load(source.id,true)">重试</button></div>
         </details>
         <p v-if="queueStatus" class="quiet-message" role="status">{{ queueStatus }}</p>
-        <WorkbenchTaskRows v-if="queueView==='table'&&matchedTasks.length" :groups="byBuilding([...matchedTasks].sort(compareRows))"
-          view="table" :label="taskLabel" :action="actionLabel" :when="taskWhen" :seen="isRead" :late="isOverdue" :read-only="readOnly"
-          :can-delete="canOpenNoticeDeletion" @open="openItem"/>
-        <ul v-else-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
+        <ul v-if="taskGroups.length" class="task-tiles" aria-label="待办模块">
           <li v-for="group in taskGroups" :key="group.key" :style="{'--tile-hue':group.hue}">
             <NPopover trigger="click" :placement="groupPlacement" raw :show-arrow="false"
               :animated="false" :show="activeGroup===group.key" @update:show="show=>setGroup(group.key,show)">
@@ -703,7 +678,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .task-dialog[data-case=pre_shift] :deep(.v2-check-form>footer) {bottom:0}
 .task-dialog[data-case=pre_shift] :deep(.v2-check-items) {padding-block-end:8px;scroll-padding-block-end:8px}
 .task-desk button:disabled { cursor:default }
-.business-strip,.business-key,.queue-title,.queue-switches,.queue-filters label,.expand-key { display:flex; align-items:center; gap:7px }
+.business-strip,.business-key,.queue-title,.queue-switches,.expand-key { display:flex; align-items:center; gap:7px }
 .scope-choice { min-width:0 }
 .scope-choice select { max-width:100%;min-height:36px;padding:4px 8px;border:1px solid var(--desk-line);border-radius:9px;background:var(--desk-paper);color:var(--desk-ink);font-size:12px }
 .quiet-message { color:var(--desk-muted); font-size:12px }
@@ -724,16 +699,11 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .queue-switches { flex-wrap:wrap; gap:4px }
 .task-desk .queue-switches button { min-height:32px;padding:3px 9px;border:1px solid transparent;border-radius:999px;background:transparent;color:var(--desk-muted);font-size:12px;white-space:nowrap }
 .task-desk .queue-switches button[aria-pressed="true"] { background:var(--v2-palette-selection); color:var(--v2-palette-accent-text); font-weight:650 }
-.queue-filters { display:flex;align-items:center;gap:5px;flex:1 1 170px;max-width:272px;margin-inline-start:auto }
-.queue-filters label { flex:1;min-width:0; min-height:35px; padding:0 7px; background:var(--desk-well); border:1px solid var(--desk-line); border-radius:8px; color:var(--desk-muted) }
-.queue-filters svg { flex:none }
-.task-desk .queue-filters input { min-width:0; width:100%; min-height:32px; border:0; color:var(--desk-ink); background:transparent; box-shadow:none; padding:0; font-size:13px }
 .task-tiles {
   display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,106px),1fr));gap:7px;
   margin:9px 0 0;padding:0;list-style:none
 }
 .task-tiles>li { min-width:0 }
-.wb-task-tile,.tile-popover { --tile-accent:hsl(var(--tile-hue) 57% 35%);--tile-tint:color-mix(in srgb,var(--tile-accent) 10%,var(--desk-paper)) }
 .task-desk .wb-task-tile {
   display:grid;grid-template-columns:1fr auto;align-items:center;align-content:space-between;gap:7px 4px;
   width:100%;min-height:72px;padding:9px 11px;text-align:left;border-radius:13px;
@@ -758,7 +728,6 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .tile-close { width:34px;display:grid;place-items:center }
 .tile-popover .queue-list { min-height:0;list-style:none;padding:0 8px;margin:0;overflow:auto;overscroll-behavior:contain }
 :global(.v-binder-follower-container:has(.tile-popover)) { position:fixed }
-:global([data-v2-theme="dark"] :is(.wb-task-tile,.tile-popover)) { --tile-accent:hsl(var(--tile-hue) 65% 73%) }
 @media(max-width:600px){
   .task-tiles { grid-template-columns:repeat(3,minmax(0,1fr));gap:6px }
   .task-desk .wb-task-tile { min-height:66px;padding:8px 10px }
@@ -773,7 +742,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .close-key { display:grid; place-items:center; min-width:38px; min-height:36px; padding:5px 9px; color:inherit; background:var(--soft-field,#edf2f3); border:1px solid #879b9c66; border-radius:8px }
 @media(max-width:760px) {
   .scope-choice select { min-height:44px }
-  .task-desk :is(.business-key,.more-key,.expand-key,.queue-switches button),.queue-filters label,.close-key { min-height:44px }
+  .task-desk :is(.business-key,.more-key,.expand-key,.queue-switches button),.close-key { min-height:44px }
   .queue-switches { gap:2px }
   .task-dialog { width:calc(100vw - 12px) }
 }
@@ -848,9 +817,4 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 }
 .task-desk .shift-check { margin:12px 0 0 }
 .shift-check :deep(.v2-check-task:only-child:has(> .n-empty)) { grid-column:1 / -1;display:block }
-@media(max-width:640px) {
-  .queue-toolbar { display:grid; grid-template-columns:minmax(0,1fr) minmax(130px,49%); gap:4px 6px }
-  .queue-filters { grid-area:1/2; width:100% }
-  .queue-switches { grid-column:1/-1 }
-}
 </style>

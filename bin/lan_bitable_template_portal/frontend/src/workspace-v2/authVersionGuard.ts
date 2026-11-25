@@ -5,8 +5,8 @@ export function useAuthVersionGuard(){
   let observer:MutationObserver|undefined,form:HTMLFormElement|null=null,proceed:(()=>void)|undefined;
   function read(){
     const current=document.querySelector<HTMLFormElement>('form.pwd-form');
-    if(form!==current){observer?.disconnect();form=current;if(form){observer=new MutationObserver(read);observer.observe(form,{subtree:true,childList:true,attributes:true,attributeFilter:['disabled']});}}
-    busy.value=!!form?.querySelector('button[type=submit] .spin');
+    if(form!==current){observer?.disconnect();form=current;if(form){observer=new MutationObserver(read);observer.observe(form,{attributes:true,attributeFilter:['aria-busy']});}}
+    busy.value=form?.getAttribute('aria-busy')==='true';
     return form;
   }
   function request(action:()=>void){

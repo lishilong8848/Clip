@@ -84,10 +84,9 @@
             <option v-for="item in sourceOptions" :key="item" :value="item">{{ item }}</option>
           </select>
           <select v-model="specialtyFilter" aria-label="专业筛选">
-            <option value="">全部专业</option>
-            <option v-for="item in specialtyOptions" :key="item" :value="item">{{ item }}</option>
+            <option v-for="item in specialtyOptions" :key="item.value" :value="item.value">{{ item.label }}</option>
           </select>
-          <button type="button" v-if="activeFilterCount" class="btn quiet" @click="clearFilters">
+          <button type="button" v-if="activeFilterCount" class="btn quiet" @click="clearFilters(true)">
             清空筛选
           </button>
         </div>
@@ -276,6 +275,7 @@ import EventStatsCards from "./EventStatsCards.vue";
 import EventVirtualList from "./EventVirtualList.vue";
 import NoticeAlertTags from "./NoticeAlertTags.vue";
 import MessageBanner from "./MessageBanner.vue";
+import {defaultProfessionView,professionChoices,professionMatches,useProfessionUser} from '../workspace-v2/professionBrowse';
 import VnetBackButton from "./VnetBackButton.vue";
 
 const props = defineProps<{
@@ -320,7 +320,8 @@ const buildingFilter = ref("");
 const statusFilter = ref("");
 const levelFilter = ref("");
 const sourceFilter = ref("");
-const specialtyFilter = ref("");
+const professionUser=useProfessionUser();
+const specialtyFilter = ref(defaultProfessionView(professionUser?.value));
 const initialDetailRequested = !!props.focusRecordId || new URLSearchParams(window.location.search).get("detail") === "1";
 const initialDetailScope = initialDetailRequested ? normalizeScope(props.scope) : "";
 const detailScope = ref(initialDetailScope);
@@ -495,7 +496,7 @@ const filteredEvents = computed(() => {
     if (statusFilter.value && String(item.status || "") !== statusFilter.value) return false;
     if (levelFilter.value && String(item.level || "") !== levelFilter.value) return false;
     if (sourceFilter.value && String(item.source || "") !== sourceFilter.value) return false;
-    if (specialtyFilter.value && String(item.specialty || "") !== specialtyFilter.value) return false;
+    if (!professionMatches(specialtyFilter.value,item.specialty,professionUser?.value)) return false;
     if (!query) return true;
     const haystack = [
       item.title,
@@ -525,7 +526,9 @@ const priorityEvents = computed(() => {
 const statusOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.status)));
 const levelOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.level)));
 const sourceOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.source)));
-const specialtyOptions = computed(() => uniqueOptions(detailEvents.value.map((item) => item.specialty)));
+const availableSpecialties = ref<string[]>([]);
+const specialtyOptions = computed(() => professionChoices(professionUser?.value,
+  [...new Set(['电气','暖通','弱电','消防',...availableSpecialties.value])]));
 const activeFilterCount = computed(() => {
   return [searchText.value, buildingFilter.value, statusFilter.value, levelFilter.value, sourceFilter.value, specialtyFilter.value]
     .filter((value) => String(value || "").trim()).length;
@@ -536,7 +539,7 @@ const filterSummaryItems = computed(() => [
   { label: "状态", value: statusFilter.value || "全部状态", active: Boolean(statusFilter.value) },
   { label: "等级", value: levelFilter.value || "全部等级", active: Boolean(levelFilter.value) },
   { label: "来源", value: sourceFilter.value || "全部来源", active: Boolean(sourceFilter.value) },
-  { label: "专业", value: specialtyFilter.value || "全部专业", active: Boolean(specialtyFilter.value) },
+  { label: "专业", value: specialtyOptions.value.find(option=>option.value===specialtyFilter.value)?.label||"全部专业", active: Boolean(specialtyFilter.value) },
 ]);
 const visibleFilterSummaryItems = computed(() => (
   filterSummaryItems.value.filter((item) => item.active || item.label === "楼栋" || item.label === "月份")
@@ -769,13 +772,13 @@ function setEventDetailUrlFlag(enabled: boolean): void {
   window.history.replaceState({}, "", url.toString());
 }
 
-function clearFilters(): void {
+function clearFilters(showAll = false): void {
   searchText.value = "";
   buildingFilter.value = "";
   statusFilter.value = "";
   levelFilter.value = "";
   sourceFilter.value = "";
-  specialtyFilter.value = "";
+  specialtyFilter.value = showAll ? '' : defaultProfessionView(professionUser?.value);
 }
 
 function cancelEventRefreshWait(): void {
@@ -826,6 +829,7 @@ async function loadEvents(): Promise<void> {
   }
 }
 usePageReadRefresh(url => ['/api/events/overview','/api/events/monthly'].includes(url.pathname) && url.searchParams.get('month') === selectedMonth.value, loadEvents, () => !loading.value && !refreshing.value);
+watch(specialtyFilter,()=>{if(professionUser&&!props.recordOnly&&showingDetails.value)void loadEvents();});
 
 async function loadMonthlyEvents(
   scope: string,
@@ -833,9 +837,11 @@ async function loadMonthlyEvents(
   loadVersion = eventLoadVersion,
 ): Promise<void> {
   const params = new URLSearchParams({ scope, month: selectedMonth.value, date_field: "occurrence_time" });
+  if(professionUser&&!props.recordOnly)params.set('profession_view',specialtyFilter.value||'all');
   const payload = await requestJson(`/api/events/monthly?${params.toString()}`, { signal });
   if (loadVersion !== eventLoadVersion || signal?.aborted) return;
   events.value = Array.isArray(payload.records) ? payload.records : [];
+  availableSpecialties.value=uniqueOptions(events.value.map(item=>item.specialty));
   detailUnknownTimeCount.value = Number(payload.unknown_time_count || 0);
   stats.value = payload.stats && typeof payload.stats === "object" ? payload.stats : {};
   lastRefreshedAt.value = Number(payload.last_refreshed_at || lastRefreshedAt.value || 0);

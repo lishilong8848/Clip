@@ -474,7 +474,7 @@ def install_eop_scenario_routes(app, controller, runtime):
     app.add_event_handler('shutdown', shutdown)
 
     async def endpoint(request: Request):
-        from .module_access import professional_record_visible, session_engineer_professions
+        from .module_access import professional_record_visible, profession_query
 
         try:
             session = await asyncio.to_thread(controller._current_session, request)
@@ -487,12 +487,6 @@ def install_eop_scenario_routes(app, controller, runtime):
             editor = await asyncio.to_thread(runtime.auth_manager.is_admin, session)
             svc = await asyncio.to_thread(manager)
             rid, ticket = (request.path_params.get(key, '') for key in ('rid', 'ticket'))
-            professions = await asyncio.to_thread(session_engineer_professions, runtime.auth_manager, session)
-            if rid and professions is not None:
-                cache = await asyncio.to_thread(svc.cache)
-                fields = cache['records'].get(rid)
-                if not fields or not professional_record_visible(professions, fields):
-                    raise RiskError('该场景不存在或不在当前专业范围。', 404)
             if request.method == 'GET' and ticket:
                 token, extra = svc.check_ticket(ticket, rid, user, 'preview')
                 if request.query_params.get('original') == '1':
@@ -501,6 +495,14 @@ def install_eop_scenario_routes(app, controller, runtime):
                     mime, content = await asyncio.to_thread(svc.thumbnail, token, extra)
                 return Response(content, media_type=mime, headers={'Cache-Control': 'private, max-age=180',
                     'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer'})
+            view = request.query_params.get('profession_view') if request.method == 'GET' else None
+            professional_scope = await asyncio.to_thread(profession_query, runtime.auth_manager, session, view=view)
+            professions = professional_scope.get('professions')
+            if rid and professions is not None:
+                cache = await asyncio.to_thread(svc.cache)
+                fields = cache['records'].get(rid)
+                if not fields or not professional_record_visible(professions, fields):
+                    raise RiskError('该场景不存在或不在当前专业范围。', 404)
             if request.method == 'GET':
                 if not rid and request.query_params.get('refresh') == '1':
                     await asyncio.to_thread(svc.refresh_cache)

@@ -310,8 +310,6 @@ class ToolManagementLifecycle:
                     'orders': orders[:HISTORY_LIMIT], 'has_more': len(visible) + len(legacy) > HISTORY_LIMIT, **lifecycle}
 
     def _building_reminder_cards(self, db, today):
-        from .tool_management import configured_kind
-
         pending = defaultdict(lambda: defaultdict(list))
         day = today.isoformat()
         limit = (today + dt.timedelta(days=7)).isoformat()
@@ -326,6 +324,14 @@ class ToolManagementLifecycle:
             group = ('review' if row['review_status'] == 'pending' else
                      'external' if row['kind'] == 'external' else 'self_draft' if row['workspace_direct'] else 'late')
             pending[row['scope']][group].append((row['due'], json.loads(row['asset']).get('name') or ''))
+        for asset, due, unqualified in self._due_external_assets(db, today):
+            pending[asset['scope']]['retest' if unqualified else 'certificate'].append((due, asset['name']))
+        return {scope: _reminder_card(scope, day, groups) for scope, groups in pending.items()}
+
+    def _due_external_assets(self, db, today):
+        from .tool_management import configured_kind
+
+        limit = (today + dt.timedelta(days=7)).isoformat()
         history, scrapped, blocked = defaultdict(list), defaultdict(int), set()
         for row in db.execute('''SELECT id,asset_id,scope,kind,due,actual,submitted_at,outcome,scrap_qty,inspection_meta,ledger_deleted_at
                 FROM tool_work_orders WHERE submitted_at IS NOT NULL OR outcome IN ('repair','scrap','scrapped')'''):
@@ -349,9 +355,7 @@ class ToolManagementLifecycle:
             certificate = lifecycle['certificate'] or {}
             due = lifecycle['next_external_due']
             if due and due <= limit:
-                group = 'retest' if certificate.get('validity') == 'unqualified' else 'certificate'
-                pending[scope][group].append((due, asset['name']))
-        return {scope: _reminder_card(scope, day, groups) for scope, groups in pending.items()}
+                yield asset, due, certificate.get('validity') == 'unqualified'
 
     def send_building_reminders(self, deliver, current=None, *, link_for_scope=None):
         """Call deliver(scope, Beijing ISO day, Feishu card); bool or (bool, message) receipt.

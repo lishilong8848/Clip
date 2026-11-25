@@ -2717,6 +2717,16 @@ function applyRepairChanges(changes: unknown): boolean {
   return needsFullRefresh;
 }
 
+function applyNewRepairChanges(changes: unknown, cursor: unknown): boolean {
+  const previous = repairStreamCursor;
+  const next = Number(cursor);
+  markRepairStreamActive(cursor);
+  if (!Array.isArray(changes)) return false;
+  return applyRepairChanges(changes.filter(change =>
+    Number(change?.id) > 0 ? Number(change.id) > previous : next > previous,
+  ));
+}
+
 async function pollRepairChangesIfStale(force = false): Promise<void> {
   if (
     !repairPageActive
@@ -2731,23 +2741,22 @@ async function pollRepairChangesIfStale(force = false): Promise<void> {
     return;
   }
   repairStreamPollInFlight = true;
+  const scope = props.scope || "ALL";
+  const requestedCursor = repairStreamCursor;
   try {
     const params = new URLSearchParams({
-      scope: props.scope || "ALL",
-      after_id: String(repairStreamCursor),
+      scope,
+      after_id: String(requestedCursor),
       limit: "100",
     });
     const payload = await requestJson(
       `/api/repair-management/changes?${params.toString()}`,
     );
-    const nextCursor = Math.max(
-      0,
-      Number(payload.cursor || payload.latest_cursor || repairStreamCursor),
-    );
-    storeRepairStreamCursor(nextCursor);
-    repairStreamLastActivityAt = Date.now();
-    const needsFullRefresh = applyRepairChanges(payload.changes);
-    if (Boolean(payload.cursor_reset) || needsFullRefresh) {
+    if (!repairPageActive || scope !== (props.scope || "ALL")) return;
+    const reset = Boolean(payload.cursor_reset) && repairStreamCursor === requestedCursor;
+    if (reset) storeRepairStreamCursor(payload.cursor ?? payload.latest_cursor ?? 0);
+    const needsFullRefresh = applyNewRepairChanges(payload.changes, payload.cursor ?? payload.latest_cursor);
+    if (reset || needsFullRefresh) {
       scheduleRepairStreamRefresh();
     }
     await loadRepairHealth();
@@ -2836,17 +2845,20 @@ function startRepairManagementStream(): void {
     if (repairManagementStream !== stream) return;
     markRepairStreamActive();
   });
+  stream.addEventListener("repair_reset", event => {
+    if (repairManagementStream !== stream) return;
+    const cursor = Number((event as MessageEvent).data);
+    if (!Number.isSafeInteger(cursor) || cursor < 0) return;
+    storeRepairStreamCursor(cursor);
+    markRepairStreamActive();
+    scheduleRepairStreamRefresh();
+  });
   stream.addEventListener("repair_change", (event) => {
     if (repairManagementStream !== stream) return;
     try {
       const payload = JSON.parse(String((event as MessageEvent).data || "{}"));
-      markRepairStreamActive(
-        payload.cursor || (event as MessageEvent).lastEventId,
-      );
-      if (Array.isArray(payload.changes) && payload.changes.length) {
-        if (applyRepairChanges(payload.changes)) {
-          scheduleRepairStreamRefresh();
-        }
+      if (applyNewRepairChanges(payload.changes, payload.cursor || (event as MessageEvent).lastEventId)) {
+        scheduleRepairStreamRefresh();
       }
     } catch {
       // EventSource reconnects and the next list refresh reconciles the page.

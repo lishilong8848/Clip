@@ -27,7 +27,7 @@
 
   <template v-else>
     <!-- 姓名密码登录 -->
-    <form v-if="mode === 'login'" class="pwd-form" novalidate @submit.prevent="submitLogin">
+    <form v-if="mode === 'login'" class="pwd-form" :aria-busy="busy" novalidate @submit.prevent="submitLogin">
       <label class="field" for="personnel-name-select">
         <span class="field-label"><User :size="15" aria-hidden="true" /> 姓名</span>
         <VnetSelect input-id="personnel-name-select" :model-value="personSearch" :options="personOptions"
@@ -101,7 +101,7 @@
     </form>
 
     <!-- 忘记密码（自动身份核验） -->
-    <form v-else-if="mode === 'reset'" class="pwd-form" novalidate @submit.prevent="submitReset">
+    <form v-else-if="mode === 'reset'" class="pwd-form" :aria-busy="busy" novalidate @submit.prevent="submitReset">
       <p class="reset-note">验证本人身份后即可设置新密码</p>
 
       <div v-if="isPersonFixed" class="current-account">
@@ -179,7 +179,7 @@
     </form>
 
     <!-- 修改密码（已登录） -->
-    <form v-else class="pwd-form" novalidate @submit.prevent="submitChange">
+    <form v-else class="pwd-form" :aria-busy="busy" novalidate @submit.prevent="submitChange">
       <div class="current-account">
         <span class="field-label"><User :size="15" aria-hidden="true" /> 当前账号</span>
         <strong>{{ changeUserName || "已登录" }}</strong>

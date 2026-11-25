@@ -18,6 +18,7 @@ defineEmits<{open:[item:WorkItem]}>();
             <span class="read-pin"><span class="wb-sr-only">{{ seen(item)?'已读':'未读' }}</span></span>
             <span class="task-copy"><span class="task-title"><strong>{{ item.title }}</strong></span>
               <span class="task-meta"><span v-if="label">{{ label(item) }}</span><span v-if="item.status">{{ item.status }}</span>
+                <span v-if="item.detail&&(item.kind==='tool_management'||item.kind==='tool_external')">{{ item.detail }}</span>
                 <span v-if="when(item)" class="due">{{ when(item) }}{{ late(item)?' · 逾期':'' }}</span></span>
             </span>
             <span class="item-action">{{ action(item) }}<ChevronRight :size="13" aria-hidden="true"/></span>

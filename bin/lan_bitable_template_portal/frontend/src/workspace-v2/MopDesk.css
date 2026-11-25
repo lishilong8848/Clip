@@ -1,7 +1,7 @@
-.v2-mop-workspace.engineer-mop {--mop-line:var(--soft-edge);--mop-ink:var(--v2-ink);--mop-muted:var(--v2-muted);--mop-accent:#21694f;--mop-sky:color-mix(in srgb,#84caec 22%,var(--soft-face));--mop-mint:color-mix(in srgb,#8cdbac 18%,var(--soft-face));width:100%;max-width:none;min-width:0;margin:0;padding:0;gap:8px}
+.v2-mop-workspace.engineer-mop {--mop-line:var(--soft-edge);--mop-ink:var(--v2-ink);--mop-muted:var(--v2-muted);--mop-accent:var(--cf-success);--mop-sky:var(--soft-sky);--mop-mint:var(--soft-mint);width:100%;max-width:none;min-width:0;margin:0;padding:0;gap:8px}
 .v2-mop-workspace .page-back-row:not(:has(button,a)){display:none}
 .v2-mop-workspace .mop-desk-bar,.v2-mop-workspace .mop-desk-panelbar,.v2-mop-workspace .mop-desk-line,.mop-desk-attachment-row {display:flex;align-items:center;gap:6px 10px;min-width:0;flex-wrap:wrap}
-.v2-mop-workspace .mop-desk-bar {padding:9px 14px;border-radius:13px;background:linear-gradient(110deg,var(--mop-sky),var(--mop-mint));box-shadow:var(--soft-key)}
+.v2-mop-workspace .mop-desk-bar {padding:9px 14px;border:1px solid var(--soft-edge);border-radius:var(--cf-radius-panel);background:var(--mop-sky);box-shadow:var(--soft-key)}
 .v2-mop-workspace .mop-desk-bar h1 {margin:0;display:block;font-size:20px;color:var(--v2-ink);line-height:1.35}
 .v2-mop-workspace .mop-desk-bar .mop-head {border:none;border-radius:0;box-shadow:none;background:transparent;padding:0;min-height:0;flex:1}
 .v2-mop-workspace .mop-desk-bar .head-actions {display:flex;flex-wrap:wrap;align-items:center;gap:8px}
@@ -25,7 +25,7 @@
 }
 .v2-mop-workspace :is(.mop-desk-notice,.mop-desk-file){min-width:0;display:grid;align-content:start;gap:5px;border:1px solid var(--soft-edge);padding:10px 12px;border-radius:11px;background:var(--soft-face);box-shadow:var(--soft-key);color:var(--v2-ink);font:inherit;text-align:start;overflow-wrap:anywhere;cursor:pointer}
 .v2-mop-workspace :is(.mop-desk-notice,.mop-desk-file):is([aria-pressed=true],:hover){border-color:var(--v2-blue)}
-.v2-mop-workspace :is(.mop-desk-notice,.mop-desk-file)[aria-pressed=true]{background:var(--mop-mint);box-shadow:var(--soft-inset)}
+.v2-mop-workspace :is(.mop-desk-notice,.mop-desk-file)[aria-pressed=true]{background:var(--v2-palette-selection);box-shadow:var(--soft-inset)}
 .v2-mop-workspace .mop-desk-line {justify-content:space-between;font-size:12px}
 .v2-mop-workspace .mop-desk-line b {font-weight:600;color:var(--v2-blue)}
 .v2-mop-workspace .mop-desk-empty {padding:15px 12px;margin:0;border-radius:9px;color:var(--v2-muted);background:var(--soft-field)}
@@ -35,12 +35,12 @@
 .v2-mop-workspace .mop-desk-attachment .mop-desk-panelbar>div {min-width:0;flex:1 1 170px}
 .v2-mop-workspace .mop-desk-attachment-row label {min-width:0;display:flex;align-items:center;flex-wrap:wrap;gap:7px;font-size:12px}
 .v2-mop-workspace .mop-desk-attachment p,.v2-mop-workspace .mop-desk-file-hint {display:block;margin:3px 0 7px;font-size:12px;overflow-wrap:anywhere}
-.v2-mop-workspace .mop-desk-attachment button.btn.blue:not(:disabled) {background:var(--mop-accent);color:white}
+.v2-mop-workspace .mop-desk-attachment button.btn.blue:not(:disabled) {background:var(--v2-palette-accent);color:var(--v2-palette-on-accent)}
 .v2-mop-workspace .mop-desk-local {position:relative;margin-left:auto;cursor:pointer;border:1px solid var(--soft-edge);padding:5px 9px;color:var(--v2-ink);border-radius:8px;font-size:13px;background:var(--soft-face);box-shadow:var(--soft-key)}
 .v2-mop-workspace .mop-desk-local input {position:absolute;width:1px;height:1px;clip-path:inset(50%);overflow:hidden}
 .v2-mop-workspace .mop-desk-local.dragging,.v2-mop-workspace .mop-desk-local:focus-within,.v2-mop-workspace button:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
 .v2-mop-workspace .mop-desk-sign-head,.v2-mop-workspace .mop-desk-sheetbar {display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;min-width:0}
-.v2-mop-workspace .mop-desk-sign-head {background:linear-gradient(110deg,var(--mop-sky),var(--mop-mint));padding:9px 12px;border-radius:12px}
+.v2-mop-workspace .mop-desk-sign-head {background:var(--mop-sky);padding:9px 12px;border-radius:var(--cf-radius-panel)}
 .v2-mop-workspace .mop-desk-sign-head .sign-panel-head {position:static;flex:1 1 230px;background:none!important;border:0;padding:0}
 .v2-mop-workspace .mop-desk-sign-head .signature-role-summary {flex:1 1 300px;min-width:0}
 .v2-mop-workspace .mop-desk-sign-sources {min-width:0}
@@ -71,7 +71,7 @@ html.workspace-v2 .v2-mop-workspace.engineer-mop:not(.preview-open){padding:0;ga
 
 .v2-mop-workspace .mop-desk-ledger {border-block:1px solid var(--soft-edge);max-inline-size:68rem}
 .v2-mop-workspace .mop-desk-ledger .mop-desk-notice {width:100%;display:grid;grid-template-columns:minmax(0,1fr) minmax(0,.55fr);grid-template-areas:"status upload" "title title" "kind binding";gap:3px 8px;border:0;border-left:3px solid transparent;border-bottom:1px solid var(--soft-edge);border-radius:0;box-shadow:none;background:transparent}
-.v2-mop-workspace .mop-desk-ledger .mop-desk-notice[aria-pressed=true]{border-left-color:var(--mop-accent);background:var(--mop-mint)}
+.v2-mop-workspace .mop-desk-ledger .mop-desk-notice[aria-pressed=true]{border-left-color:var(--v2-blue);background:var(--v2-palette-selection)}
 .v2-mop-workspace .mop-desk-ledger .mop-desk-ledger-status {grid-area:status;justify-content:flex-start}
 .v2-mop-workspace .mop-desk-ledger .mop-desk-ledger-title {grid-area:title}
 .v2-mop-workspace .mop-desk-ledger .mop-desk-ledger-kind {grid-area:kind}

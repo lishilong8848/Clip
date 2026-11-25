@@ -153,6 +153,7 @@ import { NSelect } from "naive-ui";
 import { QrCode, UserRound, Eye, ShieldCheck } from "lucide-vue-next";
 import VnetBackButton from "./VnetBackButton.vue";
 import PersonnelPasswordLogin from "./PersonnelPasswordLogin.vue";
+import feishuLogo from "../assets/feishu-logo.svg?inline";
 import { rememberLoginMethod, requestJson, requestPeople } from "../api/client";
 
 type Dict = Record<string, any>;
@@ -191,9 +192,9 @@ const emit = defineEmits<{
 
 // --- Login panel tabs (only used by the !loggedIn branch) ---
 const tabs = [
-  { value: "feishu", label: "飞书扫码登录", icon: QrCode },
-  { value: "password", label: "账号密码登录", icon: UserRound },
-  { value: "guest", label: "访客查看机柜", icon: Eye },
+  { value: "feishu", label: "飞书扫码登录", entryLabel: "飞书授权登录", icon: QrCode },
+  { value: "password", label: "账号密码登录", entryLabel: "姓名登录", icon: UserRound },
+  { value: "guest", label: "访客查看机柜", entryLabel: "访客登录", icon: Eye },
 ] as const;
 
 type TabValue = (typeof tabs)[number]["value"];

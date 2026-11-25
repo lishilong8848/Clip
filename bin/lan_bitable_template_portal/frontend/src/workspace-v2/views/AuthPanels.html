@@ -1,24 +1,35 @@
 <section class="serenity-desk entry-desk" :class="{'session-entry':!checking&&!loggedIn}" aria-label="账号办理">
   <p v-if="checking" role="status">正在检查登录状态…</p>
   <template v-else-if="!loggedIn">
-    <div class="entry-scene" aria-hidden="true"><span class="entry-beam"/><span class="entry-tower"/></div>
     <div class="entry-signin" data-v2-inline-feedback>
-      <header><h1>登录灯塔</h1></header>
+      <header class="entry-heading">
+        <span class="entry-security"><ShieldCheck :size="24" aria-hidden="true"/></span>
+        <h1>统一登录</h1>
+        <p>请选择一种方式登录</p>
+      </header>
       <div class="entry-methods" role="tablist" aria-label="登录方式" @keydown="onTabKeydown">
         <button v-for="tab in tabs" :id="'login-tab-'+tab.value" :key="tab.value" role="tab" type="button"
           :aria-controls="'login-panel-'+tab.value" :tabindex="activeTab===tab.value?0:-1" :aria-selected="activeTab===tab.value" @click="selectTab(tab.value)">
-          <component :is="tab.icon" :size="17" aria-hidden="true"/>{{ tab.label }}</button>
+          <img v-if="tab.value==='feishu'" :src="feishuLogo" alt="" width="16" height="16"/>{{ tab.entryLabel }}</button>
       </div>
       <div :id="'login-panel-'+activeTab" role="tabpanel" :aria-labelledby="'login-tab-'+activeTab" class="entry-body">
         <div v-if="activeTab==='feishu'" class="entry-choice">
-          <p>授权后进入南通运维工作空间。</p>
-          <p v-if="authCancelled" class="entry-cancelled" role="status">上次授权已取消，可重新登录。</p>
-          <a class="entry-primary feishu-btn" :href="feishuLoginUrl" @click="handleFeishuLogin"><QrCode :size="18" aria-hidden="true"/>前往飞书授权</a>
+          <p>VNET 人员及固定值班账号请使用飞书授权登录。</p>
+          <p v-if="authCancelled" class="entry-cancelled" role="status">已取消飞书授权，可重新登录。</p>
+          <div class="entry-method-intro">
+            <span class="entry-emblem"><img :src="feishuLogo" alt="" width="42" height="42"/></span>
+            <strong>使用飞书账号授权</strong>
+          </div>
+          <a class="entry-primary feishu-btn" :href="feishuLoginUrl" @click="handleFeishuLogin">飞书授权登录</a>
           <a class="entry-link" href="https://applink.feishu.cn/T9aX3K4ZHOXl" target="_blank" rel="noopener noreferrer">申请飞书应用权限</a>
         </div>
         <PersonnelPasswordLogin v-else-if="activeTab==='password'"/>
         <form v-else class="entry-choice" action="/api/auth/guest" method="post">
-          <p>访客权限仅用于查询机柜信息。</p><button class="entry-primary" type="submit">查看机柜</button>
+          <div class="entry-method-intro">
+            <span class="entry-emblem"><Eye :size="34" aria-hidden="true"/></span>
+            <p>访客权限仅用于查询机柜信息。</p>
+          </div>
+          <button class="entry-primary" type="submit">访客登录</button>
         </form>
       </div>
     </div>

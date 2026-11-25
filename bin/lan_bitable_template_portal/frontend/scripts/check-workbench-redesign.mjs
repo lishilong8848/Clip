@@ -388,25 +388,25 @@ try {
 
   const period=page.getByRole('region',{name:'工作状态'});
   await set(account('period-review','other',['daily','event','maintenance','repair','learning']),['A','B']);
-  const personalCard=period.getByRole('article',{name:'个人卡片'});
+  const personalCard=period.locator('.period-card[data-card=personal]');
   await period.getByRole('button',{name:'今日',exact:true}).click();
   await personalCard.getByText(/已答.*4 \/ 15/).waitFor();
-  const buildingCard=period.getByRole('article',{name:'楼栋卡片'});
+  const buildingCard=period.locator('.period-card[data-card=building]');
   await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
-  await buildingCard.getByRole('region',{name:'进行中通告'}).getByText('已发检修通告',{exact:true}).waitFor();
+  await period.locator('[data-card=building][data-state=ongoing]').getByText('已发检修通告',{exact:true}).waitFor();
   assert.equal(await period.getByText('隔离已完成计划',{exact:true}).count(),0);
   await period.getByRole('button',{name:'表单显示'}).click();
   assert.equal(await period.locator('.period-grid').getAttribute('data-view'),'table');
   await period.getByRole('button',{name:'卡片显示'}).click();
   const status=period.getByRole('group',{name:'工作状态筛选'});
   await status.getByRole('button',{name:'逾期 1',exact:true}).click();
-  await buildingCard.getByRole('button',{name:/跨月未发检修.*已逾期/}).waitFor();
+  await buildingCard.getByRole('button',{name:/跨月未发检修/}).waitFor();
   assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'今明截止 1',exact:true}).click();
-  await buildingCard.getByRole('button',{name:/隔离明日截止维保.*明日截止/}).waitFor();
+  await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
   assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'未开始 2',exact:true}).click();
-  await buildingCard.getByRole('region',{name:'未开始通告'}).getByText('跨月未发检修',{exact:true}).waitFor();
+  await period.locator('[data-card=building][data-module=planned]').getByText('跨月未发检修',{exact:true}).waitFor();
   assert.equal(await buildingCard.getByText('已发检修通告',{exact:true}).count(),0);
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
@@ -419,7 +419,7 @@ try {
   embeddedTest=true;
   const statusNotice=buildingCard.getByRole('button',{name:/计划和进行中同一条/});
   await statusNotice.waitFor({timeout:5000});
-  assert.match(await statusNotice.innerText(),/办理/);
+  assert.match(await statusNotice.getAttribute('aria-label'),/办理/);
   const [noticeDetail]=await Promise.all([
     page.waitForRequest(req=>new URL(req.url()).pathname==='/api/workbench/lite-detail'&&new URL(req.url()).searchParams.get('active_item_id')==='active-1',{timeout:20000}),
     statusNotice.click({timeout:6000}),
@@ -437,9 +437,9 @@ try {
   await personalCard.getByText(/已答.*9 \/ 30/).waitFor();
   await period.getByRole('button',{name:'本月',exact:true}).click();
   await personalCard.getByText(/已答.*23 \/ 60/).waitFor();
-  await buildingCard.getByRole('region',{name:'未开始通告'}).getByText('隔离逾期维保',{exact:true}).waitFor();
+  await period.locator('[data-card=building][data-module=planned]').getByText('隔离逾期维保',{exact:true}).waitFor();
   await page.locator('.wb-scope select').selectOption('B');
-  await personalCard.getByText('本楼暂无个人题单').waitFor();
+  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor({state:'detached'});
   await buildingCard.getByRole('button',{name:/B楼待开始维保/}).waitFor();
   assert.equal(await buildingCard.getByText('隔离明日截止维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'逾期 0',exact:true}).click();
@@ -529,10 +529,8 @@ try {
   await readOnlyNotice.waitFor({state:'hidden'});
   await absent('notices:维保','本月计划通告');
   await absent('critical_guard','已完成重保');
-  await todo.getByLabel('搜索待办').fill('本楼重保任务');
   await reveal('critical_guard');
   await pop.getByText('本楼重保任务',{exact:true}).waitFor();
-  await todo.getByLabel('搜索待办').fill('');
   assert.equal(await page.getByText('冷源运行状态',{exact:true}).count(),0);
   assert.equal(await page.locator('.wb-shortcuts').getByText('通告办理').count(),0);
   await page.locator('.wb-scope select').selectOption('B');

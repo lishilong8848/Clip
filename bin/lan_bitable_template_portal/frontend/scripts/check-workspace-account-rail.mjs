@@ -77,7 +77,7 @@ try{
  }
  await page.setViewportSize({width:1440,height:900});user={...user,open_id:'member-rail',name:'普通人员',role:'building',level:'L4',modules:['learning']};await page.goto(entry+'?view=my');await page.getByRole('heading',{name:user.name,exact:true}).waitFor();
  assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'light');
- assert.equal(await page.locator('html').getAttribute('data-v2-palette'),'mineral');await openRail();await page.getByRole('button',{name:'账户菜单：'+user.name}).click();assert.equal(await page.locator('.n-dropdown-menu').getByText('系统设置',{exact:true}).count(),0);
+ assert.equal(await page.locator('html').getAttribute('data-v2-palette'),'panorama');await openRail();await page.getByRole('button',{name:'账户菜单：'+user.name}).click();assert.equal(await page.locator('.n-dropdown-menu').getByText('系统设置',{exact:true}).count(),0);
  await page.locator('.n-dropdown-menu').getByText('切换账号',{exact:true}).click();await page.getByRole('button',{name:'取消',exact:true}).click();assert(!writes.includes('/api/auth/logout'));
  await account('切换账号');await page.getByRole('button',{name:'继续',exact:true}).click();await page.locator('#personnel-name-select').waitFor();assert.equal(writes.filter(v=>v==='/api/auth/logout').length,1);
  await page.clock.install();logged=true;user={...user,open_id:'admin-again',name:'管理员',role:'admin',level:'L0',modules:['accounts','critical_guard']};await page.goto(entry+'?__page=/critical-guard&mode=admin');

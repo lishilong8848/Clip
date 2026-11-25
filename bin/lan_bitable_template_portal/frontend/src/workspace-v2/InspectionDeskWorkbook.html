@@ -4,7 +4,7 @@
   <div class="ins-toolbar"><header class="ins-bar ins-head">
     <div class="ins-title"><strong>{{ currentPage?.name || '巡检工作簿' }}</strong><small>{{ scope }}楼 · {{ mobilePhase || day }}</small></div>
     <div class="ins-actions">
-      <slot name="round-start" :current="isCurrentDate" :target="dialogRoot" :locked="actionLocked"/>
+      <slot v-if="!browseProfessions" name="round-start" :current="isCurrentDate" :target="dialogRoot" :locked="actionLocked"/>
       <button v-if="mobileSheet" :aria-expanded="compactMenu" @click="compactMenu=!compactMenu">{{ compactMenu?'收起操作':'轮次与选表' }}</button>
       
       <button v-if="!mobileSheet" @click="openSettings()" :disabled="!!abnormal || exemptionSaving">表格设置</button>
@@ -20,16 +20,17 @@
       <div class="ins-rounds" aria-label="巡检轮次"><button v-for="slot in roundStates" :key="slot.slot" :aria-pressed="shownSlot===slot.slot" :disabled="!!abnormal || saving" @click="selectSlot(slot.slot)">
         {{ slot.slot }} <small>{{ slot.label }} {{ slot.sourceClock || slot.scheduledClock }}</small></button></div>
     </div>
-    <div class="ins-line"><label>专业<select data-native-select :value="professionView" @change="changeProfessionView"><option value="ALL">全部专业</option><option v-for="p in professions" :key="p">{{ p }}</option></select></label>
+    <div class="ins-line"><label>专业<select data-native-select :value="professionView" @change="changeProfessionView"><option v-if="visibleProfessions" value="OWN">本专业</option><option value="ALL">全部专业</option><option v-for="p in professions" :key="p">{{ p }}</option></select></label>
+      <small v-if="browseProfessions">跨专业只读</small>
       <label class="ins-sheet-choice">工作表<select data-native-select :value="pageKey" :disabled="!!abnormal" @change="selectPage(($event.target as HTMLSelectElement).value)">
         <option v-for="s in sheetOptions" :key="s.value" :value="s.value">{{ s.label }}</option></select></label>
       <button v-if="nextUnvisited" @click="openPage(nextUnvisited.key)">下一张未查看</button>
       <button @click="openLookup('search')">查找单元格</button><button @click="openLookup('abnormal')">异常 {{ roundAbnormal.length }}</button>
-      <button v-if="pendingRows.length && !props.readOnly && viewedRound?.round_id===activeRound?.round_id" :disabled="!!abnormal || saving" @click="gotoNextEmpty()">下一待填格 · {{ pendingRows.length }}</button>
+      <button v-if="pendingRows.length && !readOnly && viewedRound?.round_id===activeRound?.round_id" :disabled="!!abnormal || saving" @click="gotoNextEmpty()">下一待填格 · {{ pendingRows.length }}</button>
       <button :disabled="!sheetLoaded || !activeRound || viewedRound?.round_id!==activeRound.round_id" @click="openComparison()">本表复核</button>
-      <button :disabled="!report?.rounds.length || report.archive_incomplete || exporting || dirty || saving || !!editing" @click="download()">导出工作簿</button>
+      <button :disabled="browseProfessions || !report?.rounds.length || report.archive_incomplete || exporting || dirty || saving || !!editing" @click="download()">导出工作簿</button>
     </div>
-    <div v-if="currentActive && viewedRound?.round_id===currentActive.id && !awaitingStart" class="ins-line">
+    <div v-if="!browseProfessions && currentActive && viewedRound?.round_id===currentActive.id && !awaitingStart" class="ins-line">
       <strong>本轮确认</strong><small>已查看 {{ visitedCount }}/{{ requiredPages.length }}</small>
       <template v-for="p in selectedProfessions" :key="p"><span v-if="confirmedProfessions.includes(p)" class="ins-chip">{{ p }} · {{ confirmationLabel(p) }}</span>
         <button v-else :disabled="actionLocked || props.readOnly || currentActive.pending || !hasViewed(p)" @click="deskProfession=p">{{ p }} · {{ progressLabel(p) }}</button></template>

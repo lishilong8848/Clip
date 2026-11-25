@@ -10,7 +10,7 @@ import httpx
 from fastapi import FastAPI, Request
 from lan_bitable_template_portal.module_access import (
     MODULE_IDS, MODULE_OPTIONS, NOTICE_MODULES, filter_overview, filter_workbench, module_denial, required_modules,
-    engineer_professions, professional_record_visible,
+    engineer_professions, profession_query, professional_record_visible,
 )
 
 
@@ -26,6 +26,19 @@ class ModuleAccessTests(unittest.IsolatedAsyncioTestCase):
         for role in ('operator', 'shift_leader', 'duty', 'supervisor', 'manager'):
             self.assertIsNone(engineer_professions(engineer | {'category': role}))
         self.assertIsNone(engineer_professions(engineer | {'level': 'L1'}))
+
+    def test_explicit_profession_filter_keeps_legacy_default_and_shared_rules(self):
+        auth = SimpleNamespace(account_profile=lambda _: {'category': 'engineer', 'level': 'L2', 'specialties': ['弱电']})
+        session = {'open_id': 'isolated-engineer'}
+        records = [{'profession': '弱电'}, {'profession': '强电'}, {}]
+        def selected(view):
+            scope = profession_query(auth, session, view=view).get('professions')
+            return [item for item in records if professional_record_visible(scope, item)]
+        self.assertEqual(selected('own'), records[:1])
+        self.assertEqual(selected('电气'), records[1:2])
+        self.assertEqual(selected('all'), records)
+        self.assertEqual(selected(None), records[::2])
+
     def test_inspection_entry_label_keeps_existing_module_and_route(self):
         self.assertEqual(next(item['label'] for item in MODULE_OPTIONS if item['value'] == 'risk_inspection'), '专项排查')
         for path in ('/risk-inspections', '/api/risk-inspections', '/api/risk-inspections/people'):

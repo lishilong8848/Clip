@@ -40,11 +40,10 @@ try{
     return ok({items:[],records:[],users:[],scopes:[],scope_options:[],settings:{},summary:{},stats:{}});
   });
   const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
+  const themeToggle=page.getByRole('button',{name:'夜间模式',exact:true});
+  const paletteMenu=page.getByRole('button',{name:'主题配色',exact:true});
   const theme=async(mode)=>{
-    const button=page.getByRole('button',{name:'导航配色',exact:true});
-    if(!await page.getByRole('switch',{name:'夜间模式'}).isVisible())await button.click();
-    const toggle=page.getByRole('switch',{name:'夜间模式'});
-    if(await toggle.getAttribute('aria-checked')!==String(mode==='dark'))await toggle.click();
+    if(await themeToggle.getAttribute('aria-pressed')!==String(mode==='dark'))await themeToggle.click();
     await page.waitForFunction(value=>document.documentElement.dataset.v2Theme===value,mode);
     await page.waitForTimeout(400);
   };
@@ -60,13 +59,20 @@ try{
   const day=await paint('body');assert(light(day.background)>.5);
   const before=requests.length;await theme('dark');assert.equal(requests.length,before,'switching themes does not refetch business data');
   const night=await paint('body');assert(light(night.background)<.05);assert(contrast(night.color,night.background)>=4.5);
-  const popup=await paint('.n-popover');assert(light(popup.background)<.08,'portalled component-library popover is dark');
+  await paletteMenu.click();
+  const popup=await paint('.n-dropdown-menu');assert(light(popup.background)<.08,'portalled palette menu is dark');
+  await page.keyboard.press('Escape');
   if(await page.locator('.v2-nav-search').count())assert(light((await paint('.v2-nav-search')).background)<.08,'navigation search does not retain a pale background');
-  await page.getByRole('switch',{name:'夜间模式'}).focus();await page.keyboard.press('Space');
+  await themeToggle.focus();await page.keyboard.press('Space');
   await page.waitForFunction(()=>document.documentElement.dataset.v2Theme==='light');
   await page.keyboard.press('Space');await page.waitForFunction(()=>document.documentElement.dataset.v2Theme==='dark');
-  for(const label of ['钴蓝银白','黑金','朱砂红橙','松绿薄荷','石墨冰青','莓红石白']){
-    await page.getByRole('button',{name:label,exact:true}).click();
+  for(const label of ['松绿','海蓝','暮紫','赛博青','霓虹玫红','熔岩橙','石墨银','全景蓝']){
+    await paletteMenu.click();
+    await page.locator('.n-dropdown-menu').getByText(label,{exact:true}).click();
+    assert(await page.evaluate(()=>{
+      const style=getComputedStyle(document.documentElement);
+      return style.getPropertyValue('--v2-blue')===style.getPropertyValue('--v2-palette-accent-text');
+    }),'business accent follows the selected palette');
     const colors=await page.evaluate(()=>{
       const el=document.createElement('span');document.querySelector('.v2-shell').append(el);
       el.style.background='var(--v2-nav-side)';el.style.color='var(--v2-nav-text)';
@@ -83,16 +89,15 @@ try{
   assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'light','another account does not inherit night mode');
   account='night-a';await page.goto(entry+'?__page=/knowledge-base');await page.getByText(item.name,{exact:true}).waitFor();
   assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
-  const panel=await paint('.kb-pane');assert(light(panel.background)<.1,'reused business panel has a dark surface');
+  const panel=await paint('.sk-shelf');assert(light(panel.background)<.1,'business panel has a dark surface');
   await page.getByRole('button',{name:'上传文件',exact:true}).click();await page.getByRole('button',{name:'粘贴文本',exact:true}).click();
-  const input=page.getByRole('textbox',{name:'文档名称',exact:true});await input.fill('未提交的草稿');
-  const field=await paint('.kb-text-input input, .kb-text-upload input, input[aria-label="文档名称"]');
+  const input=page.getByRole('textbox',{name:'文件名',exact:true});await input.fill('未提交的草稿');
+  const field=await paint('.sk-write input');
   assert(light(field.background)<.1&&contrast(field.color,field.background)>=4.5,'native form fields remain legible');
   await theme('light');assert.equal(await input.inputValue(),'未提交的草稿','switch preserves unsaved input');
   assert(light((await paint('body')).background)>.5);
   await theme('dark');assert.equal(await input.inputValue(),'未提交的草稿');
-  await page.getByRole('button',{name:'导航配色',exact:true}).click();
-  await page.getByRole('switch',{name:'夜间模式'}).waitFor({state:'hidden'});
+  await page.getByLabel('文件操作 '+item.name,{exact:true}).click();
   await page.getByRole('button',{name:'移入回收站',exact:true}).click();
   const dialog=page.getByRole('dialog');await dialog.waitFor();
   await page.waitForTimeout(400);
@@ -100,10 +105,12 @@ try{
   assert(light(dialogPaint.bg)<.1,'teleported native business dialog has a dark surface');
   await page.screenshot({path:path.join(output,'business-dialog-night.png')});
   await dialog.getByRole('button',{name:'取消',exact:true}).click();
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('.v2-mobile-nav').getByRole('button',{name:'我的',exact:true}).click();
   for(const width of [390,360]){
     await page.setViewportSize({width,height:844});await theme('dark');
     assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
-    const box=await page.getByRole('switch',{name:'夜间模式'}).boundingBox();assert(box.x>=0&&box.x+box.width<=width);
+    const box=await themeToggle.boundingBox();assert(box.x>=0&&box.x+box.width<=width);
     await page.screenshot({path:path.join(output,'mobile-night-'+width+'.png')});
   }
   await page.emulateMedia({media:'print'});assert.equal((await paint('body')).background,'rgb(255, 255, 255)','printing is still white');
@@ -112,14 +119,14 @@ try{
     window.fixtureStorageSet=Storage.prototype.setItem;
     Storage.prototype.setItem=function(key,value){if(key.startsWith('clipflow:workspace-night-mode:'))throw new DOMException('blocked','SecurityError');return window.fixtureStorageSet.call(this,key,value);};
   });
-  await theme('light');await page.getByText('当前浏览器无法保存外观设置，刷新后可能恢复默认。',{exact:true}).waitFor();
+  await theme('light');await page.getByText('当前外观已切换，浏览器未能保存偏好。',{exact:true}).waitFor();
   await page.evaluate(()=>{Storage.prototype.setItem=window.fixtureStorageSet;delete window.fixtureStorageSet;});
-  loggedIn=false;await page.goto(entry);await page.locator('.login-panel').waitFor();
-  await page.getByRole('tab',{name:'账号密码登录',exact:true}).click();await page.locator('#personnel-password').waitFor();
+  loggedIn=false;await page.goto(entry);await page.locator('.session-entry').waitFor();
+  await page.getByRole('tab',{name:'姓名登录',exact:true}).click();await page.locator('#personnel-password').waitFor();
   for(const width of [1440,390]){
     await page.setViewportSize({width,height:900});
     for(const mode of ['dark','light']){
-      await theme(mode);await page.getByRole('button',{name:'导航配色',exact:true}).click();await page.getByRole('switch',{name:'夜间模式'}).waitFor({state:'hidden'});
+      await theme(mode);
       const field=await paint('#personnel-password');
       await page.screenshot({path:path.join(output,`login-${mode}-${width}.png`)});
       assert(contrast(field.color,field.background)>=4.5,'password form text is legible in both themes: '+JSON.stringify({mode,width,field}));

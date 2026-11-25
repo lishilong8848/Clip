@@ -325,7 +325,7 @@ class ToolWorkspaceMixin:
             "version": row.get("digest") or digest(row.get("file_token") or row["id"]),
         } for row in templates]
 
-    def workspace_list(self, actor, *, refresh_templates=False, legacy_templates=False):
+    def workspace_list(self, actor, *, refresh_templates=False, legacy_templates=False, browse_all_professions=False):
         from .tool_management import can_scope, clock
 
         self._workspace_access(actor)
@@ -334,7 +334,14 @@ class ToolWorkspaceMixin:
             submissions, monthly_reset_at = self._workspace_monthly_submissions(db, clock().date())
             for row in db.execute("SELECT * FROM tool_inventory WHERE active=1"):
                 asset = self._workspace_inventory_asset(row)
-                if not can_scope(actor, asset.get("scope")) or not self._tool_profession_visible(db, actor, asset):
+                if not can_scope(actor, asset.get("scope")):
+                    continue
+                if not self._tool_profession_visible(db, actor, asset):
+                    if browse_all_professions:
+                        assets.append(self._workspace_asset(asset) | {
+                            'kind': self._workspace_kind(asset)[0], 'eligible_kinds': [], 'selectable': False, 'monthly_locked': False,
+                            'disabled_reason': '仅查看 · 其它专业', 'plan': {},
+                        })
                     continue
                 kind, reason = self._workspace_kind(asset)
                 monthly_locked = self._workspace_monthly_locked(submissions, asset, kind)
@@ -401,14 +408,27 @@ class ToolWorkspaceMixin:
             sessions.append(summary)
         return {'sessions': sessions, 'history_cursor': cursor}
 
-    def workspace_history(self, actor, before='', before_id='', kind='', asset_id=''):
+    def workspace_history(self, actor, before='', before_id='', kind='', asset_id='', *, include_due=False):
         self._workspace_access(actor)
         if len(before) > 40 or len(before_id) > 128 or bool(before) != bool(before_id) or kind not in ('', 'self', 'external'):
             raise RiskError('办理记录分页参数无效。')
         asset_id = text(asset_id, 120)
         with self.connect() as db:
             db.execute('BEGIN')
-            return self._workspace_history_page(db, actor, before, before_id, kind=kind, asset_id=asset_id)
+            result = self._workspace_history_page(db, actor, before, before_id, kind=kind, asset_id=asset_id)
+            if include_due and kind == 'external' and not before and not asset_id:
+                from .tool_management import clock
+
+                result['due_inspections'] = [
+                    {'id': asset['id'], 'scope': asset['scope'], 'name': asset['name'],
+                     'model': asset.get('model', ''), 'location': asset.get('location', ''),
+                     'profession': self._tool_profession(db, asset), 'due': due, 'retest': retest}
+                    for asset, due, retest in self._due_external_assets(db, clock().date())
+                    if self._workspace_allowed(db, actor, asset, 'external')
+                    and self._workspace_asset_state(db, actor, asset, 'external')['mode'] == 'direct'
+                ]
+                result['inventory_error'] = self.state(db, 'inventory_error')
+            return result
 
     def workspace_refresh(self, actor):
         self._workspace_access(actor)

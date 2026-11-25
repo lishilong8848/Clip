@@ -24,10 +24,10 @@ api.saveNightMode('a',true);api.loadNightMode('b');assert.equal(api.nightMode.va
 api.loadNightMode('a');assert.equal(api.nightMode.value,true);
 api.savePalette('a','violet');
 assert.equal(api.theme.value.Button.colorPrimary,api.palettes.violet.light.accent);
-api.loadPalette('b');assert.equal(api.paletteId.value,'mineral');
+api.loadPalette('b');assert.equal(api.paletteId.value,'panorama');
 api.loadPalette('a');assert.equal(api.paletteId.value,'violet');
 values.set('clipflow:workspace-color-palette:c','__proto__');
-api.loadPalette('c');assert.equal(api.paletteId.value,'mineral');
+api.loadPalette('c');assert.equal(api.paletteId.value,'panorama');
 sandbox.localStorage.setItem=()=>{throw Error('blocked');};
 assert.equal(api.saveNightMode('a',false),false);assert.equal(api.nightMode.value,false);
 console.log('PASS: light and dark contrast, per-account display preferences and storage errors.');

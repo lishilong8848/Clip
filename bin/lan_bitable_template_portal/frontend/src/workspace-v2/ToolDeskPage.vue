@@ -57,7 +57,7 @@ function goBack() {
           <button v-if="r.board?.can_download_month && r.board?.archived_at" :disabled="r.busy" @click="r.download('/archive/'+r.month)">下载月度归档</button></div></div>
       </section>
       <ToolWorkspace :key="[r.view,r.linkedSession,r.linkedAsset,r.props.scope].join('/')" :ref="el=>r.workspace=el" :scope="r.props.scope==='CAMPUS'?'ALL':r.props.scope"
-        :session-id="r.linkedSession" :asset-id="r.linkedAsset" :records-only="r.view==='followups'" :followup-order-ids="r.followupOrderIds"
+        :session-id="r.linkedSession" :asset-id="r.linkedAsset" :initial-kind="r.props.toolView==='external'?'external':'self'" :records-only="r.view==='followups'" :followup-order-ids="r.followupOrderIds"
         :inventory-warning="r.board?.inventory_error" @inventory-status="r.updateInventoryStatus" @records-refresh="r.loadBoard()"
         @asset-history="r.historyAsset=$event" @records="r.selectView('followups')" @choose="r.selectView('workspace')"/>
     </template>

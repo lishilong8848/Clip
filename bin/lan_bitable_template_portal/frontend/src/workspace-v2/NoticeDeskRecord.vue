@@ -1,6 +1,6 @@
 <template>
   <article class="desk-record" :class="{ 'is-ongoing': ongoing }"
-    @click="activateCard($event) && emit('open')">
+    @click="!readOnly && activateCard($event) && emit('open')">
     <div v-if="!ongoing" class="schedule-date">
       <template v-if="startDate"><small>{{ startDate.month }}月</small><b>{{ startDate.day }}</b></template>
       <template v-else><CalendarDays :size="18" /><small>{{ planWindow.start ? '计划' : '待定' }}</small></template>
@@ -8,21 +8,21 @@
     <header class="record-heading">
       <span class="record-location"><MapPin :size="14" />{{ building }}</span>
       <span class="record-status" :data-tone="status.tone"><i aria-hidden="true"></i>{{ status.label }}</span>
-      <div v-if="ongoing" class="record-actions">
+      <div v-if="ongoing&&!readOnly" class="record-actions">
           <button type="button" v-if="!source.bound" class="bind-action" data-v2-navigation @click="emit('bind')"><Link2 :size="14" />绑定源表</button>
           <button type="button" data-v2-navigation @click="emit('open', 'end')">结束</button>
           <button type="button" class="primary-action" data-v2-navigation @click="emit('open', 'update')">更新<ArrowUpRight :size="14" /></button>
       </div>
     </header>
-    <h3><button type="button" class="record-link" data-v2-navigation @click="emit('open')">{{ title }}</button></h3>
-    <div v-if="!ongoing" class="record-actions plan-action">
+    <h3><span v-if="readOnly">{{ title }}</span><button v-else type="button" class="record-link" data-v2-navigation @click="emit('open')">{{ title }}</button></h3>
+    <div v-if="!ongoing&&!readOnly" class="record-actions plan-action">
       <button type="button" :class="{ 'primary-action': !ended && !unknown }" data-v2-navigation
         :disabled="unknown" @click="emit('open', started ? '' : 'start')">
         {{ unknown ? '请重新读取' : ended ? '查看' : started ? '核验' : '开始' }}<ArrowRight v-if="!unknown" :size="14" />
       </button>
     </div>
     <div class="record-meta">
-      <span>{{ type }}</span>
+      <span>{{ type }}</span><span v-if="readOnly">仅查看</span>
       <span v-if="specialty">{{ specialty }}</span>
       <span v-if="cycle">{{ cycle }}</span>
       <span v-if="ongoing">{{ source.label }}</span>
@@ -48,7 +48,7 @@ import { noticeListCycle, noticeListSpecialty, noticeListStatus, noticePlanWindo
 
 const props = defineProps<{
   row: Dict; lane: string; title: string; type: string; building: string;
-  attention: string; ended: boolean; started: boolean; unknown: boolean;
+  attention: string; ended: boolean; started: boolean; unknown: boolean; readOnly?:boolean;
 }>();
 const emit = defineEmits<{ open: [action?: string]; bind: [] }>();
 const ongoing = computed(() => props.lane === 'ongoing');

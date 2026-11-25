@@ -83,6 +83,23 @@ try{
   const editor=page.getByRole('dialog',{name:'隔离验收下属 账号详情',exact:true});panel=editor.getByRole('region',{name:'签名信息',exact:true});
   await panel.getByText(/已有可用签名/).waitFor();
   assert.equal(await panel.getByRole('button',{name:'重新签名',exact:true}).count(),0);
+  for(const width of [390,1440]){
+    await page.setViewportSize({width,height:width<700?844:950});
+    const button=panel.getByRole('button',{name:'发起签名请求',exact:true});
+    await button.scrollIntoViewIfNeeded();
+    const fits=await button.evaluate(el=>{
+      const bounds=el.getBoundingClientRect();
+      const label=document.createRange();
+      label.selectNodeContents(el);
+      const content=label.getBoundingClientRect();
+      return bounds.left>=0 && bounds.right<=innerWidth && content.left>=bounds.left && content.right<=bounds.right
+        && bounds.height>=(innerWidth<=760?44:34);
+    });
+    assert(fits,'the signature request label and icon fit within the account dialog button');
+    assert((await panel.getByRole('heading',{name:'登记签名',exact:true}).boundingBox()).height<45,
+      'allow the signature actions to wrap under the title on narrow screens');
+    if(width<700)await page.screenshot({path:path.join(output,'manager-request-mobile.png')});
+  }
   await panel.getByRole('button',{name:'发起签名请求',exact:true}).click();
   assert.equal(posts.filter(p=>p.path.endsWith('/requests')).length,0,'opening confirmation does not send');
   failSend=true;await panel.getByRole('button',{name:'确认发送',exact:true}).click();
