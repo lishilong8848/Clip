@@ -2265,8 +2265,10 @@ const navigator={},setLiteStatus=text=>message=text;
 
     def test_work_order_message_falls_back_to_current_account(self) -> None:
         manager = MagicMock()
-        manager.group_with_links.return_value = {
+        group = {
             "target_record_id": "recTarget1",
+            "state": "active",
+            "steps": [{"operator_required": True, "reviewer_required": True}],
             "title": "轮巡测试",
             "sop_name": "切换 SOP",
             "runs": [{"from_unit": "1#", "to_unit": "2#"}],
@@ -2276,17 +2278,22 @@ const navigator={},setLiteStatus=text=>message=text;
             "operator_link": "http://127.0.0.1/operator",
             "reviewer_link": "http://127.0.0.1/reviewer",
         }
-        manager.update_notifications.side_effect = lambda _record_id, data: data
+        group["notifications"] = {}
+        manager.group_with_links.return_value = group
+        def save(_id, data, **_kwargs):
+            group["notifications"].update(data)
+            return group
+        manager.update_notifications.side_effect = save
         recipients = []
 
-        def send(_text, open_ids):
+        def send(_text, open_ids, *, message_uuid):
             recipients.append(open_ids)
-            return open_ids != ["ou_unreachable"], "ok", []
+            return open_ids != ["ou_unreachable"], "ok", [{"failure_kind": "recipient_unavailable"}]
 
         with patch.object(
             PortalRuntime, "polling_work_orders", return_value=manager
         ), patch.object(portal_server, "_send_text_to_open_ids_guarded", side_effect=send):
-            notifications = PortalRuntime._send_polling_work_order_links({})
+            notifications = PortalRuntime._send_polling_work_order_links(group)["notifications"]
 
         self.assertEqual(recipients[:2], [["ou_unreachable"], ["ou_current"]])
         self.assertTrue(notifications["operator"]["sent"])
@@ -2298,9 +2305,11 @@ const navigator={},setLiteStatus=text=>message=text;
     def test_failed_work_order_link_notifications_are_throttled(self) -> None:
         manager = MagicMock()
         manager.group_with_links.side_effect = lambda group, _base: group
-        manager.update_notifications.side_effect = lambda _record_id, data: data
         group = {
             "target_record_id": "recNotifyThrottle",
+            "state": "active",
+            "steps": [{"operator_required": True, "reviewer_required": True}],
+            "notifications": {},
             "title": "轮巡测试",
             "sop_name": "SOP",
             "runs": [{}],
@@ -2310,6 +2319,11 @@ const navigator={},setLiteStatus=text=>message=text;
             "operator_link": "https://relay.example/op",
             "reviewer_link": "https://relay.example/re",
         }
+        manager.get_group.return_value = group
+        def save(_id, data, **_kwargs):
+            group["notifications"].update(data)
+            return group
+        manager.update_notifications.side_effect = save
         with patch.object(
             PortalRuntime, "polling_work_orders", return_value=manager
         ), patch.object(
@@ -2317,16 +2331,20 @@ const navigator={},setLiteStatus=text=>message=text;
             "_send_text_to_open_ids_guarded",
             return_value=(False, "network down", []),
         ) as send:
-            notifications = PortalRuntime._send_polling_work_order_links(group)
-            PortalRuntime._send_polling_work_order_links(
-                {**group, "notifications": notifications}
-            )
+            notifications = PortalRuntime._send_polling_work_order_links(group)["notifications"]
+            PortalRuntime._send_polling_work_order_links(group)
+            self.assertEqual(send.call_count, 2)
+            with patch.object(portal_server.time, "time", return_value=time.time() + 61):
+                PortalRuntime._send_polling_work_order_links(group)
         self.assertEqual(send.call_count, 4)
+        self.assertEqual(send.call_args_list[:2], send.call_args_list[2:])
+        self.assertTrue(all(c.args[1] != ["ou_sender"] for c in send.call_args_list))
         self.assertGreater(notifications["operator"]["next_retry_at"], time.time())
 
     def test_sending_existing_public_work_order_keeps_settings_port(self) -> None:
         group = {
             'target_record_id':'recPortTest','title':'Port test','sop_name':'SOP','runs':[{}],
+            'state':'active','steps':[{'operator_required':True,'reviewer_required':True}],
             'operator':{'open_id':'ou_fixture_operator'},'reviewer':{'open_id':'ou_fixture_reviewer'},
             'relay':{'mode':'public_relay','registration_state':'registered',
                      'relay_url':'https://public.example:8787',
@@ -2335,6 +2353,7 @@ const navigator={},setLiteStatus=text=>message=text;
         }
         manager=MagicMock()
         manager.get_group.return_value=group
+        manager.update_notifications.return_value=group
         manager.group_with_links.side_effect=lambda value,base:PollingWorkOrderService.group_with_links(None,value,base)
         with patch.object(PortalRuntime,'polling_work_orders',return_value=manager), patch.object(PortalRuntime,'polling_work_order_relay',return_value=MagicMock(enabled=True)), patch.object(portal_server,'_send_text_to_open_ids_guarded',return_value=(True,'ok',[])) as send:
             PortalRuntime._send_polling_work_order_links(group)
@@ -2346,6 +2365,8 @@ const navigator={},setLiteStatus=text=>message=text;
         manager = MagicMock()
         state = {
             "target_record_id": "recNotifyConcurrent",
+            "state": "active",
+            "steps": [{"operator_required": True, "reviewer_required": True}],
             "title": "轮巡测试",
             "sop_name": "SOP",
             "runs": [{}],
@@ -2359,13 +2380,13 @@ const navigator={},setLiteStatus=text=>message=text;
         manager.group_with_links.side_effect = lambda group, _base: copy.deepcopy(group)
         manager.get_group.side_effect = lambda _record_id: copy.deepcopy(state)
 
-        def save_notifications(_record_id, notifications):
-            state["notifications"] = copy.deepcopy(notifications)
+        def save_notifications(_record_id, notifications, *, binding_id):
+            state["notifications"].update(copy.deepcopy(notifications))
             return copy.deepcopy(state)
 
         manager.update_notifications.side_effect = save_notifications
 
-        def send(_text, _open_ids):
+        def send(_text, _open_ids, *, message_uuid):
             time.sleep(0.02)
             return True, "ok", []
 
@@ -2382,7 +2403,7 @@ const navigator={},setLiteStatus=text=>message=text;
             ))
 
         self.assertEqual(send_mock.call_count, 2)
-        self.assertEqual(manager.update_notifications.call_count, 1)
+        self.assertEqual(manager.update_notifications.call_count, 2)
 
     def test_polling_start_persists_lan_group_without_waiting_for_messages(self) -> None:
         manager = MagicMock()
@@ -3807,12 +3828,57 @@ const navigator={},setLiteStatus=text=>message=text;
 
 
 class AdjustSopTypeTests(unittest.TestCase):
+    def test_signed_reviewer_is_skipped_while_operator_still_has_a_step(self):
+        group = self.service.create_group(self.prepare(self.ready()), target_record_id='recSignedReviewer',
+                                          title='fixture', public_base_url='http://localhost')
+        saved = self.service.get_group('recSignedReviewer')
+        saved['steps'][0]['reviewer_confirmation'] = {'confirmed_at': '2026-11-25 09:00'}
+        saved['steps'][0]['operator_confirmation'] = {'confirmed_at': '2026-11-25 08:55'}
+        saved['steps'].append({'step_key': '1:2', 'operator_required': True, 'reviewer_required': False})
+        self.service.state_store.put_document('polling_work_order', 'recSignedReviewer', saved)
+        with patch.object(PortalRuntime, 'polling_work_orders', return_value=self.service), patch.object(
+                PortalRuntime, '_polling_work_order_public_base_url', return_value='http://localhost'), patch.object(
+                portal_server, '_send_text_to_open_ids_guarded', return_value=(True, 'ok', [])) as send:
+            for force in (False, False, True):
+                PortalRuntime._send_polling_work_order_links(group, force=force)
+            self.assertEqual([c.args[1] for c in send.call_args_list], [['fixture_operator']] * 2)
+
+    def test_link_delivery_resumes_with_same_uuid_after_interrupted_receipt(self):
+        group = self.service.create_group(self.prepare(self.ready()), target_record_id='recResumeLink',
+                                          title='fixture', public_base_url='http://localhost')
+        store_receipt = self.service.update_notifications
+        def interrupted(record_id, changes, *, binding_id):
+            if 'reviewer' in changes:
+                raise OSError('receipt write interrupted')
+            return store_receipt(record_id, changes, binding_id=binding_id)
+
+        with patch.object(portal_server, '_send_text_to_open_ids_guarded', return_value=(True, 'ok', [])) as send:
+            with patch.object(self.service, 'update_notifications', side_effect=interrupted):
+                with self.assertRaises(OSError):
+                    PortalRuntime._send_polling_work_order_links_locked(self.service, group)
+            self.assertEqual(set(self.service.get_group('recResumeLink')['notifications']), {'operator'})
+            restarted = PollingWorkOrderService(LanPortalStateStore(self.root / 'state.sqlite3'))
+            with patch.object(PortalRuntime, 'polling_work_orders', return_value=restarted), patch.object(
+                    PortalRuntime, '_polling_work_order_public_base_url', return_value='http://localhost'):
+                PortalRuntime._send_polling_work_order_links(group)
+            self.assertEqual([c.args[1] for c in send.call_args_list],
+                             [['fixture_operator'], ['fixture_reviewer'], ['fixture_reviewer']])
+            self.assertEqual(send.call_args_list[1], send.call_args_list[2])
+            self.assertTrue(send.call_args_list[1].kwargs['message_uuid'])
+            # A different address for the same LAN credentials is not a new invitation.
+            other_base = restarted.group_with_links(restarted.get_group('recResumeLink'), 'http://other-lan')
+            PortalRuntime._send_polling_work_order_links_locked(restarted, other_base)
+            self.assertEqual(send.call_count, 3)
+
     def test_multiple_operators_share_progress_and_reviewer_can_add_photo(self):
         self.people.append({'record_id':'operator2', 'name':'Second', 'open_id':'fixture_second'})
         sop = self.ready()
         prepared = self.prepare(sop, polling_operator_record_ids=['operator', 'operator2'])
         self.assertEqual(prepared['polling_operator_name'], 'Operator、Second')
         group = self.service.create_group(prepared, target_record_id='recMany', title='fixture', public_base_url='http://localhost')
+        with patch.object(portal_server, '_send_text_to_open_ids_guarded', return_value=(True,'',[])) as send:
+            PortalRuntime._send_polling_work_order_links_locked(self.service, group)
+            self.assertEqual({call.args[1][0] for call in send.call_args_list}, {'fixture_operator','fixture_second','fixture_reviewer'})
         operator = self.service.role_token('recMany', 'operator')
         reviewer = self.service.role_token('recMany', 'reviewer')
         session = self.service.activate(operator, run_index=1, expected_version=group['version'])
@@ -3827,18 +3893,30 @@ class AdjustSopTypeTests(unittest.TestCase):
         self.assertEqual(session['version'], version + 1)
         confirmed = self.service.get_group('recMany')['steps'][0]['operator_confirmation']
         self.assertIn(confirmed['assigned_record_id'], ['operator', 'operator2'])
+        with patch.object(portal_server, '_send_text_to_open_ids_guarded', return_value=(True,'',[])) as send:
+            partial = self.service.group_with_links(self.service.get_group('recMany'), 'http://localhost')
+            PortalRuntime._send_polling_work_order_links_locked(self.service, partial, force=True)
+            self.assertEqual([call.args[1] for call in send.call_args_list], [['fixture_reviewer']])
         session = self.service.add_step_photo(reviewer, step_key='1:1', expected_version=session['version'],
             file_name='review.png', mime_type='image/png', content=_png_bytes('#ff0000'))
         self.assertEqual(len(session['steps'][0]['photos']), 2)
         session = self.service.confirm(reviewer, step_key='1:1', expected_version=session['version'])
         self.assertEqual(session['state'], 'upload_pending')
-        with patch.object(portal_server, '_send_text_to_open_ids_guarded', return_value=(True,'',[])) as send:
-            group = self.service.group_with_links(self.service.get_group('recMany'), 'http://localhost')
-            PortalRuntime._send_polling_work_order_links_locked(self.service, group)
-            self.assertEqual({call.args[1][0] for call in send.call_args_list}, {'fixture_operator','fixture_second','fixture_reviewer'})
-            group = self.service.group_with_links(self.service.get_group('recMany'), 'http://localhost')
-            PortalRuntime._send_polling_work_order_links_locked(self.service, group)
-            self.assertEqual(send.call_count, 3)
+        restarted = PollingWorkOrderService(LanPortalStateStore(self.root / "state.sqlite3"))
+        with patch.object(PortalRuntime, 'polling_work_orders', return_value=restarted), patch.object(
+                PortalRuntime, '_polling_work_order_public_base_url', return_value='http://localhost'), patch.object(
+                portal_server, '_send_text_to_open_ids_guarded') as send:
+            for phase in ('upload_pending', 'completed', 'active'):
+                # Even an old active snapshot with every step signed and no delivery receipts is quiet.
+                saved = {**restarted.get_group('recMany'), 'state': phase, 'notifications': {}}
+                restarted.state_store.put_document('polling_work_order', 'recMany', saved)
+                PortalRuntime._send_polling_work_order_links(group)
+                with self.assertRaisesRegex(portal_server.PortalConflictError, '没有待确认步骤'):
+                    PortalRuntime._send_polling_work_order_links(group, force=True)
+            with patch.object(restarted, 'get_group', side_effect=OSError('read failed')):
+                with self.assertRaises(OSError):
+                    PortalRuntime._send_polling_work_order_links(group)
+            send.assert_not_called()
 
     def test_reviewer_cannot_be_any_of_multiple_operators(self):
         sop = self.ready()

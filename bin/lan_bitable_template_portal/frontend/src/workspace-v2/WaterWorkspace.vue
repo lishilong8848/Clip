@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, defineAsyncComponent, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { NButton, NDataTable, NDrawer, NModal, NPagination, NTag, useDialog, type DataTableColumns } from 'naive-ui';
 import { Activity, ArrowLeft, ArrowRight, ChartNoAxesCombined, CheckCircle2, ChevronRight, CircleAlert, ClipboardList, Download, Droplets, Plus, RefreshCw, Search, SlidersHorizontal, X } from 'lucide-vue-next';
@@ -292,6 +294,8 @@ function unload(event:BeforeUnloadEvent){if(busy.value||dirty.value||uncertain.v
 function escape(event:KeyboardEvent){if(event.key!=='Escape'||event.defaultPrevented||isAssistantEvent(event)||lightbox.url||abnormalOpen.value||(event.target as Element)?.closest('.n-dialog,.water-abnormal-sheet,.water-photo-dialog'))return;if(editorOpen.value){event.preventDefault();leaveEditing(closeEditor);}}
 onMounted(()=>{void Promise.all([loadBootstrap(),loadRecords()]);const target=logicalUrl().searchParams.get('record_id');if(target&&!showOverview.value)void readRecord(target);media.addEventListener('change',viewport);window.addEventListener('beforeunload',unload);document.addEventListener('visibilitychange',visibility);window.addEventListener('keydown',escape);});
 onBeforeUnmount(()=>{disposed=true;bootstrapRead?.abort();listRead?.abort();detailRead?.abort();lifetime.abort();clearTimeout(filterTimer);clearTimeout(pollTimer);clearPhotos();removeGuard();media.removeEventListener('change',viewport);window.removeEventListener('beforeunload',unload);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('keydown',escape);});
+
+useUsagePage('water', () => showOverview.value ? 'water/overview' : editorOpen.value ? 'water/editor' : 'water/records');
 </script>
 
 <template>
@@ -460,13 +464,13 @@ onBeforeUnmount(()=>{disposed=true;bootstrapRead?.abort();listRead?.abort();deta
       :new-reading="waterNumberText(abnormalDetails.new_value)" :change="abnormalDetails.baseline_zero ? '上期读数为零' : ratio(abnormalDetails.ratio)"
       @cancel="abnormalVisibility(false)" @confirm="saveWithNote"/>
     <NModal :show="!!lightbox.url" @update:show="lightboxVisibility">
-      <section class="water-photo-dialog" role="dialog" aria-modal="true" aria-label="水表照片预览">
+      <div class="water-photo-dialog" role="dialog" aria-modal="true" aria-label="水表照片预览">
         <header><strong>{{ lightbox.name || '水表照片' }}</strong>
           <a :href="lightbox.url" :download="lightbox.name || '水表照片'" aria-label="下载原图"><Download :size="18"/>下载</a>
           <button class="icon-button" type="button" aria-label="关闭照片预览" @click="lightboxVisibility(false)"><X :size="18"/></button>
         </header>
         <a v-if="lightbox.url" :href="lightbox.url" target="_blank" rel="noopener" aria-label="打开原图"><img :src="lightbox.url" :alt="lightbox.name || '现场水表照片'"></a>
-      </section>
+      </div>
     </NModal>
   </div>
 </template>

@@ -1,6 +1,6 @@
 <section class="serenity-desk accounts" aria-label="账号与权限">
   <header class="serenity-heading console-heading"><div class="serenity-segment" role="group" aria-label="账号视图">
-    <button v-for="item in tabs" :key="item.value" type="button" :aria-pressed="tab===item.value" @click="switchTab(item.value)">{{ item.label }}<template v-if="item.value==='requests' && pendingCount"> · {{ pendingCount }}</template></button>
+    <button v-for="item in tabs" :key="item.value" type="button" :aria-pressed="tab===item.value" @click="switchTab(item.value)">{{ item.label }}<template v-if="item.value==='requests' && pendingBadge"> · {{ pendingBadge }}</template></button>
   </div><div v-if="tab!=='requests'" class="serenity-actions"><button type="button" :disabled="saving||loading||auditLoading" @click="tab==='audit'?loadAudit():load(true)"><RefreshCw :size="15" :class="{spin:loading||auditLoading}"/> {{ tab==='audit' ? '刷新记录' : '刷新账号' }}</button>
     <button v-if="tab==='accounts' && myLevel && !policy.is_fixed_superuser" type="button" :disabled="saving" @click="v2RequestAccess">申请修改本人权限</button>
     <button v-if="tab==='accounts' && items.some(canSelectModules)" type="button" class="entry-primary" :disabled="saving||loading" @click="openGrantByModule"><Settings2 :size="15"/>按功能授权</button>
@@ -28,7 +28,7 @@
       <div class="serenity-actions"><button type="button" @click="openAccount(item)">查看账号</button><button v-if="item.can_impersonate" type="button" :disabled="saving" @click="requestImpersonation(item)">代登录</button></div>
     </article></div><p v-if="!pageItems.length" role="status">{{ loading?'读取中…':'没有符合条件的账号' }}</p>
     </template>
-  </template><PermissionReview v-else-if="tab==='requests'" :scopes="scopeOptions" :modules="moduleOptions" :categories="categoryOptions" @changed="load();emit('changed')"/>
+  </template><PermissionReview v-else-if="tab==='requests'" :scopes="scopeOptions" :modules="moduleOptions" :categories="categoryOptions" @pending-count="reviewedPendingCount=$event" @changed="load();emit('changed')"/>
   <section v-else class="serenity-panel"><h2>账号变更记录</h2><div v-for="(row,i) in audits" :key="i" class="transfer-item">
     <strong>{{ actionLabel(row.action) }}</strong><span>{{ row.actor_name || row.actor }} · {{ row.target_name }} · {{ statusLabel(row.status) }}</span><time>{{ formatTime(row.created_at) }}</time></div>
     <p v-if="!audits.length">{{ auditLoading?'读取中…':'暂无变更记录' }}</p></section>

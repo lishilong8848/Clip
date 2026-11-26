@@ -388,6 +388,8 @@ def main():
 
     window_started_at = time.perf_counter()
     try:
+        from upload_event_module.ui.page_usage import QtPageUsage, backend_state_dir
+        app._qt_page_usage = QtPageUsage(backend_state_dir())
         window = ClipboardTool()
     except BaseException:
         portal_cancelled.set()
@@ -548,6 +550,8 @@ def main():
     try:
         exit_code = app.exec()
     finally:
+        app._qt_page_usage.close()
+        app._qt_page_usage = None
         try:
             window._shutdown_runtime()
         except Exception:

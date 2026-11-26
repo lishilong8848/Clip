@@ -286,12 +286,72 @@ class OpenClawRuntimeStartupTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(AssistantStartupError) as caught:
                         await runtime._ready(item, clock["now"] + 1.0, _UnavailableGateway, GatewayError)
                 self.assertEqual(caught.exception.status, 503)
-                self.assertIn("启动超时", str(caught.exception))
+                self.assertEqual(caught.exception.code, "startup_catalog")
+                self.assertIn("模型目录", str(caught.exception))
                 methods = [method for client in gateway_calls for method, _ in client.calls]
                 self.assertEqual(methods, ["models.list"],
                                  "only the local read-only models.list probe may run during readiness")
             finally:
                 await runtime.close()
+
+    async def test_slow_model_directory_finishes_on_original_connection(self):
+        from lan_bitable_template_portal import lighthouse_runtime as lrt
+        calls = []
+        connections = []
+
+        class WarmingGateway:
+            protocol = 4
+
+            def __init__(self, *_):
+                connections.append(self)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_):
+                return False
+
+            async def request(self, method, params, *, timeout):
+                calls.append((method, params))
+                if len(calls) < 3:
+                    raise GatewayError("UNAVAILABLE")
+                return {}
+
+        item = {"process": _FakeProcess(), "port": 12345, "token": "fixture"}
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = OpenClawRuntime(Path(tmp), runtime_root=Path(tmp) / "runtime")
+            with patch.object(asyncio, "sleep", new=AsyncMock()):
+                result = await runtime._ready(item, lrt.time.monotonic() + 8, WarmingGateway, GatewayError)
+            self.assertIs(result, item)
+            self.assertEqual(len(connections), 1)
+            self.assertEqual(calls, [("models.list", {"preparedOnly": True})] * 3)
+            await runtime.close()
+
+    async def test_user_turn_can_join_short_cooldown_and_cancel_before_acquisition(self):
+        from lan_bitable_template_portal import lighthouse_runtime as lrt
+        with tempfile.TemporaryDirectory() as tmp:
+            runtime = OpenClawRuntime(Path(tmp), runtime_root=Path(tmp) / "runtime")
+            runtime._gateway_retry_at = lrt.time.monotonic() + 10
+            entered = asyncio.Event()
+
+            async def hold(_delay):
+                entered.set()
+                await asyncio.Future()
+
+            with patch.object(runtime, "_acquire", AsyncMock()) as acquire, patch.object(asyncio, "sleep", hold):
+                task = asyncio.create_task(runtime.acquire({}, None, {}, wait_for_recovery=True))
+                await asyncio.wait_for(entered.wait(), timeout=2)
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+                acquire.assert_not_awaited()
+            with patch.object(asyncio, "sleep", AsyncMock()) as pause, patch.object(
+                    runtime, "_acquire", AsyncMock(return_value={"configured": True})) as acquire, patch.object(
+                    runtime, "_check_shared_health", AsyncMock()):
+                await runtime.acquire({}, None, {}, wait_for_recovery=True)
+                pause.assert_awaited_once()
+                acquire.assert_awaited_once()
+            await runtime.close()
 
 
 # ---------------------------------------------------------------------------

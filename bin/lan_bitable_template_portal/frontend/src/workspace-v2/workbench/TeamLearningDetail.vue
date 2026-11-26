@@ -139,9 +139,10 @@ const buildingName = (s: string) => s==='110'?'110站':s+'楼';
 table{width:100%;border-collapse:separate;border-spacing:0;text-align:left;font-variant-numeric:tabular-nums}
 th,td{padding:8px 6px}th{font-size:12px;font-weight:550;color:var(--v2-muted);position:sticky;top:0;background:var(--soft-field);z-index:1}
 td{border-top:1px solid var(--soft-edge)}tbody tr:first-child td{border-top:0}td strong,td small{display:block}td small{color:var(--v2-muted);font-size:11px}
+td{overflow-wrap:anywhere}
 th:nth-last-child(-n+2),td:nth-last-child(-n+2){text-align:right;white-space:nowrap}
 .detail-number{color:var(--v2-muted)}.detail-number b{color:var(--v2-ink)}
-.detail-status{display:inline-block;padding:2px 7px;border-radius:5px;background:var(--soft-field);color:var(--v2-muted);font-size:12px}
+.detail-status{display:inline-block;padding:2px 7px;border-radius:5px;background:var(--soft-field);color:var(--v2-muted);font-size:12px;white-space:nowrap}
 .detail-status[data-group=done]{color:var(--cf-success,#18704c);background:color-mix(in srgb,currentColor 10%,var(--soft-face))}
 .detail-status[data-group=pending]{color:var(--cf-warning,#925510);background:color-mix(in srgb,currentColor 10%,var(--soft-face))}
 .detail-status[data-late=true]{color:var(--cf-danger,#b33532)}

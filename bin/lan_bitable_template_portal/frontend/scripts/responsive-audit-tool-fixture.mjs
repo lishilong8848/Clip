@@ -6,7 +6,8 @@ const tools=[
   ['绝缘电阻表','1507','D','电气工具柜','self'],['接地电阻测试仪','4105A','D','配电间','external'],
 ];
 const assets=tools.map(([name,model,scope,location,kind],i)=>({id:'demo-tool-'+i,name,model,scope,location,brand:i===5?'KYORITSU':'FLUKE',eligible_kinds:[kind],
-  ...(kind==='self'?{self_cycle:'每月'}:{external_cycle:'一年'})}));
+  profession:scope==='E'?'暖通':'电气',
+  ...(kind==='self'?{self_cycle:'每月',template_name:scope==='E'?'暖通仪表检查记录':'电气仪表检查记录'}:{external_cycle:'一年'})}));
 const templates=['电气仪表检查记录','暖通仪表检查记录'].map((name,i)=>({id:'demo-template-'+i,name}));
 const sessions=new Map();
 function layout(template){
@@ -27,10 +28,10 @@ export function toolFixture({url,method,body}){
   if((method==='GET'&&path===ws)||(method==='POST'&&path===ws+'/refresh'))return ok({assets,templates,sessions:[...sessions.values()]});
   if(method==='POST'&&path===ws+'/open'&&body.kind==='self'){
     const ids=body.asset_ids || [], selected=ids.map(id=>assets.find(a=>a.id===id));
-    if(!ids.length||selected.some(a=>!a || !a.eligible_kinds.includes('self') || !templates.some(t=>t.id===body.template_ids?.[a.id])))return issue('请先为每台工具选择模板');
+    if(!ids.length||selected.some(a=>!a || !a.eligible_kinds.includes('self') || !templates.some(t=>t.name===a.template_name)))return issue('工具台账缺少模板文件');
     const id='demo-session-'+(sessions.size+1), session={id,kind:'self',status:'draft',revision:1,can_edit:true,items:selected.map(asset=>({
       id:asset.id,asset_id:asset.id,asset,can_edit:true,order_revision:1,values:{},checks:{},outcome:'',reviewer:'',signature:'',reviewed_at:'',qualified:null,
-      template:layout(templates.find(t=>t.id===body.template_ids[asset.id])),
+      template:layout(templates.find(t=>t.name===asset.template_name)),
     }))};
     sessions.set(id,session);return ok(session);
   }

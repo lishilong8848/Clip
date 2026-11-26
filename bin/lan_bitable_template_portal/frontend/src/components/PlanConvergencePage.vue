@@ -69,6 +69,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { Activity, AlertCircle, ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, Download, Eye, FilePenLine, FileUp, Info, Layers, ListFilter, Loader2, LogIn, RefreshCw, Save, Settings, Wrench, X } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
@@ -236,6 +238,8 @@ function modalKey(event:KeyboardEvent){if(!modalOwner?.isTop(event,dialogElement
 watch(()=>dialog.open,async open=>{if(open){returnFocus=document.activeElement as HTMLElement;modalOwner=acquireModal();window.addEventListener('keydown',modalKey,true);await nextTick();dialogElement.value?.focus();}else{modalOwner?.release();modalOwner=undefined;window.removeEventListener('keydown',modalKey,true);returnFocus?.isConnected&&returnFocus.focus();}});
 onMounted(async()=>{unregisterGuard=registerNavigationGuard((target,proceed)=>{if(new URL(target).pathname==='/plan-convergence'||!hasUnsaved())return true;confirmProceed=proceed;confirmOpen.value=true;return false;});window.addEventListener('beforeunload',beforeUnload);try{const data=await requestJson(base+'/bootstrap',requestOptions);if(disposed)return;boot.value=data;blocks.value=data.blocks.items||[];loadedAt.value=data.blocks.loaded_at||0;await loadRuleSets();const params=new URLSearchParams(location.search);const initial=params.get('tab') as Tab;if(tabs.some(t=>t.id===initial))switchTab(initial);const id=params.get('blockId');if(id)void chooseBlock(id);}catch(e){report(e);}finally{loading.value=false;}});
 onBeforeUnmount(()=>{disposed=true;clearDetailFocus();pageController.abort();stopLoginPoll();unregisterGuard?.();window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('keydown',modalKey,true);modalOwner?.release();confirmProceed=null;});
+
+useUsagePage('plan_convergence', () => 'plan_convergence/' + tab.value);
 </script>
 
 <style scoped>

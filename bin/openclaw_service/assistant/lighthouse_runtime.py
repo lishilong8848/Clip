@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 from ..gateway_log import GatewayLog
-from ..protocol import MAX_CONCURRENT_ACCOUNTS, OPENCLAW_MAX_CONCURRENT
+from ..protocol import MAX_CONCURRENT_ACCOUNTS, OPENCLAW_MAX_CONCURRENT, STARTUP_MESSAGES
 from ..protocol import atomic_json
 from .lighthouse_ai import AssistantError
 from .lighthouse_context import execution_key
@@ -34,6 +34,8 @@ class AssistantStartupError(AssistantError):
 
     def __init__(self, message, status=503, *, category="runtime_startup"):
         super().__init__(message, status, category=category or self.code)
+        if category in STARTUP_MESSAGES:
+            self.code = category
 
 
 def account_key(identity):
@@ -271,7 +273,16 @@ class OpenClawRuntime:
                 startup_log('runtime_ready', node=PIN['node_version'], openclaw=PIN['openclaw_version'])
             return self.prepared
 
-    async def acquire(self, actor, model, profile, **kwargs):
+    async def acquire(self, actor, model, profile, *, wait_for_recovery=False, **kwargs):
+        # The resident client allows 210 s for acquisition, including up to 180 s for
+        # a cold start. A short remaining cooldown can be joined by the current turn.
+        if wait_for_recovery and not self.closing and self.startup is None:
+            delay = self._gateway_retry_at - time.monotonic()
+            if 0 < delay <= 25:
+                progress = kwargs.get('progress')
+                if progress:
+                    progress('助手正在恢复连接，当前问题将自动继续')
+                await asyncio.sleep(delay)
         task = asyncio.current_task()
         self.starting[task] = None
         try:
@@ -331,7 +342,7 @@ class OpenClawRuntime:
                     self.startup = None
                     self._record_gateway_failure('process_exited')
                 if self.startup is None and time.monotonic() < self._gateway_retry_at:
-                    raise AssistantStartupError('助手网关正在恢复，请稍后重试。', 503)
+                    raise AssistantStartupError(STARTUP_MESSAGES['startup_cooldown'], 503, category='startup_cooldown')
                 if 0 < self.maximum <= sum(bool(item.get('busy')) for item in self.accounts.values()):
                     raise AssistantError("助手正在处理其他会话，请稍后继续。", 503)
                 if self.plugin_hash is not None and self.plugin_hash != plugin_hash:
@@ -433,7 +444,7 @@ class OpenClawRuntime:
                         for file in Path(plugin).iterdir():
                             if file.is_file():
                                 shutil.copyfile(file, shared_plugin / file.name)
-                    port, token = free_port(port), secrets.token_urlsafe(32)
+                    port, token = (free_port(port) if port is not None else free_port()), secrets.token_urlsafe(32)
                     # Load the existing allowlist explicitly, not the unused bundled inventory.
                     gateway = {'root': root, 'plugin': shared_plugin,
                                'port': port, 'token': token, 'bridge_url': bridge_url}
@@ -481,7 +492,9 @@ class OpenClawRuntime:
                 if started is None:
                     started = time.monotonic()
                 deadline = started + self.startup_timeout
-                listener_deadline = started + min(120, self.startup_timeout * 2 / 3) if attempt == 0 else deadline
+                # A live cold process can spend most of its budget loading Node before binding.
+                # Only a confirmed port conflict warrants replacing it during this deadline.
+                listener_deadline = deadline
                 probe.pop('startup_stage', None)
                 startup_log('gateway_starting', pid=process.pid, port=port)
                 try:
@@ -680,11 +693,12 @@ class OpenClawRuntime:
         except OSError:
             LOGGER.warning('Gateway auto-recovery could not clear the compile cache')
 
-    async def _ready(self, item, deadline, GatewayClient, GatewayError, listener_deadline):
+    async def _ready(self, item, deadline, GatewayClient, GatewayError, listener_deadline=None):
         from websockets.exceptions import InvalidHandshake
         process, port, token = item['process'], item['port'], item['token']
         started = time.monotonic()
         last_phase = ''
+        listener_deadline = deadline if listener_deadline is None else listener_deadline
         while not self.closing and time.monotonic() < deadline:
             if process.poll() is not None:
                 # A listener left behind by an exited child belongs to another process.
@@ -698,12 +712,28 @@ class OpenClawRuntime:
                 raise AssistantStartupError("助手运行环境启动失败，请查看本机助手诊断。", 503,
                                             category=item['startup_stage'])
             try:
-                async with asyncio.timeout(min(15, max(.01, deadline - time.monotonic()))):
+                item['startup_stage'] = 'handshake_timeout'
+                async with asyncio.timeout(max(.01, deadline - time.monotonic())):
                     async with GatewayClient("ws://127.0.0.1:" + str(port), token) as client:
-                        # The authenticated hello can precede readiness of the gateway RPCs.
-                        await client.request("models.list", {"preparedOnly": True}, timeout=5)
-                        item["protocol"] = client.protocol
-                        return item
+                        listener_deadline = deadline
+                        item["startup_stage"] = 'models_loading'
+                        # A valid hello often precedes model readiness. Keep the authenticated
+                        # connection while the gateway explicitly reports it is still warming.
+                        while not self.closing and (remaining := deadline - time.monotonic()) > 0:
+                            try:
+                                await client.request("models.list", {"preparedOnly": True}, timeout=min(30, remaining))
+                            except GatewayError as exc:
+                                if exc.code != 'UNAVAILABLE':
+                                    raise
+                                if last_phase != 'models_loading':
+                                    startup_log('gateway_starting', last_stage='models_loading',
+                                                elapsed_ms=round((time.monotonic() - started) * 1000))
+                                    last_phase = 'models_loading'
+                                await asyncio.sleep(min(1, remaining))
+                            else:
+                                item["protocol"] = client.protocol
+                                return item
+                        break
             except GatewayError as exc:
                 phase = exc.code
                 listener_deadline = deadline
@@ -712,7 +742,8 @@ class OpenClawRuntime:
                     raise AssistantStartupError("助手网关握手未通过（" + phase + "），未启动会话。", 503,
                                                 category=phase) from None
             except (InvalidHandshake, asyncio.TimeoutError) as exc:
-                phase = 'handshake_invalid' if isinstance(exc, InvalidHandshake) else 'handshake_timeout'
+                phase = ('handshake_invalid' if isinstance(exc, InvalidHandshake) else
+                         'models_loading' if item.get('startup_stage') == 'models_loading' else 'handshake_timeout')
                 listener_deadline = deadline
             except OSError:
                 phase = 'port_unavailable'
@@ -724,8 +755,14 @@ class OpenClawRuntime:
             if phase == 'port_unavailable' and time.monotonic() >= listener_deadline:
                 break
             await asyncio.sleep(.3)
-        raise AssistantStartupError("助手启动超时，原消息已保留，可继续。", 503,
-                                    category=item.get("startup_stage", ""))
+        if self.closing:
+            raise AssistantStartupError('助手服务正在关闭，原问题已保留。', 503)
+        phase = item.get("startup_stage", "")
+        code = ('startup_listener' if phase == 'port_unavailable' else
+                'startup_catalog' if phase in {'models_loading', 'UNAVAILABLE', 'TIMEOUT'} else 'startup_handshake')
+        error = AssistantStartupError(STARTUP_MESSAGES[code], 503, category=phase)
+        error.code = code
+        raise error
 
     async def _verify_tools(self, client, item):
         from .lighthouse_ai import model_capabilities

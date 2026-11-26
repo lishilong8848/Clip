@@ -432,6 +432,10 @@ def refresh_archived_original(book, changes=None, actor=''):
         if len(entries)>2 or len({entry[0] for entry in entries})!=len(entries):
             raise ValueError('原表映射目标重复')
         selected = [entry for entry in entries if entry[1] in changed]
+        # Keep the frozen display (including an automatic stop mark) on unrelated
+        # cells when someone edits a different historical reading.
+        if changes is not None and not selected:
+            continue
         values = [entry[2].get('现场读数') for entry in (selected or entries)]
         if any(not same_reading(values[0],value) for value in values[1:]):
             raise ValueError('同一原表位置修改了不同读数')

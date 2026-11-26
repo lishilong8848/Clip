@@ -11,6 +11,9 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+import { noticePage } from '../usageRoutes';
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import AsyncPageState from './AsyncPageState.vue';
 import NoticeHistory from './NoticeHistory.vue';
@@ -141,6 +144,9 @@ function guardNativeNavigation(proceed: () => void): boolean {
 watch(() => [props.search, props.active] as const, ([search, active]) => { setGuard(); if (active) void syncSearch(search); else historyOpen.value = false; });
 onMounted(() => { window.addEventListener('message', onMessage); setGuard(); });
 onBeforeUnmount(() => { window.clearTimeout(loadTimer); unregister?.(); window.removeEventListener('message', onMessage); });
+
+useUsagePage('lite_frame', () => !props.active ? '' : historyOpen.value ? 'notices/history' : eventMode.value ? 'notices/event' :
+  loading.value || error.value ? '' : noticePage(new URLSearchParams(props.search).get('work_type'), new URLSearchParams(props.search).get('notice_action')));
 </script>
 
 <style scoped>

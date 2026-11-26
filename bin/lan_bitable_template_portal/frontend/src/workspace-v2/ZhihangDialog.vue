@@ -9,7 +9,7 @@ const emit = defineEmits<{ dismiss: [] }>();
 <template>
   <NModal :show="show" :mask-closable="!locked" :close-on-esc="!locked"
     @update:show="value => { if (!value && !locked) emit('dismiss'); }">
-    <section class="zh-dialog" :class="{ wide }" role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
+    <div class="zh-dialog" :class="{ wide }" role="dialog" aria-modal="true" :aria-label="title" tabindex="-1">
       <header class="zh-dialog-head">
         <div>
           <p>{{ context }}</p>
@@ -23,7 +23,7 @@ const emit = defineEmits<{ dismiss: [] }>();
         </div>
       </header>
       <div class="zh-dialog-body"><slot /></div>
-    </section>
+    </div>
   </NModal>
 </template>
 
@@ -46,16 +46,16 @@ const emit = defineEmits<{ dismiss: [] }>();
 .zh-dialog.wide { width: min(1110px, calc(100vw - 28px)); }
 .zh-dialog-head { flex: none; display: flex; align-items: center; gap: 6px 12px; flex-wrap:wrap; padding: 12px 16px; }
 .zh-dialog-tools { display:flex;align-items:center;gap:6px;margin-inline-start:auto; }
-.zh-dialog-head { justify-content: space-between; background: linear-gradient(106deg,#dfedf9,#e6f4ed); border-bottom: 1px solid #d5e2e4; }
-.zh-dialog-head p { margin: 0 0 2px; font-size: 12px; color: #486677; }
+.zh-dialog-head { justify-content: space-between; background: var(--soft-title-line); border-bottom: 1px solid var(--soft-edge); }
+.zh-dialog-head p { margin: 0 0 2px; font-size: 12px; color: var(--v2-muted); }
 .zh-dialog-head h2 { margin: 0; font-size: 20px; font-weight: 700; line-height: 1.35; }
-.zh-close { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 1px solid #c8d9d7; border-radius: 50%; background: #f5faf8; color: #37596a; cursor: pointer; }
-.zh-dialog-head button:focus-visible { outline: 2px solid #257294; outline-offset: 2px; }
+.zh-close { display: grid; place-items: center; width: 36px; height: 36px; padding: 0; border: 1px solid var(--soft-edge); border-radius: var(--cf-radius-control); background: var(--soft-face); color: var(--v2-ink); cursor: pointer; }
+.zh-dialog-head button:focus-visible { outline: 2px solid var(--v2-blue); outline-offset: 2px; }
 .zh-dialog-head button:disabled { opacity: .5; cursor: wait; }
 .zh-dialog-body { min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 16px 20px; }
 @media (max-width: 620px) {
   .zh-dialog, .zh-dialog.wide { width: calc(100vw - 16px); max-height: calc(100dvh - 18px); margin: 9px auto; border-radius: 16px; }
   .zh-dialog-head, .zh-dialog-body { padding: 10px 12px; }
-  .zh-close { width: 40px; height: 40px; }
+  .zh-close { width: 44px; height: 44px; }
 }
 </style>

@@ -243,14 +243,14 @@
                       <td>{{ step.row }}</td>
                       <td>{{ step.location || "—" }}</td>
                       <td>{{ step.content || "—" }}</td>
-                      <td>{{ step.duration_text || `${step.duration_minutes || 0}分钟` }}</td>
+                      <td>{{ step.skipped ? "跳过" : (step.duration_text || `${step.duration_minutes || 0}分钟`) }}</td>
                       <td>
                         <input
                           v-model.number="step.signature_slots"
                           type="number"
                           min="0"
                           max="10"
-                          :disabled="configurationLocked || busy"
+                          :disabled="configurationLocked || busy || step.skipped"
                           aria-label="步骤签名人数"
                         />
                       </td>
@@ -417,7 +417,7 @@
                 <article v-for="step in executionSteps" :key="step.row" class="execution-step">
                   <div class="step-number">{{ stepIndex(step) }}</div>
                   <div class="step-copy">
-                    <span>{{ step.location || "未填写位置" }} · {{ step.duration_text || `${step.duration_minutes || 0}分钟` }}</span>
+                    <span>{{ step.location || "未填写位置" }} · {{ step.skipped ? "跳过" : (step.duration_text || `${step.duration_minutes || 0}分钟`) }}</span>
                     <p>{{ step.content || "未填写操作内容" }}</p>
                   </div>
                   <div class="signer-grid">
@@ -550,6 +550,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import {
   computed,
   defineComponent,
@@ -2063,6 +2065,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("popstate", handleHistoryNavigation);
   printStyle?.remove();
 });
+
+useUsagePage('drills', () => 'drills/' + (props.printMode ? 'print' : props.adminMode ? 'admin' : 'main'));
 </script>
 
 <style scoped>

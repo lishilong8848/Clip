@@ -93,3 +93,4 @@ html.workspace-v2 .v2-mop-workspace.engineer-mop:not(.preview-open){padding:0;ga
     }
   }
 }
+.v2-mop-workspace .mop-history-tabs{width:fit-content;max-width:100%}

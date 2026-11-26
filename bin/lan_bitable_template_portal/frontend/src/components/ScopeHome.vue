@@ -276,6 +276,9 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+import { legacyHome } from '../usageRoutes';
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { ClipboardCheck, FolderOpen, Library, ShieldCheck, Wrench } from 'lucide-vue-next';
 import { requestJson } from "../api/client";
@@ -1025,6 +1028,7 @@ onBeforeUnmount(() => {
   clearWaterBuildingsPoll();
 });
 
+useUsagePage('scope_home', () => legacyHome(activeMode.value));
 </script>
 
 <style scoped>

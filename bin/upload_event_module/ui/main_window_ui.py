@@ -44,6 +44,7 @@ from .deleted_notice_delegate import DeletedNoticeDelegate
 from .deleted_notice_model import DeletedNoticeModel
 from .display_state import normalize_active_item_data
 from .common import show_toast_message
+from .page_usage import navigate_notice, notice_window_shown
 
 class MainWindowUiMixin:
     def request_active_cache_save(self, delay_ms: int = 800, *, force: bool = False):
@@ -102,12 +103,12 @@ class MainWindowUiMixin:
         self.event_tab_btn = QPushButton("事件通告")
         self.event_tab_btn.setObjectName("NoticeTabBtn")
         self.event_tab_btn.setFixedHeight(34)
-        self.event_tab_btn.clicked.connect(lambda: self.set_notice_tab("event"))
+        self.event_tab_btn.clicked.connect(lambda: navigate_notice(self, self.set_notice_tab, "event"))
 
         self.other_tab_btn = QPushButton("其他通告")
         self.other_tab_btn.setObjectName("NoticeTabBtn")
         self.other_tab_btn.setFixedHeight(34)
-        self.other_tab_btn.clicked.connect(lambda: self.set_notice_tab("other"))
+        self.other_tab_btn.clicked.connect(lambda: navigate_notice(self, self.set_notice_tab, "other"))
 
         notice_tab_layout.addWidget(self.event_tab_btn, 1)
         notice_tab_layout.addWidget(self.other_tab_btn, 1)
@@ -134,7 +135,7 @@ class MainWindowUiMixin:
         self.deleted_history_btn.setObjectName("NavBtn")
         self.deleted_history_btn.setFixedSize(80, 40)
         self.deleted_history_btn.setToolTip("查看近三天已删除且可回退的通告")
-        self.deleted_history_btn.clicked.connect(self._show_deleted_notice_history)
+        self.deleted_history_btn.clicked.connect(lambda: self._show_deleted_notice_history(user_entry=True))
 
         self.title_label = QLabel("剪贴板助手")
         self.title_label.setObjectName("TitleLabel")
@@ -197,7 +198,7 @@ class MainWindowUiMixin:
         self.deleted_history_back_btn = QPushButton("返回通告")
         self.deleted_history_back_btn.setObjectName("NavBtn")
         self.deleted_history_back_btn.setFixedSize(80, 30)
-        self.deleted_history_back_btn.clicked.connect(lambda: self._set_view_mode(True))
+        self.deleted_history_back_btn.clicked.connect(lambda: navigate_notice(self, self._set_view_mode, True))
         deleted_history_head.addWidget(self.deleted_history_back_btn)
 
         deleted_history_layout.addLayout(deleted_history_head)
@@ -1096,6 +1097,7 @@ class MainWindowUiMixin:
 
     def showEvent(self, event):
         super().showEvent(event)
+        notice_window_shown(self)
         QTimer.singleShot(0, self._sync_clipboard_preview_visibility)
         QTimer.singleShot(0, self._flush_pending_cache_refresh)
 

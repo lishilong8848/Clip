@@ -29,6 +29,7 @@ from ..config import SPECIALTY_FIRE
 from ..services.handlers import NoticePayload, get_notice_handler
 from ..core.parser import extract_event_info
 from .styles import get_stylesheet
+from .page_usage import navigate_notice, watch_window
 
 class MainWindowWorkflowMixin:
     _INLINE_IMAGE_COMMAND_FIELDS = {"bytes_b64", "screenshot_bytes_b64"}
@@ -302,6 +303,7 @@ class MainWindowWorkflowMixin:
         if not candidates:
             return None
         dialog = QDialog(self)
+        watch_window(dialog, "notices", "select_record")
         dialog.setWindowTitle("选择对应的多维记录")
         dialog.setObjectName("ScreenshotWindow")
         dialog.setWindowFlags(
@@ -400,7 +402,7 @@ class MainWindowWorkflowMixin:
             visible = matched[:max_visible_candidates]
             for index, candidate in enumerate(visible, start=1):
                 item = QStandardItem(self._candidate_summary(candidate, index))
-                item.setData(Qt.ItemDataRole.UserRole, candidate)
+                item.setData(candidate, Qt.ItemDataRole.UserRole)
                 candidate_model.appendRow(item)
             suffix = ""
             if len(matched) > len(visible):
@@ -2445,7 +2447,7 @@ class MainWindowWorkflowMixin:
         meta = " · ".join(part for part in [notice_type, building, time_text] if part)
         return f"{title}\n{meta}" if meta else title
 
-    def _show_deleted_notice_history(self):
+    def _show_deleted_notice_history(self, *, user_entry=False):
         button = getattr(self, "deleted_history_btn", None)
         if button is not None:
             button.setEnabled(False)
@@ -2458,7 +2460,10 @@ class MainWindowWorkflowMixin:
             if not success:
                 self.show_message(error or "读取历史删除失败。")
                 return
-            self._render_deleted_notice_history(items or [])
+            if user_entry:
+                navigate_notice(self, self._render_deleted_notice_history, items or [])
+            else:
+                self._render_deleted_notice_history(items or [])
 
         def _worker() -> None:
             success, error, items = self._list_deleted_notice_undos_from_backend(days=3)

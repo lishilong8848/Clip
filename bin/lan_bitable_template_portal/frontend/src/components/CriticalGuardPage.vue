@@ -671,6 +671,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   AlertTriangle,
@@ -2095,6 +2097,8 @@ onBeforeUnmount(() => {
   adminDetailPollTimer = null;
   document.removeEventListener("visibilitychange", handlePageVisibilityChange);
 });
+
+useUsagePage('critical_guard', () => props.adminMode ? 'critical_guard/admin' : 'critical_guard/main');
 </script>
 
 <style scoped>

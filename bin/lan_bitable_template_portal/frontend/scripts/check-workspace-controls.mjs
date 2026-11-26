@@ -19,7 +19,8 @@ assert.equal((binary.match(/data-v2-binary/g)||[]).length,1);
 assert.match(binary,/<input data-v2-binary type="checkbox" v-model="settings.enabled"/);
 assert.match(binary,/<input type="checkbox" v-model="selected"/);
 const learning=readFileSync(new URL('../src/components/LearningPage.vue',import.meta.url),'utf8');
-assert.match(learning,/夜班题单发布时间<input v-model="settingsForm.night_publish_time"/);
+assert.match(learning,/field: 'night_publish_time', label: '夜班题单发布时间'/);
+assert.match(learning,/v-model="settingsForm\[shift\.field\]" type="time"/);
 assert.match(learning,/night_publish_time: settingsForm.night_publish_time/);
 let motionCount=0;
 for(const dir of ['components','workspace-v2'])for(const file of readdirSync(new URL('../src/'+dir+'/',import.meta.url))){

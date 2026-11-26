@@ -227,6 +227,7 @@
           </dl>
         </section>
         <NoticeAlertTags :record-id="eventRecordId(selectedEvent)" work-type="event" />
+        <p v-if="eventTransferError" role="alert">{{ eventTransferError }}</p>
         <footer class="event-drawer-footer">
           <button type="button" class="btn primary" @click="openRepairManagementForScope">
             进入检修管理
@@ -239,6 +240,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { refreshRemoteSourceAndWait, requestJson } from "../api/client";
 import { usePageReadRefresh } from '../api/usePageReadRefresh';
@@ -338,6 +341,7 @@ watch([events, () => props.focusRecordId], () => {
 });
 const selectedEventDetailTab = ref<"summary" | "timeline" | "fields">("summary");
 const eventTransferBusy = ref(false);
+const eventTransferError = ref("");
 type EventMetricKey = "repairing" | "i2plus" | "i3";
 const metricModalKey = ref<EventMetricKey | "">("");
 const metricSourceRecords = ref<LooseDict[]>([]);
@@ -680,20 +684,22 @@ function selectMetricEvent(item: LooseDict | undefined): void {
 
 function setEventTransferState(recordId: string): void {
   if (!recordId) return;
-  if (selectedEvent.value && eventRecordId(selectedEvent.value) === recordId) {
-    selectedEvent.value = { ...selectedEvent.value, transfer_to_overhaul: "True" };
-  }
-  events.value = events.value.map((item) => (
-    eventRecordId(item) === recordId ? { ...item, transfer_to_overhaul: "True" } : item
-  ));
+  const mark = (item: LooseDict) => eventRecordId(item) === recordId
+    ? { ...item, transfer_to_overhaul: "True", under_repair: !String(item.repair_completion_time || "").trim() }
+    : item;
+  if (selectedEvent.value) selectedEvent.value = mark(selectedEvent.value);
+  events.value = events.value.map(mark);
+  metricSourceRecords.value = metricSourceRecords.value.map(mark);
 }
 
 async function markSelectedEventTransferred(): Promise<void> {
+  if (eventTransferBusy.value) return;
   const recordId = eventRecordId(selectedEvent.value);
   if (!recordId) {
-    errorText.value = "当前事件缺少记录 ID，无法转检修。";
+    eventTransferError.value = "当前事件缺少记录 ID，无法转检修。";
     return;
   }
+  eventTransferError.value = "";
   eventTransferBusy.value = true;
   try {
     await requestJson("/api/events/transfer-repair", {
@@ -707,8 +713,10 @@ async function markSelectedEventTransferred(): Promise<void> {
     setEventTransferState(recordId);
     emit("status", "事件已标记为转检修。");
   } catch (error: unknown) {
-    errorText.value = error instanceof Error ? error.message : "转检修失败。";
-    emit("status", errorText.value);
+    if (eventRecordId(selectedEvent.value) === recordId) {
+      eventTransferError.value = error instanceof Error ? error.message : "转检修失败。";
+      emit("status", eventTransferError.value);
+    }
   } finally {
     eventTransferBusy.value = false;
   }
@@ -931,6 +939,7 @@ watch(
 
 watch(selectedEvent, () => {
   selectedEventDetailTab.value = "summary";
+  eventTransferError.value = "";
 });
 
 watch(
@@ -958,6 +967,8 @@ onBeforeUnmount(() => {
   eventLoadAbortController?.abort();
   eventLoadAbortController = null;
 });
+
+useUsagePage('event', () => 'event/' + (selectedEvent.value ? 'detail' : showingDetails.value ? 'list' : 'main'));
 </script>
 
 <style scoped>

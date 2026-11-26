@@ -92,6 +92,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue';
 import {NAlert,NButton,NCheckbox,NConfigProvider,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NTag,dateZhCN,zhCN,type SelectOption} from 'naive-ui';
 import {ArrowLeft,ArrowRight,ExternalLink,ListPlus,Paperclip,Pencil,Plus,RefreshCw,RotateCcw,Trash2,Upload,X} from 'lucide-vue-next';
@@ -188,6 +190,8 @@ function unload(e:BeforeUnloadEvent){if(dirty.value||busy.value){e.preventDefaul
 const unregister=registerNavigationGuard(()=>leaveAllowed());
 onMounted(async()=>{window.addEventListener('beforeunload',unload);try{await directory();}catch{/* Existing handovers remain readable when the directory refresh fails. */}if(disposed)return;await loadList();const identity=props.handoverId||new URLSearchParams(window.location.search).get('id');if(identity&&!disposed)await select(identity);});
 onBeforeUnmount(()=>{disposed=true;cancelDetailRead();sourceAbort?.abort();unregister();window.removeEventListener('beforeunload',unload);});
+
+useUsagePage('work_handover', () => 'work_handover/' + (detail.value ? 'detail' : view.value));
 </script>
 
 <style scoped>

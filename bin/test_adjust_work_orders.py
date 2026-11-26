@@ -111,15 +111,17 @@ class AdjustWorkOrderTests(unittest.TestCase):
         for work in ("maintenance","polling","adjust"):
             service._manual_payload_notice_work_type.return_value=work
             for action in ("update","end","start"):
-                service.prepare_simple_manual_notice_action.return_value={}
-                service.prepare_maintenance_action.return_value={}
-                MaintenancePortalService.prepare_workbench_action(service,{"work_type":work,"action":action,"_web_action_request":True,"polling_work_order_exempt":True},job_id="timing-test")
+                service.prepare_simple_manual_notice_action.return_value={"action": action}
+                service.prepare_maintenance_action.return_value={"action": action}
+                with patch("lan_bitable_template_portal.dingtalk_notices.DingTalkNotices.snapshot"):
+                    MaintenancePortalService.prepare_workbench_action(service,{"work_type":work,"action":action,"_web_action_request":True,"polling_work_order_exempt":True,"dingtalk_robot_ids":["fixture"]},job_id="timing-test")
         service._load_signature_people.assert_not_called()
 
     def test_local_notifications_are_retried_by_existing_worker(self):
         controller=object.__new__(FastAPIPortalController)
-        manager=MagicMock(); group={"target_record_id":"recAdjust","operator_link":"http://lan/operator","reviewer_link":"http://lan/reviewer"}
-        manager.open_groups.return_value=[group]; manager.group_with_links.return_value=group
+        manager=MagicMock(); group={"target_record_id":"recAdjust","state":"active","steps":[{"reviewer_required":True}],"operator_link":"http://lan/operator","reviewer_link":"http://lan/reviewer"}
+        manager.open_groups.return_value=[group, {**group,"state":"upload_pending"}, {**group,"state":"completed"}]
+        manager.group_with_links.side_effect=lambda value,_base:value
         with patch("clipflow_backend.main._mock_external_enabled",return_value=False),patch.object(PortalRuntime,"polling_work_order_public_relay_should_run",return_value=False),patch.object(PortalRuntime,"polling_work_orders",return_value=manager),patch.object(PortalRuntime,"_polling_work_order_public_base_url",return_value="http://lan"),patch.object(PortalRuntime,"_send_polling_work_order_links") as send:
             controller._run_scheduled_polling_relay()
         send.assert_called_once_with(group)

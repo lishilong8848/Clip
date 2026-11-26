@@ -46,9 +46,11 @@ onMounted(load);
 onBeforeUnmount(()=>controller.abort());
 </script>
 <style scoped>
-.handover-buildings{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:8px}
+.handover-buildings{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,104px),1fr));gap:8px}
 .review-count{font-size:12px;color:var(--v2-muted)}
-.handover-buildings button{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:44px;padding:8px 12px;border-radius:10px;border:1px solid var(--v2-border);background:var(--soft-field);color:var(--v2-ink);font:inherit;cursor:pointer}
+.handover-buildings button{display:flex;align-items:center;justify-content:space-between;gap:6px;min-height:44px;padding:8px 12px;border-radius:10px;border:1px solid var(--v2-border);background:var(--soft-field);color:var(--v2-ink);font:inherit;text-align:start;cursor:pointer;overflow-wrap:anywhere}
 .handover-buildings button:focus-visible{outline:2px solid var(--v2-blue);outline-offset:2px}
-.handover-buildings svg{color:var(--v2-blue)}
+.handover-buildings button>span{min-width:0}
+.handover-buildings svg{flex:none;color:var(--v2-blue)}
+@media(pointer:coarse){.handover-buildings button{min-height:48px}}
 </style>

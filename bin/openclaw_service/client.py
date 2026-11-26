@@ -75,6 +75,8 @@ class ResidentRuntime:
                 'lease_expired': '助手业务连接已失效，原消息已保留，请重新连接。',
                 'portal_offline': '灯塔业务连接已停止，未重新提交业务。',
                 'account_busy': '当前账号已有处理中的会话，请稍后继续。'}
+            from .protocol import STARTUP_MESSAGES
+            codes.update(STARTUP_MESSAGES)
             code = value.get('code') if isinstance(value, dict) else 'service_error'
             raise ServiceError(codes.get(code, '助手服务请求未完成，原消息已保留。'), response.status_code, code or 'service_error')
         return value['data']

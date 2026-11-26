@@ -142,7 +142,8 @@ async function openFirst(page,followups=true){
   if(followups){await detail(page).getByText(/^跟进记录 \d+$/).click();await detail(page).getByRole('heading',{name:'本次跟进',exact:true}).waitFor();}
 }
 async function noOverflow(page){assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1),true,'no page horizontal overflow');}
-async function fieldRect(page,label){return detail(page).locator('.n-form-item').filter({has:page.getByLabel(label,{exact:true})}).evaluate(el=>{const box=el.getBoundingClientRect();return {x:box.x,y:box.y,width:box.width};});}
+function formItem(page,label){return detail(page).locator('.n-form-item:visible').filter({has:page.locator('label').getByText(label,{exact:true})});}
+async function fieldRect(page,label){return formItem(page,label).boundingBox();}
 async function checkRefreshPosition(page){
   const heading=detail(page).locator('.v2-repair-followup-heading');
   const refresh=heading.getByRole('button',{name:'刷新历史跟进',exact:true});
@@ -152,15 +153,18 @@ async function checkRefreshPosition(page){
 }
 async function checkFieldContrast(page){
   const editable=await detail(page).getByLabel('维修名称',{exact:true}).evaluate(el=>getComputedStyle(el.closest('.n-input')).backgroundColor);
-  const readonly=await detail(page).getByLabel('故障原因',{exact:true}).evaluate(el=>getComputedStyle(el).backgroundColor);
+  const cause=formItem(page,'故障原因').locator('.v2-repair-source-value');
+  const readonly=await cause.getByRole('button').evaluate(el=>getComputedStyle(el).backgroundColor);
   assert.notEqual(editable,readonly,'writable controls must differ visibly from source-owned values');
   assert.notEqual(editable,await detail(page).evaluate(el=>getComputedStyle(el).backgroundColor),'editable fields must stand out from the surrounding form');
-  assert.equal(await detail(page).getByLabel('楼栋',{exact:true}).getAttribute('aria-readonly'),'true','source values are readable summaries');
+  const building=formItem(page,'楼栋');
+  assert.equal(await building.locator('.v2-repair-source-value button').innerText(),'A楼');
+  assert.equal(await building.locator('input,textarea,select,[contenteditable=true]').count(),0,'source building cannot be edited');
   const notes=detail(page).getByLabel('备注',{exact:true});
   assert.equal(await notes.getAttribute('placeholder'),'补充需要说明的事项');
   assert.equal(await notes.inputValue(),'','guidance is never a submitted field value');
-  assert.match(await detail(page).getByLabel('故障原因',{exact:true}).innerText(),/来自关联资料/,'source-owned values explain their origin');
-  assert.match(await detail(page).getByLabel('故障原因',{exact:true}).innerText(),/^ATS通信模块异常/,'source summaries must preserve letters in equipment names');
+  assert.match(await cause.innerText(),/来自关联资料/,'source-owned values explain their origin');
+  assert.equal(await cause.getByRole('button').innerText(),'ATS通信模块异常','source summaries must preserve letters in equipment names');
   const colors=await notes.evaluate(el=>({ink:getComputedStyle(el,'::placeholder').color,bg:getComputedStyle(el.closest('.n-input')).backgroundColor}));
   const light=color=>color.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>v/255).map(v=>v<=.04045?v/12.92:((v+.055)/1.055)**2.4).reduce((sum,v,i)=>sum+v*[.2126,.7152,.0722][i],0);
   const ink=light(colors.ink),bg=light(colors.bg);
@@ -295,9 +299,10 @@ try{
     const page=await newPage(width,900);
     const last=page.locator('.repair-desk-record').last();
     await last.scrollIntoViewIfNeeded();
-    const scroll=await page.evaluate(()=>scrollY);
+    const rowPosition=()=>last.evaluate(el=>el.getBoundingClientRect().top);
+    const position=await rowPosition();
     await last.click();await detail(page).locator('.v2-repair-project-form:visible').waitFor();
-    assert.equal(await page.evaluate(()=>scrollY),scroll,'opening the last row preserves list position');
+    assert(Math.abs(await rowPosition()-position)<=1,'opening the last row preserves list position');
     const box=await detail(page).boundingBox();
     assert(box.y>=0&&box.y+box.height<=900,'editor is inside the current viewport, not after the list');
     await detail(page).getByLabel('备注',{exact:true}).fill('保留填写内容');
@@ -310,13 +315,13 @@ try{
     await detail(page).getByRole('button',{name:'返回列表',exact:true}).click();
     await page.getByRole('button',{name:'放弃并继续',exact:true}).click();
     await detail(page).waitFor({state:'hidden'});
-    assert.equal(await page.evaluate(()=>scrollY),scroll,'returning restores the same row without a page jump');
+    assert(Math.abs(await rowPosition()-position)<=1,'returning restores the same row without a page jump');
     assert.equal(await page.evaluate(()=>document.body.style.overflow),'','scroll locking is released');
     assert.equal(fixture.writes.length,0,'navigation has no business writes');
     await page.screenshot({path:path.join(output,`list-position-${width}.png`)});
   }
   let page=await newPage();
-  assert.equal(await page.locator('.v2-repair-overview[aria-label="维修项目状态"]').count(),1,'one status filter group serves the full list');
+  assert.equal(await page.getByRole('navigation',{name:'维修项目状态',exact:true}).count(),1,'one status filter group serves the full list');
   assert.equal(await page.locator('.v2-repair-workspace>.v2-repair-state-row').count(),0,'no duplicate state toolbar above the list');
   assert.ok(fixture.reads.some(item=>item.path==='/api/repair-management/records'&&item.params.state==='active'));
   assert.equal(await page.locator('.repair-desk-record').count(),30,'one bounded page uses the page scroll, not a nested virtual viewport');
@@ -328,17 +333,18 @@ try{
   await checkFieldContrast(page);
   const name=await fieldRect(page,'维修名称'),faultTime=await fieldRect(page,'故障发生时间'),cause=await fieldRect(page,'故障原因');
   const building=await fieldRect(page,'楼栋'),specialty=await fieldRect(page,'专业');
-  assert(Math.abs(name.y-faultTime.y)<2&&faultTime.x>name.x,'name and fault time share one desktop row');
-  assert(Math.abs(cause.y-building.y)<2&&Math.abs(cause.y-specialty.y)<2,'short project fields use three columns on desktop');
+  assert(name.y+name.height<=faultTime.y+1&&name.width>faultTime.width,'project name spans the row above its source fields');
+  assert(Math.abs(faultTime.y-cause.y)<2&&faultTime.x+faultTime.width<=cause.x+1,'fault time and cause fit side by side');
+  assert(Math.abs(building.y-specialty.y)<2&&building.x+building.width<=specialty.x+1,'building and specialty fit side by side');
   await detail(page).getByText(/^跟进记录 \d+$/).click();
   assert.equal(await detail(page).getByLabel('维修进展描述',{exact:true}).getAttribute('placeholder'),'填写本次处理内容和处理结果');
   assert.equal(await detail(page).getByLabel('维修进展描述',{exact:true}).inputValue(),'');
   const descriptionBox=await fieldRect(page,'维修进展描述'),progressBox=await fieldRect(page,'维修进度');
-  assert(Math.abs(descriptionBox.y-progressBox.y)<2&&progressBox.x>descriptionBox.x,'description and progress share a desktop row');
+  assert(descriptionBox.y+descriptionBox.height<=progressBox.y+1&&descriptionBox.width>progressBox.width,'the progress section gives the description a full row');
   const partyBox=await fieldRect(page,'维修方'),peopleBox=await detail(page).locator('.repair-people-picker').boundingBox();
-  assert(Math.abs(partyBox.y-peopleBox.y)<3&&peopleBox.x>partyBox.x,'repair party and people picker share a desktop row');
+  assert(partyBox.x>=descriptionBox.x+descriptionBox.width&&peopleBox.y>=partyBox.y+partyBox.height-1,'repair execution sits beside progress, with personnel below the repair party');
   const followupItem=await fieldRect(page,'跟进项'),measure=await fieldRect(page,'后续整改措施');
-  assert(Math.abs(followupItem.y-measure.y)<2&&measure.x>followupItem.x,'supplementary followup text fields share a desktop row');
+  assert(Math.abs(followupItem.y-progressBox.y)<2&&followupItem.x>=progressBox.x+progressBox.width-1&&measure.y>=followupItem.y+followupItem.height-1,'short notes fit the progress grid without overlap');
   await checkRefreshPosition(page);
   assert.equal(fixture.writes.length,0,'step navigation only switches the existing form');
   assert.equal(await detail(page).getByRole('button',{name:'办理检修通告',exact:true}).count(),1,'notice access independent of delete permission');
@@ -365,14 +371,14 @@ try{
   await detail(page).getByRole('textbox',{name:'备注',exact:true}).fill('核对现场进度');await detail(page).getByRole('button',{name:'保存修改',exact:true}).click();await detail(page).getByText('维修项目已保存。',{exact:true}).waitFor();
   const update=fixture.writes.find(item=>item.path==='/api/repair-management/records/project-1');assert.ok(update);assert.equal(update.body.expected_version,'v1');assert.deepEqual(update.body.fields,{'备注':'核对现场进度'},'untouched end time is not cleared');
   fixture.conflict=true;await detail(page).getByRole('textbox',{name:'备注',exact:true}).fill('当前填写应保留');await detail(page).getByRole('button',{name:'保存修改',exact:true}).click();await detail(page).locator('.n-alert').filter({hasText:'记录已由其他人修改，请核对最新版。'}).waitFor();assert.equal(await detail(page).getByRole('textbox',{name:'备注',exact:true}).inputValue(),'当前填写应保留');fixture.conflict=false;
-  fixture.canDelete=false;fixture.failStats=true;page=await newPage(390);await page.getByText('数量暂不可用',{exact:false}).waitFor();assert.match(await page.locator('.v2-repair-overview .n-button').filter({hasText:'未完成'}).innerText(),/—/,'failed count not zero');fixture.failStats=false;await noOverflow(page);assert.equal(await page.locator('.v2-repair-row-state').first().isVisible(),true,'mobile keeps status');assert.equal(await page.locator('.v2-repair-row-progress').first().isVisible(),true,'mobile keeps progress');await page.screenshot({path:path.join(output,'mobile-list.png'),fullPage:true});await openFirst(page);await noOverflow(page);assert.equal(await page.evaluate(()=>document.body.style.overflow),'hidden','modal locks background scroll');await page.screenshot({path:path.join(output,'mobile-followup.png'),fullPage:true});
+  fixture.canDelete=false;fixture.failStats=true;page=await newPage(390);await page.getByText('数量暂不可用',{exact:false}).waitFor();assert.match(await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^未完成/}).innerText(),/—/,'failed count not zero');fixture.failStats=false;await noOverflow(page);assert.equal(await page.locator('.repair-desk-record header .n-tag').first().isVisible(),true,'mobile keeps status');assert.equal(await page.locator('.repair-desk-record .repair-desk-progress').first().isVisible(),true,'mobile keeps progress');await page.screenshot({path:path.join(output,'mobile-list.png'),fullPage:true});await openFirst(page);await noOverflow(page);assert.equal(await page.evaluate(()=>document.body.style.overflow),'hidden','modal locks background scroll');await page.screenshot({path:path.join(output,'mobile-followup.png'),fullPage:true});
   for(const width of [360,402,440]){
     page=await newPage(width,640);await openFirst(page);
     await checkRefreshPosition(page);
     const shortItem=await fieldRect(page,'跟进项'),shortMeasure=await fieldRect(page,'后续整改措施');
-    assert(Math.abs(shortItem.y-shortMeasure.y)<2&&shortMeasure.x>shortItem.x,'short followup notes share a mobile row');
+    assert(shortMeasure.y>=shortItem.y+shortItem.height-1||shortMeasure.x>=shortItem.x+shortItem.width-1,'short followup notes remain separate at each mobile width');
     assert.equal(await detail(page).evaluate(el=>Math.round(el.getBoundingClientRect().height)),640,'mobile dialog uses the full viewport');
-    const listBlock=page.locator('.grid-stack-item').filter({has:page.locator('.v2-repair-list')});
+    const listBlock=page.locator('.grid-stack-item').filter({has:page.getByRole('region',{name:'维修项目列表'})});
     if(await listBlock.count())assert.equal(await listBlock.locator('.v2-repair-detail').count(),0,'detail is not a canvas block below the list');
     const detailHeader=detail(page).locator('.v2-repair-detail-head');
     const closeBox=await detailHeader.getByRole('button',{name:'关闭维修项目',exact:true}).boundingBox(),titleBox=await detailHeader.locator('h2').boundingBox();
@@ -395,8 +401,8 @@ try{
     await detail(page).getByLabel('维修方',{exact:true}).selectOption('我方');
     assert.equal(await detail(page).getByLabel('维修方',{exact:true}).inputValue(),'我方');
     const spares=await detail(page).locator('.v2-repair-spares').boundingBox();
-    const party=await detail(page).getByLabel('维修方',{exact:true}).evaluate(el=>{const r=el.closest('.n-form-item').getBoundingClientRect();return {left:r.left,top:r.top,bottom:r.bottom};});
-    assert(party.left>=spares.x+spares.width&&party.top<spares.y+spares.height&&party.bottom>spares.y,'short switch and select share a mobile row');
+    const party=await fieldRect(page,'维修方');
+    assert(party.x>=spares.x+spares.width-1||party.y>=spares.y+spares.height-1,'parts switch and repair party do not overlap on mobile');
     await detail(page).getByLabel('随工人员（我方维修人员）',{exact:true}).fill('验收');
     await page.getByRole('option',{name:/验收人员/}).click();
     assert.equal(await detail(page).locator('.repair-person-chip').innerText(),'验收人员');
@@ -438,7 +444,7 @@ try{
     await page.locator('.record-picker-dialog').getByRole('radio').first().check();await page.locator('.record-picker-dialog').getByRole('button',{name:'确认',exact:true}).click();
     await detail(page).getByLabel('维修名称',{exact:true}).waitFor();
     await page.waitForFunction(()=>document.querySelector('[aria-label="维修名称"]').value==='关联资料自动填入的维修项目');
-    assert.equal((await detail(page).getByLabel('故障发生时间',{exact:true}).innerText()).split('\n')[0],'2026-10-15 09:10');
+    assert.equal(await formItem(page,'故障发生时间').locator('.v2-repair-source-value button').innerText(),'2026-10-15 09:10');
     await flow.getByRole('button',{name:'选择检修通告并带入资料',exact:true}).click();
     await page.locator('.record-picker-dialog').getByRole('radio').first().check();await page.locator('.record-picker-dialog').getByRole('button',{name:'确认',exact:true}).click();
     await page.waitForFunction(()=>document.querySelector('[aria-label="维修结束时间"]').value==='2026-10-20T18:30');
@@ -448,9 +454,11 @@ try{
   }
   fixture.unlinked=true;page=await newPage(390);await openFirst(page);
   assert(await detail(page).getByRole('textbox',{name:'维修进展描述',exact:true}).isVisible(),'no notice association is required to enter followup');
-  assert.equal(await detail(page).getByRole('button',{name:/完成现场检查，待更换模块/}).isVisible(),false,'new followup prioritizes the current form');
+  const history=page.getByRole('region',{name:'选择历史跟进'});
+  assert.equal(await history.isVisible(),false,'new followup prioritizes the current form');
   await detail(page).getByText('历史跟进 · 1 条',{exact:true}).click();
-  assert(await detail(page).getByRole('button',{name:/完成现场检查，待更换模块/}).isVisible(),'saved history remains available on demand');
+  await history.getByRole('button',{name:/完成现场检查，待更换模块/}).click();
+  await detail(page).getByRole('heading',{name:'历史跟进详情'}).waitFor();
   await detail(page).getByText('维修单信息',{exact:true}).click();
   await detail(page).getByRole('region',{name:'关联资料自动填写'}).waitFor();fixture.unlinked=false;
   fixture.locked=true;page=await newPage();await page.locator('.repair-desk-record').first().click();await detail(page).getByText('跟进状态尚未核验，当前只读。',{exact:true}).waitFor();assert.equal(await detail(page).getByRole('button',{name:'关联已有跟进',exact:true}).count(),0);assert.equal(await detail(page).getByRole('button',{name:/保存/}).count(),0);fixture.locked=false;
@@ -481,7 +489,7 @@ try{
   await page.waitForFunction(()=>document.querySelector('.v2-repair-list-caption')?.textContent.includes('维修中'));
   await page.waitForTimeout(700);
   assert.equal(await page.locator('.repair-desk-record').count(),28,'late filter responses cannot replace the current filter');
-  assert((await page.locator('.v2-repair-row-state').allTextContents()).every(value=>value.includes('维修中')));
+  assert((await page.locator('.repair-desk-record header .n-tag').allTextContents()).every(value=>value.includes('维修中')));
   fixture.statusDelay=0;fixture.largeFilter=false;
   await page.getByRole('button',{name:'自定义检修办理布局',exact:true}).click();
   await page.locator('.v2-page-canvas.is-customizing').waitFor();
@@ -501,7 +509,7 @@ try{
   const recordsBeforeRemote=fixture.reads.filter(item=>item.path==='/api/repair-management/records').length;
   await page.evaluate(()=>window.__repairTestStream.dispatchEvent(new MessageEvent('repair_change',{data:JSON.stringify({cursor:1,changes:[{entity_type:'followup',action:'update',payload:{record_patch:{record_id:'project-1',followup_count:1,workflow:'维修中'}}}]})})));
   await page.waitForFunction(()=>document.querySelectorAll('.repair-desk-record').length===2);
-  await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-repair-overview button')).some(el=>/暂无跟进\s*2/.test(el.textContent)));
+  await page.waitForFunction(()=>Array.from(document.querySelectorAll('nav[aria-label="维修项目状态"] button')).some(el=>/暂无跟进\s*2/.test(el.textContent)));
   await page.getByRole('navigation',{name:'维修项目状态'}).getByRole('button',{name:/^未完成/}).click();
   await page.locator('.repair-desk-record').nth(10).waitFor();
   assert(fixture.reads.filter(item=>item.path==='/api/repair-management/records').length>recordsBeforeRemote,'remote updates invalidate both list caches');
@@ -510,7 +518,7 @@ try{
   await openFirst(page,false);await detail(page).getByLabel('备注',{exact:true}).fill('正在填写，不可覆盖');
   fixture.noFollowupCount=1;
   await page.evaluate(()=>window.__repairTestStream.dispatchEvent(new MessageEvent('repair_change',{data:JSON.stringify({cursor:2,changes:[{entity_type:'project',action:'update',payload:{record_patch:{record_id:'project-1',followup_count:2,workflow:'维修中',display_fields:{'备注':'另一人保存'}}}}]})})));
-  await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-repair-overview button')).some(el=>/暂无跟进\s*1/.test(el.textContent)));
+  await page.waitForFunction(()=>Array.from(document.querySelectorAll('nav[aria-label="维修项目状态"] button')).some(el=>/暂无跟进\s*1/.test(el.textContent)));
   assert.equal(await detail(page).getByLabel('备注',{exact:true}).inputValue(),'正在填写，不可覆盖','live refresh preserves unsaved text');
   // Saving the first followup removes the record from the zero-followup list.
   fixture.trackFilteredSave=true;fixture.noFollowupCount=1;fixture.followups=[];page=await newPage();
@@ -526,7 +534,7 @@ try{
   assert.equal(await detail(page).count(),1,'the saved detail stays open after leaving the list filter');
   await detail(page).getByRole('button',{name:'返回列表',exact:true}).click();
   await page.getByText('当前没有“暂无跟进”的维修项目',{exact:true}).waitFor();
-  await page.waitForFunction(()=>Array.from(document.querySelectorAll('.v2-repair-overview button')).some(el=>/暂无跟进\s*0/.test(el.textContent)));
+  await page.waitForFunction(()=>Array.from(document.querySelectorAll('nav[aria-label="维修项目状态"] button')).some(el=>/暂无跟进\s*0/.test(el.textContent)));
   assert.deepEqual(fixture.errors,[],'no browser runtime errors');
   console.log('Repair V2: isolated PC/mobile, permissions, draft guard, late requests, equipment pagination, original API payload and refresh checks passed.');
   }

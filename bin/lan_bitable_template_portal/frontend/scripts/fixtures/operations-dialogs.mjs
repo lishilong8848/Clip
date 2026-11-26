@@ -8,7 +8,7 @@ const imageBody = '<svg xmlns="http://www.w3.org/2000/svg" width="460" height="1
 export function operationsFixture(){
   const user={open_id:'ou_responsive_fixture',name:'隔离验收员',role:'admin',level:'L0',category:'manager',login_method:'password',home_scope:'A',modules:['event','daily','learning','repair_management','accounts']};
   const scopes=['ALL','A','H'].map(value=>({value,label:value==='ALL'?'全部楼栋':value+'楼'}));
-  const event={record_id:'evt-audit',title:'H楼冷却水泵运行告警',status:'处理中',level:'I2',building:'H楼',building_codes:['H'],occurrence_time:day()+' 08:10:00',response_time:day()+' 08:16:00',source:'值班巡查',specialty:'暖通',display_fields:{告警位置:'H楼冷却水泵房',现场情况:'备用泵已投入，正在核对轴承温度。'},transfer_to_overhaul:'False'};
+  const event={record_id:'evt-audit',title:'H楼冷却水泵运行告警',status:'处理中',level:'I2',building:'H楼',building_codes:['H'],occurrence_time:day()+' 08:10:00',response_time:day()+' 08:16:00',source:'值班巡查',specialty:'暖通',display_fields:{告警位置:'H楼冷却水泵房',现场情况:'备用泵已投入，正在核对轴承温度。'},transfer_to_overhaul:'False',under_repair:false};
   const tasks=[['risk','风险排查'],['change','变更'],['drill','演练'],['event','事件'],['inspection','巡检']].map(([kind,label])=>({kind,label,pull_scope:'近三日授权楼栋记录',times:['07:00','17:00'],confirmed:true,enabled:true,notify:true,targets:[{label:label+'原表'}],notification_targets:['运行值班群']}));
   const inspection=tasks.at(-1);
   const makeRun=(id,mode,status)=>({id,kind:'inspection',mode,status,created_at:day()+'T08:00:00+08:00',counts:{total:2,create:1,update:1,delete:0}});
@@ -23,7 +23,7 @@ export function operationsFixture(){
     if(p==='/api/assistant/appearance')return ok({enabled:false});
     if(p.startsWith('/api/workspace-layouts/'))return ok({revision:0,value:null});
     if(p==='/api/events/monthly')return ok({snapshot_exists:true,records:event.occurrence_time.startsWith(url.searchParams.get('month'))?[event]:[],last_refreshed_at:Date.now()/1000});
-    if(p==='/api/events/transfer-repair'){event.transfer_to_overhaul='True';return ok({});}
+    if(p==='/api/events/transfer-repair'){event.transfer_to_overhaul='True';event.under_repair=true;return ok({});}
     if(p==='/api/cold-source-monitor'){
       const row={id:'wet-h',scope:'H',date:day(),temperature:21.5,mode:'冷机供冷',hint:'当班湿球温度已核对'};
       const jobs=Array.from({length:11},(_,i)=>({id:'notify-'+i,row,created_at:Date.now()/1000-i*3600,status:i===0?'uncertain':'sent',targets:{shift:{name:'当班工程师',id:'shift',status:'sent'}},error:i===0?'备用通知通道回执待核实':''}));

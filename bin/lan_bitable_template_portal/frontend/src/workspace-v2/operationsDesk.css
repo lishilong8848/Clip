@@ -190,6 +190,9 @@
   .ops-desk .ops-dialog-head, .ops-desk .ops-dialog-body, .ops-desk .ops-dialog-foot { padding: 10px; }
   .ops-desk .ops-environment { grid-template-columns: minmax(0,1fr); }
 }
+@media screen {
+  .ops-desk--print { max-width: 100%; min-width: 0; overflow-x: auto; }
+}
 @media print {
   body:has(.ops-desk--print) :not(:has(.ops-desk--print),.ops-desk--print,.ops-desk--print *) { display: none !important; }
   body:has(.ops-desk--print), body :has(.ops-desk--print), .ops-desk--print {

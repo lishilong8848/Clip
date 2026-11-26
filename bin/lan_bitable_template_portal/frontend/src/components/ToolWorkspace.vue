@@ -362,6 +362,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsageOverlay } from '../usageNavigation';
+
 import { computed, markRaw, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import ToolWorkbookInput from './ToolWorkbookInput.vue';
 import {boxParts,displayToolDate,type ToolDateKind} from './toolWorkbookFields';
@@ -1297,6 +1299,8 @@ onBeforeUnmount(() => {
   clearTimeout(pollTimer);
   clearInterval(recordsTimer);
 });
+
+useUsageOverlay('tool_management', 'tool_management/session', () => Boolean(session.value));
 </script>
 
 <style scoped>

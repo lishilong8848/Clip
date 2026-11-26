@@ -1,6 +1,0 @@
-import{L as n}from"./part-v2-DkvgN_K7.js";import{bl as u,bD as m,dS as l,bg as s,I as h,em as b,bd as p,be as k,eA as v,dm as y,az as _}from"./app-v2-efpO7EXp.js";/**
- * @license lucide-vue-next v0.468.0 - ISC
- *
- * This source code is licensed under the ISC license.
- * See the LICENSE file in the root directory of this source tree.
- */const f=u("ListIcon",[["path",{d:"M3 12h.01",key:"nlz23k"}],["path",{d:"M3 18h.01",key:"1tta3j"}],["path",{d:"M3 6h.01",key:"1rqtza"}],["path",{d:"M8 12h13",key:"1za7za"}],["path",{d:"M8 18h13",key:"1lx6n3"}],["path",{d:"M8 6h13",key:"ik3vkj"}]]),V={class:"record-view-switch",role:"group","aria-label":"显示方式"},z=["title","aria-label","aria-pressed","onClick"],w=m({__name:"RecordViewSwitch",props:{modelValue:{}},emits:["update:modelValue"],setup(a,{emit:c}){const o=a,r=c,i=[{value:"cards",label:"卡片显示",icon:n},{value:"table",label:"表单显示",icon:f}];function d(t){t!==o.modelValue&&r("update:modelValue",t)}return(t,L)=>(l(),s("div",V,[(l(),s(h,null,b(i,e=>p("button",{key:e.value,type:"button",class:y(["rvs-btn",{"is-active":a.modelValue===e.value}]),title:e.label,"aria-label":e.label,"aria-pressed":a.modelValue===e.value,onClick:M=>d(e.value)},[(l(),k(v(e.icon),{size:16,"aria-hidden":"true",focusable:"false"}))],10,z)),64))]))}}),B=_(w,[["__scopeId","data-v-0d52a877"]]);export{B as R};

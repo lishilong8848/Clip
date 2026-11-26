@@ -12,8 +12,9 @@ import {toolFixture} from './responsive-audit-tool-fixture.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
 const output=path.resolve(root,'../../../output/responsive-audit');
 await mkdir(output,{recursive:true});
-const modules=['event','maintenance','change','repair','polling','adjust','power','engineer_mop','repair_management','critical_guard','risk_inspection','daily','cabinet','water','plan_convergence','drills','learning','knowledge','links','life_guide','signatures','handover','work_handover','assistant','accounts'];
+const modules=['event','maintenance','change','repair','polling','adjust','power','engineer_mop','repair_management','critical_guard','risk_inspection','tool_management','sops','pre_shift','daily_inspection','cold_source','eop_scenarios','documents','zhihang_data','notice_history','daily','cabinet','water','plan_convergence','drills','learning','knowledge','links','life_guide','signatures','handover','work_handover','assistant','accounts'];
 const scopes=[{value:'ALL',label:'全部授权楼栋'},...['A','B','C','D','E','H','110'].map(value=>({value,label:value==='110'?'110站':value+'楼'}))];
+modules.push('backend_status','handover_settings','mop_settings','feishu_settings','dingtalk_settings','release_journal','backend_diagnostics');
 const user={open_id:'ou_responsive_fixture',name:'演示管理员',tool_management_enabled:true,level:'L0',category:'manager',category_label:'经理',role:'admin',can_manage_accounts:true,can_delete_business:true,modules,home_scope:'A',scopes:scopes.map(s=>s.value),login_method:'password'};
 const layouts=new Map();
 let server;
@@ -28,10 +29,19 @@ const api={name:'isolated-responsive-fixtures',configurePreviewServer(host){host
     const chunks=[];for await(const chunk of req){chunks.push(chunk);if(chunks.reduce((n,c)=>n+c.length,0)>1024*1024)throw new Error('Fixture request exceeds 1 MiB');}
     const text=Buffer.concat(chunks).toString();
     const body=text&&req.headers['content-type']?.includes('application/json')?JSON.parse(text):{};
+    if(url.pathname==='/api/usage/events' && req.method==='POST' && Array.isArray(body.events))return ok({accepted:body.events.length});
     if(url.pathname==='/api/health')return reply({json:{ok:true,service:'clipflow_backend',instance_id:'responsive-isolated-preview'}});
+    if(url.pathname==='/api/signatures/management/request' && req.method==='GET' && req.headers['x-signature-token']==='fixture-sign-token')
+      return ok({request_id:'fixture-request',name:'隔离签名人员',building:'A楼',status:'sent'});
+    if(url.pathname==='/api/polling-work-orders/session' && req.method==='GET' && url.searchParams.get('token')==='fixture_token')
+      return ok({title:'隔离轮巡工单',role:'operator',role_label:'操作人',state:'active',version:1,current_run_index:1,
+        assigned_person:{name:'值班人员'},work_orders:[{run_index:1,label:'核验仪表',state:'active',step_count:1,completed_steps:0,selectable:true}],
+        steps:[{run_index:1,step_index:1,step_key:'demo',position:'current',operator_required:true,content:'核对现场仪表',photos:[]}]});
     if(url.pathname==='/api/auth/status'){
       const login=ref.searchParams.get('__audit')==='login',guest=ref.searchParams.get('__audit')==='guest';
-      return ok({logged_in:!login,user:login?{}:guest?{...user,name:'访客',role:'guest',modules:['cabinet']}:user,scope_options:login?[]:scopes,allowed_scopes:login?[]:scopes.map(s=>s.value),default_scope:'A',login_url:'/api/auth/login'});
+      const visibleScopes=login?[]:guest?scopes.filter(s=>s.value==='A'):scopes;
+      const visitor={open_id:'fixture-guest',name:'访客',role:'guest',modules:['cabinet'],home_scope:'A',scopes:['A']};
+      return ok({logged_in:!login,user:login?{}:guest?visitor:user,scope_options:visibleScopes,allowed_scopes:visibleScopes.map(s=>s.value),default_scope:'A',login_url:'/api/auth/login'});
     }
     if(url.pathname.startsWith('/api/workspace-layouts/')){
       const saved=layouts.get(url.pathname)||{revision:0,value:null};

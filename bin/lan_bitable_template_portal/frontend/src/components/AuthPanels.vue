@@ -148,6 +148,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { NSelect } from "naive-ui";
 import { QrCode, UserRound, Eye, ShieldCheck } from "lucide-vue-next";
@@ -379,6 +381,8 @@ async function retryNotification(){retryingNotification.value=true;try{await req
 watch(()=>[props.loggedIn,props.checking,props.passwordSettings,props.user?.open_id],()=>{if(props.loggedIn&&!props.checking&&!props.passwordSettings)void loadApprovers();else requestAbort?.abort();},{immediate:true});
 watch(()=>[props.request.requestId,props.request.status],()=>{clearTimeout(pollTimer);if(props.request.status==='pending')pollTimer=setTimeout(pollRequest,1000);},{immediate:true});
 onBeforeUnmount(()=>{disposed=true;requestAbort?.abort();clearTimeout(pollTimer);});
+
+useUsagePage('auth_panel', () => props.checking ? '' : !props.loggedIn ? 'auth/' + activeTab.value : props.passwordSettings ? 'auth/change_password' : 'auth/permission');
 </script>
 
 <style scoped>

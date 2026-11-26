@@ -1,22 +1,34 @@
 import assert from 'node:assert/strict';
-import {mkdir,readFile} from 'node:fs/promises';
+import {mkdtemp,readFile} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {preview} from 'vite';
 import {chromium} from 'playwright';
 import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=fileURLToPath(new URL('..',import.meta.url));
-const output=path.resolve(root,'../../../output/playwright/operation-widgets');await mkdir(output,{recursive:true});
-const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0}}),origin='http://127.0.0.1:'+server.httpServer.address().port;
-const browser=await chromium.launch({headless:true}),context=await browser.newContext({viewport:{width:1440,height:960},reducedMotion:'reduce'});
+const output=await mkdtemp(path.join(tmpdir(),'operation-widgets-'));
+const server=await preview({root,configFile:false,base:'/assets/workspace-v2/',build:{outDir:process.env.CLIPFLOW_WORKSPACE_BUILD_DIR||'dist/assets/workspace-v2'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const origin='http://127.0.0.1:'+server.httpServer.address().port;
+const browser=await chromium.launch({headless:true}),context=await browser.newContext({serviceWorkers:'block',viewport:{width:1440,height:960},reducedMotion:'reduce'});
 const user={open_id:'operation-fixture',name:'操作组件验收',level:'L4',role:'user',category:'engineer',modules:['maintenance','repair_management']};
 const project={record_id:'repair-fixture',title:'BMS报D-416-UPS-1011#电池组最高电池内阻值过高告警并进行设备模块核对与修复'.repeat(3),building:'A楼',building_codes:['A'],workflow:'维修中',progress_percent:25,followup_count:2,followup_state_verified:true};
 const errors=[],reads=[];
 let noticeActionAvailable=true,repairMalformed=false,repairDelay=0;
 const layouts=layoutApiFixture();
 await context.route('**/*',async route=>{
-  const req=route.request(),url=new URL(req.url());if(url.origin!==origin)return route.abort();if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});if(!url.pathname.startsWith('/api/'))return route.continue();
-  if(await layouts.handle(route,user.open_id))return;
+  const req=route.request(),url=new URL(req.url());
+  if(url.origin!==origin)return route.abort();
+  if(!url.pathname.startsWith('/api/')){
+    assert.equal(req.method(),'GET');
+    if(url.pathname==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});
+    return route.continue();
+  }
+  if(url.pathname.startsWith('/api/workspace-layouts/')){
+    assert(['GET','PUT'].includes(req.method()));
+    if(req.method()==='PUT')assert.match(url.pathname,/^\/api\/workspace-layouts\/(desktop|mobile)\/(notices|repair)$/);
+    return layouts.handle(route,user.open_id);
+  }
   assert.equal(req.method(),'GET','choosing a widget operation never sends or saves a notice');reads.push(url.pathname+url.search);
   const ok=data=>route.fulfill({json:{ok:true,data}});
   if(url.pathname==='/api/auth/status')return ok({logged_in:true,user,scope_options:[{value:'A',label:'A楼'}]});
@@ -34,44 +46,53 @@ await context.route('**/*',async route=>{
   if(url.pathname==='/api/repair-management/stream')return route.fulfill({status:204,body:''});
   return ok({items:[],records:[],fields:[],stats:{},people:[],summary:{}});
 });
-const page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',e=>errors.push(e.message));
+const page=await context.newPage();page.setDefaultTimeout(15000);
+page.setDefaultNavigationTimeout(60000);
+page.on('pageerror',e=>errors.push(e.message));
 const entry=origin+'/assets/workspace-v2/index.html';
 const notice=()=>page.locator('.v2-widget[aria-label="通告办理"]');
 const repair=()=>page.locator('.v2-widget[aria-label="维修跟进"]');
+const noticePage=entry+'?__page=/workbench-lite&scope=A&work_type=maintenance';
+const repairPage=entry+'?__page=/repair-management&scope=A';
+async function saveWidget(url,canvas,title,kind,device){
+  await page.goto(url);
+  await page.getByRole('button',{name:'自定义'+canvas+'布局',exact:true}).click();
+  await page.getByRole('button',{name:'添加组件',exact:true}).click();
+  await page.locator('.v2-page-library-items').getByRole('button',{name:title,exact:true}).click();
+  await page.getByRole('button',{name:'保存布局',exact:true}).click();
+  await page.getByText('本页布局已同步到账号',{exact:true}).waitFor();
+  const key=url===noticePage?'notices':'repair';
+  const saved=layouts.records.get(user.open_id+':/api/workspace-layouts/'+device+'/'+key);
+  assert(saved?.value.layout.items.some(item=>item.kind===kind));
+}
 try{
-  await page.goto(entry);await page.getByRole('button',{name:'自定义工作台',exact:true}).waitFor();
-  await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
-  for(const title of ['通告办理','维修跟进']){
-    await page.getByRole('button',{name:'添加组件',exact:true}).click();
-    await page.locator('.v2-library-item').filter({has:page.getByText(title,{exact:true})}).click();
-    await page.locator('.v2-widget-editor').getByRole('button',{name:'应用设置',exact:true}).click();
-  }
-  await page.getByRole('button',{name:'保存布局',exact:true}).click();await page.reload();
-  await notice().scrollIntoViewIfNeeded();await notice().getByRole('button',{name:'结束',exact:true}).waitFor();
+  await saveWidget(noticePage,'通告办理','通告办理','notice_actions','desktop');
+  await saveWidget(repairPage,'检修办理','维修跟进','repair_actions','desktop');
+  await page.goto(noticePage);
+  await notice().scrollIntoViewIfNeeded();
+  await notice().getByRole('button',{name:'结束',exact:true}).waitFor();
   assert.equal(await notice().getByText('已结束计划',{exact:true}).count(),0);
-  const saved=layouts.records.get('operation-fixture:/api/workspace-layouts/desktop/workspace').value;
-  assert(saved.widgets.some(item=>item.kind==='notice_actions')&&saved.widgets.some(item=>item.kind==='repair_actions'));
   await page.screenshot({path:path.join(output,'notice-actions.png')});
   await notice().getByRole('button',{name:'结束',exact:true}).click();
   await page.locator('.v2-notice-editor .n-radio-button--checked').getByText('结束',{exact:true}).waitFor();
   assert(reads.some(url=>url.includes('/api/workbench/lite-detail?')&&url.includes('active_item_id=active-fixture')));
-  await page.goto(entry);await notice().scrollIntoViewIfNeeded();await notice().getByRole('button',{name:'填写开始',exact:true}).click();
+  await page.goto(noticePage);await notice().scrollIntoViewIfNeeded();await notice().getByRole('button',{name:'填写开始',exact:true}).click();
   await page.locator('.v2-notice-editor .n-radio-button--checked').getByText('开始',{exact:true}).waitFor();
   assert(reads.some(url=>url.includes('/api/workbench/lite-detail?')&&url.includes('record_id=plan-fixture')));
-  await page.goto(entry);await repair().scrollIntoViewIfNeeded();
-  const repairRefresh=repair().locator('.v2-widget-head').getByRole('button',{name:'刷新维修跟进',exact:true});
+  await page.goto(repairPage);await repair().scrollIntoViewIfNeeded();
+  const repairRefresh=repair().getByRole('button',{name:'刷新待办',exact:true});
   await repairRefresh.waitFor();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();
-  assert.equal(await repair().locator('.v2-widget-body').getByRole('button',{name:'刷新待办',exact:true}).count(),0,'refresh is in the widget header, not another content row');
+  assert.equal(await repairRefresh.count(),1,'one refresh control for the repair widget');
   repairDelay=1400;
   await repair().locator('.v2-task-operation').first().evaluate(el=>window.refreshCard=el);
   await repairRefresh.click();await page.waitForTimeout(200);
   assert(await page.evaluate(()=>window.refreshCard.isConnected),'refresh does not remove operation cards');
   assert.equal(await repair().locator('.n-spin-content--spinning').count(),0,'background refresh does not mask the loaded list');
-  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新维修跟进"].n-button--loading'));repairDelay=0;
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新待办"].n-button--loading'));repairDelay=0;
   await page.evaluate(()=>{Object.defineProperty(document,'hidden',{value:true,configurable:true});window.dispatchEvent(new Event('clipflow-business-changed'));});
   assert(await page.evaluate(()=>window.refreshCard.isConnected),'background notifications cannot blank a hidden tab');
   await page.evaluate(()=>{delete document.hidden;document.dispatchEvent(new Event('visibilitychange'));});
-  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新维修跟进"].n-button--loading'));
+  await page.waitForFunction(()=>!document.querySelector('[aria-label="刷新待办"].n-button--loading'));
   repairMalformed=true;await repairRefresh.click();await repair().getByText('待办资料未完整返回，请重试或进入业务列表核对。',{exact:false}).waitFor();
   assert(await page.evaluate(()=>window.refreshCard.isConnected),'failed refresh keeps the last verified operation cards');
   assert.equal(await repair().locator('.n-empty').count(),0,'incomplete required records never become a successful empty result');
@@ -80,34 +101,28 @@ try{
   await page.locator('.v2-repair-detail').getByRole('heading',{name:'本次跟进',exact:true}).waitFor();
   assert(reads.some(url=>url.includes('/api/repair-management/status?')&&url.includes('state=all')),'reuse the existing unfinished status query');
   assert(reads.some(url=>url.includes('/api/repair-management/followups?')&&url.includes('repair-fixture')));
-  await page.goto(entry);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'维修单',exact:true}).first().click();
+  await page.goto(repairPage);await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'维修单',exact:true}).first().click();
   await page.locator('.v2-repair-project-form:visible').waitFor();
   noticeActionAvailable=false;await page.goto(entry+'?__page=/workbench-lite&scope=A&work_type=maintenance&active_item_id=active-fixture&notice_action=end');
   await page.getByText(/该记录当前不能结束/).waitFor();
   assert.equal(await page.locator('.v2-notice-editor .n-radio-button--checked').count(),0,'no silent replacement when requested action is unavailable');
   for(const width of [1366,390]){
-    await page.setViewportSize({width,height:width<761?844:900});await page.goto(entry);
-    if(width<761){
-      await page.getByRole('button',{name:'自定义工作台',exact:true}).click();
-      for(const title of ['通告办理','维修跟进']){
-        await page.getByRole('button',{name:'添加组件',exact:true}).click();
-        await page.locator('.v2-library-item').filter({has:page.getByText(title,{exact:true})}).click();
-        await page.locator('.v2-widget-editor').getByRole('button',{name:'应用设置',exact:true}).click();
-      }
-      await page.getByRole('button',{name:'保存布局',exact:true}).click();
-      await page.waitForFunction(()=>!document.querySelector('.v2-edit-banner'));
+    await page.setViewportSize({width,height:width<761?844:900});
+    if(width===390){
+      await saveWidget(noticePage,'通告办理','通告办理','notice_actions','mobile');
+      await saveWidget(repairPage,'检修办理','维修跟进','repair_actions','mobile');
     }
-    await notice().scrollIntoViewIfNeeded();
-    assert(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1));
-    await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();
-    for(const widget of [notice(),repair()]){
+    for(const [url,widget,action] of [[noticePage,notice(),'结束'],[repairPage,repair(),'填写跟进']]){
+      await page.goto(url);
       await widget.scrollIntoViewIfNeeded();
+      await widget.getByRole('button',{name:action,exact:true}).first().waitFor();
+      assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth+1));
       assert(await widget.locator('.v2-widget-body').evaluate(el=>el.scrollWidth<=el.clientWidth+1),'widget has no horizontal overflow');
       const geometry=await widget.locator('.v2-task-operation').evaluateAll(cards=>cards.map(card=>{
         const box=card.getBoundingClientRect(),title=card.querySelector('.v2-operation-title').getBoundingClientRect(),status=card.querySelector('.n-tag').getBoundingClientRect();
         return {fits:card.scrollWidth<=card.clientWidth+1,titleFits:title.left>=box.left&&title.right<=status.left+1&&status.right<=box.right+1};
       }));
-      assert(geometry.every(v=>v.fits&&v.titleFits),'long titles stay within their cards: '+JSON.stringify(geometry));
+      assert(geometry.length>0&&geometry.every(v=>v.fits&&v.titleFits),'long titles stay within their cards: '+JSON.stringify(geometry));
     }
     await page.screenshot({path:path.join(output,'widgets-'+width+'.png')});
     if(width===1366){
@@ -117,12 +132,16 @@ try{
         assert(await repair().evaluate(el=>[el,...el.querySelectorAll('.v2-task-operation,.v2-task-operation-head')].every(n=>n.scrollWidth<=n.clientWidth+1)),'resized repair cards never overflow');
         await repair().screenshot({path:path.join(output,'repair-width-'+span+'.png')});
       }
-      await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:operation-fixture','dark'));await page.reload();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();await repair().scrollIntoViewIfNeeded();
+      await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:operation-fixture','dark'));await page.reload();await repair().scrollIntoViewIfNeeded();await repair().getByRole('button',{name:'填写跟进',exact:true}).first().waitFor();await repair().scrollIntoViewIfNeeded();
       assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
       await repair().screenshot({path:path.join(output,'repair-dark-long-titles.png')});
     }
   }
-  user.modules=['learning'];await page.reload();await page.getByRole('button',{name:'自定义工作台',exact:true}).waitFor();
-  assert.equal(await notice().count()+await repair().count(),0,'revoked modules cannot retain operation widgets');
+  user.modules=['learning'];
+  for(const url of [noticePage,repairPage]){
+    await page.goto(url);
+    await page.getByText('没有该功能权限',{exact:true}).waitFor();
+    assert.equal(await notice().count()+await repair().count(),0,'revoked modules cannot retain operation widgets');
+  }
   assert.deepEqual(errors,[]);console.log('PASS: optional operation widgets, persisted layout, authorized modules, exact notice actions, no implicit writes, repair followup/project routing and responsive layout.');
 }finally{await browser.close();await new Promise(resolve=>server.httpServer.close(resolve));}

@@ -18,7 +18,7 @@ const { outputFiles } = await build({ stdin: { contents: script.content, resolve
     builder.onResolve({ filter: /\.vue$/ }, args => ({ path: args.path, namespace: 'component' }));
     builder.onLoad({ filter: /.*/, namespace: 'component' }, () => ({ contents: 'export default {};' }));
     builder.onResolve({ filter: /api\/client$/ }, () => ({ path: 'api', namespace: 'api' }));
-    builder.onLoad({ filter: /.*/, namespace: 'api' }, () => ({ contents: 'export const requestJson = (...args) => globalThis.fixtureRequest(...args);' }));
+    builder.onLoad({ filter: /.*/, namespace: 'api' }, () => ({ contents: 'export const assistantClientId = async () => "isolated-client"; export const requestJson = (...args) => globalThis.fixtureRequest(...args);' }));
   } }] });
 const require = createRequire(filename);
 const componentModule = new Module(filename);
@@ -28,18 +28,20 @@ return componentModule.exports.default;
 }
 const memory = new Map();
 const storage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value), removeItem: key => memory.delete(key) };
+globalThis.sessionStorage = storage;
 globalThis.window = { localStorage: storage, sessionStorage: storage, location: new URL('http://fixture.invalid/'),
-  addEventListener() {}, removeEventListener() {}, dispatchEvent() {}, clearTimeout,
+  addEventListener() {}, removeEventListener() {}, dispatchEvent() {}, clearTimeout, clearInterval,
   setTimeout: (...args) => { const timer = setTimeout(...args); timer.unref(); return timer; },
   innerWidth: 1440, innerHeight: 1000, matchMedia: () => ({ matches: false }) };
 const require = createRequire(import.meta.url);
-const { effectScope, nextTick, reactive } = require('vue');
+const { createApp, effectScope, nextTick, reactive } = require('vue');
 const component = await loadComponent(resolve(root, 'src/components/LighthouseAssistant.vue'));
 function setup(account = 'account-A', target = component, extraProps = {}) {
   const scope = effectScope(), previous = console.warn;
   // Lifecycle hooks are deliberately not mounted in this state-only check.
   console.warn = message => { if (!String(message).includes('no active component instance')) previous(message); };
-  try { return { vm: scope.run(() => target.setup({ userId: account, userName: account, ...extraProps }, { expose() {}, emit() {} })), stop: () => scope.stop() }; }
+  try { return { vm: createApp({}).runWithContext(() => scope.run(() =>
+    target.setup({ userId: account, userName: account, ...extraProps }, { expose() {}, emit() {} }))), stop: () => scope.stop() }; }
   finally { console.warn = previous; }
 }
 const plan = id => ({ id, version: 1, status: 'needs_input', title: id, operations: [], fields: [{ name: 'title', type: 'text', value: '原内容' }] });
@@ -140,6 +142,76 @@ await nextTick();
 await new Promise(resolve => setTimeout(resolve, 200));
 assert.equal(vm.state.value.turns[0].answer, 'same answer extended', 'hidden pages should not keep rendering chunks');
 document.hidden = false;
+// A startup failure follows the existing attempt exclusively through conversation reads.
+const recovery = setup('startup-fixture'), chat = recovery.vm;
+const turn = { operation_id: 'original-question', attempt_id: 'first-attempt', run_id: 'original-run',
+  question: '隔离原问题', status: 'failed', error_code: 'startup_catalog', error: '模型目录尚未就绪。' };
+const conversation = (value, active = '') => ({ ...snapshot(), turns: [{ ...value }],
+  active_run_id: active, busy: !!active, sync_stamp: value.status });
+for (const error_code of ['startup_listener', 'startup_handshake', 'startup_catalog', 'startup_cooldown']) {
+  assert.equal(chat.turnAction({ ...turn, error_code }), '重试原问题');
+}
+for (const receipt of [{ task_id: 'existing-task' }, { job_id: 'submitted-job' }, { plan: { status: 'submitted' } }]) {
+  assert.equal(chat.turnAction({ ...turn, ...receipt }), '查看原任务');
+}
+assert.equal(chat.turnAction({ ...turn, client_pending: true }), '查看原进度');
+assert.equal(chat.turnAction({ ...turn, error_code: 'runtime_startup' }), '查看原进度');
+chat.replaceState(conversation({ ...turn, client_pending: true }));
+const reads = [];
+let observed = conversation({ ...turn, status: 'pending', error: '', error_code: '' }, turn.run_id);
+globalThis.fixtureRequest = async (url, options) => {
+  reads.push([url, options.method]);
+  assert.equal(url, '/api/assistant/conversation');
+  assert.equal(options.method, 'GET');
+  return structuredClone(observed);
+};
+await chat.send(chat.state.value.turns[0]);
+assert.equal(chat.state.value.turns[0].status, 'pending', 'same run and attempt resume from the server snapshot');
+assert.equal(chat.state.value.turns[0].run_id, turn.run_id);
+chat.replaceState(conversation({ ...turn, status: 'stopped' }));
+await chat.readState(false, true);
+assert.equal(chat.state.value.turns[0].status, 'stopped', 'late pending snapshot cannot undo a stop');
+const legacy = { ...turn, error_code: '', error: '助手启动超时，原消息已保留，可继续。诊断编号:fixture' };
+observed = conversation(legacy);
+chat.replaceState(structuredClone(observed));
+await chat.resumeResearch({ ...legacy, resume_available: true });
+assert.equal(reads.length, 3, 'legacy timeout and research entry only reread');
+chat.replaceState(conversation(turn));
+let ambiguousPosts = 0;
+globalThis.fixtureRequest = async (url, options) => {
+  if (options.method === 'POST') { ambiguousPosts++; throw new Error('lost retry receipt'); }
+  return conversation(turn); // Storage still exposes only the previous failed attempt.
+};
+await chat.send(chat.state.value.turns[0]);
+assert.equal(ambiguousPosts, 1);
+const afterReload = setup('startup-fixture');
+afterReload.vm.replaceState(conversation(turn));
+assert.equal(afterReload.vm.turnAction(afterReload.vm.state.value.turns[0]), '查看原进度');
+await afterReload.vm.send(afterReload.vm.state.value.turns[0]);
+assert.equal(ambiguousPosts, 1, 'old receipt after reload does not authorize another retry');
+chat.replaceState(conversation({ ...turn, attempt_id: afterReload.vm.state.value.turns[0].attempt_id,
+  run_id: 'confirmed-retry', status: 'completed' }));
+afterReload.stop();
+
+for (const message of ['HTTP 503', '请求超时，请稍后重试。']) {
+  let posts = 0, gets = 0, body;
+  chat.replaceState({ ...snapshot(), turns: [] });
+  chat.draft.value = '只提交一次';
+  globalThis.fixtureRequest = async (url, options) => {
+    if (url === '/api/assistant/messages') {
+      posts++; body = JSON.parse(options.body); throw new Error(message);
+    }
+    assert.equal(url, '/api/assistant/conversation'); gets++;
+    return conversation({ ...turn, ...body, status: 'completed', answer: '原运行已完成', error: '', error_code: '' });
+  };
+  await chat.send();
+  assert.equal(posts, 1); assert.equal(gets, 1);
+  assert.equal(chat.state.value.turns.length, 1);
+  assert.equal(chat.state.value.turns[0].attempt_id, body.attempt_id);
+  assert.equal(chat.state.value.turns[0].status, 'completed');
+  assert.equal(chat.error.value, '', 'lost POST receipt cannot leave a stale error on a confirmed answer');
+}
+recovery.stop();
 vm.open.value = true;
 vm.resumeStreamRendering();
 assert.equal(vm.state.value.turns[0].answer, 'same answer extended while hidden');

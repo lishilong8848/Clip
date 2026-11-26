@@ -1,5 +1,5 @@
 <template>
-  <section class="v2-full-module" :data-module-widget="item.module" @click="followLink">
+  <section class="v2-full-module" :data-module-widget="item.module" @click="followLink" @click.capture="markUsageInteraction" @keydown.capture="markUsageInteraction">
     <Teleport v-if="headerTarget" :to="headerTarget"><NButton size="small" text data-v2-navigation aria-label="独立页面" title="独立页面" @click="openPage"><Maximize2 :size="14" /><span class="v2-module-open-label">独立页面</span></NButton></Teleport>
     <div v-if="backRoute||!headerTarget" class="v2-module-toolbar" data-v2-navigation><NButton v-if="backRoute" size="small" quaternary @click="back"><ArrowLeft :size="14" />返回</NButton><span v-if="!headerTarget">{{scopeLabel}}</span><NButton v-if="!headerTarget" size="small" text @click="openPage"><Maximize2 :size="14" />{{initialUrl?'在原模块办理':'独立页面'}}</NButton></div>
     <div ref="filterTarget" class="v2-module-filters" data-v2-filter role="region" :aria-label="item.title+'筛选'" />
@@ -15,6 +15,9 @@
   </section>
 </template>
 <script setup lang="ts">
+import { provideUsage } from '../usageNavigation';
+import { usageRoute } from '../usageRoutes';
+
 import { computed,defineAsyncComponent,nextTick,provide,ref,watch } from 'vue';
 import { NAlert,NButton,NEmpty,NResult,NSpin } from 'naive-ui';
 import { ArrowLeft,Maximize2 } from 'lucide-vue-next';
@@ -44,6 +47,8 @@ pages.cold_source=lazy(()=>import('../components/ColdSourceMonitorPage.vue'));
 pages.documents=lazy(()=>import('../components/DocumentLibraryPage.vue'));
 function initial(){const entry=navigationModules(props.user.modules||[],false,canViewInspectionHistory(props.user)).find(module=>module.id===props.item.module);const url=new URL(entry?.path||'/',location.origin);url.searchParams.set('scope',props.scope);if(props.item.module==='water')url.searchParams.set('water_view','records');if(props.initialUrl){const target=new URL(props.initialUrl,location.origin);const kind=moduleForRoute(target);if(target.origin===location.origin&&(kind===props.item.module||props.item.module==='notices'&&(NOTICE_IDS.includes(kind)||kind==='all'))&&(!target.searchParams.get('scope')||props.scopes.some(s=>s.value===target.searchParams.get('scope'))))return target;}return url;}
 const route=ref(initial()),history=ref<URL[]>([]),filterTarget=ref<HTMLElement|null>(null),error=ref('');
+let usageInteracted = false;
+function markUsageInteraction(event: Event) { if (event.isTrusted) usageInteracted = true; }
 const moduleId=computed(()=>{const id=moduleForRoute(route.value);return NOTICE_IDS.includes(id)||id==='all'?'notices':id;});
 const permitted=computed(()=>navigationModules(props.user.modules||[],props.user.tool_management_enabled===true,canViewInspectionHistory(props.user)).some(module=>module.id===props.item.module));
 const localScope=computed(()=>{const scope=route.value.searchParams.get('scope')||props.scope;return props.scopes.some(item=>item.value===scope)?scope:props.scope;});
@@ -100,4 +105,10 @@ watch(()=>JSON.stringify([props.scope,props.selectedScopes]),()=>{
 });
 const handovers=ref<Dict>({}),handoverLoading=ref(false);
 watch(moduleId,async (id,_previous,onCleanup)=>{handovers.value={};if(id!=='handover'||!permitted.value)return;const controller=new AbortController();onCleanup(()=>controller.abort());handoverLoading.value=true;try{const data=await requestJson('/api/handover-links',{signal:controller.signal});if(!controller.signal.aborted)handovers.value=data.links||{};}catch(e){if(!controller.signal.aborted)error.value=e instanceof Error?e.message:'审核入口读取失败';}finally{if(!controller.signal.aborted)handoverLoading.value=false;}},{immediate:true});
+
+provideUsage('web_v2', () => {
+  if (!permitted.value || unsupported.value) return '';
+  if (pageName.value === 'signatures' && route.value.searchParams.get('self') === '1') return 'signatures/self';
+  return usageRoute(route.value.pathname, route.value.searchParams);
+}, () => Boolean(props.initialUrl) || usageInteracted);
 </script>

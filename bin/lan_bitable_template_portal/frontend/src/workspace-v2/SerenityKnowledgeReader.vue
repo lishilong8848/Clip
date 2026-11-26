@@ -22,7 +22,7 @@ function replaceFile() {
 </script>
 <template>
   <NModal :show="!!model.detail" :mask-closable="true" @update:show="(value: boolean) => { if (!value) model.closeDetail() }">
-    <section v-if="model.detail" class="sk-reader v2-kb-reader" role="dialog" aria-modal="true" :aria-label="model.detail.name">
+    <div v-if="model.detail" class="sk-reader v2-kb-reader" role="dialog" aria-modal="true" :aria-label="model.detail.name">
       <header><div><small>{{ model.detail.historical ? '历史版本' : '文档原文' }}<template v-if="model.detail.view_version || model.detail.active_version"> · v{{ model.detail.view_version || model.detail.active_version }}</template></small>
         <h2>{{ model.detail.name }}</h2></div><button aria-label="关闭预览" @click="model.closeDetail"><X :size="19"/></button></header>
       <div class="reader-tools" v-if="!model.detailLoading && !model.readerError">
@@ -43,7 +43,7 @@ function replaceFile() {
       </div>
       <footer><span>{{ model.detailTotal }} 个片段</span><button aria-label="上一页片段" :disabled="model.detailLoading || model.detailPage<=1" @click="model.readPage(model.detailPage-1)"><ChevronLeft :size="16"/></button>
         <span>{{ model.detailPage }} / {{ model.detailPages }}</span><button aria-label="下一页片段" :disabled="model.detailLoading || model.detailPage>=model.detailPages" @click="model.readPage(model.detailPage+1)"><ChevronRight :size="16"/></button></footer>
-    </section>
+    </div>
   </NModal>
 </template>
 <style scoped>

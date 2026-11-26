@@ -214,6 +214,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   AlertCircle, Check, CheckCircle2, CheckSquare, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight,
@@ -1074,6 +1076,8 @@ onBeforeUnmount(() => {
   selectionController?.abort();
   detailRequest += 1;
 });
+
+useUsagePage('knowledge', () => 'knowledge/' + (uploadPanel.value ? 'upload' : detail.value ? 'reader' : 'main'));
 </script>
 
 <style scoped>

@@ -581,6 +581,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { acquireModal } from "../modalState";
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, reactive, ref, watch } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
@@ -3739,6 +3741,8 @@ onBeforeUnmount(() => {
   recordDetailAbortController?.abort();
   clearSyncStatusTimer();
 });
+
+useUsagePage('repair_management', () => projectDrawerOpen.value ? 'repair_management/' + activeWorkspaceTab.value : 'repair_management/main');
 </script>
 
 <style scoped>

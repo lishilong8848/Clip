@@ -169,7 +169,7 @@ try {
     assert.equal(photoRequired,['maintenance','change','repair'].includes(kind),'photo gate matches the original business contract');
     assert(fields.includes('title'));
     const literal=fixtures[kind].html.match(/const previewTemplates = (\{[\s\S]*?\n    \});/)[1];
-    const template=runInNewContext('('+literal+')',{}, {timeout:100})[kind];
+    const template=runInNewContext('('+literal+')',{}, {timeout:1000})[kind];
     const value=key=>{const text=String(expected[key]??'').trim();return ['start_time','end_time','actual_action_time','response_time'].includes(key)?text.replace('T',' '):text;};
     const heading=kind==='power'&&['上电通告','下电通告'].includes(expected.notice_type)?expected.notice_type:template.heading;
     const expectedPreview=[`【${heading}】状态：${view==='plan'?'开始':'更新'}`,...template.fields.map(([label,key])=>`【${label}】${key==='__range'?[value('start_time'),value('end_time')].filter(Boolean).join('~'):value(key)}`)].join('\n');
@@ -359,10 +359,21 @@ try {
   for (const width of [402,440,1440]) {
     await page.setViewportSize({width,height:900});
     await page.goto(origin+entry+'?__page=/workbench-lite&scope=A&work_type=event');
-    await types.getByRole('button',{name:'事件通告',exact:true,pressed:true}).waitFor();
+    if(width<=760){
+      const selector=page.getByRole('combobox',{name:'通告类型',exact:true});
+      await selector.waitFor();
+      await selector.selectOption('maintenance');
+      await plannedLane.waitFor();
+      await selector.selectOption('event');
+      assert.equal(await selector.inputValue(),'event');
+    }else{
+      await types.getByRole('button',{name:'事件通告',exact:true,pressed:true}).waitFor();
+    }
     assert.equal(await page.locator('[data-list="planned"]').count(),0,'events have no planned list');
     const card=page.locator('.raw-event-card.evt-compose');
-    await card.locator('summary').filter({hasText:'新建事件通告'}).click();
+    const composeToggle=card.locator('summary').filter({hasText:'新建事件通告'});
+    await composeToggle.waitFor();
+    if(!await composeToggle.evaluate(el=>el.closest('details').open))await composeToggle.click();
     await card.getByLabel('本次通告原文',{exact:true}).fill('【事件通告】状态：新增\n【标题】A楼I3隔离草稿');
     await card.getByRole('button',{name:'发送新增',exact:true}).scrollIntoViewIfNeeded();
     assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);

@@ -800,6 +800,24 @@ class StreamTests(unittest.IsolatedAsyncioTestCase):
         await self.finish()
         self.assertEqual(self.engine.calls[-1]["history"], [])
 
+    async def test_explicit_startup_retry_only_reopens_the_observed_failed_run_once(self):
+        payload = self.payload("查看维修进度")
+        with patch.object(self.engine, 'answer', AsyncMock(side_effect=AssistantError(
+                '助手已连接，模型目录尚未就绪。', 503, category='startup_catalog'))):
+            first = await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+            await self.finish()
+        retry = {**payload, 'attempt_id': 'startup_retry_' + first['run_id']}
+        with self.assertRaises(AssistantError):
+            await self.runtime.submit(self.actor, {**retry, 'question': '另一个问题'}, self.request, self.authorize)
+        for _ in range(2):
+            result = await self.runtime.submit(self.actor, retry, self.request, self.authorize)
+            await self.finish()
+            self.assertNotEqual(result['run_id'], first['run_id'])
+        self.assertEqual(len(self.engine.calls), 1)
+        with self.assertRaises(AssistantError):
+            await self.runtime.submit(self.actor, {**payload, 'attempt_id': 'startup_retry_' + result['run_id']},
+                                      self.request, self.authorize)
+
     async def test_duplicate_submission_and_unknown_retry_reuse_attempt(self):
         payload = self.payload("你好")
         first = await self.runtime.submit(self.actor, payload, self.request, self.authorize)

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { recordPage } from '../../usageEvents';
+import { noticePage } from '../../usageRoutes';
 import { computed, defineAsyncComponent, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch, type VNode } from 'vue';
 import { NModal, NPopover, useMessage } from 'naive-ui';
 import { Bell, BookOpen, ChevronRight, CircleAlert, ClipboardList, Layers3, ListChecks, Search, ShieldCheck, Siren, Wrench, X } from 'lucide-vue-next';
@@ -459,6 +461,15 @@ function changeCase(next?:OpenCase){
     caseListOpen.value=false;
     caseSearch.value='';
     activeCase.value=next;
+    if (next && !next.widget) {
+      // The guard has committed a new card. ModuleWidget owns its own nested navigation.
+      const screen = next.mode === 'notice' ? noticePage(new URL(next.url,location.origin).searchParams.get('work_type'),
+        new URL(next.url,location.origin).searchParams.get('notice_action')) : {
+          pre_shift:'pre_shift/main', event:'notices/event', change:'notices/confirmation', read:'portal/task_detail', module:'',
+        }[next.mode];
+      const [module,page] = screen.split('/');
+      if (page) recordPage('web_v2',module,page);
+    }
     if(next){markRead(next.item);focusCasePanel();}
     else restoreFocus();
   };
@@ -724,6 +735,7 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .tile-popover>header { display:flex;flex:none;flex-wrap:wrap;align-items:center;gap:6px;padding:5px 8px 5px 12px;background:var(--tile-tint);color:var(--tile-accent);border-bottom:1px solid var(--desk-line) }
 .tile-popover h3 { margin:0;font-size:14px }.tile-popover>header>span { flex:1;font-size:12px }
 .tile-popover button { color:inherit;cursor:pointer }
+.task-tiles>li:only-child {max-width:min(100%,188px)}
 .tile-more,.tile-close { border:0;background:transparent;min-height:32px;border-radius:8px }
 .tile-close { width:34px;display:grid;place-items:center }
 .tile-popover .queue-list { min-height:0;list-style:none;padding:0 8px;margin:0;overflow:auto;overscroll-behavior:contain }
@@ -785,6 +797,9 @@ function shortcutIcon(icon:string){return moduleIcons[icon as keyof typeof modul
 .case-header { display:flex;align-items:center;gap:8px;padding:10px 14px;flex:none;background:var(--soft-field,#e4eeeb);border-bottom:1px solid var(--soft-edge,#bacac8) }
 .case-title { flex:1;min-width:0 }
 .case-title small { color:var(--v2-muted,#496064);font-size:12px }
+@media(pointer:coarse){
+  .case-panel .case-title h2 {white-space:normal;overflow-wrap:anywhere}
+}
 .case-title h2 { margin:0;font-size:17px;font-weight:700;color:var(--v2-ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap }
 .case-tools,.case-panel .close-key { flex:none }
 .case-tools:empty { display:none }

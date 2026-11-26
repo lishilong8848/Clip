@@ -14,7 +14,7 @@ const browser=await chromium.launch({headless:true});
 const errors=[];
 try {
   for(const version of ['legacy','workspace'])for(const width of [1440,390]){
-    let reads=0,writes=0,complete=false,auth='expired';
+    let unavailable=true,writes=0,complete=false,auth='expired';
     const ctx=await browser.newContext({viewport:{width,height:width===390?844:900},reducedMotion:'reduce'});
     await ctx.route('**/*',async route=>{
       const req=route.request(),url=new URL(req.url());
@@ -28,8 +28,8 @@ try {
         ?route.fulfill({status:401,json:{ok:false,auth_required:true,error:'登录已过期'}})
         :ok({logged_in:true,user:{open_id:'fixture-guest',role:'guest',modules:['cabinet']},scope_options:[]});
       if(url.pathname==='/api/signatures/management/request'){
-        reads++;assert.equal(req.headers()['x-signature-token'],'fixture-sign-token');
-        if(reads===1)return route.fulfill({status:503,json:{ok:false,error:'隔离测试：签名读取暂未完成'}});
+        assert.equal(req.headers()['x-signature-token'],'fixture-sign-token');
+        if(unavailable)return route.fulfill({status:503,json:{ok:false,error:'隔离测试：签名读取暂未完成'}});
         if(complete)return route.fulfill({status:410,json:{ok:false,error:'签名已完成，此链接已失效。'}});
         return ok({request_id:'fixture-request',name:'隔离签名人员',building:'B楼',status:'sent'});
       }
@@ -43,32 +43,38 @@ try {
       return ok({items:[],records:[],scopes:{}});
     });
     const page=await ctx.newPage();page.on('pageerror',e=>errors.push(e.message));
-    const link=origin+(version==='workspace'?'/assets/workspace-v2/index.html?__page=/signature&':'/signature?')+'request_id=fixture-request#token=fixture-sign-token';
+    const link=origin+(version==='workspace'?'/assets/workspace-v2/index.html?__page=/signature&':'/signature?frontend=legacy&')+'request_id=fixture-request#token=fixture-sign-token';
     await page.goto(link);
-    await page.getByText('暂时无法读取签名',{exact:true}).waitFor();
+    await page.getByText('暂时无法读取签名',{exact:true}).waitFor({timeout:12000}).catch(error=>{
+      return page.locator('body').innerText().then(text=>{throw new Error(version+' '+width+' '+text.slice(0,900),{cause:error});});
+    });
     assert.equal(writes,0);assert.equal(new URL(page.url()).hash,'#token=fixture-sign-token');
+    unavailable=false;
     await page.getByRole('button',{name:'重新读取签名',exact:true}).click();
-    await page.locator('.signature-page canvas').waitFor();
+    const canvas=page.getByLabel(version==='workspace'?'手写签名画布':'手写签名区域');
+    await canvas.waitFor();
     await page.evaluate(()=>sessionStorage.clear());
     auth='guest';
     await page.goto(origin+'/fixture-back');await page.goBack();
-    const canvas=page.locator('.signature-page canvas');await canvas.waitFor();
+    await canvas.waitFor();
     assert(!page.url().includes('signature-management')&&!page.url().includes('cabinet-power'));
     await page.reload();await canvas.waitFor();
-    await page.getByRole('checkbox',{name:/我确认由/}).check();
+    await page.getByRole('checkbox',{name:/确认由/}).check();
     const box=await canvas.boundingBox();
     await page.mouse.move(box.x+box.width*.3,box.y+box.height*.4);
     await page.mouse.down();await page.mouse.move(box.x+box.width*.65,box.y+box.height*.65,{steps:12});await page.mouse.up();
     assert(await canvas.evaluate(el=>el.getContext('2d').getImageData(0,0,el.width,el.height).data.some((v,i)=>i%4===3&&v>0)),'first usable canvas accepts ink');
     await page.screenshot({path:path.join(output,`${version}-${width}.png`)});
-    await page.getByRole('button',{name:'保存到签名表',exact:true}).click();
+    await page.getByRole('button',{name:version==='workspace'?'保存签名':'保存到签名表',exact:true}).click();
     await page.getByText('签名已完成',{exact:true}).waitFor();assert.equal(writes,1);
     await page.reload();await page.getByText('签名已完成，此链接已失效。',{exact:true}).waitFor();
     assert.equal(await page.locator('canvas').count(),0);assert.equal(writes,1);
     await page.evaluate(()=>sessionStorage.clear());
-    await page.goto(link.split('#')[0]);
-    await page.getByText('签名链接缺少验证信息，请从原消息重新打开完整链接。',{exact:true}).waitFor();
-    assert(!page.url().includes('signature-management'));
+    const incomplete=await ctx.newPage();
+    await incomplete.goto(link.split('#')[0]);
+    await incomplete.getByText('签名链接缺少验证信息，请从原消息重新打开完整链接。',{exact:true}).waitFor();
+    assert.equal(await incomplete.locator('canvas').count(),0);
+    assert(!incomplete.url().includes('signature-management'));
     await ctx.close();
   }
   assert.deepEqual(errors,[]);

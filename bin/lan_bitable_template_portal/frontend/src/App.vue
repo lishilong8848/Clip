@@ -289,6 +289,10 @@
 </template>
 
 <script setup lang="ts">
+import { setUsageAccess } from './usageEvents';
+import { provideUsage } from './usageNavigation';
+import { usageRoute } from './usageRoutes';
+
 import { computed, defineAsyncComponent, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { Library } from "lucide-vue-next";
 import AppStatusNotices from "./components/AppStatusNotices.vue";
@@ -1288,6 +1292,20 @@ onBeforeUnmount(() => {
   clearAuthKeepalive();
   for (const timer of refreshCooldownTimers.values()) window.clearTimeout(timer);
   refreshCooldownTimers.clear();
+});
+
+watch(() => authChecking.value || !auth.loggedIn ? 'public' : isGuest.value ? 'guest' : 'member', setUsageAccess, {immediate:true,flush:'sync'});
+provideUsage('web_legacy', () => {
+  if (authChecking.value || impersonationBlocked.value || pageAccessDenied.value) return '';
+  if (signatureLinkMode.value) return 'signature_link';
+  if (!auth.loggedIn && (isSignaturePage.value || isSignatureManagementPage.value || isHistoryMemoryPage.value ||
+      isEngineerMopPage.value || isRepairModulePage.value || isWorkbenchLitePage.value)) return '';
+  const earlyBusiness = isNoticeHistoryPage.value || isHistoryMemoryPage.value || isSignaturePage.value ||
+    isSignatureManagementPage.value || isEngineerMopPage.value || isRepairModulePage.value || isWorkbenchLitePage.value;
+  if (!earlyBusiness && (!auth.loggedIn || auth.directoryPending || isPasswordSettingsPage.value || showPermissionRequestPanel.value ||
+      !auth.scopeOptions.length && !isLearningPage.value && !isKnowledgeBasePage.value && !isDocumentLibraryPage.value && !isEopScenarioPage.value && !assignedRiskPage.value)) return 'auth_panel';
+  if (isAdminSettingsPage.value && !canManageAccounts.value) return '';
+  return usageRoute(routePath.value, routeParams.value, true);
 });
 </script>
 

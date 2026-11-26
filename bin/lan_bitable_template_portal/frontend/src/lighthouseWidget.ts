@@ -4,6 +4,8 @@ import LoadingIndicator from './components/LoadingIndicator.vue';
 import UiTransition from './components/UiTransition.vue';
 import { requestJson } from './api/client';
 import { setModulePermissions } from './api/modulePermissions';
+import { usageClientKey } from './usageNavigation';
+import { setUsageAccess, startUsage } from './usageEvents';
 import './lighthouseWidget.css';
 
 const host = document.getElementById('clipflow-lighthouse-widget');
@@ -17,9 +19,12 @@ if (host?.dataset.userId && !host.hasChildNodes() && !(window.parent !== window 
       const available = status.logged_in && status.user?.open_id === host!.dataset.userId && status.user.role !== 'guest' && !status.user.impersonation;
       const modules = available ? status.user.modules || [] : [];
       setModulePermissions(modules);
+      setUsageAccess(!status.logged_in ? 'public' : status.user?.role === 'guest' ? 'guest' : 'member');
+      startUsage();
       if (available) {
         if (!app) {
           app = createApp(Assistant, { userId: host!.dataset.userId, userName: host!.dataset.userName || '' });
+          app.provide(usageClientKey,'web_standalone');
           app.component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount(host!);
         }
       } else if (app) { app.unmount(); app = null; }

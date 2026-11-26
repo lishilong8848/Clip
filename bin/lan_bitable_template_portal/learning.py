@@ -894,7 +894,6 @@ class LearningService:
             return daily_eligibility(person, paper['date'], entry_directory)[0] != 'exempt'
         completed_papers = {task['task_id'] for task in daily_progress(self, date, current).values()
                             if task['status'] == '已完成'} if settings['reminder_enabled'] else set()
-        link = None
         with self.transaction() as conn:
             if settings["reminder_enabled"] and current.strftime("%H:%M") >= settings["reminder_time"]:
                 for paper in self._documents("paper", start=date, end=date, conn=conn):
@@ -943,9 +942,8 @@ class LearningService:
                 if notification["kind"] == "reminder" and not outstanding:
                     notification["status"] = "skipped_completed"
                 else:
-                    if link is None and notification['kind'] != 'app_access':
-                        link = self.portal_url()
-                    if not link and notification['kind'] != 'app_access':
+                    link = APP_ACCESS_URL if notification['kind'] == 'app_access' else self.portal_url()
+                    if not link:
                         self._last_error = "程序暂未识别到可访问的门户地址，学习提醒保留待发送，请检查程序的网络与访问地址设置"
                         continue
                     message = notification.get("message") or f"【画像学练】{notification['scope']}楼 {date}\n" + ("今日学练已发布" if notification["kind"] == "publish" else "今日学练尚未完成")
@@ -961,11 +959,12 @@ class LearningService:
                         end = windows(notification['date'], notification['shift'])[1]
                         message += '\n答题截止：' + end.strftime('%Y-%m-%d %H:%M') + '（北京时间）。'
                         url = link + '/learning?' + urlencode({'view': 'practice', 'date': notification['date'], 'shift': notification['shift']})
+                    elif notification['kind'] == 'app_access':
+                        url = link
                     else:
                         url = f"{link}/learning?scope={notification['scope']}"
-                    card = reminder_card(message, url)
-                    if notification['kind'] == 'app_access':
-                        card = reminder_card(message, APP_ACCESS_URL, button='申请使用小塔飞书应用')
+                    card = (reminder_card(message, url, button='申请使用小塔飞书应用')
+                            if notification['kind'] == 'app_access' else reminder_card(message, url))
                     try:
                         result = self._send(notification.get('open_id') or notification['scope'], card, notification['id'])
                     except Exception:

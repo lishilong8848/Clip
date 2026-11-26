@@ -7,7 +7,7 @@ export const auditPages=[
   ['events','事件管理','/?mode=events&detail=1&scope=A'],
   ...['maintenance','change','repair','polling','adjust','power'].map((type,i)=>['notice-'+type,['维保通告','变更通告','检修通告','设备轮巡','设备调整','上下电通告'][i],'/workbench-lite?scope=A&work_type='+type]),
   ['sops','SOP 与工单模板','/?view=sops&scope=A'],
-  ['mop','维护单管理','/engineer/mop?scope=A'],
+  ['mop','维保单办理','/engineer/mop?scope=D'],
   ['repairs','维修项目','/repair-management?scope=A'],
   ['repair-followups','维修跟进','/repair-status?scope=A'],
   ['risk','风险排查','/risk-inspections?scope=A'],
@@ -28,6 +28,24 @@ export const auditPages=[
   ['work-handover','人员工作交接','/work-handover?scope=A'],
   ['assistant','灯塔助手','/?view=assistant'],
   ['history','历史记忆','/admin/history-memory'],
+];
+
+// Query parameters distinguish real workspaces that share a pathname.
+export const workspaceAuditPages = [...auditPages,
+  ['notice-event','事件通告办理','/workbench-lite?scope=A&work_type=event'],
+  ['functions','全部应用','/?view=functions'], ['tasks','待办办理','/?view=tasks'],
+  ['access','申请权限','/?view=permission'], ['guest','访客机柜查询','/cabinet-power?__audit=guest'],
+  ['tool','工具管理','/risk-inspections?view=tool-self-check&scope=A'],
+  ['inspection','日常巡检','/daily-inspection?scope=D'], ['cold','冷源运行状态','/cold-source-monitor?scope=D'],
+  ['eop','EOP 场景维护','/eop-scenarios?scope=D'], ['documents','南通文件','/document-library'],
+  ['zhihang','智航数据拉取','/zhihang-data'],
+  ['signature','签名请求','/signature?request_id=fixture-request#token=fixture-sign-token'],
+  ['work-order','轮巡工单','/polling-work-order?token=fixture_token'],
+  ['work-order-steps','轮巡步骤','/polling-work-order/steps?token=fixture_token&run_index=1'],
+  ['morning-print','早会打印','/daily-tasks/morning-meeting/print?scope=A&date=2026-11-25'],
+  ['drill-print','演练打印','/drill-management/print?scope=A&drill_id=collab-drill-1&sheet=record'],
+  ...['status','development','handover','mop','feishu','dingtalk','pressure'].map(tab=>
+    ['settings-'+tab,'设置 · '+tab,'/admin/settings?tab='+tab]),
 ];
 
 export function auditUrl(origin,version,logical){

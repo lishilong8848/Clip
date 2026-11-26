@@ -33,6 +33,15 @@ class ServiceError(RuntimeError):
         self.status, self.code = status, code
 
 
+# Shared, safe public descriptions for failures before the gateway accepted a run.
+STARTUP_MESSAGES = {
+    'startup_listener': '助手服务启动超时，尚未建立连接。原问题已保留，可以稍后重试。',
+    'startup_handshake': '助手连接校验未完成。原问题已保留，可以稍后重试。',
+    'startup_catalog': '助手已连接，模型目录尚未就绪。原问题已保留，可以稍后重试。',
+    'startup_cooldown': '助手服务正在恢复连接。原问题已保留，可以稍后重试。',
+}
+
+
 def identity(project=PROJECT, state=STATE):
     if os.name == 'nt':
         import win32api

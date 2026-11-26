@@ -21,7 +21,7 @@
       <p v-if="states[kind]?.ready&&!groupRows(kind).length&&!groupErrors(kind)" class="v2-todo-empty">{{hasMore(kind)?'已读取记录中暂无待办，可继续读取。':states[kind]?.sources.length?'当前没有未完成事项':'当前楼栋未接入此业务'}}</p>
       <footer v-if="!groupErrors(kind)&&(hasMore(kind)||groupNotes(kind))"><span>{{groupNotes(kind)}}</span><NButton v-if="hasMore(kind)" size="small" secondary :loading="states[kind]?.loading" @click="loadGroup(kind)">加载更多</NButton></footer>
     </section>
-    <NModal v-if="active" :show="true" :mask-closable="false" :close-on-esc="false" :auto-focus="false" @update:show="shown=>{if(!shown)closeHandler()}">
+    <NModal v-if="active" :show="true" :mask-closable="false" @update:show="shown=>{if(!shown)closeHandler()}">
       <!-- Naive UI detects the focus boundary using the modal's first div. -->
       <div class="v2-todo-handler" role="dialog" aria-modal="true" :aria-label="'办理：'+active.title">
         <header><div><small>{{label(active.kind)}} · {{scopeText(active.scope)}}</small><h2>{{active.title}}</h2></div><NButton data-v2-navigation quaternary circle aria-label="关闭待办办理" @click="closeHandler"><X :size="22" /></NButton></header>

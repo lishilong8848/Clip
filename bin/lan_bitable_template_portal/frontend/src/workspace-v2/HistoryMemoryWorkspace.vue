@@ -112,13 +112,13 @@ watch(historyPages,pages=>{if(historyPage.value>pages)historyPage.value=pages;})
           </div></footer>
       </template>
       <NModal :show="r.saveConfirmOpen" :mask-closable="!r.busy" :close-on-esc="!r.busy" @update:show="(v:boolean)=>{if(!v)r.cancelSaveConfirm()}">
-        <section role="dialog" aria-modal="true" :aria-label="r.saveConfirmTitle" class="hm-confirm v2-history-confirm" data-v2-inline-feedback>
+        <div role="dialog" aria-modal="true" :aria-label="r.saveConfirmTitle" class="hm-confirm v2-history-confirm" data-v2-inline-feedback>
           <h2>{{ r.saveConfirmTitle }}</h2><p>保存 {{ r.saveSummary.total }} 条 · 套用历史候选 {{ r.saveSummary.candidate }} 条 · 覆盖已有记忆 {{ r.saveSummary.overwrite }} 条</p>
           <ul><li v-for="item in r.savePreviewItems" :key="item.key"><strong>{{ item.title }}</strong><small>{{ item.type }} · {{ item.building }} · {{ item.origin }}</small></li></ul>
           <p v-if="r.saveSummary.total>r.savePreviewItems.length">另有 {{ r.saveSummary.total-r.savePreviewItems.length }} 条</p>
           <p v-if="r.messageType==='failed'" role="alert">{{ r.message }}</p>
           <div class="hm-line"><NButton :disabled="r.busy" @click="r.cancelSaveConfirm">继续核对</NButton><NButton type="primary" :loading="r.busy" :disabled="r.busy" @click="save">确认保存 {{ r.saveSummary.total }} 条</NButton></div>
-        </section>
+        </div>
       </NModal>
     </template>
   </section>

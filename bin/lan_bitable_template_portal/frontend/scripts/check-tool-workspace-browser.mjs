@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,14 +8,28 @@ import { chromium } from 'playwright';
 
 // Only this loopback HTTP server handles API traffic; no production backend is used.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, process.env.TOOL_WORKSPACE_FIXTURE_DIR || '../../../output/tool-workspace-preview');
-const dist = path.resolve(root, process.env.TOOL_WORKSPACE_LEGACY_DIST || '../../../output/tool-workspace-build');
-const v2dist = path.resolve(root, process.env.TOOL_WORKSPACE_V2_DIST || '../../../output/tool-management-v2');
+const fixtureDir = process.env.TOOL_WORKSPACE_FIXTURE_DIR && path.resolve(root,process.env.TOOL_WORKSPACE_FIXTURE_DIR);
+const output = path.resolve(root, process.env.TOOL_WORKSPACE_OUTPUT_DIR || fixtureDir || '../../../output/tool-workspace-preview');
+const dist = path.resolve(root, process.env.TOOL_WORKSPACE_LEGACY_DIST || 'dist');
+const v2dist = path.resolve(root, process.env.TOOL_WORKSPACE_V2_DIST || path.join(dist,'assets/workspace-v2'));
 const api = '/api/tool-self-check/workspace';
-const layouts = {};
+// Generate the same sheet descriptions the backend serves, including editable titles and profession cells.
+const layouts = fixtureDir ? {} : JSON.parse(execFileSync('python',['-B','-X','utf8','-c',`
+import json
+from lan_bitable_template_portal.tool_self_check import TEMPLATES
+from lan_bitable_template_portal.tool_workspace_workbook import describe
+samples = TEMPLATES / 'folder_imports'
+print(json.dumps({
+    'electrical': describe((samples / '电气自检记录单' / '电能质量分析仪自检记录.xlsx').read_bytes()),
+    'hvac': describe((samples / '暖通自检记录单' / '温湿度仪自检记录.xlsx').read_bytes()),
+}))
+`],{cwd:path.resolve(root,'../..'),encoding:'utf8'}));
 for (const name of ['electrical', 'hvac']) {
-  layouts[name] = JSON.parse((await readFile(path.join(output, name + '.json'), 'utf8')).replace(/^\uFEFF/, ''));
+  if(fixtureDir) layouts[name] = JSON.parse((await readFile(path.join(fixtureDir, name + '.json'), 'utf8')).replace(/^\uFEFF/, ''));
   assert(layouts[name].sheets.length > 1 && layouts[name].schema.review_row, 'Use original workbook fixtures with covers and review rows');
+  const form=layouts[name].sheets.find(sheet=>sheet.name===layouts[name].schema.sheet);
+  assert(form?.titles?.length && layouts[name].prefill_fields?.assets.profession,
+    'Regenerate '+name+'.json with tool_workspace_workbook.describe from the bundled workbook');
 }
 const clone = value => structuredClone(value);
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));

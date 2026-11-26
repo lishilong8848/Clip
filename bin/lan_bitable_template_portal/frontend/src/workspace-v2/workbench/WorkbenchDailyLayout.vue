@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useUsageOverlay } from '../../usageNavigation';
+
 import { computed, inject, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue';
 import { NModal, NPopover } from 'naive-ui';
 import { ArrowRight, Bell, CalendarDays, ChevronLeft, ChevronRight, ShieldCheck, UserRound, X } from 'lucide-vue-next';
@@ -324,6 +326,8 @@ function afterAgendaClose() {
   pendingAgendaTask.value=undefined;
   if(item)emit('task',item);
 }
+
+useUsageOverlay('portal/home','portal/agenda', () => agendaExpanded.value);
 </script>
 
 <template>

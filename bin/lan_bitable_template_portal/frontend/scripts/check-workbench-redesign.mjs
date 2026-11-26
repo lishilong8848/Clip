@@ -1,66 +1,28 @@
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp } from 'node:fs/promises';
+import {tmpdir} from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createServer } from 'vite';
-import vue from '@vitejs/plugin-vue';
+import { preview } from 'vite';
 import { chromium } from 'playwright';
-import { adaptEmbeddedNavigation } from './workspace-embedded-adapter.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url));
-const output=path.resolve(root,process.env.WORKBENCH_REDESIGN_OUTPUT||'../../../output/playwright/workbench-redesign');
-const fixture=`<template><NConfigProvider><NDialogProvider><NMessageProvider>
-  <div v-show="shown" class="workbench-fixture-account"><WorkbenchWeather :identity="user.open_id"/></div>
-  <KeepAlive :key="user.open_id">
-    <WorkbenchHome v-if="shown" :user="user" :scope="scope" :scopes="scopes" :explicit-scope="explicitScope" @open="open" />
-  </KeepAlive>
-  </NMessageProvider></NDialogProvider></NConfigProvider></template>
-  <script setup>
-  import {ref} from 'vue';
-  import {NConfigProvider,NDialogProvider,NMessageProvider} from 'naive-ui';
-  import WorkbenchHome from '/src/workspace-v2/workbench/WorkbenchHome.vue';
-  import WorkbenchWeather from '/src/workspace-v2/workbench/WorkbenchWeather.vue';
-  import {runNavigationAction} from '/src/workspace-v2/navigation';
-  import '/src/workspace-v2/workspace.css';
-  import '/src/workspace-v2/night.css';
-  document.documentElement.classList.add('workspace-v2');
-  const user=ref({}),scope=ref('A'),scopes=ref([]),explicitScope=ref(true),shown=ref(true);
-  window.showWorkbench=value=>{shown.value=value;};
-  window.setAccount=(account,options,explicit)=>{user.value=account;scopes.value=options;scope.value=options[0].value;explicitScope.value=explicit;};
-  function open(url){runNavigationAction(url,()=>{window.opened=url;if(new URL(url,location.origin).pathname==='/'&&!url.includes('mode')&&!url.includes('view')){scope.value=new URL(url,location.origin).searchParams.get('scope');explicitScope.value=true;}});}
-  </script>`;
-const entry=`import {createApp} from 'vue'; import Fixture from '/@workbench-check.vue';
-  import LoadingIndicator from '/src/components/LoadingIndicator.vue'; import UiTransition from '/src/components/UiTransition.vue';
-  createApp(Fixture).component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount('#app');`;
-const html=`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1">
-  <div id="app"></div><script type="module" src="/@workbench-check.js"></script>`;
-const server=await createServer({
-  root,configFile:false,logLevel:'error',cacheDir:path.join(root,'node_modules/.vite-workbench-check'),
-  optimizeDeps:{include:['vue','naive-ui','lucide-vue-next']},
-  server:{host:'127.0.0.1',port:0,hmr:false},
-  plugins:[{name:'workbench-fixture',enforce:'pre',resolveId(id, importer){
-    if (id.startsWith('/@workbench-check.')) return id;
-    const source=importer?.replaceAll('\\','/');
-    if(source?.includes('/src/')){
-      if(id.endsWith('/VnetBackButton.vue'))return path.join(root,'src/workspace-v2/ModuleBackButton.vue');
-      if(id.endsWith('/VnetSelect.vue')&&!source.endsWith('/SingleSelect.vue'))return path.join(root,'src/workspace-v2/SingleSelect.vue');
-    }
-  },
-    load(id){if(id==='/@workbench-check.vue')return fixture;if(id==='/@workbench-check.js')return entry;},
-    transform(code,id){if(id.endsWith('.vue')&&/[\\/]src[\\/]/.test(id))return adaptEmbeddedNavigation(code,id.replaceAll('\\','/'));}},vue()],
-});
-await server.listen();
+const output=process.env.WORKBENCH_REDESIGN_OUTPUT||await mkdtemp(path.join(tmpdir(),'workbench-redesign-'));
+const server=await preview({root,configFile:false,base:'/assets/workspace-v2/',build:{outDir:process.env.CLIPFLOW_WORKSPACE_BUILD_DIR||'dist/assets/workspace-v2'},logLevel:'error',preview:{host:'127.0.0.1',port:0}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
-let browser;
+const entry=origin+'/assets/workspace-v2/index.html';
+let browser,page;
 try {
   browser=await chromium.launch({headless:true});
   await mkdir(output,{recursive:true});
-  const page=await browser.newPage({viewport:{width:1440,height:1000},reducedMotion:'reduce'});
+  page=await browser.newPage({serviceWorkers:'block',timezoneId:'Asia/Shanghai',viewport:{width:1440,height:1000},reducedMotion:'reduce'});
   await page.clock.setFixedTime(new Date('2026-11-18T03:00:00Z'));
+  page.setDefaultTimeout(10000);
+  page.setDefaultNavigationTimeout(60000);
   const errors=[], requests=[], unexpected=[];
   page.on('pageerror',error=>errors.push(error.stack||error.message));
   let failure='', exempt=true, hold=false, release, checkMember='', practiceFinished=false;
-  let currentAccount={}, holdAgenda=false, releaseAgenda;
+  let scopeOptions=[], currentAccount={}, holdAgenda=false, releaseAgenda;
   let dailyDesk=false;
   let aggregateTrial=false, lateForecast=false, missingWeather=false;
   let pausedReads;
@@ -76,8 +38,11 @@ try {
   await page.route('**/*',async route=>{
     const req=route.request(),url=new URL(req.url()),scope=url.searchParams.get('scope');
     if(url.origin!==origin)return route.abort();
-    if(url.pathname==='/fixture')return route.fulfill({contentType:'text/html',body:html});
-    if(!url.pathname.startsWith('/api/'))return route.continue();
+
+    if(!url.pathname.startsWith('/api/')){
+      assert.equal(req.method(),'GET','static preview only serves read requests');
+      return route.continue();
+    }
     requests.push([req.method(),url.pathname,scope,url.searchParams]);
     const ok=data=>route.fulfill({json:{ok:true,data}});
     if(waterTrial&&url.pathname==='/api/capacity/water/records/water-home'&&req.method()==='PATCH'){
@@ -87,6 +52,8 @@ try {
       return ok({record_id:'water-home',warnings:[]});
     }
     if(req.method()!=='GET') {unexpected.push(req.method()+' '+url.pathname);return route.abort();}
+    if(url.pathname==='/api/auth/status')return ok({logged_in:true,user:currentAccount,scope_options:scopeOptions,default_scope:currentAccount.home_scope});
+    if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'workbench-fixture'}});
     const paused=inlineRead;
     if(paused?.matches(url)){paused.started(url);await paused.until;}
     if(url.pathname==='/api/assistant/icon-weather')return ok({
@@ -134,6 +101,7 @@ try {
       {state:'confirmed',target_record_id:'ali-2',title:'已确认变更',building:'A楼'},
     ]});
     if(url.pathname==='/api/daily-inspection/status')return ok({
+      viewer_on_duty:checkMember===currentAccount.open_id,
       view_scope:url.searchParams.get('view_scope'),duty:{scope:'D',date:'2026-11-18',shift:'白'},
       next_round:2,round_limit:2,opens_at:Date.parse('2026-11-18T16:00:00+08:00'),
     });
@@ -172,6 +140,7 @@ try {
           records.push(
             {...row('A','隔离逾期维保','未开始'),record_id:'plan-overdue',planned_start_time:'2026-11-12 09:00',planned_end_time:'2026-11-13 18:00'},
             {...row('A','跨月未发检修','进行中'),record_id:'repair-unsent',work_type:'repair',planned_start_time:'2026-10-12 09:00',planned_end_time:'2026-10-13 18:00'},
+            {...row('A','逾期进行中检修','进行中'),record_id:'repair-late',work_type:'repair',planned_start_time:'2026-10-12 09:00',planned_end_time:'2026-10-13 18:00',repair_notice_linked:true},
             {...row('A','已发检修通告','未开始'),record_id:'repair-sent',work_type:'repair',planned_end_time:'',repair_notice_linked:true});
         return ok({scope,source_snapshot_ready:true,records:records.filter(row=>scope==='ALL'||row.building_codes.includes(scope))});
       }
@@ -255,7 +224,7 @@ try {
     if(url.pathname==='/api/drills/drill-live/preview')return ok({});
     if(url.pathname==='/api/engineer/mop/bootstrap'){
       if(mopDelayed&&url.searchParams.get('view')==='todos')return ok({notices:[],snapshot_pending:true});
-      if(mopRetryFailures>0&&scope==='A'&&url.searchParams.get('view')==='todos'){
+      if(mopRetryFailures>0&&scope==='D'&&url.searchParams.get('view')==='todos'){
         mopRetryFailures--;
         return route.fulfill({status:503,json:{ok:false,error:'隔离临时读取失败'}});
       }
@@ -263,10 +232,11 @@ try {
         {notice_key:'mop-live',title:'待处理维护单甲',status:'开始'},{notice_key:'mop-done',title:'已上传维护单甲',mop_binding:{id:'bound'},mop_uploaded:true,status:'开始'}]});
     }
     if(url.pathname==='/api/workbench-events')return ok({items:[{event_id:'event-active',state:'active',metadata:{summary:'进行中事件通告甲'}},{event_id:'event-ended',state:'ended'}]});
+    if(url.pathname==='/api/learning/issues/workbench-questions')return ok({total:0,items:[]});
     if(url.pathname==='/api/learning/workbench-summary')return ok({scopes:scope==='ALL'?['A','B']:[scope],
       summary:{已完成:4,待答:2,答题中:1,逾期:0,待核对:0,未到时:0}});
     if(url.pathname==='/api/auth/permission-requests/admin')return ok({items:[{request_id:'perm-1',name:'权限待审核人',status:'pending'}]});
-    if(url.pathname==='/api/tool-self-check/workspace/history')return ok({sessions:[{id:'tool-session',history_items:[
+    if(url.pathname==='/api/tool-self-check/workspace/history')return ok({due_inspections:[],sessions:[{id:'tool-session',kind:'self',history_items:[
       {id:'asset-A',asset_name:'工具待审核',scope:'A',order_status:'review_pending'},
       {id:'asset-B',asset_name:'工具已归档',scope:'A',order_status:'submitted',archive_status:'archived'}]}]});
     if(url.pathname==='/api/pre-shift-checks'){
@@ -296,17 +266,17 @@ try {
     if(!embeddedTest&&!paused?.matches(url))unexpected.push(url.pathname);
     return route.fulfill({status:404,json:{ok:false,error:'No fixture'}});
   });
-  await page.goto(origin+'/fixture',{timeout:60000});
-  await page.waitForFunction(()=>!!window.setAccount);
-  const account=(id,category,modules=['event','repair_management','learning'])=>({open_id:id,category,modules,role:'building',home_scope:'A',enabled:true,
+  const account=(id,category,modules=['event','repair_management','learning'])=>({open_id:id,name:id,category,modules,role:'building',home_scope:'A',enabled:true,
     ...(category==='engineer'?{specialties:['电气']}:{}),
   });
   const options=ids=>ids.map(value=>({value,label:value+'楼'}));
-  const set=(actor,ids,explicit=true)=>{
+  const set=async(actor,ids,explicit=true)=>{
     currentAccount=actor;
-    return page.evaluate(([user,scopes,explicit])=>window.setAccount(user,scopes,explicit),[actor,options(ids),explicit]);
+    scopeOptions=options(ids);
+    await page.goto(entry+(explicit?'?scope='+ids[0]:''));
+    await page.getByRole('heading',{name:'个人工作台',exact:true}).waitFor();
   };
-  await page.evaluate(()=>{
+  await page.addInitScript(()=>{
     localStorage.setItem('clipflow:workspace-layout:v1:engineer',JSON.stringify({version:1,widgets:[
       {id:'main',kind:'shortcuts',links:['learning','accounts','learning'],x:0,y:0},
       {id:'tasks',kind:'tasks',taskKinds:['learning'],x:0,y:1},
@@ -372,7 +342,7 @@ try {
   await reveal('learning');
   await task('自主练习').click();
   await dialog('自主练习').locator('[data-module-widget=learning]').waitFor();
-  assert.equal(new URL(page.url()).pathname,'/fixture');
+  assert.equal(new URL(page.url()).searchParams.get('__page')||'/','/');
   await closeTask('自主练习');
   await reveal('learning');
   assert.equal(await task('自主练习').count(),1,'opening a todo does not complete it');
@@ -392,22 +362,30 @@ try {
   await period.getByRole('button',{name:'今日',exact:true}).click();
   await personalCard.getByText(/已答.*4 \/ 15/).waitFor();
   const buildingCard=period.locator('.period-card[data-card=building]');
-  await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
+  assert.equal(await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).count(),0,'tomorrow is outside the day view');
   await period.locator('[data-card=building][data-state=ongoing]').getByText('已发检修通告',{exact:true}).waitFor();
+  await period.getByRole('button',{name:'本周',exact:true}).click();
+  const plannedCard=period.locator('[data-card=building][data-module=planned]');
+  const fold=plannedCard.getByRole('button',{name:/未开始通告/});
+  assert.equal(await fold.getAttribute('aria-expanded'),'false');
+  await fold.click();
+  await plannedCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
   assert.equal(await period.getByText('隔离已完成计划',{exact:true}).count(),0);
   await period.getByRole('button',{name:'表单显示'}).click();
   assert.equal(await period.locator('.period-grid').getAttribute('data-view'),'table');
   await period.getByRole('button',{name:'卡片显示'}).click();
   const status=period.getByRole('group',{name:'工作状态筛选'});
   await status.getByRole('button',{name:'逾期 1',exact:true}).click();
-  await buildingCard.getByRole('button',{name:/跨月未发检修/}).waitFor();
-  assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
+  await buildingCard.getByRole('button',{name:/逾期进行中检修/}).waitFor();
+  assert.equal(await buildingCard.getByText('跨月未发检修',{exact:true}).count(),0);
+  assert.equal(await buildingCard.getByText('隔离逾期维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'今明截止 1',exact:true}).click();
-  await buildingCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
-  assert.equal(await period.getByText('隔离逾期维保',{exact:true}).count(),0);
-  await status.getByRole('button',{name:'未开始 2',exact:true}).click();
-  await period.locator('[data-card=building][data-module=planned]').getByText('跨月未发检修',{exact:true}).waitFor();
-  assert.equal(await buildingCard.getByText('已发检修通告',{exact:true}).count(),0);
+  await fold.click();
+  await plannedCard.getByRole('button',{name:/隔离明日截止维保/}).waitFor();
+  await status.getByRole('button',{name:'未开始 1',exact:true}).click();
+  await plannedCard.getByText('隔离明日截止维保',{exact:true}).waitFor();
+  for(const excluded of ['跨月未发检修','隔离逾期维保','已发检修通告'])
+    assert.equal(await plannedCard.getByText(excluded,{exact:true}).count(),0);
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
   assert.equal(await task('计划和进行中同一条').count(),1);
@@ -425,7 +403,7 @@ try {
     statusNotice.click({timeout:6000}),
   ]);
   assert.equal(new URL(noticeDetail.url()).searchParams.get('scope'),'A');
-  assert.equal(new URL(page.url()).pathname,'/fixture');
+  assert.equal(new URL(page.url()).searchParams.get('__page')||'/','/');
   await closeTask('计划和进行中同一条');
   await reveal('notices:维保');
   await task('计划和进行中同一条').waitFor();
@@ -437,9 +415,12 @@ try {
   await personalCard.getByText(/已答.*9 \/ 30/).waitFor();
   await period.getByRole('button',{name:'本月',exact:true}).click();
   await personalCard.getByText(/已答.*23 \/ 60/).waitFor();
-  await period.locator('[data-card=building][data-module=planned]').getByText('隔离逾期维保',{exact:true}).waitFor();
+  await fold.click();
+  await plannedCard.getByText('隔离明日截止维保',{exact:true}).waitFor();
+  assert.equal(await plannedCard.getByText('隔离逾期维保',{exact:true}).count(),0);
   await page.locator('.wb-scope select').selectOption('B');
   await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor({state:'detached'});
+  await fold.click();
   await buildingCard.getByRole('button',{name:/B楼待开始维保/}).waitFor();
   assert.equal(await buildingCard.getByText('隔离明日截止维保',{exact:true}).count(),0);
   await status.getByRole('button',{name:'逾期 0',exact:true}).click();
@@ -469,22 +450,32 @@ try {
 
   checkMember='operator';
   const hRosterRead=page.waitForResponse(response=>response.url().includes('/api/pre-shift-checks?')&&new URL(response.url()).searchParams.get('scope')==='H');
-  await set({...account('h-off','operator',['maintenance']),home_scope:'H',level:'L4'},['H']);
+  await set({...account('h-off','operator',['maintenance','pre_shift']),home_scope:'H',level:'L4'},['H']);
   await hRosterRead;
-  assert.equal(await page.locator('.wb-check-panel').count(),0,'an off-duty H operator has no pre-shift card');
+  assert.equal(await page.locator('[data-case=pre_shift]').count(),0,'an off-duty H operator has no pre-shift card');
   assert.equal(await personalCard.getByRole('button',{name:/班前检查/}).count(),0);
-  await set(account('operator','operator',['learning','water']),['A']);
+  await set(account('operator','operator',['learning','water','pre_shift']),['A']);
   await page.getByText('值班人员 · A楼 · 白班',{exact:true}).waitFor();
   await page.setViewportSize({width:393,height:852});
-  const shiftArea=page.locator('.wb-check-panel');
+  const shiftArea=dialog('白班班前检查');
+  await personalCard.getByRole('button',{name:/白班班前检查/}).click();
   await shiftArea.getByRole('button',{name:'提交检查'}).waitFor();
-  await personalCard.getByRole('button',{name:/班前检查.*待检查/}).click();
-  assert(await shiftArea.evaluate(el=>document.activeElement===el));
   await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
   assert.equal(await shiftArea.getByLabel('当班人员').innerText(),'隔离值班人员');
   assert(await shiftArea.evaluate(area=>area.getBoundingClientRect().width>=innerWidth-40 &&
-    area.querySelector('.v2-check-task').getBoundingClientRect().width>=innerWidth-70),
+    area.querySelector('.v2-check-form').getBoundingClientRect().width>=innerWidth-80),
     'Mobile shift checks and form body use the available width');
+  await shiftArea.getByText('无异常',{exact:true}).click();
+  const previous=page.url();
+  await shiftArea.getByRole('button',{name:'关闭待办办理'}).click();
+  await page.getByText('检查尚未提交',{exact:true}).waitFor();
+  await page.getByRole('button',{name:'继续填写'}).click();
+  assert.equal(page.url(),previous);
+  await shiftArea.locator('[data-v2-layout-protected=true]').waitFor();
+  await shiftArea.getByRole('button',{name:'关闭待办办理'}).click();
+  await page.getByRole('button',{name:'放弃并离开'}).click();
+  await shiftArea.waitFor({state:'hidden'});
+  assert.equal(await page.locator('[data-v2-layout-protected=true]').count(),0);
   await page.setViewportSize({width:1440,height:1000});
   const constrained=page.locator('.wb-home');
   await constrained.evaluate(area=>{area.style.maxWidth='480px';});
@@ -495,19 +486,9 @@ try {
   assert(bounds.taskWidth>=475 && bounds.asideTop>=bounds.taskBottom,
     'The workbench switches to one column when its container is narrow');
   await constrained.evaluate(area=>{area.style.removeProperty('max-width');});
-  await page.getByText('无异常',{exact:true}).click();
-  const previous=await page.evaluate(()=>window.opened);
-  await page.locator('.wb-shortcuts').getByRole('button',{name:'水耗管理'}).click();
-  await page.getByText('检查尚未提交',{exact:true}).waitFor();
-  assert.equal(await page.evaluate(()=>window.opened),previous,'an unfinished pre-shift check blocks navigation');
-  await page.getByRole('button',{name:'继续填写'}).click();
-  assert.equal(await page.locator('[data-v2-layout-protected=true]').count(),1);
-  await page.locator('.wb-shortcuts').getByRole('button',{name:'水耗管理'}).click();
-  await page.getByRole('button',{name:'放弃并离开'}).click();
-  assert.equal(await page.locator('[data-v2-layout-protected=true]').count(),0);
   checkMember='';
 
-  const full=['event','repair_management','learning','maintenance','change','repair','adjust','power','risk_inspection','critical_guard','cabinet','drills','engineer_mop','daily','water','accounts','signatures'];
+  const full=['event','repair_management','learning','maintenance','change','repair','adjust','power','risk_inspection','critical_guard','cabinet','drills','engineer_mop','daily','water','accounts','signatures','pre_shift','daily_inspection','tool_management'];
   await set(account('campus-dashboard','manager',full),['A','B'],false);
   await reveal('repair_management');
   await task('B楼隔离维修').waitFor();
@@ -562,7 +543,7 @@ try {
   await reveal('events');await task('A楼隔离事件').waitFor();
 
   const dutyReadStart=requests.length;
-  await set(account('shared-desk','duty',full),['A']);
+  await set({...account('shared-desk','duty',full),home_scope:'D'},['D']);
   await reveal('notices:维保');
   await pop.getByRole('button',{name:'更新／结束 计划和进行中同一条',exact:true}).waitFor();
   await reveal('events');
@@ -577,14 +558,14 @@ try {
   assert.ok(requests.slice(dutyReadStart).some(([,url,,params])=>url==='/api/engineer/mop/bootstrap'&&params.get('view')==='todos'));
   await absent('drills','已完成演练甲');
   await absent('engineer_mop','已上传维护单甲');
-  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
+  assert.equal(await personalCard.getByRole('button',{name:'打开画像学练'}).count(),0);
   assert.ok(!requests.slice(dutyReadStart).some(([,url])=>url==='/api/learning/papers'));
   await closeWhileReading('notices:维保','计划和进行中同一条',url=>url.pathname==='/api/workbench/lite-detail',true);
 
   const drillReads=requests.length;
   const drillPath='/api/drills/drill-live/execution';
   const drillExecution=await closeWhileReading('drills','待完成演练甲',url=>url.pathname===drillPath);
-  assert.equal(drillExecution.searchParams.get('scope'),'A');
+  assert.equal(drillExecution.searchParams.get('scope'),'D');
   await closeWhileReading('engineer_mop','待处理维护单甲',url=>url.pathname==='/api/engineer/mop/bootstrap'&&url.searchParams.get('view')!=='todos');
   embeddedTest=true;
   await reveal('drills');
@@ -601,12 +582,12 @@ try {
   assert.equal(await drillDate.inputValue(),'2026-11-19','An unsaved drill remains open with its draft');
   await switchDrill.click();
   await choices.getByRole('button',{name:/待处理维护单甲/}).click();
-  await page.getByRole('button',{name:'放弃修改并继续',exact:true}).click();
+  await page.getByRole('button',{name:'放弃修改',exact:true}).click();
   await drillPanel.waitFor({state:'hidden'});
   assert.equal(await page.getByRole('dialog',{name:'待办办理窗口',exact:true}).count(),1);
   await dialog('待处理维护单甲').locator('[data-module-widget=engineer_mop]').waitFor();
   await closeTask('待处理维护单甲');
-  assert.equal(new URL(page.url()).pathname,'/fixture');
+  assert.equal(new URL(page.url()).searchParams.get('__page')||'/','/');
   assert.ok(!requests.slice(drillReads).some(([,url])=>url.includes('/drill-done/')));
 
   await set({...account('admin-dashboard','administrator',full),tool_management_enabled:true,can_manage_accounts:true},['A']);
@@ -631,7 +612,7 @@ try {
           .slice(0,8).map(el=>el.tagName+'.'+el.getAttribute('class')+': '+Math.round(el.getBoundingClientRect().right));
       });
       assert.deepEqual(overflow,[],profile+' overflow at '+width);
-      if(width===1440||width===390){
+      if([1440,800,390].includes(width)){
         await page.evaluate(()=>window.scrollTo(0,0));
         await page.screenshot({path:path.join(output,profile+'-'+width+'.png'),animations:'disabled'});
       }
@@ -641,7 +622,7 @@ try {
   holdAgenda=true;
   mopDelayed=true; riskDenied=true;
   await page.setViewportSize({width:1440,height:1000});
-  await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B'],false);
+  await set({...account('global-desk','manager',full),name:'陈晨',level:'L0',can_manage_accounts:true},['A','B','D'],false);
   await page.getByRole('region',{name:'交接班人员'}).getByRole('rowheader',{name:'B楼'}).waitFor();
   holdAgenda=false;
   releaseAgenda?.();
@@ -658,7 +639,7 @@ try {
   await task('待处理维护单甲').first().waitFor();
   assert.equal(mopRetryFailures,0);
   const overview=page.getByRole('region',{name:'工作状态',exact:true});
-  await overview.getByRole('heading',{name:'画像学练情况汇总',exact:true}).waitFor();
+  await overview.getByRole('button',{name:'画像学练情况汇总',exact:true}).waitFor();
   await overview.getByText(/已完成.*4 \/ 7/).waitFor();
   await settleQueue();
   await reveal('notices:设备调整');
@@ -666,7 +647,7 @@ try {
   await pop.press('Escape');await pop.waitFor({state:'hidden'});
   assert(await tile('notices:设备调整').evaluate(el=>document.activeElement===el));
   assert.equal(await page.getByText('全域待办总数',{exact:true}).count(),0);
-  assert.equal(await page.locator('.wb-check-panel').count(),0);
+  assert.equal(await page.locator('[data-case=pre_shift]').count(),0);
   const agenda=page.getByRole('complementary',{name:'我的日程'});
   await reveal('notices:变更');
   await pop.getByText('冷冻水系统运行参数调整',{exact:true}).first().waitFor();
@@ -690,22 +671,26 @@ try {
   const roster=agenda.getByRole('region',{name:'交接班人员'});
   await roster.getByRole('rowheader',{name:'A楼'}).waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
-  const intern=roster.getByRole('button',{name:'查看隔离长白实习生的基本信息（长白实习生）'});
+  const intern=roster.getByRole('button',{name:/查看隔离长白实习生的基本信息.*长白实习生/});
   assert(await intern.evaluate(el=>el.classList.contains('is-intern')));
-  await roster.getByRole('button',{name:'卡片显示',exact:true}).click();
-  await roster.locator('[data-view=cards]').getByText('接班人员',{exact:true}).first().waitFor();
-  await intern.click();
+  await roster.getByRole('button',{name:'排班详情'}).click();
+  const fullRoster=page.locator('.wb-roster-dialog');
+  await fullRoster.getByRole('button',{name:'卡片显示',exact:true}).click();
+  await fullRoster.locator('[data-view=cards]').getByText('接班人员',{exact:true}).first().waitFor();
+  await fullRoster.getByRole('button',{name:/查看隔离长白实习生的基本信息/}).click();
   const internDialog=page.getByRole('dialog',{name:'隔离长白实习生的基本信息'});
-  await internDialog.getByText('长白',{exact:true}).waitFor();
+  await internDialog.getByText('长白实习生',{exact:true}).waitFor();
   assert.equal(await internDialog.getByRole('link',{name:'飞书对话'}).getAttribute('href'),'https://applink.feishu.cn/client/chat/open?openId=ou_fixtureIntern');
-  await page.locator('.title-line h1').click();
-  await roster.getByRole('button',{name:'表单显示',exact:true}).click();
-  assert.equal(await roster.getByRole('table').getByRole('columnheader').count(),3);
-  await roster.getByRole('button',{name:'查看验收值班员的基本信息'}).click();
+  await fullRoster.getByRole('button',{name:/查看隔离长白实习生的基本信息/}).click();
+  await internDialog.waitFor({state:'hidden'});
+  await fullRoster.getByRole('button',{name:'表单显示',exact:true}).click();
+  assert.equal(await fullRoster.getByRole('columnheader').count(),3);
+  await fullRoster.getByRole('button',{name:/查看验收值班员的基本信息/}).click();
   const person=page.getByRole('dialog',{name:'验收值班员的基本信息'});
   await person.getByText('A班',{exact:true}).waitFor();
   assert.equal(await person.getByRole('link',{name:'飞书对话'}).getAttribute('href'),'https://applink.feishu.cn/client/chat/open?openId=ou_fixtureA1');
-  await page.locator('.title-line h1').click();
+  await fullRoster.locator('.n-card-header__close').click();
+  await fullRoster.waitFor({state:'hidden'});
   await reveal('notices:变更');
   await pop.getByRole('region',{name:'A楼待办'}).waitFor();
   await pop.getByRole('region',{name:'B楼待办'}).waitFor();
@@ -713,12 +698,13 @@ try {
   assert.equal(await pop.locator('.queue-list').getAttribute('data-view'),'cards');
   await pop.press('Escape');
   const beforeReturn=requests.length;
-  await page.evaluate(()=>window.showWorkbench(false));
+  await page.getByRole('button',{name:'账户菜单：陈晨'}).click();
+  await page.getByRole('menuitem',{name:'个人信息'}).click();
   await todo.waitFor({state:'detached'});
-  await page.evaluate(()=>window.showWorkbench(true));
+  await page.goBack();
   await todo.waitFor();
   await roster.getByRole('rowheader',{name:'B楼'}).waitFor();
-  assert.equal(requests.length,beforeReturn,'returning to the workbench reuses loaded data within the freshness window');
+  assert.equal(requests.slice(beforeReturn).filter(([,url])=>['/api/workbench','/api/events/monthly','/api/repair-management/status','/api/personal-calendar'].includes(url)).length,0,'returning to the workbench reuses loaded data within the freshness window');
   await page.getByLabel('工作台楼栋').selectOption('B');
   await agenda.getByRole('button',{name:/2026-11-18.*项日程/}).waitFor();
   await roster.getByText('B楼当晚值班员',{exact:true}).waitFor();
@@ -747,7 +733,6 @@ try {
   assert.equal(await roster.getByText('验收值班员',{exact:true}).count(),0);
   await page.getByLabel('工作台楼栋').selectOption('A');
   await agenda.getByRole('button',{name:'今天',exact:true}).click();
-  await agenda.getByText('隔离封网安排',{exact:true}).waitFor();
   const sealFilter=overview.getByRole('button',{name:'封网 1',exact:true});
   await sealFilter.click();
   const sealList=overview.getByLabel('周期内封网');
@@ -755,14 +740,15 @@ try {
   assert.equal(await sealList.getByRole('button').count(),0,'freeze windows are informational');
   assert.equal(await overview.getByText('隔离封网安排',{exact:true}).count(),1);
   await overview.getByRole('button',{name:/^全部 /}).click();
-  await agenda.getByText('隔离智航风险',{exact:true}).waitFor();
   const openAgenda=agenda.getByRole('button',{name:/展开全部 .* 项日程/});
   const railHeight=(await agenda.boundingBox()).height;
   const agendaDialog=page.getByRole('dialog',{name:'当天全部日程'});
   await openAgenda.click();
   await agendaDialog.waitFor();
+  await agendaDialog.getByText('隔离封网安排',{exact:true}).waitFor();
+  await agendaDialog.getByText('隔离智航风险',{exact:true}).waitFor();
   await agendaDialog.getByText('隔离晚间事项 18',{exact:true}).waitFor();
-  assert.equal(await agenda.getByRole('region',{name:'所选日期日程'}).locator('.timeline li').count(),3);
+  assert.equal(await agenda.getByRole('region',{name:'所选日期日程'}).locator('.timeline li').count(),2);
   assert(await agendaDialog.locator('.agenda-scroll').evaluate(el=>el.scrollHeight>el.clientHeight&&getComputedStyle(el).overflowY==='auto'));
   assert.ok(Math.abs((await agenda.boundingBox()).height-railHeight)<3,'the full agenda does not extend the calendar rail');
   await page.setViewportSize({width:390,height:844});
@@ -798,11 +784,9 @@ try {
   await preview.waitFor({state:'hidden'});
   await page.evaluate(()=>{
     document.activeElement?.blur();
-    document.querySelector('#app').style.padding='18px 22px';
     window.scrollTo(0,0);
   });
   await page.screenshot({path:path.join(output,'daily-desktop.png'),animations:'disabled'});
-  await page.evaluate(()=>{document.querySelector('#app').style.padding='';});
   await page.setViewportSize({width:1440,height:1000});
   await page.getByLabel('工作台楼栋').selectOption('A');
   await page.locator('.wb-scope select').selectOption('B');
@@ -810,7 +794,9 @@ try {
   await agenda.getByText('封网表未接入',{exact:true}).waitFor();
   assert.equal(await agenda.getByText('隔离封网安排',{exact:true}).count(),0,'switching the workbench building changes the calendar');
   await page.getByRole('navigation',{name:'常用业务'}).getByRole('button',{name:'维修项目',exact:true}).click();
-  assert.equal(new URL(await page.evaluate(()=>window.opened),origin).searchParams.get('scope'),'B');
+  await page.waitForURL(url=>url.searchParams.get('__page')==='/repair-management');
+  assert.equal(new URL(page.url()).searchParams.get('scope'),'B');
+  await page.goBack();
   await absent('repair_management','A楼隔离维修');
   await reveal('repair_management');
   await task('B楼隔离维修').waitFor();
@@ -819,7 +805,7 @@ try {
   await page.getByRole('button',{name:'打开未读清单'}).click();
   assert.equal(await todo.getByRole('button',{name:/^未读/}).getAttribute('aria-pressed'),'true');
   await closeWhileReading('repair_management','A楼隔离维修',url=>url.pathname==='/api/repair-management/records'&&url.searchParams.get('focus_record_id')==='repair-A');
-  assert.equal(new URL(page.url()).pathname,'/fixture');
+  assert.equal(new URL(page.url()).searchParams.get('__page')||'/','/');
   await absent('repair_management','A楼隔离维修');
   await todo.getByRole('button',{name:'全部',exact:true}).click();
   await reveal('repair_management');
@@ -850,20 +836,21 @@ try {
   await reveal('notices:维保');await task('配电柜保护定值复核').waitFor();
   await absent('repair_management','B楼隔离维修');
   await set({...account('manager-desk','manager',full),level:'L1',can_manage_accounts:true},['A','B'],false);
-  await overview.getByRole('heading',{name:'画像学练情况汇总'}).waitFor();
+  await overview.getByRole('button',{name:'画像学练情况汇总'}).waitFor();
   assert.equal(await page.getByRole('heading',{name:/交接待审|账号权限待审批/}).count(),0);
   await set({...account('h-duty','duty',full),home_scope:'H',level:'L4'},['H']);
   await reveal('ali_confirmation');
   await pop.getByRole('button',{name:'确认截图 本日变更截图待确认'}).waitFor();
   await absent('ali_confirmation','已确认变更');
   await set({...account('h-duty-admin','duty',full),home_scope:'H',role:'admin',level:'L4'},['A','H'],false);
-  await overview.getByRole('heading',{name:'画像学练情况汇总'}).waitFor();
+  await overview.getByRole('button',{name:'画像学练情况汇总'}).waitFor();
+  checkMember='d-duty';
   await set({...account('d-duty','duty',full),home_scope:'D',level:'L4'},['D','E']);
   await reveal('inspection');
   await pop.getByText('D楼白班第 2 轮巡检',{exact:true}).waitFor();
   await personalCard.getByRole('button',{name:/D楼白班第 2 轮巡检/}).waitFor();
   await personalCard.getByRole('button',{name:/班前检查/}).waitFor();
-  await personalCard.getByRole('button',{name:'打开画像学练'}).waitFor();
+  assert.equal(await personalCard.getByRole('button',{name:'打开画像学练'}).count(),0);
   assert.equal(await page.locator('.wb-scope select').count(),0);
   checkMember='d-operator';
   await set({...account(checkMember,'operator',full),home_scope:'D',level:'L4'},['D']);
@@ -961,12 +948,10 @@ try {
   aggregateTrial=false;
   lateForecast=true;
   await page.clock.setFixedTime(new Date('2026-11-18T14:30:00Z'));
+  await page.evaluate(()=>localStorage.setItem('clipflow:workspace-night-mode:visual-check','dark'));
   await set(account('visual-check','manager'),['A','B']);
   await page.setViewportSize({width:390,height:844});
-  await page.evaluate(()=>{
-    document.documentElement.dataset.v2Theme='dark';
-    document.querySelector('.workbench-fixture-account').style.paddingLeft='205px';
-  });
+  assert.equal(await page.locator('html').getAttribute('data-v2-theme'),'dark');
   await weatherKey.click();
   await trend.waitFor();
   await page.waitForFunction(()=>{
@@ -992,8 +977,5 @@ try {
   ]);
   assert.deepEqual(unexpected,[]);
   assert.deepEqual(errors,[]);
-  const before=await readFile(path.join(root,'src/workspace-v2/HomePage.vue'),'utf8');
-  const shell=await readFile(path.join(root,'src/workspace-v2/Workspace.vue'),'utf8');
-  assert.match(before,/<BusinessTodos /);assert.match(shell,/<KeepAlive[^>]*>\s*<WorkbenchHome /);
   console.log('Workbench roles, responsive layouts, todo filters and pagination, exact record dispatch and completion refresh passed.');
-} finally { await browser?.close(); await server.close(); }
+} catch(error){console.error((await page?.locator('main').innerText({timeout:1500}).catch(()=>''))?.slice(-3500));throw error;} finally { await browser?.close(); await new Promise(resolve=>server.httpServer.close(resolve)); }

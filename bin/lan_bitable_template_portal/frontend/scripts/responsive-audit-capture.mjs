@@ -2,14 +2,15 @@ import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {connectResponsively,captureResponsively} from './responsive-audit-responsively.mjs';
-import {auditPages,auditUrl,layoutEvidence} from './responsive-audit-pages.mjs';
+import {auditPages,workspaceAuditPages,auditUrl,layoutEvidence} from './responsive-audit-pages.mjs';
 
 const root=fileURLToPath(new URL('..',import.meta.url)),repo=path.resolve(root,'../../..');
 const [phase='before',version='v2',...only]=process.argv.slice(2);
 const origin='http://127.0.0.1:'+String(process.env.RESPONSIVE_PORT||14536);
 const base=path.join(repo,'output/responsive-audit',phase,version);
 await mkdir(base,{recursive:true});
-const pages=only.length?auditPages.filter(p=>only.includes(p[0])):auditPages;
+const available=version==='v2'?workspaceAuditPages:auditPages;
+const pages=only.length?available.filter(p=>only.includes(p[0])):available;
 const reports=[];
 for(const [id,name,logical] of pages){
   const folder=path.join(base,id),url=auditUrl(origin,version,logical);

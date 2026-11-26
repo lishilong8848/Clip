@@ -74,6 +74,60 @@ class FastPathTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('模型服务响应超时', result['error'])
         manager.acquire.assert_not_awaited()
 
+    async def transformer_question(self, *drafts):
+        manager = Mock(acquire=AsyncMock(side_effect=AssertionError('Gateway entered')), close=AsyncMock())
+        self.runtime.engine = LighthouseOpenClaw(self.portal, bridge_url=lambda: '', manager=manager)
+        self.portal.get_knowledge = Mock(side_effect=AssertionError('Company search entered'))
+        self.model.complete.side_effect = drafts
+        payload = stream_tests.StreamTests.payload(self, '变压器原理是什么?')
+        await self.runtime.submit(self.actor, payload, self.request, self.authorize)
+        await stream_tests.StreamTests.finish(self)
+        turn = (await self.runtime.conversation(self.actor))['turns'][-1]
+        manager.acquire.assert_not_awaited()
+        self.portal.get_knowledge.assert_not_called()
+        self.assertTrue(all(step['label'].strip() for step in turn['process']))
+        return turn
+
+    async def test_general_transformer_formula_reaches_saved_answer(self):
+        answer = '变压器利用电磁感应传递电能。理想变压器的电压比等于匝数比。\nU₁/U₂ = N₁/N₂\n例如从高压降到低压：\n10 kV → 400 V'
+        turn = await self.transformer_question(answer)
+        self.assertEqual((turn['status'], turn['answer']), ('completed', answer))
+        self.model.complete.assert_called_once()
+
+    async def test_general_question_corrects_language_before_publishing(self):
+        rejected = 'I should explain the principle of a transformer.'
+        answer = '一次绕组通入交流电，在铁芯中形成交变磁通，二次绕组由此感应出电压。'
+        turn = await self.transformer_question(rejected, answer)
+        self.assertEqual(turn['answer'], answer)
+        self.assertEqual(turn['answer_review']['repairs'], 1)
+        self.assertNotIn(rejected, str(self.model.complete.call_args))
+        self.assertEqual(self.model.complete.call_count, 2)
+
+    async def test_twice_invalid_general_answer_stays_retryable(self):
+        turn = await self.transformer_question('First English draft.', 'Second English draft.')
+        self.assertEqual((turn['status'], turn['error_code'], turn['answer']), ('failed', 'general_presentation', ''))
+        self.assertEqual(self.model.complete.call_count, 2)
+        self.model.complete.side_effect = None
+        self.model.complete.return_value = '变压器通过交变磁通在二次绕组感应出电压。'
+        retry = stream_tests.StreamTests.payload(self, turn['question'],
+            operation_id=turn['operation_id'], attempt_id='fixture_regenerate_1')
+        await self.runtime.submit(self.actor, retry, self.request, self.authorize)
+        await stream_tests.StreamTests.finish(self)
+        turns = (await self.runtime.conversation(self.actor))['turns']
+        self.assertEqual([(t['operation_id'], t['status'], t['answer']) for t in turns],
+                         [(turn['operation_id'], 'completed', self.model.complete.return_value)])
+
+    def test_notation_and_public_milestones(self):
+        from openclaw_service.assistant.lighthouse_output import presentation_issue
+        from openclaw_service.assistant.lighthouse_stream import public_turn
+        for formula in (r'\[ \frac{U_1}{U_2} = \frac{N_1}{N_2} \]', 'E = 4.44 f N Φm', 'P = UI', '50 Hz'):
+            with self.subTest(formula=formula):
+                self.assertFalse(presentation_issue('计算示例\n' + formula))
+        for text in ('I should explain the answer.', 'The transformer transfers energy.', 'P = UI means electric power.'):
+            self.assertTrue(presentation_issue('变压器\n' + text))
+        rows = public_turn({'process': ['正在准备回答', {'phase': 'model'}, {'label': '  '}, None]})['process']
+        self.assertEqual([row['label'] for row in rows], ['正在准备回答', '正在生成回答'])
+
     def test_explicit_company_command_and_special_queries_keep_existing_routes(self):
         cases = (
             ('D楼本周有哪些未结束的维修', {}),

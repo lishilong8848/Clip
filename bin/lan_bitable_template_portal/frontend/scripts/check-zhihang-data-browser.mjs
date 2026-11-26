@@ -204,6 +204,11 @@ try {
   await runDialog.getByLabel('运行时间（北京时间）').fill('25:01');
   await runDialog.getByRole('button', { name: '保存设置' }).click();
   await runDialog.getByRole('alert').getByText('请输入 1 至 24 个运行时间，格式为 HH:mm。').waitFor();
+  await runDialog.getByLabel('运行时间（北京时间）').focus();
+  for(const key of ['Tab','Shift+Tab','Shift+Tab','Tab']){
+    await page.keyboard.press(key);
+    assert(await runDialog.evaluate(dialog=>dialog.contains(document.activeElement)),'keyboard focus stays in the settings dialog');
+  }
   await runDialog.getByLabel('运行时间（北京时间）').fill('11:00、07:00、11:00');
   for (const name of ['确认旧工具已停止写入，由灯塔同步原表', '启用定时同步', inspectionCardSetting]) {
     await runDialog.getByRole('checkbox', { name }).click();

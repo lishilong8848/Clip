@@ -453,6 +453,8 @@ summary { cursor: pointer; color: #2357a0; padding: 8px 0; }.issue-snapshot { ba
 <style scoped src="../learningMobile.css"></style>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { AlertCircle, BookOpen, Check, CheckCircle2, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Copy, Download, Eye, FileText, History, Lightbulb, Loader2, MessageSquare, Pencil, Plus, RefreshCw, RotateCcw, Save, Search, Send, Settings, Shuffle, Star, Trash2, Upload, Users, X, ChartNoAxesCombined } from "lucide-vue-next";
 import { ApiError, downloadFile, requestJson } from "../api/client";
@@ -1409,6 +1411,8 @@ onMounted(() => {
   void bootstrap();
 });
 onBeforeUnmount(() => { saveDraft(); disposed = true; epoch++; lifetime.abort(); readRequest?.abort(); peopleRequest?.abort(); window.clearTimeout(pollTimer); window.clearInterval(todayTimer); releaseGuard?.(); modalOwner?.release(); window.removeEventListener("keydown", modalKeydown, true); window.removeEventListener("beforeunload", beforeUnload); document.removeEventListener("visibilitychange", checkToday); if (onPopstate) window.removeEventListener("popstate", onPopstate); resolveConfirm?.(false); });
+
+useUsagePage('learning', () => !ready.value ? '' : 'learning/' + (reading.value && ['review','history'].includes(tab.value) ? 'paper_review' : tab.value === 'today' && studyMode.value === 'practice' ? 'practice' : isLearningHub.value && viewMode.value === 'overview' ? 'overview' : tab.value));
 </script>
 
 <style scoped>

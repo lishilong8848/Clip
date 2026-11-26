@@ -1,4 +1,4 @@
-"""One background public-health probe; message senders read only its local result."""
+"""HTTPS health checks and the background monitor responsible for outage alerts."""
 from datetime import datetime
 import hashlib
 import json

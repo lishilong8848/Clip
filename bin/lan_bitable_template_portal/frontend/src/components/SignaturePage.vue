@@ -124,6 +124,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { requestJson, type Dict } from "../api/client";
 
@@ -486,6 +488,9 @@ onBeforeUnmount(() => {
 watch(query, () => {
   schedulePeopleSearch();
 });
+
+useUsagePage('signature_link', () => !selectedRecordId.value || !linkToken.value ? '' :
+  managedRequestId ? 'signatures/request' : temporaryMode.value ? 'signatures/temporary' : requestedRecordId.value ? 'signatures/record' : '');
 </script>
 
 <style scoped>

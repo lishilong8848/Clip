@@ -6,11 +6,11 @@ import { chromium } from 'playwright';
 import { preview } from 'vite';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const output = path.resolve(root, '../../../output/playwright/plan-convergence-notices');
+const output = path.resolve(root, process.env.PLAN_CONVERGENCE_SCREENSHOT_DIR || '../../../output/playwright/plan-convergence-notices');
 await mkdir(output, { recursive: true });
 const server = await preview({ root, logLevel: 'error', preview: { host: '127.0.0.1', port: 0, strictPort: false } });
 const browser = await chromium.launch({ headless: true });
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC' });
+const page = await browser.newPage({ viewport: { width: 1440, height: 1000 }, timezoneId: 'UTC', serviceWorkers: 'block' });
 page.setDefaultTimeout(15000);
 const base = `http://127.0.0.1:${server.httpServer.address().port}`;
 const title = 'EA118_C01机房B楼B-124-BAS-101/103/104/105/401、B-150-BAS-101/102控制柜指示灯微亮或不亮检修';
@@ -75,15 +75,21 @@ const records = {
     row('change-multi', 'C楼控制柜更换多明细', { device: 'BAS-150-027', auto_check_status: 'ready', auto_checked_at: checkedAt, hits: [hitMulti] }),
   ],
 };
-const requests = [], errors = [], snapshots = [];
-let failNext = false, checks = 0, delaySnapshots = false, delayDetailMs = 0;
+const initialRecords = structuredClone(records);
+const requests = [], errors = [], snapshots = [], checkCalls = [];
+let failNext = false, delaySnapshots = false, delayDetailMs = 0;
 page.on('pageerror', error => errors.push(error.message));
-await page.route('**/api/**', async route => {
+await page.route('**/*', async route => {
   const url = new URL(route.request().url());
+  if (url.origin !== base) {
+    errors.push('Unexpected external request: ' + url.origin);
+    return route.abort();
+  }
+  if (!url.pathname.startsWith('/api/')) return route.continue();
   requests.push(url.pathname);
   const reply = data => route.fulfill({ json: { ok: true, data } });
   if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-convergence-review' } });
-  if (url.pathname === '/api/auth/status') return reply({ logged_in: true, user: { name: '隔离测试', open_id: 'isolated-review', role: 'admin' }, scope_options: [{ value: 'ALL', label: '全部' }] });
+  if (url.pathname === '/api/auth/status') return reply({ logged_in: true, user: { name: '隔离测试', open_id: 'isolated-review', role: 'building', category: 'engineer', modules: ['plan_convergence'], home_scope: 'B' }, scope_options: [{ value: 'B', label: 'B楼' }], default_scope: 'B' });
   if (url.pathname === '/api/plan-convergence/bootstrap') return reply({ is_admin: false, catalog_ready: true, points_ready: true, blocks: { items: structuredClone(bootstrapBlocks), loaded_at: checkedAt } });
   if (url.pathname === '/api/plan-convergence/rulesets') return reply([]);
   let match = url.pathname.match(/^\/api\/plan-convergence\/(maintenance|change)\/records$/);
@@ -91,12 +97,13 @@ await page.route('**/api/**', async route => {
   match = url.pathname.match(/^\/api\/plan-convergence\/(maintenance|change)\/check$/);
   if (match) {
     const kind = match[1];
-    checks++;
+    const body = route.request().postDataJSON();
+    checkCalls.push({ method: route.request().method(), kind, body });
     await new Promise(resolve => setTimeout(resolve, 350));
     if (failNext) { failNext = false; return route.fulfill({ status: 502, json: { ok: false, error: '无法连接智航，请连接 VPN 后重试' } }); }
-    const id = route.request().postDataJSON().record_id;
+    const id = body.record_id;
     const selected = records[kind].filter(row => !id || row.record_id === id);
-    for (const item of selected) Object.assign(item, { hits: kind === 'maintenance' ? [hitSingle] : [], check_status: 'ready', checked_at: checkedAt + checks * 60, check_source: 'manual' });
+    for (const item of selected) Object.assign(item, { hits: kind === 'maintenance' ? [hitSingle] : [], check_status: 'ready', checked_at: checkedAt + checkCalls.length * 60, check_source: 'manual' });
     return reply({ records: structuredClone(selected), stats: { [kind]: selected.length, blocks: 1, matched_records: selected.filter(row => row.hits.length).length, orphan_blocks: kind === 'change' ? 1 : 0 } });
   }
   match = url.pathname.match(/^\/api\/plan-convergence\/blocks\/(\d+)$/);
@@ -114,6 +121,10 @@ await page.route('**/api/**', async route => {
     return reply(instances.map((n, i) => ({ insName: n, insStandardId: 'std-' + n, objName: '楼宇设备' })));
   }
   if (url.pathname === '/api/assistant/conversation') return reply({ enabled: false, turns: [] });
+  if (route.request().method() !== 'GET') {
+    errors.push('Unexpected fixture request: ' + route.request().method() + ' ' + url.pathname);
+    return route.fulfill({ status: 405, json: { ok: false } });
+  }
   return reply({});
 });
 const tableRow = name => page.locator('.pc-maintenance tbody tr').filter({ has: page.getByText(name, { exact: true }) });
@@ -121,7 +132,7 @@ const switchTo = label => page.getByRole('button', { name: label, exact: true })
 
 try {
   // ---- retained: maintenance check states ----
-  await page.goto(base + '/plan-convergence?tab=maintenance');
+  await page.goto(base + '/plan-convergence?frontend=legacy&tab=maintenance');
   await tableRow(title).waitFor();
   assert.match(await tableRow(title).locator('.pc-check-result').innerText(), /未找到匹配屏蔽[\s\S]*自动核对/);
   assert.match(await tableRow('B楼空调检修').locator('.pc-check-result').innerText(), /找到 1 条候选屏蔽/);
@@ -290,33 +301,89 @@ try {
   assert.match(await tableRow('B楼控制柜更换变更').locator('.pc-check-result').innerText(), /手动核对/);
   await switchTo('检修核对');
   assert.match(await tableRow(title).locator('.pc-check-result').innerText(), /找到 1 条候选屏蔽[\s\S]*手动核对/);
-  const countBeforeReload = checks;
+  const countBeforeReload = checkCalls.length;
   await page.reload();
   await tableRow(title).waitFor();
   assert.match(await tableRow(title).locator('.pc-check-result').innerText(), /手动核对/);
-  assert.equal(checks, countBeforeReload, 'reopening reads saved results without performing another check');
+  assert.equal(checkCalls.length, countBeforeReload, 'reopening reads saved results without performing another check');
   failNext = true;
   await tableRow(title).getByRole('button', { name: '核对', exact: true }).click();
-  await page.getByText('无法连接智航，请连接 VPN 后重试', { exact: true }).waitFor();
+  const auditError = page.getByRole('alert').filter({ hasText: '无法连接智航，请连接 VPN 后重试' });
+  await auditError.getByRole('button', { name: '重试', exact: true }).waitFor();
+  assert.match(await auditError.innerText(), /上次记录和核对结果已保留/);
   assert.match(await tableRow(title).locator('.pc-check-result').innerText(), /找到 1 条候选屏蔽/, 'failed retry preserves prior successful result');
 
   // ---- retained: change-tab error isolation, refresh persistence, checks count ----
   await switchTo('变更核对');
   await tableRow('B楼控制柜更换变更').waitFor();
-  assert.equal(await page.getByText('无法连接智航，请连接 VPN 后重试', { exact: true }).count(), 0, 'separate tabs do not share error state');
+  assert.equal(await auditError.count(), 0, 'separate tabs do not share error state');
   await page.reload();
   await tableRow('B楼控制柜更换变更').waitFor();
   assert.match(await tableRow('B楼控制柜更换变更').locator('.pc-check-result').innerText(), /未找到匹配屏蔽[\s\S]*手动核对/);
-  assert.equal(checks, countBeforeReload + 1, 'change-tab reload reads saved result without another check');
+  assert.equal(checkCalls.length, countBeforeReload + 1, 'change-tab reload reads saved result without another check');
 
   for (const width of [1920, 1366, 1024]) {
     await page.setViewportSize({ width, height: 1000 });
     assert.ok(await page.locator('.pc-page').evaluate(el => el.scrollWidth <= el.clientWidth + 1), `PC page overflow at ${width}`);
   }
 
+  // Enter the default workspace through its directory and exercise fresh notice data.
+  Object.assign(records, structuredClone(initialRecords));
+  const v2CheckStart = checkCalls.length, v2SnapshotStart = snapshots.length;
+  await page.goto(base + '/?view=functions');
+  await page.locator('.v2-functions').getByRole('button', { name: '计划收敛审查', exact: true }).click();
+  await page.waitForURL(url => url.searchParams.get('__page') === '/plan-convergence');
+  const desk = page.getByRole('region', { name: '计划收敛', exact: true });
+  const tabs = desk.getByRole('navigation', { name: '核对任务' });
+  const card = name => desk.getByRole('article').filter({ has: page.getByRole('heading', { name, exact: true }) });
+  await tabs.getByRole('button', { name: '检修核对', exact: true }).click();
+  const maintenance = card(title);
+  const stale = card('内容已变化记录');
+  await stale.getByText('通告内容已变化，请重新核对',{exact:true}).waitFor();
+  await stale.getByText(/上次手动核对/).waitFor();
+  await maintenance.getByText('未找到匹配屏蔽', { exact: true }).waitFor();
+  await maintenance.getByRole('button', { name: '核对本条' }).click();
+  await maintenance.getByText('找到 1 条候选屏蔽', { exact: true }).waitFor();
+  await maintenance.getByText(/手动核对/).waitFor();
+  await maintenance.getByRole('button', { name: blockNameSingle + ' · ' + hitSingle.reason }).click();
+  const focused = desk.locator('.pc-focused-detail').filter({ hasText: 'BAS-101控制柜指示灯告警' });
+  await focused.waitFor();
+  assert.equal(await desk.getByRole('button', { name: /B-124控制柜检修屏蔽.*#1001/, pressed: true }).count(), 1);
+  assert.equal(snapshots.length, v2SnapshotStart, 'locating a candidate does not request a snapshot');
+  await focused.getByRole('button', { name: '查看实例快照' }).click();
+  const snapshot = page.getByRole('dialog', { name: '实例快照 · ' + blockNameSingle });
+  await snapshot.getByText('ins-bas-103', { exact: true }).waitFor();
+  assert.deepEqual(snapshots.slice(v2SnapshotStart).map(call => call.body), [
+    { blockId: '1001', blockDetailId: 'd-1001-1', instanceIds: 'ins-bas-101,ins-bas-103' },
+  ]);
+  await snapshot.getByRole('button', { name: '关闭弹窗' }).click();
+  await tabs.getByRole('button', { name: '变更核对', exact: true }).click();
+  const change = card('B楼控制柜更换变更');
+  const multiChange = card('C楼控制柜更换多明细');
+  await change.getByText('尚未核对', { exact: true }).waitFor();
+  await multiChange.getByRole('button', { name: blockNameMulti + ' · ' + hitMulti.reason }).click();
+  await desk.locator('.pc-focused-detail').getByText(/BAS-150-027/).waitFor();
+  assert.equal(await desk.locator('.pc-focused-detail').count(), 1, 'change candidate selects only matching detail 27 on page two');
+  assert.equal(snapshots.length, v2SnapshotStart + 1, 'navigating to the change candidate does not open its snapshot');
+  await tabs.getByRole('button', { name: '变更核对', exact: true }).click();
+  await desk.getByRole('button', { name: '核对全部' }).click();
+  await change.getByText('未找到匹配屏蔽', { exact: true }).waitFor();
+  await multiChange.getByText('未找到匹配屏蔽', { exact: true }).waitFor();
+  await change.getByText(/手动核对/).waitFor();
+  await desk.getByText('匹配 0 条 · 屏蔽记录 1 条 · 未关联屏蔽 1 条').waitFor();
+  await page.screenshot({ path: path.join(output, 'v2-change-check.png') });
+  await tabs.getByRole('button', { name: '检修核对', exact: true }).click();
+  await page.reload();
+  await maintenance.getByText('找到 1 条候选屏蔽', { exact: true }).waitFor();
+  await maintenance.getByText(/手动核对/).waitFor();
+  await page.screenshot({ path: path.join(output, 'v2-maintenance-match.png') });
+  assert.deepEqual(checkCalls.slice(v2CheckStart), [
+    { method: 'POST', kind: 'maintenance', body: { record_id: 'same-id' } },
+    { method: 'POST', kind: 'change', body: {} },
+  ], 'single/batch checks use separate endpoints and reloading does not resubmit');
   assert.deepEqual(errors, []);
   assert.ok(!requests.some(url => url === '/api/workbench-actions' || url.startsWith('/api/notice-cards')));
   assert.ok(!requests.some(url => url.includes('/maintenance/points') || url.includes('/change/points')), 'points endpoint is no longer the main hit action');
-  console.log(JSON.stringify({ ok: true, production: true, checks, snapshots: snapshots.length, screenshots: output, assertions: 'numeric blocks, single/multi locate + highlight only (no auto modal/snapshot, full list retained, cleared filters, target page + selected id), user camera opens exact snapshot payload, cache-missing block appended, empty/vpn/late-detail/late-snapshot guards, response persistence/isolation/refresh/checks count, PC widths' }));
+  console.log(JSON.stringify({ ok: true, fixtureOnly: true, legacyChecks: v2CheckStart, workspaceChecks: checkCalls.slice(v2CheckStart), snapshots: snapshots.length, screenshots: output }));
 } catch (error) { await page.screenshot({ path: path.join(output, 'failure.png'), fullPage: true }); throw error; }
 finally { await browser.close(); await new Promise(resolve => server.httpServer.close(resolve)); }

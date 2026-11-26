@@ -2182,12 +2182,16 @@ def _ensure_mcp_frontend_assets() -> None:
     if not all(path.is_file() for path in inputs):
         return
     inputs = [path for path in (frontend / 'src').rglob('*') if path.is_file()]
+    if (frontend.parent / 'usage_pages.json').is_file():
+        inputs.append(frontend.parent / 'usage_pages.json')  # Imported by both web builds.
     inputs += [path for path in (frontend / 'public').rglob('*') if path.is_file()]
     inputs += list((frontend / 'scripts').glob('workspace-*.mjs'))
     inputs += [path for path in (frontend / 'scripts').glob('prune-dist-assets.mjs') if path.is_file()]
     inputs += [path for path in frontend.iterdir() if path.is_file() and
                (path.name.startswith('vite.') or path.name in {'package.json', 'package-lock.json', 'index.html', 'assistant.html'})]
     entries = [frontend / 'dist/assistant.html', frontend / 'dist/index.html']
+    if (frontend / 'src/usageHtml.ts').is_file():
+        entries.append(frontend / 'dist/assets/usage-pages.js')
     if (frontend / 'src/workspace-v2').is_dir():
         entries.extend((frontend / 'dist/assets/workspace-v2/index.html', PROJECT_ROOT / V2_MANIFEST))
     newest = max(path.stat().st_mtime for path in inputs)

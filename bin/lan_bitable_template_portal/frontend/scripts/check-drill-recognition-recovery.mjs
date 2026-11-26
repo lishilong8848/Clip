@@ -16,11 +16,10 @@ sys.path.insert(0,'bin')
 from lan_bitable_template_portal import drill_management as d
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_drill_untimed_steps import _drill_fixture
-source=Path('D:/下载/21V-JSNTFOC-EOP-KT-308 机房局部高温故障应急处理流程V1.5.xlsx')
 with tempfile.TemporaryDirectory() as folder:
  service=d.DrillManagementService(LanPortalStateStore(Path(folder)/'state.sqlite3'),data_root=Path(folder)/'drills')
  with patch.object(d,'_step_duration_minutes',side_effect=d.parse_duration_minutes):
-  failed=service.create_definition(name='机房局部高温演练',year=2026,month=10,file_name='template.xlsx',source=source.read_bytes() if source.is_file() else _drill_fixture(14,predicted='7分'))
+  failed=service.create_definition(name='机房局部高温演练',year=2026,month=10,file_name='template.xlsx',source=_drill_fixture(14,predicted='10分',marker='不执行'))
  recovered=service.list_definitions('2026-10')[0]
  for item in [failed,recovered]: item['source'].pop('path',None)
  print(json.dumps({'failed':failed,'recovered':recovered},ensure_ascii=False))
@@ -29,7 +28,7 @@ const expected=fixture.recovered.configuration.steps.length;
 assert(expected>0);
 const shots=path.join(project,'output/playwright/drill-recognition');
 await mkdir(shots,{recursive:true});
-const server=await preview({root,logLevel:'error',preview:{host:'127.0.0.1',port:0}});
+const server=await preview({root,logLevel:'error',build:{outDir:process.env.CLIPFLOW_DRILL_PREVIEW_DIR || 'dist'},preview:{host:'127.0.0.1',port:0}});
 const origin=`http://127.0.0.1:${server.httpServer.address().port}`;
 const browser=await chromium.launch({headless:true});
 let page;
@@ -45,6 +44,7 @@ try {
    if(p==='/assets/vnet-logo.png')return route.fulfill({contentType:'image/png',body:await readFile(path.join(root,'public/assets/vnet-logo.png'))});
    if(!p.startsWith('/api/'))return route.continue();
    const ok=data=>route.fulfill({json:{ok:true,data}});
+   if(p==='/api/usage/events'&&request.method()==='POST')return ok({accepted:request.postDataJSON().events.length});
    const scopes=['A','B','C','D','E'].map(value=>({value,label:value+'楼'}));
    if(p==='/api/auth/status')return ok({logged_in:true,user:{open_id:'drill-recovery-fixture',name:'隔离验收人员',role:'admin',level:'L0',modules:['drills']},scope_options:scopes});
    if(p==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'drill-recovery-fixture'}});
@@ -74,6 +74,11 @@ try {
   await page.evaluate(()=>window.dispatchEvent(new CustomEvent('clipflow-read-cache-updated',{detail:{path:'/api/drills?month=2026-10'}})));
   const slots=panel.getByRole('spinbutton',{name:'步骤签名人数',exact:true});
   await slots.first().waitFor();assert.equal(await slots.count(),expected);
+  const skipped=panel.locator('.drd-config-step, tbody tr').filter({hasText:'跳过'});
+  await skipped.getByText(/跳过/).waitFor();
+  const skippedSlots=skipped.getByRole('spinbutton',{name:'步骤签名人数',exact:true});
+  assert.equal(await skippedSlots.inputValue(),'0');
+  assert.equal(await skippedSlots.isDisabled(),true);
   assert.equal(await panel.getByText('步骤识别未完成',{exact:true}).count(),0);
   const original=await slots.first().inputValue();await slots.first().fill(original==='1'?'2':'1');
   const manual=await slots.first().inputValue(),before=reads;
@@ -89,14 +94,15 @@ try {
    await page.locator('.upload-panel').waitFor({state:'hidden'});
   }
   await upload();
-  await page.locator('.drill-page').getByText('文件已上传，但步骤识别未完成，请查看模板中的具体原因。',{exact:true}).waitFor();
   await panel.getByText('工作表未识别到完整的演练步骤表头。',{exact:true}).waitFor();
   assert.equal(await page.getByText('文件已上传并完成初步识别，请核对配置后发布。',{exact:true}).count(),0);
   uploadMode='recovered';await upload();await slots.first().waitFor();
   assert.equal(await slots.count(),expected,'fresh list recovery must not be overwritten by the older POST response');
   assert.equal(await slots.first().getAttribute('min'),'0');
   await slots.first().fill('0');await slots.last().fill('10');
-  await page.getByRole('button',{name:'保存配置',exact:true}).click();await page.locator('.drill-page').getByText('模板配置已保存',{exact:true}).waitFor();
+  const saveResponse=page.waitForResponse(response=>response.url().endsWith('/configuration')&&response.request().method()==='PUT');
+  await page.getByRole('button',{name:'保存配置',exact:true}).click();
+  assert.equal((await saveResponse).ok(),true);
   assert.equal(listing[0].configuration.steps[0].signature_slots,0);
   assert.equal(listing[0].configuration.steps.at(-1).signature_slots,10);
   await page.reload();await slots.first().waitFor();assert.equal(await slots.first().inputValue(),'0');

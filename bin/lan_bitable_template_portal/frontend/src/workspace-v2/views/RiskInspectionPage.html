@@ -164,14 +164,14 @@
     </NDrawer>
 
     <NModal :trap-focus="!confirmation && !discard" :show="!!fieldEditor" :close-on-esc="!busy && !confirmation && !discard" :mask-closable="!busy" @update:show="!$event && closeFieldEditor()">
-      <section v-if="fieldEditor" class="rd-dialog rd-desk" role="dialog" aria-modal="true" aria-label="编辑模板字段">
+      <div v-if="fieldEditor" class="rd-dialog rd-desk" role="dialog" aria-modal="true" aria-label="编辑模板字段">
         <div class="rd-section-head"><h2>编辑模板字段</h2><button class="rd-link" :disabled="busy" @click="closeFieldEditor">取消</button></div>
         <label class="rd-field">字段名称<NInput v-model:value="fieldEditor.field_name" :disabled="busy" /></label>
         <label class="rd-field">字段类型<NSelect v-model:value="fieldEditor.type" :options="typeOptions" :disabled="busy" /></label>
         <label v-if="[3,4].includes(fieldEditor.type)" class="rd-field">选项（每行一个）<NInput v-model:value="fieldEditor.optionsText" type="textarea" :disabled="busy" /></label>
         <div class="rd-section-head"><label>必填 <NSwitch v-model:value="fieldEditor.required" :disabled="busy" /></label><button class="rd-btn rd-primary" :disabled="busy || !fieldEditor.field_name?.trim() || !canEditTemplate" @click="ask('save_field')">保存字段</button></div>
         <p v-if="error && !confirmation" role="alert">{{ error }}</p>
-      </section>
+      </div>
     </NModal>
     <dialog v-if="confirmation" class="risk-decision-layer" :aria-label="confirmTitle" @vue:mounted="node=>node.el?.showModal()" @vue:before-unmount="node=>node.el?.close()" @keydown.esc.capture="reviewerMenuOpen && $event.preventDefault()" @cancel.prevent="!busy && (confirmation=null)" @click.self="!busy && (confirmation=null)">
       <section v-if="confirmation" class="risk-confirm rd-dialog rd-desk" >

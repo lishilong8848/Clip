@@ -268,6 +268,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue';
 import { NAlert, NButton, NEmpty, NInput, NModal, NPagination, NPopconfirm, NRadioButton, NRadioGroup, NSelect, NSpin, NTag } from 'naive-ui';
 import { ArrowLeft, ClipboardList, Download, FileText, Plus, RefreshCw, Search, Trash2, Upload, Wrench } from 'lucide-vue-next';
@@ -690,6 +692,8 @@ onMounted(() => {
   if (/^[a-f0-9]{32}$/.test(props.toolOrder || '')) void openOrder({ id: props.toolOrder! } as Order);
 });
 onBeforeUnmount(() => { disposed = true; reader?.abort(); unregister(); window.removeEventListener('beforeunload', beforeUnload); });
+
+useUsagePage('tool_management', () => 'tool_management/' + (order.value ? 'order' : view.value));
 </script>
 
 <style scoped>

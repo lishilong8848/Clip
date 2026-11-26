@@ -205,7 +205,7 @@
     </NDrawerContent>
   </NDrawer>
   <NModal :show="!!(previewFile && detail && detailOpen)" @update:show="(show:boolean)=>{if(!show)previewFile=null}">
-    <section v-if="previewFile && detail" class="sdoc-dialog sdoc-preview document-preview" :class="{'sdoc-image-preview':previewKind==='image'}" role="dialog" aria-modal="true" aria-label="附件预览" data-v2-inline-feedback>
+    <div v-if="previewFile && detail" class="sdoc-dialog sdoc-preview document-preview" :class="{'sdoc-image-preview':previewKind==='image'}" role="dialog" aria-modal="true" aria-label="附件预览" data-v2-inline-feedback>
       <header class="sdoc-dialog-head"><h2>{{ previewFile.name }}</h2><button aria-label="关闭预览" @click="previewFile=null"><X :size="16"/></button></header>
       <div class="sdoc-preview-body">
         <p v-if="previewError" role="alert">{{ previewError }} <button @click="previewError=''">重试预览</button></p>
@@ -216,25 +216,25 @@
       <div class="sdoc-actions"><a :href="fileUrl(previewFile)" target="_blank" rel="noopener noreferrer">下载原文件</a>
         <button :disabled="previewPosition<=0" @click="stepPreview(-1)">上一个</button><span>{{ previewPosition+1 }} / {{ previewFiles.length }}</span>
         <button :disabled="previewPosition>=previewFiles.length-1" @click="stepPreview(1)">下一个</button></div>
-    </section>
+    </div>
   </NModal>
   <NModal :show="maintenanceOpen" :mask-closable="!maintenanceBusy" :close-on-esc="!maintenanceBusy" @update:show="(show:boolean)=>{if(!show)closeMaintenance()}">
-    <section v-if="maintenanceIntent" class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="确认维护操作">
+    <div v-if="maintenanceIntent" class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="确认维护操作">
       <h2>{{ maintenanceIntent.kind==='remove'?'移除本地接入':reindexAction }}</h2><p>{{ maintenanceIntent.label }}</p>
       <p>{{ maintenanceIntent.kind==='remove'?'将移除本地数据表接入并清理该来源的本地索引。飞书源表和原始文件保留。':'将按上述范围重新提交本地知识库索引任务。' }}</p>
       <p v-if="maintenanceError" role="alert">{{ maintenanceError }}</p>
       <div class="sdoc-actions"><button :disabled="maintenanceBusy" @click="closeMaintenance">取消</button>
         <button class="sdoc-primary" :disabled="maintenanceBusy || (!!maintenanceError && !maintenanceUncertain)" @click="runMaintenance">{{ maintenanceBusy?'处理中…':maintenanceUncertain?'按原操作重试':maintenanceIntent.kind==='remove'?'确认移除本地接入':'确认更新索引' }}</button></div>
-    </section>
+    </div>
   </NModal>
   <NModal :show="discardOpen" @update:show="(show:boolean)=>{if(!show)discardOpen=false}">
-    <section class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="放弃未保存修改">
+    <div class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="放弃未保存修改">
       <h2>放弃未保存的修改？</h2><p>当前输入或待核验的操作将退出编辑。{{ pendingWrite || pendingUpload ? '请先核对原操作回执。' : '' }}</p>
       <div class="sdoc-actions"><button @click="discardOpen=false">继续编辑</button><button @click="confirmDiscard">放弃修改</button></div>
-    </section>
+    </div>
   </NModal>
   <NModal :show="storageOpen && canConfigure" :mask-closable="!storageBusy" :close-on-esc="!storageBusy" @update:show="(show:boolean)=>{if(!show && !storageBusy)storageOpen=false}">
-    <section class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="本地附件缓存">
+    <div class="sdoc-dialog" role="dialog" aria-modal="true" aria-label="本地附件缓存">
       <header class="sdoc-dialog-head"><h2>本地附件缓存</h2><button :disabled="storageBusy" @click="storageOpen=false">关闭</button></header>
       <p v-if="storageError" role="alert">{{ storageError }}</p><p v-if="storageBusy" role="status">正在处理缓存…</p>
       <dl v-if="storageInfo" class="sdoc-values"><div><dt>使用空间</dt><dd>{{ sizeText(storageInfo.bytes) }} · {{ storageInfo.files }} 个文件</dd></div>
@@ -242,7 +242,7 @@
         <div><dt>磁盘可用</dt><dd>{{ sizeText(storageInfo.free_bytes) }}</dd></div></dl>
       <div class="sdoc-actions"><button :disabled="storageBusy" @click="openStorage">刷新</button>
         <button :disabled="storageBusy || !!storageError || !storageInfo?.orphan_files || !storageInfo.revision" @click="cleanStorage">清理无引用缓存</button></div>
-    </section>
+    </div>
   </NModal>
   <DocumentLibraryTableSettings v-if="canConfigure && settingsOpen" :show="settingsOpen" :initial="settingsNew?undefined:activeTable" :schema="settingsNew?undefined:schema || undefined" :scopes="configurationScopes" @close="closeSettings" @saved="configurationSaved"/>
 </NConfigProvider>

@@ -1,7 +1,7 @@
 <section class="serenity-desk status-desk" aria-label="后台状态">
   <header class="serenity-heading console-heading"><div><h2>运行监测</h2><p>{{ statusWarnings.length?'有 '+statusWarnings.length+' 项需要关注':'已读取后台运行指标' }}</p></div>
     <div class="serenity-actions"><button type="button" :disabled="busy" @click="emit('refresh')">刷新状态</button><button type="button" :disabled="busy" @click="emit('preflight')">真实联调预检</button>
-      <button type="button" @click="emit('open-history-memory')">打开历史记忆</button></div></header>
+      <button v-if="canUseModule('notice_history')" type="button" @click="emit('open-history-memory')">打开历史记忆</button></div></header>
   <div class="status-facts"><article><span>Qt 连接</span><b>{{ stats.qt_bridge?.connected?'已连接':'未连接' }}</b></article><article><span>附件暂存</span><b>{{ formatBytes(stats.upload_attachments?.total_bytes) }}</b></article>
     <article><span>源表快照</span><b>{{ stats.source_snapshot?.active?.status||'待核对' }}</b></article><article><span>近期慢任务</span><b>{{ slowJobs.length }}</b></article></div>
   <div v-if="statusWarnings.length" class="serenity-panel"><p v-for="text in statusWarnings" :key="text">{{ text }}</p></div>

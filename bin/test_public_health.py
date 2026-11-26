@@ -73,14 +73,14 @@ class PublicHealthTests(unittest.TestCase):
             self.fail_three(base=base + 60)
         self.assertEqual(self.sender.call_count, 2)
 
-    def test_live_result_restores_generated_links_without_restart_or_network_in_sender(self):
+    def test_live_result_restores_generated_links_without_restart(self):
         from public_access import links
         lan = 'http://192.168.224.130:18766'
         with patch.object(links, 'deployment', return_value=(self.monitor.host, self.monitor.origin)), \
                 patch.object(links, 'local_host', return_value=True), \
                 patch.object(links, 'HEALTH', self.root / 'health.json'), \
                 patch('public_access.links.time.time', return_value=1200), \
-                patch('httpx.Client', side_effect=AssertionError('Sender must only read saved health')):
+                patch.object(links, '_probe_origin', return_value=False):
             self.assertEqual(links.preferred_base(lan), lan)
             self.fail_three()
             self.assertEqual(links.preferred_base(lan), lan)

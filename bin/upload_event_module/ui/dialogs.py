@@ -110,6 +110,7 @@ _DIALOG_BACKGROUND_EXECUTOR = ThreadPoolExecutor(
 
 
 from .styles import get_stylesheet
+from .page_usage import watch_window
 
 from .common import show_simple_message
 
@@ -255,6 +256,7 @@ class AddDialog(QDialog):
     def __init__(self, parent=None, theme="dark"):
 
         super().__init__(parent)
+        watch_window(self, "notices", "manual_add")
 
         self.theme = theme
 
@@ -1287,6 +1289,7 @@ class ScreenshotConfirmOverlay(QWidget):
     def __init__(self, crop_region, screen_geometry):
 
         super().__init__()
+        watch_window(self, "screenshot", "confirm_region")
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
@@ -1603,6 +1606,7 @@ class ScreenshotRegionSelector(QWidget):
     def __init__(self):
 
         super().__init__()
+        watch_window(self, "screenshot", "select_region")
 
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
 
@@ -2267,6 +2271,7 @@ class ScreenshotConfirmDialog(QDialog):
     def __init__(self, parent=None, theme="dark"):
 
         super().__init__(parent)
+        watch_window(self, "screenshot", "upload")
 
         self._capture_generation = 0
 
@@ -5774,6 +5779,7 @@ class ScreenshotConfirmDialog(QDialog):
         dialog = QMessageBox(self)
 
         dialog.setWindowTitle("响应时间识别")
+        watch_window(dialog, "screenshot", "response_time")
 
         dialog.setIcon(QMessageBox.Icon.Question)
 
@@ -6551,6 +6557,7 @@ class ScreenshotConfirmDialog(QDialog):
             if not self.datetime_popup:
 
                 self.datetime_popup = QFrame(parent_widget)
+                watch_window(self.datetime_popup, "screenshot", "datetime_picker")
 
                 self.datetime_popup.setObjectName("DateTimePopup")
 
@@ -9244,6 +9251,7 @@ class DetailDialog(QDialog):
     def __init__(self, parent=None, theme="dark"):
 
         super().__init__(parent)
+        watch_window(self, "notices", "detail")
 
         self.theme = theme
 

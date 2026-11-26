@@ -243,7 +243,7 @@ class Host:
             item = await self.manager.acquire(actor, model, profile, plugin=plugin,
                 plugin_catalog=plugin, tool_names=enabled,
                 bridge_token=self.bridge_key(key), bridge_url=f'http://127.0.0.1:{self.port}/bridge',
-                model_parameters=payload.get('model_parameters'))
+                model_parameters=payload.get('model_parameters'), wait_for_recovery=payload.get('warm_only') is not True)
             if self.lease is not lease:
                 item['busy'] = False
                 raise ServiceError('助手业务连接已失效，网关已保留待命。', 409, 'lease_expired')
@@ -398,7 +398,14 @@ def build_app(host, *, request_stop=lambda _: None):
                 except AssistantError as exc:
                     raise ServiceError(str(exc), exc.status, 'sharing_generation_failed') from None
             elif action == 'acquire':
-                data = await host.acquire(payload)
+                from .assistant.lighthouse_runtime import AssistantStartupError
+                from .protocol import STARTUP_MESSAGES
+                try:
+                    data = await host.acquire(payload)
+                except AssistantStartupError as exc:
+                    if exc.code not in STARTUP_MESSAGES:
+                        raise
+                    raise ServiceError(STARTUP_MESSAGES[exc.code], exc.status, exc.code) from None
             elif action == 'begin-run':
                 data = await host.begin_run(payload)
             elif action == 'end-run':

@@ -165,7 +165,7 @@
           <dl v-if="visibleDisplayFields.length" class="ops-facts ops-source-fields"><div v-for="field in visibleDisplayFields" :key="field.key"><dt>{{ field.key }}</dt><dd>{{ field.value }}</dd></div></dl>
           <p v-else class="ops-empty">暂无可展示字段</p>
         </section>
-        <p v-if="errorText" class="ops-alert is-error" role="alert">{{ errorText }}</p>
+        <p v-if="eventTransferError" class="ops-alert is-error" role="alert">{{ eventTransferError }}</p>
       </div>
     </article>
   </component>

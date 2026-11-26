@@ -131,6 +131,17 @@ def failure_detail(exc):
 def public_turn(turn):
     result = {key: copy.deepcopy(value) for key, value in turn.items()
               if not key.startswith("_") and key not in {"prompt", "file_ids", "submitted_file_ids"}}
+    if "process" in result:
+        steps = []
+        for item in result["process"] if isinstance(result["process"], list) else []:
+            step = item if isinstance(item, dict) else {"label": item}
+            raw = step.get("label")
+            label = safe_text(raw, limit=120).strip() if isinstance(raw, str) else ""
+            if not label or presentation_issue(label):
+                label = RUNTIME_PHASES.get(str(step.get("phase") or ""), "")
+            if label:
+                steps.append({**step, "label": label})
+        result["process"] = steps
     counts = runtime_counts(turn)
     if counts:
         result['runtime'] = {**result.get('runtime', {}), **counts}
@@ -241,12 +252,24 @@ class LighthouseStream:
                 raise AssistantError("当前权限已无法读取此消息，请重新提问。", 403)
             if old and old.get('status') == 'pending' and old.get('execution_lane', '') != execution_lane(actor):
                 raise AssistantError('请在原浏览器标签或飞书话题中继续此消息。', 409)
-            if old and old.get("attempt_id", operation) == attempt:
+            same_attempt = old is not None and old.get("attempt_id", operation) == attempt
+            startup_retry = attempt.startswith('startup_retry_')
+            if old and (same_attempt or startup_retry):
                 if (old["question"] != clean_question or old.get("submitted_file_ids", old.get("file_ids", [])) != files
                         or old.get('submitted_commands', []) != selections
                         or (old.get('preview_file') or {}).get('id', '') != preview_id):
                     raise AssistantError("消息编号不能用于不同内容。", 409)
-                return None, {"conversation_id": state["id"], "run_id": old.get("run_id", ""), "turn": public_turn(self._knowledge_turn(actor, old))}
+                if same_attempt:
+                    return None, {"conversation_id": state["id"], "run_id": old.get("run_id", ""), "turn": public_turn(self._knowledge_turn(actor, old))}
+            if startup_retry:
+                from openclaw_service.protocol import STARTUP_MESSAGES
+                previous_run = attempt.removeprefix('startup_retry_')
+                if (not re.fullmatch('[a-f0-9]{32}', previous_run) or not old
+                        or old.get('run_id') != previous_run or old.get('status') != 'failed'
+                        or old.get('error_code') not in STARTUP_MESSAGES or lane.get('active_run_id')
+                        or old.get('plan') or old.get('task_id') or old.get('job_id')
+                        or old.get('feishu_topic', '') != topic_id):
+                    raise AssistantError('原问题的进度已变化，请查看当前记录。', 409)
             if old and (old.get("plan") or {}).get("status") in PROTECTED_PLANS:
                 raise AssistantError("此消息的业务操作已执行或已提交，请查询原任务，不重新执行。", 409)
             from .lighthouse_commands import resolve

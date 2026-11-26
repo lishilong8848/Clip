@@ -56,10 +56,12 @@
           <AuthPanels v-else-if="!publicLink && (!loggedIn || passwordPage || !scopes.length && !['learning','knowledge','documents','eop_scenarios',zhihangDataModule.id].includes(activeModule) && !assignedRiskPage)"
             :checking="false" :logged-in="loggedIn" :user="user" :login-url="loginUrl" :busy="permissionBusy" :request="permission" :requestable-scopes="requestableScopes" :password-settings="passwordPage" :show-back="loggedIn" :title="permissionPage?'申请楼栋权限':''" @back="navigate('/?view=my')" @update-request="Object.assign(permission, $event)" @submit="submitPermission" @confirm="submitPermission" />
           <template v-else>
-            <div v-if="user.role==='guest' && !publicLink" class="wb-home">
-              <GuestWorkbenchHeader guest :name="String(user.name||'访客')" :clock="Date.now()" :tasks="[]" :unread="[]"
-                @open="navigate" @guest-account="selectAccountAction('logout')" />
-            </div>
+            <header v-if="user.role==='guest' && !publicLink" class="guest-session">
+              <span class="v2-brand"><img :src="vnetLogo" alt="世纪互联 VNET"><span>南通灯塔运维平台</span></span>
+              <NButton data-v2-navigation quaternary :disabled="logoutBusy" @click="selectAccountAction('logout')">
+                <UserRound :size="16" aria-hidden="true"/>{{ user.name||'访客' }} · 退出
+              </NButton>
+            </header>
             <nav v-if="showDutyTabs" class="v2-duty-tabs" aria-label="值班常用业务">
               <NButton v-for="tab in dutyTabs" :key="tab.id" :type="dutyActive === tab.id ? 'primary' : 'default'" :secondary="dutyActive !== tab.id" @click="navigate(tab.url)"><component :is="tab.icon" :size="18" />{{ tab.label }}</NButton>
             </nav>
@@ -102,6 +104,10 @@
   </NConfigProvider>
 </template>
 <script setup lang="ts">
+import { setUsageAccess } from '../usageEvents';
+import { provideUsage } from '../usageNavigation';
+import { usageRoute } from '../usageRoutes';
+
 import { computed, defineAsyncComponent, h, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch } from 'vue';
 import { NAlert, NAvatar, NButton, NConfigProvider, NDialogProvider, NDropdown, NEmpty, NMenu, NMessageProvider, NModal, NPopover, NResult, NSelect, NSpin, NTag, darkTheme, dateZhCN, zhCN } from 'naive-ui';
 import { Activity, ArrowLeft, Building2, ChevronDown, ChevronRight, ClipboardList, Droplets, Grid2X2, House, KeyRound, LogOut, Menu, MessageCircle, PanelLeft, Settings, ShieldCheck, UserRound, UsersRound, Ellipsis } from 'lucide-vue-next';
@@ -136,7 +142,6 @@ const lazy = (load: () => Promise<any>) => defineAsyncComponent({ loader: load, 
 const AccountHome=lazy(()=>import('./AccountHome.vue'));
 const HomePage = lazy(() => import('./HomePage.vue'));
 const WorkbenchHome = lazy(() => import('./workbench/WorkbenchHome.vue'));
-const GuestWorkbenchHeader = lazy(() => import('./workbench/WorkbenchDailyLayout.vue'));
 const WorkbenchWeather = lazy(() => import('./workbench/WorkbenchWeather.vue'));
 const HandoverReviewDialog = lazy(() => import('./workbench/HandoverReviewDialog.vue'));
 const WorkOrderWorkspace = lazy(() => import('./WorkOrderWorkspace.vue'));
@@ -247,6 +252,7 @@ const workbenchReturn = computed(() => {
   return '/?'+new URLSearchParams({view:'home',...(scopes.value.some(option=>option.value===scope)?{scope}:{})});
 });
 provide(pageContext,{user:computed(()=>user.value),scopes:computed(()=>scopes.value.map(scope=>scope.value)),scope:currentScope,module:computed(()=>NOTICE_IDS.includes(activeModule.value)||activeModule.value==='all'?'notices':activeModule.value),changeScope});
+provide('life-guide-owner',computed(()=>String(user.value.open_id || '')));
 watch([route,identityKey],()=>{const value=route.value.searchParams.get('scope');if(scopeOwner(user.value)&&value&&scopes.value.some(s=>s.value===value)){rememberedScopes.value={...rememberedScopes.value,[scopeFamily(activeModule.value)]:value};saveScopeMemory(user.value,rememberedScopes.value);}},{flush:'sync'});
 const noticeActive = computed(() => loggedIn.value && !checking.value && !denied.value && route.value.pathname === '/workbench-lite');
 const noticeView = ref<{identity:string;url:string}|null>(null);
@@ -303,6 +309,21 @@ const breadcrumb=computed(()=>{
   return null;
 });
 const accountConfirm=ref(false),accountAction=ref('logout'),accountMenuOpen=ref(false);
+const pageTitle = computed(() => {
+  if (publicLink.value) return route.value.pathname === '/signature' ? '签名办理' : '工单办理';
+  if (!loggedIn.value) return checking.value ? '' : '登录';
+  if (user.value.role === 'guest') return '机柜查询';
+  if (permissionPage.value) return '申请权限';
+  if (passwordPage.value) return '修改密码';
+  if (printMode.value) return activeModule.value === 'drills' ? '演练打印' : '晨会打印';
+  if (route.value.pathname === '/repair-status') return '维修跟进';
+  if (breadcrumb.value) return breadcrumb.value.page;
+  const module = [...permittedModules.value, zhihangDataModule].find(m => m.id === activeModule.value);
+  if (module) return module.label;
+  const homeLabels:Record<string,string> = {home:'个人工作台',tasks:'待办办理',functions:'全部应用',my:'个人信息'};
+  return route.value.pathname === '/' ? homeLabels[view.value] : '';
+});
+watch(pageTitle, label => {document.title = label ? '灯塔 · '+label : '南通灯塔运维平台';}, {immediate:true});
 const appsOpen=ref(false), appsTrigger=ref<HTMLButtonElement>(), appsPanel=ref<HTMLElement>();
 async function showApps(open:boolean){
   appsOpen.value=open;
@@ -483,6 +504,16 @@ watch([route,checking,loggedIn,denied],()=>{
 },{immediate:true});
 onMounted(()=>{void loadAuth();window.addEventListener('focus',visibility);window.addEventListener('popstate',routeChanged);window.addEventListener('auth-account-changed',refreshAuth);window.addEventListener('workspace-permissions-stale',refreshAuth);window.addEventListener(AUTH_EXPIRED_EVENT,expired);document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;cancelAuth();window.removeEventListener('focus',visibility);window.removeEventListener('popstate',routeChanged);window.removeEventListener('auth-account-changed',refreshAuth);window.removeEventListener('workspace-permissions-stale',refreshAuth);window.removeEventListener(AUTH_EXPIRED_EVENT,expired);document.removeEventListener('visibilitychange',visibility);});
+
+watch(() => checking.value || !loggedIn.value ? 'public' : user.value.role === 'guest' ? 'guest' : 'member', setUsageAccess, {immediate:true,flush:'sync'});
+provideUsage('web_v2', () => {
+  if (checking.value || impersonationBlocked.value || denied.value || loggedIn.value && unsupportedScope.value) return '';
+  if (loggedIn.value && permissionPage.value) return 'auth/permission';
+  if (!publicLink.value && (!loggedIn.value || passwordPage.value || !scopes.value.length &&
+      !['learning','knowledge','documents','eop_scenarios',zhihangDataModule.id].includes(activeModule.value) && !assignedRiskPage.value)) return 'auth_panel';
+  if (handoverOpen.value && workbenchActive.value) return 'handover/main';
+  return usageRoute(route.value.pathname, route.value.searchParams);
+});
 </script>
 <style scoped>
 .topnav-all-apps {

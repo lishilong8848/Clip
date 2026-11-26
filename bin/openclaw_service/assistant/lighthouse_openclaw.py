@@ -300,13 +300,15 @@ class OpenClawToolAgent:
         if text_only:
             self._buffered_reply = False
         if self.resident:
-            from openclaw_service.protocol import ServiceError
+            from openclaw_service.protocol import ServiceError, STARTUP_MESSAGES
             if not self.engine.gateway_ready(self.actor):
                 await self.emit('status', {'label': '正在连接灯塔助手'})
             try:
                 return await self.engine.manager.acquire(self.actor, self.engine.assistant.model_for(self.actor), self.profile,
                     definitions=definitions, tool_names=enabled, warm_only=warm_only, text_only=text_only)
             except ServiceError as exc:
+                if exc.code in STARTUP_MESSAGES:
+                    raise AssistantError(STARTUP_MESSAGES[exc.code], exc.status, category=exc.code) from None
                 raise AssistantError(str(exc), exc.status) from None
         plugin = self.engine.manager.root / account_key(execution_key(self.actor)) / 'plugin'
         from openclaw_service.protocol import prepare_tool_plugin
@@ -326,6 +328,7 @@ class OpenClawToolAgent:
             item = await self.engine.manager.acquire(self.actor, self.engine.assistant.model_for(self.actor), self.profile,
                 plugin=plugin, plugin_catalog=plugin,
                 tool_names=enabled, bridge_token=self.token, bridge_url=self.engine.bridge_url(),
+                wait_for_recovery=not warm_only,
                 progress=lambda label: loop.call_soon_threadsafe(progress.put_nowait, label))
         finally:
             announcer.cancel()
@@ -895,6 +898,7 @@ class LighthouseOpenClaw(LighthouseModel):
     async def _direct_reply(self, actor, turn, history, emit, authorize):
         from .lighthouse_ai import LighthouseAssistant
         from .lighthouse_context import reply_preference_hint
+        from .lighthouse_output import presentation_issue
 
         async def current_actor():
             current = await authorize()
@@ -905,7 +909,7 @@ class LighthouseOpenClaw(LighthouseModel):
             return current
 
         profile = turn['_profile']
-        instructions = ('你是灯塔助手。用用户使用的语言直接、简洁地回答普通问题。'
+        instructions = ('你是灯塔助手。用中文直接、简洁地回答普通问题。保留必要的公式、单位和专业缩写。'
                         '本轮没有工具或公司资料，不能声称查过系统、核实现场信息或完成操作。'
                         '涉及具体现场、内部规定或仍需核验的要求时，说明需要哪些信息，勿编造。'
                         + reply_preference_hint(turn.get('_reply_preferences')))
@@ -920,8 +924,23 @@ class LighthouseOpenClaw(LighthouseModel):
         model = self.assistant.model_for(await current_actor())
         await emit('status', {'label': '正在等待模型回答', 'phase': 'model'})
         try:
-            answer = await asyncio.wait_for(asyncio.to_thread(model.complete, messages,
-                profile={**profile, 'reasoning': False}, max_tokens=1200, timeout=25), timeout=28)
+            async with asyncio.timeout(28) as budget:
+                for repairs in range(2):
+                    timeout = min(25, budget.when() - asyncio.get_running_loop().time())
+                    if timeout <= 0:
+                        raise asyncio.TimeoutError
+                    answer = await asyncio.to_thread(model.complete, messages,
+                        profile={**profile, 'reasoning': False}, max_tokens=1200, timeout=timeout)
+                    issue = presentation_issue(answer) if answer.strip() else '只返回完整的中文答案。'
+                    if not issue:
+                        break
+                    if repairs:
+                        raise AssistantError('暂未生成可展示的中文答案，可重新生成回答。', 502,
+                                             category='general_presentation')
+                    await current_actor()
+                    await emit('status', {'label': '正在重新整理中文答案', 'phase': 'checking'})
+                    messages = [{'role': 'system', 'content': instructions + issue +
+                                 '请用简短的中文重新解释原问题，复杂公式可以用文字说明。'}, *messages[1:]]
         except asyncio.TimeoutError:
             raise AssistantError('模型服务响应超时，原问题已保留，可直接重试。', 504,
                                  category='general_model_timeout') from None
@@ -936,7 +955,7 @@ class LighthouseOpenClaw(LighthouseModel):
         await current_actor()
         await emit('text', {'delta': answer})
         return {'answer': answer, 'sources': [],
-                'answer_review': {'status': 'live_general', 'reason': 'direct_general', 'repairs': 0}}
+                'answer_review': {'status': 'live_general', 'reason': 'direct_general', 'repairs': repairs}}
 
     def gateway_ready(self, actor):
         cached = self.gateways.get(account_key(execution_key(actor)))

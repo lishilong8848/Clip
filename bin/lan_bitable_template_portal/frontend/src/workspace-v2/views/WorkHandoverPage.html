@@ -7,15 +7,15 @@
   <template v-if="!detail"><div class="serenity-segment" role="group" aria-label="交接范围"><button v-for="tab in views" :key="tab.value" type="button"
     :aria-pressed="view===tab.value" :disabled="busy" @click="changeView(tab.value)">{{ tab.label }}</button></div>
     <div class="transfer-ledger"><button v-for="row in list" :key="row.id" type="button" :disabled="busy||detailLoading" @click="select(row.id)">
-      <span class="serenity-symbol"><ArrowRight :size="18"/></span><span><strong>{{ row.title || '交接草稿' }}</strong>
+      <span class="serenity-symbol"><ArrowRight :size="18"/></span><span class="transfer-row-title"><strong :title="row.title">{{ row.title || '交接草稿' }}</strong>
         <small>{{ row.owner?.name }} → {{ row.recipient_name || '接收人待定' }}</small></span>
-      <span>{{ statusLabel(row.status) }}<small>{{ row.total }} 项 · 待办 {{ row.remaining }} 项</small></span><time>{{ timeText(row.updated_at) }}</time></button></div>
+      <span>{{ statusLabel(row.status) }}<small>{{ row.total }} 项 · 待办 {{ row.remaining }} 项</small></span><time :datetime="row.updated_at" :title="todoTimeLabel(row.updated_at,true)">{{ todoTimeLabel(row.updated_at) }}</time></button></div>
     <NEmpty v-if="!list.length" :description="loading||detailLoading?'正在读取交接单':'当前没有交接单'"/>
     <NPagination v-if="total>30" :page="page" :page-size="30" :item-count="total" @update:page="changePage"/>
   </template>
   <template v-else>
     <NAlert v-if="detail.status==='returned'" type="warning">{{ detail.decision_by }}退回了交接单 · {{ detail.decision_reason }}</NAlert>
-    <p v-if="detail.status==='accepted' && detail.decision_at">{{ detail.decision_by }}于 {{ timeText(detail.decision_at) }} 接收了交接单。</p>
+    <p v-if="detail.status==='accepted' && detail.decision_at">{{ detail.decision_by }}于 {{ todoTimeLabel(detail.decision_at,true) }} 接收了交接单。</p>
     <section v-if="editable" class="serenity-panel transfer-form"><header class="serenity-heading"><h2>交接信息</h2><div class="serenity-actions"><NButton :disabled="!dirty||busy||defaultsLoading" @click="save">保存草稿</NButton>
         <NButton type="primary" :disabled="busy||defaultsLoading||!form.recipient_id||!form.items.length" @click="confirmAction='send'">发送交接</NButton>
         <NButton v-if="detail.status==='draft' && !detail.sent_version" type="error" text :disabled="busy||defaultsLoading" @click="confirmAction='delete_draft'">删除草稿</NButton></div></header><div class="scene-fields">
@@ -52,7 +52,7 @@
       <div v-for="file in detail.files" :key="file.id" class="transfer-item"><a :href="base+'/files/'+encodeURIComponent(file.id)" target="_blank" rel="noopener">{{ file.name }}</a>
         <NButton v-if="editable" text :disabled="busy||defaultsLoading" @click="removeFile(file.id)">移除</NButton></div>
     </section>
-    <details class="serenity-panel"><summary>办理记录</summary><p v-for="(row,i) in detail.audit" :key="i">{{ timeText(row.time) }} · {{ row.actor }} · {{ confirmLabels[row.action]||row.action }}</p></details>
+    <details class="serenity-panel"><summary>办理记录</summary><p v-for="(row,i) in detail.audit" :key="i">{{ todoTimeLabel(row.time,true) }} · {{ row.actor }} · {{ confirmLabels[row.action]||row.action }}</p></details>
     <NAlert v-if="detail.notification_failures?.length" type="warning">通知发送失败 · {{ detail.notification_failures.map((k:string)=>notificationLabels[k]||k).join('、') }} <NButton text :disabled="busy" @click="act('retry-notification')">重试通知</NButton></NAlert>
   </template>
   <NModal :show="!!editingItem" preset="card" class="transfer-dialog" title="交接事项" :mask-closable="false" @update:show="show=>{if(!show)editingItem=null}">

@@ -3,7 +3,7 @@
     @click="!readOnly && activateCard($event) && emit('open')">
     <div v-if="!ongoing" class="schedule-date">
       <template v-if="startDate"><small>{{ startDate.month }}月</small><b>{{ startDate.day }}</b></template>
-      <template v-else><CalendarDays :size="18" /><small>{{ planWindow.start ? '计划' : '待定' }}</small></template>
+      <template v-else><CalendarDays :size="18" aria-hidden="true" /></template>
     </div>
     <header class="record-heading">
       <span class="record-location"><MapPin :size="14" />{{ building }}</span>
@@ -27,10 +27,11 @@
       <span v-if="cycle">{{ cycle }}</span>
       <span v-if="ongoing">{{ source.label }}</span>
     </div>
-    <div v-if="!ongoing || planWindow.start || planWindow.end" class="record-window">
+    <div v-if="!ongoing || planWindow.start || planWindow.end" class="record-window" :class="{ 'is-pending': !planWindow.start && !planWindow.end }">
       <CalendarDays :size="15" aria-hidden="true" />
-      <span>计划时段</span>
-      <span class="time-range"><span>{{ planWindow.start || '开始时间未填' }}</span><span aria-label="至"> → </span><span>{{ planWindow.end || '结束时间未填' }}</span></span>
+      <span v-if="planWindow.start || planWindow.end">计划时段</span>
+      <span v-if="!planWindow.start && !planWindow.end" class="time-range">时间待定</span>
+      <span v-else class="time-range"><span>{{ planWindow.start || '未定' }}</span><span aria-label="至"> → </span><span>{{ planWindow.end || '未定' }}</span></span>
     </div>
     <footer v-if="(ongoing && photoCount!==null) || attention">
       <small v-if="ongoing && photoCount !== null" class="record-photos"><Camera :size="14" />现场照片 {{ photoCount }} 张</small>
@@ -89,6 +90,7 @@ const source = computed(() => noticeSourceMode(props.row));
 .schedule-date {grid-row:1 / span 4;align-self:start;display:grid;justify-items:center;gap:2px;padding:8px 3px;border-radius:10px;
   color:var(--v2-ink);background:var(--desk-sky);font-variant-numeric:tabular-nums}
 .schedule-date small {font-size:11px;font-weight:600}.schedule-date b {font-size:22px;line-height:1.1}
+.schedule-date>svg {flex:none;color:var(--v2-muted)}
 .record-photos {display:inline-flex;align-items:center;gap:4px;color:var(--v2-muted);font-size:12px}
 .desk-record:not(.is-ongoing) .record-window {padding:0;background:none}
 .record-heading,footer,.record-actions,.record-meta,.record-window,.record-location,.record-status,.record-note {
@@ -109,6 +111,7 @@ h3 {margin:0;line-height:1.45}
 .record-meta span+span::before {content:'·';margin-inline:7px;color:var(--v2-muted)}
 .record-window {padding:7px 9px;border-radius:7px;background:var(--soft-field);font-variant-numeric:tabular-nums}
 .time-range {display:inline-flex;flex-wrap:wrap;gap:2px 5px;color:var(--v2-ink)}
+.record-window.is-pending .time-range {color:var(--v2-muted)}
 footer {margin-top:auto;gap:6px;justify-content:space-between}
 .record-actions {gap:6px;margin-inline-start:auto}
 .record-note {margin:0;color:var(--v2-ink)}

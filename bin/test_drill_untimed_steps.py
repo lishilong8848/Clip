@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""演练步骤 ⊗ 不计时符号的派生时间、不完整预览、总用时校验与实际文件发布形状回归。"""
+"""演练跳过步骤、派生时间、不完整预览及 Excel 成品回归。"""
 from __future__ import annotations
 
 import sys
@@ -7,6 +7,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 BIN_DIR = Path(__file__).resolve().parent
 if str(BIN_DIR) not in sys.path:
@@ -18,6 +19,7 @@ from test_drill_management import (  # noqa: E402
     _signature_png,
 )
 
+from lan_bitable_template_portal import drill_management  # noqa: E402
 from lan_bitable_template_portal.drill_management import (  # noqa: E402
     DrillError,
     DrillManagementService,
@@ -45,15 +47,15 @@ def _cell_xml(reference: str, text: str) -> bytes:
     ).encode("utf-8")
 
 
-def _drill_fixture(*untimed_rows: int, predicted: str) -> bytes:
-    """基于模板生成演练记录表，把指定行的预估时间单元格改写为 ⊗。"""
+def _drill_fixture(*untimed_rows: int, predicted: str, marker: str = UNTIMED_SYMBOL) -> bytes:
+    """基于模板生成演练记录表，把指定行的预估时间改写为指定标记。"""
     untimed = set(untimed_rows)
     if not untimed:
         untimed = {14}
 
     def transform(content: bytes) -> bytes:
         for row, original in _TEMPLATE_DURATIONS.items():
-            value = UNTIMED_SYMBOL if row in untimed else original
+            value = marker if row in untimed else original
             content = content.replace(_cell_xml(f"E{row}", original), _cell_xml(f"E{row}", value), 1)
         content = content.replace(
             _cell_xml("D16", _TEMPLATE_PREDICTED), _cell_xml("D16", predicted), 1
@@ -92,6 +94,47 @@ def _execution_for(configuration: dict) -> dict:
 
 
 class UntimedDrillStepRegressionTests(unittest.TestCase):
+    def test_invalid_duration_skips_execution_and_recovers_old_upload(self) -> None:
+        for marker in ("/", " ／ ", "", "未演练", "—", "0分"):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                store = LanPortalStateStore(root / "state.sqlite3")
+                service = DrillManagementService(store, data_root=root / "drills")
+                upload = dict(name="跳过步骤", year=2026, month=10, file_name="skip.xlsx",
+                              source=_drill_fixture(14, predicted="10分", marker=marker))
+                with patch.object(drill_management, "_step_duration_minutes", side_effect=parse_duration_minutes):
+                    failed = service.create_definition(**upload)
+                self.assertIn("预估时间", failed["detection_error"])
+                recovered = service.get_definition(failed["drill_id"])
+                fresh = service.create_definition(**upload)
+                self.assertEqual(recovered["configuration"], fresh["configuration"])
+                self.assertFalse(recovered["detection_error"])
+                step = recovered["configuration"]["steps"][1]
+                self.assertEqual((step["duration_text"], step["duration_minutes"], step["signature_slots"]),
+                                 (marker.strip(), 0, 0))
+                self.assertTrue(step["skipped"])
+
+                drill_id = recovered["drill_id"]
+                step["signature_slots"] = 3
+                saved = service.save_configuration(drill_id, recovered["configuration"],
+                                                   expected_version=recovered["version"])
+                self.assertEqual(saved["configuration"]["steps"][1]["signature_slots"], 0)
+                service.publish(drill_id, expected_version=saved["version"])
+                execution = _execution_for(saved["configuration"])
+                del execution["step_signers"]["14"]
+                service.save_execution(drill_id, "A", execution, expected_version=0)
+                generated = service.generate(drill_id, "A", signatures={
+                    person["record_id"]: _signature_png() for person in execution["participants"]
+                })
+                book = _parse_workbook(Path(generated["generated"]["path"]))
+                cells = next(sheet["cells"] for sheet in book["sheets"] if sheet["name"] == "本月记录")
+                self.assertEqual([cells.get(cell, "") for cell in ("E14", "F14", "G14", "I14")],
+                                 [marker, "", "", ""])
+                self.assertEqual([cells["G13"], cells["F15"], cells["G15"], cells["I15"]],
+                                 ["09:02", "09:02", "09:07", _CONFIRMED])
+                total_cell = _cell_target(saved["configuration"]["mapping"]["actual_total"])
+                self.assertEqual(cells[total_cell], "0时07分")
+
     def test_middle_untimed_step_full_workflow(self) -> None:
         """中间步骤 E14 改为 ⊗ 的全流程：配置、派生时间、生成文件一致。"""
         source = _drill_fixture(14, predicted="7分")
@@ -126,6 +169,8 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
             self.assertEqual(published["status"], "published")
 
             people = _make_people()
+            signers = _make_step_signers(people)
+            del signers["14"]
             execution = service.save_execution(
                 saved["drill_id"],
                 "A",
@@ -134,7 +179,7 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
                     "first_start_time": "09:00",
                     "commander": people[0],
                     "participants": people,
-                    "step_signers": _make_step_signers(people),
+                    "step_signers": signers,
                 },
                 expected_version=0,
             )
@@ -151,9 +196,9 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
             self.assertEqual(derived["record_values"].get(f"{step_mapping['end_col']}14"), "")
             self.assertEqual(derived["record_values"].get(f"{step_mapping['start_col']}15"), "09:02")
             self.assertEqual(derived["record_values"].get(f"{step_mapping['end_col']}15"), "09:07")
-            self.assertEqual(derived["record_values"].get(f"{step_mapping['result_col']}14"), _CONFIRMED)
+            self.assertEqual(derived["record_values"].get(f"{step_mapping['result_col']}14"), "")
             signature_ranges = {item["range"] for item in derived["signature_cells"]}
-            self.assertTrue({"H13", "H14", "H15"}.issubset(signature_ranges))
+            self.assertEqual(signature_ranges & {"H13", "H14", "H15"}, {"H13", "H15"})
             assessment = configuration["mapping"]["assessment"]
             self.assertEqual(
                 derived["assessment_values"].get(_cell_target(assessment["start_time"])), "09:00"
@@ -183,14 +228,14 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
             self.assertEqual(record["cells"].get("G14"), "")
             self.assertEqual(record["cells"].get("F15"), "09:02")
             self.assertEqual(record["cells"].get("G15"), "09:07")
-            self.assertEqual(record["cells"].get("I14"), _CONFIRMED)
+            self.assertEqual(record["cells"].get("I14"), "")
             with zipfile.ZipFile(output_path) as archive:
                 self.assertTrue(
                     any("drill_signature_" in name for name in archive.namelist())
                 )
 
     def test_first_last_and_multiple_untimed_steps(self) -> None:
-        """首/尾/多步 ⊗ 时派生时间正确，评估起止取首尾计时步骤，签名位置保留。"""
+        """首尾步骤跳过时，评估起止取首尾有效步骤。"""
         cases = [
             (
                 {13}, "8分",
@@ -249,7 +294,7 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         derived["record_values"].get(f"{step_mapping['result_col']}{row}"),
-                        _CONFIRMED,
+                        "" if row in untimed_rows else _CONFIRMED,
                         f"第 {row} 行确认结果缺失",
                     )
 
@@ -264,10 +309,14 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
                 )
 
                 signature_ranges = {item["range"] for item in derived["signature_cells"]}
-                self.assertTrue({"H13", "H14", "H15"}.issubset(signature_ranges))
+                self.assertEqual(signature_ranges & {"H13", "H14", "H15"},
+                                 {f"H{row}" for row in (13, 14, 15) if row not in untimed_rows})
                 step_by_row = {int(s["row"]): s for s in validated["steps"]}
                 for row in (13, 14, 15):
                     step = step_by_row[row]
+                    if row in untimed_rows:
+                        self.assertEqual(step["signature_slots"], 0)
+                        continue
                     cells = [item for item in derived["signature_cells"] if item["range"] == f"H{row}"]
                     self.assertEqual(len(cells), 1, f"第 {row} 行 H 签名位缺失")
                     self.assertEqual(
@@ -278,14 +327,13 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
                         cells[0]["signers"],
                         f"第 {row} 行执行人签名人员被绕过",
                     )
-                if 13 in untimed_rows:
+                if 13 not in untimed_rows:
                     invalid = {**execution, "step_signers": {**execution["step_signers"],
                         "13": [execution["participants"][1]["record_id"]]}}
                     self.assertIn("第 13 行 ECC 步骤需选择指挥人签名。",
                         _validate_execution({"configuration": validated}, invalid))
 
-    def test_exact_symbol_with_whitespace_is_accepted_but_unknown_text_rejected(self) -> None:
-        """精确符号 ⊗（剥离前后空白）计为不计时；其它未知文本仍严格拒绝。"""
+    def test_unrecognized_duration_and_empty_row_placeholder(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "spaced.xlsx"
             path.write_bytes(_drill_fixture(predicted="7分"))
@@ -304,26 +352,27 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
             )
             self.assertEqual(validated["steps"][1]["duration_minutes"], 0)
 
-        for bad in ("?", "abc", "⊗x", "1分⊗"):
+        for bad in ("?", "abc", "⊗x", "1分⊗", "  ", "9" * 320):
             with self.subTest(bad=bad), tempfile.TemporaryDirectory() as temporary:
                 path = Path(temporary) / "bad.xlsx"
                 path.write_bytes(_drill_fixture(predicted="7分"))
                 workbook = _parse_workbook(path)
                 mapping = detect_drill_configuration(workbook)["mapping"]
                 workbook["sheets"][0]["cells"]["E14"] = bad
-                with self.assertRaisesRegex(DrillError, "预估时间"):
-                    _validate_configuration(
-                        workbook,
-                        {
-                            "record_sheet": "本月记录",
-                            "assessment_sheet": "评估表",
-                            "mapping": mapping,
-                        },
-                    )
+                validated = _validate_configuration(workbook, {"record_sheet": "本月记录",
+                    "assessment_sheet": "评估表", "mapping": mapping})
+                step = validated["steps"][1]
+                self.assertEqual((step["row"], step["duration_minutes"], step["signature_slots"]), (14, 0, 0))
+                self.assertTrue(step["skipped"])
+
+                cells = workbook["sheets"][0]["cells"]
+                for column in ("location_col", "content_col"):
+                    cells.pop(f"{mapping['steps'][column]}14", None)
+                self.assertEqual([s["row"] for s in detect_drill_configuration(workbook)["steps"]], [13, 15])
 
     def test_public_duration_guards_reject_zero_negative_symbol_and_unknown(self) -> None:
         """parse_duration_minutes 与 build_time_chain 对 0、负值、⊗ 符号及未知文本严格拒绝。"""
-        for value in ("0", "0分", "-1", "-1分", "abc", "?", UNTIMED_SYMBOL):
+        for value in ("0", "0分", "-1", "-1分", "abc", "?", "/", "／", UNTIMED_SYMBOL):
             with self.subTest(value=value), self.assertRaises(DrillError):
                 parse_duration_minutes(value)
         for durations in ([0], [-1], [-5, 2]):
@@ -332,11 +381,13 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
             ):
                 build_time_chain("2026-10-17", "09:00", durations)
 
-    def test_untimed_step_total_validation_rejects_symbol_and_mismatch(self) -> None:
-        """配置预计总用时为 ⊗ 或数值与计时步骤合计不一致时，校验必须拒绝。"""
+    def test_all_timed_steps_still_validate_template_total(self) -> None:
+        """全部步骤计时时，仍校验表头总用时。"""
         with self.subTest(case="predicted symbol"), tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "symbol.xlsx"
-            path.write_bytes(_drill_fixture(predicted=UNTIMED_SYMBOL))
+            path.write_bytes(_replace_zip_part(_fixture_xlsx(), "xl/worksheets/sheet1.xml",
+                lambda source: source.replace(_cell_xml("D16", _TEMPLATE_PREDICTED),
+                                              _cell_xml("D16", UNTIMED_SYMBOL), 1)))
             workbook = _parse_workbook(path)
             mapping = detect_drill_configuration(workbook)["mapping"]
             with self.assertRaises(DrillError):
@@ -346,7 +397,8 @@ class UntimedDrillStepRegressionTests(unittest.TestCase):
                 )
         with self.subTest(case="predicted mismatch"), tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary) / "mismatch.xlsx"
-            path.write_bytes(_drill_fixture(predicted="8分"))
+            path.write_bytes(_replace_zip_part(_fixture_xlsx(), "xl/worksheets/sheet1.xml",
+                lambda source: source.replace(_cell_xml("D16", _TEMPLATE_PREDICTED), _cell_xml("D16", "8分"), 1)))
             workbook = _parse_workbook(path)
             mapping = detect_drill_configuration(workbook)["mapping"]
             with self.assertRaisesRegex(DrillError, "不一致"):

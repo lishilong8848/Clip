@@ -97,6 +97,11 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
   const block = descriptor.scriptSetup;
   const tree = ts.createSourceFile('Event.vue.ts', block.content, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   const bodies = {
+    loadMetricSourceRecords: `{
+      // V2 has already loaded the authorized rows for the entire selected period.
+      metricSourceRecords.value = detailEvents.value.slice();
+      metricLoading.value = false;
+    }`,
     loadEvents: `{
       if (!props.scope) return;
       const loadVersion = ++eventLoadVersion;
@@ -148,7 +153,7 @@ function drillEventLevel(value:string){clearFilters();levelFilter.value=value;sh
       edits.push([block.loc.start.offset + node.body.getStart(tree), block.loc.start.offset + node.body.end, bodies[node.name.text]]);
     }
   }
-  if (edits.length !== 2) throw new Error('Event V2 read functions changed');
+  if (edits.length !== Object.keys(bodies).length) throw new Error('Event V2 read functions changed');
   for (const [start, end, body] of edits.sort((a, b) => b[0] - a[0])) code = code.slice(0, start) + body + code.slice(end);
   return code;
 }

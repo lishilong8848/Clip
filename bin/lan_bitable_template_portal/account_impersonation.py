@@ -134,6 +134,8 @@ def check_origin(request, controller):
 
 
 def request_allowed(path, method):
+    if path == '/api/usage/events':
+        return method == 'POST'
     if path == '/api/auth/status' or path == '/api/health':
         return True
     if path == '/api/workbench/draft':

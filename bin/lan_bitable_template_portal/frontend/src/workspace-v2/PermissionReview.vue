@@ -5,7 +5,7 @@ import {Check,RefreshCw,Search,X} from 'lucide-vue-next';
 import {ApiError,requestJson,type Dict} from './client';
 import {registerNavigationGuard} from './navigation';
 const props=defineProps<{scopes:{value:string;label:string}[];modules:{value:string;label:string}[];categories:{value:string;label:string}[]}>();
-const emit=defineEmits<{changed:[]}>(),message=useMessage();
+const emit=defineEmits<{changed:[];pendingCount:[count:number|string]}>(),message=useMessage();
 const rows=ref<Dict[]>([]),loading=ref(false),busy=ref(false),error=ref(''),notice=ref(''),uncertain=ref(false);
 const status=ref('pending'),search=ref(''),page=ref(1),selected=ref<string[]>([]),review=ref<Dict[]>([]),action=ref('approve'),reason=ref('');
 const choices=[{value:'pending',label:'待审批'},{value:'all',label:'全部申请'},{value:'approved',label:'已通过'},{value:'rejected',label:'已拒绝'}];
@@ -18,6 +18,12 @@ async function load(){
  if(busy.value)return;read?.abort();const controller=new AbortController();read=controller;loading.value=true;error.value='';
  try{const result=await requestJson('/api/auth/permission-requests/admin?'+new URLSearchParams({status:status.value,limit:'200'}),{signal:controller.signal,cache:'no-store'});
   if(controller.signal.aborted)return;rows.value=result.items||[];selected.value=selected.value.filter(id=>rows.value.some(row=>row.request_id===id&&row.status==='pending'));uncertain.value=false;
+  if(status.value==='pending'){
+    const total=result.total;
+    emit('pendingCount',Number.isInteger(total)&&total>=rows.value.length?total:rows.value.length===200?'200+':rows.value.length);
+  }else if(status.value==='all' && rows.value.length<200){
+    emit('pendingCount',rows.value.filter(row=>row.status==='pending').length);
+  }
  }catch(e){if(!controller.signal.aborted){error.value=(e as Error).message;if(e instanceof ApiError&&[401,403].includes(e.status)){rows.value=[];selected.value=[];review.value=[];}}}
  finally{if(read===controller)loading.value=false;}
 }

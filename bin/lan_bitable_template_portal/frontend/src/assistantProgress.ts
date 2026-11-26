@@ -1,3 +1,20 @@
+const preStartCodes = new Set(['startup_listener', 'startup_handshake', 'startup_catalog', 'startup_cooldown']);
+
+export function startupFailure(turn: Record<string, any>): boolean {
+  return turn.status === 'failed' && (
+    preStartCodes.has(turn.error_code) || ['runtime_startup', 'service_startup_timeout'].includes(turn.error_code)
+    || /^助手启动超时，原消息已保留，可继续。/.test(turn.error || '')
+  );
+}
+
+export function recoveryAction(turn: Record<string, any>, activeRun: string): string {
+  if (turn.plan || turn.task_id || turn.job_id) return '查看原任务';
+  if (turn.client_pending || turn.status === 'pending' || (activeRun && activeRun === turn.run_id)) return '查看原进度';
+  if (!startupFailure(turn)) return '';
+  return preStartCodes.has(turn.error_code) && turn.operation_id && turn.attempt_id && turn.run_id
+    ? '重试原问题' : '查看原进度';
+}
+
 /** Display observed server milestones, never generated reasoning or draft text. */
 export function assistantProgressText(turn: Record<string, any>): string {
   const timing = turn.runtime || {};

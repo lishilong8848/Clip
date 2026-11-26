@@ -92,8 +92,8 @@
       </div>
       <details class="rd-fold" open><summary>步骤与签名人数 <span>{{ configSteps.length }} 步</span></summary>
         <div class="drd-step-cards"><div v-for="step in configSteps" :key="step.row" class="drd-config-step">
-          <div class="drd-step-head"><b>{{ step.location || '位置待核对' }}</b><small>第 {{ step.row }} 行 · {{ step.duration_minutes ?? '—' }} 分钟</small></div>
-          <p>{{ step.content }}</p><label class="drd-inline">签名人数<input v-model.number="step.signature_slots" aria-label="步骤签名人数" type="number" min="0" max="10" step="1" :disabled="busy || configurationLocked"></label>
+          <div class="drd-step-head"><b>{{ step.location || '位置待核对' }}</b><small>第 {{ step.row }} 行 · {{ step.skipped ? '跳过' : `${step.duration_minutes ?? '—'} 分钟` }}</small></div>
+          <p>{{ step.content }}</p><label class="drd-inline">签名人数<input v-model.number="step.signature_slots" aria-label="步骤签名人数" type="number" min="0" max="10" step="1" :disabled="busy || configurationLocked || step.skipped"></label>
         </div></div>
         <p v-if="!configSteps.length" class="rd-notice">未识别到步骤，请检查步骤区域映射。</p>
       </details>
@@ -139,7 +139,7 @@
           <p v-if="missingSignaturePeople.length" class="rd-notice">{{ missingSignaturePeople.map(personName).join('、') }} 的签名待补充</p>
           <div class="rd-section-head"><h3>步骤执行人</h3><small>{{ executionSteps.length }} 步</small></div>
           <ol class="drd-steps"><li v-for="step in executionSteps" :key="step.row" class="execution-step">
-            <div class="drd-step-head"><b>{{ stepIndex(step) }} · {{ step.location || '位置未提供' }}</b><small>{{ step.duration_minutes ?? '—' }} 分钟</small></div>
+            <div class="drd-step-head"><b>{{ stepIndex(step) }} · {{ step.location || '位置未提供' }}</b><small>{{ step.skipped ? '跳过' : `${step.duration_minutes ?? '—'} 分钟` }}</small></div>
             <p>{{ step.content }}</p>
             <div class="rd-form-grid signer-grid"><label v-for="slot in Number(step.signature_slots ?? 1)" :key="slot" class="rd-field">执行人 {{ slot }}
               <VnetSelect :input-id="'drill-step-'+step.row+'-'+slot" :label="'执行人 '+slot" :model-value="stepSignerIds(step.row)[slot-1]?personOptionLabel(stepSignerIds(step.row)[slot-1]):blankStepSignerOption"

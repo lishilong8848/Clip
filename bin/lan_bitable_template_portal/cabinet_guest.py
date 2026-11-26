@@ -11,7 +11,7 @@ def is_cabinet_guest(session):
 
 def cabinet_guest_api_allowed(method, path):
     if method == "POST":
-        return path == "/api/cabinet-power/exports"
+        return path in {"/api/cabinet-power/exports", "/api/usage/events"}
     if method != "GET":
         return False
     return bool(re.fullmatch(

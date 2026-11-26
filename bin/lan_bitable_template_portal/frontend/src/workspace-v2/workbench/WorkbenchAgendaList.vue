@@ -12,9 +12,9 @@ defineEmits<{ task:[item:WorkItem] }>();
       <time>{{ entry.time }}</time>
       <div>
         <small>{{ entry.label }}</small>
-        <button v-if="entry.task" type="button" class="agenda-task" @click="$emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></button>
+        <button v-if="entry.task" type="button" class="agenda-task" :title="entry.title" @click="$emit('task',entry.task)">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></button>
         <details v-else-if="entry.meta">
-          <summary class="agenda-task">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></summary>
+          <summary class="agenda-task" :title="entry.title">{{ entry.title }} <ChevronRight :size="14" aria-hidden="true" /></summary>
           <p>{{ entry.meta }}</p>
         </details>
         <b v-else>{{ entry.title }}</b>
@@ -42,4 +42,6 @@ details[open] summary svg{transform:rotate(90deg)}
 .timeline[data-view=table] li>div{border:0;padding:5px 0}
 .timeline[data-view=table] li>div::before{display:none}
 .agenda-task{min-width:0;overflow-wrap:anywhere}
+/* The compact rail hides long titles behind an ellipsis with no tooltip; on touch show the words instead. */
+@media(pointer:coarse){.timeline[data-view=table] li>div{overflow-wrap:anywhere}}
 </style>

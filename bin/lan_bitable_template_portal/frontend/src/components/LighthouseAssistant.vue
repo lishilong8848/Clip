@@ -270,13 +270,14 @@
                   <p v-for="warning in turn.warnings || []" :key="warning" class="source-warning">{{ warning }}</p>
                   <div class="message-actions">
                     <button v-if="turn.answer" type="button" class="icon" title="复制回答" aria-label="复制回答" @click="copyAnswer(turn)"><Copy :size="15" /></button>
-                    <button type="button" class="icon" title="编辑后重新提问" aria-label="编辑后重新提问" @click="editQuestion(turn)"><Pencil :size="15" /></button>
-                    <button v-if="turn.resume_available && turn.run_id" type="button" class="retry" data-v2-navigation :disabled="!!resumeRun || sending || state.busy" @click="resumeResearch(turn)"><Loader2 v-if="resumeRun === turn.run_id" :size="14" class="spin" /><RotateCcw v-else :size="14" />继续研究</button>
+                    <button v-if="turnAction(turn) !== '查看原任务'" type="button" class="icon" title="编辑后重新提问" aria-label="编辑后重新提问" @click="editQuestion(turn)"><Pencil :size="15" /></button>
+                    <button v-if="turnAction(turn)" type="button" class="retry" :disabled="sending || loading || (turnAction(turn) === '重试原问题' && state.busy)" @click="send(turn)">{{ turnAction(turn) }}</button>
+                    <button v-else-if="turn.resume_available && turn.run_id" type="button" class="retry" data-v2-navigation :disabled="!!resumeRun || sending || state.busy" @click="resumeResearch(turn)"><Loader2 v-if="resumeRun === turn.run_id" :size="14" class="spin" /><RotateCcw v-else :size="14" />继续研究</button>
                     <button v-else-if="['failed', 'stopped'].includes(turn.status) && !sending" type="button" class="retry" @click="send(turn)"><RotateCcw :size="14" />{{ turn.status === 'stopped' ? '继续回答' : '重试' }}</button>
                     <span v-if="turnIsComplete(turn)" :title="synthesisReason || (playingId === turn.operation_id ? '停止播报' : '朗读回复')">
                       <button type="button" class="icon voice-control" data-v2-navigation :aria-label="playingId === turn.operation_id ? '停止播报' : '朗读回复'" :aria-pressed="playingId === turn.operation_id" :disabled="!!synthesisReason || !['idle', 'playing'].includes(voicePhase)" @click="readReply(turn.operation_id, turn.answer)"><Square v-if="playingId === turn.operation_id" :size="15" /><Volume2 v-else :size="15" /></button>
                     </span>
-                    <button v-if="turn.status === 'completed' && !turn.plan && !state.busy" type="button" class="icon" title="重新生成回答" aria-label="重新生成回答" @click="send(turn, true)"><RefreshCw :size="15" /></button>
+                    <button v-if="turn.status === 'completed' && !turnAction(turn) && !state.busy" type="button" class="icon" title="重新生成回答" aria-label="重新生成回答" @click="send(turn, true)"><RefreshCw :size="15" /></button>
                     <span v-if="turn.model_name && turn.answer" class="used-model" :title="'由 ' + turn.model_name + ' 回答'">{{ turn.model_name }}</span>
                   </div>
                 </div>
@@ -344,7 +345,10 @@
 </template>
 
 <script setup lang="ts">
-import { assistantProgressText } from '../assistantProgress';
+import { usageClientKey } from '../usageNavigation';
+import { recordPage } from '../usageEvents';
+
+import { assistantProgressText, recoveryAction, startupFailure } from '../assistantProgress';
 import { computed, defineAsyncComponent, inject, nextTick, onBeforeUnmount, onMounted, reactive, ref, shallowRef, watch } from 'vue';
 import { focusNoticePhotoArea, noticePhotoFiles } from '../noticePhotoInput';
 import type { Chat } from '@ai-sdk/vue';
@@ -524,6 +528,7 @@ function insertResearch(): void {
   focusComposer();
 }
 async function resumeResearch(turn: Dict): Promise<void> {
+  if (turnAction(turn)) { await readState(false, true); return; }
   if (!turn.resume_available || !turn.run_id || resumeRun.value || sending.value || state.value.busy) return;
   const current = new AbortController(), owner = props.userId; resumeController = current; resumeRun.value = turn.run_id; error.value = '';
   try {
@@ -972,8 +977,10 @@ function onThreadScroll(): void { if (isNearBottom()) hasNewContent.value = fals
 function isNearBottom(): boolean {
   return !thread.value || thread.value.scrollHeight - thread.value.scrollTop - thread.value.clientHeight < 80;
 }
-function preservePendingTurn(turn: Dict, live?: Dict): void {
+function preservePendingTurn(turn: Dict, live?: Dict, activeRun?: string): void {
   if (turn.status !== 'pending' || !live || live.run_id !== turn.run_id) return;
+  // Trust a fresh snapshot of this active attempt after a startup failure.
+  if (activeRun && turn.run_id === activeRun && turn.attempt_id === live.attempt_id && startupFailure(live)) return;
   if (live.status !== 'pending' && !live.client_pending) { Object.assign(turn, live); return; }
   if (!String(turn.answer || '').startsWith(live.answer || '')) turn.answer = live.answer;
   if (Number(live.process?.at(-1)?.at || 0) > Number(turn.process?.at(-1)?.at || 0)) turn.process = live.process;
@@ -1001,7 +1008,7 @@ function replaceState(result: Dict): void {
   const pending = changedConversation ? [] : (state.value.turns || []).filter((turn: Dict) => turn.client_pending && !received.has(turn.operation_id));
   for (const turn of result.turns || []) {
     const live = changedConversation ? undefined : previousTurns.get(turn.operation_id);
-    preservePendingTurn(turn, live);
+    preservePendingTurn(turn, live, result.active_run_id);
   }
   const older = changedConversation ? [] : (state.value.turns || []).filter((turn: Dict) => turn.history_loaded && !received.has(turn.operation_id));
   result.turns = [...older, ...(result.turns || []), ...pending].sort((a: Dict, b: Dict) => Number(a.at || 0) - Number(b.at || 0));
@@ -1048,7 +1055,8 @@ async function readState(showLoading = true, force = false): Promise<void> {
     if (disposed || readController !== controller) return;
     // 响应到达后、替换 state 之前再测跟随，避免长 GET 返回时被强制跳底（首次打开 showLoading 可强制）。
     replaceState(result);
-    if (result.active_run_id && open.value) attachStream(result.active_run_id);
+    if (result.active_run_id && open.value && result.turns.some((turn: Dict) =>
+      turn.run_id === result.active_run_id && turn.status === 'pending')) attachStream(result.active_run_id);
     if (showLoading) scrollBottom();
   } catch (e) {
     if (disposed || readController !== controller) return;
@@ -1117,10 +1125,48 @@ async function answerQuestion(turn:Dict,answer:string):Promise<void>{
   if(state.value.turns.at(-1)?.operation_id!==turn.operation_id||state.value.busy)return;
   await send(undefined,false,{operationId:turn.operation_id,answer});
 }
+function turnAction(turn: Dict): string { return recoveryAction(turn, state.value.active_run_id); }
+
 async function send(retry?: Dict, regenerate = false, clarification?:{operationId:string;answer:string}): Promise<void> {
-  if (sending.value || loading.value || uploading.value || (!retry && !clarification && !draft.value.trim() && !draftFiles.value.some(f => f.id))) return;
-  if (!retry && !clarification && commandsMenu.value?.visible) return;
-  const question = clarification?.answer || retry?.question || draft.value.trim();
+  const fromDraft = !retry && !clarification;
+  if (sending.value || loading.value || uploading.value || (fromDraft && !draft.value.trim() && !draftFiles.value.some(f => f.id))) return;
+  let retryOfRun = '';
+  if (retry && turnAction(retry)) {
+    const action = turnAction(retry), owner = props.userId, conversation = state.value.conversation_id;
+    const { operation_id, attempt_id, run_id } = retry;
+    const epoch = shapeEpoch;
+    sending.value = true;
+    try {
+      if (action !== '重试原问题') {
+        await readState(false, true);
+        const id = state.value.turns.find((item: Dict) => item.operation_id === operation_id)?.plan?.id;
+        if (id && owner === props.userId && conversation === state.value.conversation_id && epoch === shapeEpoch) {
+          expandedPlans[id] = true;
+          await nextTick(); locatePlan(id);
+        }
+        return;
+      }
+      // Read the stored receipt, including older turns. A merged local snapshot is not proof of termination.
+      const snapshot = await call('conversation?operation_id=' + encodeURIComponent(operation_id));
+      if (disposed || epoch !== shapeEpoch || owner !== props.userId || conversation !== state.value.conversation_id ||
+          conversation !== snapshot.conversation_id) return;
+      const current = state.value.turns.find((item: Dict) => item.operation_id === operation_id);
+      const receipt = snapshot.turns?.find((item: Dict) => item.operation_id === operation_id);
+      if (!receipt || recoveryAction(receipt, snapshot.active_run_id) !== action || receipt.run_id !== run_id ||
+          receipt.attempt_id !== attempt_id || !current || current.run_id !== run_id || current.attempt_id !== attempt_id ||
+          turnAction(current) !== action || snapshot.busy || state.value.busy || !snapshot.enabled || !snapshot.configured) {
+        await readState(false, true);
+        return;
+      }
+      retry = Object.assign(current, receipt);
+      retryOfRun = run_id;
+    } catch {
+      error.value = '暂时无法核对原问题，请稍后查看。';
+      return;
+    } finally { sending.value = false; }
+  }
+  if (fromDraft && commandsMenu.value?.visible) return;
+  const question = fromDraft ? draft.value.trim() : clarification?.answer ?? retry?.question ?? '';
   const clarificationOperationId=clarification?.operationId||retry?.clarification_operation_id||'';
   if (!retry && !clarificationOperationId && /^(?:请)?确认发送[。！!\s]*$/.test(question) && !draftFiles.value.length) {
     const pending = [...planTurns.value.values()].filter(turn => ['needs_input', 'awaiting_confirmation', 'awaiting_second_confirmation'].includes(turn.plan.status));
@@ -1133,16 +1179,19 @@ async function send(retry?: Dict, regenerate = false, clarification?:{operationI
       return;
     }
   }
-  const commands = clarification?[]:retry?.commands || selectedCommands.value;
+  const commands = fromDraft ? selectedCommands.value : retry?.commands || [];
   const submittedCommands = retry?.submitted_commands || commands.map((item: Dict) => ({ kind: item.kind, id: item.id }));
-  const attachments = clarification?[]:retry?.attachments || draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file);
+  const attachments = fromDraft ? draftFiles.value.filter(f => f.id).map(({ preview, localId, uploading, error, ...file }) => file) : retry?.attachments || [];
   const previewFile = clarification?null:retry ? retry.preview_file || null : artifactFile.value;
   const operation = retry?.operation_id || (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_assistant`);
-  const attempt = retry?.client_pending && !regenerate ? (retry.attempt_id || operation) : (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_attempt`);
+  // Two tabs explicitly retrying the same failed run must propose the same new attempt.
+  const attempt = retryOfRun ? 'startup_retry_' + retryOfRun :
+    retry?.client_pending && !regenerate ? (retry.attempt_id || operation) : (window.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(36).slice(2)}_attempt`);
   const at = retry?.at || Date.now() / 1000;
+  const conversation = state.value.conversation_id, owner = props.userId;
   sending.value = true; error.value = '';
   abortRead();
-  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, question: question || '请处理附件', attachments, preview_file: previewFile, commands, submitted_commands: submittedCommands, clarification_operation_id:clarificationOperationId, at });
+  rememberOutgoing({ conversation_id: state.value.conversation_id, operation_id: operation, attempt_id: attempt, retry_of_run: retryOfRun, question: question || '请处理附件', attachments, preview_file: previewFile, commands, submitted_commands: submittedCommands, clarification_operation_id:clarificationOperationId, at });
   if (!retry) {
     state.value.turns.push({ question: question || '请处理附件', attachments, preview_file: previewFile, commands: [...commands], submitted_commands: submittedCommands, clarification_operation_id:clarificationOperationId, operation_id: operation, attempt_id: attempt, status: 'pending', client_pending: true, at });
     if(!clarification){draft.value = '';selectedCommands.value = [];
@@ -1154,23 +1203,34 @@ async function send(retry?: Dict, regenerate = false, clarification?:{operationI
   const previousRun = state.value.active_run_id;
   try {
     const result = await call('messages', 'POST', { question, commands: submittedCommands, file_ids: attachments.map((file: Dict) => file.id), preview_file_id: previewFile?.id || '', operation_id: operation, attempt_id: attempt, conversation_id: state.value.conversation_id, ...(clarificationOperationId?{clarification_operation_id:clarificationOperationId}:{}) }, 20000);
-    if (disposed) return;
-    abortRead();
+    if (disposed || owner !== props.userId || conversation !== state.value.conversation_id) return;
     forgetOutgoing(operation, attempt);
+    const saved = state.value.turns.find((turn: Dict) => turn.operation_id === operation);
+    // Polling may already have observed completion or cancellation while the POST receipt was in flight.
+    if (saved && !saved.client_pending && saved.run_id === result.run_id) {
+      await readState(false, true);
+      return;
+    }
+    abortRead();
     for (const turn of state.value.turns) {
       if (turn.operation_id === operation) Object.assign(turn, result.turn, { client_pending: false });
       else if (previousRun && turn.run_id === previousRun && turn.status === 'pending') turn.status = 'superseded';
     }
     state.value.active_run_id = result.run_id;
     state.value.busy = result.turn.status === 'pending';
-    attachStream(result.run_id);
+    if (state.value.busy) attachStream(result.run_id);
   } catch (e) {
-    if (disposed) return;
+    if (disposed || owner !== props.userId || conversation !== state.value.conversation_id) return;
     const message = e instanceof Error ? e.message : '回答失败，问题已保留';
-    const item = state.value.turns.find((turn: Dict) => turn.operation_id === operation);
-    if (item) Object.assign(item, { status: 'failed', error: message });
+    const item = state.value.turns.find((turn: Dict) =>
+      turn.operation_id === operation && turn.attempt_id === attempt && turn.client_pending);
+    if (item) {
+      const payload = (e as Dict)?.payload;
+      Object.assign(item, { status: 'failed', error: message, error_code: payload?.code || payload?.category });
+      const envelope = outgoing().find(entry => entry.operation_id === operation && entry.attempt_id === attempt);
+      if (envelope && startupFailure(item)) rememberOutgoing({ ...envelope, error_code: item.error_code || 'runtime_startup' });
+    }
     await readState(false, true);
-    if (!disposed && item?.client_pending) error.value = message;
   } finally {
     sending.value = false;
     if (!disposed) { scheduleRead(); void nextTick(() => input.value?.focus()); }
@@ -1194,7 +1254,13 @@ function restoreOutgoing(): void {
     if (item.conversation_id !== state.value.conversation_id) { forgetOutgoing(item.operation_id, item.attempt_id); continue; }
     const saved = state.value.turns.find((turn: Dict) => turn.operation_id === item.operation_id);
     if (saved?.attempt_id === item.attempt_id && !saved.client_pending) { forgetOutgoing(item.operation_id, item.attempt_id); continue; }
-    if (!saved) state.value.turns.push({ ...item, status: 'failed', client_pending: true, error: '这条消息尚未确认送达，可重试原消息。' });
+    if (item.retry_of_run && saved && !saved.client_pending) {
+      if (saved.run_id === item.retry_of_run && !saved.plan && saved.status === 'failed') {
+        Object.assign(saved, { client_pending: true, attempt_id: item.attempt_id, error: '正在核对重试回执。' });
+      } else { forgetOutgoing(item.operation_id, item.attempt_id); }
+    }
+    if (!saved) state.value.turns.push({ ...item, status: 'failed', client_pending: true,
+      error: item.error_code ? '原问题已保留。' : '这条消息尚未确认送达，可重试原消息。' });
   }
 }
 
@@ -1251,6 +1317,7 @@ async function attachStream(runId: string): Promise<void> {
         if (turn && Array.isArray(value.process)) turn.process = value.process;
         if (turn && value.runtime && typeof value.runtime === 'object') turn.runtime = value.runtime;
       } else if (part.type === 'data-turn' && turn) {
+        if (value.status !== 'pending' && !loading.value) abortRead();
         const follow = isNearBottom();
         const newFiles = (value.output_files?.length || 0) > (turn.output_files?.length || 0);
         const incoming = { ...value }; preservePendingTurn(incoming, turn);
@@ -1258,11 +1325,20 @@ async function attachStream(runId: string): Promise<void> {
         if (newFiles) { if (follow) scrollBottom(); else hasNewContent.value = true; }
       }
     },
-    onFinish: () => { if (!disposed && serial === streamSerial) { renderStream(); void readState(false, true); } },
-    onError: () => { if (!disposed && serial === streamSerial) { streamRun = ''; error.value = '连接暂时中断，正在恢复原回答。'; scheduleRead(); } },
+    onFinish: () => {
+      if (disposed || serial !== streamSerial) return;
+      renderStream();
+      streamRun = '';
+      if (state.value.turns?.some((turn: Dict) => turn.run_id === runId && turn.status === 'pending')) scheduleRead();
+      else void readState(false, true);
+    },
+    onError: () => { if (!disposed && serial === streamSerial) { streamRun = ''; scheduleRead(); } },
   });
   streamChat.value = client;
-  void client.resumeStream().catch(() => { if (!disposed && serial === streamSerial) scheduleRead(); });
+  const streamEnded = () => {
+    if (!disposed && serial === streamSerial && streamRun === runId) { streamRun = ''; scheduleRead(); }
+  };
+  void client.resumeStream().then(streamEnded, streamEnded);
   } catch {
     if (!disposed && serial === streamSerial) { streamRun = ''; error.value = '会话组件加载未完成，请重新打开助手。'; scheduleRead(); }
   }
@@ -2642,6 +2718,10 @@ onBeforeUnmount(() => {
   resizeActive.value = false;
   resizePointerId = null;
 });
+
+const usageClient = inject(usageClientKey, null);
+watch(() => workspaceOpen.value ? 'workspace' : settingsOpen.value ? 'settings' : open.value ? 'chat' : '',
+  page => { if (usageClient && page) recordPage(usageClient, 'assistant', page); }, {flush:'post',immediate:true});
 </script>
 
 <style scoped>

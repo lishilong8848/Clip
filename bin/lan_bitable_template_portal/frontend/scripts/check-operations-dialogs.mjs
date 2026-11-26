@@ -64,8 +64,28 @@ async function events({page,go,capture}){
   for(const [key,label] of [['timeline','时间线'],['fields','原表字段']]){
     await button(dialog,label).click();await capture('ev-'+key,'事件'+label,dialog);
   }
-  await button(dialog,'关闭').click();await page.locator('.ops-event-row').first().click();await button(dialog,'标记转检修').click();
+  await button(dialog,'关闭').click();
+  const eventRow=page.locator('.ops-event-row').filter({hasText:'H楼冷却水泵运行告警'});
+  const transfers=[];
+  await page.route('**/api/events/transfer-repair',async route=>{
+    transfers.push(route.request().postDataJSON());
+    if(transfers.length===1)return route.fulfill({status:409,json:{ok:false,error:'隔离测试：此次标记未保存'}});
+    return route.continue();
+  });
+  await eventRow.click();await button(dialog,'标记转检修').click();
+  await dialog.getByRole('alert').filter({hasText:'此次标记未保存'}).waitFor();
+  await button(dialog,'关闭').click();
+  await eventRow.click();
+  assert.equal(await dialog.getByText(/此次标记未保存/).count(),0);
+  await button(dialog,'标记转检修').click();
   await button(dialog,'填写维修单').waitFor();await capture('ev-transfer','台账打开事件并标记转检修',dialog);
+  assert.deepEqual(transfers.map(item=>item.record_id),['evt-audit','evt-audit']);
+  await button(dialog,'关闭').click();
+  const monthlyReads=[];
+  page.on('request',request=>{if(new URL(request.url()).pathname==='/api/events/monthly')monthlyReads.push(request.url());});
+  await page.locator('[data-metric=repairing]').click();await dialog.getByRole('button',{name:/H楼冷却水泵运行告警/}).click();
+  await button(dialog,'填写维修单').waitFor();
+  assert.deepEqual(monthlyReads,[],'metric details use the same rows as the displayed count');
   await button(dialog,'填写维修单').click();await page.waitForURL(u=>u.searchParams.get('__page')==='/repair-management'&&u.searchParams.get('from_event_record_id')==='evt-audit');
 }
 async function daily({page,go,capture}){

@@ -19,7 +19,7 @@ let failUpload=false, releaseUpload;
 const layouts = layoutApiFixture();
 const titles = ['冷水机组月度维护', 'BA系统资料维护', '空调过滤网更换维护', '旁滤装置月度维护', '制冷单元季度维护', '水处理系统维护'];
 const notices = Array.from({ length: 12 }, (_, i) => ({ notice_key: 'fixture-notice-' + i, source_record_id: 'fixture-source-' + i,
-  title: `EA118机房A楼${titles[i % titles.length]}${i > 5 ? '（第二阶段）' : ''}`, building: 'A楼', scope: 'A', specialty: '暖通',
+  title: `EA118机房D楼${titles[i % titles.length]}${i > 5 ? '（第二阶段）' : ''}`, building: 'D楼', scope: 'D', specialty: '暖通',
   status: i > 8 ? '已结束' : '开始', maintenance_cycle: '月度', start_time: '2026-10-14 09:00', end_time: '2026-10-14 18:30',
   mop_uploaded: i > 8, mop_attachment_count: i > 8 ? 1 : 0 }));
 const candidates = Array.from({ length: 15 }, (_, i) => ({ record_id: 'fixture-mop-' + i, title: titles[i % titles.length] + '标准作业指导书',
@@ -55,30 +55,31 @@ try {
     if (await layouts.handle(route, 'mop-layout-fixture')) return;
     const ok = data => route.fulfill({ json: { ok: true, data } });
     reads.push(url.pathname + url.search);
-    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'mop-layout-fixture', name: '界面预览', role: 'admin', level: 'L1', category: 'manager', modules: ['engineer_mop'] }, scope_options: [{ value: 'A', label: 'A楼' }, { value: 'B', label: 'B楼' }] });
+    if (url.pathname === '/api/auth/status') return ok({ logged_in: true, user: { open_id: 'mop-layout-fixture', name: '界面预览', role: 'admin', level: 'L1', category: 'manager', modules: ['engineer_mop'] }, scope_options: [{ value: 'D', label: 'D楼' }, { value: 'E', label: 'E楼' }] });
     if (url.pathname === '/api/health') return route.fulfill({ json: { ok: true, service: 'clipflow_backend', instance_id: 'isolated-mop' } });
     if (url.pathname === '/api/signatures/people') return ok({people,count:people.length});
     if (url.pathname === '/api/engineer/mop/history') {
-      const scope=url.searchParams.get('scope'), specialty=url.searchParams.get('specialty'), page=Number(url.searchParams.get('page')||1);
-      const records=scope==='B'?[]:[{
-        record_id:'recOldMop',title:'2025 年已归档暖通维保',building:'A楼',specialty:'暖通',cycle:'月度',status:'已结束',
+      const scope=url.searchParams.get('scope'), specialty=url.searchParams.get('profession_view'), page=Number(url.searchParams.get('page')||1);
+      const records=scope==='E'?[]:[{
+        record_id:'recOldMop',title:'2025 年已归档暖通维保',building:'D楼',specialty:'暖通',cycle:'月度',status:'已结束',
         planned:'2025-04-01',attachments:[{id:'a'.repeat(24),name:'暖通维保归档.xlsx'}],
       }];
-      return ok({scope,specialties:scope==='B'?[]:['暖通','电气'],records:specialty==='电气'?[]:records,
-        page,page_size:20,total:specialty==='电气'||scope==='B'?0:21});
+      return ok({scope,specialties:scope==='E'?[]:['暖通','电气'],records:specialty==='电气'?[]:records,
+        page,page_size:20,total:specialty==='电气'||scope==='E'?0:21});
     }
     if (url.pathname === '/api/engineer/mop/history/recOldMop/'+'a'.repeat(24)) {
-      assert.equal(url.searchParams.get('scope'),'A');
+      assert.equal(url.searchParams.get('scope'),'D');
+      assert.equal(url.searchParams.get('profession_view'),'暖通');
       return route.fulfill({contentType:'application/octet-stream',body:'history attachment fixture',
         headers:{'Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent('暖通维保归档.xlsx')}});
     }
-    if (url.pathname === '/api/engineer/mop/bootstrap') return ok({ notices: url.searchParams.get('scope') === 'B' ? [] : structuredClone(notices), mop_candidates: candidates, warnings: ['隔离测试提示：请核对本次维护单填写内容。'], auth: { user: { open_id: 'mop-layout-fixture', name: '界面预览' } } });
+    if (url.pathname === '/api/engineer/mop/bootstrap') return ok({ notices: url.searchParams.get('scope') === 'E' ? [] : structuredClone(notices), mop_candidates: candidates, warnings: ['隔离测试提示：请核对本次维护单填写内容。'], auth: { user: { open_id: 'mop-layout-fixture', name: '界面预览' } } });
     if (url.pathname === '/api/engineer/mop/bind') {
       const body = req.postDataJSON(); writes.push(body);
       assert(body.notice_key.startsWith('fixture-notice-'));
       return ok({ binding: body });
     }
-    if (url.pathname === '/api/engineer/mop/preview') return ok({ local_file: { path: 'fixture.xlsx', relative_path: localPath, file_name: attachmentName }, mop_title: '冷却塔月度维保保养记录单', attachment: { name: attachmentName }, sheets: [sheet, { name: '封面', is_cover: true, row_count: 1, column_count: 2, rows: [['设备维护作业', 'A楼']] }], warnings: [] });
+    if (url.pathname === '/api/engineer/mop/preview') return ok({ local_file: { path: 'fixture.xlsx', relative_path: localPath, file_name: attachmentName }, mop_title: '冷却塔月度维保保养记录单', attachment: { name: attachmentName }, sheets: [sheet, { name: '封面', is_cover: true, row_count: 1, column_count: 2, rows: [['设备维护作业', 'D楼']] }], warnings: [] });
     if (url.pathname === '/api/engineer/mop/fill' || url.pathname === '/api/engineer/mop/upload-signed') {
       assert.equal(req.method(),'POST');
       const body=req.postDataJSON();fileActions.push({path:url.pathname,body});
@@ -100,7 +101,7 @@ try {
   });
   page = await context.newPage(); page.setDefaultTimeout(15000);
   page.on('pageerror', error => errors.push(error.message));
-  await page.goto(origin + '/assets/workspace-v2/index.html?__page=/engineer/mop&scope=A');
+  await page.goto(origin + '/assets/workspace-v2/index.html?__page=/engineer/mop&scope=D');
   await page.getByRole('button', { name: '打开填写', exact: true }).waitFor();
   await page.screenshot({ path: path.join(output, before ? 'before-desktop.png' : 'desktop.png'), fullPage: before });
   if (!before) {
@@ -145,16 +146,16 @@ try {
     await history.getByRole('button',{name:'卡片显示'}).click();
     await page.screenshot({path:path.join(output,'history-mobile.png')});
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
-    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('B');
+    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('E');
     await history.getByText('暂无符合条件的已上传维保单',{exact:true}).waitFor();
     assert.equal(await history.getByRole('button',{name:'下载 暖通维保归档.xlsx'}).count(),0);
-    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('A');
+    await history.getByRole('combobox',{name:'填写记录楼栋'}).selectOption('D');
     await page.setViewportSize({width:1440,height:900});
     await page.getByRole('navigation',{name:'维保单办理分区'}).getByRole('button',{name:'办理',exact:true}).click();
     const search = page.getByPlaceholder('搜索通告、楼栋、专业');
     await search.fill('BA系统'); assert.equal(await page.locator('.mop-desk-notice').count(), 2);
     await page.locator('.mop-desk-notice').first().click();
-    await page.locator('.mop-desk-target').getByText('EA118机房A楼BA系统资料维护', { exact: true }).waitFor();
+    await page.locator('.mop-desk-target').getByText('EA118机房D楼BA系统资料维护', { exact: true }).waitFor();
     await search.fill('');
     await page.getByPlaceholder('搜索 MOP 名称、文件编号、专业').fill('JSNT-MOP-102');
     assert.equal(await page.locator('.mop-desk-file').count(), 1);
@@ -309,13 +310,31 @@ try {
     if(!await page.getByPlaceholder('搜索通告、楼栋、专业').isVisible())await page.getByRole('button',{name:'1 选择通告'}).click();
     await page.getByPlaceholder('搜索通告、楼栋、专业').fill('冷水');
     await page.locator('.mop-desk-notice').first().click();
-    await page.locator('.mop-desk-target').getByText('EA118机房A楼冷水机组月度维护', { exact: true }).waitFor();
+    await page.locator('.mop-desk-target').getByText('EA118机房D楼冷水机组月度维护', { exact: true }).waitFor();
     await page.screenshot({ path: path.join(output, 'mobile.png') });
     assert.equal(writes.length, 1, 'Choosing notices does not submit a business action');
     await page.getByRole('combobox', { name: '切换楼栋', exact: true }).click();
-    await page.locator('.v2-single-select-menu').getByText('B楼',{exact:true}).click();
+    await page.locator('.v2-single-select-menu').getByText('E楼',{exact:true}).click();
     await page.getByText('暂无维保通告', { exact: true }).waitFor();
-    assert(reads.some(url => url.includes('bootstrap?scope=B')));
+    assert(reads.some(url => url.includes('bootstrap?scope=E')));
+
+    await page.setViewportSize({width:1440,height:900});
+    await page.goto(origin+'/engineer/mop?frontend=legacy&scope=D');
+    await page.getByRole('button',{name:'填写记录',exact:true}).click();
+    await history.getByRole('combobox',{name:'筛选专业'}).selectOption('电气');
+    await history.getByText('暂无符合条件的已上传维保单',{exact:true}).waitFor();
+    await history.getByRole('combobox',{name:'筛选专业'}).selectOption('暖通');
+    await history.getByText('2025 年已归档暖通维保',{exact:true}).waitFor();
+    await page.getByRole('navigation',{name:'维保单办理分区'}).getByRole('button',{name:'办理',exact:true}).click();
+    await page.locator('.notice-row').filter({hasText:'EA118机房D楼BA系统资料维护'}).first().click();
+    await page.getByPlaceholder('搜索 MOP 名称、文件编号、专业').fill('JSNT-MOP-102');
+    await page.locator('.mop-row').click();
+    await page.getByLabel('表格附件').selectOption({label:'维护计划表.xlsx'});
+    await page.getByRole('button',{name:'打开填写',exact:true}).click();
+    await page.locator('.preview-scroll table').waitFor();
+    assert.equal(writes.length,2,'each version binds once when opening its selected file');
+    for(const key of ['notice_key','mop_record_id','mop_attachment_token'])assert.equal(writes[1][key],writes[0][key]);
+    await page.screenshot({path:path.join(output,'legacy-preview.png')});
   }
   assert.deepEqual(errors, []);
   console.log(before ? 'Captured existing MOP layout.' : 'PASS: native MOP controller, PC/mobile and 360x640/375x667 layouts, touch filling/signatures, download, upload failure/retry, busy guards and unchanged API payloads. All APIs mocked.');

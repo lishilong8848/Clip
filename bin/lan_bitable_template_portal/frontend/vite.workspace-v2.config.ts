@@ -129,6 +129,8 @@ export default defineConfig({
         if(!controller)throw new Error('Missing controller for '+viewPath);
         const moduleScript=script?'<script lang="ts">'+script.content+'</script>\n':'';
         const imports=path.endsWith('/CriticalGuardPage.vue')?'import {NModal} from "naive-ui";\n':
+          path.endsWith('/WorkHandoverPage.vue')?'import {todoTimeLabel} from "../workspace-v2/todoTime";\n':
+          path.endsWith('/AdminStatusPane.vue')?'import {canUseModule} from "../api/modulePermissions";\n':
           path.endsWith('/DingTalkNoticeSettings.vue')?'import ConfirmDialog from "./ConfirmDialog.vue";\n':'';
         result=moduleScript+'<template>\n'+readFileSync(viewPath,'utf8')+'\n</template>\n<script setup lang="ts">\n'+imports+controller.content+'\n</script>';
       }

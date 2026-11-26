@@ -26,13 +26,14 @@ from fastapi.responses import JSONResponse, Response
 from upload_event_module.services.feishu_service import _stable_uuid4_client_token
 from upload_event_module.services.http_client import FeishuHTTPError
 from .daily_inspection_form_fields import CHILLER_SHEET, form_header, remark_positions
+from .daily_inspection_hvac_mapping import hvac_switch_map
 from .daily_inspection_history import (MAX_ARCHIVE, MAX_ROWS, REVIEW_COLUMNS, REVIEW_SHEET, archived_devices,
                                        archived_workbook, edit_archived_devices, valid_cell_text)
 from .daily_inspection_operating import (AUXILIARY_STATE_CELLS, OPERATING_SOURCE, apply_operating_marks, auxiliary_levels,
                                          collect_operating_marks, compressor_running_marks, remember_pump_pressures,
                                          unbound_operating_cells, unit_pump_marks)
 from .daily_inspection_original import (ORIGINAL_INDEX_COLUMNS, ORIGINAL_INDEX_SHEET, ORIGINAL_MAPPING_COLUMNS, ORIGINAL_MAPPING_SHEET, catalog_locations,
-                                        original_cells, original_templates, original_views, same_reading, template_version, cell_excluded, all_cells_excluded,
+                                        original_cells, original_templates, original_views, round_rows, same_reading, template_version, cell_excluded, all_cells_excluded,
                                         cell_exemption_selection, form_sheet_key, with_cell_exemptions,
                                         refresh_archived_original, write_original_sheet, display_templates)
 from .daily_inspection_sheet_edit import apply_cells, form_extras, overlay_views, frozen_readings
@@ -1687,6 +1688,95 @@ def source_text(value):
     return str(value)
 
 
+def hvac_switch_state(fields):
+    """Only explicit, mutually consistent measurements can prove a switch is off."""
+    states = set()
+    for key in ('测点原始值', '测点修正值', '测点值'):
+        value = fields.get(key)
+        if isinstance(value, (list, dict)):
+            value = plain(value)
+        if value is None or value == '':
+            continue
+        text = str(value).strip()
+        if text in ('关闭', '关', '△') or re.fullmatch(r'0(?:\.0+)?', text):
+            states.add('off')
+        elif text in ('开启', '开', '运行', '√') or re.fullmatch(r'1(?:\.0+)?', text):
+            states.add('on')
+        else:
+            return None
+    return states.pop() if len(states) == 1 else None
+
+
+def stopped_hvac_cells(scope, batch, slot, start, end):
+    """Freeze this slot's display coordinates from one complete result-table upload."""
+    rows = batch['rows']
+    sealed = batch['batch']
+    marker = validate_source_batch(scope, rows)
+    if not marker or marker['upload_time'] != sealed or not start <= sealed < end:
+        return []
+    mapping = hvac_switch_map(scope)
+    states = {}
+    device_samples = {}
+    devices = {key_name(scope, target['device']) for target in mapping.values()}
+    for row in rows:
+        fields = row['fields']
+        point_id = plain(fields.get('测点ID')).strip()
+        if plain(fields.get('记录类型')) != '测点明细':
+            continue
+        device = key_name(scope, plain(fields.get('设备编号')))
+        sampled = fields.get('采样时间')
+        source_time = fields.get('源文件时间')
+        if (device in devices and plain(fields.get('专业')) == '暖通' and not LOCAL_POINT_ID.fullmatch(point_id)):
+            # The two collection groups share one sampling instant. A later source file
+            # timestamp is normal; a different sampling instant on this device is not.
+            device_samples.setdefault(device, set()).add(sampled if type(sampled) is int else None)
+        if point_id not in mapping:
+            continue
+        target = mapping[point_id]
+        valid = (fields.get('上传日期') == sealed and plain(fields.get('楼栋')) == scope + '楼'
+                 and plain(fields.get('专业')) == '暖通'
+                 and device == key_name(scope, target['device'])
+                 and type(sampled) is int and start <= sampled <= sealed
+                 and type(source_time) is int and start <= source_time <= sealed
+                 and plain(fields.get('测点来源')).strip() not in LOCAL_POINT_SOURCES | HANDOVER_POINT_SOURCES | {OPERATING_SOURCE}
+                 and not plain(fields.get('缺少源数据')).strip()
+                 and plain(fields.get('数据完整性')).strip() in ('', '完整'))
+        states.setdefault(point_id, set()).add(hvac_switch_state(fields) if valid else None)
+    groups = {}
+    for point_id, observed in states.items():
+        target = mapping[point_id]
+        if observed == {'off'} and len(device_samples.get(key_name(scope, target['device']), ())) == 1:
+            groups.setdefault((target['template'], target['sheet']), []).extend(target['slots'][slot])
+    return [{'template': template, 'sheet': sheet, 'cells': cells} for (template, sheet), cells in groups.items()]
+
+
+def hvac_form_marks(active, layouts):
+    """Apply only to this round's blank data anchors in its effective form layout."""
+    marks = {}
+    if not active.get('hvac_stopped_cells'):
+        return marks
+    slot = active['duty']['shift'] + str(active['round'])
+    for group in active.get('hvac_stopped_cells', ()):
+        template, title = group['template'], group['sheet']
+        key = (template, title)
+        if key not in layouts:
+            matches = [k for k in layouts if k[0] == template and k[1].strip() == title.strip()]
+            if len(matches) != 1:
+                continue
+            key = matches[0]
+        layout = layouts[key]
+        slots = round_rows(layout)
+        cells = set()
+        for address in group['cells']:
+            col, row = coordinate_from_string(address)
+            column = column_index_from_string(col)
+            if (slots.get(row) == slot and column <= len(layout['rows'][row - 1])
+                    and layout['rows'][row - 1][column - 1] in ('', None) and not cell_excluded(layout, address)):
+                cells.add(address)
+        marks[key] = cells
+    return marks
+
+
 def archive_integer(value):
     if value is None or value == '':
         return None
@@ -2099,6 +2189,7 @@ class DailyInspection:
                 active.pop('review_orphan_identities', None)
             active['batches'][scope] = {key: live[key] for key in
                                         ('batch', 'rows', 'devices', 'config_fp', 'form_devices') if key in live}
+            self.freeze_hvac_switches(active, dt.datetime.now(CN))
             self.fill_handover_points(scope, active, active['batches'][scope], live, state.get('pump_pressures'))
             adopt_manual_state_overrides(state, active, scope)
             inherit_manual_states(state, active, scope)
@@ -2414,6 +2505,23 @@ class DailyInspection:
             return True
         return False
 
+    def freeze_hvac_switches(self, active, accepted_at):
+        from .daily_inspection_reminders import shift_bounds, slot_time
+
+        duty, number = active['duty'], active['round']
+        scope = duty['scope']
+        when = slot_time(duty['date'], duty['shift'], number)
+        start = when.replace(hour=when.hour - when.hour % 2, minute=0)
+        shift_start, shift_end = shift_bounds(duty['date'], duty['shift'])
+        end = min(self.round_cutoff(duty, number).timestamp(), shift_end)
+        batch = active['batches'][scope]
+        active.pop('hvac_stopped_cells', None)
+        if batch.get('rows') and type(batch.get('batch')) is int and batch['batch'] <= accepted_at.timestamp() * 1000:
+            stopped = stopped_hvac_cells(scope, batch, duty['shift'] + str(number),
+                                         int(max(shift_start, start.timestamp()) * 1000), int(end * 1000))
+            if stopped:
+                active['hvac_stopped_cells'] = stopped
+
     def new_round(self, state, duty, number, batches, actor, started, professions=None):
         scope, day, shift = duty['scope'], duty['date'], duty['shift']
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
@@ -2427,6 +2535,7 @@ class DailyInspection:
         if professions is not None:
             active.update(professions=professions, profession_confirmations={})
         if scope in batches:
+            self.freeze_hvac_switches(active, started)
             self.fill_handover_points(scope, active, batches[scope], batches[scope], state.get('pump_pressures'))
         inherit_manual_states(state, active, scope)
         return active
@@ -3345,6 +3454,14 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                     view['rows'][row - 1][column_index_from_string(col) - 1] = value
             overrides = visible_sheet_overrides(active, layouts)
             overlay_views(views, overrides)
+            # Freeze the display projection in the original forms only. The review,
+            # sensor, source snapshot and manual values above retain their actual data.
+            stopped = hvac_form_marks(active, layouts)
+            for view in views:
+                for address in stopped.get((view['template'], view['sheet']), ()):
+                    col, row = coordinate_from_string(address)
+                    view['rows'][row - 1][column_index_from_string(col) - 1] = '△'
+                    view['filled'].add(address)
             filled_by_sheet = {(view['template'], view['sheet']): view['filled'] for view in views}
             for edit in overrides:
                 filled = filled_by_sheet.get((edit['template'], edit['sheet']))
@@ -3513,6 +3630,13 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
             template = batch.get('operating_template')
             known = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {}),
                      **batch.get('auxiliary_levels', {})}
+            if active.get('hvac_stopped_cells'):
+                stopped = hvac_form_marks(active, active_form_layouts(active, scope))
+                data = {**data, 'original_cells': [
+                    {**entry, 'verified_operating': True}
+                    if entry['value'] == '△' and entry['cell'] in stopped.get((entry['template'], entry['sheet']), ())
+                    else entry for entry in data['original_cells']
+                ]}
             if template and known:
                 # Configured sensor readings and verified operating marks are
                 # both eligible for display. Catalogue placeholders alone are not.

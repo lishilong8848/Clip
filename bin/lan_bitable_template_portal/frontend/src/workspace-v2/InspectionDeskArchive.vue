@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useUsageOverlay } from '../usageNavigation';
+
 import { ref } from 'vue';
 import InspectionDeskDialog from './InspectionDeskDialog.vue';
 
@@ -12,6 +14,8 @@ defineProps<{
   target?: HTMLElement;
 }>();
 const open = ref(false);
+
+useUsageOverlay('daily_inspection/main', 'daily_inspection/archive', () => open.value);
 </script>
 <template>
   <button v-if="compact" type="button" @click="open=true">归档记录（{{ records.length }}）</button>

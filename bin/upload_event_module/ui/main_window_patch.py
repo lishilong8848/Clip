@@ -27,6 +27,7 @@ from PyQt6.QtGui import QColor
 from ..logger import log_error, log_info, log_warning
 from ..utils import BASE_DIR
 from .styles import get_stylesheet
+from .page_usage import enter_page
 from ..hot_reload.state_store import (
     build_state_payload,
     cleanup_state,
@@ -132,6 +133,7 @@ class PatchUpdateMixin:
     def show_remote_update_error(self, _checked: bool = False):
         detail = getattr(self, '_remote_update_diagnostic', None)
         if detail:
+            enter_page("settings", "update_diagnostic")
             QMessageBox.information(self, detail['title'], detail['detail'])
 
     def _set_remote_update_status(self, text: str):

@@ -219,6 +219,8 @@
   </section>
 </template>
 <script setup lang="ts">
+import { useUsageOverlay } from '../usageNavigation';
+
 import {computed,nextTick,onBeforeUnmount,onMounted,ref,shallowRef,watch} from 'vue';
 import {NModal,NButton,NSelect} from 'naive-ui';
 import './inspection.css';
@@ -1137,6 +1139,8 @@ window.addEventListener('beforeunload',unload);
 const progressTimer=window.setInterval(()=>void syncProgress(),12000);
 void loadTemplates();void load();void loadPreferences();
 onBeforeUnmount(()=>{disposed=true;controller?.abort();clearProgress();window.clearInterval(progressTimer);window.clearTimeout(timer);cancelAnimationFrame(pinchFrame);pinch=undefined;persist();unregister();phoneMedia.removeEventListener('change',updatePhoneScreen);window.removeEventListener('beforeunload',unload);window.removeEventListener('resize',measureHeight);window.removeEventListener('orientationchange',measureHeight);window.screen.orientation?.removeEventListener?.('change',measureHeight);window.visualViewport?.removeEventListener('resize',measureHeight);});
+
+useUsageOverlay('daily_inspection/main', 'daily_inspection/settings', () => settingsOpen.value);
 </script>
 <style scoped>
 .inspection-workbook{

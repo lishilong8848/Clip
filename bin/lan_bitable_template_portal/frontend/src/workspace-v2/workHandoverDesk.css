@@ -10,3 +10,5 @@
 .workspace-v2 .transfer-confirm .n-dialog__content { overflow-wrap:anywhere }
 .workspace-v2 .transfer-form>.serenity-heading { display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px }
 
+.transfer-ledger .transfer-row-title { min-width:0 }
+.transfer-ledger .transfer-row-title strong { display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap }

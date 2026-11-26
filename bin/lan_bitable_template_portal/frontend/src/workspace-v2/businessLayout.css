@@ -278,3 +278,17 @@
     html.workspace-v2 :is(.confirm-close,.drawer-close,.dialog-close,.n-drawer-header .n-base-close,.n-modal .n-base-close) {min-width:44px;min-height:44px}
   }
 }
+@media screen {
+  html.workspace-v2[data-v2-keyboard] :is(.n-modal-body-wrapper,.dir-modal-layer,.ops-desk dialog.ops-overlay[open]) {
+    top:var(--v2-visible-top);bottom:auto;height:var(--v2-visible-height);
+  }
+  html.workspace-v2[data-v2-keyboard] :is(.dir-modal-layer>.dir-modal,dialog.ops-overlay>.ops-dialog),
+  html.workspace-v2[data-v2-keyboard] .n-modal-scroll-content > :is(.n-modal,[role=dialog],[role=alertdialog]) {
+    max-height:calc(var(--v2-visible-height) - 16px)!important;
+  }
+}
+.workspace-v2 .v2-shell.is-guest .v2-main {padding-block-start:8px}
+.workspace-v2 .guest-session {display:flex;align-items:center;justify-content:space-between;gap:8px;padding-block:4px;border-bottom:1px solid var(--soft-edge)}
+.workspace-v2 .guest-session .v2-brand {font-size:15px}
+.workspace-v2 .guest-session .v2-brand img {width:60px}
+.workspace-v2 .guest-session .n-button {min-height:44px}

@@ -35,6 +35,7 @@ from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from starlette.middleware.gzip import GZipMiddleware
 from lan_bitable_template_portal.polling_work_orders import (
+    PollingWorkOrderService,
     POLLING_SOP_MAX_FILE_BYTES,
     POLLING_STEP_ATTACHMENT_MAX_BYTES,
     STEP_ATTACHMENT_MIME,
@@ -799,6 +800,8 @@ class FastAPIPortalController:
         install_document_library_portal(app, self, PortalRuntime)
         from lan_bitable_template_portal.workspace_layout_routes import install_workspace_layout_routes
         install_workspace_layout_routes(app, self, PortalRuntime)
+        from lan_bitable_template_portal.usage_routes import install_usage_routes
+        install_usage_routes(app, self, PortalRuntime)
         from public_access.certificate import install_certificate_routes
         install_certificate_routes(app, self, PortalRuntime)
         from lan_bitable_template_portal.lighthouse_routes import install_lighthouse_routes
@@ -6810,22 +6813,18 @@ class FastAPIPortalController:
                 )
                 notifications = data.get("notifications")
                 notifications = notifications if isinstance(notifications, dict) else {}
-                safe_roles = {}
-                for role in ("operator", "reviewer"):
-                    item = notifications.get(role)
-                    item = item if isinstance(item, dict) else {}
-                    safe_roles[role] = {
-                        "sent": bool(item.get("sent")),
-                        "fallback": bool(item.get("fallback")),
-                    }
+                pending_roles = PollingWorkOrderService.pending_confirmation_roles(data)
+                safe_roles = {role: {"sent": True, "fallback": False, "pending": role in pending_roles}
+                              for role in ("operator", "reviewer")}
+                for role, key, _person in PollingWorkOrderService.link_recipients(data):
+                    receipt = notifications.get(key) or {}
+                    safe_roles[role]["sent"] &= bool(receipt.get("sent"))
+                    safe_roles[role]["fallback"] |= bool(receipt.get("fallback"))
                 return self._json_ok(
                     request,
                     session,
                     {
-                        "sent": all(
-                            safe_roles[role]["sent"]
-                            for role in ("operator", "reviewer")
-                        ),
+                        "sent": all(safe_roles[role]["sent"] for role in pending_roles),
                         "roles": safe_roles,
                     },
                 )
@@ -10264,6 +10263,8 @@ class FastAPIPortalController:
         method = str(request.method or "GET").upper()
         if path.endswith("/stream"):
             return "stream"
+        if path == "/api/usage/events" and method == "POST":
+            return "usage"
         if method not in {"GET", "HEAD"}:
             return "mutation"
         if path == "/" or path.startswith("/assets/"):
@@ -10296,6 +10297,8 @@ class FastAPIPortalController:
 
     @staticmethod
     def _rate_limit_params(group: str) -> tuple[float, float]:
+        if group == "usage":
+            return 4.0, 24.0
         if group == "mutation":
             return 20.0, 120.0
         if group == "heavy_read":
@@ -10746,7 +10749,7 @@ class FastAPIPortalController:
             "Content-Type": str(entry.get("content_type") or "application/octet-stream"),
             "ETag": str(entry.get("etag") or ""),
             "Cache-Control": "no-store" if html or resolved.suffix.lower() == ".html" or resolved.name == "entry.json"
-                             else "no-cache" if resolved.name == "page-navigation.css" else "public, max-age=86400",
+                             else "no-cache" if resolved.name in {"page-navigation.css", "usage-pages.js"} else "public, max-age=86400",
         }
         if str(request.headers.get("if-none-match") or "").strip() == headers["ETag"]:
             return Response(status_code=304, headers=headers)
@@ -10987,7 +10990,8 @@ class FastAPIPortalController:
     }}
   </style>
 </head>
-<body>
+<body data-usage-module="signatures" data-usage-page="{'usage_confirm' if not result_message else ''}">
+  <script type="module" referrerpolicy="no-referrer" src="/assets/usage-pages.js"></script>
   <main class="card">
     <span class="badge">{html.escape(page_title)}</span>
     <h1>是否允许本次使用你的已保存签名？</h1>
@@ -13621,8 +13625,9 @@ class FastAPIPortalController:
                 # Public outages must not starve pending LAN/fallback role links.
                 relay_error = exc
         manager = PortalRuntime.polling_work_orders()
-        groups = manager.open_groups()
-        for group in groups:
+        pending_groups = [group for group in manager.open_groups()
+                          if PollingWorkOrderService.pending_confirmation_roles(group)]
+        for group in pending_groups:
             projected = manager.group_with_links(
                 group, PortalRuntime._polling_work_order_public_base_url()
             )
@@ -13635,7 +13640,7 @@ class FastAPIPortalController:
                     log_warning(f"工单角色链接待重试：group_id={projected.get('target_record_id')}, error={exc}")
         if relay_error is not None:
             raise relay_error  # preserve the worker's existing offline backoff
-        return bool(relay_enabled or groups)
+        return bool(relay_enabled or pending_groups)
 
     def _start_polling_relay_worker(self) -> None:
         if self._polling_relay_thread and self._polling_relay_thread.is_alive():
@@ -13848,6 +13853,12 @@ class FastAPIPortalController:
         if panel is not None:
             panel.tick()
 
+    def _sync_usage_metrics(self) -> None:
+        if self._stopping_event.is_set() or not external_real_write_guard().get("real_write_allowed"):
+            return
+        from lan_bitable_template_portal.usage_metrics import sync_usage
+        sync_usage(PortalRuntime.state_store.db_path.parent, stopping=self._stopping_event.is_set)
+
     def _start_scheduler(self) -> None:
         if self._scheduler is not None:
             return
@@ -13867,6 +13878,8 @@ class FastAPIPortalController:
                     "thread_name_prefix": "ClipFlowEventMessages"}),
             },
         )
+        scheduler.add_job(self._sync_usage_metrics, "interval", seconds=60, id="usage_metrics",
+                          max_instances=1, coalesce=True, replace_existing=True)
         scheduler.add_job(self._run_notice_panel, "interval", seconds=10,
                           id="notice_panel", max_instances=1, coalesce=True)
         scheduler.add_job(self._run_scheduled_plan_deadlines, "cron", hour="9-23", minute="*", second=0,

@@ -64,6 +64,7 @@ from ..config import (
 from ..services.service_registry import resolve_bitable_app_token
 
 from .common import show_toast_message
+from .page_usage import watch_window
 
 
 
@@ -83,6 +84,7 @@ class SettingsDialog(QDialog):
     def __init__(self, parent=None):
 
         super().__init__(parent)
+        watch_window(self, "settings", "preferences")
         self._relay_health_executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="RelayHealthTest"
         )

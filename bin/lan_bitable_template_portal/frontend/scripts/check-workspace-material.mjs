@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import {mkdir,writeFile} from 'node:fs/promises';
 import path from 'node:path';
 import {chromium} from 'playwright';
-import {auditPages,auditUrl} from './responsive-audit-pages.mjs';
+import {workspaceAuditPages,auditUrl} from './responsive-audit-pages.mjs';
 
 // Run against scripts/responsive-audit-server.mjs. Require its fixture identity
 // before visiting routes; the browser can only reach this loopback origin.
@@ -10,41 +10,36 @@ const origin=new URL(process.argv[2]);
 assert.equal(origin.hostname,'127.0.0.1');
 const health=await (await fetch(new URL('/api/health',origin))).json();
 assert.equal(health.instance_id,'responsive-isolated-preview');
-const out=path.resolve('../../../output/playwright/soft-ui');
+const out=path.resolve(process.argv[3]||'../../../output/playwright/soft-ui');
 await mkdir(out,{recursive:true});
-const pages=[...auditPages.map(([id,,url])=>[id,url]),
-  ['functions','/?view=functions'],['tasks','/?view=tasks'],['access','/?view=permission'],['guest','/cabinet-power?__audit=guest'],
-  ['tool','/risk-inspections?view=tool-self-check&scope=A'],['inspection','/daily-inspection?scope=D'],
-  ['cold','/cold-source-monitor?scope=D'],['eop','/eop-scenarios?scope=D'],['documents','/document-library'],
-  ['zhihang','/zhihang-data'],['signature','/signature?record_id=test-record'],['work-order','/polling-work-order?token=test-token'],
-  ...['status','development','handover','mop','feishu','dingtalk','pressure'].map(tab=>['settings-'+tab,'/admin/settings?tab='+tab])];
+const pages=workspaceAuditPages.map(([id,,url])=>[id,url]);
 const shots=new Set(['home','functions','notice-maintenance','repairs','profile','handover','guard','cabinet','tool','inspection','cold','eop','documents','zhihang','login','water','work-handover']);
-const profiles=[['desktop',1440,900],['mobile',375,812],['tablet',820,1180],['dark',1440,900]];
+const profiles=[['desktop',1440,900],['mobile',393,852],['mobile-max',430,932],['tablet',820,1180],['dark',1440,900]];
 const results=[];
 const browser=await chromium.launch();
 async function scan([profile,width,height]){
-  const context=await browser.newContext({viewport:{width,height},hasTouch:['mobile','tablet'].includes(profile),reducedMotion:'reduce'});
-  if(profile==='dark')await context.addInitScript(()=>{if(window.top!==window)return;localStorage.setItem('clipflow:workspace-night-mode:ou_responsive_fixture','dark');localStorage.setItem('clipflow:workspace-night-mode:visitor','dark');});
-  await context.route('**/*',async route=>{
-    const url=new URL(route.request().url());
-    if(url.origin!==origin.origin)return route.abort();
-    if(url.pathname==='/api/auth/status'){
-      const response=await route.fetch(),body=await response.json();
-      if(body.data?.user?.role==='admin')body.data.user.tool_management_enabled=true;
-      return route.fulfill({response,json:body});
-    }
-    return route.continue();
-  });
-  const page=await context.newPage();page.setDefaultTimeout(5500);
-  let errors=[];
+  const context=await browser.newContext({viewport:{width,height},hasTouch:width<=820,reducedMotion:'reduce'});
+  // The print routes automatically open the native print dialog. In the
+  // isolated browser verify the rendered document without blocking inspection.
+  await context.addInitScript(()=>{window.print=()=>{document.documentElement.dataset.auditPrintRequested='true';};});
+  if(profile==='dark')await context.addInitScript(()=>{if(window.top!==window)return;for(const id of ['ou_responsive_fixture','fixture-guest','visitor'])localStorage.setItem('clipflow:workspace-night-mode:'+id,'dark');});
+  await context.route(url=>url.origin!==origin.origin,route=>route.abort());
+  const page=await context.newPage();page.setDefaultTimeout(18000);
+  let errors=[],unavailable=new Set();
   page.on('pageerror',e=>errors.push(e.message));
+  page.on('response',response=>{
+    const {pathname}=new URL(response.url());
+    if(response.status()>=400&&pathname.startsWith('/api/'))unavailable.add(response.status()+' '+pathname);
+  });
   try{
     for(const [id,logical] of pages){
-      errors=[];
+      errors=[];unavailable=new Set();
       try{
         await page.goto(auditUrl(origin.origin,'v2',logical),{waitUntil:'domcontentloaded',timeout:15000});
+        if(id==='morning-print')await page.getByRole('table',{name:'EA118 H楼晨会'}).waitFor();
+        if(id==='drill-print')await page.locator('.print-sheet').waitFor();
         await page.waitForFunction(()=>[...document.querySelectorAll('.v2-main > *')].some(el=>
-          !el.matches('.v2-breadcrumb,.v2-loading,.v2-alert,.v2-duty-tabs,.v2-workbench-return,.async-page-state') &&
+          !el.matches('.v2-breadcrumb,.v2-loading,.v2-alert,.v2-duty-tabs,.guest-session,.v2-workbench-return,.async-page-state') &&
           el.getBoundingClientRect().height>0 && (el.innerText?.trim().length>3 || el.querySelector('iframe,canvas'))));
         await page.waitForTimeout(180);
         const result=await page.evaluate(()=>{
@@ -69,13 +64,36 @@ async function scan([profile,width,height]){
         if(result.noAccess||result.rail||!result.material||Math.abs(result.left)>1||result.docWidth>width+1||result.contentWidth>result.mainWidth+2)failures.push('route or geometry');
         if(result.sparseBars.length)failures.push('isolated full-width actions: '+result.sparseBars.map(bar=>bar.bar).join(', '));
         if(result.theme!==(profile==='dark'?'dark':'light'))failures.push('wrong appearance');
-        results.push({profile,id,...result,failures});
+        const controls=await page.locator('main button:visible,main [role=combobox]:visible,main input:visible,main [role=tab]:visible,[role=dialog] button:visible').evaluateAll(nodes=>
+          nodes.map(el=>(el.getAttribute('aria-label')||el.getAttribute('title')||el.innerText||el.getAttribute('placeholder')||el.type||el.tagName).trim()));
+        if(id==='links'&&profile==='mobile'){
+          await page.getByRole('button',{name:'新增链接',exact:true}).click();
+          const dialog=page.getByRole('dialog');
+          await dialog.locator('input:visible').first().focus();
+          await page.evaluate(()=>{
+            Object.defineProperty(visualViewport,'height',{configurable:true,value:470});
+            visualViewport.dispatchEvent(new Event('resize'));
+          });
+          await page.waitForFunction(()=>document.documentElement.hasAttribute('data-v2-keyboard'));
+          const box=await dialog.boundingBox();
+          if(!box||box.y+box.height>471)failures.push('keyboard covers link editor');
+          await page.evaluate(()=>{delete visualViewport.height;visualViewport.dispatchEvent(new Event('resize'));});
+          await page.keyboard.press('Escape');
+          await dialog.waitFor({state:'hidden'});
+        }
+        results.push({profile,id,...result,controls,unavailable:[...unavailable],failures});
         if(failures.length||shots.has(id))await page.screenshot({path:path.join(out,profile+'-'+id+'.png'),animations:'disabled'});
-      }catch(e){results.push({profile,id,failures:[e.message.split('\n')[0],...errors]});}
+      }catch(e){
+        const visible=(await page.locator('main').first().innerText({timeout:2000}).catch(()=>'')).slice(0,280);
+        results.push({profile,id,visible,unavailable:[...unavailable],failures:[e.message.split('\n')[0],...errors]});
+      }
     }
   }finally{await context.close();}
 }
-try{await Promise.all(profiles.map(scan));}finally{await browser.close();}
+try{
+  // Keep browser load comparable to an ordinary user opening a page.
+  for(let i=0;i<profiles.length;i+=2)await Promise.all(profiles.slice(i,i+2).map(scan));
+}finally{await browser.close();}
 const failed=results.filter(item=>item.failures.length);
 await writeFile(path.join(out,'routes.json'),JSON.stringify(results,null,2));
 console.log(results.length+' rendered route checks, '+failed.length+' failures');

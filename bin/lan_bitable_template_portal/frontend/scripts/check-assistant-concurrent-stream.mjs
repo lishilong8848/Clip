@@ -101,7 +101,9 @@ const server = await createServer({ root, configFile: false, publicDir: false, l
         if (url.pathname === '/api/assistant/conversation') return reply(snapshot(lane));
         if (url.pathname === '/api/assistant/conversation/stamp') return reply({ stamp: String(revision) });
         if (url.pathname === '/api/assistant/messages') {
-          const result = start(lane, value); reply(result);
+          if (value.question === 'fixture uncertain receipt') return reply({}, 503);
+          const previous = turns.find(turn => turn.operation_id === value.operation_id);
+          const result = start(lane, value, previous); reply(result);
           if (value.question === 'preview') setTimeout(() => { const run = runs.get(result.run_id); delta(run, '## Live reply\n\n' + chinese.repeat(5)); finish(run); }, 200);
           return;
         }
@@ -131,7 +133,24 @@ const server = await createServer({ root, configFile: false, publicDir: false, l
   } }],
 });
 let browser;
-try {
+async function buildWorkspace() {
+  const previous = process.env.CLIPFLOW_WORKSPACE_BUILD_DIR;
+  process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = realBuild;
+  try { await build({ root, configFile: path.join(root, 'vite.workspace-v2.config.ts'), logLevel: 'error' }); }
+  finally { if (previous === undefined) delete process.env.CLIPFLOW_WORKSPACE_BUILD_DIR; else process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = previous; }
+}
+async function sendOnRealPage(target, question) {
+  await target.getByRole('textbox', { name: '询问灯塔助手' }).fill(question);
+  const [posted, streamed] = await Promise.all([
+    target.waitForResponse(r => new URL(r.url()).pathname === '/api/assistant/messages' && r.request().method() === 'POST' && r.request().postDataJSON()?.question === question),
+    target.waitForResponse(r => /^\/api\/assistant\/runs\/[^/]+\/stream$/.test(new URL(r.url()).pathname)),
+    target.getByRole('button', { name: '发送问题', exact: true }).click(),
+  ]);
+  const result = await posted.json(), run = runs.get(result.data.run_id);
+  assert.equal(new URL(streamed.url()).pathname, '/api/assistant/runs/' + run.id + '/stream');
+  return run;
+}
+async function runChecks() {
   await mkdir(output, { recursive: true }); await server.listen();
   const origin = 'http://127.0.0.1:' + server.httpServer.address().port;
   console.log('Offline fixture: ' + origin + '/__assistant-concurrent?preview');
@@ -146,10 +165,6 @@ try {
     await target.waitForFunction(() => !!window.fixture);
     await target.evaluate(() => window.fixture.vm.openAssistant()); return target;
   }
-  const desktop = await page(), mobile = await page({ width: 390, height: 844 });
-  const laneA = await desktop.evaluate(() => fixture.assistantClientId()), laneB = await mobile.evaluate(() => fixture.assistantClientId());
-  assert.notEqual(laneA, laneB, 'tabs for the same person must have independent channels');
-  for (const lane of [laneA, laneB]) assert.match(lane, /^[A-Za-z0-9_-]{16,80}$/);
   async function send(target, question) {
     await target.getByRole('textbox', { name: '\u8be2\u95ee\u706f\u5854\u52a9\u624b' }).fill(question);
     await target.getByRole('button', { name: '\u53d1\u9001\u95ee\u9898', exact: true }).click();
@@ -157,6 +172,104 @@ try {
     const id = await target.evaluate(() => fixture.vm.state.active_run_id);
     await target.waitForFunction(() => fixture.vm.streamChat?.status === 'streaming'); return runs.get(id);
   }
+  async function checkStartupRecovery(target, submit, edition) {
+    const question = edition + ' startup retry';
+    const original = await submit(target, question);
+    const { operation_id, attempt_id } = original.turn;
+    const row = target.locator('.turn').filter({ hasText: question });
+    const action = label => row.getByRole('button', { name: label, exact: true });
+    const writes = () => requests.filter(r => r.method === 'POST' && (r.path === '/api/assistant/messages' || r.path.endsWith('/resume'))).length;
+    const readAfterClick = async (button) => {
+      const read = target.waitForResponse(r => new URL(r.url()).pathname === '/api/assistant/conversation' && r.request().method() === 'GET');
+      await button.click(); await read;
+    };
+    const before = writes();
+    await readAfterClick(action('查看原进度'));
+    assert.equal(writes(), before);
+    original.turn.error_code = 'startup_catalog';
+    finish(original, 'failed');
+    await action('重试原问题').waitFor();
+    assert.equal(writes(), before, 'confirmed failure alone must never submit');
+    const posted = target.waitForRequest(r => new URL(r.url()).pathname === '/api/assistant/messages' && r.method() === 'POST');
+    await action('重试原问题').evaluate(button => { button.click(); button.click(); });
+    const body = (await posted).postDataJSON();
+    assert.equal(body.operation_id, operation_id);
+    assert.notEqual(body.attempt_id, attempt_id);
+    assert.equal(body.question, question);
+    await action('查看原进度').waitFor();
+    assert.equal(writes(), before + 1, 'double click must create exactly one new attempt');
+    const retried = [...runs.values()].find(run => run.id !== original.id && run.turn.operation_id === operation_id);
+    assert(retried);
+    assert.equal(await row.count(), 1);
+    retried.turn.error_code = 'startup_handshake';
+    finish(retried, 'failed');
+    await action('重试原问题').waitFor();
+    // The visible receipt is stale: the targeted GET must see the newly submitted business plan.
+    retried.turn.plan = { id: edition + '-receipt', status: 'submitted', title: '隔离办理任务', fields: [], operations: [], results: [] };
+    revision++;
+    await action('重试原问题').click();
+    await action('查看原任务').waitFor();
+    await readAfterClick(action('查看原任务'));
+    assert.equal(await action('重试原问题').count(), 0);
+    assert.equal(writes(), before + 1);
+    const input = target.getByRole('textbox', { name: '询问灯塔助手' });
+    await input.fill('fixture uncertain receipt');
+    const lost = target.waitForResponse(r => new URL(r.url()).pathname === '/api/assistant/messages' && r.status() === 503);
+    await input.press('Enter');
+    await lost;
+    const uncertain = target.locator('.turn').filter({hasText:'fixture uncertain receipt'}).last();
+    const progress = uncertain.getByRole('button', {name:'查看原进度', exact:true});
+    await readAfterClick(progress);
+    assert.equal(await uncertain.getByRole('button', {name:'重试原问题', exact:true}).count(), 0);
+    assert.equal(writes(), before + 2, 'unacknowledged 503 gets only the original POST');
+    console.log('PASS: ' + edition + ' startup recovery: pending, uncertain, explicit retry, double click, stale receipt and submitted plan');
+  }
+  if (process.argv.includes('--new-question')) {
+    await buildWorkspace();
+    const target = await context.newPage(); target.setDefaultTimeout(10000);
+    target.on('pageerror', error => errors.push(error.message));
+    await target.goto(origin + '/assets/workspace-v2/index.html?view=assistant');
+    await checkStartupRecovery(target, sendOnRealPage, 'workspace');
+    const sendButton = target.getByRole('button', { name: '发送问题', exact: true });
+    const inspectButton = button => ({ attribute: button.getAttribute('type'), type: button.type,
+      inComposer: button.form === document.querySelector('form.ld-composer'), hasForm: !!button.form });
+    const sendDOM = await sendButton.evaluate(inspectButton);
+    assert.deepEqual(sendDOM, { attribute: 'submit', type: 'submit', inComposer: true, hasForm: true });
+    console.log('Send button DOM:', sendDOM);
+    console.log('Untyped progress button DOM:', await target.getByRole('button', { name: '查看原进度', exact: true }).last().evaluate(inspectButton));
+    const evidence = [];
+    target.on('console', message => {
+      if (message.text().startsWith('composer-event ')) evidence.push(message.text());
+    });
+    await target.evaluate(() => {
+      for (const type of ['click', 'submit', 'invalid']) window.addEventListener(type, event => {
+        const form = document.querySelector('form.ld-composer');
+        if (!form?.contains(event.target)) return;
+        const button = form.querySelector('button[type=submit]');
+        const before = { type, disabled: button.disabled, action: button.dataset.v2Action || '', valid: form.matches(':valid') };
+        setTimeout(() => console.log('composer-event ' + JSON.stringify({ ...before, prevented: event.defaultPrevented })), 0);
+      }, true);
+    });
+    const before = requests.length, question = 'real page desktop stream';
+    try {
+      const fresh = await sendOnRealPage(target, question);
+      finish(fresh, 'completed', '隔离普通问题回答');
+      const bubble = target.locator('.turn').filter({ hasText: question });
+      await bubble.getByText('隔离普通问题回答', { exact: true }).waitFor();
+      assert.equal(await bubble.count(), 1);
+      assert.equal(requests.slice(before).filter(r => r.method === 'POST' && r.path === '/api/assistant/messages').length, 1);
+      assert.deepEqual(errors, []);
+      console.log('PASS: one ordinary question after recovery, one POST, original response stream and visible answer.');
+    } finally {
+      console.log(evidence.join('\n'));
+      console.log('Messages POST count:', requests.slice(before).filter(r => r.method === 'POST' && r.path === '/api/assistant/messages').length);
+    }
+    return;
+  }
+  const desktop = await page(), mobile = await page({ width: 390, height: 844 });
+  const laneA = await desktop.evaluate(() => fixture.assistantClientId()), laneB = await mobile.evaluate(() => fixture.assistantClientId());
+  assert.notEqual(laneA, laneB, 'tabs for the same person must have independent channels');
+  for (const lane of [laneA, laneB]) assert.match(lane, /^[A-Za-z0-9_-]{16,80}$/);
   let runA = await send(desktop, 'first desktop question');
   const popup = desktop.waitForEvent('popup'); await desktop.evaluate(url => window.open(url, '_blank'), origin + '/__assistant-concurrent');
   const copied = await popup; copied.on('pageerror', error => errors.push(error.message)); await copied.waitForFunction(() => !!window.fixture);
@@ -198,6 +311,17 @@ try {
   assert.equal(previousRun.status, 'superseded', 'a follow-up replaces this channel\'s active run');
   assert.equal(runB.status, 'pending', 'a follow-up leaves the other channel running');
   assert.equal(await desktop.evaluate(id => fixture.vm.state.turns.find(turn => turn.run_id === id).status, runB.id), 'pending', 'follow-up preserves the other pending bubble');
+  // A slow startup can outlive the response stream. The only allowed recovery request is a read.
+  const streamPath = '/api/assistant/runs/' + runA.id + '/stream';
+  await desktop.waitForFunction(() => fixture.vm.streamChat?.status === 'streaming');
+  const beforeReconnect = requests.length;
+  const reconnected = desktop.waitForResponse(response =>
+    new URL(response.url()).pathname === streamPath && response.request().method() === 'GET');
+  for (const response of runA.streams) response.end('data: [DONE]\n\n');
+  await reconnected;
+  delta(runA, 'Original run ready.');
+  await desktop.waitForFunction(id => fixture.vm.state.turns.find(turn => turn.run_id === id)?.answer.includes('Original run ready.'), runA.id);
+  assert(!requests.slice(beforeReconnect).some(request => request.path === '/api/assistant/messages' || request.path.endsWith('/resume')));
   const beforeCancel = requests.length; await desktop.evaluate(() => fixture.vm.stopAnswer());
   assert(requests.slice(beforeCancel).some(request => request.path === '/api/assistant/runs/' + runA.id + '/cancel' && request.lane === laneA));
   assert.equal(runB.turn.status, 'pending', 'stopping desktop leaves mobile running');
@@ -244,6 +368,7 @@ try {
   assert(requests.some(request => request.path === '/api/assistant/files' && request.type.startsWith('multipart/form-data; boundary=')), 'upload keeps its browser-generated multipart boundary');
   assert.deepEqual(errors, []);
   const legacy = await page({ width: 402, height: 874 }, '?legacy=1');
+  await checkStartupRecovery(legacy, send, 'legacy');
   const legacyRun = await send(legacy, 'legacy live reply');
   delta(legacyRun, chinese);
   const liveWord = legacy.locator('.turn').filter({ hasText: 'legacy live reply' }).locator('.v2-word').first();
@@ -261,9 +386,7 @@ try {
   console.log('PASS: independent channels, real incremental SSE, stale snapshots, verified final replacement, cancel/resume, upload headers, Chinese word fade, legacy live and buffered replies, caret, scroll, reduced motion and storage recovery.');
   if (process.argv.includes('--real-page')) {
     console.log('Building the full workspace into the isolated output directory.');
-    const previousOutput = process.env.CLIPFLOW_WORKSPACE_BUILD_DIR; process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = realBuild;
-    try { await build({ root, configFile: path.join(root, 'vite.workspace-v2.config.ts'), logLevel: 'error' }); }
-    finally { if (previousOutput === undefined) delete process.env.CLIPFLOW_WORKSPACE_BUILD_DIR; else process.env.CLIPFLOW_WORKSPACE_BUILD_DIR = previousOutput; }
+    await buildWorkspace();
     const realContext = await browser.newContext({ viewport: { width: 1440, height: 960 } });
     await realContext.addInitScript(() => { try { window.initialClient = sessionStorage.getItem('lighthouse_client'); } catch {} });
     await realContext.route('**/*', route => new URL(route.request().url()).origin === origin ? route.continue() : route.abort());
@@ -271,16 +394,8 @@ try {
     const url = origin + '/assets/workspace-v2/index.html?view=assistant';
     const realDesktop = await realContext.newPage(); await realDesktop.goto(url);
     await realDesktop.locator('.v2-shell').waitFor();
-    await realDesktop.getByRole('button', { name: '\u6253\u5f00\u706f\u5854\u52a9\u624b', exact: true }).click();
-    async function sendOnRealPage(target, question) {
-      await target.getByRole('textbox', { name: '\u8be2\u95ee\u706f\u5854\u52a9\u624b' }).fill(question);
-      const posted = target.waitForResponse(response => new URL(response.url()).pathname === '/api/assistant/messages' && response.request().method() === 'POST');
-      const streamed = target.waitForResponse(response => /^\/api\/assistant\/runs\/[^/]+\/stream$/.test(new URL(response.url()).pathname));
-      await target.getByRole('button', { name: '\u53d1\u9001\u95ee\u9898', exact: true }).click();
-      const result = await (await posted).json(), run = runs.get(result.data.run_id);
-      assert.equal(new URL((await streamed).url()).pathname, '/api/assistant/runs/' + run.id + '/stream');
-      return run;
-    }
+    await realDesktop.getByRole('textbox', { name: '询问灯塔助手', exact: true }).waitFor();
+    await checkStartupRecovery(realDesktop, sendOnRealPage, 'workspace');
     const realA = await sendOnRealPage(realDesktop, 'real page desktop stream');
     const answerA = realDesktop.locator('.turn').filter({ hasText: 'real page desktop stream' }).locator('.assistant-rich-reply');
     await realDesktop.evaluate(() => {
@@ -299,7 +414,16 @@ try {
     assert.equal(await answerA.locator('.v2-reply-caret').count(), 1);
     assert.equal(await answerA.locator('.v2-word').first().evaluate(node => getComputedStyle(node).animationDuration), '0.38s');
     delta(realA, chinese); await answerA.getByText(realA.answer, { exact: true }).waitFor();
-    assert(await answerA.locator('.v2-word').evaluateAll(nodes => nodes.some(node => parseFloat(node.style.animationDelay) < 0)), 'full-page token updates preserve running fades');
+    const keptPrefix = await answerA.evaluate(host => {
+      const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+      let node;
+      while ((node = walker.nextNode()) && !node.textContent?.trim()) {}
+      if (!node) return false;
+      const word = node.parentElement?.closest('.v2-word');
+      // A completed 380 ms fade becomes plain text. Neither case should restart at zero.
+      return !word || parseFloat(word.style.animationDelay) < 0;
+    });
+    assert(keptPrefix, 'full-page token updates must not restart the first word fade');
     await realDesktop.screenshot({ path: path.join(output, 'real-page-desktop-live.png') });
     const opened = realDesktop.waitForEvent('popup'); await realDesktop.evaluate(url => window.open(url, '_blank'), url);
     const realMobile = await opened; await realMobile.setViewportSize({ width: 390, height: 844 }); await realMobile.locator('.v2-shell').waitFor();
@@ -339,7 +463,8 @@ try {
       child.on('error', reject); child.on('exit', code => code === 0 ? resolve() : reject(new Error('Responsively exited ' + code)));
     });
   }
-} catch (error) {
+}
+try { await runChecks(); } catch (error) {
   const details = [];
   for (const context of browser?.contexts() || []) for (const target of context.pages()) {
     if (!target.isClosed() && target.url().includes('/assets/workspace-v2/')) {

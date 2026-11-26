@@ -14,6 +14,11 @@
         </div>
       </header>
       <div v-if="types.length>1 || kind!=='event'" class="desk-band">
+        <label v-if="types.length>1" class="desk-kind-picker">
+          <select data-native-select :value="kind" aria-label="通告类型" @change="setKind(($event.target as HTMLSelectElement).value)">
+            <option v-for="entry in types" :key="entry.id" :value="entry.id">{{ entry.label }}</option>
+          </select>
+        </label>
         <nav v-if="types.length>1" ref="typeNavigation" class="desk-types" aria-label="通告类型">
           <button v-for="entry in types" :key="entry.id" type="button" data-v2-navigation
             :aria-pressed="kind===entry.id" @click="setKind(entry.id)">{{ entry.label }}</button>
@@ -45,7 +50,12 @@
                 </div>
                 <span class="lane-count"><NSpin v-if="loading" :size="14" /><b>{{ total(lane.id) }}</b> 条</span>
               </header>
-              <form v-if="lane.id==='planned'" class="desk-filters" aria-label="仅筛选计划通告" @submit.prevent="filter">
+              <button v-if="lane.id==='planned'" class="desk-filter-toggle" type="button" :aria-expanded="filtersOpen" :aria-controls="filterId" @click="filtersOpen=!filtersOpen">
+                <SlidersHorizontal :size="16" aria-hidden="true"/><strong>筛选</strong>
+                <span>{{ [applied.month,specialties.find(s=>s.value===applied.specialty)?.label||'全部专业',applied.search].filter(Boolean).join(' · ') }}</span>
+                <ChevronDown :size="15" aria-hidden="true"/>
+              </button>
+              <form v-if="lane.id==='planned'" :id="filterId" class="desk-filters" :class="{'filters-open':filtersOpen}" aria-label="仅筛选计划通告" @submit.prevent="filter();filtersOpen=false">
                 <NInput v-model:value="search" clearable placeholder="搜索计划名称" :input-props="{'aria-label':'搜索计划通告'}" @clear="search='';filter()"><template #prefix><Search :size="16" /></template></NInput>
                 <NSelect v-model:value="month" :options="months" aria-label="计划月份" />
                 <NSelect v-model:value="specialty" :options="specialties" placeholder="全部专业" aria-label="计划专业" />
@@ -186,13 +196,16 @@
   </section>
 </template>
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+import { noticePage } from '../usageRoutes';
+
 // v2-compact-adapted: this page supplies its own command area and PageCanvas toolbar host.
 import NoticeDeskRecord from './NoticeDeskRecord.vue';
 import NoticeDeskReceipt from './NoticeDeskReceipt.vue';
-import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,watch } from 'vue';
+import { computed,h,nextTick,onBeforeUnmount,onMounted,ref,useId,watch } from 'vue';
 import PageCanvas from './PageCanvas.vue';
 import { NAlert,NButton,NCard,NCheckbox,NCheckboxGroup,NDropdown,NEmpty,NForm,NFormItem,NImage,NInput,NModal,NPagination,NRadioButton,NRadioGroup,NSelect,NSkeleton,NSpin,useDialog,useMessage } from 'naive-ui';
-import { CalendarDays,ClipboardList,Inbox,Link2,Radio,RadioTower,Ellipsis,History,Plus,RefreshCw,Search,Send,Trash2,X } from 'lucide-vue-next';
+import { CalendarDays,ChevronDown,ClipboardList,Inbox,Link2,Radio,RadioTower,Ellipsis,History,Plus,RefreshCw,Search,Send,SlidersHorizontal,Trash2,X } from 'lucide-vue-next';
 import { defaultProfessionView,isProfessionEngineer,professionChoices,professionCodes,professionMatches } from './professionBrowse';
 import {noticeListSpecialty} from './noticeListMeta';
 import { ApiError,requestJson,requestPeople,refreshRemoteSourceAndWait,type Dict } from './client';
@@ -244,6 +257,7 @@ function revealActiveType(){
 }
 watch([kind,typeNavigation,()=>props.active],()=>{void nextTick(revealActiveType);},{flush:'post'});
 const applied=ref({month:month.value,search:search.value,specialty:specialty.value});
+const filtersOpen=ref(false),filterId=useId();
 const filtersDirty=computed(()=>month.value!==applied.value.month||search.value!==applied.value.search||specialty.value!==applied.value.specialty);
 const months=Array.from({length:12},(_,i)=>({label:(i+1)+'月',value:(i+1)+'月'}));
 const specialties=computed(()=>professionChoices(props.user).map(option=>({...option,value:option.value||'all'})));
@@ -812,6 +826,9 @@ function requestedAction(){const value=params.value.get('notice_action')||'';ret
 onMounted(()=>{void load();if(params.value.has('active_item_id')||params.value.has('record_id'))void openRecord(null,true,requestedAction());if(params.value.has('change_confirmation')&&moreOptions.value.some(o=>o.key==='change'))changeOpen.value=true;document.addEventListener('visibilitychange',visibility);window.addEventListener('beforeunload',beforeUnload);window.addEventListener('resize',measureViewport);});
 watch(undoOpen,value=>{if(!value)window.clearTimeout(undoTimer);});
 onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();detailAbort?.abort();syncAbort?.abort();window.clearTimeout(timer);window.clearTimeout(sourceTimer);window.clearTimeout(undoTimer);document.removeEventListener('visibilitychange',visibility);window.removeEventListener('beforeunload',beforeUnload);window.removeEventListener('resize',measureViewport);});
+
+useUsagePage('notices', () => !props.active ? '' : historyOpen.value ? 'notices/history' : recordsOpen.value ? 'notices/records' :
+  editing.value && !form.value ? '' : noticePage(kind.value, editing.value ? action.value : null));
 </script>
 <style>
 .notice-desk,.desk-editor,.desk-dialog {
@@ -854,6 +871,18 @@ onBeforeUnmount(()=>{persist();disposed=true;stopGuard();listAbort?.abort();deta
 .desk-filters {display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.3fr) auto;gap:6px;align-items:center;margin-bottom:10px}
 .desk-filters>.n-input,.desk-filters>small {grid-column:1/-1}
 .desk-filters>.n-select {min-width:0}
+.desk-kind-picker,.desk-filter-toggle {display:none}
+@media(max-width:760px){
+  .desk-band .desk-types {display:none}
+  .desk-band .desk-kind-picker,.desk-filter-toggle {display:flex;align-items:center;gap:6px;min-height:44px}
+  .notice-desk .desk-band {gap:4px 6px}
+  .desk-kind-picker {min-width:0;font-size:13px;color:var(--v2-muted)}
+  .desk-kind-picker select {border:1px solid var(--soft-edge);border-radius:var(--cf-radius-control);background:var(--soft-face);color:var(--v2-ink);font:inherit;min-height:44px}
+  .desk-filter-toggle {width:100%;border:0;border-bottom:1px solid var(--soft-edge);background:transparent;color:var(--v2-ink);text-align:start;cursor:pointer}
+  .desk-filter-toggle span {flex:1;min-width:0;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;color:var(--v2-muted)}
+  .desk-filter-toggle[aria-expanded=true]>svg:last-child {transform:rotate(180deg)}
+  .desk-lane .desk-filters:not(.filters-open) {display:none}
+}
 .desk-records,.desk-loading {list-style:none;padding:0;margin:0;display:grid;gap:8px;grid-template-columns:minmax(0,1fr)}
 .desk-records>li {min-width:0}
 [data-list=planned]>.desk-records {row-gap:0;column-gap:14px}

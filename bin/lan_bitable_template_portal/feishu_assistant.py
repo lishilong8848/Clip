@@ -1607,6 +1607,19 @@ class FeishuAssistant:
         if turn.get('status') in {'failed', 'stopped', 'cancelled', 'superseded'}:
             from openclaw_service.assistant.lighthouse_context import reply_failure
             text = reply_failure(turn.get('error'), turn.get('error_code', ''), question)
+            from openclaw_service.protocol import STARTUP_MESSAGES
+            startup_reason = STARTUP_MESSAGES.get(turn.get('error_code'))
+            if not startup_reason and text.startswith('助手启动超时'):
+                startup_reason = '助手服务在启动时超时'
+            if startup_reason:
+                reason = startup_reason.split('。', 1)[0]
+                if turn.get('plan'):
+                    action = '请在原对话回复「查看当前计划」，核对办理进度。'
+                elif turn.get('resume_available'):
+                    action = '原研究已保存。在原对话回复「继续研究」即可恢复。'
+                else:
+                    action = '原问题已保留。稍后可在原对话重发这条问题。'
+                text = reason + '。' + action
             if turn.get('status') == 'failed' and re.fullmatch('[a-f0-9]{32}', str(turn.get('run_id') or '')):
                 text += '\n诊断编号：' + turn['run_id'][:8]
         elif turn.get('status') == 'pending':
@@ -2436,15 +2449,26 @@ class FeishuAssistant:
                 await self._validate_delivery(message, reply)
                 async def checkpoint():
                     await asyncio.to_thread(self.inbox.set, message['message_id'], 'reply', reply)
+                recheck_files_on_send = False
+                async def authorize():
+                    if recheck_files_on_send:
+                        await self._validate_reply_files(message, reply)
+                    await self._validate_delivery(message, reply)
+
                 if (reply.get('files') and not reply.get('awaiting_turn')
                         and (not reply.get('card') or all(file.get('inline_image') for file in reply['files']))):
                     # Confirmed text must not wait for file uploads. Keep the
                     # full attachment queue and ordinary delivery receipts in SQLite.
-                    await self._validate_reply_files(message, reply)
+                    # With every file receipted, history-only retries need no file read.
+                    # Any outstanding post or edit still checks all source files in authorize().
+                    recheck_files_on_send = all('file:' + file['id'] in reply.get('sent_parts', [])
+                                                for file in reply['files'])
+                    if not recheck_files_on_send:
+                        await self._validate_reply_files(message, reply)
                     send_started = time.monotonic()
                     self._delivery_milestone(message, reply, 'sending', delivery_started)
                     await self.messenger.send(message, reply, checkpoint=checkpoint,
-                        authorize=lambda: self._validate_delivery(message, reply), text_only=True)
+                        authorize=authorize, text_only=True)
                     self._delivery_milestone(message, reply, 'text_delivered', delivery_started, send_started)
                     # The delivered text and its document references can support
                     # a followup even if a subsequent attachment upload fails.
@@ -2456,7 +2480,7 @@ class FeishuAssistant:
                     if send_started is None:
                         send_started = time.monotonic()
                         self._delivery_milestone(message, reply, 'sending', delivery_started)
-                await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=lambda: self._validate_delivery(message, reply))
+                await self.messenger.send(message, reply, checkpoint=checkpoint, authorize=authorize)
                 if not reply.get('awaiting_turn'):
                     self._delivery_milestone(message, reply, 'delivered', delivery_started, send_started)
                     await asyncio.to_thread(self.inbox.remember_public_reply, message, reply)

@@ -28,9 +28,11 @@ API_ROOTS |= frozenset(prefix.split('/')[2] for prefix, _ in PREFIXES
                        if prefix.startswith('/api/') and not prefix.endswith('-'))
 API_ROOTS |= {'alarm-scan'}
 WORKBENCH_READS = {('GET', '/api/personal-calendar'), ('GET', '/api/personal-calendar/weather')}
+USAGE_VISIT = ('POST', '/api/usage/events')
 # Only these two endpoints bypass portal login. Event submission validates the QR signature.
 ALARM_SCAN_PUBLIC = {('GET', '/api/alarm-scan/health'), ('POST', '/api/alarm-scan/events')}
 ANONYMOUS = {
+    USAGE_VISIT,  # The collector itself restricts signed-out visits to named public pages.
     ('GET', '/api/auth/status'), ('GET', '/api/auth/login'), ('GET', '/api/auth/feishu/callback'),
     ('GET', '/api/auth/password/people'), ('POST', '/api/auth/password/login'),
     ('POST', '/api/auth/password/reset'), ('GET', '/api/auth/logout'), ('POST', '/api/auth/logout'),
@@ -105,7 +107,8 @@ class PublicGuard:
                                       headers={'Cache-Control': 'no-store'})(scope, receive, send)
         if not any(regex.fullmatch(path) and method in methods for regex, methods in self.routes):
             return await reject(scope, receive, send, 404, '公网入口不存在。')
-        if path.startswith('/api/') and path.split('/')[2] not in API_ROOTS and (method, path) not in WORKBENCH_READS:
+        if (path.startswith('/api/') and path.split('/')[2] not in API_ROOTS
+                and (method, path) not in WORKBENCH_READS and (method, path) != USAGE_VISIT):
             return await reject(scope, receive, send, 403, '此模块尚未开放公网访问。')
         if method not in {'GET', 'HEAD', 'OPTIONS'}:
             source = headers.get(b'origin') or headers.get(b'referer') or b''

@@ -1,0 +1,31 @@
+{
+  "notices": {
+    "label": "通告办理",
+    "pages": {
+      "event": "事件通告",
+      "other": "其他通告",
+      "deleted_history": "历史删除",
+      "manual_add": "手动添加",
+      "detail": "通告详情",
+      "select_record": "选择对应的多维记录",
+      "bind_record": "绑定记录"
+    }
+  },
+  "screenshot": {
+    "label": "截图上传",
+    "pages": {
+      "upload": "截图上传确认",
+      "select_region": "选择截图区域",
+      "confirm_region": "确认截图区域",
+      "response_time": "响应时间识别",
+      "datetime_picker": "日期时间选择"
+    }
+  },
+  "settings": {
+    "label": "桌面设置",
+    "pages": {
+      "preferences": "设置",
+      "update_diagnostic": "更新失败原因"
+    }
+  }
+}

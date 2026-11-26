@@ -6,23 +6,27 @@
 </template>
 
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref } from "vue";
+import { inject, onBeforeUnmount, onMounted, ref, type Ref } from "vue";
 import VnetBackButton from "./VnetBackButton.vue";
 import guideHtml from "../assets/HowToLiveBetter.html?raw";
 
 const keys = ["theme", "htlb_todos_v1", "htlb_rail_open_v1"];
 const guideFrame = ref<HTMLIFrameElement | null>(null);
+const owner = inject<Readonly<Ref<string>> | null>("life-guide-owner", null);
+const openedOwner = owner?.value;
+// Legacy browser-wide entries have no account ID and cannot be assigned to a person.
+const prefix = owner ? (openedOwner ? `clipflow-life-guide:user:${encodeURIComponent(openedOwner)}:` : "") : "clipflow-life-guide:";
 const saved: Record<string, string> = {};
-for (const key of keys) {
-  try { const value = localStorage.getItem(`clipflow-life-guide:${key}`); if (value !== null) saved[key] = value; } catch { /* Storage may be disabled. */ }
+if (prefix) for (const key of keys) {
+  try { const value = localStorage.getItem(prefix + key); if (value !== null) saved[key] = value; } catch { /* Storage may be disabled. */ }
 }
 const storageSeed = JSON.stringify(saved);
 
 function onGuideMessage(event: MessageEvent): void {
   if (event.source !== guideFrame.value?.contentWindow || event.data?.kind !== "clipflow-life-guide-storage") return;
   const { key, value } = event.data;
-  if (!keys.includes(key) || typeof value !== "string" || value.length > 200_000) return;
-  try { localStorage.setItem(`clipflow-life-guide:${key}`, value); } catch { /* Keep the current page usable without storage. */ }
+  if (!prefix || owner?.value !== openedOwner || !keys.includes(key) || typeof value !== "string" || value.length > 200_000) return;
+  try { localStorage.setItem(prefix + key, value); } catch { /* Keep the current page usable without storage. */ }
 }
 onMounted(() => window.addEventListener("message", onGuideMessage));
 onBeforeUnmount(() => window.removeEventListener("message", onGuideMessage));

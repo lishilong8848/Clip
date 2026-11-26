@@ -332,6 +332,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { ArrowRight, ClipboardCheck, UsersRound } from 'lucide-vue-next';
 import { requestJson, type Dict } from "../api/client";
@@ -2909,6 +2911,8 @@ watch(mopScopes, (items) => {
     scope.value = allowed[0] || "";
   }
 }, { immediate: true, deep: true });
+
+useUsagePage('engineer_mop', () => 'engineer_mop/' + (signatureManagerOpen.value ? 'signatures' : previewMode.value && preview.value ? (mopMobileStep.value === 'checks' ? 'checks' : 'editor') : 'main'));
 </script>
 
 <style scoped>

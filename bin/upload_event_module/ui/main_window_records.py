@@ -7,6 +7,7 @@ import uuid
 import os
 import queue
 from PyQt6.QtWidgets import QInputDialog
+from .page_usage import enter_page
 from PyQt6.QtCore import Qt, QSize, QTimer, QPoint, QObject
 from PyQt6 import sip
 
@@ -2321,6 +2322,7 @@ class MainWindowRecordsMixin:
         ):
             self.show_message("当前条目无需重新绑定 Record ID。")
             return
+        enter_page("notices", "bind_record")
         new_record_id, ok = QInputDialog.getText(
             self,
             "绑定 Record ID",

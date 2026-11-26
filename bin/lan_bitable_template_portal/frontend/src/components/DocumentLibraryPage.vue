@@ -169,6 +169,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import { NAlert, NButton, NCheckbox, NConfigProvider, NDatePicker, NDrawer, NDrawerContent, NEmpty, NInput, NInputNumber, NModal, NProgress, NSelect, NSkeleton, NSpin, NTab, NTabs, NTag, dateZhCN, zhCN, useThemeVars } from 'naive-ui';
 import { ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, Download, Eye, HardDrive, ExternalLink, FileText, FolderOpen, History, ListChecks, LockKeyhole, Paperclip, Pencil, Plus, RefreshCw, Search, Settings2, Trash2, Upload, X } from 'lucide-vue-next';
@@ -749,6 +751,8 @@ watch(() => props.scope, value => { if (value !== undefined && normalizeScope(va
 watch(uploadField, () => replaceId.value = '');
 onMounted(() => { unregisterNavigation = registerNavigationGuard((_target, proceed) => { if (busy.value) return false; if (!hasUnsaved()) return true; leaveAction = proceed; discardOpen.value = true; return false; }); window.addEventListener('beforeunload', beforeUnload); window.addEventListener('clipflow-read-cache-reset', identityChanged); window.addEventListener(AUTH_EXPIRED_EVENT, clearIdentity); document.addEventListener('visibilitychange', visibilityChanged); void loadTables(); schedulePoll(); });
 onBeforeUnmount(() => { disposed = true; window.clearTimeout(pollTimer); maintenanceRead?.abort(); tablesRead?.abort(); listRead?.abort(); detailRead?.abort(); versionRead?.abort(); unregisterNavigation?.(); window.removeEventListener('beforeunload', beforeUnload); window.removeEventListener('clipflow-read-cache-reset', identityChanged); window.removeEventListener(AUTH_EXPIRED_EVENT, clearIdentity); document.removeEventListener('visibilitychange', visibilityChanged); });
+
+useUsagePage('documents', () => 'documents/' + (settingsOpen.value ? 'settings' : detailOpen.value ? 'detail' : 'main'));
 </script>
 
 <style scoped>

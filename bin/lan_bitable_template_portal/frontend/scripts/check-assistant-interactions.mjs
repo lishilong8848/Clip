@@ -9,14 +9,18 @@ import {layoutApiFixture} from './layout-api-fixture.mjs';
 const root=path.resolve(path.dirname(fileURLToPath(import.meta.url)),'..');
 const output=path.resolve(root,'../../../output/playwright/assistant-interactions');
 await mkdir(output,{recursive:true});
-const server=await preview({root,...(process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
+const frozenDist=process.env.CLIPFLOW_ASSISTANT_DIST;
+const server=await preview({root,...(frozenDist?{configFile:false,build:{outDir:path.resolve(frozenDist)}}:process.env.CLIPFLOW_WORKSPACE_BUILD_DIR?{configFile:path.join(root,'vite.workspace-v2.config.ts')}:{}),logLevel:'error',preview:{host:'127.0.0.1',port:0,proxy:{}}});
 const origin='http://127.0.0.1:'+server.httpServer.address().port;
 const browser=await chromium.launch({headless:true}),errors=[];
 try{
  for(const width of [1440,390]){
-  const context=await browser.newContext({viewport:{width,height:width<700?844:1000},reducedMotion:'reduce'});
+  const context=await browser.newContext({viewport:{width,height:width<700?844:1000},isMobile:width<700,hasTouch:width<700,serviceWorkers:'block',reducedMotion:'reduce'});
   const layouts=layoutApiFixture();
   let version=1,turns=[],messageWrites=[],planWrites=[];
+  const draftFile={id:'draft-file',name:'draft.txt',url:'/api/assistant/files/draft-file'};
+  const draftCommand={kind:'skill',id:'draft-skill',label:'草稿技能'};
+  let failNextMessage=false;
   const turn=(id,extra)=>({operation_id:id,question:'整理工作安排',answer:'请补充以下信息',status:'completed',at:Date.now()/1000,scopes:['A'],sources:[],...extra});
   const ask=(id,clarification)=>{turns=[turn(id,{clarification})];version++;};
   ask('ask-a',{options:['新员工','工程师']});
@@ -31,9 +35,19 @@ try{
    if(url.pathname==='/api/health')return route.fulfill({json:{ok:true,service:'clipflow_backend',instance_id:'isolated-interactions'}});
    if(url.pathname==='/api/assistant/conversation')return ok(state());
    if(url.pathname==='/api/assistant/conversation/stamp')return ok({stamp:String(version)});
+   if(url.pathname==='/api/assistant/files' && req.method()==='POST')return ok({files:[draftFile]});
+   if(url.pathname==='/api/assistant/commands')return ok({items:[draftCommand],total:1,page:1});
    if(url.pathname==='/api/assistant/messages'){
-    messageWrites.push(body());await new Promise(resolve=>setTimeout(resolve,80));
-    const next=turn(body().operation_id,{question:body().question,answer:'已收到补充'});turns.push(next);version++;
+    const payload=body(),existing=turns.find(item=>item.operation_id===payload.operation_id);
+    messageWrites.push(payload);await new Promise(resolve=>setTimeout(resolve,80));
+    if(failNextMessage){
+     failNextMessage=false;
+     Object.assign(existing,{status:'failed',answer:'',error:'隔离接口暂时失败'});version++;
+     return route.fulfill({status:503,json:{ok:false,error:existing.error}});
+    }
+    const next=turn(payload.operation_id,{...existing,attempt_id:payload.attempt_id,question:payload.question,status:'completed',answer:'已收到补充',error:''});
+    if(existing)Object.assign(existing,next);else turns.push(next);
+    version++;
     return ok({turn:next,run_id:''});
    }
    if(url.pathname.startsWith('/api/assistant/plans/')){
@@ -88,8 +102,55 @@ try{
   await page.locator('.operation-plan').screenshot({path:path.join(output,'send-preview-'+width+'.png')});
   await page.getByRole('button',{name:'确认发送',exact:true}).click();await page.locator('.operation-plan[data-plan-status=completed]').waitFor();
   assert.equal(planWrites.filter(item=>item.method==='POST').length,1);assert.equal(planWrites.at(-1).payload.stage,'review');
+  const legacy=turn('legacy',{question:'历史问题'});
+  const oldFile={id:'old-file',name:'original.txt',url:'/api/assistant/files/old-file'};
+  const oldCommand={kind:'tool',id:'old-tool',label:'历史工具'};
+  turns=[legacy,turn('file-only',{question:'',attachments:[oldFile],preview_file:oldFile,commands:[oldCommand]})];version++;
+  await open();
+  const historical=page.locator('[data-operation-id="legacy"]');
+  const button=(name,scope=page)=>scope.getByRole('button',{name,exact:true});
+  const edited='编辑后的独立问题';
+  await button('编辑问题',historical).click();
+  assert.equal(await composer.inputValue(),legacy.question);
+  await composer.fill(edited);
+  await button('插入技能或工具').click();
+  await page.getByRole('option',{name:new RegExp(draftCommand.label)}).click();
+  await page.locator('.composer input[type=file]').setInputFiles({name:draftFile.name,mimeType:'text/plain',buffer:Buffer.from('fixture')});
+  const fileChip=button('移除'+draftFile.name),commandChip=button('移除 '+draftCommand.label);
+  await page.locator('.draft-files').getByText(draftFile.name,{exact:true}).waitFor();
+  async function checkDraft(){
+   assert.equal(await composer.inputValue(),edited);
+   assert(await fileChip.isVisible());assert(await commandChip.isVisible());
+  }
+  async function submit(action){
+   const before=messageWrites.length;
+   const [response]=await Promise.all([page.waitForResponse(res=>res.url()===origin+'/api/assistant/messages' && res.request().method()==='POST'),action.click()]);
+   await response.finished();
+   assert.equal(messageWrites.length,before+1);
+   const {operation_id,question,commands,file_ids,preview_file_id}=messageWrites.at(-1);
+   return {operation_id,question,commands,file_ids,preview_file_id};
+  }
+  const original={operation_id:legacy.operation_id,question:legacy.question,commands:[],file_ids:[],preview_file_id:''};
+  failNextMessage=true;
+  assert.deepEqual(await submit(button('重新生成回答',historical)),original,'regeneration must use only the historical turn');
+  await historical.getByText('隔离接口暂时失败',{exact:true}).waitFor();await checkDraft();
+  assert.deepEqual(await submit(button('重试原问题',historical)),original,'failed retry must use only the historical turn');
+  await button('重新生成回答',historical).waitFor();await checkDraft();
+  const fileOnly=page.locator('[data-operation-id="file-only"]');
+  assert.deepEqual(await submit(button('重新生成回答',fileOnly)),{
+   operation_id:'file-only',question:'',commands:[{kind:oldCommand.kind,id:oldCommand.id}],file_ids:[oldFile.id],preview_file_id:oldFile.id
+  });
+  await checkDraft();
+  const editedPost=await submit(button('发送问题'));
+  assert(editedPost.operation_id && !['legacy','file-only'].includes(editedPost.operation_id));
+  assert.deepEqual(editedPost,{operation_id:editedPost.operation_id,question:edited,commands:[{kind:draftCommand.kind,id:draftCommand.id}],file_ids:[draftFile.id],preview_file_id:''});
+  assert.equal(await composer.inputValue(),'');await fileChip.waitFor({state:'detached'});await commandChip.waitFor({state:'detached'});
+  await composer.fill('新的独立提问');
+  const fresh=await submit(button('发送问题'));
+  assert(fresh.operation_id && ![editedPost.operation_id,'legacy','file-only'].includes(fresh.operation_id));
+  assert.deepEqual(fresh,{operation_id:fresh.operation_id,question:'新的独立提问',commands:[],file_ids:[],preview_file_id:''});
   assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
   await context.close();
  }
- assert.deepEqual(errors,[]);console.log('PASS: native choices/multiple/date fields, current-question binding, stale controls, composer isolation and editable send/confirm flow on PC/mobile. Every API mocked.');
+ assert.deepEqual(errors,[]);console.log('PASS: clarification, plan confirmation, editing, new questions, failed regeneration and retry. Historical and draft files/commands isolated at 1440px and 390px. Every API mocked.');
 }finally{await browser.close();await server.close();}

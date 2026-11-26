@@ -301,6 +301,20 @@ class HostTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/register', json={'portal_id': 'bad', 'callback_url': 'https://outside.invalid/'})
         self.assertEqual(response.status_code, 400)
 
+    async def test_startup_failure_preserves_safe_stage_without_reserving_a_run(self):
+        from openclaw_service.assistant.lighthouse_runtime import AssistantStartupError
+        from openclaw_service.protocol import STARTUP_MESSAGES
+        lease = await self.register()
+        failure = AssistantStartupError("fixture diagnostic detail", category="startup_catalog")
+        with patch.object(self.host.manager, 'acquire', side_effect=failure):
+            reply = await self.client.post('/acquire', json={
+                'lease': lease, 'actor': self.actor, 'profile': self.profile,
+                'definitions': self.definitions, 'request_id': 'f' * 32})
+        self.assertEqual(reply.status_code, 503)
+        self.assertEqual(reply.json(), {'ok': False, 'code': 'startup_catalog',
+                                        'error': STARTUP_MESSAGES['startup_catalog']})
+        self.assertFalse(self.host.reservations)
+
     async def test_control_requires_bearer_scheme_and_integer_protocol(self):
         response = await self.client.post('/health', headers={'Authorization': self.host.key}, json={})
         self.assertEqual(response.status_code, 403)

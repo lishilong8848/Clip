@@ -79,12 +79,13 @@
       <h3>{{ row.name || row.record_id }}</h3><small>{{ [row.building,row.status,row.device,row.location,row.start_time].filter(Boolean).join(' · ') }}</small>
       <p v-if="row.fault">{{ row.fault }}</p>
       <div v-if="(row.check_status || row.auto_check_status)==='skipped'">跳过核对<span v-if="row.skip_reason"> · {{ row.skip_reason }}</span></div>
+      <p v-else-if="(row.check_status || row.auto_check_status)==='stale'">通告内容已变化，请重新核对</p>
       <div v-else-if="Array.isArray(row.hits) && (!row.check_status || row.check_status==='ready') && (row.check_status==='ready' || !row.auto_check_status || row.auto_check_status==='ready')">
         <strong>{{ row.hits.length?'找到 '+row.hits.length+' 条候选屏蔽':'未找到匹配屏蔽' }}</strong>
         <button v-for="hit in row.hits" :key="hit.blockId" :title="hit.reason" @click="locateNoticeBlock(hit,row)">{{ hit.blockName || hit.blockId }} · {{ hit.reason }}</button>
       </div>
       <p v-else>{{ auditResultText(row) }}</p>
-      <div class="sp-tools"><small v-if="row.checked_at || row.auto_checked_at">{{ row.check_source==='manual'?'手动核对':'自动核对' }} · {{ timeText(row.checked_at || row.auto_checked_at) }}</small>
+      <div class="sp-tools"><small v-if="row.checked_at || row.auto_checked_at"><template v-if="(row.check_status || row.auto_check_status)==='stale'">上次</template>{{ row.check_source==='manual'?'手动核对':'自动核对' }} · {{ timeText(row.checked_at || row.auto_checked_at) }}</small>
         <button v-if="(row.check_status || row.auto_check_status)!=='skipped'" :disabled="currentAudit.checking || currentAudit.loading" @click="checkNoticeAudit(row.record_id)">核对本条</button>
         <button @click="showFields(row,currentAudit.label+'通告字段')">详情</button></div>
     </article></div>

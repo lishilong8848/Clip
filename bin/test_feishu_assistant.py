@@ -360,16 +360,17 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.channel.inbox.add(message)
         actor = {'id': 'ou_A', 'scopes': ['A'], 'modules': ['assistant']}
         reply = {'text': '完整附件说明', 'sync_history': True, 'actor_id': actor['id'], 'conversation_id': 'same',
-                 'files': [{'id': 'a' * 32, 'file_key': 'fixture-key'}]}
+                 'files': [{'id': 'a' * 32, 'file_key': 'fixture-key'}],
+                 'delivery_access': self.channel._delivery_access(actor)}
         self.channel.answer = AsyncMock(return_value=reply)
         self.channel._react = AsyncMock()
-        self.channel._validate_delivery = AsyncMock()
         self.channel._request_context = AsyncMock(return_value=(None, actor))
-        self.channel._reply_file_context = AsyncMock(return_value=(None, actor))
-        delivered, reads, syncs = [], [], []
+        delivered, preflight_reads, reads, syncs = [], [], [], []
         async def call(request, actor, path, *a, **kw):
+            if path == 'conversation':
+                return {'conversation_id': 'same'}
             if path.startswith('files/'):
-                reads.append(path)
+                (reads if delivered else preflight_reads).append(path)
                 if syncs:
                     raise AssistantError('附件已过期', 404)
                 return {'name': '说明.txt'}
@@ -379,18 +380,21 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
                     raise AssistantError('暂不可用', 503)
                 return {'recorded': True}
             raise AssertionError(path)
-        async def send(message, reply, **kw):
-            for part in ('answer:0', 'file:' + 'a' * 32):
-                if part not in reply.get('sent_parts', []):
-                    delivered.append(part)
-                    reply.setdefault('sent_parts', []).append(part)
-                    await kw['checkpoint']()
+        async def post(url, *, headers, json):
+            self.assertTrue(url.endswith('/' + message['message_id'] + '/reply'))
+            delivered.append({'interactive': 'answer:0', 'file': 'file:' + 'a' * 32}[json['msg_type']])
+            return SimpleNamespace(json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})
         self.channel._call = AsyncMock(side_effect=call)
-        self.channel.messenger = SimpleNamespace(send=AsyncMock(side_effect=send))
+        self.channel.messenger = FeishuMessenger({})
+        self.channel.messenger.client = AsyncMock(return_value=SimpleNamespace(post=post))
+        self.channel.messenger.headers = AsyncMock(return_value={})
+        self.enterContext(patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
+                                return_value={'real_write_allowed': True}))
         await self.channel._drain(message['union_id'])
         self.channel.inbox = Inbox(self.channel.inbox.path)
         self.channel.inbox.set(message['message_id'], 'reply', delay=0)
         await self.channel._drain(message['union_id'])
+        self.assertEqual(preflight_reads, ['files/' + 'a' * 32])
         self.assertEqual(len(reads), 1)
         self.assertEqual(len(syncs), 2)
         self.assertEqual(delivered, ['answer:0', 'file:' + 'a' * 32])
@@ -400,23 +404,40 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_stopped_attachment_reply_retains_distinct_notice_until_delivery(self):
         message = parse_message(event(message_id='filestopped'), 'cliTest', 'ouBot')
         self.channel.inbox.add(message)
-        reply = {'text': '文件已经生成', 'actor_id': 'fixture', 'conversation_id': 'same',
+        actor = {'id': 'ou_A', 'scopes': ['A'], 'modules': ['assistant']}
+        reply = {'text': '文件已经生成', 'actor_id': actor['id'], 'conversation_id': 'same',
+                 'delivery_access': self.channel._delivery_access(actor),
                  'sent_parts': ['answer:0'], 'files': [{'id': 'a' * 32, 'file_key': 'old_key'}]}
         self.channel.inbox.set(message['message_id'], 'reply', reply)
         self.channel.answer = AsyncMock()
-        self.channel._validate_delivery = AsyncMock()
-        self.channel._prepare_reply_files = AsyncMock(side_effect=AssistantError('文件权限失效', 403))
-        self.channel.messenger = SimpleNamespace(send=AsyncMock())
+        self.channel._request_context = AsyncMock(return_value=(None, actor))
+        async def call(request, actor, path, **kw):
+            if path == 'conversation':
+                return {'conversation_id': 'same'}
+            self.assertEqual(path, 'files/' + 'a' * 32)
+            raise AssistantError('文件权限失效', 403)
+        self.channel._call = AsyncMock(side_effect=call)
+        self.channel.messenger = FeishuMessenger({})
+        client = SimpleNamespace(post=AsyncMock(side_effect=[TimeoutError(), SimpleNamespace(
+            json=lambda: {'code': 0, 'data': {'message_id': 'om_Receipt'}})]))
+        self.channel.messenger.client = AsyncMock(return_value=client)
+        self.channel.messenger.headers = AsyncMock(return_value={})
+        self.channel.messenger.send = AsyncMock(wraps=self.channel.messenger.send)
+        self.enterContext(patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
+                                return_value={'real_write_allowed': True}))
         await self.channel._drain(message['union_id'])
         with self.channel.inbox.connect() as db:
             saved = json.loads(db.execute('SELECT reply FROM messages WHERE id=?', (message['message_id'],)).fetchone()[0])
         self.assertTrue(saved['attachment_stopped'])
         self.assertNotIn('files', saved)
         self.channel.inbox.set(message['message_id'], 'reply', saved, delay=0)
-        self.channel._prepare_reply_files = AsyncMock()
         await self.channel._drain(message['union_id'])
         self.channel.answer.assert_not_awaited()
         self.assertTrue(self.channel.messenger.send.call_args.args[1]['attachment_stopped'])
+        self.assertEqual(client.post.await_count, 2)
+        first, retry = (attempt.kwargs['json'] for attempt in client.post.await_args_list)
+        self.assertEqual(first, retry)
+        self.assertIn('停止发送', first['content'])
         self.assertEqual(self.channel.inbox.owners(), [])
 
     async def test_missing_file_upload_scope_preserves_answer_without_reasking_model(self):
@@ -440,7 +461,16 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         message = parse_message(event(message_id='filebody'), 'cliTest', 'ouBot')
         self.channel.inbox.add(message)
         text = '完整业务说明。\n' * 900
-        self.channel.answer = AsyncMock(return_value={'text': text, 'files': [{'id': 'a' * 32}]})
+        actor = {'id': 'ou_A', 'scopes': ['A'], 'modules': ['assistant']}
+        self.channel.answer = AsyncMock(return_value={'text': text, 'files': [{'id': 'a' * 32}],
+            'actor_id': actor['id'], 'conversation_id': 'same', 'delivery_access': self.channel._delivery_access(actor)})
+        self.channel._request_context = AsyncMock(return_value=(None, actor))
+        async def call(request, actor, path, **kw):
+            if path == 'conversation':
+                return {'conversation_id': 'same'}
+            self.assertEqual(path, 'files/' + 'a' * 32)
+            return {'name': '说明.txt'}
+        self.channel._call = AsyncMock(side_effect=call)
         self.channel._react = AsyncMock()
         denied = AssistantError('飞书应用缺少文件上传权限，请联系管理员。', 403,
                                 category='feishu_file_upload_permission')
@@ -532,9 +562,11 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         self.store = self.runtime.state_store = auth._state_store
         self.runtime.auth_manager = auth
         previous = person['login_ids'][0]
+        # Model an explicit assistant-only grant, using the same version as account edits.
         permission = {'enabled': True, 'role': 'building', 'level': 'L4', 'category': 'engineer',
-                      'access_version': 1, 'modules': ['assistant'], 'scopes': ['A']}
+                      'access_version': 1, 'module_grants_version': 2, 'modules': ['assistant'], 'scopes': ['A']}
         self.store.put_auth_permissions({'version': 2, 'users': {previous: permission}})
+        stored_grant = self.store.get_auth_permissions()['users'][previous]
         self.store.put_document(DIRECTORY_NS, DIRECTORY_KEY, {
             'schema': 3, 'app_id': 'cliRetired', 'loaded_at': time.time(), 'people': {person['id']: person}})
         history = {'id': 'fixture-existing-conversation', 'unified_person': True, 'turns': [{
@@ -553,6 +585,7 @@ class ChannelTests(unittest.IsolatedAsyncioTestCase):
         snapshot = auth._account_directory_provider()
         self.assertEqual((snapshot['schema'], snapshot['app_id']), (4, TARGET_APP_ID))
         self.assertEqual(snapshot['people'][person['id']]['login_ids'], [current_open_id])
+        self.assertEqual(self.store.get_auth_permissions()['users'][current_open_id], stored_grant)
         self.assertEqual(auth.scopes_for_open_id(current_open_id), ['A'])
         self.assertEqual(auth.account_profile(current_open_id)['modules'], ['assistant'])
         self.assertIsNone(self.channel._sender_user({'sender_id': previous}))

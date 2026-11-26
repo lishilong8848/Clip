@@ -154,6 +154,32 @@ class ShiftReminderTests(TestCase):
     def run_at(self, hour, day=10):
         self.service.send_notifications(dt.datetime(2026, 10, day, hour, tzinfo=learning.TZ))
 
+    def test_same_shift_picks_up_recovered_public_origin_before_next_person(self):
+        from urllib.parse import parse_qs, urlsplit
+        from public_access import links
+        self.reader.return_value[0]['shift'] = '白'
+        lan = 'http://192.168.224.130:18766'
+        origin = 'https://portal.example.com'
+        self.service._portal_url = lambda: links.preferred_base(lan)
+        with patch.object(links, 'deployment', return_value=('192.168.224.130', origin)), \
+                patch.object(links, 'local_host', return_value=True), \
+                patch.object(links, 'read_result', return_value={}), \
+                patch.object(links, '_last_probe', None), \
+                patch.object(links, '_probe_origin', side_effect=[False, True]) as probe, \
+                patch.object(links.time, 'monotonic', return_value=100) as clock:
+            def receive(*args):
+                clock.return_value += 6
+                return True, 'ok', []
+            self.sender.side_effect = receive
+            self.run_at(13)
+            self.run_at(13)
+        self.assertEqual(probe.call_count, 2)
+        urls = [urlsplit(c.args[1]['elements'][-1]['actions'][0]['url']) for c in self.sender.call_args_list]
+        self.assertEqual([url.netloc for url in urls], ['192.168.224.130:18766', 'portal.example.com'])
+        for url in urls:
+            self.assertEqual(url.path, '/learning')
+            self.assertEqual(parse_qs(url.query), {'view': ['practice'], 'date': ['2026-10-10'], 'shift': ['白']})
+
     def test_daily_snapshot_times_restart_and_concurrent_dedup(self):
         self.run_at(7)
         self.reader.assert_not_called()

@@ -538,6 +538,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { isAssistantEvent } from '../modalState';
 import {
@@ -1498,6 +1500,8 @@ onBeforeUnmount(() => {
   clearSnapshotPoll();
   clearStagedPhotos();
 });
+
+useUsagePage('water', () => drawerOpen.value ? 'water/editor' : 'water/records');
 </script>
 
 <style scoped>

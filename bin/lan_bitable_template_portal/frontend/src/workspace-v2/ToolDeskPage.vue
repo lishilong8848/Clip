@@ -80,7 +80,9 @@ function goBack() {
 </template>
 
 <style scoped>
-.td-section-nav{flex:1 1 auto;min-width:0}
+.td-page-title.td-heading{justify-content:flex-start}
+.td-section-nav{flex:0 1 auto;min-width:0}
+.td-page-title>.td-actions{margin-inline-start:auto}
 .tool-desk .tool-worklist{gap:.65rem}
 .followup-filters{display:flex;flex-wrap:wrap;gap:.4rem;width:min(40rem,100%);align-items:center;min-width:0}
 .followup-filters input[type=search]{flex:1 1 12rem;min-width:0}

@@ -4,6 +4,10 @@ import re
 CHINESE_OUTPUT_NOTICE = '本次答复未通过中文与内容校验，不合格内容未展示。原问题和已读取资料已保留。'
 _CJK = re.compile(r'[\u3400-\u9fff]')
 _WORD = re.compile(r"[A-Za-z]+(?:['’][A-Za-z]+)?")
+_QUANTITY = re.compile(r'(?<![\d.])[+-]?\d+(?:\.\d+)?\s*(?:[mkMµμ]?(?:VA|var|Hz|V|A|W|F|H|Ω)|°C|℃|%)(?![a-zA-Z])')
+_MATH_COMMAND = re.compile(r'\\(?:dfrac|tfrac|frac|sqrt|cdot|times|approx|sim|left|right|mathrm|Phi|phi|Delta)\b')
+_MATH_LINE = re.compile(r'[\d\sA-Za-z\u0370-\u03ff₀-₉⁰¹²³⁴⁵⁶⁷⁸⁹=≈≃∝→+\-−*/×÷·^_{}()\[\]\\$.,:%°Ω℃]+')
+_NOTATION_SPAN = re.compile(r'[^\u3400-\u9fff，。；：！？、|]+')
 _INTERNAL = re.compile(
     r'\b(?:I|we)\s+(?:should|must|need\s+to|have\s+to)\s+(?:give|answer|respond|reply|say|suggest|follow|make\s+sure|provide|tell|explain|be\s+(?:concise|careful))\b'
     r'|\bfollowing\s+(?:the|these|my)\s+(?:system\s+)?instructions\b'
@@ -33,12 +37,29 @@ def _nontechnical(value):
     return re.sub(r'\b[A-Za-z][A-Za-z0-9_.-]*\d[A-Za-z0-9_.-]*\b', '', text)
 
 
+def _notation_line(line):
+    # Accept standalone quantities or equations, without exempting surrounding prose.
+    line = _QUANTITY.sub('0', line.strip())
+    line = _MATH_COMMAND.sub('=', line)
+    if not _MATH_LINE.fullmatch(line):
+        return False
+    symbols = _WORD.findall(line)
+    if not symbols:
+        return True
+    return bool(re.search(r'[=≈≃∝→]', line)) and all(
+        len(symbol) == 1 or re.fullmatch(r'[A-Z][A-Za-z]', symbol) for symbol in symbols
+    )
+
+
 def presentation_issue(value):
     prose = public_prose(value)
     if _INTERNAL.search(prose):
         return '答复包含内部自述或遵循指令的过程。只返回面向用户的中文结论、必要依据和限制，不输出思考、评审或写作计划。'
     for paragraph in re.split(r'\n\s*\n|[\r\n]', prose):
-        words = _WORD.findall(_nontechnical(paragraph))
+        if not _WORD.search(paragraph):
+            continue
+        narration = _NOTATION_SPAN.sub(lambda m: ' ' if _notation_line(m[0]) else m[0], paragraph)
+        words = _WORD.findall(_nontechnical(narration))
         if not words:
             continue
         letters = sum(len(word) for word in words)

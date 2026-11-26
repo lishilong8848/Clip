@@ -228,6 +228,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { randomHexId, resilientStorage } from "../browserStorage";
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue';
 import { ArrowUpRight, Building2, ChevronLeft, ChevronRight, ClipboardList, CloudUpload, Download, FileCheck2, FileSpreadsheet, Files, HardDrive, History, Loader2, Pencil, Plus, RefreshCw, Save, Search, Settings2, Trash2, TriangleAlert, X, ZoomIn, ZoomOut } from 'lucide-vue-next';
@@ -804,6 +806,8 @@ onMounted(async () => {
   try { const savedDraft = draftStorage.getItem(draftKey); if (savedDraft && !saving.value) { draft = JSON.parse(savedDraft); if (draft?.scope === props.scope && Array.isArray(draft.form?.groups)) { restoreDialogOpen.value = true; void focusModal(); } } } catch { clearDraft(); }
 });
 onBeforeUnmount(() => { flushDraft(); disposed = true; recordAbort?.abort(); mapAbort?.abort(); historyAbort?.abort(); removeNavigationGuard?.(); window.removeEventListener('pagehide', flushDraft); window.removeEventListener('keydown', keyboard); window.clearTimeout(pollTimer); window.clearTimeout(bootstrapTimer); window.clearTimeout(savePollTimer); window.clearTimeout(draftTimer); });
+
+useUsagePage('cabinet', () => 'cabinet/' + tab.value);
 </script>
 
 <style scoped>

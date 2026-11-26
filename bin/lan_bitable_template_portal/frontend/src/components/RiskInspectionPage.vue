@@ -84,6 +84,8 @@
   </NConfigProvider>
 </template>
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import {computed,h,nextTick,onBeforeUnmount,onMounted,reactive,ref,watch} from 'vue';
 import {NAlert,NButton,NConfigProvider,NDataTable,NDatePicker,NDrawer,NDrawerContent,NEmpty,NInput,NModal,NPagination,NSelect,NSpin,NSwitch,NTab,NTabs,NTag,zhCN,dateZhCN,type DataTableColumns} from 'naive-ui';
 import {ArrowLeft,ExternalLink,Library,Plus,RefreshCw,Search,Settings2,Trash2} from 'lucide-vue-next';
@@ -285,6 +287,8 @@ function leaving(e:BeforeUnloadEvent){if(unsaved.value||busy.value){e.preventDef
 const unregister=registerNavigationGuard((_target,proceed)=>leaveAllowed(proceed));
 onMounted(async()=>{await reload();if(disposed)return;const id=props.releaseId||new URLSearchParams(window.location.search).get('id');if(id)await openTask(id,true);if(disposed)return;window.addEventListener('beforeunload',leaving);timer=window.setInterval(()=>{const editing=document.activeElement?.closest('.risk-page input,.risk-page textarea,.risk-feedback input,.risk-feedback textarea,[role="listbox"]');if(!disposed&&!document.hidden&&!busy.value&&!dirty.value&&!editor.value&&!confirmation.value&&!fieldEditor.value&&!editing)void reload();},15000);});
 onBeforeUnmount(()=>{disposed=true;cancelTaskListRead();read?.abort();unregister();window.clearInterval(timer);window.removeEventListener('beforeunload',leaving);});
+
+useUsagePage('risk_inspection', () => 'risk_inspection/' + (detail.value ? 'detail' : activeView.value));
 </script>
 <style scoped>
 .risk-view-tabs {

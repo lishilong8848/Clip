@@ -308,6 +308,8 @@
 </template>
 
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   CalendarDays,
@@ -770,6 +772,8 @@ onBeforeUnmount(() => {
   requestController?.abort();
   morningPrintStyle?.remove();
 });
+
+useUsagePage('daily', () => 'daily/' + (props.printMode ? 'print' : morningDialogOpen.value ? 'morning' : 'main'));
 </script>
 
 <style scoped>

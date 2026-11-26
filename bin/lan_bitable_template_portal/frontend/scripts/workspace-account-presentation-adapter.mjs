@@ -176,7 +176,7 @@ function adaptAdminAccounts(source) {
   source = patchScript(source, `${HIERARCHY_IMPORT}\n${CSS_IMPORT}`);
   source = source.replace(
     "const v2Level=ref('');",
-    "const v2Level=ref('');\nconst v2AccountMode = ref<'list' | 'tree'>('list');",
+    "const v2Level=ref('');\nconst v2AccountMode = ref<'list' | 'tree'>('list');\nconst reviewedPendingCount = ref<number | string | null>(null);\nconst pendingBadge = computed(() => reviewedPendingCount.value ?? props.pendingCount);",
   );
   return source;
 }

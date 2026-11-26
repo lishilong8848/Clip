@@ -34,5 +34,21 @@ document.documentElement.classList.add('workspace-v2');
 installLinkNavigation();
 installActionMotion();
 installFeedbackMotion();
+// Some mobile WebViews resize only the visual viewport when the keyboard opens.
+const viewport = window.visualViewport;
+if (viewport && navigator.maxTouchPoints > 0) {
+  const root = document.documentElement;
+  function syncDialogViewport() {
+    const obscured = viewport!.scale === 1 && root.clientHeight - viewport!.height > 100;
+    root.toggleAttribute('data-v2-keyboard', obscured);
+    if (obscured) {
+      root.style.setProperty('--v2-visible-height', viewport!.height + 'px');
+      root.style.setProperty('--v2-visible-top', viewport!.offsetTop + 'px');
+    }
+  }
+  viewport.addEventListener('resize', syncDialogViewport);
+  viewport.addEventListener('scroll', syncDialogViewport);
+  syncDialogViewport();
+}
 document.addEventListener('click',event=>{const input=event.target instanceof HTMLInputElement?event.target:null;if(input&&!input.disabled&&!input.readOnly&&['date','time','month','datetime-local'].includes(input.type)){try{input.showPicker?.();}catch{/* Native focus remains available on unsupported browsers. */}}});
 createApp(Workspace).component('LoadingIndicator', LoadingIndicator).component('UiTransition', UiTransition).mount('#app');

@@ -55,6 +55,8 @@
   </section>
 </template>
 <script setup lang="ts">
+import { useUsagePage } from '../usageNavigation';
+
 import {computed,onBeforeUnmount,onMounted,ref} from 'vue';
 import {NAlert,NButton,NSkeleton} from 'naive-ui';
 import {ArrowLeft,Check,ClipboardList,ImagePlus,RefreshCw} from 'lucide-vue-next';
@@ -137,6 +139,8 @@ function visibility(){window.clearTimeout(timer);window.clearInterval(clock);if(
 const stopGuard=registerNavigationGuard(()=>!busy.value);
 onMounted(()=>{visibility();document.addEventListener('visibilitychange',visibility);});
 onBeforeUnmount(()=>{disposed=true;stopGuard();abort?.abort();window.clearTimeout(timer);window.clearInterval(clock);document.removeEventListener('visibilitychange',visibility);});
+
+useUsagePage('work_order', () => !state.value || stepsView && !state.value.current_run_index ? '' : stepsView ? 'work_order/steps' : 'work_order/overview');
 </script>
 <style scoped>
 .order-desk{max-width:1160px;margin-inline:auto;color:var(--v2-ink);padding:clamp(10px,2vw,25px);display:grid;gap:18px}

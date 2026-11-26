@@ -76,7 +76,7 @@
                   <details v-if="turn.process?.length" class="process ld-activity"><summary><ChevronRight class="process-chevron" :size="12" aria-hidden="true"/>处理过程 · {{ turn.process.length }} 项</summary>
                     <ol class="process-rows"><li v-for="(step,i) in turn.process" :key="i">{{ step.label }}</li></ol></details>
                   <div v-if="turn.status==='pending' && !turn.answer" class="assistant-thinking" role="status"><span class="thinking-dots" aria-hidden="true"><i/><i/><i/></span>{{ assistantProgressText(turn) }}</div>
-                  <AnimatedReply v-if="turn.answer" :text="turn.answer" :streaming="turn.status==='pending'"/>
+                  <AnimatedReply v-if="turn.answer || turn.status==='pending'" v-show="!!turn.answer" :text="turn.answer || ''" :streaming="turn.status==='pending'"/>
                   <p v-if="turn.error" class="failure ld-alert">{{ turn.error }}</p>
                   <LighthouseDeskFiles :files="turn.output_files || []" :safe-url="safeAttachmentUrl" @preview="openArtifact"/>
                   <LighthouseDownloads v-if="turn.downloads?.length" :items="turn.downloads"/>
@@ -179,13 +179,14 @@
   </div>
   <p v-if="planErrors[turn.plan.id]" class="ld-alert" role="alert">{{ planErrors[turn.plan.id] }}</p>
 </section>
-                  <div v-if="turn.answer || ['stopped','failed','interrupted'].includes(turn.status) || turn.resume_available" class="message-actions ld-actions">
+                  <div v-if="turnAction(turn) || turn.answer || ['stopped','failed','interrupted'].includes(turn.status) || turn.resume_available" class="message-actions ld-actions">
                     <button v-if="turn.answer" @click="copyAnswer(turn)">复制</button>
                     <button v-if="turnIsComplete(turn)" :disabled="!!synthesisReason" :title="synthesisReason" @click="readReply(turn.operation_id,turn.answer)">{{ playingId===turn.operation_id?'停止朗读':'朗读' }}</button>
-                    <button v-if="turnIsComplete(turn) && !turn.history_loaded" :disabled="busy || uploading" @click="editQuestion(turn)">编辑问题</button>
-                    <button v-if="turnIsComplete(turn) && !turn.history_loaded" class="retry" :disabled="busy || uploading || !state.enabled" @click="send(turn,true)">重新生成回答</button>
-                    <button v-if="!turn.history_loaded && ['stopped','failed','interrupted'].includes(turn.status)" class="retry" :disabled="busy || uploading" @click="send(turn)">{{ turn.status==='stopped'?'继续回答':'重试原问题' }}</button>
-                    <button v-if="turn.resume_available" :disabled="!!resumeRun || busy" @click="resumeResearch(turn)">继续研究</button>
+                    <button v-if="turnIsComplete(turn) && !turn.history_loaded && turnAction(turn)!=='查看原任务'" :disabled="busy || uploading" @click="editQuestion(turn)">编辑问题</button>
+                    <button v-if="turnIsComplete(turn) && !turn.history_loaded && !turnAction(turn)" class="retry" :disabled="busy || uploading || !state.enabled" @click="send(turn,true)">重新生成回答</button>
+                    <button v-if="turnAction(turn)" class="retry" :disabled="sending || loading || (turnAction(turn)==='重试原问题' && busy)" @click="send(turn)">{{ turnAction(turn) }}</button>
+                    <button v-else-if="!turn.history_loaded && ['stopped','failed','interrupted'].includes(turn.status)" class="retry" :disabled="busy || uploading" @click="send(turn)">{{ turn.status==='stopped'?'继续回答':'重试原问题' }}</button>
+                    <button v-if="turn.resume_available && !turnAction(turn)" :disabled="!!resumeRun || busy" @click="resumeResearch(turn)">继续研究</button>
                   </div>
                 </div>
               </article>
@@ -207,7 +208,8 @@
                 <button type="button" :title="microphoneReason" :aria-label="voicePhase==='recording'?'停止录音':'语音输入'" :disabled="!!microphoneReason || !['idle','recording'].includes(voicePhase)" @click="toggleRecording"><Mic :size="15"/><span v-if="voicePhase==='recording'">{{ voiceElapsed }}s</span></button>
               </div><div class="ld-actions">
                 <button v-if="state.active_run_id && state.busy" class="stop" type="button" :disabled="stopping" @click="stopAnswer"><Square :size="12"/>停止生成</button>
-                <button type="submit" class="ld-primary" aria-label="发送问题" :disabled="sending || loading || uploading || state.enabled===false || !state.configured || (!draft.trim() && !draftFiles.some(f=>f.id))"><ArrowUp :size="15"/>发送</button>
+                <!-- 每条提问由 sending 防重，上一条提交的反馈动画不能锁住下一条。 -->
+                <button type="submit" data-v2-navigation class="ld-primary" aria-label="发送问题" :disabled="sending || loading || uploading || state.enabled===false || !state.configured || (!draft.trim() && !draftFiles.some(f=>f.id))"><ArrowUp :size="15"/>发送</button>
               </div></div>
             </form>
           </template>

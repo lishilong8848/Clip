@@ -1691,6 +1691,12 @@ class PollingWorkOrderService:
         return group.get('operators') or [group.get('operator') or {}]
 
     @staticmethod
+    def link_recipients(group: dict):
+        for i, person in enumerate(PollingWorkOrderService.operators(group)):
+            yield "operator", ("operator" if i == 0 else "operator:" + person["record_id"]), person
+        yield "reviewer", "reviewer", group.get("reviewer") or {}
+
+    @staticmethod
     def operator_names(group):
         return '、'.join(str(person.get('name') or '') for person in PollingWorkOrderService.operators(group))
 
@@ -2139,6 +2145,16 @@ class PollingWorkOrderService:
             if isinstance(photo, dict)
         ]
         return result
+
+    @staticmethod
+    def pending_confirmation_roles(group: dict) -> set[str]:
+        if group.get("state") != "active":
+            return set()
+        return {
+            role for role in ("operator", "reviewer")
+            if any(step.get(f"{role}_required") and not step.get(f"{role}_confirmation")
+                   for step in group.get("steps") or [])
+        }
 
     @staticmethod
     def _step_done(step: dict) -> bool:
@@ -3233,10 +3249,12 @@ class PollingWorkOrderService:
             )
         return group
 
-    def update_notifications(self, target_record_id: str, notifications: dict) -> dict:
+    def update_notifications(self, target_record_id: str, notifications: dict, *, binding_id: str) -> dict:
         with self._lock:
             group = self.get_group(target_record_id)
-            group["notifications"] = copy.deepcopy(notifications or {})
+            if str(group.get("binding_id") or "") != binding_id:
+                raise PortalConflictError("工单已重新绑定，请刷新最新工单。")
+            group["notifications"] = {**(group.get("notifications") or {}), **copy.deepcopy(notifications)}
             group["updated_at"] = self._now_text()
             self.state_store.put_document(POLLING_WORK_ORDER_NAMESPACE, target_record_id, group)
         return group

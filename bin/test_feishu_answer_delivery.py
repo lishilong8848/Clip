@@ -63,9 +63,11 @@ class DeliveryTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_step_photo_upload_receipt_is_reused_and_authorized_again(self):
         upload = AsyncMock(return_value='img_receipt')
-        bot = SimpleNamespace(_reply_file_context=AsyncMock(return_value=(object(), {'id': 'owner'})),
-            _call=AsyncMock(return_value={'name': '步骤2.jpg', 'is_image': True}),
-            messenger=SimpleNamespace(upload_file=upload), inbox=Mock())
+        bot = object.__new__(FeishuAssistant)
+        bot._reply_file_context = AsyncMock(return_value=(object(), {'id': 'owner'}))
+        bot._call = AsyncMock(return_value={'name': '步骤2.jpg', 'is_image': True})
+        bot.messenger = SimpleNamespace(upload_file=upload)
+        bot.inbox = Mock()
         reply = {'text': '步骤说明', 'files': [{'id': 'a' * 32, 'name': '步骤2.jpg', 'inline_image': True}]}
         with patch('lan_bitable_template_portal.feishu_assistant_files._assistant_download', new=AsyncMock(return_value=b'checked image')):
             await FeishuAssistant._prepare_reply_files(bot, self.message, reply)
@@ -254,6 +256,15 @@ class AnswerRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed['live_reply']['message_id'], 'om_Existing')
         self.assertFalse(failed['live_reply']['notice'])
         self.assertEqual(self.posts, 1)
+
+    async def test_startup_failure_explains_the_available_next_action(self):
+        for data, expected in [({}, '重发这条问题'), ({'resume_available': True}, '继续研究')]:
+            reply = await self.bot._turn_reply(self.message, self.request, self.actor, self.conversation,
+                {'status': 'failed', 'error_code': 'startup_catalog', 'run_id': 'abc12345' * 4,
+                 **data}, self.message['question'])
+            self.assertIn('模型目录尚未就绪', reply['text'])
+            self.assertIn(expected, reply['text'])
+            self.assertRegex(reply['text'], r'诊断编号[:：]abc12345')
 
     async def test_failed_turn_has_a_safe_run_reference_but_no_rejected_candidate(self):
         reply = await self.bot._turn_reply(self.message, self.request, self.actor, self.conversation,

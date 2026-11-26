@@ -1604,25 +1604,11 @@ class PortalRuntime:
         force: bool = False,
     ) -> dict:
         manager = cls.polling_work_orders()
-        group = manager.group_with_links(
-            group,
-            cls._polling_work_order_public_base_url(),
-        )
         target_record_id = str(group.get("target_record_id") or "").strip()
-        lock = cls._local_upload_lock_for_key(
-            f"polling-work-order-links:{target_record_id or 'unknown'}"
-        )
+        lock = cls._local_upload_lock_for_key(f"polling-work-order-links:{target_record_id}")
         with lock:
-            if target_record_id:
-                try:
-                    latest = manager.get_group(target_record_id)
-                except Exception:
-                    latest = None
-                if isinstance(latest, dict):
-                    group = manager.group_with_links(
-                        latest,
-                        cls._polling_work_order_public_base_url(),
-                    )
+            latest = manager.get_group(target_record_id)
+            group = manager.group_with_links(latest, cls._polling_work_order_public_base_url())
             return cls._send_polling_work_order_links_locked(
                 manager,
                 group,
@@ -1639,6 +1625,10 @@ class PortalRuntime:
     ) -> dict:
         if group.get("state") in {"binding_pending", "cancelled", "stopped"}:
             raise PortalConflictError("当前工单链接不可用，请刷新最新工单。")
+        if not PollingWorkOrderService.pending_confirmation_roles(group):
+            if force:
+                raise PortalConflictError("当前工单没有待确认步骤，无需重发链接。")
+            return group
         relay_state = group.get("relay") if isinstance(group.get("relay"), dict) else {}
         if str(relay_state.get("mode") or "") in {"public_service", "public_relay"}:
             connector = cls.polling_work_order_relay()
@@ -1646,23 +1636,29 @@ class PortalRuntime:
                 relay_state.get("registration_state") or ""
             ) != "registered":
                 raise PortalConflictError("公网工单正在注册，请稍后重试发送链接。")
-        notifications = dict(group.get("notifications") or {})
         initiator_open_id = str(group.get("initiator_open_id") or "").strip()
         work_order_label = cls._work_order_label(group)
         binding_id = str(group.get("binding_id") or "")
-        changed = False
-        recipients = [('operator', '操作人', person, 'operator' if i == 0 else 'operator:' + person['record_id'])
-                      for i, person in enumerate(PollingWorkOrderService.operators(group))]
-        recipients.append(('reviewer', '现场审核人', group.get('reviewer') or {}, 'reviewer'))
-        for role, label, person, delivery_key in recipients:
+        current = group
+        for role, delivery_key, person in PollingWorkOrderService.link_recipients(group):
+            if role not in PollingWorkOrderService.pending_confirmation_roles(current):
+                continue
+            label = "操作人" if role == "operator" else "现场审核人"
+            notifications = current.get("notifications") or {}
             previous = notifications.get(delivery_key) if isinstance(notifications.get(delivery_key), dict) else {}
             assigned_open_id = str(person.get("open_id") or "").strip()
             link = str(group.get(f"{role}_link") or "").strip()
             link_fingerprint = (
                 hashlib.sha256(link.encode("utf-8")).hexdigest() if link else ""
             )
+            parsed_link = urlparse(link)
+            capability = parsed_link.fragment or parsed_link.query or link
+            capability_hash = hashlib.sha256(capability.encode("utf-8")).hexdigest()
+            recipient = assigned_open_id or initiator_open_id
             same_link = (
-                str(previous.get("link_fingerprint") or "") == link_fingerprint
+                previous.get("assigned_recipient", recipient) == recipient and
+                (previous.get("capability_hash") == capability_hash
+                 or previous.get("link_fingerprint") == link_fingerprint)
             )
             if (
                 not force
@@ -1686,36 +1682,45 @@ class PortalRuntime:
                     link or "工单链接尚未生成。",
                 )
             ).strip()
-            recipient = assigned_open_id or initiator_open_id
-            identity = str(uuid.uuid5(uuid.NAMESPACE_URL, f"polling-binding:{binding_id}:{delivery_key}:{recipient}:{link_fingerprint}")) if binding_id and not force else ""
+            if binding_id:
+                # Keep existing rebound deliveries compatible with their stored Feishu UUID.
+                key = f"polling-binding:{binding_id}:{delivery_key}:{recipient}:{link_fingerprint}"
+            else:
+                key = f"polling-invite:{group['target_record_id']}:{delivery_key}:{recipient}:{capability_hash}"
+            identity = str(uuid.uuid4() if force else uuid.uuid5(uuid.NAMESPACE_URL, key))
+            # Once a definite rejection routes the invite to the initiator, retry that delivery.
+            retry_fallback = (not force and same_link and previous.get("fallback")
+                              and initiator_open_id and initiator_open_id != recipient)
+            fallback_id = str(uuid.uuid5(uuid.NAMESPACE_URL, identity + ":fallback"))
             ok_send, message, results = _send_text_to_open_ids_guarded(
                 text,
-                [recipient] if recipient and link else [],
-                **({"message_uuid": identity} if identity else {}),
+                [initiator_open_id if retry_fallback else recipient] if recipient and link else [],
+                message_uuid=fallback_id if retry_fallback else identity,
             )
-            fallback = False
+            fallback = bool(retry_fallback)
             if (
                 not ok_send
+                and not fallback
                 and initiator_open_id
                 and initiator_open_id != recipient
                 and link
-                and (not identity or results and results[0].get("failure_kind") in {"not_sent", "bot_unavailable", "recipient_unavailable"})
+                and results and results[0].get("failure_kind") in {"not_sent", "bot_unavailable", "recipient_unavailable"}
             ):
                 fallback = True
                 ok_send, message, _results = _send_text_to_open_ids_guarded(
                     text,
                     [initiator_open_id],
-                    **({"message_uuid": str(uuid.uuid5(uuid.NAMESPACE_URL, identity + ":fallback"))} if identity else {}),
+                    message_uuid=fallback_id,
                 )
-                if ok_send:
-                    recipient = initiator_open_id
             attempts = (
                 int(previous.get("attempts") or 0) + 1 if same_link else 1
             )
-            notifications[delivery_key] = {
+            receipt = {
                 "sent": bool(ok_send),
-                "recipient_open_id": recipient,
+                "assigned_recipient": recipient,
+                "recipient_open_id": initiator_open_id if fallback else recipient,
                 "fallback": fallback or not bool(assigned_open_id),
+                "capability_hash": capability_hash,
                 "link_fingerprint": link_fingerprint,
                 "attempts": attempts,
                 "next_retry_at": (
@@ -1726,13 +1731,10 @@ class PortalRuntime:
                 "message": str(message or ""),
                 "updated_at": time.time(),
             }
-            changed = True
-        if not changed:
-            return group
-        return manager.update_notifications(
-            str(group.get("target_record_id") or ""),
-            notifications,
-        )
+            current = manager.update_notifications(
+                group["target_record_id"], {delivery_key: receipt}, binding_id=binding_id
+            )
+        return current
 
     @classmethod
     def _create_polling_work_order_group(

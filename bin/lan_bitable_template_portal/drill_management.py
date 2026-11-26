@@ -262,8 +262,10 @@ def parse_duration_minutes(value: Any) -> int:
 
 
 def _step_duration_minutes(value: str) -> int:
-    # This explicit template marker excludes estimation, not the step itself.
-    return 0 if value.strip() == "⊗" else parse_duration_minutes(value)
+    try:
+        return parse_duration_minutes(value)
+    except (DrillError, OverflowError):
+        return 0
 
 
 def _unrecognized_draft(definition: dict[str, Any]) -> bool:
@@ -778,9 +780,10 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
         location = str((sheet.get("cells") or {}).get(_cell_ref(row, location_col)) or "").strip()
         content = str((sheet.get("cells") or {}).get(_cell_ref(row, content_col)) or "").strip()
         duration_text = str((sheet.get("cells") or {}).get(_cell_ref(row, duration_col)) or "").strip()
-        if not any((location, content, duration_text)):
-            continue
         duration_minutes = _step_duration_minutes(duration_text)
+        if not any((location, content, duration_minutes)):
+            continue
+        skipped = duration_minutes == 0
         executor_col = int(headers["executor_col"][1])
         steps.append(
             {
@@ -789,7 +792,8 @@ def _detect_record_configuration(sheet: dict[str, Any]) -> dict[str, Any]:
                 "content": content,
                 "duration_text": duration_text,
                 "duration_minutes": duration_minutes,
-                "signature_slots": _connector_slot_count(sheet, row, executor_col),
+                "skipped": skipped,
+                "signature_slots": 0 if skipped else _connector_slot_count(sheet, row, executor_col),
             }
         )
     if not steps:
@@ -1129,9 +1133,11 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
         location = str(cells.get(f"{step_mapping['location_col']}{row}") or "").strip()
         content = str(cells.get(f"{step_mapping['content_col']}{row}") or "").strip()
         duration_text = str(cells.get(f"{step_mapping['duration_col']}{row}") or "").strip()
-        if not any((location, content, duration_text)):
+        duration_minutes = _step_duration_minutes(duration_text)
+        if not any((location, content, duration_minutes)):
             continue
-        slots = supplied_slots.get(
+        skipped = duration_minutes == 0
+        slots = 0 if skipped else supplied_slots.get(
             row,
             int(detected.get("signature_slots") or 0)
             or _connector_slot_count(
@@ -1148,7 +1154,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
                 "location": location,
                 "content": content,
                 "duration_text": duration_text,
-                "duration_minutes": _step_duration_minutes(duration_text),
+                "duration_minutes": duration_minutes,
+                "skipped": skipped,
                 "signature_slots": slots,
             }
         )
@@ -1158,7 +1165,8 @@ def _validate_configuration(workbook: dict[str, Any], configuration: dict[str, A
     predicted_text = str((record.get("cells") or {}).get(predicted_cell) or "").strip()
     scenario_cell = _cell_target(mapping["scenario"]) if mapping.get("scenario") else ""
     scenario_text = str((record.get("cells") or {}).get(scenario_cell) or "")
-    if predicted_text:
+    # The template's total can still include steps marked to be skipped.
+    if predicted_text and not any(item["skipped"] for item in normalized_steps):
         predicted_minutes = parse_duration_minutes(predicted_text)
         configured_minutes = sum(int(item["duration_minutes"]) for item in normalized_steps)
         if predicted_minutes != configured_minutes:
@@ -1234,7 +1242,10 @@ def _derived_values(
     commander = _person(execution.get("commander"))
     evaluator = _person(execution.get("evaluator"))
     participants = [_person(item) for item in execution.get("participants") or []]
-    timed_steps = [item for item in steps if str(item.get("duration_text") or "").strip() != "⊗"]
+    timed_steps = [
+        item for item in steps
+        if not item.get("skipped") and str(item.get("duration_text") or "").strip() != "⊗"
+    ]
     timeline: list[dict[str, str]] = []
     timeline_ready = False
     drill_date_text = str(execution.get("drill_date") or "")
@@ -1272,10 +1283,13 @@ def _derived_values(
         times = times_by_row.get(row, {})
         record_values[f"{step_mapping['start_col']}{row}"] = times.get("start_time", "")
         record_values[f"{step_mapping['end_col']}{row}"] = times.get("end_time", "")
-        record_values[f"{step_mapping['result_col']}{row}"] = "符合【 √ 】 不符【   】"
+        record_values[f"{step_mapping['result_col']}{row}"] = (
+            "" if item.get("skipped") else "符合【 √ 】 不符【   】"
+        )
     total_minutes = sum(int(item["duration_minutes"]) for item in steps)
     total_text = str(configuration.get("predicted_total_text") or "").strip()
-    if not total_text:
+    if not total_text or (any(item.get("skipped") for item in steps)
+                          and _step_duration_minutes(total_text) != total_minutes):
         total_text = f"{total_minutes // 60}时{total_minutes % 60:02d}分"
     if mapping.get("actual_total"):
         record_values[_cell_target(mapping["actual_total"])] = total_text
@@ -1354,6 +1368,8 @@ def _derived_values(
     step_signers = execution.get("step_signers") if isinstance(execution.get("step_signers"), dict) else {}
     participant_by_id = {item["record_id"]: item for item in participants}
     for step in steps:
+        if step.get("skipped"):
+            continue
         row = int(step["row"])
         signers = [participant_by_id.get(str(record_id or ""), {}) for record_id in step_signers.get(str(row), [])]
         signature_cells.append(

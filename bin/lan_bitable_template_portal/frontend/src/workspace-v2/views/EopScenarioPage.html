@@ -11,7 +11,9 @@
       <NButton v-if="editing" type="primary" :disabled="!dirty||busy" :loading="saving" @click="save">保存修改</NButton>
     </div>
   </header>
-  <NAlert v-if="error" type="error">{{ error }}</NAlert><p v-if="message||progress" role="status">{{ progress||message }}</p>
+  <NAlert v-if="error" type="error">{{ error }}</NAlert>
+  <p v-if="(saving||uploading) && progress" role="status">{{ progress }}</p>
+  <p v-else-if="message && !error" role="status">{{ message }}</p>
   <template v-if="!record">
     <div class="scene-queries"><div class="serenity-segment" aria-label="场景范围">
       <button type="button" :aria-pressed="listMode==='p0'" @click="changeListMode('p0')">P0 场景</button>

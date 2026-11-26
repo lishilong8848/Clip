@@ -690,7 +690,8 @@ class SharedRuntimeTests(unittest.IsolatedAsyncioTestCase):
         entered, resume = asyncio.Event(), asyncio.Event()
         self.popen.side_effect = [failed, recovered]
 
-        async def ready(item, *_):
+        async def ready(item, deadline, _client, _error, listener_deadline):
+            self.assertEqual(listener_deadline, deadline, 'keep a live cold process for its whole startup budget')
             if item['process'] is failed:
                 entered.set()
                 await resume.wait()
