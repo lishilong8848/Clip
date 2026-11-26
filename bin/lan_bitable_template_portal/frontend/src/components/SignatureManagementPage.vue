@@ -238,6 +238,7 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { CheckCircle2, CircleAlert, Eye, Fingerprint, Link2, Plus, RefreshCw, Search, ShieldCheck, UserRound, UsersRound, X } from "lucide-vue-next";
 import ConfirmDialog from "./ConfirmDialog.vue";
 import { requestJson, requestPeople, type Dict } from "../api/client";
+import { readManagedSignatureDelivery } from "../mopSignatureApi";
 
 const props = defineProps<{ checking: boolean; loggedIn: boolean; loginUrl: string; isAdmin: boolean; userId?: string }>();
 const workspaceV2 = document.documentElement.classList.contains('workspace-v2');
@@ -449,7 +450,10 @@ async function submitModal() {
       notice.value = "人员关联已保存，目录正在后台刷新。";
     } else {
       const relayRecipient = recipient.value === "direct" ? "" : recipient.value;
-      const result = await post("requests", { source: selectedPerson.value?.source, record_id: selectedPerson.value?.record_id, recipient: relayRecipient, operation_id: operationId.value });
+      const initial = await post("requests", { source: selectedPerson.value?.source, record_id: selectedPerson.value?.record_id, recipient: relayRecipient, operation_id: operationId.value });
+      const result = await readManagedSignatureDelivery(initial, () => {
+        if (!disposed && identity === identityEpoch) modalError.value = "请求已受理，正在后台发送。";
+      });
       if (disposed || identity !== identityEpoch) return;
       if (result.status !== "sent") {
         modalError.value = result.error || requestLabel(result.status);

@@ -20,6 +20,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue';
 import { NButton, NSelect } from 'naive-ui';
 import { requestJson, requestPeople, type Dict } from '../api/client';
+import { readManagedSignatureDelivery } from '../mopSignatureApi';
 import { randomHexId } from '../browserStorage';
 const props=defineProps<{scope:string;noticeKey:string;role:'implementer'|'auditor';resume?:Dict|null}>();
 const emit=defineEmits<{close:[];busy:[value:boolean];changed:[value:{scope:string;noticeKey:string;person?:Dict}]}>();
@@ -30,6 +31,7 @@ const retryable=computed(()=>['send_failed','expired','revoked'].includes(reques
 const checking=computed(()=>started.value&&Boolean(requestStatus.value)&&!retryable.value);
 const operationId=String(props.resume?.operation_id||randomHexId());
 let sendId=String(props.resume?.send_operation_id||randomHexId()),expectedRequest=String(props.resume?.request_id||''),disposed=false,read:AbortController|undefined;
+let deliveryId='';
 async function load(){
   read?.abort();const controller=new AbortController();read=controller;loading.value=true;loadError.value=false;error.value=String(props.resume?.signature_reason||'');
   try{const data=await requestPeople('/api/signatures/management/mop-people?'+new URLSearchParams({scope:props.scope,notice_key:props.noticeKey}),{signal:controller.signal,cache:'no-store'});
@@ -54,6 +56,13 @@ async function submit(){
   if(busy.value||loading.value||loadError.value||!checking.value&&(!draft.name.trim()||!draft.scope||!recipient.value))return;
   busy.value=true;emit('busy',true);error.value='';
   try{
+    if(checking.value && deliveryId){
+      const initial=await requestJson(`/api/signatures/usage-confirmations/${encodeURIComponent(deliveryId)}`,{cache:'no-store'});
+      const data=await readManagedSignatureDelivery(initial,()=>{if(!disposed)error.value='请求已受理，正在后台发送。';});
+      if(data.person?.request_id){deliveryId='';applyResult(data.person);return;}
+      if(data.status==='sending'){error.value=data.error;return;}
+      if(data.error){deliveryId='';requestStatus.value='';error.value=data.error;return;}
+    }
     if(checking.value){
       const data=await requestJson('/api/signatures/management/mop-list?'+new URLSearchParams({scope:props.scope,notice_key:props.noticeKey}),{cache:'no-store'});
       if(!Array.isArray(data.items))throw new Error('签名请求信息不完整，请重新核对。');
@@ -66,7 +75,12 @@ async function submit(){
     }
     if(retryable.value)sendId=randomHexId();
     started.value=true;requestStatus.value='sending';
-    const data=await requestJson('/api/signatures/management/mop-invite',{method:'POST',body:JSON.stringify({...draft,name:draft.name.trim(),notice_key:props.noticeKey,role:props.role,recipient:recipient.value,operation_id:operationId,send_operation_id:sendId,expected_request_id:expectedRequest})});
+    const initial=await requestJson('/api/signatures/management/mop-invite',{method:'POST',body:JSON.stringify({...draft,name:draft.name.trim(),notice_key:props.noticeKey,role:props.role,recipient:recipient.value,operation_id:operationId,send_operation_id:sendId,expected_request_id:expectedRequest})});
+    deliveryId=String(initial.delivery_id||'');
+    const data=await readManagedSignatureDelivery(initial,()=>{if(!disposed)error.value='请求已受理，正在后台发送。';});
+    if(data.status==='sending'&&deliveryId){error.value=data.error;return;}
+    if(data.error&&!data.person){deliveryId='';requestStatus.value='';error.value=data.error;return;}
+    deliveryId='';
     if(!data.person?.request_id)throw new Error('发送回执不完整，请核对原请求。');
     applyResult(data.person);
   }catch(e){requestStatus.value='send_unknown';if(!disposed)error.value=e instanceof Error?e.message:'发送结果暂未确认，请核对原请求。';emit('changed',{scope:props.scope,noticeKey:props.noticeKey});}

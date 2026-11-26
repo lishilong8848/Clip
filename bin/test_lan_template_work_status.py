@@ -27311,6 +27311,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "维修开始时间": "2026-08-05 09:00",
                     "维修结束时间（2026）": "2026-08-05 18:00",
                     "流程": "维修完成",
+                    "关联事件单": "rec_event_undo",
                 },
             }
             meta_by_name = {
@@ -27414,7 +27415,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             ) as sync_workflow, patch.object(
                 service,
                 "_invalidate_repair_management_status_cache",
-            ):
+            ), patch.object(
+                service, "_reconcile_repair_event_status", return_value=[],
+            ) as reconcile_event:
                 restored = service.restore_notice_undo_related_remote(
                     undo,
                     target_record_id=target_id,
@@ -27428,6 +27431,7 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             self.assertEqual(set(patched_fields), {"维修结束时间（2026）"})
             sync_followups.assert_called_once()
             self.assertEqual(sync_workflow.call_args.kwargs["workflow"], "维修中")
+            reconcile_event.assert_called_once_with("rec_event_undo", "A", current_summary_id=summary_id)
 
     def test_applied_repair_end_undo_matches_exact_ids_and_only_repairs_once(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -32821,6 +32825,10 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                 ("事件发生原因", "事件应急措施", "事件解决措施")
             )
         ]
+        event_metas.extend([
+            FieldMeta("fld_progress", "检修进展", "Progress", 2, False, {}, [], False),
+            FieldMeta("fld_end", "检修完成时间", "DateTime", 5, False, {}, [], False),
+        ])
         project = {
             "record_id": "rec_summary",
             "raw_fields": {
@@ -32889,12 +32897,17 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda: ("app_event", "tbl_event", "event")
         )
 
-        result = service._sync_repair_relation_business_fields(
-            summary_record_id="rec_summary",
-            event_record_id="rec_event",
-            target_record_id="rec_target",
-            scope="E",
-        )
+        with patch.object(service, "_request_json", return_value={"data": {"record": {
+            "record_id": "rec_summary",
+            "fields": {"关联事件单-L": "rec_event", "当前维修进度-L": 0.61,
+                       "维修结束时间（2026）-L": 1791536700000},
+        }}}):
+            result = service._sync_repair_relation_business_fields(
+                summary_record_id="rec_summary",
+                event_record_id="rec_event",
+                target_record_id="rec_target",
+                scope="E",
+            )
 
         self.assertTrue(result["synced"])
         self.assertEqual(
@@ -32913,9 +32926,89 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
                     "事件发生原因": "高压保护触发",
                     "事件解决措施": "更换压力传感器并复测",
                     "事件应急措施": "隔离故障设备并启用备用设备",
+                    "检修进展": 0.61,
+                    "检修完成时间": 1791536700000,
                 }
             ],
         )
+
+    def test_repair_event_reconciliation_uses_current_owner_and_cleared_writable_values(self):
+        service = _TestMaintenancePortalService()
+        event_meta = {
+            "检修进展": FieldMeta("fld_progress", "检修进展", "Progress", 2, False, {}, [], False),
+            "检修完成时间": FieldMeta("fld_end", "检修完成时间", "DateTime", 5, False, {}, [], False),
+        }
+        project_meta = {
+            "关联事件单": FieldMeta("fld_link", "关联事件单", "Text", 1, False, {}, [], False),
+        }
+        record = {"record_id": "rec_current", "fields": {
+            "关联事件单-L": "rec_event", "当前维修进度-L": 0,
+            "当前维修进度": 1, "维修结束时间（2026）": 1791536700000,
+        }}
+        with patch.multiple(
+            service,
+            _load_repair_management_event_records=Mock(return_value=([], event_meta, [])),
+            _event_source_config=Mock(return_value=("app_event", "tbl_event", "event")),
+            _event_snapshot_record_for_repair=Mock(return_value={"record_id": "rec_event"}),
+            _load_table_fields=Mock(return_value=([], project_meta)),
+            _search_table_records=Mock(side_effect=[
+                [{"record_id": "rec_current"}], [],
+                [{"record_id": "rec_current"}, {"record_id": "rec_other"}],
+            ]),
+            _request_json=Mock(return_value={"data": {"record": record}}),
+            _patch_record_fields_exact=Mock(),
+            _upsert_repair_snapshot_fields=Mock(),
+            _invalidate_repair_management_event_cache=Mock(),
+        ):
+            self.assertEqual(service._reconcile_repair_event_status("rec_event", "A"), [])
+            service._patch_record_fields_exact.assert_called_once_with(
+                app_token="app_event", table_id="tbl_event", record_id="rec_event",
+                fields={"检修进展": 0, "检修完成时间": None},
+            )
+            self.assertEqual(service._reconcile_repair_event_status("rec_event", "A"), [])
+            self.assertEqual(service._patch_record_fields_exact.call_args.kwargs["fields"],
+                             {"检修进展": None, "检修完成时间": None})
+            self.assertIn("多张维修单", service._reconcile_repair_event_status("rec_event", "A")[0])
+            self.assertEqual(service._patch_record_fields_exact.call_count, 2)
+            record["fields"]["关联事件单-L"] = "rec_other_event"
+            self.assertEqual(service._reconcile_repair_event_status(
+                "rec_event", "A", current_summary_id="rec_current",
+            ), [])
+            self.assertEqual(service._patch_record_fields_exact.call_count, 2)
+
+    def test_repair_event_ordinary_save_preserves_historical_completion_when_source_is_blank(self):
+        service = _TestMaintenancePortalService()
+        event_meta = {
+            "检修进展": FieldMeta("fld_progress", "检修进展", "Progress", 2, False, {}, [], False),
+            "检修完成时间": FieldMeta("fld_end", "检修完成时间", "DateTime", 5, False, {}, [], False),
+        }
+        event = {"record_id": "rec_event", "raw_fields": {"检修完成时间": 1791536700000}}
+        summary = {"record_id": "rec_summary", "raw_fields": {"关联事件单": "rec_event"}}
+        with patch.multiple(
+            service,
+            _load_repair_management_event_records=Mock(return_value=([], event_meta, [])),
+            _load_repair_management_project_records=Mock(return_value=([], {}, [summary])),
+            _event_snapshot_record_for_repair=Mock(return_value=event),
+            _event_source_config=Mock(return_value=("app_event", "tbl_event", "event")),
+            _request_json=Mock(return_value={"data": {"record": {
+                "record_id": "rec_summary",
+                "fields": {"关联事件单-L": "rec_event", "当前维修进度-L": 0},
+            }}}),
+            _patch_record_fields_exact=Mock(),
+            _upsert_repair_snapshot_fields=Mock(),
+            _invalidate_repair_management_event_cache=Mock(),
+        ):
+            for pending_event, expected in (
+                ("", {"检修进展": 0}),
+                ("rec_previous", {"检修进展": 0}),
+                ("rec_event", {"检修进展": 0, "检修完成时间": None}),
+            ):
+                with self.subTest(pending_event=pending_event):
+                    service._sync_repair_relation_business_fields(
+                        summary_record_id="rec_summary", summary_record=summary, scope="A",
+                        clear_completion_for_event_id=pending_event,
+                    )
+                    self.assertEqual(service._patch_record_fields_exact.call_args.kwargs["fields"], expected)
 
     def test_repair_relation_sync_skips_historical_event_write_without_retry(self):
         service = _TestMaintenancePortalService()
@@ -34668,17 +34761,19 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             lambda **kwargs: captured.update(kwargs)
         )
 
-        service.update_repair_management_record(
-            "rec_repair_1",
-            {"维修名称": "A楼测试检修"},
-            source_event_id="",
-            source_repair_ids=[],
-            replace_source_relations=True,
-            scope="A",
-        )
+        with patch.object(service, "_reconcile_repair_event_status", return_value=[]) as reconcile_event:
+            service.update_repair_management_record(
+                "rec_repair_1",
+                {"维修名称": "A楼测试检修"},
+                source_event_id="",
+                source_repair_ids=[],
+                replace_source_relations=True,
+                scope="A",
+            )
 
         self.assertEqual(captured["fields"]["关联事件单"], [])
         self.assertEqual(captured["fields"]["设备检修关联"], [])
+        reconcile_event.assert_called_once_with("rec_event_1", "A")
 
     def test_repair_management_update_rejects_cross_scope_record(self):
         service = _TestMaintenancePortalService()
@@ -38852,6 +38947,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         deleted = []
         snapshot_deleted = []
+        service._read_repair_project_for_notice = lambda *_args: (
+            {"record_id": "rec_summary", "raw_fields": {"关联事件单": "rec_event_delete"}}, {}
+        )
         def delete_record(**kwargs):
             deleted.append((kwargs["table_id"], kwargs["record_id"]))
             remaining[:] = [row for row in remaining if row["record_id"] != kwargs["record_id"]]
@@ -38863,8 +38961,13 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             )
         )
 
-        result = service.delete_repair_management_record("rec_summary")
-
+        with patch.object(service, "_reconcile_repair_event_status",
+                          side_effect=[PortalError("模拟飞书回填失败"), []]) as reconcile_event:
+            with self.assertRaisesRegex(PortalError, "维修项目已删除"):
+                service.delete_repair_management_record("rec_summary")
+            result = service.delete_repair_management_record("rec_summary")
+        self.assertEqual(reconcile_event.call_count, 2)
+        reconcile_event.assert_called_with("rec_event_delete", "ALL")
         self.assertEqual(
             deleted,
             [
@@ -38915,7 +39018,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
             return {"code": 0}
 
         service._delete_record_fields = fake_delete  # type: ignore[method-assign]
-
+        service._read_repair_project_for_notice = lambda *_args: (
+            {"record_id": "rec_summary", "raw_fields": {}}, {}
+        )
         with self.assertRaisesRegex(PortalError, "已删除 1/2 条跟进记录"):
             service.delete_repair_management_record("rec_summary")
 
@@ -38948,6 +39053,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         deleted: list[tuple[str, str]] = []
         fail_second = {"value": True}
+        service._read_repair_project_for_notice = lambda *_args: (
+            {"record_id": "rec_summary", "raw_fields": {}}, {}
+        )
 
         def fake_delete(**kwargs):
             key = (kwargs["table_id"], kwargs["record_id"])
@@ -39052,6 +39160,9 @@ class LanTemplateWorkStatusTests(unittest.TestCase):
         )
         service._ensure_repair_management_record_in_scope = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: {"record_id": "rec_repair_delete", "raw_fields": {}}
+        )
+        service._read_repair_project_for_notice = lambda *_args: (
+            {"record_id": "rec_repair_delete", "raw_fields": {}}, {}
         )
         service._load_repair_followups_for_summary = (  # type: ignore[method-assign]
             lambda *_args, **_kwargs: ([], {}, [])

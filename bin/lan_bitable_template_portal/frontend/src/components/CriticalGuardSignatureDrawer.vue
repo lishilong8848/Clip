@@ -101,6 +101,7 @@ import {
   fetchSignaturePeople,
   fetchTemporarySignatures,
   sendSignatureUsageConfirmations,
+  readSignatureUsageDelivery, signatureUsageDeliveryPending, signatureUsageDeliveryMessage,
 } from "../mopSignatureApi";
 import MopCompanySelectedSignatures from "./MopCompanySelectedSignatures.vue";
 import MopCompanySignaturePicker from "./MopCompanySignaturePicker.vue";
@@ -547,12 +548,12 @@ async function sendAllUsageConfirmations(): Promise<void> {
       contextType: "critical_guard",
       signatures: targets.map((item) => ({ source: "staff", role: "inspector", record_id: item.record_id })),
     });
-    const failed = Number(data.failed_count || 0);
+    setStatus(signatureUsageDeliveryMessage(data), "info");
+    const result = await readSignatureUsageDelivery(data);
     setStatus(
-      failed
-        ? `确认请求已发送 ${Number(data.sent_count || 0)} 人，${failed} 人发送失败；签名新增或重签请使用首页指纹入口。`
-        : `确认请求已发送 ${Number(data.sent_count || 0)} 人。`,
-      failed ? "warning" : "success",
+      signatureUsageDeliveryMessage(result),
+      signatureUsageDeliveryPending(result) ? "info"
+        : result.status === "failed" || result.status === "expired" || result.failed_count || result.uncertain_count ? "warning" : "success",
     );
     await loadCompanyPeople(false, true);
   } catch (error: any) {

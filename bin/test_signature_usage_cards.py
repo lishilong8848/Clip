@@ -20,6 +20,8 @@ class SignatureUsageCardsTests(unittest.TestCase):
     def setUp(self):
         folder = tempfile.TemporaryDirectory(); self.addCleanup(folder.cleanup)
         self.store = LanPortalStateStore(str(Path(folder.name) / 'state.sqlite'))
+        self.addCleanup(self.store.shutdown_write_worker)
+        self.addCleanup(self.wait_delivery_idle)
         self.runtime = SimpleNamespace(state_store=self.store,
             auth_manager=SimpleNamespace(_open_id_explicitly_disabled=lambda _: False))
         self.check = patch('lan_bitable_template_portal.feishu_delivery.current_recipient_open_id', side_effect=lambda _rt, oid, _app: oid)
@@ -28,6 +30,14 @@ class SignatureUsageCardsTests(unittest.TestCase):
             role='implementer', signer_record_id='rec-person', signer_open_id='ou_person', signer_name='签名人',
             requested_by_openid='ou_requester', payload={'app_id': 'cli_test', 'notice_title': '维保任务',
                 'role_text': '实施人', 'public_base_url': 'https://fixture.invalid'})
+
+    def wait_delivery_idle(self):
+        for _ in range(100):
+            with cards._delivery_lock:
+                if str(self.store.db_path) not in cards._running_stores:
+                    return
+            time.sleep(.02)
+        self.fail('签名发送测试后台线程未结束')
 
     def event(self, **values):
         return {'header': {'app_id': 'cli_test', 'event_type': 'card.action.trigger'},
@@ -114,6 +124,89 @@ class SignatureUsageCardsTests(unittest.TestCase):
             self.assertFalse(cards.send(item)[0]); cards.send(item)
         self.assertEqual(sender.call_args_list[0], sender.call_args_list[1])
         self.assertEqual(self.row()['status'], 'pending')
+
+    def test_delivery_retry_keeps_original_card_and_skips_successful_recipient(self):
+        first = {'record_id': 'rec-one', 'open_id': 'ou_first', 'confirmation_id': 'one', 'card': {'secret': 'one'}}
+        second = {'record_id': 'rec-two', 'open_id': 'ou_second', 'confirmation_id': 'two', 'card': {'secret': 'two'}}
+        service = SimpleNamespace(_state_store=self.store, build_signature_usage_confirmation_messages=Mock(
+            return_value={'messages': [first, second], 'skipped': []}))
+        payload = dict(scope='A', context_type='mop', notice_key='notice', notice_title='作业',
+                       mop_attachment_name='附件', request_base_url='https://fixture.invalid',
+                       operator_open_id='ou_actor', operator_name='发起人',
+                       signatures=[{'record_id': item['record_id'], 'role': 'implementer'} for item in (first, second)])
+        send_count = {'one': 0, 'two': 0}
+
+        def sender(item):
+            confirmation_id = item['confirmation_id']
+            send_count[confirmation_id] += 1
+            if confirmation_id == 'two' and send_count['two'] == 1:
+                return False, '尚未确认', [{'failure_kind': 'uncertain'}]
+            self.assertEqual(item['card'], {'secret': confirmation_id})
+            return True, 'ok', [{'ok': True}]
+
+        def finish(identity):
+            for _ in range(100):
+                state = cards.get_delivery(service, identity, 'ou_actor')
+                if state['status'] in {'completed', 'failed'}:
+                    return state
+                time.sleep(.025)
+            self.fail('后台发送任务未结束')
+
+        with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
+                   return_value={'real_write_allowed': True}), patch.object(cards, 'send', side_effect=sender):
+            accepted = cards.enqueue_delivery(service, **payload)
+            self.assertEqual(accepted['status'], 'queued')
+            identity = accepted['delivery_id']
+            first_result = finish(identity)
+            self.assertEqual((first_result['sent_count'], first_result['uncertain_count']), (1, 1))
+            resumed = cards.enqueue_delivery(service, **{**payload, 'signatures': list(reversed(payload['signatures']))})
+            self.assertEqual(resumed['delivery_id'], identity)
+            result = finish(identity)
+            self.assertEqual((result['status'], result['sent_count']), ('completed', 2))
+            self.assertNotIn('secret', json.dumps(result))
+            self.assertNotIn('messages', self.store.get_document(cards.DELIVERY_NS, identity))
+            service.build_signature_usage_confirmation_messages.assert_called_once()
+            self.assertEqual(send_count, {'one': 1, 'two': 2})
+            self.assertEqual(cards.enqueue_delivery(service, **payload)['status'], 'completed')
+            remainder = cards.enqueue_delivery(service, **{**payload, 'signatures': [payload['signatures'][1]]})
+            self.assertNotEqual(remainder["delivery_id"], identity)
+            self.assertEqual(finish(remainder["delivery_id"])['sent_count'], 1)
+            self.assertEqual(send_count, {'one': 1, 'two': 2})
+            with self.assertRaisesRegex(Exception, '无权查看'):
+                cards.get_delivery(service, identity, 'ou_other')
+
+    def test_signature_invites_resume_after_restart_with_original_operation(self):
+        for operation, body in (
+            ("requests", {"operation_id": "operation-001", "source": "staff", "record_id": "rec-one"}),
+            ("mop-invite", {"operation_id": "operation-002", "send_operation_id": "send-002"}),
+        ):
+            with self.subTest(operation=operation):
+                service = SimpleNamespace(_state_store=self.store, signature_management=Mock())
+                with patch.object(cards, 'resume_deliveries'):
+                    accepted = cards.enqueue_management_delivery(service, operation, body, actor="ou_actor", base_url="https://fixture.invalid")
+                    self.assertEqual(accepted['status'], 'queued')
+                # Construct a new service over the same SQLite file to verify recovery.
+                service = SimpleNamespace(_state_store=LanPortalStateStore(self.store.db_path), signature_management=Mock())
+                self.addCleanup(service._state_store.shutdown_write_worker)
+                reply = {'status': 'sending'} if operation == 'requests' else {
+                    'request': {'status': 'sending'}, 'person': {'request_status': 'sending'}}
+                with patch('lan_bitable_template_portal.portal_service.external_real_write_guard',
+                           return_value={'real_write_allowed': True}), patch(
+                               'lan_bitable_template_portal.signature_management.dispatch',
+                               return_value=reply) as dispatch:
+                    cards.resume_deliveries(service)
+                    for _ in range(100):
+                        result = cards.get_delivery(service, accepted["delivery_id"], "ou_actor")
+                        if result["status"] == "completed":
+                            break
+                        time.sleep(.025)
+                    self.assertEqual(result["status"], "completed", result)
+                    self.assertEqual(result["result"].get("request", result["result"])["status"], "send_unknown")
+                    self.assertEqual(dispatch.call_args.args[2:], (operation, body))
+                    repeated = cards.enqueue_management_delivery(service, operation, body, actor="ou_actor", base_url="https://fixture.invalid")
+                    self.assertEqual(repeated["delivery_id"], accepted["delivery_id"])
+                    dispatch.assert_called_once()
+                    self.wait_delivery_idle()
 
 
 if __name__ == '__main__': unittest.main()

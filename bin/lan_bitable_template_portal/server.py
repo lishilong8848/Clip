@@ -4673,9 +4673,16 @@ class PortalRuntime:
                        else self._read_json_body(max_bytes=4 * 1024 * 1024))
             if method == "GET" and self.headers.get("X-Signature-Token"):
                 payload["token"] = self.headers["X-Signature-Token"]
+            operation = parsed.path.rsplit("/", 1)[-1]
+            actor = str(((session or {}).get("user") or {}).get("open_id") or "")
+            if method == "POST" and operation in {"requests", "mop-invite"}:
+                from .signature_usage_cards import enqueue_management_delivery
+                result = enqueue_management_delivery(self.service, operation, payload,
+                                                     actor=actor, base_url=self._request_base_url())
+                return self._send_json(202, {"ok": True, "data": result})
             result = dispatch(
-                self.service.signature_management, method, parsed.path.rsplit("/", 1)[-1], payload,
-                actor=str(((session or {}).get("user") or {}).get("open_id") or ""),
+                self.service.signature_management, method, operation, payload,
+                actor=actor,
                 is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
                 base_url=self._request_base_url(), send_text=_send_text_to_open_ids_guarded,
                 auth=PortalRuntime.auth_manager,
@@ -4711,6 +4718,17 @@ class PortalRuntime:
             "/engineer/mop/",
         }:
             return self._send_html(portal_index_file())
+        if parsed.path.startswith("/api/signatures/usage-confirmations/"):
+            from .signature_usage_cards import get_delivery
+            session = self._require_auth_json()
+            if session is None:
+                return
+            try:
+                owner = str((session.get("user") or {}).get("open_id") or "")
+                result = get_delivery(self.service, parsed.path.rsplit("/", 1)[-1], owner)
+                return self._send_json(200, {"ok": True, "data": result})
+            except PortalError as exc:
+                return self._send_json(404, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/usage-confirm":
             try:
                 token = (parse_qs(parsed.query).get("token") or [""])[0]
@@ -5538,6 +5556,7 @@ class PortalRuntime:
         if parsed.path == "/api/signatures/send-link":
             return self._send_json(410, {"ok": False, "error": "签名采集已统一到首页指纹入口，请刷新页面。"})
         if parsed.path == "/api/signatures/usage-confirmations/send":
+            from .signature_usage_cards import enqueue_delivery
             session = self._require_auth_json()
             if session is None:
                 return
@@ -5548,7 +5567,8 @@ class PortalRuntime:
                     str(payload.get("scope") or "ALL"),
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
-                data = self.service.build_signature_usage_confirmation_messages(
+                data = enqueue_delivery(
+                    self.service,
                     scope=scope,
                     notice_key=str(payload.get("notice_key") or ""),
                     notice_title=str(payload.get("notice_title") or ""),
@@ -5563,35 +5583,7 @@ class PortalRuntime:
                     operator_open_id=str(user.get("open_id") or ""),
                     operator_name=str(user.get("name") or user.get("en_name") or ""),
                 )
-                messages = list(data.get("messages") or [])
-                results: list[dict] = []
-                from .signature_usage_cards import send as send_usage_card
-                for item in messages:
-                    open_id = str(item.get("open_id") or "")
-                    ok, message, send_results = send_usage_card(item)
-                    send_result = (send_results or [{}])[0] if send_results else {}
-                    results.append(
-                        {
-                            "record_id": item.get("record_id") or "",
-                            "open_id": open_id,
-                            "ok": bool(ok and send_result.get("ok", ok)),
-                            "message": str(send_result.get("message") or message or ""),
-                            "failure_kind": str(send_result.get("failure_kind") or ""),
-                        }
-                    )
-                failed = [item for item in results if not item.get("ok")]
-                return self._send_json(
-                    200,
-                    {
-                        "ok": True,
-                        "data": {
-                            "sent_count": len(results) - len(failed),
-                            "failed_count": len(failed),
-                            "results": results,
-                            "skipped": data.get("skipped") or [],
-                        },
-                    },
-                )
+                return self._send_json(202, {"ok": True, "data": data})
             except (PortalError, ValueError, json.JSONDecodeError) as exc:
                 return self._send_json(400, {"ok": False, "error": str(exc)})
         if parsed.path == "/api/signatures/temporary/send-link":

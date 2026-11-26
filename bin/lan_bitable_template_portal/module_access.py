@@ -168,6 +168,8 @@ def required_modules(path, work_type="", *, view="", tab="", method="GET"):
         return frozenset({"signatures"})
     if path == "/api/signatures/management/refresh":
         return frozenset({"signatures", "engineer_mop"})
+    if method == "GET" and path.startswith("/api/signatures/usage-confirmations/"):
+        return frozenset({"signatures", "engineer_mop", "critical_guard"})
     if path == "/" and view in {"assistant", "handover", "sops"}:
         return frozenset({view})
     if path in {"/api/signatures/management/mop-people", "/api/signatures/management/mop-invite", "/api/signatures/management/mop-list"}:

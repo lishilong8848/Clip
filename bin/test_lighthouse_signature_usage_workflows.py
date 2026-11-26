@@ -46,6 +46,8 @@ class SignatureUsageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         self.service.signature_image_bytes = Mock(side_effect=AssertionError("No signature images may be read"))
         self.app, self.reads, self.writes, self.messages = FastAPI(), [], [], []
         self.fail_send = False
+        self.queue_send = False
+        self.delivery_reads = []
 
         @self.app.get("/api/signatures/people")
         async def people(scope: str, notice_key: str, q: str = "", limit: int = 100):
@@ -57,8 +59,17 @@ class SignatureUsageWorkflowTests(unittest.IsolatedAsyncioTestCase):
             self.writes.append(payload.model_dump())
             data = self.service.build_signature_usage_confirmation_messages(**payload.model_dump(), operator_open_id=ACTOR["id"], operator_name="隔离测试操作人")
             self.messages.extend(data["messages"])
+            if self.queue_send:
+                return {"ok": True, "data": {"delivery_id": "delivery-fixture", "status": "queued", "sent_count": 0}}
             return {"ok": True, "data": {"sent_count": 0 if self.fail_send else len(data["messages"]),
                 "failed_count": len(data["messages"]) if self.fail_send else 0, "skipped": data["skipped"]}}
+
+        @self.app.get("/api/signatures/usage-confirmations/{delivery_id}")
+        async def delivery_status(delivery_id: str):
+            self.delivery_reads.append(delivery_id)
+            complete = len(self.delivery_reads) > 1
+            return {"ok": True, "data": {"status": "completed" if complete else "running",
+                                          "sent_count": int(complete), "failed_count": 0}}
 
         self.portal = PortalAgent(self.assistant, PortalAPICatalog(self.app), LighthouseFiles(self.store))
         self.request = Request({"type": "http", "path": "/api/assistant/messages", "root_path": "", "scheme": "http", "server": ("testserver", 80),
@@ -123,6 +134,14 @@ class SignatureUsageWorkflowTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(AssistantError):
             await self.portal.confirm(ACTOR, result["id"], {"version": result["version"], "stage": "execute"}, self.request)
         self.assertEqual(len(self.writes), 1)
+
+    async def test_queued_delivery_is_polled_without_marking_it_sent_or_submitting_again(self):
+        self.queue_send = True
+        result = await self.execute(await self.ready(self.prepare()))
+        self.assertEqual(result["status"], "completed", result.get("error"))
+        self.assertEqual(self.delivery_reads, ["delivery-fixture", "delivery-fixture"])
+        self.assertEqual(len(self.writes), 1)
+        self.assertIn("已发送 1 人", result["results"][0]["query_reply"])
 
     async def test_unknown_context_scope_recipient_and_custom_url_rejected(self):
         for body in ({"scope": "D", "notice_key": "notice-a"}, {"scope": "A", "notice_key": "unknown"},

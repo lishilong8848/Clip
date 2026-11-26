@@ -3829,6 +3829,10 @@ class PortalAgent:
         if not isinstance(data, dict):
             return None
         api_id = operation["api_id"]
+        if api_id == _SIGNATURE_USAGE and data.get("delivery_id"):
+            return {"operation": {"api_id": "GET /api/signatures/usage-confirmations/{delivery_id}",
+                                  "path_params": {"delivery_id": data["delivery_id"]}},
+                    "kind": "signature_usage"}
         if api_id.startswith("POST /api/message-delivery/") and data.get("delivery_id"):
             return {"operation": {"api_id": "GET /api/message-delivery/{delivery_id}", "path_params": {"delivery_id": data["delivery_id"]}}, "kind": "message_delivery"}
         scope = (operation.get("body") or {}).get("scope") or (operation.get("params") or {}).get("scope")
@@ -3853,6 +3857,17 @@ class PortalAgent:
         if not result.get("ok"):
             raise AssistantError(str(result.get("error") or "后台任务状态读取失败，未重复提交。"), 503 if result.get("status") in {429, 502, 503, 504} else 400)
         kind = spec["kind"]
+        if kind == "signature_usage":
+            status = data.get("status")
+            if status in {"completed", "failed", "expired"}:
+                message = (f"签名使用确认已发送 {data.get('sent_count', 0)} 人，"
+                           f"{data.get('failed_count', 0)} 人发送失败，"
+                           f"{data.get('uncertain_count', 0)} 人结果待核对。")
+                result["query_reply"] = message
+                if status != "completed":
+                    result["_task_error"] = message + str(data.get("error") or "")
+                return result, True
+            return result, False
         if kind == "message_delivery":
             if data.get("status") in {"failed", "interrupted"}:
                 result["_task_error"] = (data.get("error") or "消息未全部发送，请继续原发送任务。") + f" 已发送 {data.get('sent_count', 0)} 项。"
@@ -4037,7 +4052,9 @@ class PortalAgent:
                         result["download_url"] = expected_url
                 if result.get("ok") and op["api_id"] == _SIGNATURE_USAGE and isinstance(raw, dict):
                     sent, failed = raw.get("sent_count"), raw.get("failed_count")
-                    if type(sent) is int and type(failed) is int:
+                    if raw.get("delivery_id"):
+                        result["query_reply"] = "签名使用确认已受理，后台发送中。本人仍须确认签名使用。"
+                    elif type(sent) is int and type(failed) is int:
                         result["query_reply"] = f"签名使用确认已发送 {sent} 人，{failed} 人发送失败，{len(raw.get('skipped') or [])} 人按原规则跳过。本人仍须通过原链接确认。"
                         if failed:
                             result.update(ok=False, error="部分签名使用确认发送失败，未自动重发。")
@@ -4113,6 +4130,8 @@ class PortalAgent:
                             return
                         if done:
                             plan["results"][-1]["job_result"] = job
+                            if spec["kind"] == "signature_usage" and job.get("query_reply"):
+                                plan["results"][-1]["query_reply"] = job["query_reply"]
                             plan["results"][-1].setdefault("_raw", copy.deepcopy(plan["results"][-1].get("data") or {})).update(job_result=job.get("_raw", job.get("data")))
                             if job.get("_task_superseded"):
                                 plan.update(status="superseded", error="")
@@ -4180,6 +4199,8 @@ class PortalAgent:
             current.update(status="superseded" if result.get("_task_superseded") else "failed" if task_error else "completed", error=task_error)
             if job_result is not None:
                 job_result["job_result"] = result
+                if (job_result.get("_task") or {}).get("kind") == "signature_usage" and result.get("query_reply"):
+                    job_result["query_reply"] = result["query_reply"]
                 job_result.setdefault("_raw", copy.deepcopy(job_result.get("data") or {})).update(job_result=result.get("_raw", result.get("data")))
                 if task_error:
                     job_result.update(ok=False, error=task_error)

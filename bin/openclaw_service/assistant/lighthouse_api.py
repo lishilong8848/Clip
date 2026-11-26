@@ -99,6 +99,7 @@ _SIGNATURE_EXCLUDED_PREFIXES = (
 _SIGNATURE_BUSINESS_PATHS = frozenset({
     "/api/signatures/temporary/people", "/api/signatures/temporary/list",
     "/api/signatures/usage-confirmations/send",
+    "/api/signatures/usage-confirmations/{delivery_id}",
 })
 # SSE streams and internal remote/update/system endpoints are not business ops.
 _STREAM_AND_INTERNAL = (
@@ -910,6 +911,8 @@ def _action_label(path: str, method: str) -> str:
         return "继续发送未成功的消息"
     if path == "/api/message-delivery/{delivery_id}":
         return "查询飞书发送结果"
+    if path == "/api/signatures/usage-confirmations/{delivery_id}":
+        return "查询签名请求投递进度"
     if path == "/api/ongoing-items/delete":
         return "删除整条通告"
     if path == "/api/notice-undo/{undo_id}/apply":

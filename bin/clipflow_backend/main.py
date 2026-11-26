@@ -3029,9 +3029,18 @@ class FastAPIPortalController:
                     payload = json.loads(raw)
                     if not isinstance(payload, dict):
                         raise SignatureManagementError("请求必须是JSON对象。")
+                actor = str(user.get("open_id") or "")
+                if request.method == "POST" and operation in {"requests", "mop-invite"}:
+                    from lan_bitable_template_portal.signature_usage_cards import enqueue_management_delivery
+                    data = await asyncio.to_thread(
+                        enqueue_management_delivery, PortalRuntime.service, operation, payload,
+                        actor=actor, base_url=self._request_base_url(request),
+                    )
+                    return JSONResponse({"ok": True, "data": data}, status_code=202,
+                                        headers={"Cache-Control": "no-store"})
                 data = await asyncio.to_thread(
                     dispatch, PortalRuntime.service.signature_management, request.method, operation, payload,
-                    actor=str(user.get("open_id") or ""),
+                    actor=actor,
                     is_admin=bool(session and PortalRuntime.auth_manager.is_admin(session)),
                     base_url=self._request_base_url(request), send_text=_send_text_to_open_ids_guarded,
                     auth=PortalRuntime.auth_manager,
@@ -3227,6 +3236,7 @@ class FastAPIPortalController:
 
         @app.post("/api/signatures/usage-confirmations/send")
         async def signatures_usage_confirmations_send(request: Request):
+            from lan_bitable_template_portal.signature_usage_cards import enqueue_delivery
             session = self._current_session(request)
             if session is None:
                 return self._auth_required_response()
@@ -3244,7 +3254,7 @@ class FastAPIPortalController:
                 )
                 user = session.get("user") if isinstance(session.get("user"), dict) else {}
                 data = await asyncio.to_thread(
-                    PortalRuntime.service.build_signature_usage_confirmation_messages,
+                    enqueue_delivery, PortalRuntime.service,
                     scope=scope,
                     notice_key=str(payload.get("notice_key") or ""),
                     notice_title=str(payload.get("notice_title") or ""),
@@ -3259,34 +3269,20 @@ class FastAPIPortalController:
                     operator_open_id=str(user.get("open_id") or ""),
                     operator_name=str(user.get("name") or user.get("en_name") or ""),
                 )
-                messages = list(data.get("messages") or [])
-                results: list[dict[str, Any]] = []
-                from lan_bitable_template_portal.signature_usage_cards import send as send_usage_card
-                for item in messages:
-                    open_id = str(item.get("open_id") or "")
-                    ok, message, send_results = await asyncio.to_thread(
-                        send_usage_card, item,
-                    )
-                    send_result = (send_results or [{}])[0] if send_results else {}
-                    results.append(
-                        {
-                            "record_id": item.get("record_id") or "",
-                            "open_id": open_id,
-                            "ok": bool(ok and send_result.get("ok", ok)),
-                            "message": str(send_result.get("message") or message or ""),
-                            "failure_kind": str(send_result.get("failure_kind") or ""),
-                        }
-                    )
-                failed = [item for item in results if not item.get("ok")]
-                return {
-                    "ok": True,
-                    "data": {
-                        "sent_count": len(results) - len(failed),
-                        "failed_count": len(failed),
-                        "results": results,
-                        "skipped": data.get("skipped") or [],
-                    },
-                }
+                return JSONResponse({"ok": True, "data": data}, status_code=202)
+            except Exception as exc:
+                return self._portal_error_response(exc, default_status=400)
+
+        @app.get("/api/signatures/usage-confirmations/{delivery_id}")
+        async def signatures_usage_confirmations_status(request: Request, delivery_id: str):
+            from lan_bitable_template_portal.signature_usage_cards import get_delivery
+            session = self._current_session(request)
+            if session is None:
+                return self._auth_required_response()
+            try:
+                owner = str((session.get("user") or {}).get("open_id") or "")
+                result = await asyncio.to_thread(get_delivery, PortalRuntime.service, delivery_id, owner)
+                return JSONResponse({"ok": True, "data": result}, headers={"Cache-Control": "no-store"})
             except Exception as exc:
                 return self._portal_error_response(exc, default_status=400)
 
@@ -13843,6 +13839,8 @@ class FastAPIPortalController:
                 PortalRuntime.service.start_repair_maintenance_async()
             except Exception as exc:
                 log_warning(f"启动检修后台维护失败: {exc}")
+            from lan_bitable_template_portal.signature_usage_cards import resume_deliveries
+            resume_deliveries(PortalRuntime.service)
     def _run_notice_panel(self) -> None:
         if _mock_external_enabled() or self._stopping_event.is_set():
             return

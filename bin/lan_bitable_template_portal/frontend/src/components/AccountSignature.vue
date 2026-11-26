@@ -88,6 +88,7 @@
 import { computed, onBeforeUnmount, ref, useId, watch } from 'vue';
 import { CircleAlert, Eye, EyeOff, Fingerprint, Info, RefreshCw, Send } from 'lucide-vue-next';
 import { requestJson, type Dict } from '../api/client';
+import { readManagedSignatureDelivery } from '../mopSignatureApi';
 
 const props = defineProps<{ openId?: string }>();
 
@@ -297,7 +298,7 @@ async function sendRequest() {
   const n = ++opSeq;
   requestBusy.value = true; requestError.value = ''; notice.value = '';
   try {
-    const data = await requestJson('/api/signatures/management/requests', {
+    const initial = await requestJson('/api/signatures/management/requests', {
       method: 'POST',
       body: JSON.stringify({
         source: p.source,
@@ -308,6 +309,9 @@ async function sendRequest() {
       signal: controller.signal,
       cache: 'no-store',
     });
+    const data = await readManagedSignatureDelivery(initial, () => {
+      if (!disposed && n === opSeq) notice.value = '请求已受理，正在后台发送。';
+    }, controller.signal);
     if (disposed || controller.signal.aborted || n !== opSeq) return;
     const status = String(data.status || '');
     if (status === 'sent') {
@@ -315,7 +319,8 @@ async function sendRequest() {
       requestBusy.value = false;
       notice.value = '签名请求已发送，请该人员通过链接完成签名。';
       await load({ preserveNotice: true });
-    } else {
+    } else if (status !== 'sending') {
+      notice.value = '';
       requestError.value = data.error || requestStatusLabel(status);
       if (status === 'send_failed') {
         recognizedFailure.value = true;

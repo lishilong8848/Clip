@@ -547,8 +547,9 @@ class SignatureManagement:
                 "请交由本人完成签名。链接有效期24小时，保存一次后失效。", "请打开以下链接：", link])
             try:
                 ok, error, results = send_text(message, [open_id])
-                request.update(status="sent" if ok else "send_failed", error="" if ok else str(error),
-                               failure_kind=next((r.get("failure_kind") for r in (results or []) if r.get("failure_kind")), ""))
+                failure_kind = next((r.get("failure_kind") for r in (results or []) if r.get("failure_kind")), "")
+                delivery_status = "sent" if ok else "send_unknown" if failure_kind == "uncertain" else "send_failed"
+                request.update(status=delivery_status, error="" if ok else str(error), failure_kind=failure_kind)
             except Exception:
                 request.update(status="send_unknown", error="消息发送结果未确认，请核对接收情况后重新发送。")
             self.store.put_document(REQUEST_NS, operation_id, request)

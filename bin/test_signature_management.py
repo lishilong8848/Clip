@@ -544,6 +544,13 @@ class SignatureManagementTests(unittest.TestCase):
         self.assertEqual(response["status"], "send_failed")
         self.assertEqual(self.s.creates, 0)
 
+    def test_delivery_timeout_with_unknown_receipt_does_not_reissue_signature_link(self):
+        sender = Mock(return_value=(False, "timeout", [{"failure_kind": "uncertain"}]))
+        response = self.request(operation_id="reqUncertain", sender=sender)
+        self.assertEqual(response["status"], "send_unknown")
+        self.assertEqual(self.request(operation_id="reqUncertain", sender=sender)["status"], "send_unknown")
+        sender.assert_called_once()
+
     def test_multiple_or_arbitrary_recipients_rejected(self):
         for recipient in ("AB", "duty:X", "ou-attacker", "staff:missing"):
             with self.assertRaises(SignatureManagementError):

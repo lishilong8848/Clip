@@ -1,5 +1,7 @@
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -472,6 +474,8 @@ class _FakeCriticalGuardTemplateRouteService:
 class _FakeSignatureUsageRouteService:
     def __init__(self):
         self.calls: list[dict] = []
+        self.started = threading.Event()
+        self.finish = threading.Event()
 
     def build_signature_usage_confirmation_messages(
         self,
@@ -499,6 +503,9 @@ class _FakeSignatureUsageRouteService:
                 "operator_name": operator_name,
             }
         )
+        self.started.set()
+        if not self.finish.wait(5):
+            raise AssertionError("签名发送测试未释放后台任务")
         return {"messages": [], "skipped": []}
 
 
@@ -765,6 +772,9 @@ class BackendApiModelTests(unittest.TestCase):
         original_service = PortalRuntime.service
         original_sessions = dict(PortalRuntime.auth_manager._sessions)
         service = _FakeSignatureUsageRouteService()
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        service._state_store = LanPortalStateStore(Path(folder.name) / "state.sqlite")
         session_id = "signature-usage-route-session"
         PortalRuntime.service = service
         with PortalRuntime.auth_manager._lock:
@@ -778,10 +788,7 @@ class BackendApiModelTests(unittest.TestCase):
         client = TestClient(controller._build_app())
         headers = {"Cookie": f"{AUTH_COOKIE_NAME}={session_id}"}
         try:
-            response = client.post(
-                "/api/signatures/usage-confirmations/send",
-                headers=headers,
-                json={
+            payload = {
                     "scope": "A",
                     "notice_key": "critical-guard:task:A",
                     "notice_title": "暴雨蓝色预警",
@@ -794,16 +801,32 @@ class BackendApiModelTests(unittest.TestCase):
                             "role": "inspector",
                         }
                     ],
-                },
-            )
-            self.assertEqual(response.status_code, 200, response.text)
-            self.assertTrue(response.json().get("ok"), response.text)
-            self.assertEqual(response.json()["data"]["sent_count"], 0)
+            }
+            with patch("lan_bitable_template_portal.portal_service.external_real_write_guard",
+                       return_value={"real_write_allowed": True}):
+                response = client.post("/api/signatures/usage-confirmations/send", headers=headers, json=payload)
+                self.assertEqual(response.status_code, 202, response.text)
+                queued = response.json()["data"]
+                self.assertEqual(queued["status"], "queued")
+                self.assertEqual(queued["sent_count"], 0)
+                self.assertTrue(service.started.wait(2))
+                retry = client.post("/api/signatures/usage-confirmations/send", headers=headers, json=payload)
+                self.assertEqual(retry.json()["data"]["delivery_id"], queued["delivery_id"])
+                url = "/api/signatures/usage-confirmations/" + queued["delivery_id"]
+                self.assertEqual(client.get(url, headers=headers).json()["data"]["status"], "running")
+                service.finish.set()
+                for _ in range(60):
+                    result = client.get(url, headers=headers).json()["data"]
+                    if result["status"] == "completed":
+                        break
+                    time.sleep(0.05)
+                self.assertEqual(result["status"], "completed", result)
             self.assertEqual(len(service.calls), 1)
             self.assertEqual(service.calls[0]["context_type"], "critical_guard")
             self.assertEqual(service.calls[0]["operator_name"], "测试人员")
             self.assertEqual(service.calls[0]["signatures"][0]["role"], "inspector")
         finally:
+            service.finish.set()
             PortalRuntime.service = original_service
             with PortalRuntime.auth_manager._lock:
                 PortalRuntime.auth_manager._sessions = original_sessions

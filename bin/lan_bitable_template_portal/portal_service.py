@@ -140,6 +140,11 @@ REPAIR_MANAGEMENT_WORKFLOW_OPTIONS = (
     REPAIR_MANAGEMENT_COMPLETED_WORKFLOW,
 )
 EVENT_REPAIR_COMPLETION_FIELD_NAME = "检修完成时间"
+REPAIR_EVENT_STATUS_FIELDS = {
+    "检修进展": ("当前维修进度-L", 2),
+    EVENT_REPAIR_COMPLETION_FIELD_NAME: ("维修结束时间（2026）-L", 5),
+}
+REPAIR_EVENT_LINK_COLUMN = "关联事件单-L"
 EVENT_I2_OR_HIGHER_LEVELS = frozenset(
     {
         "I2",
@@ -633,6 +638,7 @@ REPAIR_SYNC_OPERATION_TYPES = (
     "rollback_binding_verify",
     "event_transfer_sync",
     "project_delete",
+    "event_repair_detach",
 )
 REPAIR_END_FIELDS = ("维修结束时间（2026）", "维修结束时间")
 REPAIR_END_UNDO_NAMESPACE = "repair_end_undo"
@@ -10302,7 +10308,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             events = self._repair_management_record_ids(fields.get("关联事件单"))
             result = self._sync_repair_project_relations(summary_record_id=summary_id,
                 event_record_id=events[0] if events else "", target_record_ids=[target] if target else [],
-                previous_target_record_ids=[before] if before else [], scope=scope)
+                previous_target_record_ids=[before] if before else [], scope=scope,
+                clear_completion_for_event_id=task_payload.get("clear_completion_for_event_id", ""))
             warnings = result.get("warnings") or []
             if self._repair_sync_warnings_require_retry(warnings):
                 raise PortalError("；".join(warnings))
@@ -10312,6 +10319,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                 summary_record_id=summary_id,
                 scope=scope,
             )
+        if operation_type == "event_repair_detach":
+            return self._reconcile_repair_event_status(task_payload["event_record_id"], scope)
         if operation_type == "summary_followup_copy_sync":
             summary_payload = self.get_repair_management_record(
                 summary_id,
@@ -10363,6 +10372,8 @@ class MaintenancePortalService(RepairOperationsMixin):
                     scope=scope,
                     project_overrides=project_overrides,
                     event_overrides=event_overrides,
+                    **({"clear_completion_for_event_id": task_payload["clear_completion_for_event_id"]}
+                       if task_payload.get("clear_completion_for_event_id") else {}),
                     include_target_fields=bool(
                         task_payload.get("include_target_fields", True)
                     ),
@@ -10454,8 +10465,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 )
             return []
         if operation_type == "project_delete":
-            self._execute_repair_project_delete_task(operation)
-            return []
+            return self._execute_repair_project_delete_task(operation).get("warnings", [])
         raise PortalError(f"未知维修同步任务：{operation_type}")
 
     def process_due_repair_sync_tasks(self, *, limit: int = 20) -> dict[str, int]:
@@ -10707,6 +10717,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "notice_summary_sync": "检修通告同步",
             "event_transfer_sync": "事件转检修同步",
             "project_delete": "删除同步",
+            "event_repair_detach": "原关联事件检修状态同步",
         }
         selected = [
             operation
@@ -10850,6 +10861,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             "notice_summary_sync": "检修通告同步",
             "event_transfer_sync": "事件转检修同步",
             "project_delete": "删除同步",
+            "event_repair_detach": "原关联事件检修状态同步",
         }
         operation_type = str(item.get("operation_type") or "")
         return {
@@ -13773,6 +13785,115 @@ class MaintenancePortalService(RepairOperationsMixin):
             "warnings": list(dict.fromkeys(warnings)),
         }
 
+    def _repair_event_status_for_link(
+        self, summary_id: str, event_id: str, event_meta_by_name: dict[str, FieldMeta],
+    ) -> dict[str, Any]:
+        # Read the physical fields so a cleared -L cell cannot fall back to an old formula.
+        if not any(name in event_meta_by_name for name in REPAIR_EVENT_STATUS_FIELDS):
+            return {}
+        payload = self._request_json(
+            f"records/{summary_id}", app_token=REPAIR_SOURCE_APP_TOKEN,
+            table_id=REPAIR_MANAGEMENT_TABLE_ID,
+        )
+        record = (payload.get("data") or {}).get("record") or {}
+        if record.get("record_id") != summary_id or not isinstance(record.get("fields"), dict):
+            raise PortalError("未核实维修单回执，检修进展暂未同步。")
+        source = record["fields"]
+        if self._repair_management_record_ids(source.get(REPAIR_EVENT_LINK_COLUMN)) != [event_id]:
+            return {}
+        status = {}
+        for event_field, (source_field, field_type) in REPAIR_EVENT_STATUS_FIELDS.items():
+            value = source.get(source_field)
+            if field_type == 2:
+                if type(value) in (int, float) and 0 <= value <= 1:
+                    status[event_field] = value
+                else:
+                    progress = self._repair_followup_progress_percent(value)
+                    status[event_field] = progress / 100 if progress is not None else None
+            else:
+                status[event_field] = self._repair_management_datetime_ms(value)
+        return status
+
+    def _write_repair_event_fields(
+        self, event_id: str, desired: dict[str, Any], meta_by_name: dict[str, FieldMeta],
+    ) -> tuple[dict[str, Any], list[str]]:
+        prepared = {}
+        warnings = []
+        for field_name, value in desired.items():
+            meta = meta_by_name.get(field_name)
+            expected_type = REPAIR_EVENT_STATUS_FIELDS.get(field_name)
+            if meta is None or self._field_meta_is_readonly(meta):
+                warnings.append(f"事件表缺少可写字段：{field_name}")
+                continue
+            if expected_type and meta.field_type != expected_type[1]:
+                warnings.append(f"事件表字段类型不匹配：{field_name}")
+                continue
+            prepared[field_name] = value
+        status_fields = REPAIR_EVENT_STATUS_FIELDS.keys() & desired.keys()
+        if not status_fields <= prepared.keys():
+            for field_name in status_fields:
+                prepared.pop(field_name, None)
+        if not prepared:
+            return {}, warnings
+        app_token, table_id, _source_key = self._event_source_config()
+        try:
+            self._patch_record_fields_exact(
+                app_token=app_token, table_id=table_id, record_id=event_id, fields=prepared,
+            )
+        except PortalError as exc:
+            if not self._repair_management_record_not_found_error(exc):
+                raise
+            return {}, [*warnings, "关联事件已不在当前事件表中，已跳过事件字段回写。"]
+        self._upsert_repair_snapshot_fields(
+            source_key=REPAIR_SNAPSHOT_SOURCE_EVENTS, record_id=event_id, fields=prepared,
+        )
+        self._invalidate_repair_management_event_cache()
+        return prepared, warnings
+
+    def _reconcile_repair_event_status(
+        self, event_id: str, scope: str, *, current_summary_id: str = "",
+    ) -> list[str]:
+        with self._repair_management_record_lock(f"repair-event-fields:{event_id}"):
+            _metas, event_meta, _records = self._load_repair_management_event_records()
+            if not any(name in event_meta for name in REPAIR_EVENT_STATUS_FIELDS):
+                return []
+            try:
+                event = self._event_snapshot_record_for_repair(scope=scope, record_id=event_id)
+            except PortalError as exc:
+                if not self._repair_management_record_not_found_error(exc):
+                    raise
+                return []
+            if event.get("historical_fallback"):
+                return []
+            if current_summary_id:
+                status = self._repair_event_status_for_link(current_summary_id, event_id, event_meta)
+                _, warnings = self._write_repair_event_fields(event_id, status, event_meta)
+                return warnings
+            _metas, project_meta = self._load_table_fields(
+                app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+            )
+            link_meta = project_meta.get("关联事件单")
+            if link_meta is None or link_meta.field_type != 1:
+                raise PortalError("无法核对维修项目表的关联事件单-L，已保留事件检修状态。")
+            owners = self._search_table_records(
+                app_token=REPAIR_SOURCE_APP_TOKEN, table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                meta_by_name=project_meta, work_type=WORK_TYPE_REPAIR, notice_type=NOTICE_TYPE_REPAIR,
+                field_names=["关联事件单"], limit=2,
+                filter_payload={"conjunction": "and", "conditions": [
+                    {"field_name": "关联事件单", "operator": "is", "value": [event_id]},
+                ]},
+            )
+            if len(owners) > 1:
+                return ["事件仍关联多张维修单，已保留现有检修进展和完成时间。"]
+            if owners:
+                status = self._repair_event_status_for_link(owners[0]["record_id"], event_id, event_meta)
+                if not status:
+                    raise PortalError("事件的维修单关联已变化，请稍后重试同步。")
+            else:
+                status = dict.fromkeys(REPAIR_EVENT_STATUS_FIELDS)
+            _, warnings = self._write_repair_event_fields(event_id, status, event_meta)
+            return warnings
+
     def _sync_repair_relation_business_fields(
         self,
         *,
@@ -13784,6 +13905,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         project_overrides: dict[str, Any] | None = None,
         event_overrides: dict[str, Any] | None = None,
         include_target_fields: bool = True,
+        clear_completion_for_event_id: str = "",
     ) -> dict[str, Any]:
         """Synchronize business fields after an exact repair relation is saved."""
         summary_id = str(summary_record_id or "").strip()
@@ -13819,10 +13941,7 @@ class MaintenancePortalService(RepairOperationsMixin):
 
         event_id = str(event_record_id or "").strip()
         if not event_id.startswith("rec"):
-            event_ids = self._repair_management_record_ids(
-                summary_raw.get("关联事件单")
-                or summary_display.get("关联事件单")
-            )
+            event_ids = self._repair_management_event_ids_from_record(summary)
             event_id = event_ids[0] if event_ids else ""
 
         target_id = str(target_record_id or "").strip()
@@ -13973,41 +14092,22 @@ class MaintenancePortalService(RepairOperationsMixin):
         prepared_event_fields: dict[str, Any] = {}
         if historical_event_warning:
             warnings.append(historical_event_warning)
-        elif event_id.startswith("rec") and desired_event_fields:
+        elif event_id.startswith("rec"):
             _event_metas, event_meta_by_name, _event_records = (
                 self._load_repair_management_event_records()
             )
-            for field_name, value in desired_event_fields.items():
-                meta = event_meta_by_name.get(field_name)
-                if meta is None or self._field_meta_is_readonly(meta):
-                    warnings.append(f"事件表缺少可写字段：{field_name}")
-                    continue
-                prepared_event_fields[field_name] = value
-            if prepared_event_fields:
-                event_app_token, event_table_id, _source_key = (
-                    self._event_source_config()
+            with self._repair_management_record_lock(f"repair-event-fields:{event_id}"):
+                status = self._repair_event_status_for_link(
+                    summary_id, event_id, event_meta_by_name,
                 )
-                try:
-                    self._patch_record_fields_exact(
-                        app_token=event_app_token,
-                        table_id=event_table_id,
-                        record_id=event_id,
-                        fields=prepared_event_fields,
-                    )
-                except PortalError as exc:
-                    if not self._repair_management_record_not_found_error(exc):
-                        raise
-                    prepared_event_fields = {}
-                    warnings.append(
-                        "关联事件已不在当前事件表中，已跳过事件字段回写。"
-                    )
-                else:
-                    self._upsert_repair_snapshot_fields(
-                        source_key=REPAIR_SNAPSHOT_SOURCE_EVENTS,
-                        record_id=event_id,
-                        fields=prepared_event_fields,
-                    )
-                    self._invalidate_repair_management_event_cache()
+                # A blank source on an ordinary save may predate the writable mirror.
+                if status.get(EVENT_REPAIR_COMPLETION_FIELD_NAME) is None and event_id != clear_completion_for_event_id:
+                    status.pop(EVENT_REPAIR_COMPLETION_FIELD_NAME, None)
+                desired_event_fields.update(status)
+                prepared_event_fields, event_warnings = self._write_repair_event_fields(
+                    event_id, desired_event_fields, event_meta_by_name,
+                )
+            warnings.extend(event_warnings)
 
         return {
             "synced": bool(prepared_project_fields or prepared_event_fields),
@@ -14031,6 +14131,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         scope: str = "ALL",
         sync_target_summary: bool = True,
         write_target_summary: bool = True,
+        clear_completion_for_event_id: str = "",
     ) -> dict[str, Any]:
         summary_id = str(summary_record_id or "").strip()
         target_ids = list(
@@ -14093,12 +14194,16 @@ class MaintenancePortalService(RepairOperationsMixin):
                 warnings.append(warning)
         field_sync: dict[str, Any] = {}
         field_sync_pending = False
+        clear_args = ({"clear_completion_for_event_id": clear_completion_for_event_id}
+                      if clear_completion_for_event_id else {})
+        retry_args = {"task_payload": clear_args} if clear_args else {}
         try:
             field_sync = self._sync_repair_relation_business_fields(
                 summary_record_id=summary_id,
                 event_record_id=event_record_id,
                 target_record_id=target_ids[0] if target_ids else "",
                 scope=scope,
+                **clear_args,
             )
             field_sync_warnings = [
                 str(item or "").strip()
@@ -14113,6 +14218,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                         summary_record_id=summary_id,
                         scope=scope,
                         error="；".join(field_sync_warnings),
+                        **retry_args,
                     )
                 )
         except Exception as exc:
@@ -14123,6 +14229,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     summary_record_id=summary_id,
                     scope=scope,
                     error=str(exc),
+                    **retry_args,
                 )
             )
 
@@ -16939,6 +17046,13 @@ class MaintenancePortalService(RepairOperationsMixin):
             "warnings": [],
         }
         relation_retry_needed = False
+        end_field = REPAIR_END_FIELDS[0]
+        clear_completion_for_event_id = (
+            effective_event_id
+            if not event_relation_changed and end_field in prepared and prepared[end_field] is None
+            and self._repair_management_datetime_ms(existing_raw.get(end_field)) is not None
+            else ""
+        )
         if (
             effective_event_id
             or effective_repair_ids
@@ -16956,6 +17070,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                     ),
                     scope=scope,
                     sync_target_summary=repair_relation_changed,
+                    clear_completion_for_event_id=clear_completion_for_event_id,
                 )
                 relation_retry_needed = any(
                     self._repair_sync_warnings_require_retry([result.get("warning", "")])
@@ -16975,11 +17090,33 @@ class MaintenancePortalService(RepairOperationsMixin):
                 summary_record_id=summary_id,
                 scope=scope,
                 target_record_id=existing_repair_target_id,
-                task_payload={"before_fields": {
-                    REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: existing_repair_target_id,
-                }},
+                task_payload={
+                    "before_fields": {
+                        REPAIR_MANAGEMENT_REPAIR_LINK_STORAGE_FIELD_NAME: existing_repair_target_id,
+                    },
+                    "clear_completion_for_event_id": clear_completion_for_event_id,
+                },
                 error="；".join(relation_sync.get("warnings") or []),
             ))
+        if event_relation_changed:
+            for previous_event_id in existing_event_ids:
+                if previous_event_id == effective_event_id:
+                    continue
+                try:
+                    event_warnings = self._reconcile_repair_event_status(previous_event_id, scope)
+                except Exception as exc:
+                    event_warnings = [f"维修项目已保存，原关联事件的检修状态暂未同步：{exc}"]
+                    sync_task = self._schedule_repair_sync_task(
+                        "event_repair_detach",
+                        summary_record_id=summary_id,
+                        scope=scope,
+                        target_record_id=previous_event_id,
+                        task_payload={"event_record_id": previous_event_id},
+                        error=str(exc),
+                    )
+                    if sync_task:
+                        relation_sync["sync_pending"] = True
+                relation_sync.setdefault("warnings", []).extend(event_warnings)
         followup_sync = {
             "synced_count": 0,
             "failed_count": 0,
@@ -17126,63 +17263,19 @@ class MaintenancePortalService(RepairOperationsMixin):
         operation_id = self._repair_sync_operation_id("project_delete", summary_id)
         existing_operation = self._state_store.get_repair_management_operation(operation_id) or {}
         existing_result = dict(existing_operation.get("result") or {})
-        if existing_operation.get("status") == "completed" and existing_result.get("deleted"):
-            deleted_scopes = existing_result.get("record_scope_codes") or self._building_codes_from_value(existing_operation.get("scope"))
-            if self._normalize_scope(scope) != "ALL" and (not deleted_scopes or not self._scope_matches_buildings(scope, deleted_scopes)):
+        existing_task_payload = dict(existing_result.get("task_payload") or {})
+        if existing_result.get("deleted") or existing_task_payload.get("project_deleted"):
+            record_scopes = existing_result.get("record_scope_codes") or self._building_codes_from_value(existing_operation.get("scope"))
+            if self._normalize_scope(scope) != "ALL" and (not record_scopes or not self._scope_matches_buildings(scope, record_scopes)):
                 raise PortalError("当前账号无权操作该楼栋维修项目。")
-            return existing_result
-        _metas, meta_by_name, _records = (
-            self._load_repair_management_project_records()
-        )
-        project_record = self._ensure_repair_management_record_in_scope(
-            record_id,
-            scope,
-            meta_by_name=meta_by_name,
-        )
-        record_name = self._repair_management_title(project_record)
-        summary_id = str(record_id or "").strip()
-        _followup_metas, _followup_meta_by_name, linked_followups = (
-            self._load_repair_followups_for_summary(summary_id, limit=None, force_refresh=True)
-        )
-        followup_ids = list(
-            dict.fromkeys(
-                str(item.get("record_id") or "").strip()
-                for item in linked_followups
-                if str(item.get("record_id") or "").strip()
-            )
-        )
-        existing_task_payload = (
-            dict(existing_result.get("task_payload") or {})
-            if isinstance(existing_result.get("task_payload"), dict)
-            else {}
-        )
-        followup_ids = list(
-            dict.fromkeys(
-                [
-                    *(
-                        str(item or "").strip()
-                        for item in (
-                            existing_task_payload.get("followup_record_ids") or []
-                        )
-                        if str(item or "").strip()
-                    ),
-                    *followup_ids,
-                ]
-            )
-        )
-        task_payload = {
-            **existing_task_payload,
-            "followup_record_ids": followup_ids,
-            "deleted_followup_ids": list(
-                dict.fromkeys(
-                    str(item or "").strip()
-                    for item in (
-                        existing_task_payload.get("deleted_followup_ids") or []
-                    )
-                    if str(item or "").strip()
-                )
-            ),
-        }
+            if existing_operation.get("status") == "completed":
+                return existing_result
+            record_name = existing_result.get("record_name", "")
+        else:
+            project_record = self._ensure_repair_management_record_in_scope(summary_id, scope)
+            record_scopes = self._repair_record_building_codes(project_record)
+            record_name = self._repair_management_title(project_record)
+        task_payload = existing_task_payload
         if not existing_operation:
             self._schedule_repair_sync_task_unchecked(
                 "project_delete",
@@ -17203,7 +17296,7 @@ class MaintenancePortalService(RepairOperationsMixin):
             **existing_result,
             "task_payload": task_payload,
             "record_name": record_name,
-            "record_scope_codes": self._repair_record_building_codes(project_record),
+            "record_scope_codes": record_scopes,
             "started_at": time.time(),
             "available_at": 0,
         }
@@ -17246,7 +17339,12 @@ class MaintenancePortalService(RepairOperationsMixin):
                 error=str(exc),
             )
             self._process_repair_sync_tasks_async()
-            raise PortalError(f"{exc}；系统将在后台自动重试删除。") from exc
+            retry_message = (
+                "维修项目已删除，系统将在后台重试同步关联事件。"
+                if (latest_result.get("task_payload") or {}).get("project_deleted")
+                else "系统将在后台自动重试删除。"
+            )
+            raise PortalError(f"{exc}；{retry_message}") from exc
         latest_operation = (
             self._state_store.get_repair_management_operation(operation_id)
             or {}
@@ -17281,6 +17379,7 @@ class MaintenancePortalService(RepairOperationsMixin):
         summary_id = str(operation.get("summary_record_id") or "").strip()
         if not operation_id or not summary_id.startswith("rec"):
             raise PortalError("维修项目删除任务缺少有效记录 ID。")
+        scope = self._normalize_scope(operation.get("scope"))
         result = (
             dict(operation.get("result") or {})
             if isinstance(operation.get("result"), dict)
@@ -17322,6 +17421,15 @@ class MaintenancePortalService(RepairOperationsMixin):
                 error="",
             )
 
+        # Save the current association before removing its only source record.
+        if not task_payload.get("project_deleted"):
+            try:
+                project, _metadata = self._read_repair_project_for_notice(summary_id, scope)
+            except PortalError as exc:
+                if not isinstance(exc, PortalNotFoundError) and not self._repair_management_record_not_found_error(exc):
+                    raise
+            else:
+                task_payload["event_record_ids"] = self._repair_management_event_ids_from_record(project)
         _, _, live_followups = self._load_repair_followups_for_summary(summary_id, limit=None, force_refresh=True)
         followup_ids = list(dict.fromkeys([*followup_ids, *[item["record_id"] for item in live_followups]]))
         persist_progress()
@@ -17350,25 +17458,31 @@ class MaintenancePortalService(RepairOperationsMixin):
         _, _, remaining = self._load_repair_followups_for_summary(summary_id, limit=None, force_refresh=True)
         if remaining:
             raise PortalError("云端仍有跟进记录或出现新增跟进，已保留维修项目，请继续核验删除。")
-        try:
-            self._delete_record_fields(
-                app_token=REPAIR_SOURCE_APP_TOKEN,
-                table_id=REPAIR_MANAGEMENT_TABLE_ID,
-                record_id=summary_id,
-            )
-        except Exception as exc:
-            if not self._repair_management_record_not_found_error(exc):
-                persist_progress()
-                raise PortalError(
-                    f"已删除 {len(deleted_followup_ids)} 条跟进记录，"
-                    f"但维修项目删除失败。失败原因：{exc}"
-                ) from exc
+        if not task_payload.get("project_deleted"):
+            try:
+                self._delete_record_fields(
+                    app_token=REPAIR_SOURCE_APP_TOKEN,
+                    table_id=REPAIR_MANAGEMENT_TABLE_ID,
+                    record_id=summary_id,
+                )
+            except Exception as exc:
+                if not self._repair_management_record_not_found_error(exc):
+                    persist_progress()
+                    raise PortalError(
+                        f"已删除 {len(deleted_followup_ids)} 条跟进记录，"
+                        f"但维修项目删除失败。失败原因：{exc}"
+                    ) from exc
+            task_payload["project_deleted"] = True
+            persist_progress()
         self._delete_repair_snapshot_item(
             REPAIR_SNAPSHOT_SOURCE_PROJECTS,
             summary_id,
         )
         source_projection_removed = self._remove_repair_source_projection(summary_id)
         self._invalidate_repair_management_status_cache()
+        warnings = []
+        for event_id in task_payload.get("event_record_ids") or []:
+            warnings.extend(self._reconcile_repair_event_status(event_id, scope))
         response = {
             **result,
             "task_payload": task_payload,
@@ -17376,7 +17490,8 @@ class MaintenancePortalService(RepairOperationsMixin):
             "deleted": True,
             "deleted_followup_count": len(deleted_followup_ids),
             "deleted_followup_ids": list(deleted_followup_ids),
-            "source_projection_removed": bool(source_projection_removed),
+            "source_projection_removed": bool(source_projection_removed or result.get("source_projection_removed")),
+            "warnings": list(dict.fromkeys(warnings)),
         }
         self._state_store.update_repair_management_operation(
             operation_id,
@@ -32547,6 +32662,11 @@ class MaintenancePortalService(RepairOperationsMixin):
                 fields={**dict.fromkeys(REPAIR_END_FIELDS), REPAIR_MANAGEMENT_WORKFLOW_FIELD_NAME: workflow},
             )
             self._invalidate_repair_management_status_cache()
+            event_warnings = []
+            for event_id in self._repair_management_event_ids_from_record(verified):
+                event_warnings.extend(self._reconcile_repair_event_status(
+                    event_id, scope, current_summary_id=summary_id,
+                ))
             return {
                 "restored": True,
                 "skipped": False,
@@ -32554,7 +32674,7 @@ class MaintenancePortalService(RepairOperationsMixin):
                 "target_record_id": str(target_record_id or undo.get("target_record_id") or ""),
                 "followup_count": int(followup_sync.get("synced_count") or 0),
                 "workflow": workflow,
-                "warnings": list(dict.fromkeys([*followup_warnings, *workflow_warnings])),
+                "warnings": list(dict.fromkeys([*followup_warnings, *workflow_warnings, *event_warnings])),
             }
 
     def _restore_repair_source_after_applied_end_undo(

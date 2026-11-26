@@ -412,6 +412,7 @@ import {
   fetchSignaturePeople,
   fetchTemporarySignatures,
   sendSignatureUsageConfirmations,
+  readSignatureUsageDelivery, signatureUsageDeliveryPending, signatureUsageDeliveryMessage,
 } from "../mopSignatureApi";
 import { useMopEditSessionLock } from "../useMopEditSessionLock";
 import { useMopCellSelection } from "../useMopCellSelection";
@@ -2269,13 +2270,12 @@ async function sendSignatureUsageConfirmationsForRole(role: MopSignatureRole): P
         record_id: String(person.record_id || ""),
       })),
     });
-    const sent = Number(data.sent_count || data.sent || 0);
-    const failed = Number(data.failed_count || 0);
-    signatureMessage.value = (failed
-      ? `已发送 ${sent} 张签名使用确认卡片，${failed} 人发送失败。`
-      : `已发送 ${sent} 张签名使用确认卡片。`)
-      + "收件人可在飞书卡片中直接确认或拒绝，也可点击“打开灯塔处理”；最长7天有效。";
-    signatureMessageType.value = failed ? "failed" : "success";
+    signatureMessage.value = signatureUsageDeliveryMessage(data);
+    signatureMessageType.value = "info";
+    const result = await readSignatureUsageDelivery(data);
+    signatureMessage.value = signatureUsageDeliveryMessage(result);
+    signatureMessageType.value = signatureUsageDeliveryPending(result) ? "info"
+      : result.status === "failed" || result.status === "expired" || result.failed_count || result.uncertain_count ? "failed" : "success";
     updateFormalSignaturePolling();
   } catch (error) {
     signatureMessage.value = errorMessage(error, "发送签名使用确认失败");
