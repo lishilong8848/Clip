@@ -47,8 +47,8 @@
     <button v-if="error && dirty" :disabled="saving || loading" @click="compareLatest()">核对共享版本</button>
     <button v-if="error && !dirty" :disabled="saving || loading" @click="load(true)">重试读取</button>
   </div>
-  <div v-if="editCell && mobileSheet" class="ins-line ins-editbar">
-    <strong>{{ editing }}</strong><!-- mobile cell editor --><button :disabled="!editNeighbors[0]" @click="moveEdit(-1)">上一格</button><button :disabled="!editNeighbors[1]" @click="moveEdit(1)">下一格</button>
+  <div v-if="editCell && (mobileSheet || editCell.humidifier)" class="ins-line ins-editbar">
+    <strong>{{ editing }}</strong><!-- worksheet cell editor --><button :disabled="!editNeighbors[0]" @click="moveEdit(-1)">上一格</button><button :disabled="!editNeighbors[1]" @click="moveEdit(1)">下一格</button>
     <button @click="cancelEdit()">取消</button><button class="ins-primary" @click="completeEdit()">完成编辑</button>
   </div>
   <!-- worksheet -->

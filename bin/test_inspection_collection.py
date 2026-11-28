@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+import httpx
 import requests
 
 BIN_DIR = Path(__file__).resolve().parent
@@ -140,6 +141,37 @@ class InspectionCollectionTests(unittest.TestCase):
             with self.assertRaises(RiskError):
                 self.service._request({'url': 'https://example.com'}, 'GET', '/fixture')
             request.assert_called_once()
+
+    def test_start_waits_for_complete_bitable_batch_with_the_receipt_sample(self):
+        from lan_bitable_template_portal import daily_inspection as daily
+        inspection = daily.DailyInspection(self.store, None, scheduled=True)
+        current = int(self.now * 1000)
+        sample = current - 60_000
+        receipt = {'state': 'ready', 'source_time': sample, 'uploaded_at': current,
+                   'not_before': current - 600_000}
+
+        def batch(stamp):
+            return {'D': {'batch': stamp + 1000, 'rows': [{'fields': {'源文件时间': stamp}}]}}
+
+        clock = dt.datetime
+
+        class FixedClock(clock):
+            @classmethod
+            def now(cls, tz=None):
+                return clock.fromtimestamp(current / 1000, tz)
+
+        with patch.object(daily.dt, 'datetime', FixedClock), patch.object(
+                inspection.collection, 'ensure', return_value=receipt), patch.object(
+                inspection, 'capture', side_effect=[RiskError('源表分页未读完', 503),
+                                                    httpx.ReadTimeout('隔离模拟超时'),
+                                                    batch(sample - 60_000), batch(sample)]) as capture:
+            state = {'active': None, 'history': []}
+            for _ in range(3):
+                self.assertEqual(inspection.prepare_start_collection(state, self.duty)['state'], 'waiting_bitable')
+                self.assertIsNone(state['active'])
+            self.assertEqual(inspection.prepare_start_collection(state, self.duty), receipt)
+            self.assertEqual(capture.call_count, 4)
+            capture.assert_called_with(['D'], force_probe=True)
 
     def test_learned_prefetch_before_midnight_and_later_bucket_belong_to_current_round(self):
         from lan_bitable_template_portal import daily_inspection as daily

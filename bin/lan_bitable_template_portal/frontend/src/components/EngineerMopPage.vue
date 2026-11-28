@@ -19,7 +19,7 @@
       请先登录飞书后再使用工程师 MOP 页面。
       <a class="btn blue" :href="loginUrl">飞书登录</a>
     </div>
-    <div v-else-if="!mopScopes.length" class="notice-box" role="status">维保单办理仅在 D、E 楼显示。</div>
+    <div v-else-if="!mopScopes.length" class="notice-box" role="status">维保单办理支持 D、E、H 楼，请使用具有对应楼栋权限的账号。</div>
 
     <template v-else>
       <MessageBanner

@@ -18,6 +18,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 from functools import lru_cache
+
+import httpx
 from openpyxl.utils.cell import coordinate_from_string, column_index_from_string, range_boundaries
 
 from fastapi import Request
@@ -71,6 +73,12 @@ ROUND_LOCATION_FIELDS = {'白1':'白1目标单元格', '白2':'白2目标单元�
                          '夜1':'夜1目标单元格', '夜2':'夜2目标单元格'}
 LOCAL_POINT_ID = re.compile(r'local_[0-9a-f]{32}')
 LOCAL_POINT_SOURCES = frozenset({'manual_status', 'fixed_status', 'fixed_value'})
+HUMIDIFIER_SHEET = '恒湿机巡检表'
+# The producer verified and switched these ten devices. Other units keep their original point IDs.
+E_212_FAN_IDS = {
+    f'E-212-CRAH-{number:02d}': f'55_0_{controller}_1_608_0'
+    for number, controller in enumerate(range(439, 449), 1)
+}
 HANDOVER_MODE = 'inspection_handover_mode'
 HANDOVER_PRESSURE = 'inspection_handover_pressure'
 HANDOVER_POINT_SOURCES = frozenset({HANDOVER_MODE, HANDOVER_PRESSURE})
@@ -1640,6 +1648,10 @@ def worksheet_review_versions(active, scope, profession):
     overrides = [entry for entry in visible_sheet_overrides(active, active_form_layouts(active, scope))
                  if (entry['template'], entry['sheet']) in targets]
     version = [sorted(sheets), sorted(payload), overrides]
+    humidifiers = [entry for entry in active.get('manual_sheet_cells', [])
+                   if entry.get('humidifier_state') and (entry['template'], entry['sheet']) in targets]
+    if humidifiers:
+        version.append(humidifiers)
     policy = {key: cells for key, cells in active.get('cell_exemptions', {}).items() if key in sheets}
     if policy:
         version.append(policy)
@@ -1707,7 +1719,7 @@ def hvac_switch_state(fields):
     return states.pop() if len(states) == 1 else None
 
 
-def stopped_hvac_cells(scope, batch, slot, start, end):
+def stopped_hvac_cells(scope, batch, slot, start, end, *, manual_humidifiers=False):
     """Freeze this slot's display coordinates from one complete result-table upload."""
     rows = batch['rows']
     sealed = batch['batch']
@@ -1715,24 +1727,33 @@ def stopped_hvac_cells(scope, batch, slot, start, end):
     if not marker or marker['upload_time'] != sealed or not start <= sealed < end:
         return []
     mapping = hvac_switch_map(scope)
+    fans = E_212_FAN_IDS if scope == 'E' and manual_humidifiers else {}
+    if manual_humidifiers:
+        mapping = {fans.get(item['device'], point): item for point, item in mapping.items()
+                   if item['sheet'] != HUMIDIFIER_SHEET}
     states = {}
     device_samples = {}
     devices = {key_name(scope, target['device']) for target in mapping.values()}
+    fan_devices = {key_name(scope, name) for name in fans}
     for row in rows:
         fields = row['fields']
         point_id = plain(fields.get('测点ID')).strip()
         if plain(fields.get('记录类型')) != '测点明细':
             continue
         device = key_name(scope, plain(fields.get('设备编号')))
+        metric = re.split(r'[（(%％]', plain(fields.get('测点名称')).strip(), maxsplit=1)[0].strip()
+        is_fan = metric == '室内风机转速'
         sampled = fields.get('采样时间')
         source_time = fields.get('源文件时间')
         if (device in devices and plain(fields.get('专业')) == '暖通' and not LOCAL_POINT_ID.fullmatch(point_id)):
             # The two collection groups share one sampling instant. A later source file
             # timestamp is normal; a different sampling instant on this device is not.
-            device_samples.setdefault(device, set()).add(sampled if type(sampled) is int else None)
+            if device not in fan_devices or type(sampled) is int and metric not in ('开关机状态', '运行状态'):
+                device_samples.setdefault(device, set()).add(sampled if type(sampled) is int else None)
         if point_id not in mapping:
             continue
         target = mapping[point_id]
+        fan_speed = target['device'] in fans
         valid = (fields.get('上传日期') == sealed and plain(fields.get('楼栋')) == scope + '楼'
                  and plain(fields.get('专业')) == '暖通'
                  and device == key_name(scope, target['device'])
@@ -1741,7 +1762,22 @@ def stopped_hvac_cells(scope, batch, slot, start, end):
                  and plain(fields.get('测点来源')).strip() not in LOCAL_POINT_SOURCES | HANDOVER_POINT_SOURCES | {OPERATING_SOURCE}
                  and not plain(fields.get('缺少源数据')).strip()
                  and plain(fields.get('数据完整性')).strip() in ('', '完整'))
-        states.setdefault(point_id, set()).add(hvac_switch_state(fields) if valid else None)
+        state = None
+        if valid and fan_speed and is_fan:
+            source = fields.get('测点原始值')
+            raw = (str(source) if type(source) in (float, int) else plain(source)).strip().removesuffix('%').removesuffix('％').strip()
+            try:
+                speed = Decimal(raw)
+                if speed.is_finite() and speed != 5:
+                    measured = 'off' if speed < 5 else 'on'
+                    configured = {'△': 'off', '√': 'on'}.get(plain(fields.get('状态判定')).strip())
+                    if configured == measured:
+                        state = configured
+            except InvalidOperation:
+                pass
+        elif valid and not fan_speed:
+            state = hvac_switch_state(fields)
+        states.setdefault(point_id, set()).add(state)
     groups = {}
     for point_id, observed in states.items():
         target = mapping[point_id]
@@ -1889,6 +1925,96 @@ def visible_sheet_overrides(active, layouts):
     return [entry for entry in active.get('sheet_overrides', [])
             if (entry['template'], entry['sheet'], entry['cell']) in remarks
             or not cell_excluded(layouts.get((entry['template'], entry['sheet']), {}), entry['cell'])]
+
+
+def humidifier_positions(active, scope):
+    if not active.get('manual_humidifiers'):
+        return {}
+    duty = active['duty']
+    slot = duty['shift'] + str(active['round'])
+    layouts = active_form_layouts(active, scope)
+    result = {}
+    for item in confirmed_humidity_cells().values():
+        if item['scope'] != scope:
+            continue
+        template, sheet, cell = item['template'], item['sheet'], item['cells'][slot]
+        if (template, sheet) in layouts and not cell_excluded(layouts[template, sheet], cell):
+            result[template, sheet, cell] = item
+    return result
+
+
+def humidifier_readings(active, scope, positions):
+    if not positions:
+        return {}
+    from .daily_inspection_reminders import slot_time, shift_bounds
+
+    duty, number = active['duty'], active['round']
+    when = slot_time(duty['date'], duty['shift'], number)
+    start = when.replace(hour=when.hour - when.hour % 2, minute=0).timestamp() * 1000
+    end = min(DailyInspection.round_cutoff(duty, number).timestamp(), shift_bounds(duty['date'], duty['shift'])[1]) * 1000
+    batch = active['batches'][scope]
+    rows, sealed = batch.get('rows', []), batch.get('batch')
+    if not validate_source_batch(scope, rows) or type(sealed) is not int or not start <= sealed < end:
+        return {}
+    expected = {item['point_id']: item for item in positions.values()}
+    observed = {}
+    for row in rows:
+        fields = row['fields']
+        point = plain(fields.get('测点ID')).strip()
+        item = expected.get(point)
+        if not item or plain(fields.get('记录类型')) != '测点明细':
+            continue
+        sampled = fields.get('采样时间')
+        valid = (fields.get('上传日期') == sealed and plain(fields.get('楼栋')) == scope + '楼'
+                 and plain(fields.get('专业')) == '暖通' and type(sampled) is int and start <= sampled <= sealed
+                 and key_name(scope, plain(fields.get('设备编号'))) == key_name(scope, item['source_device'])
+                 and not plain(fields.get('缺少源数据')).strip()
+                 and plain(fields.get('数据完整性')).strip() in ('', '完整'))
+        source = fields.get('测点原始值')
+        value = (str(source) if type(source) in (float, int) else plain(source)).strip() if valid else ''
+        if value:
+            try:
+                if not Decimal(value.removesuffix('%').removesuffix('％').strip()).is_finite():
+                    value = ''
+            except InvalidOperation:
+                value = ''
+        observed.setdefault(point, set()).add(value)
+    return {point: next(iter(values)) for point, values in observed.items() if len(values) == 1 and '' not in values}
+
+
+def validate_humidifier_edit(edit, position, positions, readings):
+    mode = edit.get('humidifier_state')
+    if position not in positions:
+        if mode is not None:
+            raise RiskError('该单元格不属于本轮可填写的恒湿机。', 409)
+        return {}
+    if mode not in ('on', 'off'):
+        raise RiskError('请选择恒湿机开启或关闭。', 400)
+    return {'humidifier_state': mode, 'value': '△' if mode == 'off' else readings.get(positions[position]['point_id'], '')}
+
+
+def require_humidifiers(active, scope, professions):
+    if not active.get('worksheet_mode'):
+        return
+    positions = humidifier_positions(active, scope)
+    sheets = required_sheets(active, scope, professions)
+    saved = {(item['template'], item['sheet'], item['cell']): item for item in active.get('manual_sheet_cells', [])}
+    missing, unsampled = [], []
+    for position, item in positions.items():
+        template, sheet, cell = position
+        if form_sheet_key(template, sheet) not in sheets:
+            continue
+        edit = saved.get(position, {})
+        mode = edit.get('humidifier_state')
+        label = f'{item["target_device"]} {cell}'
+        if mode not in ('on', 'off'):
+            missing.append(label)
+        elif mode == 'on' and not edit.get('value'):
+            unsampled.append(label)
+    if missing:
+        raise RiskError(f'恒湿机巡检表还有 {len(missing)} 格未选启停：{"、".join(missing[:4])}。', 409)
+    if unsampled:
+        raise RiskError(f'有 {len(unsampled)} 台开启的恒湿机缺少本轮湿度实测：{"、".join(unsampled[:4])}。', 409)
 
 
 class DailyInspection:
@@ -2189,6 +2315,7 @@ class DailyInspection:
                 active.pop('review_orphan_identities', None)
             active['batches'][scope] = {key: live[key] for key in
                                         ('batch', 'rows', 'devices', 'config_fp', 'form_devices') if key in live}
+            active['manual_humidifiers'] = True
             self.freeze_hvac_switches(active, dt.datetime.now(CN))
             self.fill_handover_points(scope, active, active['batches'][scope], live, state.get('pump_pressures'))
             adopt_manual_state_overrides(state, active, scope)
@@ -2518,7 +2645,8 @@ class DailyInspection:
         active.pop('hvac_stopped_cells', None)
         if batch.get('rows') and type(batch.get('batch')) is int and batch['batch'] <= accepted_at.timestamp() * 1000:
             stopped = stopped_hvac_cells(scope, batch, duty['shift'] + str(number),
-                                         int(max(shift_start, start.timestamp()) * 1000), int(end * 1000))
+                                         int(max(shift_start, start.timestamp()) * 1000), int(end * 1000),
+                                         manual_humidifiers=bool(active.get('manual_humidifiers')))
             if stopped:
                 active['hvac_stopped_cells'] = stopped
 
@@ -2527,7 +2655,7 @@ class DailyInspection:
         active = {'id': uuid.uuid4().hex, 'actor': actor, 'started_by': actor,
                   'started': int(started.timestamp() * 1000), 'duty': duty, 'round': number,
                   'source_locked': actor != SYSTEM_INSPECTION_ACTOR,
-                  'batches': batches, 'manual_sheet_cells': [],
+                  'batches': batches, 'manual_sheet_cells': [], 'manual_humidifiers': True,
                   'cell_exemptions': state.get('exemptions', {}).get('sheets', {})}
         if state.get('form_remarks'):
             active['sheet_overrides'] = copy.deepcopy(list(state['form_remarks'].values()))
@@ -2689,6 +2817,9 @@ class DailyInspection:
                         if not self.source_locked(active):
                             state = self.sync_active_live(scope, cached_only=True)
                             active = state['active']
+                            if not active.get('manual_humidifiers'):
+                                active['manual_humidifiers'] = True
+                                self.freeze_hvac_switches(active, dt.datetime.now(CN))
                             active.update(source_locked=True, started_by=actor, source_lock_owner=owner)
                             if duty.get('shift_names') and not active['duty'].get('shift_names'):
                                 active['duty']['shift_names'] = duty['shift_names']
@@ -2794,6 +2925,23 @@ class DailyInspection:
                                 if any(isinstance(cell, dict) and json.dumps([cell.get('template'), cell.get('sheet')],
                                        ensure_ascii=False, separators=(',', ':')) not in allowed for cell in data['sheet_cells']):
                                     raise RiskError('请先把该工作表的专业加入本轮巡检。', 409)
+                            humidifier_edits = {}
+                            if isinstance(data['sheet_cells'], list) and any(isinstance(cell, dict) and (
+                                    cell.get('sheet') == HUMIDIFIER_SHEET or 'humidifier_state' in cell)
+                                    for cell in data['sheet_cells']):
+                                positions = humidifier_positions(active, scope)
+                                readings = humidifier_readings(active, scope, positions)
+                                edits = []
+                                for item in data['sheet_cells']:
+                                    if isinstance(item, dict):
+                                        key = tuple(item.get(name) for name in ('template', 'sheet', 'cell'))
+                                        if all(isinstance(value, str) for value in key):
+                                            selection = validate_humidifier_edit(item, key, positions, readings)
+                                            if selection:
+                                                humidifier_edits[key] = selection
+                                                item = {**item, **selection}
+                                    edits.append(item)
+                                data = {**data, 'sheet_cells': edits}
                             with archived_workbook(workbook(active, {scope: []}, strict_original=False, presentation=False), active['id'], scope) as book:
                                 edits = apply_cells(book, scope, data['sheet_cells'], actor, enforce_exclusions=True,
                                                     slot=active['duty']['shift'] + str(active['round']),
@@ -2848,7 +2996,8 @@ class DailyInspection:
                                       for item in active.get('manual_sheet_cells', [])}
                             for item in data['sheet_cells']:
                                 key = (item['template'], item['sheet'], item['cell'])
-                                manual[key] = {'template': key[0], 'sheet': key[1], 'cell': key[2]}
+                                manual[key] = {'template': key[0], 'sheet': key[1], 'cell': key[2],
+                                               **humidifier_edits.get(key, {})}
                             active['manual_sheet_cells'] = list(manual.values())
                             active['last_sheet_edit'] = fingerprint
                             active['review_version'] = active.get('review_version', 0) + 1
@@ -2884,6 +3033,8 @@ class DailyInspection:
                         if action == 'finish' and (type(data.get('review_version')) is not int or
                                                    data['review_version'] != active.get('review_version', 0)):
                             raise RiskError('本轮核对资料已变化，请刷新并核对后再归档。', 409)
+                        if action in {'confirm-profession', 'finish'}:
+                            require_humidifiers(active, scope, [profession] if profession else chosen)
                         before = active.get('reviews', {})
                         reviews, version = merge_reviews(active, devices, data.get('reviews', {}), actor)
                         confirmations = dict(active.get('profession_confirmations', {}))
@@ -2941,11 +3092,33 @@ class DailyInspection:
                 return None
         cached = self.cached_source(duty['scope'])
         batch = (cached or {}).get('batch') or {}
-        pending = self.collection.ensure(duty, number, source_time=minimum_source_time(batch))
-        if pending and pending['state'] == 'ready':
+        cached_sample = minimum_source_time(batch)
+        if self.scheduled and cached_sample and not self.matches_scheduled_batch(batch, duty, number, now):
+            cached_sample = 0
+        pending = self.collection.ensure(duty, number, source_time=cached_sample)
+        if not pending or pending['state'] != 'ready' or not pending.get('uploaded_at'):
+            return pending
+
+        waiting = {**pending, 'state': 'waiting_bitable', 'error': '新采集已上传，正在核验本楼完整批次。'}
+        try:
             latest = self.capture([duty['scope']], force_probe=True)[duty['scope']]
-            if minimum_source_time(latest) < max(pending['not_before'], int(time.time()*1000)-FRESH_SECONDS*1000):
-                return {**pending, 'state': 'waiting_bitable', 'error': '新采集已上传，正在核验本楼完整批次。'}
+        except RiskError as error:
+            if error.status in (409, 503):
+                return waiting
+            raise
+        except httpx.TransportError:
+            return waiting
+        except httpx.HTTPStatusError as error:
+            if error.response.status_code >= 500:
+                return waiting
+            raise
+        current = dt.datetime.now(CN)
+        if self.scheduled and current >= self.round_cutoff(duty, number):
+            raise RiskError('本轮巡检时段已结束，请刷新后开始下一轮。', 409)
+        freshness_floor = max(pending['source_time'], (current.timestamp() - FRESH_SECONDS) * 1000)
+        if (minimum_source_time(latest) < freshness_floor or
+                self.scheduled and not self.matches_scheduled_batch(latest, duty, number, current)):
+            return waiting
         return pending
 
     def ensure_archive_fields(self, specs=ARCHIVE_FIELDS):
@@ -3419,7 +3592,9 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                           or item.get('profession') in professions)]
             report_sheets = [{'name':'测点读数','rows':[point_columns, *readings]},
                              {'name':REVIEW_SHEET,'rows':[REVIEW_COLUMNS, *reviews]}]
-            entries = original_cells(report_sheets, templates, duty.get('shift'), active.get('round'))
+            humidifiers = humidifier_positions(active, scope)
+            entries = [entry for entry in original_cells(report_sheets, templates, duty.get('shift'), active.get('round'))
+                       if (entry['template'], entry['sheet'], entry['cell']) not in humidifiers]
             if not strict_original:
                 entries = [entry for entry in entries if not entry.get('conflict')]
             views = original_views(templates, [{'shift':duty.get('shift'), 'round':active.get('round'),
@@ -3454,6 +3629,20 @@ def workbook(active, orders, *, strict_original=True, presentation=True):
                     view['rows'][row - 1][column_index_from_string(col) - 1] = value
             overrides = visible_sheet_overrides(active, layouts)
             overlay_views(views, overrides)
+            if humidifiers:
+                manual = {(item['template'], item['sheet'], item['cell']): item['value']
+                          for item in active.get('manual_sheet_cells', []) if item.get('humidifier_state')}
+                for view in views:
+                    for template, sheet_name, address in humidifiers:
+                        if (template, sheet_name) != (view['template'], view['sheet']):
+                            continue
+                        col, row = coordinate_from_string(address)
+                        value = manual.get((template, sheet_name, address))
+                        view['rows'][row - 1][column_index_from_string(col) - 1] = value or None
+                        if value:
+                            view['filled'].add(address)
+                        else:
+                            view['filled'].discard(address)
             # Freeze the display projection in the original forms only. The review,
             # sensor, source snapshot and manual values above retain their actual data.
             stopped = hvac_form_marks(active, layouts)
@@ -3627,6 +3816,18 @@ def inspection_report(service, scope, day, owner, actor, *, include_active=False
                        for key in ('original_cells', 'extra_cells')}}
         if active and summary['round_id'] == active['id']:
             batch = active['batches'][scope]
+            if not active.get('completed') and (not view_sheet or view_sheet[1] == HUMIDIFIER_SHEET):
+                saved = {(item['template'], item['sheet'], item['cell']): item.get('humidifier_state')
+                         for item in active.get('manual_sheet_cells', [])}
+                positions = humidifier_positions(active, scope)
+                readings = humidifier_readings(active, scope, positions)
+                summary['humidifier_cells'] = [
+                    {'template': template, 'sheet': sheet, 'cell': cell, 'device': item['target_device'],
+                     'mode': saved.get((template, sheet, cell)), 'reading': readings.get(item['point_id'], '')}
+                    for (template, sheet, cell), item in positions.items()
+                    if (not view_sheet or view_sheet == (template, sheet)) and (professions is None or
+                        form_sheet_key(template, sheet) in allowed)
+                ]
             template = batch.get('operating_template')
             known = {**batch.get('operating_marks', {}), **batch.get('carried_pump_pressures', {}),
                      **batch.get('auxiliary_levels', {})}

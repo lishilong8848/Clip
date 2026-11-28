@@ -12,6 +12,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from collections import Counter
 from functools import lru_cache
 from pathlib import Path
@@ -66,6 +67,34 @@ def split_steps(value):
     return [step.strip() for step in steps if step.strip()]
 
 
+def step_metadata(fields, raw):
+    try:
+        saved = json.loads(plain(fields.get(LINK)) or '{}')
+        if isinstance(saved, dict) and saved.get('text_hash') == digest(raw):
+            return saved
+    except ValueError:
+        pass
+    return {}
+
+
+def record_steps(fields, raw):
+    # Explicit boundaries preserve numbered substeps without changing the readable Bitable text.
+    counts = step_metadata(fields, raw).get('step_lines')
+    if isinstance(counts, list) and counts and all(type(count) is int and count > 0 for count in counts):
+        lines = raw.split('\n')
+        if sum(counts) == len(lines):
+            steps, start = [], 0
+            for index, count in enumerate(counts, 1):
+                prefix = f'{index}、'
+                if not lines[start].startswith(prefix):
+                    break
+                steps.append('\n'.join([lines[start][len(prefix):], *lines[start+1:start+count]]))
+                start += count
+            if start == len(lines) and all(step.strip() for step in steps):
+                return steps
+    return split_steps(raw)
+
+
 def attachment_rows(fields):
     photos = fields.get(IMAGES) or []
     if not isinstance(photos, list) or any(not isinstance(item, dict) or not isinstance(item.get('file_token'), str)
@@ -75,15 +104,68 @@ def attachment_rows(fields):
 
 
 def linked_groups(fields, raw, count):
-    try:
-        saved = json.loads(plain(fields.get(LINK)) or '{}')
-        groups = saved.get('groups')
-        if (saved.get('text_hash') != digest(raw) or not isinstance(groups, list) or len(groups) != count
-                or any(not isinstance(group, list) or any(not isinstance(token, str) for token in group) for group in groups)):
-            return [[] for _ in range(count)]
-        return groups
-    except (AttributeError, TypeError, ValueError):
+    groups = step_metadata(fields, raw).get('groups')
+    if (not isinstance(groups, list) or len(groups) != count
+            or any(not isinstance(group, list) or any(not isinstance(token, str) for token in group) for group in groups)):
         return [[] for _ in range(count)]
+    return groups
+
+
+def disposition_cards(fields):
+    steps = record_steps(fields, plain(fields.get(STEPS)))
+    if not steps:
+        raise RiskError('请先保存至少一条处置步骤。')
+    title = plain(fields.get(MAIN[0])).strip()
+    context = ' · '.join(filter(None, (plain(fields.get(name)).strip() for name in (SCENARIO_CODE, MAIN[1], MAIN[2]))))
+    summary = f'{title}\n{context}' if context else title
+    introduction = {'tag': 'div', 'text': {'tag': 'plain_text', 'content': summary}}
+
+    def card(panels):
+        return {'schema': '2.0', 'config': {'enable_forward': False},
+                'header': {'template': 'blue', 'title': {'tag': 'plain_text', 'content': 'EOP 处置步骤'}},
+                'body': {'elements': [introduction, *panels]}}
+
+    cards, panels = [], []
+    for index, step in enumerate(steps, 1):
+        first_line = step.partition('\n')[0].strip()
+        preview = first_line[:36] + ('…' if len(first_line) > 36 else '')
+        # Feishu caps a message at 30 KB and a card at 200 components.
+        for offset in range(0, len(step), 3200):
+            heading = f'第 {index} 步' + ('（续）' if offset else f' · {preview}')
+            panel = {'tag': 'collapsible_panel', 'expanded': index == 1 and offset == 0,
+                     'header': {'title': {'tag': 'plain_text', 'content': heading}},
+                     'elements': [{'tag': 'div', 'text': {'tag': 'plain_text', 'content': step[offset:offset+3200]}}]}
+            candidate = json.dumps({'content': json.dumps(card([*panels, panel]), ensure_ascii=False)}, ensure_ascii=False)
+            if panels and (len(panels) >= 45 or len(candidate.encode('utf-8')) > 26 * 1024):
+                cards.append(card(panels))
+                panels = []
+            panels.append(panel)
+    cards.append(card(panels))
+    if len(cards) > 1:
+        for index, item in enumerate(cards, 1):
+            item['header']['title']['content'] += f'（{index}/{len(cards)}）'
+    return cards
+
+
+async def send_disposition_cards(runtime, cards, user, rid, revision, delivery_id):
+    from .feishu_delivery import FeishuDeliveryError, send_agent_message
+    from .portal_service import BUILDING_OPEN_ID_MAP, LI_SHILONG_OPEN_ID
+
+    async def deliver(name, recipient):
+        for index, card in enumerate(cards, 1):
+            message_uuid = str(uuid.uuid5(uuid.NAMESPACE_URL,
+                'lighthouse:eop:' + digest([user, rid, revision, delivery_id, recipient, index])))
+            try:
+                await send_agent_message(runtime, recipient, card, message_uuid=message_uuid)
+            except FeishuDeliveryError as exc:
+                prefix = f'第 {index}/{len(cards)} 张：' if len(cards) > 1 else ''
+                return {'name': name, 'sent': False, 'error': prefix + str(exc)}
+        return {'name': name, 'sent': True}
+
+    return await asyncio.gather(
+        deliver('H楼值班账号', BUILDING_OPEN_ID_MAP['H']),
+        deliver('李世龙', LI_SHILONG_OPEN_ID),
+    )
 
 
 class EopEditor:
@@ -254,7 +336,7 @@ class EopEditor:
 
     def record_detail(self, rid, user, editable, fields, schema):
         raw = plain(fields.get(STEPS))
-        steps = split_steps(raw)
+        steps = record_steps(fields, raw)
         photos = attachment_rows(fields)
         try:
             names = json.loads(plain(fields.get(LINK)) or '{}').get('names', {})
@@ -317,10 +399,15 @@ class EopEditor:
                 raise RiskError('移除图片的清单无效。')
             if set(original).difference(files) != set(removed):
                 raise RiskError('图片清单与主动移除的图片不一致，请刷新核对。', 409)
-            for step in steps:
+            for index, step in enumerate(steps, 1):
                 if not isinstance(step, dict) or not isinstance(step.get('images'), list):
                     raise RiskError('步骤内容不完整。')
-                labels.append(text(step.get('text'), 16000, True))
+                value = step.get('text')
+                if isinstance(value, str):
+                    value = value.replace('\r\n', '\n').replace('\r', '\n')
+                    if len(value) > 16000:
+                        raise RiskError(f'第 {index} 步超过 16000 字，请缩短文字后保存。')
+                labels.append(text(value, 16000, True))
                 group = []
                 for token in step['images']:
                     if not isinstance(token, str) or token not in files or token in used:
@@ -343,11 +430,11 @@ class EopEditor:
                     raise RiskError(f'「{name}」请从原表选项中选择。')
                 changes[name] = value or (None if name in SELECTS else '')
             original_text = raw = plain(current.get(STEPS))
-            original_steps = split_steps(raw)
+            original_steps = record_steps(current, raw)
             if labels != original_steps:
                 raw = '\n'.join(f'{index}、{label}' for index, label in enumerate(labels, 1))
-                if len(raw) > 100000 or split_steps(raw) != labels:
-                    raise RiskError('步骤内容过长，或同一步中含新的编号行，请将编号行拆成独立步骤。')
+                if len(raw) > 100000:
+                    raise RiskError('处置步骤合计超过 100000 字，请缩短文字后保存。')
                 changes[STEPS] = raw
             original_order = [item['file_token'] for item in current.get(IMAGES) or []]
             removed_tokens = set(removed)
@@ -356,12 +443,16 @@ class EopEditor:
             if expected_files != original_order:
                 changes[IMAGES] = [{'file_token': token} for token in expected_files]
             if groups != linked_groups(current, original_text, len(original_steps)) or STEPS in changes or names != previous_names:
-                if used or names:
+                counts = [label.count('\n') + 1 for label in labels] if split_steps(raw) != labels else []
+                if used or names or counts:
                     if LINK not in schema:
                         self.cloud.request('POST', self.path + '/fields', json={'field_name': LINK, 'type': 1})
                     elif schema[LINK]['type'] != 1:
                         raise RiskError('「步骤图片关联」应为文本字段。', 503)
-                    changes[LINK] = json.dumps({'text_hash': digest(raw), 'groups': groups, 'names': names}, ensure_ascii=False)
+                    metadata = {'text_hash': digest(raw), 'groups': groups, 'names': names}
+                    if counts:
+                        metadata['step_lines'] = counts
+                    changes[LINK] = json.dumps(metadata, ensure_ascii=False)
                 elif LINK in schema and plain(current.get(LINK)):
                     changes[LINK] = ''
             observed = current
@@ -514,7 +605,22 @@ def install_eop_scenario_routes(app, controller, runtime):
                 expected = urlsplit(controller._request_base_url(request))
                 if not editor or (source.scheme, source.netloc) != (expected.scheme, expected.netloc) or request.headers.get('sec-fetch-site') == 'cross-site':
                     raise RiskError('仅管理员可在当前站点修改场景。', 403)
-                if request.method == 'POST':
+                if request.method == 'POST' and request.url.path.endswith('/send-card'):
+                    if session.get('impersonation') or session.get('source') == 'admin_impersonation':
+                        raise RiskError('请退出代登录后发送处置步骤卡片。', 403)
+                    payload = await controller._read_json_request(request, max_bytes=2048)
+                    delivery_id = payload.get('delivery_id') if isinstance(payload, dict) else None
+                    if not isinstance(delivery_id, str) or not re.fullmatch(r'[0-9a-f]{32}', delivery_id):
+                        raise RiskError('发送请求无效，请重新打开场景。')
+                    fields = await asyncio.to_thread(svc.read, rid)
+                    if professions is not None and not professional_record_visible(professions, fields):
+                        raise RiskError('该场景不存在或不在当前专业范围。', 404)
+                    revision = svc.revision(fields)
+                    if payload.get('revision') != revision:
+                        raise RiskError('场景已更新，请刷新并确认最新步骤后再发送。', 409)
+                    cards = disposition_cards(fields)
+                    data = {'recipients': await send_disposition_cards(runtime, cards, user, rid, revision, delivery_id)}
+                elif request.method == 'POST':
                     content = bytearray()
                     async for part in request.stream():
                         if len(content) + len(part) > MAX_UPLOAD:
@@ -533,6 +639,6 @@ def install_eop_scenario_routes(app, controller, runtime):
             logging.exception('EOP scenario editor operation failed')
             return JSONResponse({'ok': False, 'error': '飞书请求未确认，请刷新核对原记录。'}, status_code=503)
 
-    for suffix, methods in (('', ['GET']), ('/{rid}', ['GET', 'PUT']), ('/{rid}/image', ['POST']),
+    for suffix, methods in (('', ['GET']), ('/{rid}', ['GET', 'PUT']), ('/{rid}/send-card', ['POST']), ('/{rid}/image', ['POST']),
                             ('/{rid}/image/{ticket}', ['GET'])):
         app.add_api_route('/api/eop-scenarios' + suffix, endpoint, methods=methods)

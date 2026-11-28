@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 from pathlib import Path
 from lan_bitable_template_portal.daily_inspection import (CN, SOURCES, DailyInspection, inspection_report,
-    original_templates, required_sheets, default_sheet_groups, RiskError)
+    original_templates, required_sheets, default_sheet_groups, humidifier_positions, RiskError)
 from lan_bitable_template_portal.state_store import LanPortalStateStore
 from test_daily_inspection import InspectionCloud, DAY
 
@@ -73,6 +73,13 @@ class SheetWorkflowTests(unittest.TestCase):
             'review_version': signed['review_version'], 'groups': {moved: None}})['active']
         self.assertEqual(reset['sheet_groups'], {})
         self.assertIn('归属已调整', reset['confirmation_invalidations']['电气'])
+        positions = humidifier_positions(restored.load('E')['active'], 'E')
+        humidifier_edits = [
+            {'template': template, 'sheet': sheet, 'cell': cell, 'humidifier_state': 'off', 'value': '△'}
+            for template, sheet, cell in positions
+        ]
+        reset = restored.change('b', '乙', duty, 'draft', {'id': identity,
+            'review_version': reset['review_version'], 'sheet_cells': humidifier_edits})['active']
         for owner, actor, name in (('a', '甲', '电气'), ('b', '乙', '暖通')):
             pages = sorted(required_sheets(restored.load('E')['active'], 'E', [name]))
             restored.change(owner, actor, duty, 'view-sheet', {'id': identity, 'sheet': pages[0], 'visited_sheets': pages})

@@ -88,9 +88,9 @@
         <table :style="{fontSize:zoom+'px',width:gridWidth+'px'}"><colgroup><col style="width:32px"><col v-for="i in columnCount" :key="i" :style="{width:columnWidths[i-1]+'px'}"></colgroup><thead><tr><th class="grid-corner" aria-label="行列编号"></th><th v-for="i in columnCount" :key="i" class="column-number" scope="col">{{ address(0,i-1).replace(/\d+$/,'') }}</th></tr></thead><tbody>
           <tr v-for="(row,i) in grid" :key="i" :style="{height:rowHeight(i)+'px',display:rowHeight(i)===0?'none':undefined}"><th class="row-number" scope="row"><span>{{ i+1 }}</span></th><template v-for="cell in row" :key="cell.address">
             <td v-if="!cell.hidden" :data-address="cell.address" :style="originalCellStyle(cell)" :rowspan="cell.rowspan" :colspan="cell.colspan" :class="{'current-cell':cell.current,'history-cell':cell.historical,'exempt-cell':cell.exempt,'empty-cell':cell.mapped && !cell.text,'mobile-editing-cell':mobileSheet && editing===cell.address}"
-              :tabindex="cell.editable || exemptionPicking ? 0 : undefined" :aria-label="cell.address+' '+(cell.exempt?'免填':cell.text)" :title="cell.exempt?'当前配置为免填':undefined" @click="activateCell(cell)" @keydown.enter.prevent="activateCell(cell)">
-              <select v-if="!mobileSheet && editing===cell.address && cell.stateCell" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="completeEdit" @keydown.enter.stop @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)"><option value="">{{ cell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ cell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="cell.modeCell" value="/">/ 非当前模式</option></select>
-              <input v-else-if="!mobileSheet && editing===cell.address" v-model="editValue" v-focus :inputmode="cell.mapped ? 'decimal' : 'text'" enterkeyhint="done" @click.stop :aria-label="'编辑 '+cell.address" @blur="commit(cell)" @keydown.enter.stop.prevent="completeEdit" @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)">
+              :tabindex="cell.editable || exemptionPicking ? 0 : undefined" :aria-label="cell.address+' '+(cell.exempt?'免填':cell.humidifier?cell.humidifier.device+' '+(cell.displayText||'选择启停'):cell.text)" :title="cell.exempt?'当前配置为免填':cell.humidifier&&!cell.humidityMode?'选择启停':undefined" @click="activateCell(cell)" @keydown.enter.prevent="activateCell(cell)">
+              <select v-if="!mobileSheet && editing===cell.address && cell.stateCell && !cell.humidifier" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+cell.address" @click.stop @blur="commit(cell)" @change="completeEdit" @keydown.enter.stop @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)"><option value="">{{ cell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ cell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="cell.modeCell" value="/">/ 非当前模式</option></select>
+              <input v-else-if="!mobileSheet && editing===cell.address && !cell.humidifier" v-model="editValue" v-focus :inputmode="cell.mapped ? 'decimal' : 'text'" enterkeyhint="done" @click.stop :aria-label="'编辑 '+cell.address" @blur="commit(cell)" @keydown.enter.stop.prevent="completeEdit" @keydown.esc.stop="cancelEdit" @keydown.alt.up.stop.prevent="moveEdit(-1)" @keydown.alt.down.stop.prevent="moveEdit(1)">
               <span v-else class="cell-content" :class="{'filled-value':cell.filled}" :style="cellContentStyle(cell)"><span :style="filledTextStyle(cell)">{{ cell.displayText || '\u00a0' }}</span></span>
               <svg v-if="cell.diagonal?.up || cell.diagonal?.down" class="cell-diagonal" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><line v-if="cell.diagonal.up" x1="0" y1="100" x2="100" y2="0" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/><line v-if="cell.diagonal.down" x1="0" y1="0" x2="100" y2="100" :stroke="cell.diagonal.color" vector-effect="non-scaling-stroke"/></svg>
             </td>
@@ -108,7 +108,12 @@
       <p v-else-if="!report.rounds.length">尚无巡检记录；开始本轮后即可填写。原表已显示。</p>
       <div v-if="editing && editCell" class="cell-editor-tools" role="group" aria-label="单元格编辑" @keydown.esc.stop="cancelEdit" @keydown.alt.up.prevent="moveEdit(-1)" @keydown.alt.down.prevent="moveEdit(1)">
         <strong>{{ editing }} · {{ slotOf(editCell.round) }}</strong>
-        <template v-if="mobileSheet">
+        <template v-if="editCell.humidifier">
+          <select :key="editing" v-model="editHumidity" v-focus data-native-select :aria-label="editCell.humidifier.device+'运行状态'" @change="completeEdit">
+            <option value="" disabled>选择启停</option><option value="on">开启</option><option value="off">关闭</option>
+          </select>
+        </template>
+        <template v-else-if="mobileSheet">
           <select v-if="editCell.stateCell" :key="editing" v-model="editValue" v-focus data-native-select :aria-label="'编辑 '+editing" @change="completeEdit"><option value="">{{ editCell.mapped ? '待填写' : '空白' }}</option><option value="√">{{ editCell.modeCell ? '√ 当前模式' : '√ 正常' }}</option><option value="×">× 异常</option><option value="△">△ 未运行</option><option v-if="editCell.modeCell" value="/">/ 非当前模式</option></select>
           <input v-else :key="editing" v-model="editValue" v-focus :inputmode="editCell.mapped ? 'decimal' : 'text'" enterkeyhint="done" :aria-label="'编辑 '+editing" @keydown.enter.prevent="completeEdit">
         </template>
@@ -229,9 +234,11 @@ import {registerNavigationGuard} from '../navigation';
 import {inspectionCellText} from './inspectionCellFormat';
 import InspectionCollectionSettings from './InspectionCollectionSettings.vue';
 import {configuredInspectionPositions,manuallyFilledInspectionPositions,inspectionPosition,type InspectionVisibilityActive} from './inspectionCellVisibility';
-type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string};
+type HumidityMode='on'|'off';
+type CellEdit={template:string;sheet:string;cell:string;value:string;note?:string;humidifier_state?:HumidityMode};
+type HumidifierCell=Pick<CellEdit,'template'|'sheet'|'cell'> & {device:string;mode?:HumidityMode|null;reading:string};
 type Reading=CellEdit & {value:any;read_only?:boolean;verified_operating?:boolean;parameter?:string;value_type?:string;device?:string;device_name?:string;kind?:string;point_id?:string;location?:string;form?:string;members?:Reading[]};
-type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[]};
+type Round={id?:string;round_id:string;shift:string;round:number;version:string|number;status:string;auto_closed?:boolean;sheet_groups?:Record<string,string>;abnormal_cells?:Reading[];original_cells:Reading[];extra_cells?:Reading[];humidifier_cells?:HumidifierCell[]};
 type Page={key:string;baseKey:string;template:string;profession:string;homeProfession?:string;name:string;rows:any[][];merges:string[];round_rows?:Record<string,string>;remark_cells?:string[];slash_cells?:string[];column_widths?:number[];row_heights?:number[];styles?:Record<string,any>[];excel_styles?:{number_format:string;alignment:string;diagonal?:{up:boolean;down:boolean;color:string}}[];style_ids?:number[][];source_range?:string;excluded_ranges?:string[];display_artwork?:{x:number;y:number;width:number;height:number;image?:string;lines?:string[];font?:string;size?:number;left?:number;top?:number}[]};
 type SlotState={slot:string;status:string;scheduled_at:number;source_time?:number|null;auto_closed?:boolean};
 type Exemptions={revision:number;sheets:Record<string,string[]>};
@@ -272,6 +279,7 @@ const cachedTemplates=shallowRef<Report['original_templates']>([]),layoutVersion
 const compactZoom=12;
 const report=shallowRef<Report>();const comparison=shallowRef<Report>();const error=ref(''),loading=ref(false),saving=ref(false),zoom=ref(compactZoom);
 const pageKey=ref(''),visited=ref(new Set<string>()),editing=ref(''),editValue=ref('');
+const editHumidity=ref<HumidityMode|''>('');
 const rootElement=ref<HTMLElement>(),availableHeight=ref(600),rotatedWidth=ref(window.innerHeight);
 const dialogRoot=computed(()=>mobileSheet.value ? rootElement.value : undefined);
 const professionView=ref(props.visibleProfessions?'OWN':'ALL'),preferencesReady=ref(false),preferencesError=ref(''),preferencesRevision=ref(0);
@@ -472,6 +480,7 @@ const grid=computed(()=>{
   values.set(c.cell,{value:c.value,round:r,readonly:c.read_only,mapped:configured,visible:configured||manual,parameter:c.parameter,value_type:c.value_type});
  }
  const active=activeRound.value;
+ const humidifiers=new Map((active?.humidifier_cells||[]).filter(item=>item.template===p.template&&item.sheet===p.name).map(item=>[item.cell,item]));
  if(active&&visibleById.has(active.round_id))for(const key of configuredPositions.value){
   const [template,sheet,cell]=JSON.parse(key) as string[];
   if(template!==p.template||sheet!==p.name.trim()||values.has(cell))continue;
@@ -499,6 +508,7 @@ const grid=computed(()=>{
   const a=cell.address,v=values.get(a),remark=remarks.has(a);
   const style=p.excel_styles?.[p.style_ids?.[cell.rowIndex]?.[cell.colIndex]??0];
   if(fixedSlashes.has(a))return {...cell,value:'/',modeCell:false,diagonal:style?.diagonal,text:'/',displayText:'/',
+   humidifier:undefined,humidityMode:undefined,
    filled:true,round:undefined,exempt:false,current:false,historical:false,mapped:false,stateCell:false,editable:false};
   const rowSlot=isChiller.value?chillerSlot.value:remark?undefined:p.round_rows?.[String(cell.rowIndex+1)];
   // Existing mappings keep their owner. An assigned row never inherits a different round.
@@ -510,6 +520,8 @@ const grid=computed(()=>{
    const edits=Array.from(byRound.values());override=edits[edits.length-1];
   }
   const current=!!round&&round.round_id===currentActive.value?.id;
+  const humidifier=current ? humidifiers.get(a) : undefined;
+  const humidityMode=override?.humidifier_state??humidifier?.mode;
   const policy=current && currentActive.value?.source_locked && currentActive.value.cell_exemptions ? roundExemptions : exemptions;
   const excluded=!remark&&(policy ? policy.has(a) :
    defaultRanges.some(([r,c,rr,cc])=>cell.rowIndex>=r&&cell.rowIndex<=rr&&cell.colIndex>=c&&cell.colIndex<=cc));
@@ -522,8 +534,9 @@ const grid=computed(()=>{
   const format=style?.number_format;
   const modeCell=isChiller.value&&/^[K-P][789]$/.test(a);
   const filled=!exempt&&!collisions.has(a)&&!!(override||v?.visible)&&!!text(value);
-  const displayed=!exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format);
-  return {...cell,value,modeCell,diagonal:style?.diagonal,text:text(value),displayText:filled?displayed.replace(/\s+/g,' ').trim():displayed,filled,round,exempt,
+  const displayed=!exempt&&humidifier ? (!humidityMode?'':humidityMode==='on'&&!text(value)?'缺湿度':inspectionCellText(value,format)) :
+   !exempt&&current&&v?.mapped&&!text(value)?'待填写':inspectionCellText(value,format);
+  return {...cell,value,modeCell,humidifier,humidityMode,diagonal:style?.diagonal,text:text(value),displayText:filled?displayed.replace(/\s+/g,' ').trim():displayed,filled,round,exempt,
    current:!exempt&&current&&!!(v?.visible||override),historical:!!(v||override)&&!current,mapped:!exempt&&!!v?.mapped,
    stateCell:modeCell||v?.value_type==='状态'||/运行状态|启停状态|开关状态|设备状态|告警状态|有无滴漏/.test(v?.parameter||'')||['√','×','△'].includes(text(override?override.value:v?.value)),editable:!!editable};
  }));
@@ -778,7 +791,8 @@ function beginEdit(cell:GridCell){
  if(awaitingStart.value && cell.round?.round_id===currentActive.value?.id)return;
  finishEdit();if(abnormal.value)return;
  editor={cell,template:currentPage.value.template,sheet:currentPage.value.name,scope:scope.value,date:day.value};
- editValue.value=cell.text;editing.value=cell.address;
+ editHumidity.value=cell.humidityMode||'';
+ editValue.value=cell.humidifier&&cell.text==='△'?'':cell.text;editing.value=cell.address;
 }
 function queue(round:RoundMeta,edit:CellEdit){
  mutation++;
@@ -792,9 +806,12 @@ function scheduleSave(){window.clearTimeout(timer);timer=window.setTimeout(()=>v
 function commit(cell:GridCell){
  if(editing.value!==cell.address||!editor)return;
  const target=editor;editing.value='';editor=undefined;
- if(editValue.value===target.cell.text||!target.cell.round){if(dirty.value&&!error.value)scheduleSave();return;}
+ const humidity=target.cell.humidifier ? editHumidity.value : '';
+ const value=humidity==='off'?'△':humidity==='on'?target.cell.humidifier?.reading||'':editValue.value;
+ if(!target.cell.round||(target.cell.humidifier&&!humidity)||
+     (value===target.cell.text&&humidity===(target.cell.humidityMode||''))){if(dirty.value&&!error.value)scheduleSave();return;}
  if(target.scope!==scope.value||target.date!==day.value){error.value='填写所属楼栋或日期已变化，请重新核对。';return;}
- const edit={template:target.template,sheet:target.sheet,cell:target.cell.address,value:editValue.value};
+ const edit:CellEdit={template:target.template,sheet:target.sheet,cell:target.cell.address,value,...(humidity?{humidifier_state:humidity}:{})};
  if(edit.value==='×'){abnormal.value={round:target.cell.round,edit};abnormalNote.value='';return;}
  queue(target.cell.round,edit);
 }
@@ -869,17 +886,19 @@ function applySaved(job:Job,version:string|number){
  report.value={...value,rounds:value.rounds.map(r=>{
   if(r.round_id!==job.round.round_id)return r;
   const readings=r.original_cells.map(c=>({...c})),extras=(r.extra_cells||[]).map(c=>({...c}));
+  const humidifiers=r.humidifier_cells?.map(c=>({...c}));
   const abnormal=[...(r.abnormal_cells || [])];
   for(const edit of job.cells){
    const matches=(cell:Reading)=>cell.template===edit.template&&cell.sheet===edit.sheet&&cell.cell===edit.cell;
    const existing=[...readings,...extras].find(matches);
+   if(edit.humidifier_state){const cell=humidifiers?.find(c=>c.template===edit.template&&c.sheet===edit.sheet&&c.cell===edit.cell);if(cell)cell.mode=edit.humidifier_state;}
    if(existing)Object.assign(existing,{value:edit.value,...(edit.note ? {note:edit.note} : {})});
    else extras.push({...edit});
    const index=abnormal.findIndex(matches);
    if(index>=0)abnormal.splice(index,1);
    if(edit.value==='×')abnormal.push({...existing,...edit});
   }
-  return {...r,version,original_cells:readings,extra_cells:extras,abnormal_cells:abnormal};
+  return {...r,version,original_cells:readings,extra_cells:extras,humidifier_cells:humidifiers,abnormal_cells:abnormal};
  })};
  for(const queued of jobs.value)if(queued!==job&&queued.round.round_id===job.round.round_id)queued.round.version=version;
 }

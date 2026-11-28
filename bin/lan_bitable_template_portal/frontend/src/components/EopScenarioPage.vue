@@ -2,7 +2,7 @@
   <section ref="root" class="eop-page" aria-label="EOP 场景维护" data-v2-inline-feedback>
     <header class="eop-header">
       <NButton v-if="!embedded || record || opening" quaternary :aria-label="record || opening ? '返回场景列表' : '返回'"
-        :disabled="saving || uploading" @click="headerBack"><ArrowLeft :size="19" /></NButton>
+        :disabled="saving || uploading || sendingCard" @click="headerBack"><ArrowLeft :size="19" /></NButton>
       <div class="eop-heading">
         <small>{{ opening ? 'EOP 场景 · 读取中' : record ? editing ? 'EOP 场景 · 编辑中' : 'EOP 场景 · 查看' : '专项功能' }}</small>
         <h1 ref="heading" tabindex="-1">{{ (record || opening)?.fields['场景名称'] || 'EOP 场景维护' }}</h1>
@@ -89,6 +89,8 @@
             </select>
             <NButton v-if="unassigned.length" size="small" @click="focusSection(poolHeading)">待分配 {{ unassigned.length }} 张</NButton>
             <NButton v-if="editing" type="primary" secondary :disabled="busy || record.steps.length >= 200" @click="addStep"><Plus :size="16" />添加步骤</NButton>
+            <NButton v-if="record.editable && !editing" size="small" :loading="sendingCard" :disabled="cardBlocked"
+              title="发送给 H楼值班账号、李世龙" @click="sendCard">发送飞书卡片</NButton>
           </div>
         </header>
         <NEmpty v-if="!record.steps.length" class="eop-empty" description="原记录暂无步骤" />
@@ -248,10 +250,13 @@ const pageSize = 20;
 const loading = ref(false);
 const saving = ref(false);
 const uploading = ref(false);
-const busy = computed(() => saving.value || uploading.value || loading.value);
+const sendingCard = ref(false);
+const busy = computed(() => saving.value || uploading.value || loading.value || sendingCard.value);
+const cardBlocked = computed(() => !record.value?.editable || editing.value || busy.value || dirty.value || !record.value.steps.length);
 const progress = ref('');
 const error = ref('');
 const message = ref('');
+let cardDelivery: { key:string; deliveryId:string } | undefined;
 const saved = ref('');
 const removedImages = new Set<string>();
 const previewPhotos = shallowRef<Photo[]>([]);
@@ -596,6 +601,41 @@ async function save() {
     }
   } catch (value) { if (!disposed && record.value === current) fail(value); }
   finally { saving.value = false; }
+}
+interface CardRecipient { name: string; sent: boolean; error?: string }
+function cardDeliveryId(key: string) {
+  if (cardDelivery?.key !== key) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    cardDelivery = { key, deliveryId: Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('') };
+  }
+  return cardDelivery.deliveryId;
+}
+async function sendCard() {
+  const current = record.value;
+  if (!current || cardBlocked.value) return;
+  const key = current.id + '@' + current.revision;
+  const deliveryId = cardDeliveryId(key);
+  sendingCard.value = true;
+  error.value = message.value = '';
+  try {
+    const data = await requestJson(`${api}/${current.id}/send-card`, {
+      method:'POST', timeoutMs:90_000, body:JSON.stringify({ revision:current.revision, delivery_id:deliveryId }),
+    }) as {recipients: CardRecipient[]};
+    if (disposed || record.value !== current) return;
+    if (!Array.isArray(data.recipients) || data.recipients.length !== 2) throw new Error('发送回执不完整。');
+    const sent = data.recipients.filter(item => item.sent).map(item => item.name);
+    const failed = data.recipients.filter(item => !item.sent).map(item => `${item.name}（${item.error || '发送失败'}）`);
+    if (failed.length) {
+      const delivered = sent.length ? `已送达 ${sent.join('、')}。 ` : '';
+      error.value = `${delivered}${failed.join('、')}。点击「发送飞书卡片」可重试。`;
+    } else {
+      cardDelivery = undefined;
+      message.value = `飞书卡片已发送给 ${sent.join('、')}。`;
+    }
+  } catch (value) {
+    if (disposed || record.value !== current) return;
+    error.value = value instanceof Error ? value.message : '发送结果未确认，可点击「发送飞书卡片」重试。';
+  } finally { sendingCard.value = false; }
 }
 function leave(action: () => void) { if (!busy.value) { if (dirty.value) discardAction.value = action; else action(); } }
 function discard() { const action = discardAction.value; discardAction.value = undefined; action?.(); }

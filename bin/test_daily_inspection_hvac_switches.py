@@ -63,12 +63,14 @@ class HvacSwitchTests(unittest.TestCase):
         store = LanPortalStateStore(self.root / 'isolated.sqlite3')
         self.service = inspection.DailyInspection(store, Mock(spec_set=[]))
 
-    def make_round(self, scope, slot, controls, *, point_ids=None, before_freeze=None):
+    def make_round(self, scope, slot, controls, *, point_ids=None, before_freeze=None, legacy=False):
         mapping = hvac_switch_map(scope)
         duty = dict(scope=scope, date=DAY, shift=slot[0], shift_names={'白': [SIGNER], '夜': ['隔离签名乙']})
         when = slot_time(DAY, slot[0], int(slot[1]))
         stamp = int(when.timestamp() * 1000)
         rows, values = [], {}
+        humidity_ids = {f"{scope}-{item['target_device']}": item['point_id']
+                        for item in inspection.confirmed_humidity_cells().values() if item['scope'] == scope}
 
         def point(name, identity, label, value, **fields):
             common = {'记录类型': '测点明细', '专业': '暖通', '楼栋': scope + '楼', '设备编号': name,
@@ -87,10 +89,19 @@ class HvacSwitchTests(unittest.TestCase):
                 value = temperature(slot, len(values) + 1)
                 values[sheet, cell] = value
                 coordinates = {field: item['slots'][s][index] for s, field in inspection.ROUND_LOCATION_FIELDS.items()}
-                point(name, f'sensor_{identity}_{index}', ('回风温度', '送风温度')[index] if '精密' in sheet else '湿度显示',
+                point(name, humidity_ids.get(name, f'sensor_{identity}_{index}'), ('回风温度', '送风温度')[index] if '精密' in sheet else '湿度显示',
                       value, 目标巡检表=item['template'], 目标工作表=sheet, 目标单元格=item['slots']['白1'][index], **coordinates)
             for value in controls.get(identity, ()):
-                point(name, identity, '开关机状态' if '精密' in sheet else '运行状态', value)
+                fan = inspection.E_212_FAN_IDS.get(name) if scope == 'E' and not legacy else None
+                if not fan:
+                    point(name, identity, '开关机状态' if '精密' in sheet else '运行状态', value)
+                else:
+                    speed = {'关闭': '0.00', '运行': '35.00', '1': '35.00', '1.00': '35.00'}.get(str(value), value)
+                    try:
+                        status = '△' if float(speed) < 5 else '√' if float(speed) > 5 else '待核对'
+                    except (TypeError, ValueError):
+                        status = '待核对'
+                    point(name, fan, '室内风机转速（%）', speed, 状态判定=status)
         ids = sorted(row['record_id'] for row in rows)
         device_count = sum(r['fields']['记录类型'] == '设备巡检' for r in rows)
         receipt = dict(status='completed', building=scope + '楼', upload_time=stamp, device_count=device_count,
@@ -104,7 +115,17 @@ class HvacSwitchTests(unittest.TestCase):
         devices = inspection.devices_for(scope, rows, [], {(scope, '暖通'): [template]})
         batch = {'batch': stamp, 'rows': rows, 'devices': devices}
         original_rows = copy.deepcopy(rows)
-        active = self.service.new_round({}, duty, int(slot[1]), {scope: batch}, SIGNER, when, professions=['暖通'])
+        if legacy:
+            original_freeze = self.service.freeze_hvac_switches
+
+            def freeze_old(active, started):
+                active.pop('manual_humidifiers', None)
+                original_freeze(active, started)
+
+            with patch.object(self.service, 'freeze_hvac_switches', side_effect=freeze_old):
+                active = self.service.new_round({}, duty, int(slot[1]), {scope: batch}, SIGNER, when, professions=['暖通'])
+        else:
+            active = self.service.new_round({}, duty, int(slot[1]), {scope: batch}, SIGNER, when, professions=['暖通'])
         active['profession_confirmations'] = {'暖通': {'actor': SIGNER, 'confirmed': stamp}}
         self.assertEqual(batch['rows'], original_rows)
         actual_sheets = {sheet.strip(): sheet for sheet, _ in values}
@@ -113,6 +134,8 @@ class HvacSwitchTests(unittest.TestCase):
                 if sample['point_id'].startswith('sensor_'):
                     expected = values[actual_sheets[sample['sheet'].strip()], sample['round_cells'][slot]]
                     self.assertEqual((sample['raw_value'], sample['value']), (expected, expected))
+        if not legacy:
+            values = {(sheet, cell): None if sheet == '恒湿机巡检表' else value for (sheet, cell), value in values.items()}
         return active, values
 
     def export_round(self, active):
@@ -121,13 +144,14 @@ class HvacSwitchTests(unittest.TestCase):
         path.write_bytes(inspection.workbook(active, {scope: []}))
         return path
 
-    def assert_copy(self, path, expected):
+    def assert_copy(self, path, expected, *, confirmed=True):
         book = load_workbook(path, data_only=False)
         try:
             for (sheet, address), value in expected.items():
                 actual = book[sheet_name(sheet)][address].value
                 self.assertEqual(actual, value, f'{sheet!r}/{address}')
-            self.assertEqual(book['专业确认']['B2'].value, SIGNER)
+            if confirmed:
+                self.assertEqual(book['专业确认']['B2'].value, SIGNER)
             self.assertIn(SIGNER, book[sheet_name('2F包间精密空调巡检表')]['E2'].value)
         finally:
             book.close()
@@ -169,8 +193,10 @@ class HvacSwitchTests(unittest.TestCase):
                 controls, stopped = {}, set()
                 for j, (identity, item) in enumerate(mapping.items()):
                     off = (i + j + (scope == 'D')) % 2 == 0
-                    controls[identity] = [('0.00', '关闭', 0)[j % 3] if off else (1, '运行')[j % 2]]
-                    if off:
+                    migrated = item['device'] in inspection.E_212_FAN_IDS
+                    controls[identity] = [(4.99 if off else 5.01) if migrated else
+                                          ('0.00', '关闭', 0)[j % 3] if off else (1, '运行')[j % 2]]
+                    if off and item['sheet'] != '恒湿机巡检表':
                         stopped.update((item['sheet'], cell) for cell in item['slots'][slot])
                 active, expected = self.make_round(scope, slot, controls)
                 path = self.export_round(active)
@@ -204,7 +230,7 @@ class HvacSwitchTests(unittest.TestCase):
         mapping = hvac_switch_map(scope)
         devices = {item['device']: key for key, item in mapping.items()}
         ids = [devices['E-212-CRAH-06'], devices['E-240-HUM-01']]
-        for controls in ({}, {ids[0]: ['0', '1'], ids[1]: ['运行', '关闭']},
+        for controls in ({}, {ids[0]: ['0', '1'], ids[1]: ['运行', '关闭']}, {ids[0]: ['5.00']},
                          {ids[0]: [''], ids[1]: ['故障']}):
             active, expected = self.make_round(scope, '白1', controls, point_ids=ids)
             self.assert_copy(self.export_round(active), expected)
@@ -213,16 +239,55 @@ class HvacSwitchTests(unittest.TestCase):
     def test_unsealed_mixed_upload_and_old_round_controls_do_not_mark(self):
         scope = 'E'
         key = next(key for key, item in hvac_switch_map(scope).items() if item['device'] == 'E-212-CRAH-06')
+        fan = inspection.E_212_FAN_IDS['E-212-CRAH-06']
 
         def stale(rows, field):
-            row = next(row['fields'] for row in rows if row['fields'].get('测点ID') == key)
+            row = next(row['fields'] for row in rows if row['fields'].get('测点ID') == fan)
             row[field] -= 24 * 3600 * 1000
 
         for mutate in (lambda rows: rows[0]['fields'].pop('备注'), lambda rows: stale(rows, '上传日期'),
                        lambda rows: stale(rows, '采样时间'), lambda rows: stale(rows, '源文件时间'),
+                       lambda rows: rows[-1]['fields'].update(测点ID=key, 测点名称='开关机状态'),
                        lambda rows: rows[-1]['fields'].update(采样时间=rows[-1]['fields']['采样时间'] - 1)):
             active, expected = self.make_round(scope, '白2', {key: [0]}, point_ids=[key], before_freeze=mutate)
             self.assert_copy(self.export_round(active), expected)
+
+    @isolated_case
+    def test_humidifier_uses_only_real_humidity_for_the_device_and_round(self):
+        for scope in ('D', 'E'):
+            item_id = next(point for point, item in hvac_switch_map(scope).items()
+                           if item['device'] == f'{scope}-240-HUM-01')
+            active, expected = self.make_round(scope, '白1', {item_id: ['关闭']}, point_ids=[item_id])
+            active['worksheet_mode'] = True
+            duty = active['duty']
+            state_key = 'building:' + scope
+            self.service.store.put_document(inspection.NS, state_key, {'active': active, 'history': []})
+            positions = inspection.humidifier_positions(active, scope)
+            self.assertEqual(len(positions), 46)
+            with self.assertRaisesRegex(inspection.RiskError, '46 格未选启停'):
+                inspection.require_humidifiers(active, scope, ['暖通'])
+            self.assert_copy(self.export_round(active), expected)
+
+            edits = [{'template': template, 'sheet': sheet, 'cell': cell, 'value': '△',
+                      'humidifier_state': 'off'} for template, sheet, cell in positions]
+            on = next(edit for edit in edits if edit['cell'] == 'C5')
+            on.update(value='无需采信的客户端数字', humidifier_state='on')
+            missing = next(edit for edit in edits if edit['cell'] == 'D5')
+            missing.update(value='0', humidifier_state='on')
+            self.service.change('fixture', SIGNER, duty, 'draft', {
+                'id': active['id'], 'review_version': 0, 'sheet_cells': edits})
+            saved = self.service.load(scope)['active']
+            with self.assertRaisesRegex(inspection.RiskError, '缺少本轮湿度实测.*240-HUM-02 D5'):
+                inspection.require_humidifiers(saved, scope, ['暖通'])
+            self.assert_copy(self.export_round(saved), {('恒湿机巡检表', 'C5'): '18.001',
+                                                       ('恒湿机巡检表', 'D5'): None}, confirmed=False)
+            self.service.change('fixture', SIGNER, duty, 'draft', {
+                'id': active['id'], 'review_version': saved['review_version'],
+                'sheet_cells': [{**missing, 'humidifier_state': 'off'}]})
+            saved = self.service.load(scope)['active']
+            inspection.require_humidifiers(saved, scope, ['暖通'])
+            self.assert_copy(self.export_round(saved), {('恒湿机巡检表', 'C5'): '18.001',
+                                                       ('恒湿机巡检表', 'D5'): '△', ('恒湿机巡检表', 'C6'): None}, confirmed=False)
 
     @isolated_case
     def test_locked_e_round_keeps_manual_review_signature_and_original_sensor_values(self):
@@ -242,7 +307,8 @@ class HvacSwitchTests(unittest.TestCase):
             saved = self.service.sync_active_live(scope, cached_only=True)
         self.assertEqual(saved, state)
         path = self.export_round(saved['active'])
-        self.assert_copy(path, dict.fromkeys(readings, '△'))
+        stopped = {(sheet, cell): '△' if sheet != '恒湿机巡检表' else None for sheet, cell in readings}
+        self.assert_copy(path, stopped)
         book = load_workbook(path)
         try:
             def records(title):
@@ -257,7 +323,7 @@ class HvacSwitchTests(unittest.TestCase):
         # The next round's sealed input has readings but no switch state. Never borrow the prior stop.
         later, expected = self.make_round(scope, '白2', {}, point_ids=controls)
         self.assert_copy(self.export_round(later), expected)
-        self.assert_copy(path, dict.fromkeys(readings, '△'))
+        self.assert_copy(path, stopped)
 
     @unittest.skipUnless(os.environ.get('HVAC_ACCEPT_CSV_DIR') and os.environ.get('HVAC_ACCEPT_TEMPLATE_DIR'),
                          'optional local authoritative inputs')
@@ -303,7 +369,7 @@ class HvacSwitchTests(unittest.TestCase):
             controls = {k: [r['sample']] for k, r in inventory.items()}
             self.assertLessEqual({r['sample'] for r in inventory.values()}, {'0.00', '1.00'})
             for slot in SLOTS:
-                active, readings = self.make_round(scope, slot, controls)
+                active, readings = self.make_round(scope, slot, controls, legacy=True)
                 expected = {}
                 for row in rows:
                     address = row['工作表'], row[slot]

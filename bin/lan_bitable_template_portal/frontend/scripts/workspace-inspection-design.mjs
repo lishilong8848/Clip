@@ -10,11 +10,11 @@ function scrollSurface(node) {
     if(found)return found;
   }
 }
-// The rotated editor lives outside the paper surface. Retain its native input, state choices and keyboard bindings.
-function mobileEditors(node, insidePaper=false) {
-  if(node.props?.some(p=>p.name==='ref' && p.value?.content==='scrollElement'))insidePaper=true;
-  if(!insidePaper && node.props?.some(p=>p.name==='model' && p.exp?.content==='editValue'))return [node.loc.source];
-  return (node.children||[]).flatMap(child=>mobileEditors(child,insidePaper));
+function worksheetEditors(node) {
+  if(node.props?.some(p=>p.name==='class' && p.value?.content==='cell-editor-tools')){
+    return node.children.filter(child=>child.tag==='template').map(child=>child.loc.source);
+  }
+  return (node.children||[]).flatMap(worksheetEditors);
 }
 // Mount before workspace-business-imports. The host still owns API and navigation resolution.
 export default function workspaceInspectionDesign(){
@@ -33,9 +33,9 @@ export default function workspaceInspectionDesign(){
     else {
       const paper=scrollSurface(descriptor.template.ast);
       if(!paper || !paper.loc.source.includes('data-address'))throw new Error('Worksheet scroll/edit surface changed');
-      const editors=mobileEditors(descriptor.template.ast);
-      if(editors.length!==2)throw new Error('Mobile worksheet editor contract changed');
-      view=read('InspectionDeskWorkbook.html').replace('<!-- mobile cell editor -->',()=>editors.join('\n')).replace('<!-- settings -->',()=>read('InspectionDeskSettings.html'))
+      const editors=worksheetEditors(descriptor.template.ast);
+      if(editors.length!==2)throw new Error('Worksheet editor contract changed');
+      view=read('InspectionDeskWorkbook.html').replace('<!-- worksheet cell editor -->',()=>editors.join('\n')).replace('<!-- settings -->',()=>read('InspectionDeskSettings.html'))
         .replace('<!-- dialogs -->',()=>read('InspectionDeskDialogs.html')).replace('<!-- worksheet -->',()=>paper.loc.source);
     }
     const styles=page?'':descriptor.styles.map(s=>'<style'+(s.scoped?' scoped':'')+'>'+s.content+'</style>').join('\n');

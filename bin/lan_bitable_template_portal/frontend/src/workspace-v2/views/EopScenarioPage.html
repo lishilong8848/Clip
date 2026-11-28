@@ -6,7 +6,7 @@
     <div class="serenity-actions">
       <NButton v-if="record" :disabled="busy" @click="headerBack">返回场景列表</NButton>
       <NButton :loading="loading" :disabled="busy||dirty" @click="refresh">刷新</NButton>
-      <NButton v-if="record?.editable && !editing" type="primary" @click="editing=true">编辑场景</NButton>
+      <NButton v-if="record?.editable && !editing" type="primary" :disabled="busy" @click="editing=true">编辑场景</NButton>
       <NButton v-if="editing" :disabled="busy" @click="leave(finishEditing)">取消编辑</NButton>
       <NButton v-if="editing" type="primary" :disabled="!dirty||busy" :loading="saving" @click="save">保存修改</NButton>
     </div>
@@ -44,7 +44,9 @@
     <section class="serenity-panel scene-playbook" @paste="pastePictures($event,'')" @dragover="overFiles" @drop="dropFiles($event,'')">
       <header class="serenity-heading"><h2>处置步骤 <small>{{ record.steps.length }}</small></h2><div class="serenity-actions">
         <select v-if="record.steps.length>1" aria-label="定位步骤" @change="jumpToStep"><option value="">跳到步骤</option><option v-for="(step,i) in record.steps" :key="step.key" :value="step.key">步骤 {{ i+1 }}</option></select>
-        <NButton v-if="editing" :disabled="busy" @click="addStep">添加步骤</NButton></div></header>
+        <NButton v-if="editing" :disabled="busy" @click="addStep">添加步骤</NButton>
+        <NButton v-if="record.editable && !editing" size="small" :loading="sendingCard" :disabled="cardBlocked"
+          :title="!record.steps.length ? '暂无步骤，无法发送' : dirty ? '请先保存修改后再发送' : '发送飞书卡片给 H楼值班账号、李世龙'" @click="sendCard">发送飞书卡片</NButton></div></header>
       <article v-for="(step,index) in record.steps" :id="'eop-step-'+step.key" :key="step.key" class="eop-step scene-step"
         @paste.stop="pastePictures($event,step.key)" @dragover="overStep(step.key,$event)" @dragleave="leaveStep(step.key,$event)" @drop.stop="dropPicture(step.key,$event)">
         <h3 tabindex="-1">{{ index+1 }}</h3><div>

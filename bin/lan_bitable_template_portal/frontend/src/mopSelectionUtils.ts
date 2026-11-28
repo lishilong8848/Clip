@@ -1,9 +1,11 @@
 import type { Dict } from "./api/client";
 
-export const isMopBuilding=(scope:string)=>scope==='D'||scope==='E';
+const MOP_BUILDINGS = ['D', 'E', 'H'];
+
+export const isMopBuilding = (scope: string) => MOP_BUILDINGS.includes(scope);
 export function mopBuildingOptions(options:{value:string;label:string}[]){
   const all=options.some(option=>option.value==='ALL');
-  return ['D','E'].flatMap(value=>{
+  return MOP_BUILDINGS.flatMap(value=>{
     const option=options.find(item=>item.value===value);
     return option?[option]:all?[{value,label:value+'楼'}]:[];
   });

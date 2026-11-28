@@ -1,0 +1,1 @@
+import{cw as t,b9 as s,b8 as i,bF as c}from"./app-v2-DtKeHxdx.js";function m(){const o=t(s,null);return i(()=>{if(o===null)return c;const{mergedThemeRef:{value:n},mergedThemeOverridesRef:{value:e}}=o,r=(n==null?void 0:n.common)||c;return e!=null&&e.common?Object.assign({},r,e.common):r})}export{m as u};
